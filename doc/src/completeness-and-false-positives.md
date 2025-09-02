@@ -53,8 +53,8 @@ have to give up exploration. However, this overapproximation can lead to
 behaviour that is not actually possible in the real world. This kind of
 overapproximation happens mostly with a STATICCALL to an unknown address.
 
-Secondly, false positives can happen, because hevm overapproximates the Keccak
-hash function via a so-called uninterpreted function. This means that hevm does
-not precisely model the Keccak function, but instead treats it as a black box.
-This can lead to keccak hash pairs that are not possible in the real
-world.
+Secondly, false positives can happen, because hevm approximates the Keccak
+(i.e. SHA3) hash function via a so-called uninterpreted function. This means
+that hevm does not precisely model the Keccak function, but instead treats it
+as a black box. This can lead to keccak hash pairs that are not possible in the
+real world.
