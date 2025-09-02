@@ -9,34 +9,35 @@ them.
 
 ## Completeness Warnings
 
-When hevm gives a completeness warning, it is indicating that it had to
-give up exploration because of certain factors during symbolic execution.
-Hence, it may be possible that some assertion violations could be violated, but
-hevm could not explore that path.
+hevm gives a completeness warning when it indicates that it had to give up
+exploration during symbolic execution. Hence, it may be possible that some
+assertion violations could be violated, but hevm could not explore that path.
+Hence, this warning is an indication that there may be errors in the contract,
+but hevm was not able to find them.
 
 These warnings are prefixed with `[WARN]` and are collated together with the text
 `hevm was only able to partially explore XYZ due to:` and can be either:
-* A set of error(s), such as SMT solver internal errors, or SMT translation
+* **error(s)** such as SMT solver internal errors, or SMT translation
   issues related to dynamic datastructures
-* A set of unknown result(s) from the SMT solver, such as timeouts
-* A set of partial executions, such as missing implementation of a precompile,
+* **unknown result(s)** from the SMT solver, such as timeouts
+* **partial executions** such as missing implementation of a precompile,
   cheatcode, etc.
 
-Partial executions are usually the most common cause of incompleteness. They can be
+Partial executions are the most common cause of incompleteness. They can be
 due to:
-* *Unexpected symbolic argument to an opcode* For example, if a symbolic address is given to
+* **Unexpected symbolic argument to an opcode** For example, if a symbolic address is given to
   a `CALL` instruction, hevm will not be able to determine which contract is being called,
   and hence will not be able to explore that path. This can be alleviated with the option
   `--only-deployed`, which will restrict the analysis to only the contracts that are deployed
   during the `setUp()` phase of the test.
-* *Maximum iterations reached* This happens when we have too many iterations in a loop,
+* **Maximum iterations reached** This happens when we have too many iterations in a loop,
   and we have reached the maximum number of iterations allowed. This can be configured
   with the `--max-iterations` option.
-* *Jump into symbolic code* This can happen in case the contract generates code at runtime,
+* **Jump into symbolic code** This can happen in case the contract generates code at runtime,
   deploys it, and jumps into it. hevm does not support this, and will give up exploration.
-* *Branch too deep* This happens when the call depth has been limited via the `--max-depth`
+* **Branch too deep** This happens when the call depth has been limited via the `--max-depth`
   option, and hevm has reached that limit during exploration.
-* *Cheat code missing* This happens when a cheatcode is called that is not yet implemented
+* **Cheat code missing** This happens when a cheatcode is called that is not yet implemented
   in hevm.
 
 ## False Positives
