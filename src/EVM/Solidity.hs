@@ -39,6 +39,8 @@ module EVM.Solidity
   , astSrcMap
   , containsLinkerHole
   , makeSourceCache
+  , getContractsMap
+  , WarningData(..)
 ) where
 
 import EVM.ABI
@@ -161,6 +163,9 @@ data Mutability
 newtype Contracts = Contracts (Map Text SolcContract)
   deriving newtype (Show, Eq, Semigroup, Monoid)
 
+getContractsMap :: Contracts -> Map Text SolcContract
+getContractsMap (Contracts m) = m
+
 -- | A mapping from contract identifiers (filepath:name) to their ast json
 newtype Asts = Asts (Map Text Value)
   deriving newtype (Show, Eq, Semigroup, Monoid)
@@ -176,6 +181,7 @@ data SrcFile = SrcFile
 newtype Sources = Sources (Map SrcFile (Maybe ByteString))
   deriving newtype (Show, Eq, Semigroup, Monoid)
 
+-- THIS contains id -> (filepath, contents) in `sources`
 data BuildOutput = BuildOutput
   { contracts :: Contracts
   , sources   :: SourceCache
@@ -192,7 +198,7 @@ data ProjectType = CombinedJSON | Foundry
   deriving (Eq, Show, Read, ParseField)
 
 data SourceCache = SourceCache
-  { files  :: Map Int (FilePath, ByteString)
+  { files  :: Map Int (FilePath, ByteString) -- ^ map from src id to (filepath, contents)
   , lines  :: Map Int (Vector ByteString)
   , asts   :: Map Text Value
   } deriving (Show, Eq, Generic)
@@ -225,6 +231,12 @@ data SrcMap = SM {
   jump          :: JumpType,
   modifierDepth :: {-# UNPACK #-} !Int
 } deriving (Show, Eq, Ord, Generic)
+
+data WarningData s t = WarningData
+  {solcContr :: SolcContract,
+   sourceCache :: SourceCache,
+   vm :: VM s t
+  }
 
 data SrcMapParseState
   = F1 String Int
@@ -526,10 +538,10 @@ readStdJSON json = do
   contractsObject <- maybeToEither (MissingJsonField "contracts") $ json ^? key "contracts" % _Object
   contracts <- translate =<< flattenContracts <$> (parseContracts contractsObject)
   pure (Contracts contracts)
-  where 
+  where
     translate :: Map Text ContractJSON -> Either BytecodeReadingError (Map Text SolcContract)
     translate m = Map.traverseWithKey translateOne m
-    
+
     translateOne :: Text -> ContractJSON -> Either BytecodeReadingError SolcContract
     translateOne contractName contractData = do
       runtimeCode <- toCode contractName (fromMaybe "" contractData.evm.deployedBytecode.object)

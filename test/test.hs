@@ -1880,7 +1880,7 @@ tests = testGroup "hevm"
         let sig = (Just $ Sig "foo(address,uint256)" [AbiAddressType, AbiUIntType 256])
         (e, res) <- withDefaultSolver $
           \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        liftIO $ printWarnings [e] res "the contracts under test"
+        liftIO $ printWarnings Nothing [e] res "the contracts under test"
         assertEqualM "Must be QED" res [Qed]
     , test "extcodesize-symbolic2" $ do
         Just c <- solcRuntime "C"
@@ -1898,7 +1898,7 @@ tests = testGroup "hevm"
         let sig = (Just $ Sig "foo(address,uint256)" [AbiAddressType, AbiUIntType 256])
         (e, res@[Cex _]) <- withDefaultSolver $
           \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        liftIO $ printWarnings [e] res "the contracts under test"
+        liftIO $ printWarnings Nothing [e] res "the contracts under test"
     , test "jump-into-symbolic-region" $ do
         let
           -- our initCode just jumps directly to the end
@@ -1931,7 +1931,7 @@ tests = testGroup "hevm"
           let iterConf = IterConfig {maxIter=Nothing, askSmtIters=1, loopHeuristic=StackBased }
           expr <- Expr.simplify <$> interpret (Fetch.oracle s Nothing) iterConf vm runExpr
           case expr of
-            Partial _ _ (JumpIntoSymbolicCode _ _) -> assertBoolM "" True
+            Partial _ _ (JumpIntoSymbolicCode _ _ _) -> assertBoolM "" True
             _ -> assertBoolM "did not encounter expected partial node" False
     ]
   , testGroup "Dapp-Tests"

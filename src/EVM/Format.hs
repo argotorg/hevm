@@ -4,7 +4,7 @@ module EVM.Format
   ( formatExpr
   , formatSomeExpr
   , formatPartial
-  , formatPartialShort
+  , formatPartialDetailed
   , formatProp
   , formatState
   , formatError
@@ -40,7 +40,7 @@ import EVM (traceForest, traceForest', traceContext, cheatCode)
 import EVM.ABI (getAbiSeq, parseTypeName, AbiValue(..), AbiType(..), SolError(..), Indexed(..), Event(..))
 import EVM.Dapp (DappContext(..), DappInfo(..), findSrc, showTraceLocation)
 import EVM.Expr qualified as Expr
-import EVM.Solidity (SolcContract(..), Method(..))
+import EVM.Solidity (SolcContract(..), Method(..), SrcMap (..), WarningData (..))
 import EVM.Types
 import EVM.Expr (maybeLitWordSimp, maybeLitAddrSimp)
 
@@ -68,6 +68,9 @@ import Data.Vector (Vector)
 import Hexdump (prettyHex)
 import Numeric (showHex)
 import Witch (into, unsafeInto, tryFrom)
+import Data.Vector.Storable qualified as VS
+import Data.Sequence qualified as Seq
+import EVM.Solidity (SourceCache(..))
 
 data Signedness = Signed | Unsigned
   deriving (Show)
@@ -467,32 +470,70 @@ formatError = \case
 
 formatPartial :: PartialExec -> Text
 formatPartial = \case
-  UnexpectedSymbolicArg pc opcode msg args -> T.unlines
-    [ "Unexpected Symbolic Arguments to Opcode"
+  UnexpectedSymbolicArg pc addr opcode msg args -> T.unlines
+    [ "Unexpected Symbolic Arguments to Opcode."
     , indent 2 $ T.unlines
       [ "msg: " <> T.pack (show msg)
       , "opcode: " <> T.pack opcode
       , "program counter: " <> T.pack (show pc)
+      , "contract addr: " <> pack (show addr)
       , "arguments: "
       , indent 2 $ T.unlines . fmap formatSomeExpr $ args
       ]
     ]
-  MaxIterationsReached pc addr -> "Max Iterations Reached in contract: " <> formatAddr addr <> " pc: " <> pack (show pc) <> " To increase the maximum, set a fixed large (or negative) value for `--max-iterations` on the command line"
-  JumpIntoSymbolicCode pc idx -> "Encountered a jump into a potentially symbolic code region while executing initcode. pc: " <> pack (show pc) <> " jump dst: " <> pack (show idx)
-  CheatCodeMissing pc selector ->T.unlines
-    [ "Cheat code not recognized"
-    , "program counter: " <> T.pack (show pc)
-    , "function selector: " <> T.pack (show selector)
+  MaxIterationsReached pc addr -> T.unlines
+    ["Max Iterations Reached."
+    , indent 2 $ T.unlines
+      ["Contract addr: " <> formatAddr addr
+      , "program counter: " <> T.pack (show pc)
+      , "contract addr: " <> T.pack (show addr)
+      ]
     ]
-  BranchTooDeep pc -> T.unlines ["Branches too deep at program counter: " <> pack (show pc)]
+  JumpIntoSymbolicCode pc addr idx -> T.unlines
+    ["Encountered a jump into a symbolic code region."
+    , indent 2 $ T.unlines
+      ["program counter: " <> T.pack (show pc)
+      , "contract addr: " <> T.pack (show addr)
+      , "jump dst: " <> pack (show idx)
+      ]
+    ]
+  CheatCodeMissing pc addr selector -> T.unlines
+    [ "Cheat code not recognized."
+    , indent 2 $ T.unlines
+      [ "program counter: " <> T.pack (show pc)
+      , "contract addr: " <> T.pack (show addr)
+      , "function selector: " <> T.pack (show selector)
+      ]
+    ]
+  BranchTooDeep pc addr -> T.unlines
+    ["Branches too deep."
+    , indent 2 $ T.unlines
+      ["program counter: " <> pack (show pc)
+      , "contract addr: " <> pack (show addr)
+      ]
+    ]
 
-formatPartialShort :: PartialExec -> Text
-formatPartialShort = \case
-  UnexpectedSymbolicArg _ opcode _ _ -> "Unexpected symbolic arguments to opcode: " <> T.pack opcode
-  MaxIterationsReached {}            -> "Max iterations reached"
-  JumpIntoSymbolicCode {}            -> "Encountered a jump into a potentially symbolic code region while executing initcode"
-  CheatCodeMissing _ selector        -> "Cheat code not recognized: " <> T.pack (show selector)
-  BranchTooDeep pc                   -> "Branches too deep at program counter: " <> pack (show pc)
+formatPartialDetailed :: Maybe (WarningData s t) -> PartialExec -> Text
+formatPartialDetailed warnData p = case p of
+  UnexpectedSymbolicArg pc addr opcode _ _ -> "Unexpected symbolic arguments to opcode: " <> T.pack opcode <> (pack $ getSrcInfo warnData addr pc )
+  MaxIterationsReached pc addr       -> "Max iterations reached" <> (pack $ getSrcInfo warnData addr pc )
+  JumpIntoSymbolicCode pc addr _     -> "Encountered a jump into a symbolic code" <> (pack $ getSrcInfo warnData addr pc )
+  CheatCodeMissing pc addr selector  -> "Cheat code not recognized: " <> T.pack (show selector) <> (pack $ getSrcInfo warnData addr pc )
+  BranchTooDeep pc addr              -> "Branches too deep" <> (pack $ getSrcInfo warnData addr pc )
+
+getSrcInfo :: Maybe (WarningData s t) -> Expr EAddr -> Int -> String
+getSrcInfo Nothing addr pc = " at addr: " <> show addr <> " at pc: " <> show pc
+getSrcInfo (Just dat) addr pc = fromMaybe (getSrcInfo Nothing addr pc) $ do
+  contr <- Map.lookup addr dat.vm.env.contracts
+  pcOp <- contr.opIxMap VS.!? pc
+  sMap <- Seq.lookup pcOp dat.solcContr.runtimeSrcmap
+  (fname, fcontent) <- Map.lookup sMap.file dat.sourceCache.files
+  let eols = BS.count 10 $ BS.take sMap.offset fcontent  -- 10 is \n
+  let str = " in file \"" <> fname <> "\" on line " <> show (eols+1)
+  case (BS.length fcontent > (sMap.offset + sMap.length)) of
+    False -> pure str
+    True  -> let relevant = BS.take sMap.length $ BS.drop sMap.offset fcontent
+      in pure $ str <> " : " <> show relevant
 
 formatSomeExpr :: SomeExpr -> Text
 formatSomeExpr (SomeExpr e) = formatExpr $ Expr.simplify e
