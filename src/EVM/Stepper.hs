@@ -24,7 +24,7 @@ where
 import Control.Monad.IO.Class
 import Control.Monad.Operational (Program, ProgramViewT(..), ProgramView, singleton, view)
 import Control.Monad.ST (stToIO, RealWorld)
-import Control.Monad.State.Strict (execStateT, runStateT, get)
+import Control.Monad.State.Strict (execStateT, get, StateT(..))
 import Data.Text (Text)
 
 import EVM qualified
@@ -121,3 +121,4 @@ interpret fetcher vm = eval . view
         EVM m -> do
           (r, vm') <- liftIO $ stToIO $ runStateT m vm
           interpret fetcher vm' (k r)
+

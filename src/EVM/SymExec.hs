@@ -10,6 +10,7 @@ import Control.Monad.IO.Unlift
 import Control.Monad.Operational qualified as Operational
 import Control.Monad.ST (RealWorld, stToIO, ST)
 import Control.Monad.State.Strict (runStateT)
+import Control.Arrow ((>>>))
 import Data.Bifunctor (second)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -53,6 +54,7 @@ import Optics.Core
 import Options.Generic (ParseField, ParseFields, ParseRecord)
 import Text.Printf (printf)
 import Witch (into, unsafeInto)
+import Data.Text.Encoding (encodeUtf8)
 
 data LoopHeuristic
   = Naive
@@ -1120,6 +1122,23 @@ prettyBuf :: Expr Buf -> Text
 prettyBuf (ConcreteBuf "") = "Empty"
 prettyBuf (ConcreteBuf bs) = formatBinary bs
 prettyBuf b = internalError $ "Unexpected symbolic buffer:\n" <> T.unpack (formatExpr b)
+
+calldataFromCex :: App m => SMTCex -> Expr Buf -> Text -> [AbiType] -> m (Err ByteString)
+calldataFromCex cex buf funName types = do
+  let fullSig = (funName <> "(" <> T.intercalate "," (map abiTypeSolidity types) <> ")")
+      sigKeccak = keccakSig $ encodeUtf8 fullSig
+  pure $ (sigKeccak <>) <$> body
+  where
+    cd = defaultSymbolicValues $ subModel cex buf
+    argdata = case cd of
+      Right cd' -> Right $ Expr.drop 4 (Expr.simplify cd')
+      Left e -> Left e
+    body = forceConcrete =<< argdata
+    forceConcrete :: (Expr Buf) -> Err ByteString
+    forceConcrete (ConcreteBuf k) = Right k
+    forceConcrete _ = Left "Symbolic buffer in calldata, cannot produce concrete model"
+    keccakSig :: ByteString -> ByteString
+    keccakSig = keccakBytes >>> BS.take 4
 
 prettyCalldata :: SMTCex -> Expr Buf -> Text -> [AbiType] -> Text
 prettyCalldata cex buf sig types = headErr errSig (T.splitOn "(" sig) <> "(" <> body <> ")"

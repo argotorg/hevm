@@ -2,6 +2,7 @@
 [Quick Installation](./install.md)
 [When to Use](./when-to-use.md)
 [Limitations and Workarounds](./limitations-and-workarounds.md)
+[Completeness and False Positives](./completeness-and-false-positives.md)
 
 # Tutorials
 

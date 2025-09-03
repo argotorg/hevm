@@ -109,6 +109,7 @@ library
     EVM.RLP,
     EVM.Solidity,
     EVM.Stepper,
+    EVM.Tracing,
     EVM.SymExec,
     EVM.Traversals,
     EVM.CSE,
@@ -152,7 +153,6 @@ library
     scientific                        >= 0.3.6 && < 0.4,
     binary                            >= 0.8.6 && < 0.9,
     text                              >= 1.2.3 && < 2.2,
-    unordered-containers              >= 0.2.10 && < 0.3,
     vector                            >= 0.12.1 && < 0.14,
     base16                            >= 1.0 && < 1.1,
     megaparsec                        >= 9.0.0 && < 10.0,
@@ -249,9 +249,7 @@ common test-base
     text,
     vector,
     witherable,
-    operational,
     optics-core,
-    optics-extra,
     witch,
     unliftio-core,
     exceptions
@@ -261,7 +259,7 @@ library test-utils
   default-language: GHC2021
   exposed-modules:
     EVM.Test.Utils
-    EVM.Test.Tracing
+    EVM.Test.FuzzSymExec
     EVM.Test.BlockchainTests
 
 common test-common
@@ -273,7 +271,7 @@ common test-common
     test-utils
   other-modules:
     EVM.Test.Utils
-    EVM.Test.Tracing
+    EVM.Test.FuzzSymExec
     EVM.Test.BlockchainTests
 
 --- Test Suites ---
@@ -292,6 +290,7 @@ test-suite test
     extra,
     here,
     time,
+    optics-extra,
     regex
 
 -- these tests require network access so we split them into a separate test

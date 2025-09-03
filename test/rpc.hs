@@ -11,7 +11,7 @@ import Data.Text (Text)
 import Data.Vector qualified as V
 
 import Optics.Core
-import EVM (makeVm, symbolify, forceLit)
+import EVM (makeVm, symbolify)
 import EVM.ABI
 import EVM.Fetch
 import EVM.SMT
