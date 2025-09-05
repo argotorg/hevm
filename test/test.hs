@@ -156,10 +156,6 @@ tests = testGroup "hevm"
         |]
        expr <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "transfer(uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
        assertEqualM "Expression is not clean." (badStoresInExpr expr) False
-    -- This case is somewhat artificial. We can't simplify this using only
-    -- static rewrite rules, because acct is totally abstract and acct + 1
-    -- could overflow back to zero. we may be able to do better if we have some
-    -- smt assisted simplification that can take branch conditions into account.
     , expectFail $ test "simplify-storage-array-symbolic-index" $ do
        Just c <- solcRuntime "MyContract"
         [i|
@@ -175,7 +171,7 @@ tests = testGroup "hevm"
         }
         |]
        expr <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "transfer(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
-       -- T.writeFile "symbolic-index.expr" $ formatExpr expr
+       -- putStrLnM $ T.unpack $ formatExpr expr
        assertEqualM "Expression is not clean." (badStoresInExpr expr) False
     , expectFail $ test "simplify-storage-array-of-struct-symbolic-index" $ do
        Just c <- solcRuntime "MyContract"
@@ -1838,7 +1834,7 @@ tests = testGroup "hevm"
           let calldata = (WriteWord (Lit 0x0) (Var "u") (ConcreteBuf ""), [])
           initVM <- liftIO $ stToIO $ abstractVM calldata initCode Nothing True
           let iterConf = IterConfig {maxIter=Nothing, askSmtIters=1, loopHeuristic=StackBased }
-          expr <- Expr.simplify <$> interpret (Fetch.oracle s Nothing) iterConf initVM runExpr
+          expr <- Expr.simplify <$> interpret (Fetch.oracle s mempty) iterConf initVM runExpr
           assertBoolM "unexptected partial execution" (not $ Expr.containsNode isPartial expr)
     , test "mixed-concrete-symbolic-args" $ do
         Just c <- solcRuntime "C"
@@ -1929,7 +1925,7 @@ tests = testGroup "hevm"
         withDefaultSolver $ \s -> do
           vm <- liftIO $ stToIO $ loadSymVM runtimecode (Lit 0) initCode False
           let iterConf = IterConfig {maxIter=Nothing, askSmtIters=1, loopHeuristic=StackBased }
-          expr <- Expr.simplify <$> interpret (Fetch.oracle s Nothing) iterConf vm runExpr
+          expr <- Expr.simplify <$> interpret (Fetch.oracle s mempty) iterConf vm runExpr
           case expr of
             Partial _ _ (JumpIntoSymbolicCode _ _) -> assertBoolM "" True
             _ -> assertBoolM "did not encounter expected partial node" False
@@ -1969,7 +1965,7 @@ tests = testGroup "hevm"
               , ("test/contracts/fail/symbolicFail.sol",      "prove_symb_fail_allrev_selector.*", (False, False))
               , ("test/contracts/fail/symbolicFail.sol",      "prove_symb_fail_somerev_selector.*", (False, True))]
         forM_ cases $ \(testFile, match, expected) -> do
-          actual <- runSolidityTestCustom testFile match Nothing Nothing False Nothing Foundry
+          actual <- runSolidityTestCustom testFile match Nothing Nothing False mempty Foundry
           putStrLnM $ "Test result for " <> testFile <> " match: " <> T.unpack match <> ": " <> show actual
           assertEqualM "Must match" expected actual
     , test "Trivial-Fail" $ do
@@ -2002,14 +1998,14 @@ tests = testGroup "hevm"
         runSolidityTest testFile "prove_trivial" >>= assertEqualM "prove_trivial" (False, False)
         runSolidityTest testFile "prove_trivial_dstest" >>= assertEqualM "prove_trivial_dstest" (False, False)
         runSolidityTest testFile "prove_add" >>= assertEqualM "prove_add" (False, True)
-        runSolidityTestCustom testFile "prove_smtTimeout" (Just 1) Nothing False Nothing Foundry
+        runSolidityTestCustom testFile "prove_smtTimeout" (Just 1) Nothing False mempty Foundry
           >>= assertEqualM "prove_smtTimeout" (True, False)
         runSolidityTest testFile "prove_multi" >>= assertEqualM "prove_multi" (False, True)
         runSolidityTest testFile "prove_distributivity" >>= assertEqualM "prove_distributivity" (False, True)
     , test "Loop-Tests" $ do
         let testFile = "test/contracts/pass/loops.sol"
-        runSolidityTestCustom testFile "prove_loop" Nothing (Just 10) False Nothing Foundry  >>= assertEqualM "test result" (True, False)
-        runSolidityTestCustom testFile "prove_loop" Nothing (Just 100) False Nothing Foundry >>= assertEqualM "test result" (False, False)
+        runSolidityTestCustom testFile "prove_loop" Nothing (Just 10) False mempty Foundry  >>= assertEqualM "test result" (True, False)
+        runSolidityTestCustom testFile "prove_loop" Nothing (Just 100) False mempty Foundry >>= assertEqualM "test result" (False, False)
     , test "Cheat-Codes-Pass" $ do
         let testFile = "test/contracts/pass/cheatCodes.sol"
         runSolidityTest testFile ".*" >>= assertEqualM "test result" (True, False)

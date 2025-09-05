@@ -186,6 +186,7 @@ library
     split                             >= 0.2.3 && < 0.3,
     template-haskell                  >= 2.19.0 && < 3,
     extra                             >= 1.7.14 && < 2,
+    aeson-pretty,
   hs-source-dirs:
     src
 

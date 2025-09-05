@@ -310,7 +310,7 @@ getHEVMRet
   => OpContract -> ByteString -> Int -> m (Either (EvmError, [VMTrace]) (Expr 'End, [VMTrace], VMTraceResult))
 getHEVMRet contr txData gaslimitExec = do
   let (txn, evmEnv, contrAlloc, fromAddress, toAddress, _) = evmSetup contr txData gaslimitExec
-  runCodeWithTrace Nothing evmEnv contrAlloc txn (LitAddr fromAddress) (LitAddr toAddress)
+  runCodeWithTrace mempty evmEnv contrAlloc txn (LitAddr fromAddress) (LitAddr toAddress)
 
 getEVMToolRet :: FilePath -> OpContract -> ByteString -> Int -> IO (Maybe EVMToolResult)
 getEVMToolRet evmDir contr txData gaslimitExec = do
@@ -433,7 +433,7 @@ runCodeWithTrace rpcinfo evmEnv alloc txn fromAddr toAddress = withSolvers Z3 0 
   let calldata' = ConcreteBuf txn.txdata
       code' = alloc.code
       iterConf = IterConfig { maxIter = Nothing, askSmtIters = 1, loopHeuristic = Naive }
-      buildExpr s vm = interpret (Fetch.oracle s Nothing) iterConf vm runExpr
+      buildExpr s vm = interpret (Fetch.oracle s mempty) iterConf vm runExpr
   origVM <- liftIO $ stToIO $ vmForRuntimeCode code' calldata' evmEnv alloc txn fromAddr toAddress
 
   expr <- buildExpr solvers $ symbolify origVM

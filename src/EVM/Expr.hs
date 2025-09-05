@@ -783,6 +783,15 @@ writeStorage key val store@(SStore key' val' prev)
               _ -> SStore key val store
 writeStorage key val store = SStore key val store
 
+-- Used to check if the underlying concrete store contains a key. Used to decide
+-- if we need to fetch a storage slot from RPC or not
+concStoreContains :: Expr EWord -> Expr Storage -> Bool
+concStoreContains k@(Lit key) store = case store of
+  ConcreteStore s -> Map.member key s
+  SStore _ _ s -> concStoreContains k s
+  AbstractStore _ _ -> internalError "cannot read deeply into an AbstractStore"
+  GVar _ -> internalError "cannot read to a GVar"
+concStoreContains _ _ = internalError "readDeepStorage only supports concrete keys"
 
 getAddr :: Expr Storage -> Maybe (Expr EAddr)
 getAddr (SStore _ _ p) = getAddr p

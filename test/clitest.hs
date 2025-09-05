@@ -244,3 +244,10 @@ main = do
         fileExists <- doesFileExist filename
         shouldBe fileExists True
         removeFile filename
+      it "rpc-mock" $ do
+        (_, stdout, stderr) <- runForgeTest "test/contracts/fail/rpc-test.sol"
+          ["--rpc", "http://mock.mock", "--prefix", "test_attack_symbolic"
+          , "--number", "10307563", "--mock-file", "test/contracts/fail/rpc-test-mock.json"]
+        putStrLn stdout
+        putStrLn stderr
+        stdout `shouldContain` "[FAIL]"

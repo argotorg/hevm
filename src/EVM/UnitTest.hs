@@ -476,19 +476,20 @@ initialUnitTestVm (UnitTestOptions {..}) theContract = do
           & set #balance (Lit testParams.balanceCreate)
   pure $ vm & set (#env % #contracts % at (LitAddr ethrunAddress)) (Just creator)
 
-paramsFromRpc :: Fetch.RpcInfo -> IO TestVMParams
-paramsFromRpc rpcinfo = do
-  (miner,ts,blockNum,ran,limit,base) <- case rpcinfo of
+paramsFromRpc :: forall m . App m => Fetch.RpcInfo -> m TestVMParams
+paramsFromRpc rpcInfo = do
+  (miner,ts,blockNum,ran,limit,base) <- case rpcInfo.blockNumURL of
     Nothing -> pure (SymAddr "miner", Lit 0, Lit 0, 0, 0, 0)
-    Just (block, url) -> Fetch.fetchBlockFrom block url >>= \case
-      Nothing -> internalError "Could not fetch block"
-      Just Block{..} -> pure ( coinbase
-                             , timestamp
-                             , number
-                             , prevRandao
-                             , gaslimit
-                             , baseFee
-                             )
+    Just (Fetch.Latest, url) -> fetch Fetch.Latest url
+    Just (Fetch.BlockNumber block, url) -> case rpcInfo.mockBlock >>= Map.lookup block of
+        Nothing -> fetch (Fetch.BlockNumber block) url
+        Just b ->pure (b.coinbase
+                      , b.timestamp
+                      , b.number
+                      , b.prevRandao
+                      , b.gaslimit
+                      , b.baseFee
+                      )
   let ts' = fromMaybe (internalError "received unexpected symbolic timestamp via rpc") (maybeLitWordSimp ts)
   pure $ TestVMParams
     -- TODO: make this symbolic! It needs some tweaking to the way that our
@@ -510,6 +511,19 @@ paramsFromRpc rpcinfo = do
     , prevrandao = ran
     , chainId = 99
     }
+  where
+    fetch block url = do
+      conf <- readConfig
+      liftIO $ Fetch.fetchBlockFrom conf block url >>= \case
+        Nothing -> internalError "Could not fetch block"
+        Just Block{..} -> pure ( coinbase
+                               , timestamp
+                               , number
+                               , prevRandao
+                               , gaslimit
+                               , baseFee
+                               )
+
 
 tick :: Text -> IO ()
 tick x = Text.putStr x >> hFlush stdout

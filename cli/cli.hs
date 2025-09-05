@@ -186,6 +186,7 @@ data TestOptions = TestOptions
   , match         ::Maybe String
   , prefix        ::String
   , ffi           ::Bool
+  , mockFile      ::Maybe String
   }
 
 testOptions :: Parser TestOptions
@@ -197,6 +198,7 @@ testOptions = TestOptions
   <*> (optional $ strOption $ long "match" <> help "Test case filter - only run methods matching regex")
   <*> (strOption $ long "prefix"  <> showDefault <> value "prove" <> help "Prefix for test cases to prove")
   <*> (switch $ long "ffi" <> help "Allow the usage of the hevm.ffi() cheatcode (WARNING: this allows test authors to execute arbitrary code on your machine)")
+  <*> (optional $ strOption $ long "mock-file" <> help "Read mocked RPC response data from JSON file")
 
 
 data EqOptions = EqOptions
@@ -332,7 +334,7 @@ main = do
             exitFailure
           Right out -> do
             -- TODO: which functions here actually require a BuildOutput, and which can take it as a Maybe?
-            unitTestOpts <- liftIO $ unitTestOptions testOpts cOpts solvers (Just out)
+            unitTestOpts <- unitTestOptions testOpts cOpts solvers (Just out)
             res <- unitTest unitTestOpts out.contracts
             liftIO $ unless (uncurry (&&) res) exitFailure
     Exec cFileOpts execOpts cExecOpts cOpts-> do
@@ -367,8 +369,8 @@ main = do
         } }
 
 
-getCode :: Maybe String -> Maybe ByteString -> IO (Maybe ByteString)
-getCode fname code = do
+getCode :: App m => Maybe String -> Maybe ByteString -> m (Maybe ByteString)
+getCode fname code = liftIO $ do
   when (isJust fname && isJust code) $ do
     putStrLn "Error: Cannot provide both a file and code"
     exitFailure
@@ -387,8 +389,8 @@ getCode fname code = do
 
 equivalence :: App m => EqOptions -> CommonOptions -> m ()
 equivalence eqOpts cOpts = do
-  bytecodeA' <- liftIO $ getCode eqOpts.codeAFile eqOpts.codeA
-  bytecodeB' <- liftIO $ getCode eqOpts.codeBFile eqOpts.codeB
+  bytecodeA' <- getCode eqOpts.codeAFile eqOpts.codeA
+  bytecodeB' <- getCode eqOpts.codeBFile eqOpts.codeB
   let bytecodeA = decipher bytecodeA'
   let bytecodeB = decipher bytecodeB'
   when (isNothing bytecodeA) $ liftIO $ do
@@ -402,7 +404,7 @@ equivalence eqOpts cOpts = do
                             , askSmtIters = cOpts.askSmtIterations
                             , loopHeuristic = cOpts.loopDetectionHeuristic
                             }
-                          , rpcInfo = Nothing
+                          , rpcInfo = mempty
                           }
   calldata <- buildCalldata cOpts eqOpts.sig eqOpts.arg
   solver <- liftIO $ getSolver cOpts.solver
@@ -490,9 +492,9 @@ buildCalldata cOpts sig arg = case (cOpts.calldata, sig) of
 symbCheck :: App m => CommonFileOptions -> SymbolicOptions -> CommonExecOptions -> CommonOptions -> m ()
 symbCheck cFileOpts sOpts cExecOpts cOpts = do
   let block' = maybe Fetch.Latest Fetch.BlockNumber cExecOpts.block
-      rpcinfo = (,) block' <$> cExecOpts.rpc
+      blockUrlInfo = (,) block' <$> cExecOpts.rpc
   calldata <- buildCalldata cOpts sOpts.sig sOpts.arg
-  preState <- liftIO $ symvmFromCommand cExecOpts sOpts cFileOpts calldata
+  preState <- symvmFromCommand cExecOpts sOpts cFileOpts calldata
   errCodes <- case sOpts.assertions of
     Nothing -> pure defaultPanicCodes
     Just s -> case (mapM readMaybe $ splitOn "," s) of
@@ -510,7 +512,7 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = do
                               , askSmtIters = cOpts.askSmtIterations
                               , loopHeuristic = cOpts.loopDetectionHeuristic
                               }
-                            , rpcInfo = rpcinfo
+                            , rpcInfo = mempty {Fetch.blockNumURL = blockUrlInfo}
                             }
     (expr, res) <- verify solvers veriOpts preState (Just $ checkAssertions errCodes)
     case res of
@@ -557,14 +559,15 @@ areAnyPrefixOf prefixes t = any (flip T.isPrefixOf t) prefixes
 launchExec :: App m => CommonFileOptions -> ExecOptions -> CommonExecOptions -> CommonOptions -> m ()
 launchExec cFileOpts execOpts cExecOpts cOpts = do
   dapp <- getSrcInfo execOpts cOpts
-  vm <- liftIO $ vmFromCommand cOpts cExecOpts cFileOpts execOpts
+  vm <- vmFromCommand cOpts cExecOpts cFileOpts execOpts
   let
     block = maybe Fetch.Latest Fetch.BlockNumber cExecOpts.block
-    rpcinfo = (,) block <$> cExecOpts.rpc
+    blockUrlInfo = (,) block <$> cExecOpts.rpc
+    rpcDat :: Fetch.RpcInfo = mempty { Fetch.blockNumURL = blockUrlInfo }
 
   -- TODO: we shouldn't need solvers to execute this code
   withSolvers Z3 0 1 Nothing $ \solvers -> do
-    vm' <- EVM.Stepper.interpret (Fetch.oracle solvers rpcinfo) vm EVM.Stepper.runFully
+    vm' <- EVM.Stepper.interpret (Fetch.oracle solvers rpcDat) vm EVM.Stepper.runFully
     writeTraceDapp dapp vm'
     case vm'.result of
       Just (VMFailure (Revert msg)) -> liftIO $ do
@@ -585,11 +588,13 @@ launchExec cFileOpts execOpts cExecOpts cOpts = do
         internalError "no EVM result"
 
 -- | Creates a (concrete) VM from command line options
-vmFromCommand :: CommonOptions -> CommonExecOptions -> CommonFileOptions -> ExecOptions -> IO (VM Concrete RealWorld)
+vmFromCommand :: App m => CommonOptions -> CommonExecOptions -> CommonFileOptions -> ExecOptions -> m (VM Concrete RealWorld)
 vmFromCommand cOpts cExecOpts cFileOpts execOpts= do
+  conf <- readConfig
+  liftIO $ putStrLn $ "vmfromcommand calldata: " <> show calldata
   (miner,ts,baseFee,blockNum,prevRan) <- case cExecOpts.rpc of
     Nothing -> pure (LitAddr 0,Lit 0,0,Lit 0,0)
-    Just url -> Fetch.fetchBlockFrom block url >>= \case
+    Just url -> liftIO $ Fetch.fetchBlockFrom conf block url >>= \case
       Nothing -> do
         putStrLn $ "Error, Could not fetch block" <> show block <> " from URL: " <> show url
         exitFailure
@@ -602,13 +607,13 @@ vmFromCommand cOpts cExecOpts cFileOpts execOpts= do
 
   codeWrapped <- getCode cFileOpts.codeFile cFileOpts.code
   contract <- case (cExecOpts.rpc, cExecOpts.address, codeWrapped) of
-    (Just url, Just addr', Just c) -> do
+    (Just url, Just addr', Just c) -> liftIO $ do
       let code = hexByteString $ strip0x c
       if isNothing code then do
         putStrLn $ "Error, invalid code: " <> show c
         exitFailure
       else
-        Fetch.fetchContractFrom block url addr' >>= \case
+        Fetch.fetchContractFrom conf block url addr' >>= \case
           Nothing -> do
             putStrLn $ "Error: contract not found: " <> show address
             exitFailure
@@ -622,7 +627,7 @@ vmFromCommand cOpts cExecOpts cFileOpts execOpts= do
                 & set #external (contract.external)
 
     (Just url, Just addr', Nothing) ->
-      Fetch.fetchContractFrom block url addr' >>= \case
+      liftIO $ Fetch.fetchContractFrom conf block url addr' >>= \case
         Nothing -> do
           putStrLn $ "Error, contract not found: " <> show address
           exitFailure
@@ -630,12 +635,12 @@ vmFromCommand cOpts cExecOpts cFileOpts execOpts= do
 
     (_, _, Just c)  -> do
       let code = hexByteString $ strip0x c
-      if (isNothing code) then do
+      if (isNothing code) then liftIO $ do
         putStrLn $ "Error, invalid code: " <> show c
         exitFailure
       else pure $ initialContract (mkCode $ fromJust code)
 
-    (_, _, Nothing) -> do
+    (_, _, Nothing) -> liftIO $ do
       putStrLn "Error, must provide at least (rpc + address) or code"
       exitFailure
 
@@ -643,10 +648,10 @@ vmFromCommand cOpts cExecOpts cFileOpts execOpts= do
         Just t -> t
         Nothing -> internalError "unexpected symbolic timestamp when executing vm test"
 
-  if (isNothing bsCallData) then do
+  if (isNothing bsCallData) then liftIO $ do
     putStrLn $ "Error, invalid calldata: " <> show calldata
     exitFailure
-  else do
+  else liftIO $ do
     vm <- stToIO $ vm0 baseFee miner ts' blockNum prevRan contract
     pure $ EVM.Transaction.initTx vm
   where
@@ -697,11 +702,15 @@ vmFromCommand cOpts cExecOpts cFileOpts execOpts= do
         addr f def = maybe def LitAddr (f cExecOpts)
         bytes f def = maybe def decipher (f cOpts)
 
-symvmFromCommand :: CommonExecOptions -> SymbolicOptions -> CommonFileOptions -> (Expr Buf, [Prop]) -> IO (VM EVM.Types.Symbolic RealWorld)
+symvmFromCommand :: App m =>
+  CommonExecOptions -> SymbolicOptions -> CommonFileOptions ->
+  (Expr Buf, [Prop]) -> m (VM EVM.Types.Symbolic RealWorld)
 symvmFromCommand cExecOpts sOpts cFileOpts calldata = do
+  liftIO $ putStrLn $ "symvmfromcommand calldata: " <> show calldata
+  conf <- readConfig
   (miner,blockNum,baseFee,prevRan) <- case cExecOpts.rpc of
     Nothing -> pure (SymAddr "miner",Lit 0,0,0)
-    Just url -> Fetch.fetchBlockFrom block url >>= \case
+    Just url -> liftIO $ Fetch.fetchBlockFrom conf block url >>= \case
       Nothing -> do
         putStrLn $ "Error, Could not fetch block" <> show block <> " from URL: " <> show url
         exitFailure
@@ -720,7 +729,7 @@ symvmFromCommand cExecOpts sOpts cFileOpts calldata = do
   codeWrapped <- getCode cFileOpts.codeFile cFileOpts.code
   contract <- case (cExecOpts.rpc, cExecOpts.address, codeWrapped) of
     (Just url, Just addr', _) ->
-      Fetch.fetchContractFrom block url addr' >>= \case
+      liftIO $ Fetch.fetchContractFrom conf block url addr' >>= \case
         Nothing -> do
           putStrLn "Error, contract not found."
           exitFailure
@@ -740,7 +749,7 @@ symvmFromCommand cExecOpts sOpts cFileOpts calldata = do
                         & set #nonce       (contract'.nonce)
                         & set #external    (contract'.external)
 
-    (_, _, Just c)  -> do
+    (_, _, Just c) -> liftIO $ do
       let c' = decipher c
       if isNothing c' then do
         putStrLn $ "Error, invalid code: " <> show c
@@ -749,11 +758,11 @@ symvmFromCommand cExecOpts sOpts cFileOpts calldata = do
         EmptyBase -> pure (initialContract . mkCode $ fromJust c')
         AbstractBase -> pure ((`abstractContract` address) . mkCode $ fromJust c')
 
-    (_, _, Nothing) -> do
+    (_, _, Nothing) -> liftIO $ do
       putStrLn "Error, must provide at least (rpc + address) or code"
       exitFailure
 
-  vm <- stToIO $ vm0 baseFee miner ts blockNum prevRan calldata callvalue caller contract storageBase
+  vm <- liftIO $ stToIO $ vm0 baseFee miner ts blockNum prevRan calldata callvalue caller contract storageBase
   pure $ EVM.Transaction.initTx vm
 
   where
@@ -796,24 +805,35 @@ symvmFromCommand cExecOpts sOpts cFileOpts calldata = do
     word64 f def = fromMaybe def (f cExecOpts)
     eaddr f def = maybe def LitAddr (f cExecOpts)
 
-unitTestOptions :: TestOptions -> CommonOptions -> SolverGroup -> Maybe BuildOutput -> IO (UnitTestOptions RealWorld)
+unitTestOptions :: App m => TestOptions -> CommonOptions -> SolverGroup -> Maybe BuildOutput -> m (UnitTestOptions RealWorld)
 unitTestOptions testOpts cOpts solvers buildOutput = do
-  root <- getRoot cOpts
+  root <- liftIO $ getRoot cOpts
+  mockData <- if isJust testOpts.mockFile then liftIO $ do
+      ret <- Fetch.readMockData (fromJust testOpts.mockFile)
+      case ret of
+        Left err -> do
+          putStrLn $ "Error reading mock file: " <> err
+          exitFailure
+        Right md -> pure md
+    else pure mempty
+
   let srcInfo = maybe emptyDapp (dappInfo root) buildOutput
-  let rpcinfo = case (testOpts.number, testOpts.rpc) of
+  let blockUrlInfo = case (testOpts.number, testOpts.rpc) of
           (Just block, Just url) -> Just (Fetch.BlockNumber block, url)
           (Nothing, Just url) -> Just (Fetch.Latest, url)
           _ -> Nothing
-  params <- paramsFromRpc rpcinfo
+      rpcDat = Fetch.RpcInfo blockUrlInfo mockData.mockContract mockData.mockSlot mockData.mockBlock
+  params <- paramsFromRpc rpcDat
   let testn = params.number
       block' = if 0 == testn
        then Fetch.Latest
        else Fetch.BlockNumber testn
   pure UnitTestOptions
     { solvers = solvers
-    , rpcInfo = case testOpts.rpc of
-         Just url -> Just (block', url)
-         Nothing  -> Nothing
+    , rpcInfo = let i = case testOpts.rpc of
+                     Just url -> Just (block', url)
+                     Nothing  -> Nothing
+                in rpcDat { Fetch.blockNumURL = i }
     , maxIter = parseMaxIters cOpts.maxIterations
     , askSmtIters = cOpts.askSmtIterations
     , smtTimeout = Just cOpts.smttimeout

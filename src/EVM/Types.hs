@@ -1282,6 +1282,12 @@ instance JSON.ToJSON W256 where
       cutshow = drop 2 $ show x
       pad = replicate (64 - length (cutshow)) '0'
 
+instance JSON.ToJSONKey W256 where
+  toJSONKey = JSON.toJSONKeyText $ \x ->
+    let cutshow = drop 2 $ show x
+        pad = replicate (64 - length cutshow) '0'
+    in T.pack ("0x" ++ pad ++ cutshow)
+
 instance JSON.FromJSON W256 where
   parseJSON v = do
     s <- T.unpack <$> JSON.parseJSON v
