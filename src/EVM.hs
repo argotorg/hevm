@@ -3267,9 +3267,6 @@ symbolifyResult result =
     VMFailure e -> VMFailure e
     VMSuccess b -> VMSuccess b
 
-forceLit :: Expr EWord -> W256
-forceLit (Lit w) = w
-forceLit _ = internalError "concrete vm, shouldn't ever happen"
 
 burn :: VMOps t => Word64 -> EVM t s () -> EVM t s ()
 burn = burn' . toGas

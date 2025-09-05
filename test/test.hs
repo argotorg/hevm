@@ -70,7 +70,7 @@ import EVM.Solidity
 import EVM.Solvers
 import EVM.Stepper qualified as Stepper
 import EVM.SymExec
-import EVM.Test.Tracing qualified as Tracing
+import EVM.Test.FuzzSymExec qualified as FuzzSymExec
 import EVM.Test.Utils
 import EVM.Traversals
 import EVM.Types hiding (Env)
@@ -138,7 +138,7 @@ runSubSet p = defaultMain . applyPattern p $ tests
 
 tests :: TestTree
 tests = testGroup "hevm"
-  [ Tracing.tests
+  [ FuzzSymExec.tests
   , testGroup "simplify-storage"
     [ test "simplify-storage-array-only-static" $ do
        Just c <- solcRuntime "MyContract"
