@@ -587,11 +587,11 @@ evmErrToString = \case
 
 -- | Sometimes we can only partially execute a given program
 data PartialExec
-  = UnexpectedSymbolicArg { pc :: Int, opcode :: String, msg  :: String, args  :: [SomeExpr] }
+  = UnexpectedSymbolicArg { pc :: Int, addr :: Expr EAddr, opcode :: String, msg  :: String, args  :: [SomeExpr] }
   | MaxIterationsReached  { pc :: Int, addr :: Expr EAddr }
-  | JumpIntoSymbolicCode  { pc :: Int, jumpDst :: Int }
-  | CheatCodeMissing      { pc :: Int, selector :: FunctionSelector }
-  | BranchTooDeep         { pc :: Int}
+  | JumpIntoSymbolicCode  { pc :: Int, addr :: Expr EAddr, jumpDst :: Int }
+  | CheatCodeMissing      { pc :: Int, addr :: Expr EAddr, selector :: FunctionSelector }
+  | BranchTooDeep         { pc :: Int, addr :: Expr EAddr}
   deriving (Show, Eq, Ord)
 
 -- | Effect types used by the vm implementation for side effects & control flow
@@ -775,7 +775,7 @@ data FrameState (t :: VMType) s = FrameState
   { contract     :: Expr EAddr
   , codeContract :: Expr EAddr
   , code         :: ContractCode
-  , pc           :: {-# UNPACK #-} !Int
+  , pc           :: {-# UNPACK #-} !Int -- program counter in BYTES (not ops). PUSH ops will increment pc by more than 1
   , stack        :: [Expr EWord]
   , memory       :: Memory s
   , memorySize   :: Word64
@@ -847,7 +847,7 @@ data Contract = Contract
   , balance     :: Expr EWord
   , nonce       :: Maybe W64
   , codehash    :: Expr EWord
-  , opIxMap     :: VS.Vector Int
+  , opIxMap     :: VS.Vector Int -- ^ map from byte index to op index
   , codeOps     :: V.Vector (Int, Op)
   , external    :: Bool
   }

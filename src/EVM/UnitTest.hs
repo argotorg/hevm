@@ -116,15 +116,15 @@ makeVeriOpts opts =
 
 -- | Top level CLI endpoint for hevm test
 -- | Returns tuple of (No Cex, No warnings)
-unitTest :: App m => UnitTestOptions RealWorld -> Contracts -> m (Bool, Bool)
-unitTest opts (Contracts cs) = do
+unitTest :: App m => UnitTestOptions RealWorld -> BuildOutput -> m (Bool, Bool)
+unitTest opts bo@(BuildOutput (Contracts cs) _) = do
   let unitTestContrs = findUnitTests opts.prefix opts.match $ Map.elems cs
   conf <- readConfig
   when conf.debug $ liftIO $ do
     putStrLn $ "Found " ++ show (length unitTestContrs) ++ " unit test contract(s) to test:"
     let x = map (\(a,b) -> "  --> " <> a <> "  ---  functions: " <> (Text.pack $ show b)) unitTestContrs
     putStrLn $ unlines $ map Text.unpack x
-  results <- concatMapM (runUnitTestContract opts cs) unitTestContrs
+  results <- concatMapM (runUnitTestContract opts bo) unitTestContrs
   when conf.debug $ liftIO $ putStrLn $ "unitTest individual results: " <> show results
   let (firsts, seconds) = unzip results
   pure (and firsts, and seconds)
@@ -164,22 +164,22 @@ initializeUnitTest opts theContract = do
 runUnitTestContract
   :: App m
   => UnitTestOptions RealWorld
-  -> Map Text SolcContract
+  -> BuildOutput
   -> (Text, [Sig])
   -> m [(Bool, Bool)]
 runUnitTestContract
-  opts@(UnitTestOptions {..}) contractMap (name, testSigs) = do
+  opts@(UnitTestOptions {..}) buildOut (name, testSigs) = do
   liftIO $ putStrLn $ "Checking " ++ show (length testSigs) ++ " function(s) in contract " ++ unpack name
 
   -- Look for the wanted contract by name from the Solidity info
-  case Map.lookup name contractMap of
+  case Map.lookup name (getContractsMap buildOut.contracts) of
     Nothing -> internalError $ "Contract " ++ unpack name ++ " not found"
-    Just theContract -> do
+    Just solcContr -> do
       -- Construct the initial VM and begin the contract's constructor
-      vm0 :: VM Concrete RealWorld <- liftIO $ stToIO $ initialUnitTestVm opts theContract
+      vm0 :: VM Concrete RealWorld <- liftIO $ stToIO $ initialUnitTestVm opts solcContr
       vm1 <- Stepper.interpret (Fetch.oracle solvers rpcInfo) vm0 $ do
         Stepper.enter name
-        initializeUnitTest opts theContract
+        initializeUnitTest opts solcContr
         Stepper.evm get
 
       writeTraceDapp dapp vm1
@@ -190,13 +190,13 @@ runUnitTestContract
           tick $ indentLines 3 failOut
           pure [(True, False)]
         Just (VMSuccess _) -> do
-          forM testSigs $ \s -> symRun opts vm1 s
+          forM testSigs $ \s -> symRun opts vm1 s solcContr buildOut.sources
         _ -> internalError "setUp() did not end with a result"
 
 -- Define the thread spawner for symbolic tests
 -- Returns tuple of (No Cex, No warnings)
-symRun :: App m => UnitTestOptions RealWorld -> VM Concrete RealWorld -> Sig -> m (Bool, Bool)
-symRun opts@UnitTestOptions{..} vm (Sig testName types) = do
+symRun :: App m => UnitTestOptions RealWorld -> VM Concrete RealWorld -> Sig -> SolcContract -> SourceCache -> m (Bool, Bool)
+symRun opts@UnitTestOptions{..} vm (Sig testName types) solcContr sourceCache = do
     let callSig = testName <> "(" <> (Text.intercalate "," (map abiTypeSolidity types)) <> ")"
     liftIO $ putStrLn $ "\x1b[96m[RUNNING]\x1b[0m " <> Text.unpack callSig
     cd <- symCalldata callSig types [] (AbstractBuf "txdata")
@@ -267,7 +267,8 @@ symRun opts@UnitTestOptions{..} vm (Sig testName types) = do
     when (unexpectedAllRevert && (warnings || (any isCex results))) $ do
       -- if we display a FAILED due to Cex/warnings, we should also mention everything reverted
       liftIO $ putStrLn $ "   \x1b[33m[WARNING]\x1b[0m " <> Text.unpack testName <> " all branches reverted\n"
-    liftIO $ printWarnings ends results t
+    let warnData = Just $ WarningData solcContr sourceCache vm'
+    liftIO $ printWarnings warnData ends results t
     pure (not (any isCex results), not (warnings || unexpectedAllRevert))
     where
       -- The offset of the text is: the selector (4B), the offset value (aligned to 32B), and the length of the string (aligned to 32B)
@@ -295,13 +296,13 @@ symRun opts@UnitTestOptions{..} vm (Sig testName types) = do
               lhs = LitByte (c2w a)
               rhs = Expr.readByte (Lit (fromIntegral n)) b
 --
-printWarnings :: GetUnknownStr b => [Expr 'End] -> [ProofResult a b] -> String -> IO ()
-printWarnings e results testName = do
+printWarnings :: Maybe (WarningData s t) -> GetUnknownStr b => [Expr 'End] -> [ProofResult a b] -> String -> IO ()
+printWarnings warnData e results testName = do
   when (any isUnknown results || any isError results || any Expr.isPartial e) $ do
     putStrLn $ "   \x1b[33m[WARNING]\x1b[0m hevm was only able to partially explore " <> testName <> " due to: ";
     forM_ (groupIssues (filter isError results)) $ \(num, str) -> putStrLn $ "      " <> show num <> "x -> " <> str
     forM_ (groupIssues (filter isUnknown results)) $ \(num, str) -> putStrLn $ "      " <> show num <> "x -> " <> str
-    forM_ (groupPartials e) $ \(num, str) -> putStrLn $ "      " <> show num <> "x -> " <> str
+    forM_ (groupPartials warnData e) $ \(num, str) -> putStrLn $ "      " <> show num <> "x -> " <> str
   putStrLn ""
 
 symFailure :: App m => UnitTestOptions RealWorld -> Text -> Expr Buf -> [AbiType] -> [(Expr End, SMTCex)] -> m Text

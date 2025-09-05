@@ -1380,7 +1380,7 @@ runBoth depthLimit exploreDepth c = do
     assign #result $ Just $ HandleEffect (RunBoth c)
   else do
     vm <- get
-    assign #result $ Just $ Unfinished (BranchTooDeep {pc = vm.state.pc})
+    assign #result $ Just $ Unfinished (BranchTooDeep {pc = vm.state.pc, addr = vm.state.contract})
 
 runAll :: Maybe Int -> Int -> RunAll s -> EVM Symbolic s ()
 runAll depthLimit exploreDepth c = do
@@ -1388,7 +1388,7 @@ runAll depthLimit exploreDepth c = do
     assign #result $ Just $ HandleEffect (RunAll c)
   else do
     vm <- get
-    assign #result $ Just $ Unfinished (BranchTooDeep {pc = vm.state.pc})
+    assign #result $ Just $ Unfinished (BranchTooDeep {pc = vm.state.pc, addr = vm.state.contract})
 
 fetchAccount :: VMOps t => Expr EAddr -> (Contract -> EVM t s ()) -> EVM t s ()
 fetchAccount addr continue =
@@ -1642,7 +1642,7 @@ unexpectedSymArg msg n = do
   pc <- use (#state % #pc)
   state <- use #state
   let opName = getOpName state
-  partial $ UnexpectedSymbolicArg pc opName msg (wrap n)
+  partial $ UnexpectedSymbolicArg pc state.contract opName msg (wrap n)
 
 unexpectedSymArgW :: (Typeable a, VMOps t) => String -> Expr a -> EVM t s ()
 unexpectedSymArgW msg n = unexpectedSymArg msg [n]
@@ -1794,7 +1794,7 @@ cheat gas (inOffset, inSize) (outOffset, outSize) xs = do
       case Map.lookup abi' cheatActions of
         Nothing -> do
           vm <- get
-          partial $ CheatCodeMissing vm.state.pc abi'
+          partial $ CheatCodeMissing vm.state.pc vm.state.contract abi'
         Just action -> action input
 
 type CheatAction t s = Expr Buf -> EVM t s ()
@@ -2495,6 +2495,7 @@ finishFrame how = do
                     Nothing -> partial $
                       UnexpectedSymbolicArg
                         oldVm.state.pc
+                        oldVm.state.contract
                         (getOpName oldVm.state)
                         "runtime code cannot have an abstract length"
                         (wrap [output])
@@ -2757,7 +2758,7 @@ noJumpIntoInitData idx cont = do
     -- init code has a symbolic region, so check if we're trying to jump into
     -- the symbolic region and return partial if we are
     InitCode ops _ -> if idx > BS.length ops
-                      then partial $ JumpIntoSymbolicCode vm.state.pc idx
+                      then partial $ JumpIntoSymbolicCode vm.state.pc vm.state.contract idx
                       else cont
     -- we're not executing init code, so nothing to check here
     _ -> cont
