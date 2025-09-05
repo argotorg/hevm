@@ -28,6 +28,7 @@ import Data.Text.Lazy (Text)
 import Data.Text qualified as TS
 import Data.Text.Lazy qualified as T
 import Data.Text.Lazy.Builder
+import qualified Data.Text.Lazy.Builder.Int (decimal)
 import Data.Text.Read (decimal)
 import Language.SMT2.Parser (getValueRes, parseCommentFreeFileMsg)
 import Language.SMT2.Syntax (Symbol, SpecConstant(..), GeneralRes(..), Term(..), QualIdentifier(..), Identifier(..), Sort(..), Index(..), VarBinding(..))
@@ -654,9 +655,15 @@ prelude =  SMT2 src mempty mempty
     (ite (= b (_ bv30 256)) ((_ sign_extend 8  ) ((_ extract 247  0) val)) val))))))))))))))))))))))))))))))))
   |]
 
+wordAsBV :: forall a. Integral a => a -> Builder
+wordAsBV w = "(_ bv" <> Data.Text.Lazy.Builder.Int.decimal w <> " 256)"
+
+byteAsBV :: Word8 -> Builder
+byteAsBV b = "(_ bv" <> Data.Text.Lazy.Builder.Int.decimal b <> " 8)"
+
 exprToSMT :: Expr a -> Err Builder
 exprToSMT = \case
-  Lit w -> pure $ fromLazyText $ "(_ bv" <> (T.pack $ show (into w :: Integer)) <> " 256)"
+  Lit w -> pure $ wordAsBV w
   Var s -> pure $ fromText s
   GVar (BufVar n) -> pure $ fromString $ "buf" <> (show n)
   GVar (StoreVar n) -> pure $ fromString $ "store" <> (show n)
@@ -778,7 +785,7 @@ exprToSMT = \case
     wa <- exprToSMT a
     pure $ "((_ zero_extend 96)" `sp` wa `sp` ")"
 
-  LitByte b -> pure $ fromLazyText $ "(_ bv" <> T.pack (show (into b :: Integer)) <> " 8)"
+  LitByte b -> pure $ byteAsBV b
   IndexWord idx w -> case idx of
     Lit n -> if n >= 0 && n < 32
              then do
@@ -923,20 +930,19 @@ concatBytes bytes = do
 -- | Concatenates a list of bytes into a larger bitvector
 writeBytes :: ByteString -> Expr Buf -> Err Builder
 writeBytes bytes buf =  do
-  buf' <- exprToSMT buf
-  ret <- foldM wrap (0, buf') $ BS.unpack bytes
+  smtText <- exprToSMT buf
+  let ret = BS.foldl wrap (0, smtText) bytes
   pure $ snd ret
   where
     -- we don't need to store zeros if the base buffer is empty
     skipZeros = buf == mempty
-    wrap :: (Int, Builder) -> Word8 -> Err (Int, Builder)
-    wrap (idx, inner) byte =
+    wrap :: (Int, Builder) -> Word8 -> (Int, Builder)
+    wrap (idx, acc) byte =
       if skipZeros && byte == 0
-      then pure (idx + 1, inner)
-      else do
-          byteSMT <- exprToSMT (LitByte byte)
-          idxSMT <- exprToSMT . Lit . unsafeInto $ idx
-          pure (idx + 1, "(store " <> inner `sp` idxSMT `sp` byteSMT <> ")")
+      then (idx', acc)
+      else (idx', "(store " <> acc `sp` (wordAsBV idx) `sp` (byteAsBV byte) <> ")")
+      where
+        !idx' = idx + 1
 
 encodeConcreteStore :: Map W256 W256 -> Err Builder
 encodeConcreteStore s = foldM encodeWrite ("((as const Storage) #x0000000000000000000000000000000000000000000000000000000000000000)") (Map.toList s)
