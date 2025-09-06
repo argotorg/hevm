@@ -553,6 +553,7 @@ data EvmError
   | MaxInitCodeSizeExceeded W256 (Expr EWord)
   | InvalidFormat
   | PrecompileFailure
+  | NonexistentPrecompile Addr
   | ReturnDataOutOfBounds
   | NonceOverflow
   | BadCheatCode String FunctionSelector
