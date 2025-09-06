@@ -346,7 +346,7 @@ interpret fetcher iterConf vm =
         where
           goITE :: [(Expr EWord, Expr End)] -> Expr End
           goITE [] = internalError "goITE: empty list"
-          goITE [(_, end)] = end
+          goITE [(val, end)] = ITE (Eq expr val) end end
           goITE ((val,end):ps) = ITE (Eq expr val) end (goITE ps)
           runOne :: App m => VM 'Symbolic RealWorld -> Int -> Expr EWord -> m (Expr 'End)
           runOne frozen newDepth v = do
