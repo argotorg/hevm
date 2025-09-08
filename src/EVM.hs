@@ -1191,7 +1191,7 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
   input <- readMemory inOffset inSize
   let fees = vm.block.schedule
       cost = costOfPrecompile fees preCompileAddr input
-      notImplemented = internalError $ "precompile at address " <> show preCompileAddr <> " not yet implemented"
+      notImplemented = vmError $ NonexistentPrecompile preCompileAddr
       precompileFail = burn' (subGas gasCap cost) $ do
                          assign' (#state % #stack) (Lit 0 : xs)
                          pushTrace $ ErrorTrace PrecompileFailure
@@ -1794,7 +1794,7 @@ cheat gas (inOffset, inSize) (outOffset, outSize) xs = do
       case Map.lookup abi' cheatActions of
         Nothing -> do
           vm <- get
-          partial $ CheatCodeMissing vm.state.pc abi'
+          whenSymbolicElse (partial $ CheatCodeMissing vm.state.pc abi') (vmError $ BadCheatCode "Cannot understand cheatcode." abi') 
         Just action -> action input
 
 type CheatAction t s = Expr Buf -> EVM t s ()
@@ -1819,7 +1819,7 @@ cheatActions = Map.fromList
                 in query (PleaseDoFFI cmd vm.osEnv cont)
               _ -> vmError (BadCheatCode "ffi(string[]) decoding of string failed" sig)
             _ -> vmError (BadCheatCode "ffi(string[]) parameter decoding failed" sig)
-        else unexpectedSymArg "ffi disabled: run again with --ffi if you want to allow tests to call external scripts" ([] :: [Expr EWord])
+        else vmError $ BadCheatCode "ffi disabled: run again with --ffi if you want to allow tests to call external scripts" sig
 
   , action "warp(uint256)" $
       \sig input -> case decodeStaticArgs 0 1 input of

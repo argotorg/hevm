@@ -433,6 +433,7 @@ prettyError = \case
   MaxInitCodeSizeExceeded a b -> "Max init code size exceeded: max: " <> show a <> " actual: " <> show b
   InvalidFormat -> "Invalid Format"
   PrecompileFailure -> "Precompile failure"
+  NonexistentPrecompile a -> "Precompile at address " <> show a <> " does not exist"
   ReturnDataOutOfBounds -> "Return data out of bounds"
   NonceOverflow -> "Nonce overflow"
   BadCheatCode reason a -> "Bad cheat code: " <>  reason <> " sig: " <> show a
