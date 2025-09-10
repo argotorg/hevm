@@ -1618,7 +1618,7 @@ onlyDeployed addrExpr fallback continue = do
     else case eqT @t @Symbolic of
       Just Refl -> do
         let deployedAddrs = map forceEAddrToEWord $ mapMaybe (codeMustExist vm) $ Map.keys vm.env.contracts
-        runAll (?conf.maxDepth) vm.exploreDepth $ PleaseRunAll addrExpr deployedAddrs (continue . forceEWordToEAddr)
+        runAll (?conf.maxDepth) vm.exploreDepth $ PleaseRunAll addrExpr deployedAddrs runAllPaths
       _ -> internalError "Unknown address in Concrete mode"
   where
     codeMustExist :: (VM t s) -> Expr EAddr -> Maybe (Expr EAddr)
@@ -1627,6 +1627,10 @@ onlyDeployed addrExpr fallback continue = do
       case contr.code of
         RuntimeCode (ConcreteRuntimeCode _) -> Just addr
         _ -> Nothing
+    runAllPaths val = do
+        assign #result Nothing
+        pushTo #constraints $ Expr.simplifyProp (addrExpr .== val)
+        continue (forceEWordToEAddr val)
 
 forceAddr :: forall t s . (?conf :: Config, VMOps t, Typeable t) =>
   Expr EWord

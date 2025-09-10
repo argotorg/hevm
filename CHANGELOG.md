@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before fetching it via RPC
 - We no longer increment branch depth twice when branching both ways
 - We now take into account loop heuristic setting for `test`
+- During running in --only-deployed mode, we forgot to force the address
+  in the constraints to be the one we computed it to be. Fixed.
 
 ## Changed
 - Updated forge to 1.2.3 and forge-std to 60acb7aa (1.9.7+)
