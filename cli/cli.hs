@@ -409,9 +409,10 @@ equivalence eqOpts cOpts = do
   calldata <- buildCalldata cOpts eqOpts.sig eqOpts.arg
   solver <- liftIO $ getSolver cOpts.solver
   cores <- liftIO $ unsafeInto <$> getNumProcessors
+  sess <- Fetch.mkSession
   let solverCount = fromMaybe cores cOpts.numSolvers
   withSolvers solver solverCount cOpts.solverThreads (Just cOpts.smttimeout) $ \s -> do
-    eq <- equivalenceCheck s (fromJust bytecodeA) (fromJust bytecodeB) veriOpts calldata eqOpts.create
+    eq <- equivalenceCheck s sess (fromJust bytecodeA) (fromJust bytecodeB) veriOpts calldata eqOpts.create
     let anyIssues =  not (null eq.partials) || any (isUnknown . fst) eq.res  || any (isError . fst) eq.res
     liftIO $ case (any (isCex . fst) eq.res, anyIssues) of
       (False, False) -> putStrLn "   \x1b[32m[PASS]\x1b[0m Contracts behave equivalently"
@@ -493,8 +494,9 @@ symbCheck :: App m => CommonFileOptions -> SymbolicOptions -> CommonExecOptions 
 symbCheck cFileOpts sOpts cExecOpts cOpts = do
   let block' = maybe Fetch.Latest Fetch.BlockNumber cExecOpts.block
       blockUrlInfo = (,) block' <$> cExecOpts.rpc
+  sess <- Fetch.mkSession
   calldata <- buildCalldata cOpts sOpts.sig sOpts.arg
-  preState <- symvmFromCommand cExecOpts sOpts cFileOpts calldata
+  preState <- symvmFromCommand cExecOpts sOpts cFileOpts sess calldata
   errCodes <- case sOpts.assertions of
     Nothing -> pure defaultPanicCodes
     Just s -> case (mapM readMaybe $ splitOn "," s) of
@@ -514,7 +516,8 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = do
                               }
                             , rpcInfo = mempty {Fetch.blockNumURL = blockUrlInfo}
                             }
-    (expr, res) <- verify solvers veriOpts preState (Just $ checkAssertions errCodes)
+    let fetcher = Fetch.oracle solvers sess veriOpts.rpcInfo
+    (expr, res) <- verify solvers fetcher veriOpts preState (Just $ checkAssertions errCodes)
     case res of
       [Qed] -> do
         liftIO $ putStrLn "\nQED: No reachable property violations discovered\n"
@@ -559,7 +562,8 @@ areAnyPrefixOf prefixes t = any (flip T.isPrefixOf t) prefixes
 launchExec :: App m => CommonFileOptions -> ExecOptions -> CommonExecOptions -> CommonOptions -> m ()
 launchExec cFileOpts execOpts cExecOpts cOpts = do
   dapp <- getSrcInfo execOpts cOpts
-  vm <- vmFromCommand cOpts cExecOpts cFileOpts execOpts
+  sess <- Fetch.mkSession
+  vm <- vmFromCommand cOpts cExecOpts cFileOpts execOpts sess
   let
     block = maybe Fetch.Latest Fetch.BlockNumber cExecOpts.block
     blockUrlInfo = (,) block <$> cExecOpts.rpc
@@ -567,7 +571,7 @@ launchExec cFileOpts execOpts cExecOpts cOpts = do
 
   -- TODO: we shouldn't need solvers to execute this code
   withSolvers Z3 0 1 Nothing $ \solvers -> do
-    vm' <- EVM.Stepper.interpret (Fetch.oracle solvers rpcDat) vm EVM.Stepper.runFully
+    vm' <- EVM.Stepper.interpret (Fetch.oracle solvers sess rpcDat) vm EVM.Stepper.runFully
     writeTraceDapp dapp vm'
     case vm'.result of
       Just (VMFailure (Revert msg)) -> liftIO $ do
@@ -588,12 +592,12 @@ launchExec cFileOpts execOpts cExecOpts cOpts = do
         internalError "no EVM result"
 
 -- | Creates a (concrete) VM from command line options
-vmFromCommand :: App m => CommonOptions -> CommonExecOptions -> CommonFileOptions -> ExecOptions -> m (VM Concrete RealWorld)
-vmFromCommand cOpts cExecOpts cFileOpts execOpts= do
+vmFromCommand :: App m => CommonOptions -> CommonExecOptions -> CommonFileOptions -> ExecOptions -> Fetch.Session -> m (VM Concrete RealWorld)
+vmFromCommand cOpts cExecOpts cFileOpts execOpts sess = do
   conf <- readConfig
   (miner,ts,baseFee,blockNum,prevRan) <- case cExecOpts.rpc of
     Nothing -> pure (LitAddr 0,Lit 0,0,Lit 0,0)
-    Just url -> liftIO $ Fetch.fetchBlockFrom conf block url >>= \case
+    Just url -> liftIO $ Fetch.fetchBlockWithSession conf sess block url >>= \case
       Nothing -> do
         putStrLn $ "Error, Could not fetch block" <> show block <> " from URL: " <> show url
         exitFailure
@@ -612,21 +616,20 @@ vmFromCommand cOpts cExecOpts cFileOpts execOpts= do
         putStrLn $ "Error, invalid code: " <> show c
         exitFailure
       else
-        Fetch.fetchContractFrom conf block url addr' >>= \case
+        Fetch.fetchContractWithSession conf sess block url addr' >>= \case
           Nothing -> do
             putStrLn $ "Error: contract not found: " <> show address
             exitFailure
           Just contract ->
             -- if both code and url is given,
             -- fetch the contract and overwrite the code
-            pure $
-              initialContract  (mkCode $ fromJust code)
+            pure $ initialContract (mkCode $ fromJust code)
                 & set #balance  (contract.balance)
                 & set #nonce    (contract.nonce)
                 & set #external (contract.external)
 
     (Just url, Just addr', Nothing) ->
-      liftIO $ Fetch.fetchContractFrom conf block url addr' >>= \case
+      liftIO $ Fetch.fetchContractWithSession conf sess block url addr' >>= \case
         Nothing -> do
           putStrLn $ "Error, contract not found: " <> show address
           exitFailure
@@ -702,13 +705,13 @@ vmFromCommand cOpts cExecOpts cFileOpts execOpts= do
         bytes f def = maybe def decipher (f cOpts)
 
 symvmFromCommand :: App m =>
-  CommonExecOptions -> SymbolicOptions -> CommonFileOptions ->
+  CommonExecOptions -> SymbolicOptions -> CommonFileOptions -> Fetch.Session ->
   (Expr Buf, [Prop]) -> m (VM EVM.Types.Symbolic RealWorld)
-symvmFromCommand cExecOpts sOpts cFileOpts calldata = do
+symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
   conf <- readConfig
   (miner,blockNum,baseFee,prevRan) <- case cExecOpts.rpc of
     Nothing -> pure (SymAddr "miner",Lit 0,0,0)
-    Just url -> liftIO $ Fetch.fetchBlockFrom conf block url >>= \case
+    Just url -> liftIO $ Fetch.fetchBlockWithSession conf sess block url >>= \case
       Nothing -> do
         putStrLn $ "Error, Could not fetch block" <> show block <> " from URL: " <> show url
         exitFailure
@@ -727,7 +730,7 @@ symvmFromCommand cExecOpts sOpts cFileOpts calldata = do
   codeWrapped <- getCode cFileOpts.codeFile cFileOpts.code
   contract <- case (cExecOpts.rpc, cExecOpts.address, codeWrapped) of
     (Just url, Just addr', _) ->
-      liftIO $ Fetch.fetchContractFrom conf block url addr' >>= \case
+      liftIO $ Fetch.fetchContractWithSession conf sess block url addr' >>= \case
         Nothing -> do
           putStrLn "Error, contract not found."
           exitFailure
@@ -820,14 +823,16 @@ unitTestOptions testOpts cOpts solvers buildOutput = do
           (Just block, Just url) -> Just (Fetch.BlockNumber block, url)
           (Nothing, Just url) -> Just (Fetch.Latest, url)
           _ -> Nothing
-      rpcDat = Fetch.RpcInfo blockUrlInfo mockData.mockContract mockData.mockSlot mockData.mockBlock
-  params <- paramsFromRpc rpcDat
+      rpcDat = Fetch.mkRpcInfo blockUrlInfo mockData
+  sess <- Fetch.mkSession
+  params <- paramsFromRpc rpcDat sess
   let testn = params.number
       block' = if 0 == testn
        then Fetch.Latest
        else Fetch.BlockNumber testn
   pure UnitTestOptions
     { solvers = solvers
+    , sess = sess
     , rpcInfo = let i = case testOpts.rpc of
                      Just url -> Just (block', url)
                      Nothing  -> Nothing

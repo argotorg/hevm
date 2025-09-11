@@ -39,7 +39,6 @@ import Data.Word (Word8, Word32, Word64, byteSwap32, byteSwap64)
 import Data.DoubleWord
 import Data.DoubleWord.TH
 import Data.Map (Map)
-import Data.Map qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import Data.Sequence (Seq)
@@ -683,7 +682,7 @@ data VM (t :: VMType) s = VM
   , tx             :: TxState
   , logs           :: [Expr Log]
   , traces         :: Zipper.TreePos Zipper.Empty Trace
-  , cache          :: Cache
+  , pathsVisited   :: PathsVisited
   , burned         :: !(Gas t)
   , iterations     :: Map CodeLocation (Int, [Expr EWord])
   -- ^ how many times we've visited a loc, and what the contents of the stack were when we were there last
@@ -704,7 +703,7 @@ data VM (t :: VMType) s = VM
 data ForkState = ForkState
   { env :: Env
   , block :: Block
-  , cache :: Cache
+  , pathsVisited :: PathsVisited
   , urlOrAlias :: String
   }
   deriving (Show, Generic)
@@ -894,33 +893,7 @@ class VMOps (t :: VMType) where
 
 -- | A unique id for a given pc
 type CodeLocation = (Expr EAddr, Int)
-
--- | The cache is data that can be persisted for efficiency:
--- any expensive query that is constant at least within a block.
-data Cache = Cache
-  { fetched :: Map Addr Contract
-  , path    :: Map (CodeLocation, Int) Bool
-  } deriving (Show, Generic)
-
-instance Semigroup Cache where
-  a <> b = Cache
-    { fetched = Map.unionWith unifyCachedContract a.fetched b.fetched
-    , path = mappend a.path b.path
-    }
-
-instance Monoid Cache where
-  mempty = Cache { fetched = mempty
-                 , path = mempty
-                 }
-
--- only intended for use in Cache merges, where we expect
--- everything to be Concrete
-unifyCachedContract :: Contract -> Contract -> Contract
-unifyCachedContract a b = a { storage = merged }
-  where merged = case (a.storage, b.storage) of
-                   (ConcreteStore sa, ConcreteStore sb) ->
-                     ConcreteStore (mappend sa sb)
-                   _ -> a.storage
+type PathsVisited = Map (CodeLocation, Int) Bool
 
 
 -- Bytecode Representations ------------------------------------------------------------------------
@@ -1645,7 +1618,6 @@ makeFieldLabelsNoPrefix ''VM
 makeFieldLabelsNoPrefix ''FrameState
 makeFieldLabelsNoPrefix ''TxState
 makeFieldLabelsNoPrefix ''SubState
-makeFieldLabelsNoPrefix ''Cache
 makeFieldLabelsNoPrefix ''Trace
 makeFieldLabelsNoPrefix ''VMOpts
 makeFieldLabelsNoPrefix ''Frame

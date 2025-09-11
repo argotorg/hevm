@@ -13,7 +13,6 @@ import System.Exit
 import System.IO.Error (mkIOError)
 
 import EVM.Dapp (dappInfo, emptyDapp)
-import EVM.Fetch (RpcInfo)
 import EVM.Solidity
 import EVM.Solvers
 import EVM.UnitTest
@@ -25,6 +24,8 @@ import EVM.Effects
 import Data.Maybe (fromMaybe)
 import EVM.Types (internalError)
 import System.Environment (lookupEnv)
+import EVM.Fetch (RpcInfo)
+import EVM.Fetch qualified as Fetch
 
 -- Returns tuple of (No cex, No warnings)
 runSolidityTestCustom
@@ -48,13 +49,15 @@ runSolidityTest
   => FilePath -> Text -> m (Bool, Bool)
 runSolidityTest testFile match = runSolidityTestCustom testFile match Nothing Nothing True mempty Foundry
 
-testOpts :: App m => SolverGroup -> FilePath -> Maybe BuildOutput -> Text -> Maybe Integer -> Bool -> RpcInfo -> m (UnitTestOptions RealWorld)
+testOpts :: forall m . App m => SolverGroup -> FilePath -> Maybe BuildOutput -> Text -> Maybe Integer -> Bool -> RpcInfo -> m (UnitTestOptions RealWorld)
 testOpts solvers root buildOutput match maxIter allowFFI rpcinfo = do
   let srcInfo = maybe emptyDapp (dappInfo root) buildOutput
-  params <- paramsFromRpc rpcinfo
+  sess <- Fetch.mkSession
+  params <- paramsFromRpc rpcinfo sess
 
   pure UnitTestOptions
     { solvers = solvers
+    , sess = sess
     , rpcInfo = rpcinfo
     , maxIter = maxIter
     , askSmtIters = 1

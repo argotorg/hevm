@@ -151,7 +151,6 @@ makeVm o = do
       , resetCaller = False
       }
     , env = env
-    , cache = cache
     , burned = initialGas
     , constraints = snd o.calldata
     , iterations = mempty
@@ -159,13 +158,14 @@ makeVm o = do
       { allowFFI = o.allowFFI
       , baseState = o.baseState
       }
-    , forks = Seq.singleton (ForkState env block cache "")
+    , forks = Seq.singleton (ForkState env block mempty "")
     , currentFork = 0
     , labels = mempty
     , osEnv = mempty
     , freshVar = 0
     , exploreDepth = 0
     , keccakPreImgs = fromList []
+    , pathsVisited = mempty
     }
     where
     env = Env
@@ -184,7 +184,6 @@ makeVm o = do
       , baseFee = o.baseFee
       , schedule = o.schedule
       }
-    cache = Cache mempty mempty
 
 -- https://eips.ethereum.org/EIPS/eip-4788
 setEIP4788Storage :: VMOpts t -> VM t s -> VM t s
@@ -1402,18 +1401,12 @@ fetchAccountWithFallback addr fallback continue =
     Nothing -> case addr of
       SymAddr _ -> fallback addr
       LitAddr a -> do
-        use (#cache % #fetched % at a) >>= \case
-          Just c -> do
+        base <- use (#config % #baseState)
+        assign (#result) . Just . HandleEffect . Query $
+          PleaseFetchContract a base $ \c -> do
             assign (#env % #contracts % at addr) (Just c)
+            assign #result Nothing
             continue c
-          Nothing -> do
-            base <- use (#config % #baseState)
-            assign (#result) . Just . HandleEffect . Query $
-              PleaseFetchContract a base $ \c -> do
-                assign (#cache % #fetched % at a) (Just c)
-                assign (#env % #contracts % at addr) (Just c)
-                assign #result Nothing
-                continue c
       GVar _ -> internalError "Unexpected GVar"
 
 accessStorage :: forall s t . (?conf :: Config, VMOps t, Typeable t) => Expr EAddr
@@ -1457,7 +1450,6 @@ accessStorage addr slot continue = do
           continue $ Lit 0
       mkQuery :: Addr -> W256 -> EVM t s ()
       mkQuery a s = query $ PleaseFetchSlot a s $ \x -> do
-        modifying (#cache % #fetched % ix a % #storage) (writeStorage (Lit s) (Lit x))
         modifying (#env % #contracts % ix (LitAddr a) % #storage) (writeStorage (Lit s) (Lit x))
         assign #result Nothing
         continue $ Lit x
@@ -1927,7 +1919,7 @@ cheatActions = Map.fromList
           [AbiString bytes] -> do
             forkId <- length <$> gets (.forks)
             let urlOrAlias = Char8.unpack bytes
-            modify' $ \vm -> vm { forks = vm.forks Seq.|> ForkState vm.env vm.block vm.cache urlOrAlias }
+            modify' $ \vm -> vm { forks = vm.forks Seq.|> ForkState vm.env vm.block vm.pathsVisited urlOrAlias }
             frameReturn $ AbiUInt 256 (fromIntegral forkId)
           _ -> vmError (BadCheatCode "createFork(string) string provided may be incorrect?" sig)
         _ -> vmError (BadCheatCode "createFork(string) parameter decoding failed" sig)
@@ -1954,7 +1946,7 @@ cheatActions = Map.fromList
                       { env = newEnv
                       , block = forkState.block
                       , forks = Seq.adjust' (\state -> (state :: ForkState)
-                          { env = vm.env, block = vm.block, cache = vm.cache }
+                          { env = vm.env, block = vm.block, pathsVisited = vm.pathsVisited }
                         ) vm.currentFork  vm.forks
                       , currentFork = forkId'
                       }
@@ -3084,7 +3076,7 @@ instance VMOps Symbolic where
                                    else Expr.simplifyProp (condSimpConc .== Lit 0)
         (iteration, _) <- use (#iterations % at loc % non (0,[]))
         stack <- use (#state % #stack)
-        assign (#cache % #path % at (loc, iteration)) (Just v)
+        assign (#pathsVisited % at (loc, iteration)) (Just v)
         assign (#iterations % at loc) (Just (iteration + 1, stack))
         continue v
       -- Both paths are possible; we ask for more input
