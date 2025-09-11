@@ -1,10 +1,32 @@
-{-# LANGUAGE QuasiQuotes #-}
-
 {- |
     Module: EVM.SMT
     Description: Utilities for building and executing SMT queries from Expr instances
 -}
-module EVM.SMT where
+module EVM.SMT
+(
+  module EVM.SMT.Types,
+  module EVM.SMT.SMTLIB,
+
+  collapse,
+  getVar,
+  formatSMT2,
+  declareIntermediates,
+  assertProps,
+  exprToSMT,
+  encodeConcreteStore,
+  zero,
+  one,
+  propToSMT,
+  parseVar,
+  parseEAddr,
+  parseBlockCtx,
+  parseTxCtx,
+  getAddrs,
+  getVars,
+  queryMaxReads,
+  getBufs,
+  getStore
+) where
 
 import Prelude hiding (LT, GT)
 
@@ -15,10 +37,8 @@ import Data.ByteString qualified as BS
 import Data.List qualified as List
 import Data.List.NonEmpty (NonEmpty((:|)))
 import Data.List.NonEmpty qualified as NonEmpty
-import Data.String.Here
 import Data.Maybe (fromJust, fromMaybe, isJust, listToMaybe)
 import Data.Either.Extra (fromRight')
-import Data.Foldable (fold)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
@@ -29,7 +49,6 @@ import Data.Text qualified as TS
 import Data.Text.Lazy qualified as T
 import Data.Text.Lazy.Builder
 import qualified Data.Text.Lazy.Builder.Int (decimal)
-import Data.Text.Read (decimal)
 import Language.SMT2.Parser (getValueRes, parseCommentFreeFileMsg)
 import Language.SMT2.Syntax (Symbol, SpecConstant(..), GeneralRes(..), Term(..), QualIdentifier(..), Identifier(..), Sort(..), Index(..), VarBinding(..))
 import Numeric (readHex, readBin)
@@ -43,40 +62,11 @@ import EVM.Keccak (keccakAssumptions, keccakCompute)
 import EVM.Traversals
 import EVM.Types
 import EVM.Effects
+import EVM.SMT.Types
+import EVM.SMT.SMTLIB
 
 
 -- ** Encoding ** ----------------------------------------------------------------------------------
-
-
--- | Data that we need to construct a nice counterexample
-data CexVars = CexVars
-  { -- | variable names that we need models for to reconstruct calldata
-    calldata     :: [Text]
-    -- | symbolic address names
-  , addrs        :: [Text]
-    -- | buffer names and guesses at their maximum size
-  , buffers      :: Map Text (Expr EWord)
-    -- | reads from abstract storage
-  , storeReads   :: Map (Expr EAddr, Maybe W256) (Set (Expr EWord))
-    -- | the names of any block context variables
-  , blockContext :: [Text]
-    -- | the names of any tx context variables
-  , txContext    :: [Text]
-  }
-  deriving (Eq, Show)
-
-instance Semigroup CexVars where
-  (CexVars a b c d e f) <> (CexVars a2 b2 c2 d2 e2 f2) = CexVars (a <> a2) (b <> b2) (c <> c2) (d <> d2) (e <> e2) (f <> f2)
-
-instance Monoid CexVars where
-    mempty = CexVars
-      { calldata = mempty
-      , addrs = mempty
-      , buffers = mempty
-      , storeReads = mempty
-      , blockContext = mempty
-      , txContext = mempty
-      }
 
 
 -- | Attempts to collapse a compressed buffer representation down to a flattened one
@@ -93,46 +83,31 @@ collapse model = case toBuf model of
 getVar :: SMTCex -> TS.Text -> W256
 getVar cex name = fromJust $ Map.lookup (Var name) cex.vars
 
--- Props are ONLY for pretty printing the query Props
-data SMT2 = SMT2 [Builder] CexVars [Prop]
-  deriving (Eq, Show)
-
-instance Semigroup SMT2 where
-  (SMT2 a c d) <> (SMT2 a2 c2 d2) = SMT2 (a <> a2) (c <> c2) (d <> d2)
-
-instance Monoid SMT2 where
-  mempty = SMT2 mempty mempty mempty
-
 formatSMT2 :: SMT2 -> Text
-formatSMT2 (SMT2 ls _ ps) = expr <> smt2
+formatSMT2 (SMT2 (SMTScript entries) _ ps) = expr <> smt2
  where
  expr = T.concat [T.singleton ';', T.replace "\n" "\n;" $ T.pack . TS.unpack $  TS.unlines (fmap formatProp ps)]
- smt2 = T.unlines (fmap toLazyText ls)
+ smt2 = T.unlines (fmap toText entries)
 
 -- | Reads all intermediate variables from the builder state and produces SMT declaring them as constants
-declareIntermediates :: BufEnv -> StoreEnv -> Err SMT2
+declareIntermediates :: BufEnv -> StoreEnv -> Err [SMTEntry]
 declareIntermediates bufs stores = do
   let encSs = Map.mapWithKey encodeStore stores
       encBs = Map.mapWithKey encodeBuf bufs
-      sorted = List.sortBy compareFst $ Map.toList $ encSs <> encBs
-  decls <- mapM snd sorted
-  let smt2 = (SMT2 [fromText "; intermediate buffers & stores"] mempty mempty):decls
-  pure $ fold smt2
+  snippets <- sequence $ Map.elems $ encSs <> encBs
+  let decls = concat snippets
+  pure $ (SMTComment "intermediate buffers & stores") : decls
   where
-    compareFst (l, _) (r, _) = compare l r
     encodeBuf n expr = do
       buf <- exprToSMT expr
       bufLen <- encodeBufLen n expr
-      pure $ SMT2 ["(define-fun buf" <> (fromString . show $ n) <> "() Buf " <> buf <> ")\n"]  mempty mempty <> bufLen
+      pure [SMTCommand ("(define-fun buf" <> (Data.Text.Lazy.Builder.Int.decimal n) <> "() Buf " <> buf <> ")\n"), bufLen]
     encodeBufLen n expr = do
       bufLen <- exprToSMT (bufLengthEnv bufs True expr)
-      pure $ SMT2 ["(define-fun buf" <> (fromString . show $ n) <>"_length () (_ BitVec 256) " <> bufLen <> ")"] mempty mempty
+      pure $ SMTCommand ("(define-fun buf" <> (Data.Text.Lazy.Builder.Int.decimal n) <>"_length () (_ BitVec 256) " <> bufLen <> ")")
     encodeStore n expr = do
       storage <- exprToSMT expr
-      pure $ SMT2 ["(define-fun store" <> (fromString . show $ n) <> " () Storage " <> storage <> ")"] mempty mempty
-
-smt2Line :: Builder -> SMT2
-smt2Line txt = SMT2 [txt] mempty mempty
+      pure [SMTCommand ("(define-fun store" <> (Data.Text.Lazy.Builder.Int.decimal n) <> " () Storage " <> storage <> ")")]
 
 -- simplify to rewrite sload/sstore combos
 -- notice: it is VERY important not to concretize early, because Keccak assumptions
@@ -164,25 +139,17 @@ assertPropsHelper simp psPreConc = do
  frameCtxs <- (declareFrameContext . nubOrd $ foldl (<>) [] frameCtx)
  blockCtxs <- (declareBlockContext . nubOrd $ foldl (<>) [] blockCtx)
  pure $ prelude
-  <> (declareAbstractStores abstractStores)
-  <> smt2Line ""
+  <> SMT2 (SMTScript (declareAbstractStores abstractStores)) mempty mempty
   <> declareConstrainAddrs addresses
-  <> smt2Line ""
   <> (declareBufs toDeclarePsElim bufs stores)
-  <> smt2Line ""
   <> (declareVars . nubOrd $ foldl (<>) [] allVars)
-  <> smt2Line ""
   <> frameCtxs
-  <> smt2Line ""
   <> blockCtxs
-  <> smt2Line ""
-  <> intermediates
-  <> smt2Line ""
-  <> keccakAssertions'
-  <> readAssumes'
-  <> gasOrder
-  <> smt2Line ""
-  <> SMT2 (fmap (\p -> "(assert " <> p <> ")") encs) (cexInfo storageReads) ps
+  <> SMT2 (SMTScript intermediates) mempty mempty
+  <> SMT2 (SMTScript keccakAssertions') mempty mempty
+  <> SMT2 (SMTScript readAssumes') mempty mempty
+  <> SMT2 (SMTScript gasOrder) mempty mempty
+  <> SMT2 (SMTScript (fmap (\p -> SMTCommand("(assert " <> p <> ")")) encs)) (cexInfo storageReads) ps
 
   where
     ps = if simp then Expr.concKeccakSimpProps psPreConc else Expr.concKeccakProps psPreConc
@@ -212,15 +179,12 @@ assertPropsHelper simp psPreConc = do
     keccakAssertions = do
       assumps <- mapM assertSMT keccAssump
       comps <- mapM assertSMT keccComp
-      pure $ smt2Line "; keccak assumptions"
-        <> SMT2 assumps mempty mempty
-        <> smt2Line "; keccak computations"
-        <> SMT2 comps mempty mempty
+      pure $ ((SMTComment "keccak assumptions") : assumps) <> ((SMTComment "keccak computations") : comps)
 
     -- assert that reads beyond size of buffer & storage is zero
     readAssumes = do
       assumps <- mapM assertSMT $ assertReads psElim bufs stores
-      pure $ smt2Line "; read assumptions" <> SMT2 assumps mempty mempty
+      pure (SMTComment "read assumptions" : assumps)
 
     cexInfo :: Map (Expr 'EAddr, Maybe W256) (Set (Expr 'EWord)) -> CexVars
     cexInfo a = mempty { storeReads = a }
@@ -363,39 +327,39 @@ discoverMaxReads props benv senv = bufMap
 
 -- | Returns an SMT2 object with all buffers referenced from the input props declared, and with the appropriate cex extraction metadata attached
 declareBufs :: [Prop] -> BufEnv -> StoreEnv -> SMT2
-declareBufs props bufEnv storeEnv = SMT2 ("; buffers" : fmap declareBuf allBufs <> ("; buffer lengths" : fmap declareLength allBufs)) cexvars mempty
+declareBufs props bufEnv storeEnv = SMT2 (SMTScript ((SMTComment "buffers") : fmap declareBuf allBufs <> ((SMTComment "buffer lengths") : fmap declareLength allBufs))) cexvars mempty
   where
     cexvars = (mempty :: CexVars){ buffers = discoverMaxReads props bufEnv storeEnv }
     allBufs = fmap fromLazyText $ Map.keys cexvars.buffers
-    declareBuf n = "(declare-fun " <> n <> " () (Array (_ BitVec 256) (_ BitVec 8)))"
-    declareLength n = "(declare-fun " <> n <> "_length" <> " () (_ BitVec 256))"
+    declareBuf n = SMTCommand $ "(declare-fun " <> n <> " () (Array (_ BitVec 256) (_ BitVec 8)))"
+    declareLength n = SMTCommand $ "(declare-fun " <> n <> "_length" <> " () (_ BitVec 256))"
 
 -- Given a list of variable names, create an SMT2 object with the variables declared
 declareVars :: [Builder] -> SMT2
-declareVars names = SMT2 (["; variables"] <> fmap declare names) cexvars mempty
+declareVars names = SMT2 (SMTScript ([SMTComment "variables"] <> fmap declare names)) cexvars mempty
   where
-    declare n = "(declare-fun " <> n <> " () (_ BitVec 256))"
+    declare n = SMTCommand $ "(declare-fun " <> n <> " () (_ BitVec 256))"
     cexvars = (mempty :: CexVars){ calldata = fmap toLazyText names }
 
 -- Given a list of variable names, create an SMT2 object with the variables declared
 declareConstrainAddrs :: [Builder] -> SMT2
-declareConstrainAddrs names = SMT2 (["; concrete and symbolic addresses"] <> fmap declare names <> fmap assume names) cexvars mempty
+declareConstrainAddrs names = SMT2 (SMTScript ([SMTComment "concrete and symbolic addresses"] <> fmap declare names <> fmap assume names)) cexvars mempty
   where
-    declare n = "(declare-fun " <> n <> " () Addr)"
+    declare n = SMTCommand $ "(declare-fun " <> n <> " () Addr)"
     -- assume that symbolic addresses do not collide with the zero address or precompiles
-    assume n = "(assert (bvugt " <> n <> " (_ bv9 160)))"
+    assume n = SMTCommand $ "(assert (bvugt " <> n <> " (_ bv9 160)))"
     cexvars = (mempty :: CexVars){ addrs = fmap toLazyText names }
 
 -- The gas is a tuple of (prefix, index). Within each prefix, the gas is strictly decreasing as the
 -- index increases. This function gets a map of Prefix -> [Int], and for each prefix,
 -- enforces the order
-enforceGasOrder :: [Prop] -> SMT2
-enforceGasOrder ps = SMT2 (["; gas ordering"] <> (concatMap (uncurry order) indices)) mempty mempty
+enforceGasOrder :: [Prop] -> [SMTEntry]
+enforceGasOrder ps = [SMTComment "gas ordering"] <> (concatMap (uncurry order) indices)
   where
-    order :: TS.Text -> [Int] -> [Builder]
+    order :: TS.Text -> [Int] -> [SMTEntry]
     order prefix n = consecutivePairs (nubInt n) >>= \(x, y)->
       -- The GAS instruction itself costs gas, so it's strictly decreasing
-      ["(assert (bvugt " <> fromRight' (exprToSMT (Gas prefix x)) <> " " <>
+      [SMTCommand $ "(assert (bvugt " <> fromRight' (exprToSMT (Gas prefix x)) <> " " <>
         fromRight' ((exprToSMT (Gas prefix y))) <> "))"]
     consecutivePairs :: [Int] -> [(Int, Int)]
     consecutivePairs [] = []
@@ -411,249 +375,32 @@ enforceGasOrder ps = SMT2 (["; gas ordering"] <> (concatMap (uncurry order) indi
 declareFrameContext :: [(Builder, [Prop])] -> Err SMT2
 declareFrameContext names = do
   decls <- concatMapM declare names
-  pure $ SMT2 (["; frame context"] <> decls) cexvars mempty
+  pure $ SMT2 (SMTScript ([SMTComment "frame context"] <> decls)) cexvars mempty
   where
     declare (n,props) = do
       asserts <- mapM assertSMT props
-      pure $ [ "(declare-fun " <> n <> " () (_ BitVec 256))" ] <> asserts
+      pure $ (SMTCommand $ "(declare-fun " <> n <> " () (_ BitVec 256))") : asserts
     cexvars = (mempty :: CexVars){ txContext = fmap (toLazyText . fst) names }
 
-declareAbstractStores :: [Builder] -> SMT2
-declareAbstractStores names = SMT2 (["; abstract base stores"] <> fmap declare names) mempty mempty
+declareAbstractStores :: [Builder] -> [SMTEntry]
+declareAbstractStores names = [SMTComment "abstract base stores"] <> fmap declare names
   where
-    declare n = "(declare-fun " <> n <> " () Storage)"
+    declare n = SMTCommand $ "(declare-fun " <> n <> " () Storage)"
 
 declareBlockContext :: [(Builder, [Prop])] -> Err SMT2
 declareBlockContext names = do
   decls <- concatMapM declare names
-  pure $ SMT2 (["; block context"] <> decls) cexvars mempty
+  pure $ SMT2 (SMTScript ([SMTComment "block context"] <> decls)) cexvars mempty
   where
     declare (n, props) = do
       asserts <- mapM assertSMT props
-      pure $ [ "(declare-fun " <> n <> " () (_ BitVec 256))" ] <> asserts
+      pure $ [ SMTCommand $ "(declare-fun " <> n <> " () (_ BitVec 256))" ] <> asserts
     cexvars = (mempty :: CexVars){ blockContext = fmap (toLazyText . fst) names }
 
-assertSMT :: Prop -> Either String Builder
+assertSMT :: Prop -> Either String SMTEntry
 assertSMT p = do
   p' <- propToSMT p
-  pure $ "(assert " <> p' <> ")"
-
-prelude :: SMT2
-prelude =  SMT2 src mempty mempty
-  where
-  src = fmap (fromLazyText . T.drop 2) . T.lines $ [i|
-  ; logic
-  (set-info :smt-lib-version 2.6)
-  ;(set-logic QF_AUFBV)
-  (set-logic ALL)
-  (set-info :source |
-  Generator: hevm
-  Application: hevm symbolic execution system
-  |)
-  (set-info :category "industrial")
-
-  ; types
-  (define-sort Byte () (_ BitVec 8))
-  (define-sort Word () (_ BitVec 256))
-  (define-sort Addr () (_ BitVec 160))
-  (define-sort Buf () (Array Word Byte))
-
-  ; slot -> value
-  (define-sort Storage () (Array Word Word))
-
-  ; hash functions. They take buffer and a buffer size, and return a Word
-  (declare-fun keccak (Buf Word) Word)
-  (declare-fun sha256 (Buf Word) Word)
-
-  ; helper functions
-  (define-fun max ((a (_ BitVec 256)) (b (_ BitVec 256))) (_ BitVec 256) (ite (bvult a b) b a))
-
-  ; word indexing
-  (define-fun indexWord31 ((w Word)) Byte ((_ extract 7 0) w))
-  (define-fun indexWord30 ((w Word)) Byte ((_ extract 15 8) w))
-  (define-fun indexWord29 ((w Word)) Byte ((_ extract 23 16) w))
-  (define-fun indexWord28 ((w Word)) Byte ((_ extract 31 24) w))
-  (define-fun indexWord27 ((w Word)) Byte ((_ extract 39 32) w))
-  (define-fun indexWord26 ((w Word)) Byte ((_ extract 47 40) w))
-  (define-fun indexWord25 ((w Word)) Byte ((_ extract 55 48) w))
-  (define-fun indexWord24 ((w Word)) Byte ((_ extract 63 56) w))
-  (define-fun indexWord23 ((w Word)) Byte ((_ extract 71 64) w))
-  (define-fun indexWord22 ((w Word)) Byte ((_ extract 79 72) w))
-  (define-fun indexWord21 ((w Word)) Byte ((_ extract 87 80) w))
-  (define-fun indexWord20 ((w Word)) Byte ((_ extract 95 88) w))
-  (define-fun indexWord19 ((w Word)) Byte ((_ extract 103 96) w))
-  (define-fun indexWord18 ((w Word)) Byte ((_ extract 111 104) w))
-  (define-fun indexWord17 ((w Word)) Byte ((_ extract 119 112) w))
-  (define-fun indexWord16 ((w Word)) Byte ((_ extract 127 120) w))
-  (define-fun indexWord15 ((w Word)) Byte ((_ extract 135 128) w))
-  (define-fun indexWord14 ((w Word)) Byte ((_ extract 143 136) w))
-  (define-fun indexWord13 ((w Word)) Byte ((_ extract 151 144) w))
-  (define-fun indexWord12 ((w Word)) Byte ((_ extract 159 152) w))
-  (define-fun indexWord11 ((w Word)) Byte ((_ extract 167 160) w))
-  (define-fun indexWord10 ((w Word)) Byte ((_ extract 175 168) w))
-  (define-fun indexWord9 ((w Word)) Byte ((_ extract 183 176) w))
-  (define-fun indexWord8 ((w Word)) Byte ((_ extract 191 184) w))
-  (define-fun indexWord7 ((w Word)) Byte ((_ extract 199 192) w))
-  (define-fun indexWord6 ((w Word)) Byte ((_ extract 207 200) w))
-  (define-fun indexWord5 ((w Word)) Byte ((_ extract 215 208) w))
-  (define-fun indexWord4 ((w Word)) Byte ((_ extract 223 216) w))
-  (define-fun indexWord3 ((w Word)) Byte ((_ extract 231 224) w))
-  (define-fun indexWord2 ((w Word)) Byte ((_ extract 239 232) w))
-  (define-fun indexWord1 ((w Word)) Byte ((_ extract 247 240) w))
-  (define-fun indexWord0 ((w Word)) Byte ((_ extract 255 248) w))
-
-  ; symbolic word indexing
-  ; a bitshift based version might be more performant here...
-  (define-fun indexWord ((idx Word) (w Word)) Byte
-    (ite (bvuge idx (_ bv32 256)) (_ bv0 8)
-    (ite (= idx (_ bv31 256)) (indexWord31 w)
-    (ite (= idx (_ bv30 256)) (indexWord30 w)
-    (ite (= idx (_ bv29 256)) (indexWord29 w)
-    (ite (= idx (_ bv28 256)) (indexWord28 w)
-    (ite (= idx (_ bv27 256)) (indexWord27 w)
-    (ite (= idx (_ bv26 256)) (indexWord26 w)
-    (ite (= idx (_ bv25 256)) (indexWord25 w)
-    (ite (= idx (_ bv24 256)) (indexWord24 w)
-    (ite (= idx (_ bv23 256)) (indexWord23 w)
-    (ite (= idx (_ bv22 256)) (indexWord22 w)
-    (ite (= idx (_ bv21 256)) (indexWord21 w)
-    (ite (= idx (_ bv20 256)) (indexWord20 w)
-    (ite (= idx (_ bv19 256)) (indexWord19 w)
-    (ite (= idx (_ bv18 256)) (indexWord18 w)
-    (ite (= idx (_ bv17 256)) (indexWord17 w)
-    (ite (= idx (_ bv16 256)) (indexWord16 w)
-    (ite (= idx (_ bv15 256)) (indexWord15 w)
-    (ite (= idx (_ bv14 256)) (indexWord14 w)
-    (ite (= idx (_ bv13 256)) (indexWord13 w)
-    (ite (= idx (_ bv12 256)) (indexWord12 w)
-    (ite (= idx (_ bv11 256)) (indexWord11 w)
-    (ite (= idx (_ bv10 256)) (indexWord10 w)
-    (ite (= idx (_ bv9 256)) (indexWord9 w)
-    (ite (= idx (_ bv8 256)) (indexWord8 w)
-    (ite (= idx (_ bv7 256)) (indexWord7 w)
-    (ite (= idx (_ bv6 256)) (indexWord6 w)
-    (ite (= idx (_ bv5 256)) (indexWord5 w)
-    (ite (= idx (_ bv4 256)) (indexWord4 w)
-    (ite (= idx (_ bv3 256)) (indexWord3 w)
-    (ite (= idx (_ bv2 256)) (indexWord2 w)
-    (ite (= idx (_ bv1 256)) (indexWord1 w)
-    (indexWord0 w)
-    ))))))))))))))))))))))))))))))))
-  )
-
-  (define-fun readWord ((idx Word) (buf Buf)) Word
-    (concat
-      (select buf idx)
-      (concat (select buf (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000001))
-      (concat (select buf (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000002))
-      (concat (select buf (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000003))
-      (concat (select buf (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000004))
-      (concat (select buf (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000005))
-      (concat (select buf (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000006))
-      (concat (select buf (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000007))
-      (concat (select buf (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000008))
-      (concat (select buf (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000009))
-      (concat (select buf (bvadd idx #x000000000000000000000000000000000000000000000000000000000000000a))
-      (concat (select buf (bvadd idx #x000000000000000000000000000000000000000000000000000000000000000b))
-      (concat (select buf (bvadd idx #x000000000000000000000000000000000000000000000000000000000000000c))
-      (concat (select buf (bvadd idx #x000000000000000000000000000000000000000000000000000000000000000d))
-      (concat (select buf (bvadd idx #x000000000000000000000000000000000000000000000000000000000000000e))
-      (concat (select buf (bvadd idx #x000000000000000000000000000000000000000000000000000000000000000f))
-      (concat (select buf (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000010))
-      (concat (select buf (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000011))
-      (concat (select buf (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000012))
-      (concat (select buf (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000013))
-      (concat (select buf (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000014))
-      (concat (select buf (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000015))
-      (concat (select buf (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000016))
-      (concat (select buf (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000017))
-      (concat (select buf (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000018))
-      (concat (select buf (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000019))
-      (concat (select buf (bvadd idx #x000000000000000000000000000000000000000000000000000000000000001a))
-      (concat (select buf (bvadd idx #x000000000000000000000000000000000000000000000000000000000000001b))
-      (concat (select buf (bvadd idx #x000000000000000000000000000000000000000000000000000000000000001c))
-      (concat (select buf (bvadd idx #x000000000000000000000000000000000000000000000000000000000000001d))
-      (concat (select buf (bvadd idx #x000000000000000000000000000000000000000000000000000000000000001e))
-      (select buf (bvadd idx #x000000000000000000000000000000000000000000000000000000000000001f))
-      ))))))))))))))))))))))))))))))
-    )
-  )
-
-  (define-fun writeWord ((idx Word) (val Word) (buf Buf)) Buf
-      (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store
-      (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store buf
-      (bvadd idx #x000000000000000000000000000000000000000000000000000000000000001f) (indexWord31 val))
-      (bvadd idx #x000000000000000000000000000000000000000000000000000000000000001e) (indexWord30 val))
-      (bvadd idx #x000000000000000000000000000000000000000000000000000000000000001d) (indexWord29 val))
-      (bvadd idx #x000000000000000000000000000000000000000000000000000000000000001c) (indexWord28 val))
-      (bvadd idx #x000000000000000000000000000000000000000000000000000000000000001b) (indexWord27 val))
-      (bvadd idx #x000000000000000000000000000000000000000000000000000000000000001a) (indexWord26 val))
-      (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000019) (indexWord25 val))
-      (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000018) (indexWord24 val))
-      (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000017) (indexWord23 val))
-      (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000016) (indexWord22 val))
-      (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000015) (indexWord21 val))
-      (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000014) (indexWord20 val))
-      (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000013) (indexWord19 val))
-      (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000012) (indexWord18 val))
-      (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000011) (indexWord17 val))
-      (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000010) (indexWord16 val))
-      (bvadd idx #x000000000000000000000000000000000000000000000000000000000000000f) (indexWord15 val))
-      (bvadd idx #x000000000000000000000000000000000000000000000000000000000000000e) (indexWord14 val))
-      (bvadd idx #x000000000000000000000000000000000000000000000000000000000000000d) (indexWord13 val))
-      (bvadd idx #x000000000000000000000000000000000000000000000000000000000000000c) (indexWord12 val))
-      (bvadd idx #x000000000000000000000000000000000000000000000000000000000000000b) (indexWord11 val))
-      (bvadd idx #x000000000000000000000000000000000000000000000000000000000000000a) (indexWord10 val))
-      (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000009) (indexWord9 val))
-      (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000008) (indexWord8 val))
-      (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000007) (indexWord7 val))
-      (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000006) (indexWord6 val))
-      (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000005) (indexWord5 val))
-      (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000004) (indexWord4 val))
-      (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000003) (indexWord3 val))
-      (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000002) (indexWord2 val))
-      (bvadd idx #x0000000000000000000000000000000000000000000000000000000000000001) (indexWord1 val))
-      idx (indexWord0 val))
-  )
-
-  ; block context
-  (declare-fun blockhash (Word) Word)
-  (declare-fun codesize (Addr) Word)
-
-  ; macros
-  (define-fun signext ( (b Word) (val Word)) Word
-    (ite (= b (_ bv0  256)) ((_ sign_extend 248) ((_ extract 7    0) val))
-    (ite (= b (_ bv1  256)) ((_ sign_extend 240) ((_ extract 15   0) val))
-    (ite (= b (_ bv2  256)) ((_ sign_extend 232) ((_ extract 23   0) val))
-    (ite (= b (_ bv3  256)) ((_ sign_extend 224) ((_ extract 31   0) val))
-    (ite (= b (_ bv4  256)) ((_ sign_extend 216) ((_ extract 39   0) val))
-    (ite (= b (_ bv5  256)) ((_ sign_extend 208) ((_ extract 47   0) val))
-    (ite (= b (_ bv6  256)) ((_ sign_extend 200) ((_ extract 55   0) val))
-    (ite (= b (_ bv7  256)) ((_ sign_extend 192) ((_ extract 63   0) val))
-    (ite (= b (_ bv8  256)) ((_ sign_extend 184) ((_ extract 71   0) val))
-    (ite (= b (_ bv9  256)) ((_ sign_extend 176) ((_ extract 79   0) val))
-    (ite (= b (_ bv10 256)) ((_ sign_extend 168) ((_ extract 87   0) val))
-    (ite (= b (_ bv11 256)) ((_ sign_extend 160) ((_ extract 95   0) val))
-    (ite (= b (_ bv12 256)) ((_ sign_extend 152) ((_ extract 103  0) val))
-    (ite (= b (_ bv13 256)) ((_ sign_extend 144) ((_ extract 111  0) val))
-    (ite (= b (_ bv14 256)) ((_ sign_extend 136) ((_ extract 119  0) val))
-    (ite (= b (_ bv15 256)) ((_ sign_extend 128) ((_ extract 127  0) val))
-    (ite (= b (_ bv16 256)) ((_ sign_extend 120) ((_ extract 135  0) val))
-    (ite (= b (_ bv17 256)) ((_ sign_extend 112) ((_ extract 143  0) val))
-    (ite (= b (_ bv18 256)) ((_ sign_extend 104) ((_ extract 151  0) val))
-    (ite (= b (_ bv19 256)) ((_ sign_extend 96 ) ((_ extract 159  0) val))
-    (ite (= b (_ bv20 256)) ((_ sign_extend 88 ) ((_ extract 167  0) val))
-    (ite (= b (_ bv21 256)) ((_ sign_extend 80 ) ((_ extract 175  0) val))
-    (ite (= b (_ bv22 256)) ((_ sign_extend 72 ) ((_ extract 183  0) val))
-    (ite (= b (_ bv23 256)) ((_ sign_extend 64 ) ((_ extract 191  0) val))
-    (ite (= b (_ bv24 256)) ((_ sign_extend 56 ) ((_ extract 199  0) val))
-    (ite (= b (_ bv25 256)) ((_ sign_extend 48 ) ((_ extract 207  0) val))
-    (ite (= b (_ bv26 256)) ((_ sign_extend 40 ) ((_ extract 215  0) val))
-    (ite (= b (_ bv27 256)) ((_ sign_extend 32 ) ((_ extract 223  0) val))
-    (ite (= b (_ bv28 256)) ((_ sign_extend 24 ) ((_ extract 231  0) val))
-    (ite (= b (_ bv29 256)) ((_ sign_extend 16 ) ((_ extract 239  0) val))
-    (ite (= b (_ bv30 256)) ((_ sign_extend 8  ) ((_ extract 247  0) val)) val))))))))))))))))))))))))))))))))
-  |]
+  pure $ SMTCommand ("(assert " <> p' <> ")")
 
 wordAsBV :: forall a. Integral a => a -> Builder
 wordAsBV w = "(_ bv" <> Data.Text.Lazy.Builder.Int.decimal w <> " 256)"
@@ -972,9 +719,6 @@ parseAddr = parseSC
 parseW256 :: SpecConstant -> W256
 parseW256 = parseSC
 
-parseInteger :: SpecConstant -> Integer
-parseInteger = parseSC
-
 parseW8 :: SpecConstant -> Word8
 parseW8 = parseSC
 
@@ -999,11 +743,6 @@ parseEAddr name
   | Just a <- TS.stripPrefix "litaddr_" name = LitAddr (read (TS.unpack a))
   | Just a <- TS.stripPrefix "symaddr_" name = SymAddr a
   | otherwise = internalError $ "cannot parse: " <> show name
-
-textToInt :: TS.Text -> Int
-textToInt text = case decimal text of
-  Right (value, _) -> value
-  Left _ -> internalError $ "cannot parse '" <> (TS.unpack text) <> "' into an Int"
 
 parseBlockCtx :: TS.Text -> Expr EWord
 parseBlockCtx "origin" = Origin

@@ -77,7 +77,6 @@ import EVM.Types hiding (Env)
 import EVM.Effects
 import EVM.UnitTest (writeTrace, printWarnings)
 import EVM.Expr (maybeLitByteSimp)
-import Data.Text.Internal.Builder (toLazyText)
 import EVM.Keccak (keccakCompute)
 
 testEnv :: Env
@@ -4719,19 +4718,13 @@ tests = testGroup "hevm"
     , test "no-duplicates-with-concrete-keccak" $ do
       let props = [(PGT (Var "a") (Keccak (ConcreteBuf "abcdef"))), (PGT (Var "b") (Keccak (ConcreteBuf "abcdef")))]
       conf <- readConfig
-      let SMT2 builders _ _ = fromRight (internalError "Must succeed") (assertProps conf props)
-      let texts = fmap toLazyText builders
-      let sexprs = splitSExpr texts
-      let noDuplicates = ((length sexprs) == (Set.size (Set.fromList sexprs)))
-      assertBoolM "There were duplicate lines in SMT encoding" noDuplicates
+      let SMT2 script _ _ = fromRight (internalError "Must succeed") (assertProps conf props)
+      assertBoolM "There were duplicate commands in SMT encoding" $ not (hasDuplicateCommands script)
     , test "no-duplicates-with-read-assumptions" $ do
       let props = [(PGT (ReadWord (Lit 2) (AbstractBuf "test")) (Lit 0)), (PGT (Expr.padByte $ ReadByte (Lit 10) (AbstractBuf "test")) (Expr.padByte $ LitByte 1))]
       conf <- readConfig
-      let SMT2 builders _ _ = fromRight (internalError "Must succeed") (assertProps conf props)
-      let texts = fmap toLazyText builders
-      let sexprs = splitSExpr texts
-      let noDuplicates = ((length sexprs) == (Set.size (Set.fromList sexprs)))
-      assertBoolM "There were duplicate lines in SMT encoding" noDuplicates
+      let SMT2 script _ _ = fromRight (internalError "Must succeed") (assertProps conf props)
+      assertBoolM "There were duplicate lines in SMT encoding" $ not (hasDuplicateCommands script)
      , test "all-keccak-asserted" $ do
       let buf1 = (Keccak (ConcreteBuf "abc"))
           eq = (Eq buf1 (Lit 0x12))

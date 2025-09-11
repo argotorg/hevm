@@ -14,7 +14,6 @@ import Control.Concurrent.STM (writeTChan, newTChan, TChan, tryReadTChan, atomic
 import Control.Monad
 import Control.Monad.State.Strict
 import Control.Monad.IO.Unlift
-import Data.Char (isSpace)
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Set (Set, isSubsetOf, fromList)
@@ -25,9 +24,9 @@ import Data.Text.Lazy (Text)
 import Data.Text.Lazy qualified as T
 import Data.Text.Lazy.IO qualified as T
 import Data.Text.Lazy.Builder
+import qualified Data.Text.Lazy.Builder.Int (decimal)
 import System.Process (createProcess, cleanupProcess, proc, ProcessHandle, std_in, std_out, std_err, StdStream(..), createPipe)
 import System.FilePath ((</>))
-import Witch (into)
 import EVM.Effects
 import EVM.Fuzz (tryCexFuzz)
 import Data.Bits ((.&.))
@@ -183,13 +182,17 @@ getMultiSol smt2@(SMT2 cmds cexvars _) multiSol r inst availableInstances fileCo
   conf <- readConfig
   when conf.dumpQueries $ liftIO $ writeSMT2File smt2 "." (show fileCounter)
   -- reset solver and send all lines of provided script
-  out <- liftIO $ sendScript inst ("(reset)" : cmds)
+  out <- liftIO $ do
+    resetRes <- sendScript inst $ SMTScript [SMTCommand "(reset)"]
+    case resetRes of
+      e@(Left _) -> pure e
+      _ -> sendScript inst cmds
   case out of
     Left err -> liftIO $ do
       when conf.debug $ putStrLn $ "Unable to write SMT to solver: " <> (T.unpack err)
       writeChan r Nothing
     Right _ -> do
-      sat <- liftIO $ sendLine inst "(check-sat)"
+      sat <- liftIO $ sendCommand inst $ SMTCommand "(check-sat)"
       when conf.dumpQueries $ liftIO $ writeSMT2File smt2 "." (show fileCounter <> "-origquery")
       subRun [] smt2 sat
   -- put the instance back in the list of available instances
@@ -222,17 +225,17 @@ getMultiSol smt2@(SMT2 cmds cexvars _) multiSol r inst availableInstances fileCo
               Just v -> do
                 let hexMask = maskFromBytesCount multiSol.numBytes
                     maskedVal = v .&. hexMask
-                    toSMT n = show (into n :: Integer)
-                    maskedVar = "(bvand " <> multiSol.var <> " (_ bv" <> toSMT hexMask <> " 256))"
-                    restrict = "(assert (not (= " <> maskedVar <> " (_ bv" <> toSMT maskedVal <> " 256))))"
-                    newSmt = fullSmt <> SMT2 [(fromString restrict)] mempty mempty
+                    toSMT n = Data.Text.Lazy.Builder.Int.decimal n
+                    maskedVar = "(bvand " <> fromString multiSol.var <> " (_ bv" <> toSMT hexMask <> " 256))"
+                    restrict = SMTCommand $ "(assert (not (= " <> maskedVar <> " (_ bv" <> toSMT maskedVal <> " 256))))"
+                    newSmt = fullSmt <> SMT2 (SMTScript [restrict]) mempty mempty
                 when conf.debug $ liftIO $ putStrLn $ "Got one solution to symbolic query, val: 0x" <> (showHex maskedVal "") <>
                   " now have " <> show (length vals + 1) <> " solution(s), max is: " <> show multiSol.maxSols
                 when conf.dumpQueries $ liftIO $ writeSMT2File newSmt "." (show fileCounter <> "-sol" <> show (length vals))
-                out <- liftIO $ sendLine inst (T.pack restrict)
+                out <- liftIO $ sendCommand inst restrict
                 case out of
                   "success" -> do
-                    out2 <- liftIO $ sendLine inst  (T.pack "(check-sat)")
+                    out2 <- liftIO $ sendCommand inst  (SMTCommand "(check-sat)")
                     subRun (maskedVal:vals) newSmt out2
                   err -> liftIO $ do
                     when conf.debug $ putStrLn $ "Unable to write SMT to solver: " <> (T.unpack err)
@@ -254,13 +257,17 @@ getOneSol smt2@(SMT2 cmds cexvars ps) props r cacheq inst availableInstances fil
         writeChan r (Cex $ fromJust fuzzResult)
       else if Prelude.not conf.onlyCexFuzz then do
         -- reset solver and send all lines of provided script
-        out <- sendScript inst ("(reset)" : cmds)
+        out <- do
+          resetRes <- sendScript inst $ SMTScript [SMTCommand "(reset)"]
+          case resetRes of
+            e@(Left _) -> pure e
+            _ -> sendScript inst cmds
         case out of
           -- if we got an error then return it
           Left e -> writeChan r (Error $ "Error while writing SMT to solver: " <> T.unpack e)
           -- otherwise call (check-sat), parse the result, and send it down the result channel
           Right () -> do
-            sat <- sendLine inst "(check-sat)"
+            sat <- sendCommand inst $ SMTCommand "(check-sat)"
             res <- do
                 case sat of
                   "unsat" -> do
@@ -335,23 +342,23 @@ getModel inst cexvars = do
     -- and try again.
     shrinkBuf :: Text -> W256 -> StateT SMTCex IO ()
     shrinkBuf buf hint = do
-      let encBound = "(_ bv" <> (T.pack $ show (into hint :: Integer)) <> " 256)"
+      let encBound = "(_ bv" <> Data.Text.Lazy.Builder.Int.decimal hint <> " 256)"
       answer <- liftIO $ do
-        checkCommand inst "(push 1)"
-        checkCommand inst $ "(assert (bvule " <> buf <> "_length " <> encBound <> "))"
-        sendLine inst "(check-sat)"
+        checkCommand inst $ SMTCommand "(push 1)"
+        checkCommand inst $ SMTCommand ("(assert (bvule " <> (fromLazyText buf) <> "_length " <> encBound <> "))")
+        sendCommand inst $ SMTCommand "(check-sat)"
       case answer of
         "sat" -> do
           model <- liftIO getRaw
           put model
         "unsat" -> do
-          liftIO $ checkCommand inst "(pop 1)"
+          liftIO $ checkCommand inst $ SMTCommand "(pop 1)"
           let nextHint = if hint == 0 then 1 else hint * 2
           if nextHint < hint || nextHint > 1_073_741_824
             then pure () -- overflow or over 1GB
             else shrinkBuf buf nextHint
         _ -> do -- unexpected answer -> clean up and do not change the model
-          liftIO $ checkCommand inst "(pop 1)"
+          liftIO $ checkCommand inst $ SMTCommand "(pop 1)"
           pure ()
 
 
@@ -412,12 +419,12 @@ spawnSolver solver threads timeout = do
   case solver of
     CVC5 -> pure solverInstance
     Bitwuzla -> do
-      _ <- sendLine solverInstance "(set-option :print-success true)"
+      _ <- sendCommand solverInstance $ SMTCommand "(set-option :print-success true)"
       pure solverInstance
     EmptySolver -> pure solverInstance
     Z3 -> do
-      _ <- sendLine' solverInstance $ "(set-option :timeout " <> mkTimeout timeout <> ")"
-      _ <- sendLine solverInstance "(set-option :print-success true)"
+      _ <- sendCommand solverInstance $ SMTCommand "(set-option :print-success true)"
+      _ <- sendCommand solverInstance $ SMTCommand ("(set-option :timeout " <> (fromLazyText $ mkTimeout timeout) <> ")")
       pure solverInstance
     Custom _ -> pure solverInstance
 
@@ -426,51 +433,37 @@ stopSolver :: SolverInstance -> IO ()
 stopSolver (SolverInstance _ stdin stdout process) = cleanupProcess (Just stdin, Just stdout, Nothing, process)
 
 -- | Sends a list of commands to the solver. Returns the first error, if there was one.
-sendScript :: SolverInstance -> [Builder] -> IO (Either Text ())
-sendScript solver cmds = do
-  let sexprs = splitSExpr $ fmap toLazyText cmds
-  go sexprs
+sendScript :: SolverInstance -> SMTScript -> IO (Either Text ())
+sendScript solver (SMTScript entries) = do
+  go entries
   where
     go [] = pure $ Right ()
-    go (c:cs) = do
+    go (SMTComment _ : rest) = go rest
+    go (c@(SMTCommand command):cs) = do
       out <- sendCommand solver c
       case out of
         "success" -> go cs
-        e -> pure $ Left $ "Solver returned an error:\n" <> e <> "\nwhile sending the following line: " <> c
+        e -> pure $ Left $ "Solver returned an error:\n" <> e <> "\nwhile sending the following command: " <> toLazyText command
 
-checkCommand :: SolverInstance -> Text -> IO ()
+checkCommand :: SolverInstance -> SMTEntry -> IO ()
 checkCommand inst cmd = do
   res <- sendCommand inst cmd
   case res of
     "success" -> pure ()
     _ -> internalError $ "Unexpected solver output: " <> T.unpack res
 
--- | Sends a single command to the solver, returns the first available line from the output buffer
-sendCommand :: SolverInstance -> Text -> IO Text
-sendCommand inst cmd = do
-  -- trim leading whitespace
-  let cmd' = T.dropWhile isSpace cmd
-  case T.unpack cmd' of
-    "" -> pure "success"      -- ignore blank lines
-    ';' : _ -> pure "success" -- ignore comments
-    _ -> sendLine inst cmd'
 
 -- | Strips trailing \r, if present
 stripCarriageReturn :: Text -> Text
 stripCarriageReturn t = fromMaybe t $ T.stripSuffix "\r" t
 
 -- | Sends a string to the solver and appends a newline, returns the first available line from the output buffer
-sendLine :: SolverInstance -> Text -> IO Text
-sendLine (SolverInstance _ stdin stdout _) cmd = do
-  T.hPutStrLn stdin cmd
+sendCommand :: SolverInstance -> SMTEntry -> IO Text
+sendCommand _ (SMTComment _) = internalError "Attempting to send a comment as a command to SMT solver"
+sendCommand (SolverInstance _ stdin stdout _) (SMTCommand cmd) = do
+  T.hPutStrLn stdin $ toLazyText cmd
   hFlush stdin
   stripCarriageReturn <$> (T.hGetLine stdout)
-
--- | Sends a string to the solver and appends a newline, doesn't return stdout
-sendLine' :: SolverInstance -> Text -> IO ()
-sendLine' (SolverInstance _ stdin _ _) cmd = do
-  T.hPutStrLn stdin cmd
-  hFlush stdin
 
 -- | Returns a string representation of the model for the requested variable
 getValue :: SolverInstance -> Text -> IO Text
@@ -499,37 +492,3 @@ readSExpr h = go 0 0 []
       if (ls + ls') == (rs + rs')
          then pure $ cleanLine : prev
          else go (ls + ls') (rs + rs') (cleanLine : prev)
-
--- From a list of lines, take each separate SExpression and put it in
--- its own list, after removing comments.
-splitSExpr :: [Text] -> [Text]
-splitSExpr ls =
-  -- split lines, strip comments, and append everything to a single line
-  let text = T.intercalate " " $ T.takeWhile (/= ';') <$> concatMap T.lines ls in
-  filter (/= "") $ go text []
-  where
-    go "" acc = reverse acc
-    go text acc =
-      let (sexpr, text') = getSExpr text in
-      let (sexpr', rest) = T.breakOnEnd ")" sexpr in
-      go text' ((T.strip rest):(T.strip sexpr'):acc)
-
-data Par = LPar | RPar
-
--- take the first SExpression and return the rest of the text
-getSExpr :: Text -> (Text, Text)
-getSExpr l = go LPar l 0 []
-  where
-    go _ text 0 prev@(_:_) = (T.intercalate "" (reverse prev), text)
-    go _ _ r _ | r < 0 = internalError $ "Unbalanced SExpression: " <> show l
-    go _ "" _ _  = internalError $ "Unbalanced SExpression: " <> show l
-    -- find the next left parenthesis
-    go LPar line r prev = -- r is how many right parentheses we are missing
-      let (before, after) = T.breakOn "(" line in
-      let rp = T.length $ T.filter (== ')') before in
-      go RPar after (r - rp) (if before == "" then prev else before : prev)
-    -- find the next right parenthesis
-    go RPar line r prev =
-      let (before, after) = T.breakOn ")" line in
-      let lp = T.length $ T.filter (== '(') before in
-      go LPar after (r + lp) (if before == "" then prev else before : prev)
