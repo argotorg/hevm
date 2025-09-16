@@ -98,6 +98,7 @@ runFully = do
 enter :: Text -> Stepper t s ()
 enter t = evm (EVM.pushTrace (EntryTrace t))
 
+-- Concrete interpretation
 interpret
   :: forall m a . (App m)
   => Fetch.Fetcher Concrete m RealWorld
