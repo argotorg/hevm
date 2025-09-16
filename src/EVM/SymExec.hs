@@ -317,8 +317,54 @@ freezeVM vm = do
       ConcreteMemory m -> SymbolicMemory . ConcreteBuf . vectorToByteString <$> VS.freeze m
       m@(SymbolicMemory _) -> pure m
 
--- | Interpreter which explores all paths at branching points. Returns an
--- 'Expr End' representing the possible executions.
+
+-- TODO: we need an interpreter queue that has the same signature as `interpret`, but
+-- that has a queue and a set of threads to dispatch interpretations to
+interpretQ
+  :: forall m . App m
+  => Fetch.Fetcher Symbolic m RealWorld
+  -> IterConfig
+  -> VM Symbolic RealWorld
+  -> Stepper Symbolic RealWorld (Expr End)
+  -> m (Expr End)
+interpretQ fetcher iterConf vm =
+  eval . Operational.view
+  where
+  eval :: Operational.ProgramView (Stepper.Action Symbolic RealWorld) (Expr End) -> m (Expr End)
+  eval (Operational.Return x) = pure x
+  eval (action Operational.:>>= k) =
+    case action of
+      Stepper.ForkMany (PleaseRunAll expr vals continue) -> do
+        when (length vals < 2) $ internalError "PleaseRunAll requires at least 2 branches"
+        frozen <- liftIO $ stToIO $ freezeVM vm
+        let newDepth = vm.exploreDepth+1
+        ends <- withRunInIO $ \runInIO -> mapConcurrently (runInIO . runOne frozen newDepth) vals
+        pure $ goITE (zip vals ends)
+        where
+          goITE :: [(Expr EWord, Expr End)] -> Expr End
+          goITE [] = internalError "goITE: empty list"
+          goITE [(_, end)] = end
+          goITE ((val,end):ps) = ITE (Eq expr val) end (goITE ps)
+          runOne :: App m => VM 'Symbolic RealWorld -> Int -> Expr EWord -> m (Expr 'End)
+          runOne frozen newDepth v = do
+            (ra, vma) <- liftIO $ stToIO $ runStateT (continue v) frozen { result = Nothing, exploreDepth = newDepth }
+            interpret fetcher iterConf vma (k ra)
+      Stepper.Fork (PleaseRunBoth cond continue) -> do
+        frozen <- liftIO $ stToIO $ freezeVM vm
+        let newDepth = vm.exploreDepth+1
+        evalLeft <- toIO $ do
+          (ra, vma) <- liftIO $ stToIO $ runStateT (continue True) frozen { result = Nothing, exploreDepth = newDepth }
+          interpret fetcher iterConf vma (k ra)
+        evalRight <- toIO $ do
+          (rb, vmb) <- liftIO $ stToIO $ runStateT (continue False) frozen { result = Nothing, exploreDepth = newDepth }
+          interpret fetcher iterConf vmb (k rb)
+        (a, b) <- liftIO $ concurrently evalLeft evalRight
+        pure $ ITE cond a b
+      _ -> interpret fetcher iterConf vm (Operational.singleton action >>= k)
+
+-- | Symbolic interpreter that explores all paths. Returns an
+-- 'Expr End' representing the possible executions. This Expr End is NOT flattened,
+--  i.e. it (likely) contains ITE-s. The only End-s possible are: Partial, Failure, Success, ITE
 interpret
   :: forall m . App m
   => Fetch.Fetcher Symbolic m RealWorld
