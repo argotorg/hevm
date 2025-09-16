@@ -96,7 +96,6 @@ foldExpr f acc expr = acc <> (go expr)
       e@(Failure a _ (Revert c)) -> f e <> (foldl' (foldProp f) mempty a) <> go c
       e@(Failure a _ _) -> f e <> (foldl' (foldProp f) mempty a)
       e@(Partial a _ _) -> f e <> (foldl' (foldProp f) mempty a)
-      e@(ITE a b c) -> f e <> (go a) <> (go b) <> (go c)
 
       -- integers
 
@@ -358,11 +357,6 @@ mapExprM f expr = case expr of
         pure (k',v')
       pure $ Map.fromList x'
     f (Success a' b c' d')
-  ITE a b c -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    c' <- mapExprM f c
-    f (ITE a' b' c')
 
   -- integers
 

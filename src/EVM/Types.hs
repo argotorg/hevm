@@ -231,7 +231,6 @@ data Expr (a :: EType) where
   Partial        :: [Prop] -> TraceContext -> PartialExec -> Expr End
   Failure        :: [Prop] -> TraceContext -> EvmError -> Expr End
   Success        :: [Prop] -> TraceContext -> Expr Buf -> Map (Expr EAddr) (Expr EContract) -> Expr End
-  ITE            :: Expr EWord -> Expr End -> Expr End -> Expr End
 
   -- integers
 

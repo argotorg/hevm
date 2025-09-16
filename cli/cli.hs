@@ -46,7 +46,7 @@ import EVM.Concrete qualified as Concrete
 import GitHash
 import EVM.FeeSchedule (feeSchedule)
 import EVM.Fetch qualified as Fetch
-import EVM.Format (hexByteString, strip0x, formatExpr)
+import EVM.Format (hexByteString, strip0x, formatExpr, indent)
 import EVM.Solidity
 import EVM.Solvers
 import EVM.Stepper qualified
@@ -527,7 +527,7 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = do
       cache <- readMVar sess.sharedCache
       Fetch.saveCache dir block cache
     case res of
-      [Qed] -> do
+      [] -> do
         liftIO $ putStrLn "\nQED: No reachable property violations discovered\n"
         showExtras solvers sOpts calldata expr
       _ -> do
@@ -540,26 +540,29 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = do
                  , ""
                  ] <> fmap (formatCex (fst calldata) Nothing) cexs
         liftIO $ T.putStrLn $ T.unlines counterexamples
-        liftIO $ printWarnings Nothing [expr] res "symbolically"
+        liftIO $ printWarnings Nothing expr res "symbolically"
         showExtras solvers sOpts calldata expr
         liftIO exitFailure
 
-showExtras :: App m => SolverGroup ->SymbolicOptions -> (Expr Buf, [Prop]) -> Expr End -> m ()
+showExtras :: App m => SolverGroup ->SymbolicOptions -> (Expr Buf, [Prop]) -> [Expr End] -> m ()
 showExtras solvers sOpts calldata expr = do
   when sOpts.showTree $ liftIO $ do
-    putStrLn "=== Expression ===\n"
-    T.putStrLn $ formatExpr $ Expr.simplify expr
+    putStrLn "=== Leafs ===\n"
+    printLeafs $ map (formatExpr . Expr.simplify) expr
     putStrLn ""
   when sOpts.showReachableTree $ do
     reached <- reachable solvers expr
     liftIO $ do
-      putStrLn "=== Potentially Reachable Expression ===\n"
-      T.putStrLn (formatExpr . Expr.simplify $ reached)
+      putStrLn "=== Potentially Reachable Leafs ===\n"
+      printLeafs $ map (formatExpr . Expr.simplify) reached
       putStrLn ""
   when sOpts.getModels $ do
-    liftIO $ putStrLn $ "=== Models for " <> show (Expr.numBranches expr) <> " branches ==="
+    liftIO $ putStrLn $ "=== Models for " <> show (length expr) <> " branches ==="
     ms <- produceModels solvers expr
     liftIO $ forM_ ms (showModel (fst calldata))
+  where
+    printLeafs leafs =
+      T.putStrLn $ indent 2 $ T.unlines $ zipWith (\i r -> "Leaf " <> T.pack (show (i :: Integer)) <> ":\n" <> r) [0..] leafs
 
 isTestOrLib :: Text -> Bool
 isTestOrLib file = T.isSuffixOf ".t.sol" file || areAnyPrefixOf ["src/test/", "src/tests/", "lib/"] file

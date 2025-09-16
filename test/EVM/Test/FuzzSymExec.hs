@@ -16,12 +16,13 @@ import Control.Monad (when)
 import Control.Monad.ST (ST, stToIO)
 import Control.Monad.State.Strict (StateT(..))
 import Control.Monad.Reader (ReaderT)
+import Data.List (intercalate)
 import Data.Aeson ((.:), (.:?))
 import Data.Aeson qualified as JSON
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as Char8
-import Data.Maybe (fromJust, isJust, isNothing)
+import Data.Maybe (fromJust, isJust, mapMaybe)
 import Data.Map.Strict qualified as Map
 import Data.Text.IO qualified as T
 import Data.Vector qualified as Vector
@@ -38,7 +39,7 @@ import Test.QuickCheck.Instances.Text()
 import Test.QuickCheck.Instances.Natural()
 import Test.QuickCheck.Instances.ByteString()
 import Test.Tasty (testGroup, after, TestTree, TestName, DependencyType(..))
-import Test.Tasty.HUnit (assertEqual, testCase)
+import Test.Tasty.HUnit (assertEqual, testCase, assertBool)
 import Test.Tasty.QuickCheck hiding (Failure, Success)
 import Witch (into, unsafeInto)
 
@@ -280,7 +281,7 @@ evmSetup contr txData gaslimitExec = (txn, evmEnv, contrAlloc, fromAddress, toAd
 
 getHEVMRet
   :: App m
-  => OpContract -> ByteString -> Int -> m (Either (EvmError, [VMTraceStep]) (Expr 'End, [VMTraceStep], VMTraceStepResult))
+  => OpContract -> ByteString -> Int -> m (Either (EvmError, [VMTraceStep]) ([Expr 'End], [VMTraceStep], VMTraceStepResult))
 getHEVMRet contr txData gaslimitExec = do
   let (txn, evmEnv, contrAlloc, fromAddress, toAddress, _) = evmSetup contr txData gaslimitExec
   runCodeWithTrace mempty evmEnv contrAlloc txn (LitAddr fromAddress) (LitAddr toAddress)
@@ -401,7 +402,7 @@ decodeTraceOutputHelper traceFileName = do
 runCodeWithTrace
   :: App m
   => Fetch.RpcInfo -> EVMToolEnv -> EVMToolAlloc -> EVM.Transaction.Transaction
-  -> Expr EAddr -> Expr EAddr -> m (Either (EvmError, [VMTraceStep]) ((Expr 'End, [VMTraceStep], VMTraceStepResult)))
+  -> Expr EAddr -> Expr EAddr -> m (Either (EvmError, [VMTraceStep]) (([Expr 'End], [VMTraceStep], VMTraceStepResult)))
 runCodeWithTrace rpcinfo evmEnv alloc txn fromAddr toAddress = withSolvers Z3 0 1 Nothing $ \solvers -> do
   let calldata' = ConcreteBuf txn.txdata
       code' = alloc.code
@@ -760,19 +761,19 @@ checkTraceAndOutputs contract gasLimit txData = do
   case hevmRun of
     (Right (expr, hevmTrace, hevmTraceResult)) -> liftIO $ do
       let
-        concretize :: Expr a -> Expr Buf -> Expr a
-        concretize a c = mapExpr go a
+        concretize :: Expr Buf -> Expr a ->  Expr a
+        concretize c a = mapExpr go a
           where
             go :: Expr a -> Expr a
             go = \case
                        AbstractBuf "calldata" -> c
                        y -> y
-        concretizedExpr = concretize expr (ConcreteBuf txData)
-        simplConcExpr = Expr.simplify concretizedExpr
+        concretizedExpr = map (concretize (ConcreteBuf txData)) $ expr
+        simplConcExpr = map Expr.simplify concretizedExpr
         getReturnVal :: Expr End -> Maybe ByteString
         getReturnVal (Success _ _ (ConcreteBuf bs) _) = Just bs
         getReturnVal _ = Nothing
-        simplConcrExprRetval = getReturnVal simplConcExpr
+        simplConcrExprRetval = mapMaybe getReturnVal simplConcExpr
       traceOK <- compareTraces hevmTrace (evmtoolTraceOutput.trace)
       -- putStrLn $ "HEVM trace   : " <> show hevmTrace
       -- putStrLn $ "evmtool trace: " <> show (evmtoolTraceOutput.trace)
@@ -780,18 +781,19 @@ checkTraceAndOutputs contract gasLimit txData = do
       let resultOK = evmtoolTraceOutput.output.output == hevmTraceResult.out
       if resultOK then liftIO $ do
         putStrLn $ "HEVM & evmtool's outputs match: '" <> (bsToHex $ bssToBs evmtoolTraceOutput.output.output) <> "'"
-        if isNothing simplConcrExprRetval || (fromJust simplConcrExprRetval) == (bssToBs hevmTraceResult.out)
+        assertBool "Cannot have more than one success return value" (length simplConcrExprRetval <= 1)
+        if null simplConcrExprRetval || (simplConcrExprRetval !! 0) == (bssToBs hevmTraceResult.out)
            then do
              putStr "OK, symbolic interpretation -> concrete calldata -> Expr.simplify gives the same answer."
-             if isNothing simplConcrExprRetval then putStrLn ", but it was a Nothing, so not strong equivalence"
-                                               else putStrLn ""
+             if null simplConcrExprRetval then putStrLn ", but it was a Nothing, so not strong equivalence"
+                                          else putStrLn ""
            else do
              putStrLn $ "original expr                    : " <> (show expr)
              putStrLn $ "concretized expr                 : " <> (show concretizedExpr)
              putStrLn $ "simplified concretized expr      : " <> (show simplConcExpr)
              putStrLn $ "evmtoolTraceOutput.output.output : " <> (show (evmtoolTraceOutput.output.output))
              putStrLn $ "HEVM trace result output         : " <> (bsToHex (bssToBs hevmTraceResult.out))
-             putStrLn $ "ret value computed via symb+conc : " <> (bsToHex (fromJust simplConcrExprRetval))
+             putStrLn $ "ret value computed via symb+conc : " <> (intercalate "," $ map bsToHex simplConcrExprRetval)
              assertEqual "Simplified, concretized expression must match evmtool's output." True False
       else do
         putStrLn $ "Name of trace file: " <> (getTraceFileName evmDir $ fromJust evmtoolResult)

@@ -15,7 +15,7 @@ import EVM.FeeSchedule (feeSchedule)
 import EVM.Fetch qualified as Fetch
 import EVM.Format
 import EVM.Solidity
-import EVM.SymExec (defaultVeriOpts, symCalldata, verify, extractCex, prettyCalldata, calldataFromCex, panicMsg, VeriOpts(..), flattenExpr, groupIssues, groupPartials, IterConfig(..), defaultIterConf, LoopHeuristic)
+import EVM.SymExec (defaultVeriOpts, symCalldata, verify, extractCex, prettyCalldata, calldataFromCex, panicMsg, VeriOpts(..), groupIssues, groupPartials, IterConfig(..), defaultIterConf, LoopHeuristic)
 import EVM.Types
 import EVM.Transaction (initTx)
 import EVM.Stepper (Stepper)
@@ -285,18 +285,23 @@ symRun opts@UnitTestOptions{..} vm sig@(Sig testName types) solcContr sourceCach
 
     -- check postconditions against vm
     let fetcherSym = Fetch.oracle solvers (Just sess) rpcInfo
-    (end, results) <- verify solvers fetcherSym (makeVeriOpts opts) (symbolify vm') postcondition
-    let ends = flattenExpr end
+    (ends, results) <- verify solvers fetcherSym (makeVeriOpts opts) (symbolify vm') postcondition
     conf <- readConfig
-    when conf.debug $ liftIO $ forM_ (filter Expr.isFailure ends) $ \case
-      (Failure _ _ a) ->  putStrLn $ "   -> debug of func: " <> Text.unpack testName <> " Failure at the end of expr: " <> show a;
-      _ -> internalError "cannot be, filtered for failure"
+    when (conf.debug) $ liftIO $ do
+      putStrLn $ "   \x1b[94m[EXPLORATION COMPLETE]\x1b[0m " <> Text.unpack testName <> " -- explored " <> show (length ends) <> " paths."
+      when (conf.verb >= 2) $ do
+        forM_ (filter Expr.isFailure ends) $ \case
+          (Failure _ _ a) ->  putStrLn $ "   -> debug of func: " <> Text.unpack testName <> " Failure at the end of expr: " <> show a;
+          _ -> internalError "cannot be, filtered for failure"
 
     -- display results
+    when (conf.debug && conf.verb >=2) $ liftIO $ do
+      putStrLn $ "Collected END-s:\n" <> prettyvmresults ends
+      putStrLn $ "Collected verification results: " <> show results
     let warnings = any Expr.isPartial ends || any isUnknown results || any isError results
     let allReverts = not . (any Expr.isSuccess) $ ends
     let unexpectedAllRevert = allReverts && not shouldFail
-    when conf.debug $ liftIO $ putStrLn $ "symRun -- (cex,warnings,unexpectedAllRevert): " <> show (any isCex results, warnings, unexpectedAllRevert)
+    when conf.debug $ liftIO $ putStrLn $ "   symRun -- (cex,warnings,unexpectedAllRevert): " <> show (any isCex results, warnings, unexpectedAllRevert)
     txtResult <- case (any isCex results, warnings, unexpectedAllRevert) of
       (False, False, False) -> do
         -- happy case

@@ -2669,14 +2669,12 @@ traceForest' :: Expr End -> Forest Trace
 traceForest' (Success _ (TraceContext f _ _) _ _) = f
 traceForest' (Partial _ (TraceContext f _ _) _) = f
 traceForest' (Failure _ (TraceContext f _ _) _) = f
-traceForest' (ITE {}) = internalError"Internal Error: ITE does not contain a trace"
 traceForest' (GVar {}) = internalError"Internal Error: Unexpected GVar"
 
 traceContext :: Expr End -> TraceContext
 traceContext (Success _ c _ _) = c
 traceContext (Partial _ c _) = c
 traceContext (Failure _ c _) = c
-traceContext (ITE {}) = internalError"Internal Error: ITE does not contain a trace"
 traceContext (GVar {}) = internalError"Internal Error: Unexpected GVar"
 
 traceTopLog :: [Expr Log] -> EVM t s ()
@@ -3092,7 +3090,7 @@ instance VMOps Symbolic where
         assign (#iterations % at loc) (Just (iteration + 1, stack))
         continue v
       -- Both paths are possible; we ask for more input
-      runBothPaths loc exploreDepth UnknownBranch =
+      runBothPaths loc exploreDepth UnknownBranch = do
         (runBoth depthLimit exploreDepth ) . PleaseRunBoth condSimp $ (runBothPaths loc exploreDepth) . Case
 
   -- numBytes allows us to specify how many bytes of the returned value is relevant
