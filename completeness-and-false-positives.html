@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>When to Use - hevm</title>
+        <title>Completeness and False Positives - hevm</title>
 
 
         <!-- Custom HTML head -->
@@ -148,7 +148,7 @@
                         <a href="https://github.com/argotorg/hevm" title="Git repository" aria-label="Git repository">
                             <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
-                        <a href="hhttps://github.com/argotorg/hevm/edit/main/src/when-to-use.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                        <a href="hhttps://github.com/argotorg/hevm/edit/main/src/completeness-and-false-positives.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
                             <i id="git-edit-button" class="fa fa-edit"></i>
                         </a>
 
@@ -182,154 +182,70 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="when-to-use-symbolic-execution"><a class="header" href="#when-to-use-symbolic-execution">When to use Symbolic Execution</a></h1>
-<p>In the cryptocurrency world, it is exceedingly easy to lose a <a href="https://chainsec.io/defi-hacks/">lot of
-assets</a> due to bugs. While fuzz testing can
-help find potential issues with digital contracts, it is a tool that can only
-execute the program concretely, one execution at a time. In contrast, Symbolic
-Execution can execute all potential values in a decision path "in one go",
-creating a symbolic expression out of a path, and checking whether it
-can trigger a fault. Hence, Symbolic Execution tends to be more efficient at
-finding bugs than fuzzing when the bugs are rare, or explicitly (i.e.
-maliciously) hidden. Symbolic Execution can also <em>prove</em> that no postcondition
-can be violated, increasing the overall confidence in the contract. Note, however,
-that Symbolic Execution does not automatically generate postconditions for
-well-known bug classes like static code analysis tools do. Instead, these
-postconditions, and their sometimes associated preconditions, need to
-be explicitly written.</p>
-<h2 id="fuzzing-versus-symbolic-execution"><a class="header" href="#fuzzing-versus-symbolic-execution">Fuzzing versus Symbolic Execution</a></h2>
-<p>Fuzzing tests usually have a set of (sometimes implicit) pre- and
-postconditions, but the actual action (e.g. function call) is performed by an
-external entity, the fuzzer. For C/C++ fuzzing, the implicit postcondition is
-often e.g. that the system does not throw a segmentation fault. For EVM
-bytecode, postconditions need to be explicit. Let's see an example:</p>
-<pre><code class="language-solidity">// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
-import "forge-std/Test.sol";
+                        <h1 id="completeness-warnings-and-false-positives"><a class="header" href="#completeness-warnings-and-false-positives">Completeness Warnings and False Positives</a></h1>
+<p>hevm attempts to give no false negatives without warnings, but can sometimes
+give false positives. Whenever hevm could not prove the absence of negatives,
+it prints a warning <code>[WARN]</code>. While hevm attempts to give no false negatives,
+it can, in rare occasions, give false positives, indicated by <code>[not reproducible]</code>. This section explains why these happen, and how to interpret
+them.</p>
+<h2 id="completeness-warnings"><a class="header" href="#completeness-warnings">Completeness Warnings</a></h2>
+<p>hevm gives a completeness warning to indicate that it had to give up
+exploration during symbolic execution. Hence, it may be possible that some
+assertion violations can be violated, but hevm could not explore that path.
+Hence, this warning is an indication that there may be errors in the contract,
+but hevm was not able to find them.</p>
+<p>These warnings are prefixed with <code>[WARN]</code> and are collated together with the text
+<code>hevm was only able to partially explore XYZ due to:</code> and can be either:</p>
+<ul>
+<li><strong>error(s)</strong> such as SMT solver internal errors, or SMT translation
+issues related to dynamic datastructures</li>
+<li><strong>unknown result(s)</strong> from the SMT solver, such as timeouts</li>
+<li><strong>partial executions</strong> such as missing implementation of a precompile,
+cheatcode, etc.</li>
+</ul>
+<p>Partial executions are the most common cause of incompleteness. They can be
+due to:</p>
+<ul>
+<li><strong>Unexpected symbolic argument to an opcode</strong> For example, if a symbolic address is given to
+a <code>CALL</code> instruction, hevm will not be able to determine which contract is being called,
+and hence will not be able to explore that path. This can be alleviated with the option
+<code>--only-deployed</code>, which will restrict the analysis to only the contracts that are deployed
+during the <code>setUp()</code> phase of the test.</li>
+<li><strong>Maximum iterations reached</strong> This happens when we have too many iterations in a loop,
+and we have reached the maximum number of iterations allowed. This can be configured
+with the <code>--max-iterations</code> option.</li>
+<li><strong>Jump into symbolic code</strong> This can happen in case the contract generates code at runtime,
+deploys it, and jumps into it. hevm does not support this, and will give up exploration.</li>
+<li><strong>Branch too deep</strong> This happens when the call depth has been limited via the <code>--max-depth</code>
+option, and hevm has reached that limit during exploration.</li>
+<li><strong>Cheat code missing</strong> This happens when a cheatcode is called that is not yet implemented
+in hevm.</li>
+</ul>
+<h2 id="false-positives"><a class="header" href="#false-positives">False Positives</a></h2>
+<p>hevm attempts to validate every counterexample it can find. In case the
+counterexample validates, it marks it via <code>[validated]</code>. In case there is an
+error in validating the counterexample, it marks it via <code>[error attempting to reproduce...]</code>. When the counterexample cannot be validated, it marks it via
+<code>[not reproducible]</code>.</p>
+<p>False positives can happen in two different scenarios. Firstly, in some cases,
+hevm attempts to overapproximate the behaviour of the EVM, so that it doesn't
+have to give up exploration. However, this overapproximation can lead to
+behaviour that is not actually possible in the real world. This kind of
+overapproximation happens mostly with a STATICCALL to an unknown address.</p>
+<p>Secondly, false positives can happen, because hevm approximates the Keccak
+(i.e. SHA3) hash function via a so-called uninterpreted function. This means
+that hevm does not precisely model the Keccak function, but instead treats it
+as a black box. This can lead to Keccak hash pairs that are not possible in the
+real world.</p>
 
-contract MyContract is Test {
-  uint balance;
-  function test_overflow(uint amt) public {
-    unchecked {
-     balance += amt;
-    }
-    assert(balance &gt;= amt);
-  }
-}
-</code></pre>
-<p>This function is easy to break by picking an <code>amt</code> that overflows <code>balance</code>,
-so that the postcondition <code>balance &gt; amt</code> will not hold. A
-<a href="https://en.wikipedia.org/wiki/Fuzzing">fuzzer</a> finds this kind of bug very
-easily. However, fuzzers have trouble finding bugs that are either specifically
-hidden (e.g. by a malicious developer), or that have a complicated code path
-towards them. Let's see a simple one:</p>
-<pre><code class="language-solidity">// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
-import "foge-std/Test.sol";
-
-contract MyContract is Test {
-  uint balance;
-  function prove_multiply(uint amt, uint amt2) public {
-    require(amt != 1);
-    require(amt2 != 1);
-    require(amt &lt; amt2);
-    uint tmp;
-    tmp = amt * amt2;
-    if (tmp == 119274257) balance = 1337;
-    else balance += tmp;
-    assert(balance &gt;= tmp);
-  }
-}
-</code></pre>
-<p>Calling this contract with <code>amt = 9479</code> and <code>amt2 = 12583</code> will set the balance
-to 1337 which is less than <code>amt*amt2</code>, breaking the postcondition. However, a
-fuzzer, e.g. <a href="https://github.com/crytic/echidna">Echidna</a> will likely not find
-those numbers, because <code>uint</code> has a potential range of <code>2**256</code> and so it'd be
-looking for a needle in a haystack, when looking randomly. Here's how to run
-Echidna on the multiplication test:</p>
-<pre><code class="language-solidity">// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
-contract MyContract {
- // the rest is the same
-}
-</code></pre>
-<p>Then run:</p>
-<pre><code>echidna --test-mode assertion src/multiply-test.sol
-</code></pre>
-<p>Echidna will terminate after 50k runs, with all tests passing. Notice that the
-difference here, compared to the previous example, is that the overflow example
-has <em>many</em> different inputs that can break the postcondition, whereas here only
-one can.</p>
-<p>Hevm finds the bug in both of these functions. This is because
-hevm (and symbolic execution frameworks in general) try to find the bug via
-proof-directed search rather than using random inputs. In hevm, we try to prove
-that there are no inputs to the test case such that given the preconditions, the
-postconditions can be broken. While trying to construct this mathematical proof,
-hevm finds a <em>countereexample</em>, an  input that breaks the postconditions:</p>
-<pre><code>$ hevm test
-Checking 1 function(s) in contract src/multiply-test.sol:MyContract
-[RUNNING] prove_multiply(uint256,uint256)
-   [FAIL] prove_multiply(uint256,uint256)
-   Counterexample:
-     result:   Revert: 0x4e487b710000000000000000000000000000000000000000000000000000000000000001
-     calldata: prove_multiply(9479,12583)
-
-Checking 1 function(s) in contract src/overflow-test.sol:MyContract
-[RUNNING] prove_overflow(uint256)
-   [FAIL] prove_overflow(uint256)
-   Counterexample:
-     result:   Revert: 0x4e487b710000000000000000000000000000000000000000000000000000000000000001
-     calldata: prove_overflow(00000000000000000000000000000000000000000000000100000000000000000182dad8c17bd5e89e8043a08ada90a6d5efdee4425f85cb863109783e158ba4fba908a0e6fae6c6b51002)
-</code></pre>
-<h2 id="similarities-and-differences-to-other-tools"><a class="header" href="#similarities-and-differences-to-other-tools">Similarities and Differences to Other Tools</a></h2>
-<p>Fuzzers are exceedingly fast and efficient when there are many potential faults
-with a function/contract, or if the faults are of a type that's easy to search
-for (e.g. off-by-one). However, they rarely, if ever, find cases where the bug
-is hidden deep in the branch logic, or needs very specific input parameters.
-Hence, it is best to use fuzzers at first to find easy-to-find bugs, as fuzzers
-are very efficient at that. Then, once the tests pass the fuzzer, it is
-recommended to use a symbolic execution engine such as hevm.</p>
-<p>hevm is similar to <a href="https://github.com/a16z/halmos">Halmos</a> and
-<a href="https://docs.runtimeverification.com/kontrol/overview/readme">Kontrol</a> in its
-approach. However, it is quite different from static code analysis tools such
-as <a href="https://github.com/enzymefinance/oyente">Oyente</a>,
-<a href="https://github.com/crytic/slither">Slither</a>, and
-<a href="https://github.com/ConsenSys/mythril">Mythril</a>. While these 3 tools typically
-use some form of symbolic execution to try to validate their results, their
-main method of operation is not via symbolic execution, and they can, and do,
-report false positives.</p>
-<p>Notice that static code analysis tools can find bugs that the author(s) didn't
-write a test case for, as they typically have a (large) set of preconfigured
-test-cases that they can report on, if they can find a way to violate them. Hence,
-it may be valuable to run static analysis tools alongside symbolic execution tools
-such as hevm.</p>
-<p>Finally,
-<a href="https://github.com/argotorg/solidity/blob/develop/docs/smtchecker.rst">SMTChecker</a>
-may also be interesting to run alongside hevm. SMTChecker is very different
-from both approaches detailed above. While SMTChecker is capable of reliably
-finding both reentrancy and loop-related bugs, the tools above can only do so
-on a best effort basis. Hevm often reports a warning of incompleteness for
-such problems, while static code analysis tools either report potential
-positives or may even not discover them at all.</p>
-<div class="table-wrapper"><table><thead><tr><th>Tool</th><th>Approach</th><th>Primary Method</th><th>Notes</th></tr></thead><tbody>
-<tr><td><strong>hevm</strong></td><td>Symbolic analysis of EVM bytecode</td><td>Symbolic execution</td><td>Focuses on exploring all execution possibilities, identifying potential assertion violations, and optimizing gas usage. Can prove equivalence between bytecodes.</td></tr>
-<tr><td><strong>Halmos</strong></td><td>Similar to hevm</td><td>Not specified</td><td>Approach similar to hevm, but the document does not detail specific methodologies or differences.</td></tr>
-<tr><td><strong>Kontrol</strong></td><td>Similar to hevm</td><td>Not specified</td><td>Approach similar to hevm, with a focus presumably on symbolic analysis as well, but further details are not provided in the document.</td></tr>
-<tr><td><strong>Oyente</strong></td><td>Static code analysis</td><td>Partial symbolic execution</td><td>Uses symbolic execution to validate results but primarily relies on static analysis. Can report false positives.</td></tr>
-<tr><td><strong>Slither</strong></td><td>Static code analysis</td><td>Partial symbolic execution</td><td>Similar to Oyente, uses static analysis as its main method, complemented by symbolic execution for validation. Known for reporting false positives.</td></tr>
-<tr><td><strong>Mythril</strong></td><td>Static code analysis</td><td>Partial symbolic execution</td><td>Combines static code analysis with symbolic execution for result validation. Like Oyente and Slither, can report false positives.</td></tr>
-<tr><td><strong>SMTChecker</strong></td><td>Different from both hevm and static code analysis tools</td><td>SMT solving</td><td>Capable of finding reentrancy and loop-related bugs reliably, which other tools might miss or report incompletely. Offers a distinct approach from symbolic execution.</td></tr>
-</tbody></table>
-</div>
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="install.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="limitations-and-workarounds.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="limitations-and-workarounds.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="std-test-tutorial.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -339,11 +255,11 @@ positives or may even not discover them at all.</p>
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="install.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="limitations-and-workarounds.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="limitations-and-workarounds.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="std-test-tutorial.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>

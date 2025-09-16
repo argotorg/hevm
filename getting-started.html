@@ -145,10 +145,10 @@
                         <a href="print.html" title="Print this book" aria-label="Print this book">
                             <i id="print-button" class="fa fa-print"></i>
                         </a>
-                        <a href="https://github.com/ethereum/hevm" title="Git repository" aria-label="Git repository">
+                        <a href="https://github.com/argotorg/hevm" title="Git repository" aria-label="Git repository">
                             <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
-                        <a href="hhttps://github.com/ethereum/hevm/edit/main/src/getting-started.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                        <a href="hhttps://github.com/argotorg/hevm/edit/main/src/getting-started.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
                             <i id="git-edit-button" class="fa fa-edit"></i>
                         </a>
 
@@ -225,14 +225,14 @@ if <code>hevm</code> can find this bug. In order to do that, we have to prepend 
 function name with <code>prove_</code>, which we did.</p>
 <h3 id="building"><a class="header" href="#building">Building</a></h3>
 <p>We now need a copy of hevm (see
-<a href="https://github.com/ethereum/hevm/releases">releases</a>) and the SMT solver z3,
+<a href="https://github.com/argotorg/hevm/releases">releases</a>) and the SMT solver z3,
 which can be installed e.g. with <code>apt-get</code> on ubuntu/debian or <code>homebrew</code> on Mac,
 and a copy of <a href="https://getfoundry.sh/">Foundry</a>:</p>
 <pre><code class="language-shell">$ sudo apt-get install z3  # install z3
 $ curl -L https://foundry.paradigm.xyz | bash # install foundryup
 $ foundryup # install forge and other foundry binaries
 $ mkdir mytest &amp;&amp; cd mytest
-$ wget https://github.com/ethereum/hevm/releases/download/release/0.54.2/hevm-x86_64-linux
+$ wget https://github.com/argotorg/hevm/releases/download/release/0.55.1/hevm-x86_64-linux
 $ chmod +x ./hevm-x86_64-linux
 $ forge init .
 $ cat &lt;&lt;EOF &gt; src/contract.sol

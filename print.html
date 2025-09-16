@@ -146,7 +146,7 @@
                         <a href="print.html" title="Print this book" aria-label="Print this book">
                             <i id="print-button" class="fa fa-print"></i>
                         </a>
-                        <a href="https://github.com/ethereum/hevm" title="Git repository" aria-label="Git repository">
+                        <a href="https://github.com/argotorg/hevm" title="Git repository" aria-label="Git repository">
                             <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
 
@@ -223,14 +223,14 @@ if <code>hevm</code> can find this bug. In order to do that, we have to prepend 
 function name with <code>prove_</code>, which we did.</p>
 <h3 id="building"><a class="header" href="#building">Building</a></h3>
 <p>We now need a copy of hevm (see
-<a href="https://github.com/ethereum/hevm/releases">releases</a>) and the SMT solver z3,
+<a href="https://github.com/argotorg/hevm/releases">releases</a>) and the SMT solver z3,
 which can be installed e.g. with <code>apt-get</code> on ubuntu/debian or <code>homebrew</code> on Mac,
 and a copy of <a href="https://getfoundry.sh/">Foundry</a>:</p>
 <pre><code class="language-shell">$ sudo apt-get install z3  # install z3
 $ curl -L https://foundry.paradigm.xyz | bash # install foundryup
 $ foundryup # install forge and other foundry binaries
 $ mkdir mytest &amp;&amp; cd mytest
-$ wget https://github.com/ethereum/hevm/releases/download/release/0.54.2/hevm-x86_64-linux
+$ wget https://github.com/argotorg/hevm/releases/download/release/0.55.1/hevm-x86_64-linux
 $ chmod +x ./hevm-x86_64-linux
 $ forge init .
 $ cat &lt;&lt;EOF &gt; src/contract.sol
@@ -326,7 +326,7 @@ brew install --cask cvc5
 <p>If you installed cvc5 and want to use it, you will need to pass the flag
 "--solver cvc5". The z3 solver is default, but cvc5 is often faster, so you may
 want to try it out.</p>
-<p>Finally, download the static hevm binary from <a href="https://github.com/ethereum/hevm/releases/">the GitHub
+<p>Finally, download the static hevm binary from <a href="https://github.com/argotorg/hevm/releases/">the GitHub
 repository</a> for your platform and
 put it in your path so it can be executed via typing "hevm".</p>
 <h1 id="how-to-check-if-it-works"><a class="header" href="#how-to-check-if-it-works">How to Check if it Works</a></h1>
@@ -468,7 +468,7 @@ test-cases that they can report on, if they can find a way to violate them. Henc
 it may be valuable to run static analysis tools alongside symbolic execution tools
 such as hevm.</p>
 <p>Finally,
-<a href="https://github.com/ethereum/solidity/blob/develop/docs/smtchecker.rst">SMTChecker</a>
+<a href="https://github.com/argotorg/solidity/blob/develop/docs/smtchecker.rst">SMTChecker</a>
 may also be interesting to run alongside hevm. SMTChecker is very different
 from both approaches detailed above. While SMTChecker is capable of reliably
 finding both reentrancy and loop-related bugs, the tools above can only do so
@@ -579,6 +579,60 @@ alter the block number that the RPC calls use. For that, one must use the
 <code>--number</code> command line option. Hence, it is not possible to dynamically change
 what block number the RPC calls fetch from, other than by restarting the hevm
 process with a different block number.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="completeness-warnings-and-false-positives"><a class="header" href="#completeness-warnings-and-false-positives">Completeness Warnings and False Positives</a></h1>
+<p>hevm attempts to give no false negatives without warnings, but can sometimes
+give false positives. Whenever hevm could not prove the absence of negatives,
+it prints a warning <code>[WARN]</code>. While hevm attempts to give no false negatives,
+it can, in rare occasions, give false positives, indicated by <code>[not reproducible]</code>. This section explains why these happen, and how to interpret
+them.</p>
+<h2 id="completeness-warnings"><a class="header" href="#completeness-warnings">Completeness Warnings</a></h2>
+<p>hevm gives a completeness warning to indicate that it had to give up
+exploration during symbolic execution. Hence, it may be possible that some
+assertion violations can be violated, but hevm could not explore that path.
+Hence, this warning is an indication that there may be errors in the contract,
+but hevm was not able to find them.</p>
+<p>These warnings are prefixed with <code>[WARN]</code> and are collated together with the text
+<code>hevm was only able to partially explore XYZ due to:</code> and can be either:</p>
+<ul>
+<li><strong>error(s)</strong> such as SMT solver internal errors, or SMT translation
+issues related to dynamic datastructures</li>
+<li><strong>unknown result(s)</strong> from the SMT solver, such as timeouts</li>
+<li><strong>partial executions</strong> such as missing implementation of a precompile,
+cheatcode, etc.</li>
+</ul>
+<p>Partial executions are the most common cause of incompleteness. They can be
+due to:</p>
+<ul>
+<li><strong>Unexpected symbolic argument to an opcode</strong> For example, if a symbolic address is given to
+a <code>CALL</code> instruction, hevm will not be able to determine which contract is being called,
+and hence will not be able to explore that path. This can be alleviated with the option
+<code>--only-deployed</code>, which will restrict the analysis to only the contracts that are deployed
+during the <code>setUp()</code> phase of the test.</li>
+<li><strong>Maximum iterations reached</strong> This happens when we have too many iterations in a loop,
+and we have reached the maximum number of iterations allowed. This can be configured
+with the <code>--max-iterations</code> option.</li>
+<li><strong>Jump into symbolic code</strong> This can happen in case the contract generates code at runtime,
+deploys it, and jumps into it. hevm does not support this, and will give up exploration.</li>
+<li><strong>Branch too deep</strong> This happens when the call depth has been limited via the <code>--max-depth</code>
+option, and hevm has reached that limit during exploration.</li>
+<li><strong>Cheat code missing</strong> This happens when a cheatcode is called that is not yet implemented
+in hevm.</li>
+</ul>
+<h2 id="false-positives"><a class="header" href="#false-positives">False Positives</a></h2>
+<p>hevm attempts to validate every counterexample it can find. In case the
+counterexample validates, it marks it via <code>[validated]</code>. In case there is an
+error in validating the counterexample, it marks it via <code>[error attempting to reproduce...]</code>. When the counterexample cannot be validated, it marks it via
+<code>[not reproducible]</code>.</p>
+<p>False positives can happen in two different scenarios. Firstly, in some cases,
+hevm attempts to overapproximate the behaviour of the EVM, so that it doesn't
+have to give up exploration. However, this overapproximation can lead to
+behaviour that is not actually possible in the real world. This kind of
+overapproximation happens mostly with a STATICCALL to an unknown address.</p>
+<p>Secondly, false positives can happen, because hevm approximates the Keccak
+(i.e. SHA3) hash function via a so-called uninterpreted function. This means
+that hevm does not precisely model the Keccak function, but instead treats it
+as a black box. This can lead to Keccak hash pairs that are not possible in the
+real world.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="forge-std-test-usage-tutorial"><a class="header" href="#forge-std-test-usage-tutorial">Forge std-test Usage Tutorial</a></h1>
 <p>First, install foundry:</p>
 <pre><code class="language-plain">curl -L https://foundry.paradigm.xyz | bash
