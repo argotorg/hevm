@@ -32,6 +32,10 @@ import Data.Vector qualified as V
 import Data.Vector.Storable qualified as VS
 import Data.Vector.Storable.ByteString (vectorToByteString)
 
+import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
+import Control.Concurrent (forkIO, killThread)
+import Control.Concurrent.STM (writeTChan, newTChan, TChan, tryReadTChan, atomically)
+
 import EVM (makeVm, abstractContract, initialContract, getCodeLocation, isValidJumpDest)
 import EVM.Exec
 import EVM.Fetch qualified as Fetch
@@ -317,18 +321,83 @@ freezeVM vm = do
       ConcreteMemory m -> SymbolicMemory . ConcreteBuf . vectorToByteString <$> VS.freeze m
       m@(SymbolicMemory _) -> pure m
 
-
--- | Symbolic interpreter that explores all paths. Returns an
--- 'Expr End' representing the possible executions. This Expr End is NOT flattened,
---  i.e. it (likely) contains ITE-s. The only End-s possible are: Partial, Failure, Success, ITE
-interpret :: forall m z . App m
+type Interpreter = forall m z . App m
   => Fetch.Fetcher Symbolic m RealWorld
   -> IterConfig
   -> VM Symbolic RealWorld
   -> Stepper Symbolic RealWorld (Expr End)
+  -> (Expr End -> m z)
+  -> m z
+
+
+newtype InterpreterGroup = InterpreterGroup (Chan Task)
+data InterpreterInstance = InterpreterInstance
+  { instanceId :: Natural
+  , instanceTaskQ :: Chan Task
+  , instanceSolver :: Interpreter
+  }
+
+withInterpreters :: App m => Interpreter -> Natural -> (InterpreterGroup -> m a) -> m a
+withInterpreters interpreter count threads timeout cont = do
+  -- spawn interpreters
+  instances <- liftIO $ forM [1..count] $ \i -> do
+    taskq <- newChan
+    let inst = InterpreterInstance
+          { instanceId = i
+          , instanceTaskQ = taskq
+          , instanceSolver = solver
+          }
+    pure inst
+  -- spawn orchestration thread
+  taskq <- liftIO newChan
+  availableInstances <- liftIO newChan
+  liftIO $ forM_ instances (writeChan availableInstances)
+  orchestrate' <- toIO $ orchestrate taskq availableInstances [] 0
+  orchestrateId <- liftIO $ forkIO orchestrate'
+
+  -- run continuation with task queue
+  res <- cont (InterpreterGroup taskq)
+
+  -- cleanup and return results
+  liftIO $ mapM_ (stopInterpreter) instances
+  liftIO $ killThread orchestrateId
+  pure res
+  where
+    orchestrate :: App m => Chan Task -> Chan InterpreterInstance -> m b
+    orchestrate taskq avail = do
+      conf <- readConfig
+      mx <- liftIO . atomically $ tryReadTChan cacheq
+      task <- liftIO $ readChan taskq
+      inst <- liftIO $ readChan avail
+      runTask' <- toIO $ getOneSol smt2 props r cacheq inst avail
+      _ <- liftIO $ forkIO runTask'
+      orchestrate taskq cacheq avail knownUnsat
+
+interpret :: Interpreter
+interpret fetcher iterConf vm step f = do
+ -- create queue of things to do
+ queue <- undefined
+ interpretInternal fetcher iterConf vm step (addQueue queue) f
+  where
+    addQueue :: Queue -> (VM Symbolic RealWorld)
+    addQueue queue expr = do
+      -- add expr to queue
+      -- if queue is not full, continue interpreting
+      -- if queue is full, wait for some to finish and then continue interpreting
+      undefined
+
+-- | Symbolic interpreter that explores all paths. Returns an
+-- 'Expr End' representing the possible executions. This Expr End is NOT flattened,
+--  i.e. it (likely) contains ITE-s. The only End-s possible are: Partial, Failure, Success, ITE
+interpretInternal :: forall m z . App m
+  => Fetch.Fetcher Symbolic m RealWorld
+  -> IterConfig
+  -> VM Symbolic RealWorld
+  -> Stepper Symbolic RealWorld (Expr End)
+  -> (VM Symbolic RealWorld -> Expr End -> m z)
   -> (Expr End -> m z)  -- ^ Function to execute with the final result
   -> m z
-interpret fetcher iterConf vm step f =
+interpretInternal fetcher iterConf vm step f =
   eval (Operational.view step)
   where
   eval :: Operational.ProgramView (Stepper.Action Symbolic RealWorld) (Expr End) -> m z
