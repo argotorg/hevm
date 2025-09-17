@@ -315,122 +315,100 @@ freezeVM vm = do
       m@(SymbolicMemory _) -> pure m
 
 
--- TODO: we need an interpreter queue that has the same signature as `interpret`, but
--- that has a queue and a set of threads to dispatch interpretations to
-interpret
-  :: forall m . App m
-  => Fetch.Fetcher Symbolic m RealWorld
-  -> IterConfig
-  -> VM Symbolic RealWorld
-  -> Stepper Symbolic RealWorld (Expr End)
-  -> m (Expr End)
-interpret fetcher iterConf vm =
-  eval . Operational.view
-  where
-  eval :: Operational.ProgramView (Stepper.Action Symbolic RealWorld) (Expr End) -> m (Expr End)
-  eval (Operational.Return x) = pure x
-  eval (action Operational.:>>= k) =
-    case action of
-      -- Stepper.ForkMany (PleaseRunAll expr vals continue) -> do
-      --   undefined
-      -- Stepper.Fork (PleaseRunBoth cond continue) -> do
-      --   undefined
-      _ -> interpretInternal fetcher iterConf vm (Operational.singleton action >>= k)
-
 -- | Symbolic interpreter that explores all paths. Returns an
 -- 'Expr End' representing the possible executions. This Expr End is NOT flattened,
 --  i.e. it (likely) contains ITE-s. The only End-s possible are: Partial, Failure, Success, ITE
-interpretInternal
-  :: forall m . App m
+interpret :: forall m z . App m
   => Fetch.Fetcher Symbolic m RealWorld
   -> IterConfig
   -> VM Symbolic RealWorld
   -> Stepper Symbolic RealWorld (Expr End)
-  -> m (Expr End)
-interpretInternal fetcher iterConf vm =
-  eval . Operational.view
+  -> (Expr End -> m z)  -- ^ Function to execute with the final result
+  -> m z
+interpret fetcher iterConf vm step f =
+  eval (Operational.view step)
   where
-  eval :: Operational.ProgramView (Stepper.Action Symbolic RealWorld) (Expr End) -> m (Expr End)
-  eval (Operational.Return x) = pure x
+  eval :: Operational.ProgramView (Stepper.Action Symbolic RealWorld) (Expr End) -> m z
+  eval (Operational.Return x) = f x
   eval (action Operational.:>>= k) =
     case action of
       Stepper.Exec -> do
         conf <- readConfig
         (r, vm') <- liftIO $ stToIO $ runStateT (exec conf) vm
-        interpret fetcher iterConf vm' (k r)
+        interpret fetcher iterConf vm' (k r) f
       Stepper.EVM m -> do
         (r, vm') <- liftIO $ stToIO $ runStateT m vm
-        interpret fetcher iterConf vm' (k r)
-      Stepper.ForkMany (PleaseRunAll expr vals continue) -> do
-        when (length vals < 2) $ internalError "PleaseRunAll requires at least 2 branches"
-        frozen <- liftIO $ stToIO $ freezeVM vm
-        let newDepth = vm.exploreDepth+1
-        ends <- withRunInIO $ \runInIO -> mapConcurrently (runInIO . runOne frozen newDepth) vals
-        pure $ goITE (zip vals ends)
-        where
-          goITE :: [(Expr EWord, Expr End)] -> Expr End
-          goITE [] = internalError "goITE: empty list"
-          goITE [(_, end)] = end
-          goITE ((val,end):ps) = ITE (Eq expr val) end (goITE ps)
-          runOne :: App m => VM 'Symbolic RealWorld -> Int -> Expr EWord -> m (Expr 'End)
-          runOne frozen newDepth v = do
-            (ra, vma) <- liftIO $ stToIO $ runStateT (continue v) frozen { result = Nothing, exploreDepth = newDepth }
-            interpret fetcher iterConf vma (k ra)
-      Stepper.Fork (PleaseRunBoth cond continue) -> do
-        frozen <- liftIO $ stToIO $ freezeVM vm
-        let newDepth = vm.exploreDepth+1
-        evalLeft <- toIO $ do
-          (ra, vma) <- liftIO $ stToIO $ runStateT (continue True) frozen { result = Nothing, exploreDepth = newDepth }
-          interpret fetcher iterConf vma (k ra)
-        evalRight <- toIO $ do
-          (rb, vmb) <- liftIO $ stToIO $ runStateT (continue False) frozen { result = Nothing, exploreDepth = newDepth }
-          interpret fetcher iterConf vmb (k rb)
-        (a, b) <- liftIO $ concurrently evalLeft evalRight
-        pure $ ITE cond a b
-      Stepper.Wait q -> do
-        let performQuery = do
-              m <- fetcher q
-              (r, vm') <- liftIO$ stToIO $ runStateT m vm
-              interpret fetcher iterConf vm' (k r)
+        interpret fetcher iterConf vm' (k r) f
+      -- Stepper.ForkMany (PleaseRunAll expr vals continue) -> do
+      --   when (length vals < 2) $ internalError "PleaseRunAll requires at least 2 branches"
+      --   frozen <- liftIO $ stToIO $ freezeVM vm
+      --   let newDepth = vm.exploreDepth+1
+      --   ends <- withRunInIO $ \runInIO -> mapConcurrently (runInIO . runOne frozen newDepth) vals
+      --   pure $ goITE (zip vals ends)
+      --   where
+      --     goITE :: [(Expr EWord, Expr End)] -> Expr End
+      --     goITE [] = internalError "goITE: empty list"
+      --     goITE [(_, end)] = end
+      --     goITE ((val,end):ps) = ITE (Eq expr val) end (goITE ps)
+      --     runOne :: App m => VM 'Symbolic RealWorld -> Int -> Expr EWord -> m (Expr 'End)
+      --     runOne frozen newDepth v = do
+      --       (ra, vma) <- liftIO $ stToIO $ runStateT (continue v) frozen { result = Nothing, exploreDepth = newDepth }
+      --       interpret fetcher iterConf vma (k ra)
+      -- Stepper.Fork (PleaseRunBoth cond continue) -> do
+      --   frozen <- liftIO $ stToIO $ freezeVM vm
+      --   let newDepth = vm.exploreDepth+1
+      --   evalLeft <- toIO $ do
+      --     (ra, vma) <- liftIO $ stToIO $ runStateT (continue True) frozen { result = Nothing, exploreDepth = newDepth }
+      --     interpret fetcher iterConf vma (k ra)
+      --   evalRight <- toIO $ do
+      --     (rb, vmb) <- liftIO $ stToIO $ runStateT (continue False) frozen { result = Nothing, exploreDepth = newDepth }
+      --     interpret fetcher iterConf vmb (k rb)
+      --   (a, b) <- liftIO $ concurrently evalLeft evalRight
+      --   pure $ ITE cond a b
+      -- Stepper.Wait q -> do
+      --   let performQuery = do
+      --         m <- fetcher q
+      --         (r, vm') <- liftIO$ stToIO $ runStateT m vm
+      --         interpret fetcher iterConf vm' (k r)
 
-        case q of
-          PleaseAskSMT cond preconds continue -> do
-            case Expr.concKeccakSimpExpr cond of
-              -- is the condition concrete?
-              Lit c ->
-                -- have we reached max iterations, are we inside a loop?
-                case (maxIterationsReached vm iterConf.maxIter, isLoopHead iterConf.loopHeuristic vm) of
-                  -- Yes. return a partial leaf
-                  (Just _, Just True) ->
-                    pure $ Partial [] (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) $ MaxIterationsReached vm.state.pc vm.state.contract
-                  -- No. keep executing
-                  _ -> do
-                    (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case (c > 0))) vm
-                    interpret fetcher iterConf vm' (k r)
+      --   case q of
+      --     PleaseAskSMT cond preconds continue -> do
+      --       case Expr.concKeccakSimpExpr cond of
+      --         -- is the condition concrete?
+      --         Lit c ->
+      --           -- have we reached max iterations, are we inside a loop?
+      --           case (maxIterationsReached vm iterConf.maxIter, isLoopHead iterConf.loopHeuristic vm) of
+      --             -- Yes. return a partial leaf
+      --             (Just _, Just True) ->
+      --               pure $ Partial [] (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) $ MaxIterationsReached vm.state.pc vm.state.contract
+      --             -- No. keep executing
+      --             _ -> do
+      --               (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case (c > 0))) vm
+      --               interpret fetcher iterConf vm' (k r)
 
-              -- the condition is symbolic
-              _ ->
-                -- are in we a loop, have we hit maxIters, have we hit askSmtIters?
-                case (isLoopHead iterConf.loopHeuristic vm, askSmtItersReached vm iterConf.askSmtIters, maxIterationsReached vm iterConf.maxIter) of
-                  -- we're in a loop and maxIters has been reached
-                  (Just True, _, Just n) -> do
-                    -- continue execution down the opposite branch than the one that
-                    -- got us to this point and return a partial leaf for the other side
-                    (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case $ not n)) vm
-                    a <- interpret fetcher iterConf vm' (k r)
-                    pure $ ITE cond a (Partial [] (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) (MaxIterationsReached vm.state.pc vm.state.contract))
-                  -- we're in a loop and askSmtIters has been reached
-                  (Just True, True, _) ->
-                    -- ask the smt solver about the loop condition
-                    performQuery
-                  _ -> do
-                    let simpProps = Expr.concKeccakSimpProps ((cond ./= Lit 0):preconds)
-                    (r, vm') <- case simpProps of
-                      [PBool False] -> liftIO $ stToIO $ runStateT (continue (Case False)) vm
-                      [] -> liftIO $ stToIO $ runStateT (continue (Case True)) vm
-                      _ -> liftIO $ stToIO $ runStateT (continue UnknownBranch) vm
-                    interpret fetcher iterConf vm' (k r)
-          _ -> performQuery
+      --         -- the condition is symbolic
+      --         _ ->
+      --           -- are in we a loop, have we hit maxIters, have we hit askSmtIters?
+      --           case (isLoopHead iterConf.loopHeuristic vm, askSmtItersReached vm iterConf.askSmtIters, maxIterationsReached vm iterConf.maxIter) of
+      --             -- we're in a loop and maxIters has been reached
+      --             (Just True, _, Just n) -> do
+      --               -- continue execution down the opposite branch than the one that
+      --               -- got us to this point and return a partial leaf for the other side
+      --               (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case $ not n)) vm
+      --               a <- interpret fetcher iterConf vm' (k r)
+      --               pure $ ITE cond a (Partial [] (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) (MaxIterationsReached vm.state.pc vm.state.contract))
+      --             -- we're in a loop and askSmtIters has been reached
+      --             (Just True, True, _) ->
+      --               -- ask the smt solver about the loop condition
+      --               performQuery
+      --             _ -> do
+      --               let simpProps = Expr.concKeccakSimpProps ((cond ./= Lit 0):preconds)
+      --               (r, vm') <- case simpProps of
+      --                 [PBool False] -> liftIO $ stToIO $ runStateT (continue (Case False)) vm
+      --                 [] -> liftIO $ stToIO $ runStateT (continue (Case True)) vm
+      --                 _ -> liftIO $ stToIO $ runStateT (continue UnknownBranch) vm
+      --               interpret fetcher iterConf vm' (k r)
+      --     _ -> performQuery
 
 maxIterationsReached :: VM Symbolic s -> Maybe Integer -> Maybe Bool
 maxIterationsReached _ Nothing = Nothing
@@ -509,7 +487,7 @@ getExprEmptyStore solvers c signature' concreteArgs opts = do
   conf <- readConfig
   calldata <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ loadEmptySymVM (RuntimeCode (ConcreteRuntimeCode c)) (Lit 0) calldata
-  exprInter <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState runExpr
+  exprInter <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState runExpr pure
   if conf.simp then (pure $ Expr.simplify exprInter) else pure exprInter
 
 -- Used only in testing
@@ -525,7 +503,7 @@ getExpr solvers c signature' concreteArgs opts = do
   conf <- readConfig
   calldata <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ abstractVM calldata c Nothing False
-  exprInter <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState runExpr
+  exprInter <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState runExpr pure
   if conf.simp then (pure $ Expr.simplify exprInter) else pure exprInter
 
 {- | Checks if an assertion violation has been encountered
@@ -753,7 +731,7 @@ verifyInputs solvers opts fetcher preState maybepost = do
   let call = mconcat ["prefix 0x", getCallPrefix preState.state.calldata]
   when conf.debug $ liftIO $ putStrLn $ "   Exploring call " <> call
 
-  expr <- interpret fetcher opts.iterConf preState runExpr
+  expr <- interpret fetcher opts.iterConf preState runExpr $ \e -> pure e
   when conf.dumpExprs $ liftIO $ T.writeFile "unsimplified.expr" (formatExpr expr)
   let flattened = flattenExpr expr
   when (conf.dumpExprs && conf.simp) $ liftIO $ do
@@ -870,7 +848,7 @@ equivalenceCheck solvers bytecodeA bytecodeB opts calldata create = do
       conf <- readConfig
       let bytecode = if BS.null bs then BS.pack [0] else bs
       prestate <- liftIO $ stToIO $ abstractVM calldata bytecode Nothing create
-      expr <- interpret (Fetch.oracle solvers Nothing mempty) opts.iterConf prestate runExpr
+      expr <- interpret (Fetch.oracle solvers Nothing mempty) opts.iterConf prestate runExpr pure
       let simpl = if conf.simp then Expr.simplify expr else expr
       pure $ flattenExpr simpl
     oneQedOrNoQed :: EqIssues -> EqIssues
