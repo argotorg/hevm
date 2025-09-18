@@ -384,7 +384,6 @@ interpret :: forall m z . App m
   -> IterConfig
   -> VM Symbolic RealWorld
   -> Stepper Symbolic RealWorld (Expr End)
-  -> (VM Symbolic RealWorld -> Expr End -> m z)
   -> (Expr End -> m z)  -- ^ Function to execute with the final result
   -> m z
 interpret fetcher iterConf vm step f =
