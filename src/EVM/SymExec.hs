@@ -327,7 +327,6 @@ type Interpreter = forall m z . App m
   -> (Expr End -> m z)
   -> m z
 
-
 data InterpTask = InterpTask { vm :: VM Symbolic RealWorld, resultChan :: Chan SMTResult }
 newtype InterpreterGroup = InterpreterGroup (Chan InterpTask)
 data InterpreterInstance = InterpreterInstance
@@ -351,7 +350,7 @@ withInterpreters interpreter count cont = do
   taskq <- liftIO newChan
   availableInstances <- liftIO newChan
   liftIO $ forM_ instances (writeChan availableInstances)
-  orchestrate' <- toIO $ orchestrate taskq availableInstances [] 0
+  orchestrate' <- toIO $ orchestrate taskq availableInstances
   orchestrateId <- liftIO $ forkIO orchestrate'
 
   -- run continuation with task queue
@@ -368,7 +367,6 @@ withInterpreters interpreter count cont = do
       runTask' <- toIO $ getOneExpr task inst avail
       _ <- liftIO $ forkIO runTask'
       orchestrate taskq avail
-
 
 getOneExpr :: (MonadIO m, ReadConfig m) => InterpTask -> InterpreterInstance -> Chan InterpreterInstance -> m ()
 getOneExpr task inst availableInstances = do
