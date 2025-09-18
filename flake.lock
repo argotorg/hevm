@@ -241,13 +241,13 @@
       "locked": {
         "lastModified": 1716280767,
         "narHash": "sha256-cvRFeJkiaYPA+SoboEZhvH5sHDmmcMNR62OoKuEOWRg=",
-        "owner": "ethereum",
+        "owner": "argotorg",
         "repo": "solidity",
         "rev": "8a97fa7a1db1ec509221ead6fea6802c684ee887",
         "type": "github"
       },
       "original": {
-        "owner": "ethereum",
+        "owner": "argotorg",
         "repo": "solidity",
         "rev": "8a97fa7a1db1ec509221ead6fea6802c684ee887",
         "type": "github"

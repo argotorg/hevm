@@ -3,6 +3,7 @@
 
 module EVM.SymExec where
 
+import GHC.Natural
 import Control.Arrow ((>>>))
 import Control.Concurrent.Async (concurrently, mapConcurrently)
 import Control.Concurrent.Spawn (parMapIO, pool)
@@ -338,14 +339,14 @@ data InterpreterInstance = InterpreterInstance
   }
 
 withInterpreters :: App m => Interpreter -> Natural -> (InterpreterGroup -> m a) -> m a
-withInterpreters interpreter count threads timeout cont = do
+withInterpreters interpreter count cont = do
   -- spawn interpreters
   instances <- liftIO $ forM [1..count] $ \i -> do
     taskq <- newChan
     let inst = InterpreterInstance
           { instanceId = i
           , instanceTaskQ = taskq
-          , instanceSolver = solver
+          , instanceSolver = interpreter
           }
     pure inst
   -- spawn orchestration thread
@@ -359,37 +360,51 @@ withInterpreters interpreter count threads timeout cont = do
   res <- cont (InterpreterGroup taskq)
 
   -- cleanup and return results
-  liftIO $ mapM_ (stopInterpreter) instances
   liftIO $ killThread orchestrateId
   pure res
   where
     orchestrate :: App m => Chan Task -> Chan InterpreterInstance -> m b
     orchestrate taskq avail = do
       conf <- readConfig
-      mx <- liftIO . atomically $ tryReadTChan cacheq
       task <- liftIO $ readChan taskq
       inst <- liftIO $ readChan avail
-      runTask' <- toIO $ getOneSol smt2 props r cacheq inst avail
+      runTask' <- toIO $ getOneSol smt2 props r inst avail
       _ <- liftIO $ forkIO runTask'
-      orchestrate taskq cacheq avail knownUnsat
+      orchestrate taskq avail
 
-interpret :: Interpreter
-interpret fetcher iterConf vm step f = do
- -- create queue of things to do
- queue <- undefined
- interpretInternal fetcher iterConf vm step (addQueue queue) f
-  where
-    addQueue :: Queue -> (VM Symbolic RealWorld)
-    addQueue queue expr = do
-      -- add expr to queue
-      -- if queue is not full, continue interpreting
-      -- if queue is full, wait for some to finish and then continue interpreting
-      undefined
+
+getOneSol :: (MonadIO m, ReadConfig m) => SMT2 -> Maybe [Prop] -> Chan SMTResult -> InterpreterInstance -> Chan InterpreterInstance -> m ()
+getOneSol smt2 props r inst availableInstances = do
+  conf <- readConfig
+  -- reset solver and send all lines of provided script
+  out <- do
+    resetRes <- sendScript inst $ SMTScript [SMTCommand "(reset)"]
+    case resetRes of
+      e@(Left _) -> pure e
+      _ -> sendScript inst cmds
+  case out of
+    -- if we got an error then return it
+    Left e -> writeChan r (Error $ "Error while writing SMT to solver: " <> T.unpack e)
+    -- otherwise call (check-sat), parse the result, and send it down the result channel
+    Right () -> do
+      sat <- sendCommand inst $ SMTCommand "(check-sat)"
+      res <- do
+          case sat of
+            "unsat" -> do
+              when (isJust props) $ liftIO . atomically $ writeTChan cacheq (CacheEntry (fromJust props))
+              pure Qed
+            "timeout" -> pure $ Unknown "Result timeout by SMT solver"
+            "unknown" -> do
+              dumpUnsolved smt2 fileCounter conf.dumpUnsolved
+              pure $ Unknown "Result unknown by SMT solver"
+            "sat" -> Cex <$> getModel inst cexvars
+            _ -> pure . Error $ "Unable to parse SMT solver output: " <> T.unpack sat
+      writeChan r res
 
 -- | Symbolic interpreter that explores all paths. Returns an
 -- 'Expr End' representing the possible executions. This Expr End is NOT flattened,
 --  i.e. it (likely) contains ITE-s. The only End-s possible are: Partial, Failure, Success, ITE
-interpretInternal :: forall m z . App m
+interpret :: forall m z . App m
   => Fetch.Fetcher Symbolic m RealWorld
   -> IterConfig
   -> VM Symbolic RealWorld
@@ -397,7 +412,7 @@ interpretInternal :: forall m z . App m
   -> (VM Symbolic RealWorld -> Expr End -> m z)
   -> (Expr End -> m z)  -- ^ Function to execute with the final result
   -> m z
-interpretInternal fetcher iterConf vm step f =
+interpret fetcher iterConf vm step f =
   eval (Operational.view step)
   where
   eval :: Operational.ProgramView (Stepper.Action Symbolic RealWorld) (Expr End) -> m z
