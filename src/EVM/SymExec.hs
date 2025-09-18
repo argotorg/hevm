@@ -331,10 +331,11 @@ type Interpreter = forall m z . App m
   -> m z
 
 
-newtype InterpreterGroup = InterpreterGroup (Chan Task)
+data InterpTask = InterpTask { vm :: VM Symbolic RealWorld, resultChan :: Chan SMTResult }
+newtype InterpreterGroup = InterpreterGroup (Chan InterpTask)
 data InterpreterInstance = InterpreterInstance
   { instanceId :: Natural
-  , instanceTaskQ :: Chan Task
+  , instanceTaskQ :: Chan InterpTask
   , instanceSolver :: Interpreter
   }
 
@@ -363,43 +364,20 @@ withInterpreters interpreter count cont = do
   liftIO $ killThread orchestrateId
   pure res
   where
-    orchestrate :: App m => Chan Task -> Chan InterpreterInstance -> m b
+    orchestrate :: App m => Chan InterpTask -> Chan InterpreterInstance -> m b
     orchestrate taskq avail = do
-      conf <- readConfig
       task <- liftIO $ readChan taskq
       inst <- liftIO $ readChan avail
-      runTask' <- toIO $ getOneSol smt2 props r inst avail
+      runTask' <- toIO $ getOneExpr task inst avail
       _ <- liftIO $ forkIO runTask'
       orchestrate taskq avail
 
 
-getOneSol :: (MonadIO m, ReadConfig m) => SMT2 -> Maybe [Prop] -> Chan SMTResult -> InterpreterInstance -> Chan InterpreterInstance -> m ()
-getOneSol smt2 props r inst availableInstances = do
-  conf <- readConfig
-  -- reset solver and send all lines of provided script
-  out <- do
-    resetRes <- sendScript inst $ SMTScript [SMTCommand "(reset)"]
-    case resetRes of
-      e@(Left _) -> pure e
-      _ -> sendScript inst cmds
-  case out of
-    -- if we got an error then return it
-    Left e -> writeChan r (Error $ "Error while writing SMT to solver: " <> T.unpack e)
-    -- otherwise call (check-sat), parse the result, and send it down the result channel
-    Right () -> do
-      sat <- sendCommand inst $ SMTCommand "(check-sat)"
-      res <- do
-          case sat of
-            "unsat" -> do
-              when (isJust props) $ liftIO . atomically $ writeTChan cacheq (CacheEntry (fromJust props))
-              pure Qed
-            "timeout" -> pure $ Unknown "Result timeout by SMT solver"
-            "unknown" -> do
-              dumpUnsolved smt2 fileCounter conf.dumpUnsolved
-              pure $ Unknown "Result unknown by SMT solver"
-            "sat" -> Cex <$> getModel inst cexvars
-            _ -> pure . Error $ "Unable to parse SMT solver output: " <> T.unpack sat
-      writeChan r res
+getOneExpr :: (MonadIO m, ReadConfig m) => InterpTask -> InterpreterInstance -> Chan InterpreterInstance -> m ()
+getOneExpr task inst availableInstances = do
+  out <- undefined task.vm
+  liftIO $ writeChan task.resultChan out
+  liftIO $ writeChan availableInstances inst
 
 -- | Symbolic interpreter that explores all paths. Returns an
 -- 'Expr End' representing the possible executions. This Expr End is NOT flattened,
