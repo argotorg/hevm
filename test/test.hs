@@ -1019,6 +1019,9 @@ tests = testGroup "hevm"
         -- we should not recurse into a copySlice if the read index + 32 overlaps the sliced region
         (ReadWord (Lit 40) (CopySlice (Lit 0) (Lit 30) (Lit 12) (WriteWord (Lit 10) (Lit 0x64) (AbstractBuf "hi")) (AbstractBuf "hi")))
         (Expr.readWord (Lit 40) (CopySlice (Lit 0) (Lit 30) (Lit 12) (WriteWord (Lit 10) (Lit 0x64) (AbstractBuf "hi")) (AbstractBuf "hi")))
+    , test "read-word-copySlice-after-slice" $ assertEqualM "Read word simplification missing!"
+        (ReadWord (Lit 100) (AbstractBuf "dst"))
+        (Expr.readWord (Lit 100) (CopySlice (Var "srcOff") (Lit 12) (Lit 60) (AbstractBuf "src") (AbstractBuf "dst")))
     , test "indexword-MSB" $ assertEqualM ""
         -- 31st is the LSB byte (of 32)
         (LitByte 0x78)
