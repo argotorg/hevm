@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   more Keccak equalities.
 - Faster word256Bytes and word160Bytes functions to help concrete execution
   performance
+- We avoid crashing if a cheatcode or a precompiled is invalid or not implemented in concrete mode
 - RPC fetching was sometimes incorrect in case of writing to storage
   before fetching it via RPC
 - We no longer increment branch depth twice when branching both ways
