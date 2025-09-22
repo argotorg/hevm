@@ -328,27 +328,33 @@ type Interpreter = forall m z . App m
   -> m z
 
 data InterpTask m = InterpTask
-  { vm :: VM Symbolic RealWorld
-  , resultChan :: Chan (Expr End)
-  , fetcher :: Fetch.Fetcher Symbolic m RealWorld
+  {fetcher :: Fetch.Fetcher Symbolic m RealWorld
   , iterConf :: IterConfig
+  , vm :: VM Symbolic RealWorld
+  , step :: Stepper.Action Symbolic RealWorld (Expr End)
+  , intGroup :: InterpreterGroup m
+  , resultChan :: Chan (Expr End)
   }
 newtype InterpreterGroup m = InterpreterGroup (Chan (InterpTask m))
 data InterpreterInstance m = InterpreterInstance
   { instanceId :: Natural
   , instanceTaskQ :: Chan (InterpTask m)
-  , instanceSolver :: Interpreter
   }
 
-withInterpreters :: App m => Interpreter -> Natural -> (InterpreterGroup m -> m a) -> m a
-withInterpreters interpreter count cont = do
+runInterpreter :: App m =>
+  Fetch.Fetcher Symbolic m RealWorld
+  -> IterConfig
+  -> VM Symbolic RealWorld
+  -> Stepper.Action Symbolic RealWorld (Expr End)
+  -> Natural  -- num threads
+  -> (Expr End -> m a) -> m a
+runInterpreter fetcher iterConf vm stepper count f = do
   -- spawn interpreters
   instances <- liftIO $ forM [1..count] $ \i -> do
     taskq <- newChan
     let inst = InterpreterInstance
           { instanceId = i
           , instanceTaskQ = taskq
-          , instanceSolver = interpreter
           }
     pure inst
   -- spawn orchestration thread
@@ -359,7 +365,16 @@ withInterpreters interpreter count cont = do
   orchestrateId <- liftIO $ forkIO orchestrate'
 
   -- run continuation with task queue
-  res <- cont (InterpreterGroup taskq)
+  let interpTask = InterpTask
+        { fetcher = fetcher
+        , iterConf = iterConf
+        , vm = vm
+        , step = stepper
+        , intGroup = InterpreterGroup taskq
+        , resultChan = undefined
+        }
+  expr <- interpret interpTask
+  res <- f expr
 
   -- cleanup and return results
   liftIO $ killThread orchestrateId
@@ -376,7 +391,7 @@ withInterpreters interpreter count cont = do
 
 getOneExpr :: (MonadIO m, ReadConfig m) => InterpTask m -> InterpreterInstance m -> Chan (InterpreterInstance m) -> m ()
 getOneExpr task inst availableInstances = do
-  out <- interpret task.fetcher task.iterConf task.vm task.step task.intGroup
+  out <- interpret task
   liftIO $ writeChan task.resultChan out
   liftIO $ writeChan availableInstances inst
 
@@ -384,13 +399,9 @@ getOneExpr task inst availableInstances = do
 -- 'Expr End' representing the possible executions. This Expr End is NOT flattened,
 --  i.e. it (likely) contains ITE-s. The only End-s possible are: Partial, Failure, Success, ITE
 interpret :: forall m . App m
-  => Fetch.Fetcher Symbolic m RealWorld
-  -> IterConfig
-  -> VM Symbolic RealWorld
-  -> Stepper Symbolic RealWorld (Expr End)
-  -> InterpreterGroup m
+  => InterpTask m
   -> m (Expr End)
-interpret fetcher iterConf vm step g@(InterpreterGroup taskq) =
+interpret InterpTask{..} =
   eval (Operational.view step)
   where
   eval :: Operational.ProgramView (Stepper.Action Symbolic RealWorld) (Expr End) -> m (Expr End)
