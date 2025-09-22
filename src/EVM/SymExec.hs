@@ -376,7 +376,7 @@ withInterpreters interpreter count cont = do
 
 getOneExpr :: (MonadIO m, ReadConfig m) => InterpTask m -> InterpreterInstance m -> Chan (InterpreterInstance m) -> m ()
 getOneExpr task inst availableInstances = do
-  out <- interpret task.fetcher task.iterConf task.vm task.step task.intGroup pure
+  out <- interpret task.fetcher task.iterConf task.vm task.step task.intGroup
   liftIO $ writeChan task.resultChan out
   liftIO $ writeChan availableInstances inst
 
