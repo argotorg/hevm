@@ -385,9 +385,10 @@ interpret :: forall m z . App m
   -> IterConfig
   -> VM Symbolic RealWorld
   -> Stepper Symbolic RealWorld (Expr End)
+  -> InterpreterGroup
   -> (Expr End -> m z)  -- ^ Function to execute with the final result
   -> m z
-interpret fetcher iterConf vm step f =
+interpret fetcher iterConf vm step g@(InterpreterGroup taskq) f =
   eval (Operational.view step)
   where
   eval :: Operational.ProgramView (Stepper.Action Symbolic RealWorld) (Expr End) -> m z
@@ -397,10 +398,10 @@ interpret fetcher iterConf vm step f =
       Stepper.Exec -> do
         conf <- readConfig
         (r, vm') <- liftIO $ stToIO $ runStateT (exec conf) vm
-        interpret fetcher iterConf vm' (k r) f
+        interpret fetcher iterConf vm' (k r) g f
       Stepper.EVM m -> do
         (r, vm') <- liftIO $ stToIO $ runStateT m vm
-        interpret fetcher iterConf vm' (k r) f
+        interpret fetcher iterConf vm' (k r) g f
       -- Stepper.ForkMany (PleaseRunAll expr vals continue) -> do
       --   when (length vals < 2) $ internalError "PleaseRunAll requires at least 2 branches"
       --   frozen <- liftIO $ stToIO $ freezeVM vm
@@ -416,61 +417,57 @@ interpret fetcher iterConf vm step f =
       --     runOne frozen newDepth v = do
       --       (ra, vma) <- liftIO $ stToIO $ runStateT (continue v) frozen { result = Nothing, exploreDepth = newDepth }
       --       interpret fetcher iterConf vma (k ra)
-      -- Stepper.Fork (PleaseRunBoth cond continue) -> do
-      --   frozen <- liftIO $ stToIO $ freezeVM vm
-      --   let newDepth = vm.exploreDepth+1
-      --   evalLeft <- toIO $ do
-      --     (ra, vma) <- liftIO $ stToIO $ runStateT (continue True) frozen { result = Nothing, exploreDepth = newDepth }
-      --     interpret fetcher iterConf vma (k ra)
-      --   evalRight <- toIO $ do
-      --     (rb, vmb) <- liftIO $ stToIO $ runStateT (continue False) frozen { result = Nothing, exploreDepth = newDepth }
-      --     interpret fetcher iterConf vmb (k rb)
-      --   (a, b) <- liftIO $ concurrently evalLeft evalRight
-      --   pure $ ITE cond a b
-      -- Stepper.Wait q -> do
-      --   let performQuery = do
-      --         m <- fetcher q
-      --         (r, vm') <- liftIO$ stToIO $ runStateT m vm
-      --         interpret fetcher iterConf vm' (k r)
+      Stepper.Fork (PleaseRunBoth cond continue) -> do
+        frozen <- liftIO $ stToIO $ freezeVM vm
+        let newDepth = vm.exploreDepth+1
+        (ra, vma) <- liftIO $ stToIO $ runStateT (continue True) frozen { result = Nothing, exploreDepth = newDepth }
+        liftIO $ writeChan taskq (InterpTask vma undefined)
+        (rb, vmb) <- liftIO $ stToIO $ runStateT (continue False) frozen { result = Nothing, exploreDepth = newDepth }
+        interpret fetcher iterConf vmb (k rb) g f
+      Stepper.Wait q -> do
+        let performQuery = do
+              m <- fetcher q
+              (r, vm') <- liftIO$ stToIO $ runStateT m vm
+              interpret fetcher iterConf vm' (k r) g f
 
-      --   case q of
-      --     PleaseAskSMT cond preconds continue -> do
-      --       case Expr.concKeccakSimpExpr cond of
-      --         -- is the condition concrete?
-      --         Lit c ->
-      --           -- have we reached max iterations, are we inside a loop?
-      --           case (maxIterationsReached vm iterConf.maxIter, isLoopHead iterConf.loopHeuristic vm) of
-      --             -- Yes. return a partial leaf
-      --             (Just _, Just True) ->
-      --               pure $ Partial [] (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) $ MaxIterationsReached vm.state.pc vm.state.contract
-      --             -- No. keep executing
-      --             _ -> do
-      --               (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case (c > 0))) vm
-      --               interpret fetcher iterConf vm' (k r)
+        case q of
+          PleaseAskSMT cond preconds continue -> do
+            case Expr.concKeccakSimpExpr cond of
+              -- is the condition concrete?
+              Lit c ->
+                -- have we reached max iterations, are we inside a loop?
+                case (maxIterationsReached vm iterConf.maxIter, isLoopHead iterConf.loopHeuristic vm) of
+                  -- Yes. return a partial leaf
+                  (Just _, Just True) ->
+                    pure $ Partial [] (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) $ MaxIterationsReached vm.state.pc vm.state.contract
+                  -- No. keep executing
+                  _ -> do
+                    (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case (c > 0))) vm
+                    interpret fetcher iterConf vm' (k r)
 
-      --         -- the condition is symbolic
-      --         _ ->
-      --           -- are in we a loop, have we hit maxIters, have we hit askSmtIters?
-      --           case (isLoopHead iterConf.loopHeuristic vm, askSmtItersReached vm iterConf.askSmtIters, maxIterationsReached vm iterConf.maxIter) of
-      --             -- we're in a loop and maxIters has been reached
-      --             (Just True, _, Just n) -> do
-      --               -- continue execution down the opposite branch than the one that
-      --               -- got us to this point and return a partial leaf for the other side
-      --               (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case $ not n)) vm
-      --               a <- interpret fetcher iterConf vm' (k r)
-      --               pure $ ITE cond a (Partial [] (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) (MaxIterationsReached vm.state.pc vm.state.contract))
-      --             -- we're in a loop and askSmtIters has been reached
-      --             (Just True, True, _) ->
-      --               -- ask the smt solver about the loop condition
-      --               performQuery
-      --             _ -> do
-      --               let simpProps = Expr.concKeccakSimpProps ((cond ./= Lit 0):preconds)
-      --               (r, vm') <- case simpProps of
-      --                 [PBool False] -> liftIO $ stToIO $ runStateT (continue (Case False)) vm
-      --                 [] -> liftIO $ stToIO $ runStateT (continue (Case True)) vm
-      --                 _ -> liftIO $ stToIO $ runStateT (continue UnknownBranch) vm
-      --               interpret fetcher iterConf vm' (k r)
-      --     _ -> performQuery
+              -- the condition is symbolic
+              _ ->
+                -- are in we a loop, have we hit maxIters, have we hit askSmtIters?
+                case (isLoopHead iterConf.loopHeuristic vm, askSmtItersReached vm iterConf.askSmtIters, maxIterationsReached vm iterConf.maxIter) of
+                  -- we're in a loop and maxIters has been reached
+                  (Just True, _, Just n) -> do
+                    -- continue execution down the opposite branch than the one that
+                    -- got us to this point and return a partial leaf for the other side
+                    (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case $ not n)) vm
+                    a <- interpret fetcher iterConf vm' (k r)
+                    pure $ ITE cond a (Partial [] (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) (MaxIterationsReached vm.state.pc vm.state.contract))
+                  -- we're in a loop and askSmtIters has been reached
+                  (Just True, True, _) ->
+                    -- ask the smt solver about the loop condition
+                    performQuery
+                  _ -> do
+                    let simpProps = Expr.concKeccakSimpProps ((cond ./= Lit 0):preconds)
+                    (r, vm') <- case simpProps of
+                      [PBool False] -> liftIO $ stToIO $ runStateT (continue (Case False)) vm
+                      [] -> liftIO $ stToIO $ runStateT (continue (Case True)) vm
+                      _ -> liftIO $ stToIO $ runStateT (continue UnknownBranch) vm
+                    interpret fetcher iterConf vm' (k r)
+          _ -> performQuery
 
 maxIterationsReached :: VM Symbolic s -> Maybe Integer -> Maybe Bool
 maxIterationsReached _ Nothing = Nothing
