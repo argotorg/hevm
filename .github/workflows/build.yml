@@ -89,8 +89,8 @@ jobs:
         run: nix develop --command bash -c "cabal --active-repositories=:none run cli-test"
 
   build-windows:
-    name: build (windows-latest)
-    runs-on: windows-latest
+    name: build (windows-2022)
+    runs-on: windows-2022
     defaults:
       run:
         shell: msys2 {0}
