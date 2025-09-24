@@ -184,13 +184,21 @@
                     <main>
                         <h1 id="hevm-exec"><a class="header" href="#hevm-exec"><code>hevm exec</code></a></h1>
 <p>Run an EVM computation using specified parameters.</p>
-<pre><code class="language-plain">Usage: hevm exec [--code TEXT] [--code-file STRING] [--calldata TEXT] [--address ADDR]
-                 [--caller ADDR] [--origin ADDR] [--coinbase ADDR]
-                 [--value W256] [--nonce WORD64] [--gas WORD64] [--number W256]
-                 [--timestamp W256] [--basefee W256] [--priority-fee W256]
-                 [--gaslimit WORD64] [--gasprice W256]
-                 [--maxcodesize W256] [--prev-randao W256] [--chainid W256]
-                 [--trace] [--rpc TEXT] [--block W256] ...
+<pre><code class="language-plain">Usage: hevm exec [--code ARG] [--code-file ARG] [--project-type ARG] [--create]
+                 [--json-trace] [--address ARG] [--caller ARG] [--origin ARG]
+                 [--coinbase ARG] [--value ARG] [--nonce ARG] [--gas ARG]
+                 [--number ARG] [--timestamp ARG] [--basefee ARG]
+                 [--priority-fee ARG] [--gaslimit ARG] [--gasprice ARG]
+                 [--maxcodesize ARG] [--prev-randao ARG] [--chainid ARG]
+                 [--rpc ARG] [--block ARG] [--ask-smt-iterations ARG]
+                 [--loop-detection-heuristic ARG] [--no-decompose]
+                 [--solver ARG] [--debug] [--calldata ARG] [--trace]
+                 [--verb ARG] [--root ARG] [--assertion-type ARG]
+                 [--solver-threads ARG] [--smttimeout ARG] [--smtdebug]
+                 [--dump-unsolved ARG] [--num-solvers ARG] [--num-cex-fuzz ARG]
+                 [--max-iterations ARG] [--promise-no-reent]
+                 [--max-buf-size ARG] [--max-width ARG] [--max-depth ARG]
+                 [--no-simplify] [--only-deployed]
 </code></pre>
 <p>Concretely execute a given EVM bytecode with the specified parameters. Minimum
 required flags: either you must provide <code>--code</code> or you must both pass <code>--rpc</code>
@@ -205,13 +213,11 @@ errored/reverted.</p>
 <p>Which says that given the EVM bytecode <code>0x647175696e6550383480393834f3</code>, the Ethereum
 Virtual Machine will put <code>0x647175696e6550383480393834f3</code> in the RETURNDATA.</p>
 <p>To execute a mainnet transaction:</p>
-<pre><code class="language-shell"># install seth as per
-# https://github.com/makerdao/developerguides/blob/master/devtools/seth/seth-guide/seth-guide.md
-$ export ETH_RPC_URL=https://mainnet.infura.io/v3/YOUR_API_KEY_HERE
+<pre><code class="language-shell">$ export ETH_RPC_URL=https://mainnet.infura.io/v3/YOUR_API_KEY_HERE
 $ export TXHASH=0xd2235b9554e51e8ff5b3de62039d5ab6e591164b593d892e42b2ffe0e3e4e426
-hevm exec --caller $(seth tx $TXHASH from) --address $(seth tx $TXHASH to) \
-    --calldata $(seth tx $TXHASH input) --rpc $ETH_RPC_URL \
-    --block $(($(seth tx $TXHASH blockNumber)-1)) --gas $(seth tx $TXHASH gas)
+hevm exec --caller $(cast tx $TXHASH from) --address $(cast tx $TXHASH to) \
+    --calldata $(cast tx $TXHASH input) --rpc $ETH_RPC_URL \
+    --block $(($(cast tx $TXHASH blockNumber)-1)) --gas $(cast tx $TXHASH gas)
 </code></pre>
 
                     </main>
