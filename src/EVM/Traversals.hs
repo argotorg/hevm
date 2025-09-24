@@ -4,12 +4,12 @@
 -}
 module EVM.Traversals where
 
-import Prelude hiding (LT, GT)
+import Prelude hiding (LT, GT, Foldable(..))
 
 import Control.Monad (forM, void)
 import Control.Monad.Identity (Identity(Identity), runIdentity)
+import Data.Foldable (Foldable(..))
 import Data.Map.Strict qualified as Map
-import Data.List (foldl')
 
 import EVM.Types
 
@@ -89,13 +89,13 @@ foldExpr f acc expr = acc <> (go expr)
       -- control flow
 
       e@(Success a _ c d) -> f e
-                          <> foldl (foldProp f) mempty a
+                          <> foldl' (foldProp f) mempty a
                           <> go c
                           <> foldl' (foldExpr f) mempty (Map.keys d)
                           <> foldl' (foldEContract f) mempty d
-      e@(Failure a _ (Revert c)) -> f e <> (foldl (foldProp f) mempty a) <> go c
-      e@(Failure a _ _) -> f e <> (foldl (foldProp f) mempty a)
-      e@(Partial a _ _) -> f e <> (foldl (foldProp f) mempty a)
+      e@(Failure a _ (Revert c)) -> f e <> (foldl' (foldProp f) mempty a) <> go c
+      e@(Failure a _ _) -> f e <> (foldl' (foldProp f) mempty a)
+      e@(Partial a _ _) -> f e <> (foldl' (foldProp f) mempty a)
       e@(ITE a b c) -> f e <> (go a) <> (go b) <> (go c)
 
       -- integers
@@ -168,7 +168,7 @@ foldExpr f acc expr = acc <> (go expr)
 
       -- logs
 
-      e@(LogEntry a b c) -> f e <> (go a) <> (go b) <> (foldl (<>) mempty (fmap f c))
+      e@(LogEntry a b c) -> f e <> (go a) <> (go b) <> (foldl' (<>) mempty (fmap f c))
 
       -- storage
 

@@ -11,6 +11,8 @@
 
 module EVM.Types where
 
+import Prelude hiding (Foldable(..))
+
 import GHC.Stack (HasCallStack, prettyCallStack, callStack)
 import GHC.ByteOrder (targetByteOrder, ByteOrder(..))
 import Control.Arrow ((>>>))
@@ -25,7 +27,6 @@ import Data.Bits (Bits, FiniteBits, shiftR, shift, shiftL, (.&.), (.|.), toInteg
 import Data.Binary qualified as Binary
 import Data.ByteArray qualified as BA
 import Data.Char
-import Data.List (foldl')
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Base16 qualified as BS16
@@ -38,6 +39,7 @@ import Data.Int (Int64)
 import Data.Word (Word8, Word32, Word64, byteSwap32, byteSwap64)
 import Data.DoubleWord
 import Data.DoubleWord.TH
+import Data.Foldable (Foldable(..))
 import Data.Map (Map)
 import Data.Maybe (fromMaybe)
 import Data.Set (Set)
@@ -1503,7 +1505,7 @@ constructWord256 bytes
     w256m0 = word8sToWord64 (take 8 (drop 16 bytes))
     w256lo = word8sToWord64 (take 8 (drop 24 bytes))
     word8sToWord64 :: [Word8] -> Word64
-    word8sToWord64 = foldl (\acc byte -> (acc `shiftL` 8) .|. fromIntegral byte) 0
+    word8sToWord64 = foldl' (\acc byte -> (acc `shiftL` 8) .|. fromIntegral byte) 0
 
 
 -- Keccak hashing ----------------------------------------------------------------------------------

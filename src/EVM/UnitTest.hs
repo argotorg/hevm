@@ -2,6 +2,8 @@
 
 module EVM.UnitTest where
 
+import Prelude hiding (Foldable(..))
+
 import EVM
 import EVM.ABI
 import EVM.Solvers
@@ -20,7 +22,6 @@ import EVM.Stepper (Stepper)
 import EVM.Stepper qualified as Stepper
 import EVM.Tracing qualified as Tracing
 import EVM.Expr (maybeLitWordSimp)
-import Data.List (foldl')
 
 import Control.Monad (void, when, forM, forM_)
 import Control.Monad.ST (RealWorld, ST, stToIO)
@@ -34,7 +35,7 @@ import Data.ByteString.Char8 qualified as BS
 import Data.ByteString.Internal (c2w)
 import Data.ByteString.Lazy qualified as BSLazy
 import Data.Decimal (DecimalRaw(..))
-import Data.Foldable (toList)
+import Data.Foldable (Foldable(..), toList)
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Maybe

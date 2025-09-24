@@ -3,6 +3,8 @@
 
 module EVM.SymExec where
 
+import Prelude hiding (Foldable(..))
+
 import Control.Arrow ((>>>))
 import Control.Concurrent.Async (concurrently, mapConcurrently)
 import Control.Concurrent.Spawn (parMapIO, pool)
@@ -15,7 +17,8 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.Containers.ListUtils (nubOrd)
 import Data.DoubleWord (Word256)
-import Data.List (foldl', sortBy, sort)
+import Data.Foldable (Foldable(..))
+import Data.List (sortBy, sort)
 import Data.List.NonEmpty qualified as NE
 import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.Map.Strict (Map)
@@ -705,7 +708,7 @@ verify solvers fetcher opts preState maybepost = do
   pure $ verifyResults preState expr res
 
 verifyResults :: VM Symbolic RealWorld -> Expr End -> [(SMTResult, Expr End)] -> (Expr End, [VerifyResult])
-verifyResults preState expr cexs = if Prelude.null cexs then (expr, [Qed]) else (expr, fmap toVRes cexs)
+verifyResults preState expr cexs = if null cexs then (expr, [Qed]) else (expr, fmap toVRes cexs)
   where
     toVRes :: (SMTResult, Expr End) -> VerifyResult
     toVRes (res, leaf) = case res of

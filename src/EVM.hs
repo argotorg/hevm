@@ -3,7 +3,7 @@
 
 module EVM where
 
-import Prelude hiding (exponent)
+import Prelude hiding (exponent, Foldable(..))
 
 import Optics.Core
 import Optics.State
@@ -40,7 +40,7 @@ import Data.ByteString.Char8 qualified as Char8
 import Data.DoubleWord (Int256, Word256)
 import Data.Either (partitionEithers)
 import Data.Either.Extra (maybeToEither)
-import Data.Foldable (toList)
+import Data.Foldable (toList, Foldable(..))
 import Data.List (find, isPrefixOf)
 import Data.List.Split (splitOn)
 import Data.Map.Strict (Map)
@@ -2811,7 +2811,7 @@ mkOpIxMap (RuntimeCode (ConcreteRuntimeCode ops)) =
 
 mkOpIxMap (RuntimeCode (SymbolicRuntimeCode ops))
   = VS.create $ VS.Mutable.new (length ops) >>= \v ->
-      let (_, _, _, m) = foldl (go v) (0, 0, 0, pure ()) (stripBytecodeMetadataSym $ V.toList ops)
+      let (_, _, _, m) = foldl' (go v) (0, 0, 0, pure ()) (stripBytecodeMetadataSym $ V.toList ops)
       in m >> pure v
       where
         go v (0, !i, !j, !m) x = case maybeLitByteSimp x of

@@ -28,12 +28,13 @@ module EVM.SMT
   getStore
 ) where
 
-import Prelude hiding (LT, GT)
+import Prelude hiding (LT, GT, Foldable(..))
 
 import Control.Monad
 import Data.Containers.ListUtils (nubOrd, nubInt)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.Foldable (Foldable(..))
 import Data.List qualified as List
 import Data.List.NonEmpty (NonEmpty((:|)))
 import Data.List.NonEmpty qualified as NonEmpty
@@ -136,13 +137,13 @@ assertPropsHelper simp psPreConc = do
  intermediates <- declareIntermediates bufs stores
  readAssumes' <- readAssumes
  keccakAssertions' <- keccakAssertions
- frameCtxs <- (declareFrameContext . nubOrd $ foldl (<>) [] frameCtx)
- blockCtxs <- (declareBlockContext . nubOrd $ foldl (<>) [] blockCtx)
+ frameCtxs <- (declareFrameContext . nubOrd $ foldl' (<>) [] frameCtx)
+ blockCtxs <- (declareBlockContext . nubOrd $ foldl' (<>) [] blockCtx)
  pure $ prelude
   <> SMT2 (SMTScript (declareAbstractStores abstractStores)) mempty mempty
   <> declareConstrainAddrs addresses
   <> (declareBufs toDeclarePsElim bufs stores)
-  <> (declareVars . nubOrd $ foldl (<>) [] allVars)
+  <> (declareVars . nubOrd $ foldl' (<>) [] allVars)
   <> frameCtxs
   <> blockCtxs
   <> SMT2 (SMTScript intermediates) mempty mempty
@@ -271,7 +272,7 @@ findStorageReads p = foldProp go mempty p
     baseIsAbstractStore (GVar _) = internalError "Unexpected GVar"
 
 findBufferAccess :: TraversableTerm a => [a] -> [(Expr EWord, Expr EWord, Expr Buf)]
-findBufferAccess = foldl (foldTerm go) mempty
+findBufferAccess = foldl' (foldTerm go) mempty
   where
     go :: Expr a -> [(Expr EWord, Expr EWord, Expr Buf)]
     go = \case
@@ -309,7 +310,7 @@ discoverMaxReads props benv senv = bufMap
     -- we assign a default read hint of 4 to start with in these cases (since in most cases we will need at least 4 bytes to produce a counterexample)
     allBufs = Map.fromList . fmap (, Lit 4) . fmap toLazyText . nubOrd . concat $ fmap referencedBufs props <> fmap referencedBufs (Map.elems benv) <> fmap referencedBufs (Map.elems senv)
 
-    bufMap = Map.unionWith Expr.max (foldl addBound mempty allReads) allBufs
+    bufMap = Map.unionWith Expr.max (foldl' addBound mempty allReads) allBufs
 
     addBound m (idx, size, buf) =
       case baseBuf buf of

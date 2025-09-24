@@ -59,6 +59,8 @@ module EVM.ABI
   , showAlter
   ) where
 
+import Prelude hiding (Foldable(..))
+
 import EVM.Expr (readWord, isLitWord)
 import EVM.Types
 import EVM.Expr (maybeLitWordSimp)
@@ -76,13 +78,14 @@ import Data.ByteString.Lazy qualified as BSLazy
 import Data.Char (isHexDigit)
 import Data.Data (Data)
 import Data.DoubleWord (Word256, Int256, signedWord)
+import Data.Foldable (Foldable(..))
 import Data.Functor (($>))
 import Data.List (intercalate)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding (encodeUtf8)
-import Data.Vector (Vector, toList)
+import Data.Vector (Vector)
 import Data.Vector qualified as Vector
 import Data.Word (Word32)
 import GHC.Generics (Generic)
@@ -391,7 +394,7 @@ typeWithArraySuffix v = do
     parseSize t "" = AbiArrayDynamicType t
     parseSize t s  = AbiArrayType (read s) t
 
-  pure (foldl parseSize base sizes)
+  pure (foldl' parseSize base sizes)
 
 basicType :: Vector AbiType -> P.Parsec () Text AbiType
 basicType v =
