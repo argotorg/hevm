@@ -3,8 +3,12 @@
 
   inputs = {
     flake-utils.url = "github:numtide/flake-utils";
-    nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
-    foundry.url = "github:shazow/foundry.nix/stable";
+    nixpkgs.url = "github:elopez/nixpkgs/libff-cmake"; # return to nixpkgs when https://github.com/NixOS/nixpkgs/pull/445662 lands
+    foundry = {
+      url = "github:shazow/foundry.nix/stable";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.flake-utils.follows = "flake-utils";
+    };
     solidity = {
       url = "github:argotorg/solidity/8a97fa7a1db1ec509221ead6fea6802c684ee887";
       flake = false;
@@ -19,11 +23,13 @@
     };
     empty-smt-solver = {
       url = "github:msooseth/empty-smt-solver/74bd120fdb730fde8e44243305e669e5e8a3e02a";
-      flake = true;
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.flake-utils.follows = "flake-utils";
     };
     solc-pkgs = {
       url = "github:hellwolf/solc.nix";
       inputs.nixpkgs.follows = "nixpkgs";
+      inputs.flake-utils.follows = "flake-utils";
     };
   };
 
@@ -32,13 +38,28 @@
       let
         pkgs = (import nixpkgs {
           inherit system;
-          overlays = [solc-pkgs.overlay];
-          config = { allowBroken = true; };
+          overlays = [
+            foundry.overlay
+            solc-pkgs.overlay
+            # btor2tools overlay with newer commit
+            # remove when https://github.com/NixOS/nixpkgs/pull/445678 lands
+            (final: prev: {
+              btor2tools = prev.btor2tools.overrideAttrs (old: {
+                version = "0-unstable-2024-09-18";
+                src = prev.fetchFromGitHub {
+                  owner = "boolector";
+                  repo = "btor2tools";
+                  rev = "d33c73ff1d173f1bfac8ba6b1c6d68ba62c55f8e";
+                  sha256 = "sha256-RVjZ5HM2yQ3eAICFuzwvNeQDXzWzzSiCCslIWMJi6U8=";
+                };
+              });
+            })
+          ];
         });
         solc = (solc-pkgs.mkDefault pkgs pkgs.solc_0_8_26);
         testDeps = [
           solc
-          foundry.defaultPackage.${system}
+          pkgs.foundry-bin
           pkgs.go-ethereum
           pkgs.z3
           pkgs.cvc5
@@ -50,17 +71,7 @@
           configureFlags = attrs.configureFlags ++ [ "--enable-static" ];
         }));
 
-        hspkgs = ps :
-          ps.haskellPackages.override {
-            overrides = hfinal: hprev: {
-              with-utf8 =
-                if (with ps.stdenv; hostPlatform.isDarwin && hostPlatform.isx86)
-                then ps.haskell.lib.compose.overrideCabal (_ : { extraLibraries = [ps.libiconv]; }) hprev.with-utf8
-                else hprev.with-utf8;
-              # TODO: temporary fix for static build which is still on 9.4
-              witch = ps.haskell.lib.doJailbreak hprev.witch;
-            };
-          };
+        hspkgs = ps: ps.haskellPackages;
         hlib = pkgs.haskell.lib;
 
         # base hevm derivation.
