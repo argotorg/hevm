@@ -604,14 +604,17 @@ toEContract c = C c.code c.storage c.tStorage c.balance c.nonce
 -- | Converts a given top level expr into a list of final states and the
 -- associated path conditions for each state.
 flattenExpr :: Expr End -> [Expr End]
-flattenExpr = go []
+flattenExpr = go [] []
   where
-    go :: [Prop] -> Expr End -> [Expr End]
-    go pcs = \case
-      ITE c t f -> go (PNeg ((PEq (Lit 0) c)) : pcs) t <> go (PEq (Lit 0) c : pcs) f
-      Success ps trace msg store -> [Success (nubOrd $ ps <> pcs) trace msg store]
-      Failure ps trace e -> [Failure (nubOrd $ ps <> pcs) trace e]
-      Partial ps trace p -> [Partial (nubOrd $ ps <> pcs) trace p]
+    go :: [Prop] -> [Expr End] -> Expr End -> [Expr End]
+    go pcs acc  = \case
+      ITE c t f ->
+        let
+          accf = go (PEq (Lit 0) c : pcs) acc f
+        in go (PNeg ((PEq (Lit 0) c)) : pcs) accf t
+      Success ps trace msg store -> Success (nubOrd $ ps <> pcs) trace msg store : acc
+      Failure ps trace e -> Failure (nubOrd $ ps <> pcs) trace e : acc
+      Partial ps trace p -> Partial (nubOrd $ ps <> pcs) trace p : acc
       GVar _ -> internalError "cannot flatten an Expr containing a GVar"
 
 -- | Strips unreachable branches from a given expr
