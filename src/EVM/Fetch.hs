@@ -15,6 +15,8 @@ module EVM.Fetch
   , addFetchCache
   ) where
 
+import Prelude hiding (Foldable(..))
+
 import EVM (initialContract, unknownContract)
 import EVM.ABI
 import EVM.FeeSchedule (feeSchedule)
@@ -34,9 +36,9 @@ import Data.ByteString qualified as BS
 import Data.Text (Text, unpack, pack)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as T
+import Data.Foldable (Foldable(..))
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isJust, fromJust)
-import Data.List (foldl')
 import Data.Vector qualified as RegularVector
 import Network.Wreq
 import Network.Wreq.Session qualified as NetSession

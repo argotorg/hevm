@@ -29,6 +29,8 @@ module EVM.Facts
   , fileToFact
   ) where
 
+import Prelude hiding (Foldable(..))
+
 import EVM          (bytecode, initialContract, loadContract)
 import EVM.Expr     (writeStorage)
 import EVM.Types
@@ -42,6 +44,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString.Base16 qualified as BS16
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as Char8
+import Data.Foldable (Foldable(..))
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Set (Set)
@@ -210,13 +213,13 @@ instance Ord Fact where
 apply :: VM s -> Set Fact -> VM s
 apply =
   -- The set's ordering is relevant; see `apply1`.
-  foldl apply1
+  foldl' apply1
 --
 -- Applies a set of facts to a VM.
 applyCache :: VM s -> Set Fact -> VM s
 applyCache =
   -- The set's ordering is relevant; see `apply1`.
-  foldl apply2
+  foldl' apply2
 
 factToFile :: Fact -> File
 factToFile fact = case fact of
