@@ -101,16 +101,16 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1758670613,
-        "narHash": "sha256-0WhfYUF4lBYpOTPHMqJlkGv8Hd0YIxSkmAPAMYtG91k=",
-        "owner": "elopez",
+        "lastModified": 1759150607,
+        "narHash": "sha256-VgHpORcVmVVX9dylL2JXwf5f5UKjKRh36YvmbSI7xLA=",
+        "owner": "nixos",
         "repo": "nixpkgs",
-        "rev": "2a7b8c3b5d55f936f5cb91b7ce72a14ccf67326e",
+        "rev": "bfe546dade925ad62359dab0fda33a797b49e25d",
         "type": "github"
       },
       "original": {
-        "owner": "elopez",
-        "ref": "libff-cmake",
+        "owner": "nixos",
+        "ref": "staging",
         "repo": "nixpkgs",
         "type": "github"
       }

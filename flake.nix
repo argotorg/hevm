@@ -3,7 +3,7 @@
 
   inputs = {
     flake-utils.url = "github:numtide/flake-utils";
-    nixpkgs.url = "github:elopez/nixpkgs/libff-cmake"; # return to nixpkgs when https://github.com/NixOS/nixpkgs/pull/445662 lands
+    nixpkgs.url = "github:nixos/nixpkgs/staging";
     foundry = {
       url = "github:shazow/foundry.nix/stable";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -41,19 +41,6 @@
           overlays = [
             foundry.overlay
             solc-pkgs.overlay
-            # btor2tools overlay with newer commit
-            # remove when https://github.com/NixOS/nixpkgs/pull/445678 lands
-            (final: prev: {
-              btor2tools = prev.btor2tools.overrideAttrs (old: {
-                version = "0-unstable-2024-09-18";
-                src = prev.fetchFromGitHub {
-                  owner = "boolector";
-                  repo = "btor2tools";
-                  rev = "d33c73ff1d173f1bfac8ba6b1c6d68ba62c55f8e";
-                  sha256 = "sha256-RVjZ5HM2yQ3eAICFuzwvNeQDXzWzzSiCCslIWMJi6U8=";
-                };
-              });
-            })
           ];
         });
         solc = (solc-pkgs.mkDefault pkgs pkgs.solc_0_8_26);
