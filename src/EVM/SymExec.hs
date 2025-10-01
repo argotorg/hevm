@@ -385,7 +385,7 @@ runInterpreter fetcher iterConf vm stepper count f = do
     orchestrate taskq avail resChan = do
       task <- liftIO $ readChan taskq
       inst <- liftIO $ readChan avail
-      runTask' <- toIO $ getOneExpr task inst avail resChan stepper
+      runTask' <- toIO $ getOneExpr task inst avail resChan (Operational.singleton stepper)
       _ <- liftIO $ forkIO runTask'
       orchestrate taskq avail resChan
 
