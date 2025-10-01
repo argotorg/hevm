@@ -284,8 +284,7 @@ symRun opts@UnitTestOptions{..} vm sig@(Sig testName types) solcContr sourceCach
 
     -- check postconditions against vm
     let fetcherSym = Fetch.oracle solvers (Just sess) rpcInfo
-    (end, results) <- verify solvers fetcherSym (makeVeriOpts opts) (symbolify vm') (Just postcondition)
-    let ends = flattenExpr end
+    (ends, results) <- verify solvers fetcherSym (makeVeriOpts opts) (symbolify vm') (Just postcondition)
     conf <- readConfig
     when conf.debug $ liftIO $ forM_ (filter Expr.isFailure ends) $ \case
       (Failure _ _ a) ->  putStrLn $ "   -> debug of func: " <> Text.unpack testName <> " Failure at the end of expr: " <> show a;

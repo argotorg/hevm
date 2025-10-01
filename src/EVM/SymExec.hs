@@ -18,7 +18,7 @@ import Data.Containers.ListUtils (nubOrd)
 import Data.DoubleWord (Word256)
 import Data.List (foldl', sortBy, sort)
 import Data.List.NonEmpty qualified as NE
-import Data.Maybe (fromMaybe, listToMaybe, mapMaybe, fromJust)
+import Data.Maybe (fromMaybe, listToMaybe, mapMaybe, fromJust, isNothing, isJust)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Map.Merge.Strict qualified as Map
@@ -550,7 +550,7 @@ checkAssert
   -> Maybe Sig
   -> [String]
   -> VeriOpts
-  -> m [VerifyResult]
+  -> m ([Expr End], [VerifyResult])
 checkAssert solvers errs c signature' concreteArgs opts = do
   checkAssertWithSession solvers Nothing errs c signature' concreteArgs opts
 
@@ -564,7 +564,7 @@ checkAssertWithSession
   -> Maybe Sig
   -> [String]
   -> VeriOpts
-  -> m [VerifyResult]
+  -> m ([Expr End], [VerifyResult])
 checkAssertWithSession solvers sess errs c signature' concreteArgs opts = do
   verifyContractWithSession solvers sess c signature' concreteArgs opts Nothing (Just $ checkAssertions errs)
 
@@ -658,7 +658,7 @@ verifyContract :: forall m . App m
   -> VeriOpts
   -> Maybe (Precondition RealWorld)
   -> Maybe (Postcondition RealWorld)
-  -> m [VerifyResult]
+  -> m ([Expr End], [VerifyResult])
 verifyContract solvers theCode signature' concreteArgs opts maybepre maybepost = do
   verifyContractWithSession solvers Nothing theCode signature' concreteArgs opts maybepre maybepost
 
@@ -672,7 +672,7 @@ verifyContractWithSession :: forall m . App m
   -> VeriOpts
   -> Maybe (Precondition RealWorld)
   -> Maybe (Postcondition RealWorld)
-  -> m [VerifyResult]
+  -> m ([Expr End], [VerifyResult])
 verifyContractWithSession solvers sess theCode signature' concreteArgs opts maybepre maybepost = do
   calldata <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ abstractVM calldata theCode maybepre False
@@ -791,16 +791,19 @@ verify :: App m
   -> VeriOpts
   -> VM Symbolic RealWorld
   -> Maybe (Postcondition RealWorld)
-  -> m [VerifyResult]
+  -> m ([Expr End], [VerifyResult])
 verify solvers fetcher opts preState maybepost = do
   (res, _) <- verifyInputs solvers opts fetcher preState maybepost
   pure $ verifyResults preState res
 
-verifyResults :: VM Symbolic RealWorld -> [(SMTResult, Maybe (Expr End))] -> [VerifyResult]
-verifyResults preState cexs = if Prelude.null cexs then [Qed] else fmap toVRes cexs
+verifyResults :: VM Symbolic RealWorld -> [(SMTResult, Maybe (Expr End))] -> ([Expr End], [VerifyResult])
+verifyResults preState res = do
+  let ends = mapMaybe snd res
+      partials = filter (Expr.isPartial) ends
+  if Prelude.null res then ([], [Qed]) else (partials, fmap toVRes res)
   where
     toVRes :: (SMTResult, Maybe (Expr End)) -> VerifyResult
-    toVRes (res, leaf) = case res of
+    toVRes (res2, leaf) = case res2 of
       Cex model -> Cex (fromJust leaf, expandCex preState model)
       Unknown reason -> Unknown (reason, fromJust leaf)
       Error e -> Error e
