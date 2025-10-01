@@ -340,14 +340,23 @@ data InterpreterInstance m = InterpreterInstance
   , instanceTaskQ :: Chan (InterpTask m)
   }
 
-runInterpreter :: App m =>
-  Fetch.Fetcher Symbolic m RealWorld
+interpret :: App m
+  => Fetch.Fetcher Symbolic m RealWorld
   -> IterConfig
   -> VM Symbolic RealWorld
   -> Stepper.Action Symbolic RealWorld (Expr End)
-  -> Natural  -- num threads
+  -> m (Expr End)
+interpret fetcher iterConf vm stepper =
+  interpret2 fetcher iterConf vm stepper 5 pure
+
+interpret2 :: App m
+  => Fetch.Fetcher Symbolic m RealWorld
+  -> IterConfig
+  -> VM Symbolic RealWorld
+  -> Stepper.Action Symbolic RealWorld (Expr End)
+  -> Natural
   -> (Expr End -> m a) -> m a
-runInterpreter fetcher iterConf vm stepper count f = do
+interpret2 fetcher iterConf vm stepper count f = do
   -- spawn interpreters
   instances <- liftIO $ forM [1..count] $ \i -> do
     taskq <- newChan
@@ -394,17 +403,17 @@ runInterpreter fetcher iterConf vm stepper count f = do
 getOneExpr :: (MonadIO m, ReadConfig m) => InterpTask m -> InterpreterInstance m -> Chan (InterpreterInstance m) -> Chan (Expr End)
   -> m ()
 getOneExpr task inst availableInstances resChan = do
-  out <- interpret task
+  out <- interpretInternal task
   liftIO $ writeChan availableInstances inst
   liftIO $ writeChan resChan out
 
 -- | Symbolic interpreter that explores all paths. Returns an
 -- 'Expr End' representing the possible executions. This Expr End is NOT flattened,
 --  i.e. it (likely) contains ITE-s. The only End-s possible are: Partial, Failure, Success, ITE
-interpret :: forall m . App m
+interpretInternal :: forall m . App m
   => InterpTask m
   -> m (Expr End)
-interpret t@InterpTask{..} =
+interpretInternal t@InterpTask{..} =
   eval (Operational.view stepper)
   where
   eval :: Operational.ProgramView (Stepper.Action Symbolic RealWorld) (Expr End) -> m (Expr End)
@@ -415,11 +424,11 @@ interpret t@InterpTask{..} =
         conf <- readConfig
         (r, vm') <- liftIO $ stToIO $ runStateT (exec conf) vm
         let newT = (t :: InterpTask m) { vm = vm', stepper =  (k r) }
-        interpret newT
+        interpretInternal newT
       Stepper.EVM m -> do
         (r, vm') <- liftIO $ stToIO $ runStateT m vm
         let newT = (t :: InterpTask m) { vm = vm', stepper = (k r) }
-        interpret newT
+        interpretInternal newT
       -- Stepper.ForkMany (PleaseRunAll expr vals continue) -> do
       --   when (length vals < 2) $ internalError "PleaseRunAll requires at least 2 branches"
       --   frozen <- liftIO $ stToIO $ freezeVM vm
@@ -434,7 +443,7 @@ interpret t@InterpTask{..} =
       --     runOne :: App m => VM 'Symbolic RealWorld -> Int -> Expr EWord -> m (Expr 'End)
       --     runOne frozen newDepth v = do
       --       (ra, vma) <- liftIO $ stToIO $ runStateT (continue v) frozen { result = Nothing, exploreDepth = newDepth }
-      --       interpret fetcher iterConf vma (k ra)
+      --       interpretInternal fetcher iterConf vma (k ra)
       Stepper.Fork (PleaseRunBoth cond continue) -> do
         frozen <- liftIO $ stToIO $ freezeVM vm
         let newDepth = vm.exploreDepth+1
@@ -443,12 +452,12 @@ interpret t@InterpTask{..} =
         liftIO $ writeChan taskq newT
         (rb, vmb) <- liftIO $ stToIO $ runStateT (continue False) frozen { result = Nothing, exploreDepth = newDepth }
         let newT2 = (t :: InterpTask m) { vm = vmb, stepper = (k rb) }
-        interpret newT2
+        interpretInternal newT2
       -- Stepper.Wait q -> do
       --   let performQuery = do
       --         m <- fetcher q
       --         (r, vm') <- liftIO$ stToIO $ runStateT m vm
-      --         interpret fetcher iterConf vm' (k r) g f
+      --         interpretInternal fetcher iterConf vm' (k r) g f
 
       --   case q of
       --     PleaseAskSMT cond preconds continue -> do
@@ -463,7 +472,7 @@ interpret t@InterpTask{..} =
       --             -- No. keep executing
       --             _ -> do
       --               (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case (c > 0))) vm
-      --               interpret fetcher iterConf vm' (k r)
+      --               interpretInternal fetcher iterConf vm' (k r)
 
       --         -- the condition is symbolic
       --         _ ->
@@ -474,7 +483,7 @@ interpret t@InterpTask{..} =
       --               -- continue execution down the opposite branch than the one that
       --               -- got us to this point and return a partial leaf for the other side
       --               (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case $ not n)) vm
-      --               a <- interpret fetcher iterConf vm' (k r)
+      --               a <- interpretInternal fetcher iterConf vm' (k r)
       --               pure $ ITE cond a (Partial [] (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) (MaxIterationsReached vm.state.pc vm.state.contract))
       --             -- we're in a loop and askSmtIters has been reached
       --             (Just True, True, _) ->
@@ -486,7 +495,7 @@ interpret t@InterpTask{..} =
       --                 [PBool False] -> liftIO $ stToIO $ runStateT (continue (Case False)) vm
       --                 [] -> liftIO $ stToIO $ runStateT (continue (Case True)) vm
       --                 _ -> liftIO $ stToIO $ runStateT (continue UnknownBranch) vm
-      --               interpret fetcher iterConf vm' (k r)
+      --               interpretInternal fetcher iterConf vm' (k r)
       --     _ -> performQuery
 
 maxIterationsReached :: VM Symbolic s -> Maybe Integer -> Maybe Bool
