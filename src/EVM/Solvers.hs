@@ -349,15 +349,15 @@ getModel inst cexvars = do
           pure ()
 
 
-    -- we set a pretty arbitrary upper limit (of 1024) to decide if we need to do some shrinking
+    -- we set a pretty arbitrary upper limit (of 32) to decide if we need to do some shrinking
     bufsUsable :: SMTCex -> Bool
     bufsUsable model = any (go . snd) (Map.toList model.buffers)
       where
         go (Flat _) = True
         go (Comp c) = case c of
-          (Base _ sz) -> sz <= 1024
+          (Base _ sz) -> sz <= 32
           -- TODO: do I need to check the write idx here?
-          (Write _ idx next) -> idx <= 1024 && go (Comp next)
+          (Write _ idx next) -> idx <= 32 && go (Comp next)
 
 mkTimeout :: Maybe Natural -> Text
 mkTimeout t = T.pack $ show $ (1000 *)$ case t of

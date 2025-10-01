@@ -50,6 +50,7 @@ module EVM.ABI
   , encodeAbiValue
   , decodeAbiValue
   , decodeBuf
+  , decudeBufRobust
   , decodeStaticArgs
   , formatString
   , parseTypeName
@@ -522,6 +523,27 @@ decodeBuf tps buf =
        else case runGetOrFail (getAbiSeq (length tps) tps) (BSLazy.fromStrict asBS) of
          Right ("", _, args) -> CAbi (toList args)
          _ -> NoVals
+  where
+    isDynamic t = abiKind t == Dynamic
+
+decudeBufRobust :: [AbiType] -> Expr Buf -> (AbiVals, String)
+decudeBufRobust tps (ConcreteBuf b) =
+  case runGetOrFail (getAbiSeq (length tps) tps) (BSLazy.fromStrict b) of
+    Right ("", _, args) -> (CAbi (toList args), "")
+    Right (str, _, args) -> (CAbi (toList args), "with trailing bytes: " ++ show (BSLazy.unpack str))
+    Left (_, _, err) -> (NoVals, "error decoding abi: " ++ err)
+decudeBufRobust tps buf =
+  if any isDynamic tps then (NoVals, "dynamic types not supported in symbolic decoding")
+  else
+    let
+      vs = decodeStaticArgs 0 (length tps) buf
+      asBS = mconcat $ fmap word256Bytes (mapMaybe maybeLitWordSimp vs)
+    in if not (all isLitWord vs)
+       then (SAbi vs, "")
+       else case runGetOrFail (getAbiSeq (length tps) tps) (BSLazy.fromStrict asBS) of
+         Right ("", _, args) -> (CAbi (toList args), "")
+         Right (str, _, args) -> (CAbi (toList args), "with trailing bytes: " ++ show (BSLazy.unpack str))
+         Left (_, _, err) -> (NoVals, "error decoding abi: " ++ err)
   where
     isDynamic t = abiKind t == Dynamic
 

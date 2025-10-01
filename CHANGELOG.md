@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   node via `--mock-file FILE.json`. This will improve reliability of
   tests that depend on RPC responses
 - We now map back (add,pc) warnings to lines of source code
+- Calldata decoding is now more robust: we try to decode
+  as much as possible even in case of trailing bytes
 
 ## Fixed
 - We now extract more Keccak computations than before from the Props to assert
@@ -54,6 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - We no longer try to fuzz the Expr to find a concrete value that satisfies
   the expression. This was not very effective and made the system more complex
   to maintain. Echidna is an excellent fuzzer that can be used instead.
+- Shrinking of the calldata is now more aggressive, shrinking even small (<1024B)
+  buffers
 
 ## [0.55.1] - 2025-07-22
 

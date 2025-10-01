@@ -4855,7 +4855,7 @@ tests = testGroup "hevm"
             _     -> liftIO $ assertFailure "Must have exactly one cex"
           let def = fromRight (error "cannot be") $ defaultSymbolicValues $ subModel cex (AbstractBuf "txdata")
           let buf = prettyBuf $ Expr.concKeccakSimpExpr def
-          assertBoolM "Must start with specific string" (T.isPrefixOf "0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe0cf" buf)
+          assertBoolM "Must start with specific string" (T.isPrefixOf "0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe0c" buf)
       , test "eq-yul-simple-cex" $ do
         Right aPrgm <- liftIO $ yul ""
           [i|
