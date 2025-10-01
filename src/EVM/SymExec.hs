@@ -433,6 +433,8 @@ interpretInternal t@InterpTask{..} res =
         (r, vm') <- liftIO $ stToIO $ runStateT m vm
         let newT = (t :: InterpTask m) { vm = vm', stepper = (k r) }
         interpretInternal newT res
+      Stepper.ForkMany (PleaseRunAll expr vals continue) -> do
+         internalError "whatever"
       -- Stepper.ForkMany (PleaseRunAll expr vals continue) -> do
       --   when (length vals < 2) $ internalError "PleaseRunAll requires at least 2 branches"
       --   frozen <- liftIO $ stToIO $ freezeVM vm
