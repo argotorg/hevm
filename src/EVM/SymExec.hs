@@ -1,5 +1,6 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE DisambiguateRecordFields #-}
 
 module EVM.SymExec where
 
@@ -331,11 +332,9 @@ data InterpTask m = InterpTask
   {fetcher :: Fetch.Fetcher Symbolic m RealWorld
   , iterConf :: IterConfig
   , vm :: VM Symbolic RealWorld
-  , step :: Stepper.Action Symbolic RealWorld (Expr End)
-  , intGroup :: InterpreterGroup m
-  , resultChan :: Chan (Expr End)
+  , stepper :: Stepper.Action Symbolic RealWorld (Expr End)
+  , taskq :: Chan (InterpTask m)
   }
-newtype InterpreterGroup m = InterpreterGroup (Chan (InterpTask m))
 data InterpreterInstance m = InterpreterInstance
   { instanceId :: Natural
   , instanceTaskQ :: Chan (InterpTask m)
@@ -357,11 +356,14 @@ runInterpreter fetcher iterConf vm stepper count f = do
           , instanceTaskQ = taskq
           }
     pure inst
+
+  resChan <- liftIO newChan
+
   -- spawn orchestration thread
   taskq <- liftIO newChan
   availableInstances <- liftIO newChan
   liftIO $ forM_ instances (writeChan availableInstances)
-  orchestrate' <- toIO $ orchestrate taskq availableInstances
+  orchestrate' <- toIO $ orchestrate taskq availableInstances resChan
   orchestrateId <- liftIO $ forkIO orchestrate'
 
   -- run continuation with task queue
@@ -369,31 +371,32 @@ runInterpreter fetcher iterConf vm stepper count f = do
         { fetcher = fetcher
         , iterConf = iterConf
         , vm = vm
-        , step = stepper
-        , intGroup = InterpreterGroup taskq
-        , resultChan = undefined
+        , stepper = stepper
+        , taskq = taskq
         }
-  expr <- interpret interpTask
-  res <- f expr
+  liftIO $ writeChan taskq interpTask
 
-  -- cleanup and return results
+  -- wrong, only handles ONE result, but OK
+  res <- liftIO $ readChan resChan
+
   liftIO $ killThread orchestrateId
-  pure res
+  f res
   where
     -- orchestrator loop
-    orchestrate :: App m => Chan (InterpTask m) -> Chan (InterpreterInstance m) -> m b
-    orchestrate taskq avail = do
+    orchestrate :: App m => Chan (InterpTask m) -> Chan (InterpreterInstance m) -> Chan (Expr End) -> m b
+    orchestrate taskq avail resChan = do
       task <- liftIO $ readChan taskq
       inst <- liftIO $ readChan avail
-      runTask' <- toIO $ getOneExpr task inst avail
+      runTask' <- toIO $ getOneExpr task inst avail resChan
       _ <- liftIO $ forkIO runTask'
-      orchestrate taskq avail
+      orchestrate taskq avail resChan
 
-getOneExpr :: (MonadIO m, ReadConfig m) => InterpTask m -> InterpreterInstance m -> Chan (InterpreterInstance m) -> m ()
-getOneExpr task inst availableInstances = do
+getOneExpr :: (MonadIO m, ReadConfig m) => InterpTask m -> InterpreterInstance m -> Chan (InterpreterInstance m) -> Chan (Expr End) -> m ()
+getOneExpr task inst availableInstances resChan = do
   out <- interpret task
   liftIO $ writeChan task.resultChan out
   liftIO $ writeChan availableInstances inst
+  liftIO $ writeChan resChan out
 
 -- | Symbolic interpreter that explores all paths. Returns an
 -- 'Expr End' representing the possible executions. This Expr End is NOT flattened,
@@ -401,8 +404,8 @@ getOneExpr task inst availableInstances = do
 interpret :: forall m . App m
   => InterpTask m
   -> m (Expr End)
-interpret InterpTask{..} =
-  eval (Operational.view step)
+interpret t@InterpTask{..} =
+  eval (Operational.view stepper)
   where
   eval :: Operational.ProgramView (Stepper.Action Symbolic RealWorld) (Expr End) -> m (Expr End)
   eval (Operational.Return x) = pure x
@@ -411,10 +414,12 @@ interpret InterpTask{..} =
       Stepper.Exec -> do
         conf <- readConfig
         (r, vm') <- liftIO $ stToIO $ runStateT (exec conf) vm
-        interpret fetcher iterConf vm' (k r) g
+        let newT = (t :: InterpTask m) { vm = vm', stepper = (k r) }
+        interpret newT
       Stepper.EVM m -> do
         (r, vm') <- liftIO $ stToIO $ runStateT m vm
-        interpret fetcher iterConf vm' (k r) g
+        let newT = (t :: InterpTask m) { vm = vm', stepper = (k r) }
+        interpret newT
       -- Stepper.ForkMany (PleaseRunAll expr vals continue) -> do
       --   when (length vals < 2) $ internalError "PleaseRunAll requires at least 2 branches"
       --   frozen <- liftIO $ stToIO $ freezeVM vm
@@ -434,9 +439,11 @@ interpret InterpTask{..} =
         frozen <- liftIO $ stToIO $ freezeVM vm
         let newDepth = vm.exploreDepth+1
         (ra, vma) <- liftIO $ stToIO $ runStateT (continue True) frozen { result = Nothing, exploreDepth = newDepth }
-        -- liftIO $ writeChan taskq (InterpTask vma undefined)
+        let newT = (t :: InterpTask m) { vm = vma, stepper = (k ra) }
+        liftIO $ writeChan taskq newT
         (rb, vmb) <- liftIO $ stToIO $ runStateT (continue False) frozen { result = Nothing, exploreDepth = newDepth }
-        interpret fetcher iterConf vmb (k rb) g
+        let newT2 = (t :: InterpTask m) { vm = vmb, stepper = (k rb) }
+        interpret newT2
       -- Stepper.Wait q -> do
       --   let performQuery = do
       --         m <- fetcher q
