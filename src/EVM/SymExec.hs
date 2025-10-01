@@ -12,7 +12,6 @@ import Control.Monad (when, forM_, forM)
 import Control.Monad.IO.Unlift
 import Control.Monad.Operational qualified as Operational
 import Control.Monad.ST (RealWorld, stToIO, ST)
-import Control.Monad.State.Strict (runStateT)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.Containers.ListUtils (nubOrd)
@@ -33,6 +32,8 @@ import Data.Tuple (swap)
 import Data.Vector qualified as V
 import Data.Vector.Storable qualified as VS
 import Data.Vector.Storable.ByteString (vectorToByteString)
+import Control.Monad.State.Strict
+import Control.Monad.Identity
 
 import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
 import Control.Concurrent (forkIO, killThread)
@@ -339,14 +340,19 @@ data InterpreterInstance m = InterpreterInstance
   , instanceTaskQ :: Chan (InterpTask m)
   }
 
+-- Basic operations
+addElement :: Expr End -> State [Expr End] ()
+addElement = modify . (:)
+
 interpret :: forall m . App m
   => Fetch.Fetcher Symbolic m RealWorld
   -> IterConfig
   -> VM Symbolic RealWorld
   -> Stepper Symbolic RealWorld (Expr End)
-  -> m (Expr End)
-interpret fetcher iterConf vm stepper =
-  interpret2 fetcher iterConf vm stepper 5 pure
+  -> m [Expr End]
+interpret fetcher iterConf vm stepper = do
+  let collect a arr = pure $ a : arr
+  interpret2 fetcher iterConf vm stepper 5 collect
 
 interpret2 :: App m
   => Fetch.Fetcher Symbolic m RealWorld
@@ -354,7 +360,7 @@ interpret2 :: App m
   -> VM Symbolic RealWorld
   -> Stepper Symbolic RealWorld (Expr End)
   -> Natural
-  -> (Expr End -> m a) -> m a
+  -> (Expr End -> a -> m a) -> m a
 interpret2 fetcher iterConf vm stepper count f = do
   -- spawn interpreters
   instances <- liftIO $ forM [1..count] $ \i -> do
@@ -388,7 +394,7 @@ interpret2 fetcher iterConf vm stepper count f = do
   res <- liftIO $ readChan resChan
 
   liftIO $ killThread orchestrateId
-  f res
+  f res mempty
   where
     -- orchestrator loop
     orchestrate :: App m => Chan (InterpTask m) -> Chan (InterpreterInstance m) -> Chan (Expr End) -> m b
