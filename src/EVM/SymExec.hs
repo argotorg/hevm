@@ -340,11 +340,11 @@ data InterpreterInstance m = InterpreterInstance
   , instanceTaskQ :: Chan (InterpTask m)
   }
 
-interpret :: App m
+interpret :: forall m . App m
   => Fetch.Fetcher Symbolic m RealWorld
   -> IterConfig
   -> VM Symbolic RealWorld
-  -> Stepper.Action Symbolic RealWorld (Expr End)
+  -> Stepper Symbolic RealWorld (Expr End)
   -> m (Expr End)
 interpret fetcher iterConf vm stepper =
   interpret2 fetcher iterConf vm stepper 5 pure
@@ -353,7 +353,7 @@ interpret2 :: App m
   => Fetch.Fetcher Symbolic m RealWorld
   -> IterConfig
   -> VM Symbolic RealWorld
-  -> Stepper.Action Symbolic RealWorld (Expr End)
+  -> Stepper Symbolic RealWorld (Expr End)
   -> Natural
   -> (Expr End -> m a) -> m a
 interpret2 fetcher iterConf vm stepper count f = do
@@ -381,7 +381,7 @@ interpret2 fetcher iterConf vm stepper count f = do
         , iterConf = iterConf
         , vm = vm
         , taskq = taskq
-        , stepper = Operational.singleton stepper
+        , stepper = stepper
         }
   liftIO $ writeChan taskq interpTask
 
@@ -400,7 +400,11 @@ interpret2 fetcher iterConf vm stepper count f = do
       _ <- liftIO $ forkIO runTask'
       orchestrate taskq avail resChan
 
-getOneExpr :: (MonadIO m, ReadConfig m) => InterpTask m -> InterpreterInstance m -> Chan (InterpreterInstance m) -> Chan (Expr End)
+getOneExpr :: forall m . (MonadIO m, ReadConfig m, App m)
+  => InterpTask m
+  -> InterpreterInstance m
+  -> Chan (InterpreterInstance m)
+  -> Chan (Expr End)
   -> m ()
 getOneExpr task inst availableInstances resChan = do
   out <- interpretInternal task
@@ -575,7 +579,7 @@ getExprEmptyStore solvers c signature' concreteArgs opts = do
   conf <- readConfig
   calldata <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ loadEmptySymVM (RuntimeCode (ConcreteRuntimeCode c)) (Lit 0) calldata
-  exprInter <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState runExpr pure
+  exprInter <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState runExpr
   if conf.simp then (pure $ Expr.simplify exprInter) else pure exprInter
 
 -- Used only in testing
@@ -591,7 +595,7 @@ getExpr solvers c signature' concreteArgs opts = do
   conf <- readConfig
   calldata <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ abstractVM calldata c Nothing False
-  exprInter <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState runExpr pure
+  exprInter <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState runExpr
   if conf.simp then (pure $ Expr.simplify exprInter) else pure exprInter
 
 {- | Checks if an assertion violation has been encountered
@@ -819,7 +823,7 @@ verifyInputs solvers opts fetcher preState maybepost = do
   let call = mconcat ["prefix 0x", getCallPrefix preState.state.calldata]
   when conf.debug $ liftIO $ putStrLn $ "   Exploring call " <> call
 
-  expr <- interpret fetcher opts.iterConf preState runExpr $ \e -> pure e
+  expr <- interpret fetcher opts.iterConf preState runExpr
   when conf.dumpExprs $ liftIO $ T.writeFile "unsimplified.expr" (formatExpr expr)
   let flattened = flattenExpr expr
   when (conf.dumpExprs && conf.simp) $ liftIO $ do
@@ -936,7 +940,7 @@ equivalenceCheck solvers bytecodeA bytecodeB opts calldata create = do
       conf <- readConfig
       let bytecode = if BS.null bs then BS.pack [0] else bs
       prestate <- liftIO $ stToIO $ abstractVM calldata bytecode Nothing create
-      expr <- interpret (Fetch.oracle solvers Nothing mempty) opts.iterConf prestate runExpr pure
+      expr <- interpret (Fetch.oracle solvers Nothing mempty) opts.iterConf prestate runExpr
       let simpl = if conf.simp then Expr.simplify expr else expr
       pure $ flattenExpr simpl
     oneQedOrNoQed :: EqIssues -> EqIssues
