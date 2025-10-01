@@ -18,7 +18,7 @@ import Data.Containers.ListUtils (nubOrd)
 import Data.DoubleWord (Word256)
 import Data.List (foldl', sortBy, sort)
 import Data.List.NonEmpty qualified as NE
-import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, listToMaybe, mapMaybe, fromJust)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Map.Merge.Strict qualified as Map
@@ -33,7 +33,6 @@ import Data.Vector qualified as V
 import Data.Vector.Storable qualified as VS
 import Data.Vector.Storable.ByteString (vectorToByteString)
 import Control.Monad.State.Strict
-import Control.Monad.Identity
 
 import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
 import Control.Concurrent (forkIO, killThread)
@@ -351,17 +350,8 @@ interpret :: forall m . App m
   -> Stepper Symbolic RealWorld (Expr End)
   -> m [Expr End]
 interpret fetcher iterConf vm stepper = do
-  let collect a arr = pure $ a : arr
-  interpret2 fetcher iterConf vm stepper 5 collect
+  let count = 5
 
-interpret2 :: App m
-  => Fetch.Fetcher Symbolic m RealWorld
-  -> IterConfig
-  -> VM Symbolic RealWorld
-  -> Stepper Symbolic RealWorld (Expr End)
-  -> Natural
-  -> (Expr End -> a -> m a) -> m a
-interpret2 fetcher iterConf vm stepper count f = do
   -- spawn interpreters
   instances <- liftIO $ forM [1..count] $ \i -> do
     taskq <- newChan
@@ -394,7 +384,7 @@ interpret2 fetcher iterConf vm stepper count f = do
   res <- liftIO $ readChan resChan
 
   liftIO $ killThread orchestrateId
-  f res mempty
+  pure [res]
   where
     -- orchestrator loop
     orchestrate :: App m => Chan (InterpTask m) -> Chan (InterpreterInstance m) -> Chan (Expr End) -> m b
@@ -560,7 +550,7 @@ checkAssert
   -> Maybe Sig
   -> [String]
   -> VeriOpts
-  -> m (Expr End, [VerifyResult])
+  -> m [VerifyResult]
 checkAssert solvers errs c signature' concreteArgs opts = do
   checkAssertWithSession solvers Nothing errs c signature' concreteArgs opts
 
@@ -574,7 +564,7 @@ checkAssertWithSession
   -> Maybe Sig
   -> [String]
   -> VeriOpts
-  -> m (Expr End, [VerifyResult])
+  -> m [VerifyResult]
 checkAssertWithSession solvers sess errs c signature' concreteArgs opts = do
   verifyContractWithSession solvers sess c signature' concreteArgs opts Nothing (Just $ checkAssertions errs)
 
@@ -586,13 +576,11 @@ getExprEmptyStore
   -> Maybe Sig
   -> [String]
   -> VeriOpts
-  -> m (Expr End)
+  -> m [Expr End]
 getExprEmptyStore solvers c signature' concreteArgs opts = do
-  conf <- readConfig
   calldata <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ loadEmptySymVM (RuntimeCode (ConcreteRuntimeCode c)) (Lit 0) calldata
-  exprInter <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState runExpr
-  if conf.simp then (pure $ Expr.simplify exprInter) else pure exprInter
+  interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState runExpr
 
 -- Used only in testing
 getExpr
@@ -602,13 +590,11 @@ getExpr
   -> Maybe Sig
   -> [String]
   -> VeriOpts
-  -> m (Expr End)
+  -> m [Expr End]
 getExpr solvers c signature' concreteArgs opts = do
-  conf <- readConfig
   calldata <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ abstractVM calldata c Nothing False
-  exprInter <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState runExpr
-  if conf.simp then (pure $ Expr.simplify exprInter) else pure exprInter
+  interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState runExpr
 
 {- | Checks if an assertion violation has been encountered
 
@@ -672,7 +658,7 @@ verifyContract :: forall m . App m
   -> VeriOpts
   -> Maybe (Precondition RealWorld)
   -> Maybe (Postcondition RealWorld)
-  -> m (Expr End, [VerifyResult])
+  -> m [VerifyResult]
 verifyContract solvers theCode signature' concreteArgs opts maybepre maybepost = do
   verifyContractWithSession solvers Nothing theCode signature' concreteArgs opts maybepre maybepost
 
@@ -686,7 +672,7 @@ verifyContractWithSession :: forall m . App m
   -> VeriOpts
   -> Maybe (Precondition RealWorld)
   -> Maybe (Postcondition RealWorld)
-  -> m (Expr End, [VerifyResult])
+  -> m [VerifyResult]
 verifyContractWithSession solvers sess theCode signature' concreteArgs opts maybepre maybepost = do
   calldata <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ abstractVM calldata theCode maybepre False
@@ -805,18 +791,18 @@ verify :: App m
   -> VeriOpts
   -> VM Symbolic RealWorld
   -> Maybe (Postcondition RealWorld)
-  -> m (Expr End, [VerifyResult])
+  -> m [VerifyResult]
 verify solvers fetcher opts preState maybepost = do
-  (expr, res, _) <- verifyInputs solvers opts fetcher preState maybepost
-  pure $ verifyResults preState expr res
+  (res, _) <- verifyInputs solvers opts fetcher preState maybepost
+  pure $ verifyResults preState res
 
-verifyResults :: VM Symbolic RealWorld -> Expr End -> [(SMTResult, Expr End)] -> (Expr End, [VerifyResult])
-verifyResults preState expr cexs = if Prelude.null cexs then (expr, [Qed]) else (expr, fmap toVRes cexs)
+verifyResults :: VM Symbolic RealWorld -> [(SMTResult, Maybe (Expr End))] -> [VerifyResult]
+verifyResults preState cexs = if Prelude.null cexs then [Qed] else fmap toVRes cexs
   where
-    toVRes :: (SMTResult, Expr End) -> VerifyResult
+    toVRes :: (SMTResult, Maybe (Expr End)) -> VerifyResult
     toVRes (res, leaf) = case res of
-      Cex model -> Cex (leaf, expandCex preState model)
-      Unknown reason -> Unknown (reason, leaf)
+      Cex model -> Cex (fromJust leaf, expandCex preState model)
+      Unknown reason -> Unknown (reason, fromJust leaf)
       Error e -> Error e
       Qed -> Qed
 
@@ -829,28 +815,29 @@ verifyInputs
   -> Fetch.Fetcher Symbolic m RealWorld
   -> VM Symbolic RealWorld
   -> Maybe (Postcondition RealWorld)
-  -> m (Expr End, [(SMTResult, Expr End)], [(PartialExec, Expr End)])
+  -> m ([(SMTResult, Maybe (Expr End))], [(PartialExec, Expr End)])
 verifyInputs solvers opts fetcher preState maybepost = do
   conf <- readConfig
   let call = mconcat ["prefix 0x", getCallPrefix preState.state.calldata]
   when conf.debug $ liftIO $ putStrLn $ "   Exploring call " <> call
 
-  expr <- interpret fetcher opts.iterConf preState runExpr
-  when conf.dumpExprs $ liftIO $ T.writeFile "unsimplified.expr" (formatExpr expr)
-  let flattened = flattenExpr expr
-  when (conf.dumpExprs && conf.simp) $ liftIO $ do
-    let exprSimplified = Expr.simplify expr
-    T.writeFile "simplified.expr" (formatExpr exprSimplified)
-    T.writeFile "simplified-conc.expr" (formatExpr $ Expr.simplify $ mapExpr Expr.concKeccakOnePass exprSimplified)
+  flattened <- interpret fetcher opts.iterConf preState runExpr
+  -- expr <- interpret fetcher opts.iterConf preState runExpr
+  -- when conf.dumpExprs $ liftIO $ T.writeFile "unsimplified.expr" (formatExpr expr)
+  -- let flattened = flattenExpr expr
+  -- when (conf.dumpExprs && conf.simp) $ liftIO $ do
+  --   let exprSimplified = Expr.simplify expr
+  --   T.writeFile "simplified.expr" (formatExpr exprSimplified)
+  --   T.writeFile "simplified-conc.expr" (formatExpr $ Expr.simplify $ mapExpr Expr.concKeccakOnePass exprSimplified)
 
   let partials = getPartials flattened
   when conf.debug $ liftIO $ do
     putStrLn "   Flattening expression"
     printPartialIssues flattened ("the call " <> call)
-    putStrLn $ "   Exploration finished, " <> show (Expr.numBranches expr) <> " branch(es) to check in call " <> call
+    putStrLn $ "   Exploration finished, " <> show (length flattened) <> " branch(es) to check in call " <> call
     putStrLn $ "   Keccak preimages in state: " <> (show $ length preState.keccakPreImgs)
   case maybepost of
-    Nothing -> pure (expr, [(Qed, expr)], partials)
+    Nothing -> pure ([(Qed, Nothing)], partials)
     Just post -> do
       let
         -- Filter out any leaves from `flattened` that can be statically shown to be safe
@@ -867,7 +854,7 @@ verifyInputs solvers opts fetcher preState maybepost = do
       let cexs = filter (\(res, _) -> not . isQed $ res) results
       when conf.debug $ liftIO $
         putStrLn $ "   Found " <> show (length cexs) <> " potential counterexample(s) in call " <> call
-      pure (expr, cexs, partials)
+      pure (map (\(a,b) -> (a, Just b)) cexs, partials)
   where
     getCallPrefix :: Expr Buf -> String
     getCallPrefix (WriteByte (Lit 0) (LitByte a) (WriteByte (Lit 1) (LitByte b) (WriteByte (Lit 2) (LitByte c) (WriteByte (Lit 3) (LitByte d) _)))) = mconcat $ map (printf "%02x") [a,b,c,d]
@@ -949,12 +936,9 @@ equivalenceCheck solvers bytecodeA bytecodeB opts calldata create = do
     -- decompiles the given bytecode into a list of branches
     getBranches :: App m => ByteString -> m [Expr End]
     getBranches bs = do
-      conf <- readConfig
       let bytecode = if BS.null bs then BS.pack [0] else bs
       prestate <- liftIO $ stToIO $ abstractVM calldata bytecode Nothing create
-      expr <- interpret (Fetch.oracle solvers Nothing mempty) opts.iterConf prestate runExpr
-      let simpl = if conf.simp then Expr.simplify expr else expr
-      pure $ flattenExpr simpl
+      interpret (Fetch.oracle solvers Nothing mempty) opts.iterConf prestate runExpr
     oneQedOrNoQed :: EqIssues -> EqIssues
     oneQedOrNoQed (EqIssues res partials) =
       let allQed = all (\(r, _) -> isQed r) res
