@@ -374,7 +374,7 @@ runInterpreter fetcher iterConf vm stepper count f = do
         }
   liftIO $ writeChan taskq interpTask
 
-  -- wrong, only handles ONE result, but OK
+  -- TODO: wrong, only handles ONE result, but OK
   res <- liftIO $ readChan resChan
 
   liftIO $ killThread orchestrateId
