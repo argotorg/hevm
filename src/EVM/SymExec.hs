@@ -333,6 +333,7 @@ data InterpTask m = InterpTask
   , iterConf :: IterConfig
   , vm :: VM Symbolic RealWorld
   , taskq :: Chan (InterpTask m)
+  , stepper :: Stepper Symbolic RealWorld (Expr End)
   }
 data InterpreterInstance m = InterpreterInstance
   { instanceId :: Natural
@@ -371,6 +372,7 @@ runInterpreter fetcher iterConf vm stepper count f = do
         , iterConf = iterConf
         , vm = vm
         , taskq = taskq
+        , stepper = Operational.singleton stepper
         }
   liftIO $ writeChan taskq interpTask
 
@@ -385,15 +387,14 @@ runInterpreter fetcher iterConf vm stepper count f = do
     orchestrate taskq avail resChan = do
       task <- liftIO $ readChan taskq
       inst <- liftIO $ readChan avail
-      runTask' <- toIO $ getOneExpr task inst avail resChan (Operational.singleton stepper)
+      runTask' <- toIO $ getOneExpr task inst avail resChan
       _ <- liftIO $ forkIO runTask'
       orchestrate taskq avail resChan
 
 getOneExpr :: (MonadIO m, ReadConfig m) => InterpTask m -> InterpreterInstance m -> Chan (InterpreterInstance m) -> Chan (Expr End)
-  -> Stepper Symbolic RealWorld (Expr End)
   -> m ()
-getOneExpr task inst availableInstances resChan stepper = do
-  out <- interpret task stepper
+getOneExpr task inst availableInstances resChan = do
+  out <- interpret task
   liftIO $ writeChan availableInstances inst
   liftIO $ writeChan resChan out
 
@@ -402,9 +403,8 @@ getOneExpr task inst availableInstances resChan stepper = do
 --  i.e. it (likely) contains ITE-s. The only End-s possible are: Partial, Failure, Success, ITE
 interpret :: forall m . App m
   => InterpTask m
-  -> Stepper Symbolic RealWorld (Expr End)
   -> m (Expr End)
-interpret t@InterpTask{..} stepper =
+interpret t@InterpTask{..} =
   eval (Operational.view stepper)
   where
   eval :: Operational.ProgramView (Stepper.Action Symbolic RealWorld) (Expr End) -> m (Expr End)
@@ -414,12 +414,12 @@ interpret t@InterpTask{..} stepper =
       Stepper.Exec -> do
         conf <- readConfig
         (r, vm') <- liftIO $ stToIO $ runStateT (exec conf) vm
-        let newT = (t :: InterpTask m) { vm = vm' }
-        interpret newT (k r)
+        let newT = (t :: InterpTask m) { vm = vm', stepper =  (k r) }
+        interpret newT
       Stepper.EVM m -> do
         (r, vm') <- liftIO $ stToIO $ runStateT m vm
-        let newT = (t :: InterpTask m) { vm = vm' }
-        interpret newT (k r)
+        let newT = (t :: InterpTask m) { vm = vm', stepper = (k r) }
+        interpret newT
       -- Stepper.ForkMany (PleaseRunAll expr vals continue) -> do
       --   when (length vals < 2) $ internalError "PleaseRunAll requires at least 2 branches"
       --   frozen <- liftIO $ stToIO $ freezeVM vm
@@ -439,12 +439,11 @@ interpret t@InterpTask{..} stepper =
         frozen <- liftIO $ stToIO $ freezeVM vm
         let newDepth = vm.exploreDepth+1
         (ra, vma) <- liftIO $ stToIO $ runStateT (continue True) frozen { result = Nothing, exploreDepth = newDepth }
-        let newT = (t :: InterpTask m) { vm = vma }
-        -- (k ra)
+        let newT = (t :: InterpTask m) { vm = vma, stepper = (k ra) }
         liftIO $ writeChan taskq newT
         (rb, vmb) <- liftIO $ stToIO $ runStateT (continue False) frozen { result = Nothing, exploreDepth = newDepth }
-        let newT2 = (t :: InterpTask m) { vm = vmb }
-        interpret newT2 (k rb)
+        let newT2 = (t :: InterpTask m) { vm = vmb, stepper = (k rb) }
+        interpret newT2
       -- Stepper.Wait q -> do
       --   let performQuery = do
       --         m <- fetcher q
