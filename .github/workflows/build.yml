@@ -3,91 +3,13 @@ on:
   pull_request:
   push:
     branches:
-      main
+      windebug
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  nix-build:
-    strategy:
-      matrix:
-        runtime: [ linux-x64, osx-x64, osx-arm64 ]
-        include:
-        - runtime: linux-x64
-          os: ubuntu-latest
-
-        - runtime: osx-x64
-          os: macos-13
-
-        - runtime: osx-arm64
-          os: macos-14
-
-      fail-fast: false
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - name: Install Nix
-        uses: nixbuild/nix-quick-install-action@v30
-      - name: Nix cache
-        id: cache
-        uses: nix-community/cache-nix-action@v6
-        with:
-          primary-key: nix-build-${{ matrix.os }}-${{ hashFiles('**/*.nix', '**/flake.lock') }}
-          purge: true
-          purge-prefixes: nix-build-${{ matrix.os }}-
-          purge-created: 0
-          purge-primary-key: never
-          gc-max-store-size: 1G
-      - name: build hevm
-        run: nix build .#ci -L
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: hevm-${{ matrix.runtime }}
-          path: result/bin/hevm
-
-  extra-tests:
-    strategy:
-      matrix:
-       os: [ ubuntu-latest, macos-latest ]
-       include:
-         - os: ubuntu-latest
-         - os: macos-latest
-      fail-fast: false
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - name: Install Nix
-        uses: nixbuild/nix-quick-install-action@v30
-      - name: Nix cache
-        id: cache
-        uses: nix-community/cache-nix-action@v6
-        with:
-          primary-key: nix-tests-${{ matrix.os }}-${{ hashFiles('**/*.nix', '**/flake.lock') }}
-          purge: true
-          purge-prefixes: nix-tests-${{ matrix.os }}-
-          purge-created: 0
-          purge-primary-key: never
-          gc-max-store-size: 1G
-      # cabal complains if we don't do this...
-      - name: cabal update
-        run: nix develop --command bash -c "cabal update"
-      # can't be run in nix build due to network usage
-      - name: run rpc tests
-        run: nix develop --command bash -c "cabal --active-repositories=:none run rpc-tests"
-      # if we run this in nix build we often get killed due to oom in ci
-      - name: run ethereum tests
-        run: nix develop --command bash -c "cabal --active-repositories=:none run ethereum-tests"
-      # if we run this in nix build, it complains about running in a sandbox
-      - name: run cli tests
-        run: nix develop --command bash -c "cabal --active-repositories=:none run cli-test"
-
   build-windows:
     name: build (windows-latest)
     runs-on: windows-latest
@@ -100,8 +22,7 @@ jobs:
           persist-credentials: false
       - uses: foundry-rs/foundry-toolchain@v1
         with:
-          # Pinning to a version in June 2024, so in case a build fails, our CI doesn't fail
-          version: nightly-5ac78a9cd4b94dc53d1fe5e0f42372b28b5a7559
+          version: stable
       - run: |
           echo FOUNDRY_PATH="$(dirname "$(which forge)")" >> "$GITHUB_ENV"
         shell: bash
@@ -246,9 +167,6 @@ jobs:
           curl --retry 5 -fsSL https://github.com/bitwuzla/bitwuzla/releases/download/0.8.2/Bitwuzla-Win64-x86_64-static.zip -o bitwuzla.zip
           unzip bitwuzla.zip && rm bitwuzla.zip
           echo BITWUZLA_PATH="$PWD/Bitwuzla-Win64-x86_64-static/bin" >> "$GITHUB_ENV"
-          # evm
-          go install github.com/ethereum/go-ethereum/cmd/evm@latest
-          echo EVM_PATH="$(cygpath -u "$(go env GOPATH)/bin")" >> "$GITHUB_ENV"
           # cvc5
           curl --retry 5 -fsSL https://github.com/cvc5/cvc5/releases/download/cvc5-1.3.0/cvc5-Win64-x86_64-static.zip -o cvc5.zip
           unzip cvc5.zip && rm cvc5.zip
@@ -266,35 +184,11 @@ jobs:
       - name: run tests
         run: |
           export PATH="$EVM_PATH:$CVC5_PATH:$BITWUZLA_PATH:$DAPP_SOLC_PATH:$FOUNDRY_PATH:$HASKELL_PATHS:$PATH"
-          cabal run test
-
-      - name: run rpc tests
-        run: |
-          export PATH="$BITWUZLA_PATH:$FOUNDRY_PATH:$HASKELL_PATHS:$PATH"
-          cabal run rpc-tests
-
-      - name: run ethereum tests
-        run: |
-          export PATH="$HASKELL_PATHS:$PATH"
-          cabal run ethereum-tests
-
-  cabal-check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - name: Install Nix
-        uses: nixbuild/nix-quick-install-action@v30
-      - name: Nix cache
-        id: cache
-        uses: nix-community/cache-nix-action@v6
-        with:
-          primary-key: nix-cabal-check-${{ hashFiles('**/*.nix', '**/flake.lock') }}
-          purge: true
-          purge-prefixes: nix-cabal-check-
-          purge-created: 0
-          purge-primary-key: never
-          gc-max-store-size: 1G
-      - name: run cabal check
-        run: nix develop -c cabal check --verbose=3
+          HEVM=$(cabal list-bin hevm)
+          mkdir wintest
+          cd wintest
+          forge init --no-git
+          cp ../test/contracts/pass/keccak.sol test/
+          forge build --ast  test/keccak.sol
+          $HEVM test --smtdebug
+          cat query-0.smt2
