@@ -16,7 +16,7 @@ import Control.Monad.State.Strict
 import Control.Monad.IO.Unlift
 import Data.Map (Map)
 import Data.Map qualified as Map
-import Data.Set (Set, isSubsetOf, fromList)
+import Data.Set (Set, isSubsetOf, fromList, toList)
 import Data.Maybe (fromMaybe, isJust, fromJust)
 import Data.Either (isLeft)
 import Data.Text qualified as TStrict
@@ -32,6 +32,7 @@ import Data.Bits ((.&.))
 import Numeric (showHex)
 import EVM.Expr (simplifyProps)
 
+import EVM.Keccak qualified as Keccak (concreteKeccaks)
 import EVM.SMT
 import EVM.Types
 
@@ -107,7 +108,8 @@ checkSatWithProps sg props = do
   let psSimp = if conf.simp then simplifyProps props else props
   if psSimp == [PBool False] then pure Qed
   else do
-    let smt2 = assertProps conf psSimp
+    let concreteKeccaks = fmap (\(buf,val) -> PEq (Lit val) (Keccak buf)) (toList $ Keccak.concreteKeccaks props)
+    let smt2 = assertProps conf (if conf.simp then psSimp <> concreteKeccaks else psSimp)
     if isLeft smt2 then pure $ Error $ getError smt2
     else liftIO $ checkSat sg (Just props) smt2
 

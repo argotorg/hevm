@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Fixed
 - We now extract more Keccak computations than before from the Props to assert
   more Keccak equalities.
+- Fixed false positive caused by loss of information about concrete 
+  Keccak computations.
 - Faster word256Bytes and word160Bytes functions to help concrete execution
   performance
 - RPC fetching was sometimes incorrect in case of writing to storage

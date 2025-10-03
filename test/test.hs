@@ -2052,6 +2052,9 @@ tests = testGroup "hevm"
     , test "Unwind" $ do
         let testFile = "test/contracts/pass/unwind.sol"
         runSolidityTest testFile ".*" >>= assertEqualM "test result" (True, True)
+    , test "Keccak" $ do
+        let testFile = "test/contracts/pass/keccak.sol"
+        runSolidityTest testFile "prove_access" >>= assertEqualM "test result" (True, True)
     ]
   , testGroup "max-iterations"
     [ test "concrete-loops-reached" $ do
