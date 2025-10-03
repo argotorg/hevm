@@ -1681,8 +1681,8 @@ tests = testGroup "hevm"
                 }
               }
             |]
-        Right e <- reachableUserAsserts c Nothing
-        assertBoolM "The expression is not partial" $ Expr.containsNode isPartial e
+        r <- allBranchesFail c Nothing
+        assertBoolM "all branches must fail" (isRight r)
       ,
       -- TODO: we can't deal with symbolic jump conditions
       expectFail $ test "call-zero-inited-var-thats-a-function" $ do

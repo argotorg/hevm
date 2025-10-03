@@ -435,6 +435,7 @@ prettyError = \case
   MaxInitCodeSizeExceeded a b -> "Max init code size exceeded: max: " <> show a <> " actual: " <> show b
   InvalidFormat -> "Invalid Format"
   PrecompileFailure -> "Precompile failure"
+  NonexistentPrecompile a -> "Precompile at address " <> show a <> " does not exist"
   ReturnDataOutOfBounds -> "Return data out of bounds"
   NonceOverflow -> "Nonce overflow"
   BadCheatCode reason a -> "Bad cheat code: " <>  reason <> " sig: " <> show a
@@ -509,6 +510,7 @@ formatPartial = \case
       [ "contract addr: " <> pack (show addr)
       , "program counter: " <> pack (show pc)]
     ]
+  PrecompileMissing preAddr -> "Precompile at address " <> pack (show preAddr) <> " does not exist"
 
 formatPartialDetailed :: Maybe (WarningData s t) -> PartialExec -> Text
 formatPartialDetailed warnData p =
@@ -518,6 +520,7 @@ formatPartialDetailed warnData p =
     MaxIterationsReached {..}  -> "Max iterations reached" <> toTxt addr pc
     JumpIntoSymbolicCode {..}  -> "Encountered a jump into a symbolic code" <> toTxt addr pc
     CheatCodeMissing {..}      -> "Cheat code not recognized: " <> T.pack (show selector) <> toTxt addr pc
+    PrecompileMissing {..}     -> "Precompile at address " <> pack (show preAddr) <> " does not exist"
     BranchTooDeep {..}         -> "Branches too deep" <> toTxt addr pc
 
 getSrcInfo :: Maybe (WarningData s t) -> Expr EAddr -> Int -> String
