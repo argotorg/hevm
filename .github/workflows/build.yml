@@ -27,7 +27,7 @@ jobs:
       fail-fast: false
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
       - name: Install Nix
@@ -60,7 +60,7 @@ jobs:
       fail-fast: false
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
       - name: Install Nix
@@ -95,7 +95,7 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
       - uses: foundry-rs/foundry-toolchain@v1
@@ -220,21 +220,21 @@ jobs:
           name: hevm-windows-x64
           path: result/hevm.exe
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           repository: ethereum/solidity
           ref: 8a97fa7a1db1ec509221ead6fea6802c684ee887
           path: ethereum-solidity
           persist-credentials: false
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           repository: ethereum/tests
           ref: v13
           path: ethereum-tests
           persist-credentials: false
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           repository: foundry-rs/forge-std
           path: forge-std
@@ -281,7 +281,7 @@ jobs:
   cabal-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
       - name: Install Nix
