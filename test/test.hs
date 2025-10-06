@@ -289,8 +289,8 @@ tests = testGroup "hevm"
         }
         |]
       expr <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "prove_mapping_access(address,address)" [AbiAddressType, AbiAddressType])) [] defaultVeriOpts
-      let simpExpr = mapExprM Expr.decomposeStorage expr
-      assertEqualM "Decompose did not succeed." (isJust simpExpr) True
+      let simpExpr = map (mapExprM Expr.decomposeStorage) expr
+      assertEqualM "Decompose did not succeed." (all isJust simpExpr) True
     , test "decompose-2" $ do
       Just c <- solcRuntime "MyContract"
         [i|
@@ -304,9 +304,9 @@ tests = testGroup "hevm"
         }
         |]
       expr <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "prove_mixed_symoblic_concrete_writes(address,uint256)" [AbiAddressType, AbiUIntType 256])) [] defaultVeriOpts
-      let simpExpr = mapExprM Expr.decomposeStorage expr
+      let simpExpr = map (mapExprM Expr.decomposeStorage) expr
       -- putStrLnM $ T.unpack $ formatExpr (fromJust simpExpr)
-      assertEqualM "Decompose did not succeed." (isJust simpExpr) True
+      assertEqualM "Decompose did not succeed." (all isJust simpExpr) True
     , test "decompose-3" $ do
       Just c <- solcRuntime "MyContract"
         [i|
@@ -321,8 +321,8 @@ tests = testGroup "hevm"
         }
         |]
       expr <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "prove_array(uint256,uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
-      let simpExpr = mapExprM Expr.decomposeStorage expr
-      assertEqualM "Decompose did not succeed." (isJust simpExpr) True
+      let simpExpr = map (mapExprM Expr.decomposeStorage) expr
+      assertEqualM "Decompose did not succeed." (all isJust simpExpr) True
     , test "decompose-4-mixed" $ do
       Just c <- solcRuntime "MyContract"
         [i|
@@ -339,9 +339,9 @@ tests = testGroup "hevm"
         }
         |]
       expr <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "prove_array(uint256,uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
-      let simpExpr = mapExprM Expr.decomposeStorage expr
+      let simpExpr = map (mapExprM Expr.decomposeStorage) expr
       -- putStrLnM $ T.unpack $ formatExpr (fromJust simpExpr)
-      assertEqualM "Decompose did not succeed." (isJust simpExpr) True
+      assertEqualM "Decompose did not succeed." (all isJust simpExpr) True
     , test "decompose-5-mixed" $ do
       Just c <- solcRuntime "MyContract"
         [i|
@@ -366,9 +366,9 @@ tests = testGroup "hevm"
         }
         |]
       expr <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "prove_mixed(address,address,uint256)" [AbiAddressType, AbiAddressType, AbiUIntType 256])) [] defaultVeriOpts
-      let simpExpr = mapExprM Expr.decomposeStorage expr
+      let simpExpr = map (mapExprM Expr.decomposeStorage) expr
       -- putStrLnM $ T.unpack $ formatExpr (fromJust simpExpr)
-      assertEqualM "Decompose did not succeed." (isJust simpExpr) True
+      assertEqualM "Decompose did not succeed." (all isJust simpExpr) True
     , test "decompose-6" $ do
       Just c <- solcRuntime "MyContract"
         [i|
@@ -382,9 +382,9 @@ tests = testGroup "hevm"
         }
         |]
       expr <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "prove_mixed(uint256)" [AbiUIntType 256])) [] defaultVeriOpts
-      let simpExpr = mapExprM Expr.decomposeStorage expr
+      let simpExpr = map (mapExprM Expr.decomposeStorage) expr
       -- putStrLnM $ T.unpack $ formatExpr (fromJust simpExpr)
-      assertEqualM "Decompose did not succeed." (isJust simpExpr) True
+      assertEqualM "Decompose did not succeed." (all isJust simpExpr) True
     -- This test uses array.length, which is is concrete 0 only in case we start with an empty storage
     -- otherwise (i.e. with getExpr) it's symbolic, and the exploration loops forever
     , test "decompose-7-emtpy-storage" $ do
@@ -1075,7 +1075,7 @@ tests = testGroup "hevm"
             } |]
         let sig = Just $ Sig "fun(int256)" [AbiIntType 256]
         (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        assertBoolM "The expression must not be partial" $ not (Expr.containsNode isPartial e)
+        assertBoolM "The expression must not be partial" $ not (any (Expr.containsNode isPartial) e)
         let numCexes = sum $ map (fromEnum . isCex) ret
         let numErrs = sum $ map (fromEnum . isError) ret
         let numQeds = sum $ map (fromEnum . isQed) ret
@@ -1095,7 +1095,7 @@ tests = testGroup "hevm"
             } |]
         let sig = Just $ Sig "fun(int256)" [AbiIntType 256]
         (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        assertBoolM "The expression must not be partial" $ not (Expr.containsNode isPartial e)
+        assertBoolM "The expression must not be partial" $ not (any (Expr.containsNode isPartial) e)
         let numCexes = sum $ map (fromEnum . isCex) ret
         let numErrs = sum $ map (fromEnum . isError) ret
         let numQeds = sum $ map (fromEnum . isQed) ret
@@ -1115,7 +1115,7 @@ tests = testGroup "hevm"
             } |]
         let sig = Just $ Sig "fun(int256)" [AbiIntType 256]
         (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        assertBoolM "The expression must not be partial" $ not (Expr.containsNode isPartial e)
+        assertBoolM "The expression must not be partial" $ not (any (Expr.containsNode isPartial) e)
         let numCexes = sum $ map (fromEnum . isCex) ret
         let numErrs = sum $ map (fromEnum . isError) ret
         let numQeds = sum $ map (fromEnum . isQed) ret
@@ -1136,7 +1136,7 @@ tests = testGroup "hevm"
             } |]
         let sig = Just $ Sig "fun(int128)" [AbiIntType 128]
         (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        assertBoolM "The expression must not be partial" $ not (Expr.containsNode isPartial e)
+        assertBoolM "The expression must not be partial" $ not (any (Expr.containsNode isPartial) e)
         let numCexes = sum $ map (fromEnum . isCex) ret
         let numErrs = sum $ map (fromEnum . isError) ret
         let numQeds = sum $ map (fromEnum . isQed) ret
@@ -1152,7 +1152,7 @@ tests = testGroup "hevm"
             } |]
         let sig = Just $ Sig "fun(int256)" [AbiIntType 256]
         (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        assertBoolM "The expression must not be partial" $ not (Expr.containsNode isPartial e)
+        assertBoolM "The expression must not be partial" $ not (any (Expr.containsNode isPartial) e)
         let numCexes = sum $ map (fromEnum . isCex) ret
         let numErrs = sum $ map (fromEnum . isError) ret
         let numQeds = sum $ map (fromEnum . isQed) ret
@@ -1169,7 +1169,7 @@ tests = testGroup "hevm"
           } |]
         let sig = Just $ Sig "fun(int8)" [AbiIntType 8]
         (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        assertBoolM "The expression must not be partial" $ not (Expr.containsNode isPartial e)
+        assertBoolM "The expression must not be partial" $ not (any (Expr.containsNode isPartial) e)
         let numCexes = sum $ map (fromEnum . isCex) ret
         let numErrs = sum $ map (fromEnum . isError) ret
         let numQeds = sum $ map (fromEnum . isQed) ret
@@ -1186,7 +1186,7 @@ tests = testGroup "hevm"
           } |]
         let sig = Just $ Sig "fun(uint8)" [AbiUIntType 8]
         (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        assertBoolM "The expression must not be partial" $ not (Expr.containsNode isPartial e)
+        assertBoolM "The expression must not be partial" $ not (any (Expr.containsNode isPartial) e)
         let numCexes = sum $ map (fromEnum . isCex) ret
         let numErrs = sum $ map (fromEnum . isError) ret
         let numQeds = sum $ map (fromEnum . isQed) ret
@@ -1206,7 +1206,7 @@ tests = testGroup "hevm"
             } |]
         let sig = Just $ Sig "fun(int256)" [AbiIntType 256]
         (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        assertBoolM "The expression must not be partial" $ not (Expr.containsNode isPartial e)
+        assertBoolM "The expression must not be partial" $ not (any (Expr.containsNode isPartial) e)
         let numCexes = sum $ map (fromEnum . isCex) ret
         let numErrs = sum $ map (fromEnum . isError) ret
         let numQeds = sum $ map (fromEnum . isQed) ret
@@ -1226,7 +1226,7 @@ tests = testGroup "hevm"
             } |]
         let sig = Just $ Sig "fun(uint256)" [AbiUIntType 256]
         (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        assertBoolM "The expression must not be partial" $ not (Expr.containsNode isPartial e)
+        assertBoolM "The expression must not be partial" $ not (any (Expr.containsNode isPartial) e)
         let numCexes = sum $ map (fromEnum . isCex) ret
         let numErrs = sum $ map (fromEnum . isError) ret
         let numQeds = sum $ map (fromEnum . isQed) ret
@@ -1246,7 +1246,7 @@ tests = testGroup "hevm"
             } |]
         let sig = Just $ Sig "fun(uint256)" [AbiUIntType 256]
         (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        assertBoolM "The expression must not be partial" $ not (Expr.containsNode isPartial e)
+        assertBoolM "The expression must not be partial" $ not (any (Expr.containsNode isPartial) e)
         let numCexes = sum $ map (fromEnum . isCex) ret
         let numErrs = sum $ map (fromEnum . isError) ret
         let numQeds = sum $ map (fromEnum . isQed) ret
@@ -1645,7 +1645,7 @@ tests = testGroup "hevm"
             |]
         let sig = Just (Sig "fun(uint256)" [AbiUIntType 256])
         (e, [Qed]) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        assertBoolM "The expression must contain Partial." $ Expr.containsNode isPartial e
+        assertBoolM "The expression must contain Partial." $ any (Expr.containsNode isPartial) e
       , test "cheatcode-with-selector" $ do
         Just c <- solcRuntime "C"
             [i|
@@ -1786,7 +1786,7 @@ tests = testGroup "hevm"
           let numCexes = sum $ map (fromEnum . isCex) ret
           let numErrs = sum $ map (fromEnum . isError) ret
           let numQeds = sum $ map (fromEnum . isQed) ret
-          assertBoolM "The expression MUST be partial" (Expr.containsNode isPartial expr)
+          assertBoolM "The expression MUST be partial" (any (Expr.containsNode isPartial) expr)
           assertEqualM "number of errors" 0 numErrs
           assertEqualM "number of counterexamples" 0 numCexes
           assertEqualM "number of qed-s" 1 numQeds
@@ -1812,7 +1812,7 @@ tests = testGroup "hevm"
           let numCexes = sum $ map (fromEnum . isCex) ret
           let numErrs = sum $ map (fromEnum . isError) ret
           let numQeds = sum $ map (fromEnum . isQed) ret
-          assertBoolM "The expression MUST NOT be partial" $ Prelude.not (Expr.containsNode isPartial expr)
+          assertBoolM "The expression MUST NOT be partial" $ Prelude.not (any (Expr.containsNode isPartial) expr)
           assertEqualM "number of errors" 0 numErrs
           assertEqualM "number of counterexamples" 1 numCexes
           assertEqualM "number of qed-s" 0 numQeds
@@ -1871,8 +1871,9 @@ tests = testGroup "hevm"
           let calldata = (WriteWord (Lit 0x0) (Var "u") (ConcreteBuf ""), [])
           initVM <- liftIO $ stToIO $ abstractVM calldata initCode Nothing True
           let iterConf = IterConfig {maxIter=Nothing, askSmtIters=1, loopHeuristic=StackBased }
-          expr <- Expr.simplify <$> interpret (Fetch.oracle s Nothing mempty) iterConf initVM runExpr
-          assertBoolM "unexptected partial execution" (not $ Expr.containsNode isPartial expr)
+          expr <- interpret (Fetch.oracle s Nothing mempty) iterConf initVM runExpr
+          let exprSimp = map Expr.simplify expr
+          assertBoolM "unexptected partial execution" (not $ any (Expr.containsNode isPartial) exprSimp)
     , test "mixed-concrete-symbolic-args" $ do
         Just c <- solcRuntime "C"
           [i|
@@ -2069,7 +2070,7 @@ tests = testGroup "hevm"
             opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf {maxIter = Just 3 }}
         (e, [Qed]) <- withDefaultSolver $
           \s -> checkAssert s defaultPanicCodes c sig [] opts
-        assertBoolM "The expression is not partial" $ isPartial e
+        assertBoolM "The expression is not partial" $ any isPartial e
     , test "concrete-loops-not-reached" $ do
         Just c <- solcRuntime "C"
             [i|
@@ -2086,7 +2087,7 @@ tests = testGroup "hevm"
             opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf {maxIter = Just 6 }}
         (e, [Qed]) <- withDefaultSolver $
           \s -> checkAssert s defaultPanicCodes c sig [] opts
-        assertBoolM "The expression is partial" $ not $ isPartial e
+        assertBoolM "The expression is partial" $ not $ any isPartial e
     , test "symbolic-loops-reached" $ do
         Just c <- solcRuntime "C"
             [i|
@@ -2101,7 +2102,7 @@ tests = testGroup "hevm"
         let veriOpts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 }}
         (e, [Qed]) <- withDefaultSolver $
           \s -> checkAssert s defaultPanicCodes c (Just (Sig "fun(uint256)" [AbiUIntType 256])) [] veriOpts
-        assertBoolM "The expression MUST be partial" $ Expr.containsNode isPartial e
+        assertBoolM "The expression MUST be partial" $ any (Expr.containsNode isPartial) e
     , test "inconsistent-paths" $ do
         Just c <- solcRuntime "C"
             [i|
@@ -2121,7 +2122,7 @@ tests = testGroup "hevm"
             opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 10, askSmtIters = 5 }}
         (e, [Qed]) <- withDefaultSolver $
           \s -> checkAssert s defaultPanicCodes c sig [] opts
-        assertBoolM "The expression is not partial" $ Expr.containsNode isPartial e
+        assertBoolM "The expression MUST be partial" $ any (Expr.containsNode isPartial) e
     , test "mem-tuple" $ do
         Just c <- solcRuntime "C"
           [i|
@@ -2161,7 +2162,7 @@ tests = testGroup "hevm"
             -- conditions, so we never hit maxIters
             opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf {maxIter = Just 5, askSmtIters = 1 }}
         (e, [Qed]) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] opts
-        assertBoolM "The expression MUST NOT be partial" $ not (Expr.containsNode isPartial e)
+        assertBoolM "The expression MUST NOT be partial" $ not (any (Expr.containsNode isPartial) e)
     ]
   , testGroup "Symbolic Addresses"
     [ test "symbolic-address-create" $ do
@@ -6199,8 +6200,8 @@ genWordArith litFreq sz = frequency
 
 -- Finds SLoad -> SStore. This should not occur in most scenarios
 -- as we can simplify them away
-badStoresInExpr :: Expr a -> Bool
-badStoresInExpr = getAny . foldExpr match mempty
+badStoresInExpr :: [Expr a] -> Bool
+badStoresInExpr exprs = any (getAny . foldExpr match mempty) exprs
   where
       match (SLoad _ (SStore _ _ _)) = Any True
       match _ = Any False

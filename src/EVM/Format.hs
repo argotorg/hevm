@@ -201,7 +201,6 @@ showTraceTree dapp vm =
   in pack $ concatMap showTree traces
 
 showTraceTree' :: DappInfo -> Expr End -> Text
-showTraceTree' _ (ITE {}) = internalError "ITE does not contain a trace"
 showTraceTree' dapp leaf =
   let ?context = DappContext { info = dapp, contracts, labels }
   in let forest = traceForest' leaf
@@ -554,14 +553,6 @@ formatExpr = go
       (GVar v) -> "(GVar " <> T.pack (show v) <> ")"
       LitByte w -> T.pack $ show w
 
-      ITE c t f -> T.unlines
-        [ "(ITE"
-        , indent 2 $ T.unlines
-          [ formatExpr c
-          , formatExpr t
-          , formatExpr f
-          ]
-        , ")"]
       Success asserts _ buf store -> T.unlines
         [ "(Success"
         , indent 2 $ T.unlines

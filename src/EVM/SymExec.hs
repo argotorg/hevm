@@ -450,10 +450,12 @@ interpretInternal t@InterpTask{..} res =
         frozen <- liftIO $ stToIO $ freezeVM vm
         let newDepth = vm.exploreDepth+1
         (ra, vma) <- liftIO $ stToIO $ runStateT (continue True) frozen { result = Nothing, exploreDepth = newDepth }
-        let newT = (t :: InterpTask m) { vm = vma, stepper = (k ra) }
+        let vmaConst  = vma { constraints = PNeg (PEq (Lit 0) cond) : vma.constraints }
+        let newT = (t :: InterpTask m) { vm = vmaConst, stepper = (k ra) }
         liftIO $ writeChan taskq newT
         (rb, vmb) <- liftIO $ stToIO $ runStateT (continue False) frozen { result = Nothing, exploreDepth = newDepth }
-        let newT2 = (t :: InterpTask m) { vm = vmb, stepper = (k rb) }
+        let vmbConst  = vmb { constraints = PEq (Lit 0) cond : vmb.constraints }
+        let newT2 = (t :: InterpTask m) { vm = vmbConst, stepper = (k rb) }
         interpretInternal newT2 res
       Stepper.Wait q -> do
         let performQuery = do
@@ -695,16 +697,16 @@ toEContract c = C c.code c.storage c.tStorage c.balance c.nonce
 
 -- | Converts a given top level expr into a list of final states and the
 -- associated path conditions for each state.
-flattenExpr :: Expr End -> [Expr End]
-flattenExpr = go []
-  where
-    go :: [Prop] -> Expr End -> [Expr End]
-    go pcs = \case
-      ITE c t f -> go (PNeg ((PEq (Lit 0) c)) : pcs) t <> go (PEq (Lit 0) c : pcs) f
-      Success ps trace msg store -> [Success (nubOrd $ ps <> pcs) trace msg store]
-      Failure ps trace e -> [Failure (nubOrd $ ps <> pcs) trace e]
-      Partial ps trace p -> [Partial (nubOrd $ ps <> pcs) trace p]
-      GVar _ -> internalError "cannot flatten an Expr containing a GVar"
+-- flattenExpr :: Expr End -> [Expr End]
+-- flattenExpr = go []
+--   where
+--     go :: [Prop] -> Expr End -> [Expr End]
+--     go pcs = \case
+--       ITE c t f -> go (PNeg ((PEq (Lit 0) c)) : pcs) t <> go (PEq (Lit 0) c : pcs) f
+--       Success ps trace msg store -> [Success (nubOrd $ ps <> pcs) trace msg store]
+--       Failure ps trace e -> [Failure (nubOrd $ ps <> pcs) trace e]
+--       Partial ps trace p -> [Partial (nubOrd $ ps <> pcs) trace p]
+--       GVar _ -> internalError "cannot flatten an Expr containing a GVar"
 
 -- | Strips unreachable branches from a given expr
 -- Returns a list of executed SMT queries alongside the reduced expression for debugging purposes
@@ -727,30 +729,18 @@ reachable solvers e = do
        When walking back up the tree drop unreachable subbranches.
     -}
     go :: (App m, MonadUnliftIO m) => [Prop] -> Expr End -> m (Maybe (Expr End))
-    go pcs = \case
-      ITE c t f -> do
-        (tres, fres) <- withRunInIO $ \env -> concurrently
-          (env $ go (PEq (Lit 1) c : pcs) t)
-          (env $ go (PEq (Lit 0) c : pcs) f)
-        let subexpr = case (tres, fres) of
-              (Just t', Just f') -> Just $ ITE c t' f'
-              (Just t', Nothing) -> Just t'
-              (Nothing, Just f') -> Just f'
-              (Nothing, Nothing) -> Nothing
-        pure subexpr
-      leaf -> do
+    go pcs expr = do
         res <- checkSatWithProps solvers pcs
         case res of
           Qed -> pure Nothing
-          Cex _ -> pure (Just leaf)
+          Cex _ -> pure (Just expr)
           -- if we get an error, we don't know if the leaf is reachable or not, so
           -- we assume it could be reachable
-          _ -> pure (Just leaf)
+          _ -> pure (Just expr)
 
 -- | Extract constraints stored in Expr End nodes
 extractProps :: Expr End -> [Prop]
 extractProps = \case
-  ITE _ _ _ -> []
   Success asserts _ _ _ -> asserts
   Failure asserts _ _ -> asserts
   Partial asserts _ _ -> asserts
@@ -758,7 +748,6 @@ extractProps = \case
 
 extractEndStates :: Expr End -> Map (Expr EAddr) (Expr EContract)
 extractEndStates = \case
-  ITE {} -> mempty
   Success _ _ _ contr -> contr
   Failure {} -> mempty
   Partial  {} -> mempty
@@ -1062,8 +1051,6 @@ equivalenceCheck' solvers branchesA branchesB create = do
         -- partial end states can't be compared to actual end states, so we always ignore them
         (Partial {}, _) -> pure (Nothing, mempty)
         (_, Partial {}) -> pure (Nothing, mempty)
-        (ITE _ _ _, _) -> internalError "Expressions must be flattened"
-        (_, ITE _ _ _) -> internalError "Expressions must be flattened"
         (GVar _, _) -> internalError "GVar in equivalence check"
         (_, GVar _) -> internalError "GVar in equivalence check"
 
@@ -1125,10 +1112,9 @@ equivalenceCheck' solvers branchesA branchesB create = do
 both' :: (a -> b) -> (a, a) -> (b, b)
 both' f (x, y) = (f x, f y)
 
-produceModels :: App m => SolverGroup -> Expr End -> m [(Expr End, SMTResult)]
-produceModels solvers expr = do
-  let flattened = flattenExpr expr
-      withQueries = fmap (\e -> (extractProps e, e)) flattened
+produceModels :: App m => SolverGroup -> [Expr End] -> m [(Expr End, SMTResult)]
+produceModels solvers exprs = do
+  let withQueries = fmap (\e -> (extractProps e, e)) exprs
   results <- withRunInIO $ \runInIO -> (flip mapConcurrently) withQueries $ \(query, leaf) -> do
     res <- runInIO $ checkSatWithProps solvers query
     pure (res, leaf)
