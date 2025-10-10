@@ -2182,8 +2182,8 @@ tests = testGroup "hevm"
         Just a <- solcRuntime "A" src
         Just c <- solcRuntime "C" src
         let sig = Sig "fun(uint256)" [AbiUIntType 256]
-        (expr, [Qed]) <- withDefaultSolver $ \s ->
-          verifyContract s c (Just sig) [] defaultVeriOpts Nothing Nothing
+        expr <- withDefaultSolver $ \s ->
+          exploreContract s c (Just sig) [] defaultVeriOpts Nothing
         let isSuc (Success {}) = True
             isSuc _ = False
         case filter isSuc (flattenExpr expr) of
@@ -2381,7 +2381,7 @@ tests = testGroup "hevm"
           |]
         -- NOTE: we have a postcondition here, not just a regular verification
         (_, [Cex _]) <- withDefaultSolver $ \s ->
-          verifyContract s c Nothing [] defaultVeriOpts Nothing (Just $ checkBadCheatCode "load(address,bytes32)")
+          verifyContract s c Nothing [] defaultVeriOpts Nothing (checkBadCheatCode "load(address,bytes32)")
         pure ()
     , test "vm.store fails for a potentially aliased address" $ do
         Just c <- solcRuntime "C"
@@ -2398,7 +2398,7 @@ tests = testGroup "hevm"
           |]
         -- NOTE: we have a postcondition here, not just a regular verification
         (_, [Cex _]) <- withDefaultSolver $ \s ->
-          verifyContract s c Nothing [] defaultVeriOpts Nothing (Just $ checkBadCheatCode "store(address,bytes32,bytes32)")
+          verifyContract s c Nothing [] defaultVeriOpts Nothing (checkBadCheatCode "store(address,bytes32,bytes32)")
         pure ()
     -- TODO: make this work properly
     , test "transfering-eth-does-not-dealias" $ do
@@ -3588,7 +3588,7 @@ tests = testGroup "hevm"
                    _ -> PBool True
             sig = Just (Sig "add(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])
         (res, [Qed]) <- withDefaultSolver $ \s ->
-          verifyContract s safeAdd sig [] defaultVeriOpts (Just pre) (Just post)
+          verifyContract s safeAdd sig [] defaultVeriOpts (Just pre) post
         putStrLnM $ "successfully explored: " <> show (Expr.numBranches res) <> " paths"
      ,
 
@@ -3615,7 +3615,7 @@ tests = testGroup "hevm"
                    Success _ _ b _ -> (ReadWord (Lit 0) b) .== (Mul (Lit 2) y)
                    _ -> PBool True
         (res, [Qed]) <- withDefaultSolver $ \s ->
-          verifyContract s safeAdd (Just (Sig "add(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts (Just pre) (Just post)
+          verifyContract s safeAdd (Just (Sig "add(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts (Just pre) post
         putStrLnM $ "successfully explored: " <> show (Expr.numBranches res) <> " paths"
       ,
       test "summary storage writes" $ do
@@ -3646,7 +3646,7 @@ tests = testGroup "hevm"
                 _ -> PBool True
             sig = Just (Sig "f(uint256)" [AbiUIntType 256])
         (res, [Qed]) <- withDefaultSolver $ \s ->
-          verifyContract s c sig [] defaultVeriOpts (Just pre) (Just post)
+          verifyContract s c sig [] defaultVeriOpts (Just pre) post
         putStrLnM $ "successfully explored: " <> show (Expr.numBranches res) <> " paths"
         ,
         -- tests how whiffValue handles Neg via application of the triple IsZero simplification rule
@@ -3708,7 +3708,7 @@ tests = testGroup "hevm"
                      _ -> PBool True
               sig = Just (Sig "f(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])
           (_, [Qed]) <- withDefaultSolver $ \s ->
-            verifyContract s c sig [] defaultVeriOpts (Just pre) (Just post)
+            verifyContract s c sig [] defaultVeriOpts (Just pre) post
           putStrLnM "Correct, this can never fail"
         ,
         -- Inspired by these `msg.sender == to` token bugs
@@ -3745,7 +3745,7 @@ tests = testGroup "hevm"
                      _ -> PBool True
               sig = Just (Sig "f(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])
           (_, [Cex (_, ctr)]) <- withDefaultSolver $ \s ->
-            verifyContract s c sig [] defaultVeriOpts (Just pre) (Just post)
+            verifyContract s c sig [] defaultVeriOpts (Just pre) post
           let x = getVar ctr "arg1"
           let y = getVar ctr "arg2"
           putStrLnM $ "y:" <> show y
@@ -4198,7 +4198,7 @@ tests = testGroup "hevm"
                     <&> set (#state % #callvalue) (Lit 0)
                     <&> over (#env % #contracts)
                        (Map.insert aAddr (initialContract (RuntimeCode (ConcreteRuntimeCode a))))
-            verify s (Fetch.oracle s Nothing mempty) defaultVeriOpts vm (Just $ checkAssertions defaultPanicCodes)
+            verify s (Fetch.oracle s Nothing mempty) defaultVeriOpts vm (checkAssertions defaultPanicCodes)
 
           let storeCex = cex.store
               testCex = case (Map.lookup cAddr storeCex, Map.lookup aAddr storeCex) of
@@ -4274,7 +4274,7 @@ tests = testGroup "hevm"
           let yulsafeDistributivity = hex "6355a79a6260003560e01c14156016576015601f565b5b60006000fd60a1565b603d602d604435600435607c565b6039602435600435607c565b605d565b6052604b604435602435605d565b600435607c565b141515605a57fe5b5b565b6000828201821115151560705760006000fd5b82820190505b92915050565b6000818384048302146000841417151560955760006000fd5b82820290505b92915050565b"
           calldata <- mkCalldata (Just (Sig "distributivity(uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256])) []
           vm <- liftIO $ stToIO $ abstractVM calldata yulsafeDistributivity Nothing False
-          (_, [Qed]) <-  withDefaultSolver $ \s -> verify s (Fetch.oracle s Nothing mempty) defaultVeriOpts vm (Just $ checkAssertions defaultPanicCodes)
+          (_, [Qed]) <-  withDefaultSolver $ \s -> verify s (Fetch.oracle s Nothing mempty) defaultVeriOpts vm (checkAssertions defaultPanicCodes)
           putStrLnM "Proven"
         ,
         test "safemath-distributivity-sol" $ do
@@ -4365,7 +4365,7 @@ tests = testGroup "hevm"
             |]
           let sig = Just (Sig "fun(uint256)" [AbiUIntType 256])
           (_, [Cex (_, cex)]) <- withDefaultSolver $
-            \s -> verifyContract s c sig [] defaultVeriOpts Nothing (Just $ checkAssertions [0x01])
+            \s -> verifyContract s c sig [] defaultVeriOpts Nothing (checkAssertions [0x01])
           let addr = SymAddr "entrypoint"
               testCex = Map.size cex.store == 1 &&
                         case Map.lookup addr cex.store of
@@ -6328,16 +6328,16 @@ checkBadCheatCode sig _ = \case
       _ -> Nothing
 
 allBranchesFail :: App m => ByteString -> Maybe Sig -> m (Either [SMTCex] (Expr End))
-allBranchesFail = checkPost (Just p)
+allBranchesFail = checkPost p
   where
     p _ = \case
       Success _ _ _ _ -> PBool False
       _ -> PBool True
 
 reachableUserAsserts :: App m => ByteString -> Maybe Sig -> m (Either [SMTCex] (Expr End))
-reachableUserAsserts = checkPost (Just $ checkAssertions [0x01])
+reachableUserAsserts = checkPost (checkAssertions [0x01])
 
-checkPost :: App m => Maybe (Postcondition RealWorld) -> ByteString -> Maybe Sig -> m (Either [SMTCex] (Expr End))
+checkPost :: App m => Postcondition RealWorld -> ByteString -> Maybe Sig -> m (Either [SMTCex] (Expr End))
 checkPost post c sig = do
   (e, res) <- withDefaultSolver $ \s ->
     verifyContract s c sig [] defaultVeriOpts Nothing post

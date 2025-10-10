@@ -459,21 +459,7 @@ checkAssert
   -> VeriOpts
   -> m (Expr End, [VerifyResult])
 checkAssert solvers errs c signature' concreteArgs opts = do
-  checkAssertWithSession solvers Nothing errs c signature' concreteArgs opts
-
--- Used only in testing
-checkAssertWithSession
-  :: App m
-  => SolverGroup
-  -> Maybe Fetch.Session
-  -> [Word256]
-  -> ByteString
-  -> Maybe Sig
-  -> [String]
-  -> VeriOpts
-  -> m (Expr End, [VerifyResult])
-checkAssertWithSession solvers sess errs c signature' concreteArgs opts = do
-  verifyContractWithSession solvers sess c signature' concreteArgs opts Nothing (Just $ checkAssertions errs)
+  verifyContract solvers c signature' concreteArgs opts Nothing (checkAssertions errs)
 
 -- Used only in testing
 getExprEmptyStore
@@ -568,27 +554,29 @@ verifyContract :: forall m . App m
   -> [String]
   -> VeriOpts
   -> Maybe (Precondition RealWorld)
-  -> Maybe (Postcondition RealWorld)
+  -> Postcondition RealWorld
   -> m (Expr End, [VerifyResult])
-verifyContract solvers theCode signature' concreteArgs opts maybepre maybepost = do
-  verifyContractWithSession solvers Nothing theCode signature' concreteArgs opts maybepre maybepost
+verifyContract solvers theCode signature' concreteArgs opts maybepre post = do
+  calldata <- mkCalldata signature' concreteArgs
+  preState <- liftIO $ stToIO $ abstractVM calldata theCode maybepre False
+  let fetcher = Fetch.oracle solvers Nothing opts.rpcInfo
+  verify solvers fetcher opts preState post
 
 -- Used only in testing
-verifyContractWithSession :: forall m . App m
+exploreContract :: forall m . App m
   => SolverGroup
-  -> Maybe Fetch.Session
   -> ByteString
   -> Maybe Sig
   -> [String]
   -> VeriOpts
   -> Maybe (Precondition RealWorld)
-  -> Maybe (Postcondition RealWorld)
-  -> m (Expr End, [VerifyResult])
-verifyContractWithSession solvers sess theCode signature' concreteArgs opts maybepre maybepost = do
+  -> m (Expr End)
+exploreContract solvers theCode signature' concreteArgs opts maybepre = do
   calldata <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ abstractVM calldata theCode maybepre False
-  let fetcher = Fetch.oracle solvers sess opts.rpcInfo
-  verify solvers fetcher opts preState maybepost
+  let fetcher = Fetch.oracle solvers Nothing opts.rpcInfo
+  executeVM opts.iterConf fetcher preState
+
 
 -- | Stepper that parses the result of Stepper.runFully into an Expr End
 runExpr :: Stepper.Stepper Symbolic RealWorld (Expr End)
@@ -694,6 +682,11 @@ getPartials = mapMaybe go
       e@(Partial _ _ p) -> Just (p, e)
       _ -> Nothing
 
+
+-- | Symbolically execute the VM and return the representention of the execution
+executeVM :: forall m . App m => IterConfig -> Fetch.Fetcher Symbolic m RealWorld -> VM Symbolic RealWorld -> m (Expr End)
+executeVM iterConfig fetcher preState = interpret fetcher iterConfig preState runExpr
+
 -- | Symbolically execute the VM and check all endstates against the
 -- postcondition, if available.
 verify :: App m
@@ -701,10 +694,10 @@ verify :: App m
   -> Fetch.Fetcher Symbolic m RealWorld
   -> VeriOpts
   -> VM Symbolic RealWorld
-  -> Maybe (Postcondition RealWorld)
+  -> Postcondition RealWorld
   -> m (Expr End, [VerifyResult])
-verify solvers fetcher opts preState maybepost = do
-  (expr, res, _) <- verifyInputs solvers opts fetcher preState maybepost
+verify solvers fetcher opts preState post = do
+  (expr, res, _) <- verifyInputs solvers opts fetcher preState post
   pure $ verifyResults preState expr res
 
 verifyResults :: VM Symbolic RealWorld -> Expr End -> [(SMTResult, Expr End)] -> (Expr End, [VerifyResult])
@@ -725,14 +718,14 @@ verifyInputs
   -> VeriOpts
   -> Fetch.Fetcher Symbolic m RealWorld
   -> VM Symbolic RealWorld
-  -> Maybe (Postcondition RealWorld)
+  -> Postcondition RealWorld
   -> m (Expr End, [(SMTResult, Expr End)], [(PartialExec, Expr End)])
-verifyInputs solvers opts fetcher preState maybepost = do
+verifyInputs solvers opts fetcher preState post = do
   conf <- readConfig
   let call = mconcat ["prefix 0x", getCallPrefix preState.state.calldata]
   when conf.debug $ liftIO $ putStrLn $ "   Exploring call " <> call
 
-  expr <- interpret fetcher opts.iterConf preState runExpr
+  expr <- executeVM opts.iterConf fetcher preState
   when conf.dumpExprs $ liftIO $ T.writeFile "unsimplified.expr" (formatExpr expr)
   let flattened = flattenExpr expr
   when (conf.dumpExprs && conf.simp) $ liftIO $ do
@@ -746,31 +739,28 @@ verifyInputs solvers opts fetcher preState maybepost = do
     printPartialIssues flattened ("the call " <> call)
     putStrLn $ "   Exploration finished, " <> show (Expr.numBranches expr) <> " branch(es) to check in call " <> call
     putStrLn $ "   Keccak preimages in state: " <> (show $ length preState.keccakPreImgs)
-  case maybepost of
-    Nothing -> pure (expr, [(Qed, expr)], partials)
-    Just post -> do
-      let
-        -- Filter out any leaves from `flattened` that can be statically shown to be safe
-        tocheck = flip map flattened $ \leaf -> (toProps leaf preState post, leaf)
-        withQueries = filter canBeSat tocheck
-      when conf.debug $ liftIO $ putStrLn $ "   Checking for reachability of " <> show (length withQueries)
-        <> " potential property violation(s) in call " <> call
+  let
+    -- Filter out any leaves from `flattened` that can be statically shown to be safe
+    tocheck = flip map flattened $ \leaf -> (toProps leaf preState post, leaf)
+    withQueries = filter canBeSat tocheck
+  when conf.debug $ liftIO $ putStrLn $ "   Checking for reachability of " <> show (length withQueries)
+    <> " potential property violation(s) in call " <> call
 
-      -- Dispatch the remaining branches to the solver to check for violations
-      results <- withRunInIO $ \env -> flip mapConcurrently withQueries $ \(query, leaf) -> do
-        res <- env $ checkSatWithProps solvers query
-        when conf.debug $ putStrLn $ "   SMT result: " <> show res
-        pure (res, leaf)
-      let cexs = filter (\(res, _) -> not . isQed $ res) results
-      when conf.debug $ liftIO $
-        putStrLn $ "   Found " <> show (length cexs) <> " potential counterexample(s) in call " <> call
-      pure (expr, cexs, partials)
+  -- Dispatch the remaining branches to the solver to check for violations
+  results <- withRunInIO $ \env -> flip mapConcurrently withQueries $ \(query, leaf) -> do
+    res <- env $ checkSatWithProps solvers query
+    when conf.debug $ putStrLn $ "   SMT result: " <> show res
+    pure (res, leaf)
+  let cexs = filter (\(res, _) -> not . isQed $ res) results
+  when conf.debug $ liftIO $
+    putStrLn $ "   Found " <> show (length cexs) <> " potential counterexample(s) in call " <> call
+  pure (expr, cexs, partials)
   where
     getCallPrefix :: Expr Buf -> String
     getCallPrefix (WriteByte (Lit 0) (LitByte a) (WriteByte (Lit 1) (LitByte b) (WriteByte (Lit 2) (LitByte c) (WriteByte (Lit 3) (LitByte d) _)))) = mconcat $ map (printf "%02x") [a,b,c,d]
     getCallPrefix _ = "unknown"
-    toProps leaf vm post = let
-      postCondition = post preState leaf
+    toProps leaf vm post' = let
+      postCondition = post' preState leaf
       keccakConstraints = map (\(bs, k)-> PEq (Keccak (ConcreteBuf bs)) (Lit k)) (Set.toList vm.keccakPreImgs)
      in case postCondition of
       PBool True -> [PBool False]
