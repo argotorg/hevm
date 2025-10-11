@@ -39,7 +39,7 @@ tests = testGroup "rpc"
     [ test "pre-merge-block" $ do
         let block = BlockNumber 15537392
         conf <- readConfig
-        sess <- mkSession
+        sess <- mkSession Nothing
         liftIO $ do
           (cb, numb, basefee, prevRan) <- fetchBlockWithSession conf sess block testRpc >>= \case
                         Nothing -> internalError "Could not fetch block"
@@ -55,7 +55,7 @@ tests = testGroup "rpc"
           assertEqual "prevRan" 11049842297455506 prevRan
     , test "post-merge-block" $ do
         conf <- readConfig
-        sess <- mkSession
+        sess <- mkSession Nothing
         liftIO $ do
           let block = BlockNumber 16184420
           (cb, numb, basefee, prevRan) <- fetchBlockWithSession conf sess block testRpc >>= \case
@@ -87,7 +87,7 @@ tests = testGroup "rpc"
           calldata' = ConcreteBuf $ abiMethod "transfer(address,uint256)" (AbiTuple (V.fromList [AbiAddress (Addr 0xdead), AbiUInt 256 wad]))
           rpcDat = Just (BlockNumber blockNum, testRpc)
           rpcInfo :: RpcInfo = mempty { blockNumURL = rpcDat }
-        sess <- mkSession
+        sess <- mkSession Nothing
         vm <- weth9VM sess blockNum (calldata', [])
         postVm <- withSolvers Z3 1 1 Nothing $ \solvers ->
           Stepper.interpret (oracle solvers (Just sess) rpcInfo) vm Stepper.runFully
@@ -112,7 +112,7 @@ tests = testGroup "rpc"
           blockNum = 16198552
           postc _ (Failure _ _ (Revert _)) = PBool False
           postc _ _ = PBool True
-        sess <- mkSession
+        sess <- mkSession Nothing
         vm <- weth9VM sess blockNum calldata'
         (_, [Cex (_, model)]) <- withSolvers Z3 1 1 Nothing $ \s ->
           let rpcInfo ::RpcInfo =  mempty { blockNumURL = Just (BlockNumber blockNum, testRpc) }

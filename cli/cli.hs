@@ -99,6 +99,7 @@ data CommonOptions = CommonOptions
   , maxDepth      ::Maybe Int
   , noSimplify    ::Bool
   , onlyDeployed  ::Bool
+  , cacheDir      ::Maybe String
   }
 
 commonOptions :: Parser CommonOptions
@@ -127,6 +128,7 @@ commonOptions = CommonOptions
   <*> (optional $ option auto $ long "max-depth" <> help "Limit maximum depth of branching during exploration (default: unlimited)")
   <*> (switch $ long "no-simplify" <> help "Don't perform simplification of expressions")
   <*> (switch $ long "only-deployed" <> help "When trying to resolve unknown addresses, only use addresses of deployed contracts")
+  <*> (optional $ strOption $ long "cache-dir" <> help "Directory to save and load RPC cache")
 
 data CommonExecOptions = CommonExecOptions
   { address       ::Maybe Addr
@@ -496,7 +498,7 @@ symbCheck :: App m => CommonFileOptions -> SymbolicOptions -> CommonExecOptions 
 symbCheck cFileOpts sOpts cExecOpts cOpts = do
   let block' = maybe Fetch.Latest Fetch.BlockNumber cExecOpts.block
       blockUrlInfo = (,) block' <$> cExecOpts.rpc
-  sess <- Fetch.mkSession
+  sess <- Fetch.mkSession cOpts.cacheDir
   calldata <- buildCalldata cOpts sOpts.sig sOpts.arg
   preState <- symvmFromCommand cExecOpts sOpts cFileOpts sess calldata
   errCodes <- case sOpts.assertions of
@@ -564,7 +566,7 @@ areAnyPrefixOf prefixes t = any (flip T.isPrefixOf t) prefixes
 launchExec :: App m => CommonFileOptions -> ExecOptions -> CommonExecOptions -> CommonOptions -> m ()
 launchExec cFileOpts execOpts cExecOpts cOpts = do
   dapp <- getSrcInfo execOpts cOpts
-  sess <- Fetch.mkSession
+  sess <- Fetch.mkSession cOpts.cacheDir
   vm <- vmFromCommand cOpts cExecOpts cFileOpts execOpts sess
   let
     block = maybe Fetch.Latest Fetch.BlockNumber cExecOpts.block
@@ -843,7 +845,7 @@ unitTestOptions testOpts cOpts solvers buildOutput = do
           (Nothing, Just url) -> Just (Fetch.Latest, url)
           _ -> Nothing
       rpcDat = Fetch.mkRpcInfo blockUrlInfo mockData
-  sess <- Fetch.mkSession
+  sess <- Fetch.mkSession cOpts.cacheDir
   params <- paramsFromRpc rpcDat sess
   let testn = params.number
       block' = if 0 == testn
