@@ -52,7 +52,7 @@ runForgeTest testFile match = runForgeTestCustom testFile match Nothing Nothing 
 testOpts :: forall m . App m => SolverGroup -> FilePath -> Maybe BuildOutput -> Text -> Maybe Integer -> Bool -> RpcInfo -> m (UnitTestOptions RealWorld)
 testOpts solvers root buildOutput match maxIter allowFFI rpcinfo = do
   let srcInfo = maybe emptyDapp (dappInfo root) buildOutput
-  sess <- Fetch.mkSession
+  sess <- Fetch.mkSession Nothing
   params <- paramsFromRpc rpcinfo sess
 
   pure UnitTestOptions

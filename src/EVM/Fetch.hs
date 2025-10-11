@@ -3,6 +3,7 @@ module EVM.Fetch
   ( fetchContractWithSession
   , fetchBlockWithSession
   , fetchSlotWithSession
+  , fetchSlotWithCache
   , fetchWithSession
   , fetchQuery
   , oracle
@@ -17,6 +18,7 @@ module EVM.Fetch
   , Session (..)
   , FetchCache (..)
   , addFetchCache
+  , saveCache
   ) where
 
 import Prelude hiding (Foldable(..))
@@ -27,10 +29,19 @@ import EVM.FeeSchedule (feeSchedule)
 import EVM.Format (hexText)
 import EVM.SMT
 import EVM.Solvers
-import EVM.Types
+import EVM.Types hiding (ByteStringS)
+import EVM.Types (ByteStringS(..))
 import EVM (emptyContract)
 
 import Optics.Core
+import GHC.Generics (Generic)
+import System.FilePath ((</>))
+import System.Directory (createDirectoryIfMissing, doesFileExist)
+import Data.Aeson.Encode.Pretty (encodePretty)
+import qualified Data.ByteString.Lazy as BSL
+import Data.Bifunctor (first)
+import Control.Exception (try, SomeException)
+import Control.Monad (join)
 
 import Control.Monad.Trans.Maybe
 import Control.Applicative (Alternative(..))
@@ -53,9 +64,7 @@ import Control.Monad.IO.Class
 import Control.Monad (when)
 import EVM.Effects
 import qualified EVM.Expr as Expr
-import Data.Aeson.Encode.Pretty (encodePretty)
 import Data.ByteString.Base16 qualified as BS16
-import qualified Data.ByteString.Lazy as BSL
 import Data.ByteString.Char8 qualified as Char8
 import Control.Concurrent.MVar (MVar, newMVar, readMVar, modifyMVar_)
 
@@ -65,13 +74,54 @@ data Session = Session
   { sess           :: NetSession.Session
   , latestBlockNum :: MVar (Maybe W256)
   , sharedCache    :: MVar FetchCache
+  , cacheDir       :: Maybe FilePath
   }
 
 data FetchCache = FetchCache
   { contractCache :: Map.Map Addr Contract
   , slotCache     :: Map.Map (Addr, W256) W256
   , blockCache    :: Map.Map W256 Block
-  }
+  } deriving (Generic)
+
+instance ToJSON Contract where
+  toJSON c = object
+    [ "code"    .= case c.code of
+        RuntimeCode (ConcreteRuntimeCode bs) -> Just (ByteStringS bs)
+        _ -> Nothing
+    , "nonce"   .= c.nonce
+    , "balance" .= case c.balance of
+        Lit w -> Just w
+        _ -> Nothing
+    , "external" .= c.external
+    ]
+
+instance FromJSON Contract where
+  parseJSON = withObject "Contract" $ \v -> do
+    maybeCodeText <- v .:? "code"
+    let mcCode = hexText <$> join maybeCodeText
+    mcNonce <- v .: "nonce"
+    maybeBalance <- v .:? "balance"
+    let mcBalance = join maybeBalance
+    external <- v .: "external"
+    let code = maybe (RuntimeCode (ConcreteRuntimeCode "")) (RuntimeCode . ConcreteRuntimeCode) mcCode
+    pure $ initialContract code
+      & #nonce .~ mcNonce
+      & #balance .~ maybe (Lit 0) Lit mcBalance
+      & #external .~ external
+
+instance ToJSON FetchCache where
+  toJSON (FetchCache cs ss bs) = object
+    [ "contracts" .= Map.toList cs
+    , "slots"     .= map (first (T.pack . show)) (Map.toList ss)
+    , "blocks"    .= bs
+    ]
+
+instance FromJSON FetchCache where
+  parseJSON = withObject "FetchCache" $ \v -> FetchCache
+    <$> (Map.fromList <$> v .: "contracts")
+    <*> (Map.fromList . map (first (read . T.unpack)) <$> v .: "slots")
+    <*> v .: "blocks"
+
 instance Show FetchCache where
   show (FetchCache c s b) =
     "FetchCache { contractCache: " ++ show (Map.keys c) ++
@@ -299,17 +349,20 @@ fetchContractWithSession conf sess nPre url addr = do
     Just c -> do
       when (conf.debug) $ putStrLn $ "-> Using cached contract at " ++ show addr
       pure $ Just c
-    Nothing -> runMaybeT $ do
-      let fetch :: Show a => RpcQuery a -> IO (Maybe a)
-          fetch = fetchQuery n (fetchWithSession url sess.sess)
-          fname  = "fetched_contract_" ++ show addr ++ ".json"
-      code    <- MaybeT $ fetch (QueryCode addr)
-      nonce   <- MaybeT $ fetch (QueryNonce addr)
-      balance <- MaybeT $ fetch (QueryBalance addr)
-      when (conf.debug) $ liftIO $ writeMockDataToFile fname (MockData (Just (Map.singleton addr (RPCContract code nonce balance))) Nothing Nothing)
-      let contr = makeContractFromRPC (RPCContract code nonce balance)
-      liftIO $ modifyMVar_ sess.sharedCache $ \c -> pure $ c { contractCache = (Map.insert addr contr cache.contractCache) }
-      pure contr
+    Nothing -> do
+      when (conf.debug) $ putStrLn $ "-> Fetching contract at " ++ show addr
+      runMaybeT $ do
+        let fetch :: Show a => RpcQuery a -> IO (Maybe a)
+            fetch = fetchQuery n (fetchWithSession url sess.sess)
+            fname  = "fetched_contract_" ++ show addr ++ ".json"
+        code    <- MaybeT $ fetch (QueryCode addr)
+        nonce   <- MaybeT $ fetch (QueryNonce addr)
+        balance <- MaybeT $ fetch (QueryBalance addr)
+        when (conf.debug) $ liftIO $ writeMockDataToFile fname (MockData (Just (Map.singleton addr (RPCContract code nonce balance))) Nothing Nothing)
+        let contr = makeContractFromRPC (RPCContract code nonce balance)
+        liftIO $ modifyMVar_ sess.sharedCache $ \c ->
+          pure $ c { contractCache = Map.insert addr contr c.contractCache }
+        pure contr
 
 -- In case the user asks for Latest, and we have not yet established what Latest is,
 -- we fetch the block to find out. Otherwise, we update Latest to the value we have stored
@@ -338,6 +391,27 @@ makeContractFromRPC (RPCContract code nonce balance) =
       & set #balance  (Lit balance)
       & set #external True
 
+fetchSlotWithCache :: Config -> Session -> BlockNumber -> Text -> Addr -> W256 -> IO (Maybe W256)
+fetchSlotWithCache conf sess nPre url addr slot = do
+  n <- getLatestBlockNum conf sess nPre url
+  cache <- readMVar sess.sharedCache
+  case Map.lookup (addr, slot) cache.slotCache of
+    Just s -> do
+      putStrLn $ "-> Using cached slot value for slot " <> show slot <> " at " <> show addr
+      pure $ Just s
+    Nothing -> do
+      putStrLn $ "-> Fetching slot " <> show slot <> " at " <> show addr
+      ret <- fetchSlotWithSession sess.sess n url addr slot
+      when (isJust ret) $ let val = fromJust ret in
+        modifyMVar_ sess.sharedCache $ \c ->
+          pure $ c { slotCache = Map.insert (addr, slot) val c.slotCache }
+      when (conf.debug) $ do
+        let fname = "fetched_slot_" ++ show addr ++ "_" ++ show slot ++ ".json"
+        case ret of
+          Just v -> writeMockDataToFile fname (MockData Nothing (Just (Map.singleton (addr, slot) v)) Nothing)
+          Nothing -> pure ()
+      pure ret
+
 fetchSlotWithSession :: NetSession.Session -> BlockNumber -> Text -> Addr -> W256 -> IO (Maybe W256)
 fetchSlotWithSession sess n url addr slot =
   fetchQuery n (fetchWithSession url sess) (QuerySlot addr slot)
@@ -355,8 +429,8 @@ internalBlockFetch conf sess n url = do
     Nothing -> pure ret
     Just b -> do
       let bn = forceLit b.number
-      cache <- readMVar sess.sharedCache
-      liftIO $ modifyMVar_ sess.sharedCache $ \c -> pure $ c { blockCache = (Map.insert bn b cache.blockCache) }
+      liftIO $ modifyMVar_ sess.sharedCache $ \c ->
+        pure $ c { blockCache = Map.insert bn b c.blockCache }
       when (conf.debug) $ do
         let fname = "fetched_block_" ++ show bn ++ ".json"
         writeMockDataToFile fname (MockData Nothing Nothing (Just (Map.singleton bn b)))
@@ -374,7 +448,8 @@ fetchSlotFrom sess nPre url addr slot = do
     Nothing -> do
       ret <- liftIO $ fetchSlotWithSession sess.sess n url addr slot
       when (isJust ret) $ let val = fromJust ret in
-        liftIO $ modifyMVar_ sess.sharedCache $ \c -> pure $ c { slotCache = (Map.insert (addr,slot) val cache.slotCache) }
+        liftIO $ modifyMVar_ sess.sharedCache $ \c ->
+          pure $ c { slotCache = Map.insert (addr, slot) val c.slotCache }
       when (conf.debug) $ liftIO $ do
         let fname = "fetched_slot_" ++ show addr ++ "_" ++ show slot ++ ".json"
         case ret of
@@ -382,18 +457,53 @@ fetchSlotFrom sess nPre url addr slot = do
           Nothing -> pure ()
       pure ret
 
-mkSession :: App m => m Session
-mkSession = do
+cacheFileName :: FilePath
+cacheFileName = "rpc-cache.json"
+
+emptyCache :: FetchCache
+emptyCache = FetchCache Map.empty Map.empty Map.empty
+
+loadCache :: FilePath -> IO FetchCache
+loadCache dir = do
+  let fp = dir </> cacheFileName
+  exists <- doesFileExist fp
+  if exists
+    then do
+      res <- try (BSL.readFile fp) :: IO (Either SomeException BSL.ByteString)
+      case res of
+        Left e -> do
+          putStrLn $ "Warning: could not read cache file " ++ fp ++ ": " ++ show e
+          pure emptyCache
+        Right content ->
+          case eitherDecode content of
+            Left err -> do
+              putStrLn $ "Warning: could not parse cache file " ++ fp ++ ": " ++ err
+              pure emptyCache
+            Right cache -> pure cache
+    else
+      pure emptyCache
+
+saveCache :: FilePath -> FetchCache -> IO ()
+saveCache dir cache = do
+  createDirectoryIfMissing True dir
+  let fp = dir </> cacheFileName
+  BSL.writeFile fp (encodePretty cache)
+
+mkSession :: App m => Maybe FilePath -> m Session
+mkSession cacheDir = do
   sess <- liftIO NetSession.newAPISession
-  let emptyCache = FetchCache Map.empty Map.empty Map.empty
-  cache <- liftIO $ newMVar emptyCache
+  initialCache <-
+    case cacheDir of
+      Nothing -> pure emptyCache
+      Just dir -> liftIO $ loadCache dir
+  cache <- liftIO $ newMVar initialCache
   latestBlockNum <- liftIO $ newMVar Nothing
-  pure $ Session sess latestBlockNum cache
+  pure $ Session sess latestBlockNum cache cacheDir
 
 -- Only used for testing (test.hs, BlockchainTests.hs)
 zero :: Natural -> Maybe Natural -> Fetcher t m s
 zero smtjobs smttimeout q = do
-  sess <- mkSession
+  sess <- mkSession Nothing
   withSolvers Z3 smtjobs 1 smttimeout $ \s ->
     oracle s (Just sess) mempty q
 
