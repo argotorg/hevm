@@ -3,7 +3,7 @@
 
   inputs = {
     flake-utils.url = "github:numtide/flake-utils";
-    nixpkgs.url = "github:nixos/nixpkgs/staging";
+    nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
     foundry = {
       url = "github:shazow/foundry.nix/stable";
       inputs.nixpkgs.follows = "nixpkgs";
