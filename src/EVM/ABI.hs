@@ -69,7 +69,7 @@ import Control.Applicative ((<|>))
 import Control.Monad (replicateM, replicateM_, forM_, void)
 import Data.Binary.Get (Get, runGet, runGetOrFail, label, getWord8, getWord32be, skip)
 import Data.Binary.Put (Put, runPut, putWord8, putWord32be)
-import Data.Bits (shiftL, shiftR, (.&.))
+import Data.Bits (shiftL, shiftR, (.&.), testBit, bit, complement, (.|.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Base16 qualified as BS16
@@ -227,7 +227,13 @@ getAbi t = label (Text.unpack (abiTypeSolidity t)) $
       xs <- replicateM word32Count getWord32be
       pure (AbiUInt n (pack32 word32Count xs))
 
-    AbiIntType n   -> asUInt n (AbiInt n)
+    AbiIntType 256 -> asUInt 256 (AbiInt 256)
+    AbiIntType n  -> do
+      (AbiUInt _ w) <- getAbi (AbiUIntType n)
+      let truncate' n' w' = w' .&. (bit n' - 1)
+      let signExtend n' w' = if testBit w' (n' - 1) then w' .|. complement (bit n' - 1) else w'
+      pure (AbiInt n (fromIntegral $ (signExtend n) . (truncate' n) $ w))
+
     AbiAddressType -> asUInt 256 AbiAddress
     AbiBoolType    -> asUInt 256 (AbiBool . (> (0 :: Integer)))
 
@@ -506,22 +512,21 @@ bytesP = do
 data AbiVals = NoVals | CAbi [AbiValue] | SAbi [Expr EWord]
   deriving (Show)
 
-decodeBuf :: [AbiType] -> Expr Buf -> AbiVals
+decodeBuf :: [AbiType] -> Expr Buf -> (AbiVals, String)
 decodeBuf tps (ConcreteBuf b) =
   case runGetOrFail (getAbiSeq (length tps) tps) (BSLazy.fromStrict b) of
-    Right ("", _, args) -> CAbi (toList args)
-    _ -> NoVals
+    Right ("", _, args) -> (CAbi (toList args), "")
+    Right (str, _, args) -> (CAbi (toList args), "with trailing bytes: " ++ show (BSLazy.unpack str))
+    Left (_, _, err) -> (NoVals, "error decoding abi: " ++ err)
 decodeBuf tps buf =
-  if any isDynamic tps then NoVals
+  if any isDynamic tps then (NoVals, "dynamic types not supported in symbolic decoding")
   else
     let
       vs = decodeStaticArgs 0 (length tps) buf
       asBS = mconcat $ fmap word256Bytes (mapMaybe maybeLitWordSimp vs)
     in if not (all isLitWord vs)
-       then SAbi vs
-       else case runGetOrFail (getAbiSeq (length tps) tps) (BSLazy.fromStrict asBS) of
-         Right ("", _, args) -> CAbi (toList args)
-         _ -> NoVals
+       then (SAbi vs, "")
+       else decodeBuf tps (ConcreteBuf asBS)
   where
     isDynamic t = abiKind t == Dynamic
 

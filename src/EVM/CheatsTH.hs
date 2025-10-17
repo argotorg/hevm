@@ -30,7 +30,7 @@ envReadSingleCheat sigString = [|
   \wrap convert ->
     action $sigL $
       \sig input -> case decodeBuf [AbiStringType] input of
-        CAbi [AbiString variable] -> let
+        (CAbi [AbiString variable],"") -> let
           varStr = toString variable
           cont value = continueOnce $ do
             either' (convert value) frameRevert $ \v ->
@@ -50,7 +50,7 @@ envReadMultipleCheat sigString arrType = [|
   \convert ->
     action $sigL $
       \sig input -> case decodeBuf [AbiStringType, AbiStringType] input of
-        CAbi [AbiString variable, AbiString delimiter] -> let
+        (CAbi [AbiString variable, AbiString delimiter],"") -> let
           (varStr, delimStr) = (toString variable, toString delimiter)
           cont value = continueOnce $ do
             let (errors, values) = partitionEithers $ map convert $ splitOn delimStr value

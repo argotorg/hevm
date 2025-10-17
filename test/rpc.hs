@@ -18,7 +18,6 @@ import EVM.Solvers
 import EVM.Stepper qualified as Stepper
 import EVM.SymExec
 import EVM.Test.Utils
-import EVM.Solidity (ProjectType(..))
 import EVM.Types hiding (BlockNumber, Env)
 import Control.Monad.ST (stToIO, RealWorld)
 import Control.Monad.Reader (ReaderT)
@@ -76,7 +75,7 @@ tests = testGroup "rpc"
     -- execute against remote state from a ds-test harness
     [ test "dapp-test" $ do
         let testFile = "test/contracts/pass/rpc.sol"
-        res <- runSolidityTestCustom testFile ".*" Nothing Nothing False testRpcInfo Foundry
+        res <- runForgeTestCustom testFile ".*" Nothing Nothing False testRpcInfo
         liftIO $ assertEqual "test result" (True, True) res
 
     -- concretely exec "transfer" on WETH9 using remote rpc

@@ -38,11 +38,6 @@ data Config = Config
   , dumpUnsolved     :: Maybe FilePath
   , debug            :: Bool
   , dumpTrace        :: Bool
-  , numCexFuzz       :: Integer
-   -- Used to debug fuzzer in test.hs. It disables the SMT solver
-   -- and uses the fuzzer ONLY to try to find a counterexample.
-   -- Returns Unknown if the Cex cannot be found via fuzzing
-  , onlyCexFuzz      :: Bool
   , decomposeStorage :: Bool
   , promiseNoReent   :: Bool
   , maxBufSize       :: Int
@@ -62,8 +57,6 @@ defaultConfig = Config
   , dumpUnsolved = Nothing
   , debug = False
   , dumpTrace = False
-  , numCexFuzz = 10
-  , onlyCexFuzz  = False
   , decomposeStorage = True
   , promiseNoReent = False
   , maxBufSize = 64

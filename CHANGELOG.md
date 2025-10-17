@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## Fixed
+- Fix incorrect simplification rule for `PEq (Lit 1) (IsZero (LT a b))`
+
+## [0.56.0] - 2025-10-13
+
 ## Added
+- Output geth compatible jsonl traces in `hevm exec` via `--json-trace`
 - Allow dumping unsolved SMT files via `--dump-unsolved`
 - Allow resolving unknown addresses to only those that are already deployed
   via option `--only-deployed`
@@ -19,12 +25,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   node via `--mock-file FILE.json`. This will improve reliability of
   tests that depend on RPC responses
 - We now map back (add,pc) warnings to lines of source code
+- Calldata decoding is now more robust: we try to decode
+  as much as possible even in case of trailing bytes
 
 ## Fixed
 - We now extract more Keccak computations than before from the Props to assert
   more Keccak equalities.
+- Fixed false positive caused by loss of information about concrete
+  Keccak computations.
 - Faster word256Bytes and word160Bytes functions to help concrete execution
   performance
+- We avoid crashing if a cheatcode or a precompiled is invalid or not implemented in concrete mode
 - RPC fetching was sometimes incorrect in case of writing to storage
   before fetching it via RPC
 - We no longer increment branch depth twice when branching both ways
@@ -39,6 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in the constraints to be the one we computed it to be. Fixed.
 - We now properly collect all storage reads from the program and build
   a proper counterexample. Previously, some information might have been missing.
+- Fixed int calldata decoding of solc's v1 ABI encoding
 
 ## Changed
 - Updated forge to 1.2.3 and forge-std to 60acb7aa (1.9.7+)
@@ -50,6 +62,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - hevm and solidity has been moved to under github.com/argotorg
 - Extra range constraints for ABI symbolic types are no longer added. They are
   not needed as they are enforced in the bytecode.
+- We no longer try to fuzz the Expr to find a concrete value that satisfies
+  the expression. This was not very effective and made the system more complex
+  to maintain. Echidna is an excellent fuzzer that can be used instead.
+- Shrinking of the calldata is now more aggressive, shrinking even small (<1024B)
+  buffers
+- Rename confusing function name runSolidityTest to runForgeTest
 
 ## [0.55.1] - 2025-07-22
 

@@ -8,11 +8,13 @@
 module Main where
 
 import Control.Monad (when, forM_, unless)
+import Control.Monad.State.Strict (runStateT)
 import Control.Monad.ST (RealWorld, stToIO)
 import Control.Monad.IO.Unlift
 import Control.Exception (try, IOException)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString.Lazy as BS
+import Data.ByteString.Builder (toLazyByteString)
 import qualified Data.ByteString.Char8 as BC
 import Data.DoubleWord (Word256)
 import Data.List (intersperse, intercalate)
@@ -33,6 +35,7 @@ import System.FilePath ((</>))
 import System.Exit (exitFailure, exitWith, ExitCode(..))
 import Data.List.Split (splitOn)
 import Text.Read (readMaybe)
+import JSONL (jsonlBuilder, jsonLine)
 
 import EVM (initialContract, abstractContract, makeVm)
 import EVM.ABI (Sig(..))
@@ -53,6 +56,7 @@ import EVM.Types qualified
 import EVM.UnitTest
 import EVM.Effects
 import EVM.Expr (maybeLitWordSimp, maybeLitAddrSimp)
+import EVM.Tracing (interpretWithTrace, VMTraceStepResult(..))
 
 data AssertionType = DSTest | Forge
   deriving (Eq, Show, Read)
@@ -88,7 +92,6 @@ data CommonOptions = CommonOptions
   , smtdebug      ::Bool
   , dumpUnsolved  ::Maybe String
   , numSolvers    ::Maybe Natural
-  , numCexFuzz    ::Integer
   , maxIterations ::Integer
   , promiseNoReent::Bool
   , maxBufSize    ::Int
@@ -117,7 +120,6 @@ commonOptions = CommonOptions
   <*> (switch $ long "smtdebug"             <> help "Print smt queries sent to the solver")
   <*> (optional $ strOption $ long "dump-unsolved" <> help "Dump unsolved SMT queries to this (relative) path")
   <*> (optional $ option auto $ long "num-solvers" <> help "Number of solver instances to use (default: number of cpu cores)")
-  <*> (option auto $ long "num-cex-fuzz"    <> showDefault <> value 3 <> help "Number of fuzzing tries to do to generate a counterexample")
   <*> (option auto $ long "max-iterations"  <> showDefault <> value 5 <> help "Number of times we may revisit a particular branching point. For no bound, set -1")
   <*> (switch $ long "promise-no-reent"     <> help "Promise no reentrancy is possible into the contract(s) being examined")
   <*> (option auto $ long "max-buf-size"    <> value 64 <> help "Maximum size of buffers such as calldata and returndata in exponents of 2 (default: 64, i.e. 2^64 bytes)")
@@ -246,13 +248,15 @@ symbolicOptions = SymbolicOptions
   <*> createParser
 
 data ExecOptions = ExecOptions
-  { projectType   ::ProjectType
+  { projectType :: ProjectType
   , create :: Bool
+  , jsonTrace :: Bool
   }
 execOptions :: Parser ExecOptions
 execOptions = ExecOptions
   <$> projectTypeParser
   <*> createParser
+  <*> (switch $ long "json-trace" <> help "Output a geth compatible json trace")
 
 -- Combined options data type
 data Command
@@ -356,7 +360,6 @@ main = do
         , debug = cOpts.debug
         , dumpEndStates = cOpts.debug
         , dumpExprs = cOpts.debug
-        , numCexFuzz = cOpts.numCexFuzz
         , dumpTrace = cOpts.trace
         , decomposeStorage = Prelude.not cOpts.noDecompose
         , promiseNoReent = cOpts.promiseNoReent
@@ -570,7 +573,22 @@ launchExec cFileOpts execOpts cExecOpts cOpts = do
 
   -- TODO: we shouldn't need solvers to execute this code
   withSolvers Z3 0 1 Nothing $ \solvers -> do
-    vm' <- EVM.Stepper.interpret (Fetch.oracle solvers (Just sess) rpcDat) vm EVM.Stepper.runFully
+    let fetcher = Fetch.oracle solvers (Just sess) rpcDat
+    vm' <- if execOpts.jsonTrace
+           then do
+             (vm', (_, traces)) <- runStateT (interpretWithTrace fetcher EVM.Stepper.runFully) (vm, [])
+             liftIO $ do
+               let ret = case vm'.result of
+                           Just (VMSuccess (ConcreteBuf r)) -> ByteStringS r
+                           Just (VMFailure (Revert (ConcreteBuf r))) -> ByteStringS r
+                           _ -> ByteStringS ""
+               let res = VMTraceStepResult ret (vm.state.gas - vm'.state.gas)
+               let jsonl = toLazyByteString $ jsonlBuilder traces <> jsonLine res
+               let file = "hevm-trace.jsonl"
+               BS.writeFile file jsonl
+               putStrLn $ "Wrote json trace to " <> show file
+             pure vm'
+           else EVM.Stepper.interpret fetcher vm EVM.Stepper.runFully
     writeTraceDapp dapp vm'
     case vm'.result of
       Just (VMFailure (Revert msg)) -> liftIO $ do

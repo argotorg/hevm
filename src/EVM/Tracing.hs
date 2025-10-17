@@ -6,6 +6,7 @@ module EVM.Tracing
   , execWithTrace
   , vmTraceStep
   , VMTraceStep (..)
+  , VMTraceStepResult (..)
   )
 where
 
@@ -15,6 +16,7 @@ import Optics.State
 
 import Control.Monad.IO.Class
 import Control.Monad.ST (stToIO, RealWorld)
+import Data.Aeson qualified as JSON
 import Data.Word (Word8, Word64)
 import GHC.Generics (Generic)
 import Control.Monad.State.Strict (StateT(..))
@@ -27,7 +29,6 @@ import EVM.Op (intToOpName)
 import Witch (into)
 import Data.ByteString qualified as BS
 
-
 import EVM.Effects
 import EVM.Fetch qualified as Fetch
 import EVM.Types
@@ -35,13 +36,13 @@ import EVM.Stepper
 
 data VMTraceStep =
   VMTraceStep
-  { tracePc      :: Int
-  , traceOp      :: Int
-  , traceGas     :: Data.Word.Word64
-  , traceMemSize :: Data.Word.Word64
-  , traceDepth   :: Int
-  , traceStack   :: [W256]
-  , traceError   :: Maybe String
+  { pc      :: Int
+  , op      :: Int
+  , gas     :: Data.Word.Word64
+  , memSize :: Data.Word.Word64
+  , depth   :: Int
+  , stack   :: [W256]
+  , error   :: Maybe String
   } deriving (Generic)
 
 instance Show VMTraceStep where
@@ -55,6 +56,19 @@ instance Show VMTraceStep where
     ++ ", Stack = " ++ show stack
     ++ ", Error = " ++ show err
     ++ " }"
+
+instance JSON.ToJSON VMTraceStep where
+  toEncoding = JSON.genericToEncoding JSON.defaultOptions
+instance JSON.FromJSON VMTraceStep
+
+data VMTraceStepResult =
+  VMTraceStepResult
+  { out  :: ByteStringS
+  , gasUsed :: Data.Word.Word64
+  } deriving (Generic, Show)
+
+instance JSON.ToJSON VMTraceStepResult where
+  toEncoding = JSON.genericToEncoding JSON.defaultOptions
 
 type TraceState s = (VM Concrete s, [VMTraceStep])
 
@@ -78,7 +92,7 @@ runWithTrace = do
     Just (VMFailure _) -> do
       -- Update error text for last trace element
       (a, b) <- State.get
-      let updatedElem = (last b) {traceError = (vmTraceStep vm0).traceError}
+      let updatedElem = (last b) {error = (vmTraceStep vm0).error}
           updatedTraces = take (length b - 1) b ++ [updatedElem]
       State.put (a, updatedTraces)
       pure vm0
@@ -117,16 +131,17 @@ vmTraceStep :: VM Concrete s -> VMTraceStep
 vmTraceStep vm =
   let
     memsize = vm.state.memorySize
-  in VMTraceStep { tracePc = vm.state.pc
-             , traceOp = into $ getOpFromVM vm
-             , traceGas = vm.state.gas
-             , traceMemSize = memsize
-             -- increment to match geth format
-             , traceDepth = 1 + length (vm.frames)
-             -- reverse to match geth format
-             , traceStack = reverse $ forceLit <$> vm.state.stack
-             , traceError = readoutError vm.result
-             }
+  in VMTraceStep
+    { pc = vm.state.pc
+    , op = into $ getOpFromVM vm
+    , gas = vm.state.gas
+    , memSize = memsize
+    -- increment to match geth format
+    , depth = 1 + length (vm.frames)
+    -- reverse to match geth format
+    , stack = reverse $ forceLit <$> vm.state.stack
+    , error = readoutError vm.result
+    }
   where
     readoutError :: Maybe (VMResult t s) -> Maybe String
     readoutError (Just (VMFailure e)) = Just $ evmErrToString e
@@ -143,3 +158,4 @@ getOpFromVM vm =
         RuntimeCode (SymbolicRuntimeCode _) -> internalError "RuntimeCode is symbolic"
   in if xs == BS.empty then 0
                        else BS.head xs
+

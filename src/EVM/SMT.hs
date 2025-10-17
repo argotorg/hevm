@@ -116,7 +116,7 @@ declareIntermediates bufs stores = do
 assertProps :: Config -> [Prop] -> Err SMT2
 assertProps conf ps =
   if not conf.simp then assertPropsHelper False ps
-  else assertPropsHelper True (decompose . Expr.simplifyProps $ ps)
+  else assertPropsHelper True (decompose ps)
   where
     decompose :: [Prop] -> [Prop]
     decompose props = if conf.decomposeStorage && safeExprs && safeProps

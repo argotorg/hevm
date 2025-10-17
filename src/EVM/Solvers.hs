@@ -16,7 +16,7 @@ import Control.Monad.State.Strict
 import Control.Monad.IO.Unlift
 import Data.Map (Map)
 import Data.Map qualified as Map
-import Data.Set (Set, isSubsetOf, fromList)
+import Data.Set (Set, isSubsetOf, fromList, toList)
 import Data.Maybe (fromMaybe, isJust, fromJust)
 import Data.Either (isLeft)
 import Data.Text qualified as TStrict
@@ -28,11 +28,11 @@ import qualified Data.Text.Lazy.Builder.Int (decimal)
 import System.Process (createProcess, cleanupProcess, proc, ProcessHandle, std_in, std_out, std_err, StdStream(..), createPipe)
 import System.FilePath ((</>))
 import EVM.Effects
-import EVM.Fuzz (tryCexFuzz)
 import Data.Bits ((.&.))
 import Numeric (showHex)
 import EVM.Expr (simplifyProps)
 
+import EVM.Keccak qualified as Keccak (concreteKeccaks)
 import EVM.SMT
 import EVM.Types
 
@@ -108,7 +108,8 @@ checkSatWithProps sg props = do
   let psSimp = if conf.simp then simplifyProps props else props
   if psSimp == [PBool False] then pure Qed
   else do
-    let smt2 = assertProps conf psSimp
+    let concreteKeccaks = fmap (\(buf,val) -> PEq (Lit val) (Keccak buf)) (toList $ Keccak.concreteKeccaks props)
+    let smt2 = assertProps conf (if conf.simp then psSimp <> concreteKeccaks else psSimp)
     if isLeft smt2 then pure $ Error $ getError smt2
     else liftIO $ checkSat sg (Just props) smt2
 
@@ -243,43 +244,34 @@ getMultiSol smt2@(SMT2 cmds cexvars _) multiSol r inst availableInstances fileCo
           writeChan r Nothing
 
 getOneSol :: (MonadIO m, ReadConfig m) => SMT2 -> Maybe [Prop] -> Chan SMTResult -> TChan CacheEntry -> SolverInstance -> Chan SolverInstance -> Int -> m ()
-getOneSol smt2@(SMT2 cmds cexvars ps) props r cacheq inst availableInstances fileCounter = do
+getOneSol smt2@(SMT2 cmds cexvars _) props r cacheq inst availableInstances fileCounter = do
   conf <- readConfig
-  let fuzzResult = tryCexFuzz ps conf.numCexFuzz
   liftIO $ do
     when (conf.dumpQueries) $ writeSMT2File smt2 "." (show fileCounter)
-    if (isJust fuzzResult)
-      then do
-        when (conf.debug) $ putStrLn $ "   Cex found via fuzzing:" <> (show fuzzResult)
-        writeChan r (Cex $ fromJust fuzzResult)
-      else if Prelude.not conf.onlyCexFuzz then do
-        -- reset solver and send all lines of provided script
-        out <- do
-          resetRes <- sendScript inst $ SMTScript [SMTCommand "(reset)"]
-          case resetRes of
-            e@(Left _) -> pure e
-            _ -> sendScript inst cmds
-        case out of
-          -- if we got an error then return it
-          Left e -> writeChan r (Error $ "Error while writing SMT to solver: " <> T.unpack e)
-          -- otherwise call (check-sat), parse the result, and send it down the result channel
-          Right () -> do
-            sat <- sendCommand inst $ SMTCommand "(check-sat)"
-            res <- do
-                case sat of
-                  "unsat" -> do
-                    when (isJust props) $ liftIO . atomically $ writeTChan cacheq (CacheEntry (fromJust props))
-                    pure Qed
-                  "timeout" -> pure $ Unknown "Result timeout by SMT solver"
-                  "unknown" -> do
-                    dumpUnsolved smt2 fileCounter conf.dumpUnsolved
-                    pure $ Unknown "Result unknown by SMT solver"
-                  "sat" -> Cex <$> getModel inst cexvars
-                  _ -> pure . Error $ "Unable to parse SMT solver output: " <> T.unpack sat
-            writeChan r res
-      else do
-        when (conf.debug) $ putStrLn "Fuzzing failed to find a Cex, not trying SMT due to onlyCexFuzz"
-        writeChan r $ Error "Option onlyCexFuzz enabled, not running SMT"
+    -- reset solver and send all lines of provided script
+    out <- do
+      resetRes <- sendScript inst $ SMTScript [SMTCommand "(reset)"]
+      case resetRes of
+        e@(Left _) -> pure e
+        _ -> sendScript inst cmds
+    case out of
+      -- if we got an error then return it
+      Left e -> writeChan r (Error $ "Error while writing SMT to solver: " <> T.unpack e)
+      -- otherwise call (check-sat), parse the result, and send it down the result channel
+      Right () -> do
+        sat <- sendCommand inst $ SMTCommand "(check-sat)"
+        res <- do
+            case sat of
+              "unsat" -> do
+                when (isJust props) $ liftIO . atomically $ writeTChan cacheq (CacheEntry (fromJust props))
+                pure Qed
+              "timeout" -> pure $ Unknown "Result timeout by SMT solver"
+              "unknown" -> do
+                dumpUnsolved smt2 fileCounter conf.dumpUnsolved
+                pure $ Unknown "Result unknown by SMT solver"
+              "sat" -> Cex <$> getModel inst cexvars
+              _ -> pure . Error $ "Unable to parse SMT solver output: " <> T.unpack sat
+        writeChan r res
 
     -- put the instance back in the list of available instances
     writeChan availableInstances inst
@@ -359,15 +351,15 @@ getModel inst cexvars = do
           pure ()
 
 
-    -- we set a pretty arbitrary upper limit (of 1024) to decide if we need to do some shrinking
+    -- we set a pretty arbitrary upper limit (of 32) to decide if we need to do some shrinking
     bufsUsable :: SMTCex -> Bool
     bufsUsable model = any (go . snd) (Map.toList model.buffers)
       where
         go (Flat _) = True
         go (Comp c) = case c of
-          (Base _ sz) -> sz <= 1024
+          (Base _ sz) -> sz <= 32
           -- TODO: do I need to check the write idx here?
-          (Write _ idx next) -> idx <= 1024 && go (Comp next)
+          (Write _ idx next) -> idx <= 32 && go (Comp next)
 
 mkTimeout :: Maybe Natural -> Text
 mkTimeout t = T.pack $ show $ (1000 *)$ case t of

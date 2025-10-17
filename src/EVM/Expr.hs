@@ -295,8 +295,8 @@ readWord idx b@(WriteWord idx' val buf)
 readWord i@(Lit idx) (WriteByte (Lit idx') _ buf)
   | idx' < idx || (idx' >= idx + 32 && idx <= (maxBound :: W256) - 32) = readWord i buf
 -- reading a Word that is lower than the dstOffset-32 of a CopySlice, so it's just reading from dst
-readWord i@(Lit x) (CopySlice _ (Lit dstOffset) _ _ dst) | dstOffset >= x+32 =
-  readWord i dst
+readWord i@(Lit x) (CopySlice _ (Lit dstOffset) _ _ dst) | dstOffset >= x+32 = readWord i dst
+readWord i@(Lit x) (CopySlice _ (Lit dstOffset) (Lit size) _ dst) | x >= dstOffset + size = readWord i dst
 readWord (Lit idx) b@(CopySlice (Lit srcOff) (Lit dstOff) (Lit size) src dst)
   -- the region we are trying to read is enclosed in the sliced region
   | (idx - dstOff) < size && 32 <= size - (idx - dstOff) = readWord (Lit $ srcOff + (idx - dstOff)) src
@@ -1383,8 +1383,8 @@ simplifyProp prop =
     go (PEq (Lit 0) (Or a b)) = peq (Lit 0) a `PAnd` peq (Lit 0) b
 
     -- PEq rewrites (notice -- GT/GEq is always rewritten to LT by simplify)
-    go (PEq (Lit 1) (IsZero (LT a b))) = PLT a b
-    go (PEq (Lit 1) (IsZero (LEq a b))) = PLEq a b
+    go (PEq (Lit 1) (IsZero (LT a b))) = PLEq b a
+    go (PEq (Lit 1) (IsZero (LEq a b))) = PLT b a
     go (PEq (Lit 0) (IsZero a)) = PLT (Lit 0) a
     go (PEq a1 (Add a2 y)) | a1 == a2 = peq (Lit 0) y
 

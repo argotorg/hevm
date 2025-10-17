@@ -71,7 +71,7 @@ import EVM.Solvers
 import EVM.Stepper qualified as Stepper
 import EVM.SymExec
 import EVM.Test.FuzzSymExec qualified as FuzzSymExec
-import EVM.Test.Utils
+import EVM.Test.Utils (runForgeTest, runForgeTestCustom)
 import EVM.Traversals
 import EVM.Types hiding (Env)
 import EVM.Effects
@@ -108,14 +108,11 @@ testNoSimplify :: TestName -> ReaderT Env IO () -> TestTree
 testNoSimplify a b = let testEnvNoSimp = Env { config = testEnv.config { simp = False } }
   in testCase a $ runEnv testEnvNoSimp b
 
-testFuzz :: TestName -> ReaderT Env IO () -> TestTree
-testFuzz a b = testCase a $ runEnv (testEnv {config = testEnv.config {numCexFuzz = 100, onlyCexFuzz = True}}) b
-
 prop :: Testable prop => ReaderT Env IO prop -> Property
 prop a = ioProperty $ runEnv testEnv a
 
-propNoSimpNoFuzz :: Testable prop => ReaderT Env IO prop -> Property
-propNoSimpNoFuzz a = let testEnvNoSimp = Env { config = testEnv.config { numCexFuzz = 0, simp = False } }
+propNoSimp :: Testable prop => ReaderT Env IO prop -> Property
+propNoSimp a = let testEnvNoSimp = Env { config = testEnv.config { simp = False } }
   in ioProperty $ runEnv testEnvNoSimp a
 
 withDefaultSolver :: App m => (SolverGroup -> m a) -> m a
@@ -665,25 +662,31 @@ tests = testGroup "hevm"
         e2 = ConcreteBuf "Definitely not the same!"
       equal <- checkEquiv e1 e2
       assertBoolM "Should not be equivalent!" $ not equal
+    , testNoSimplify "simplify-comparison-GEq" $ do
+      let
+        expr = PEq (Lit 0x1) (GEq (Var "v") (Lit 0x2))
+        simp = Expr.simplifyProp expr
+      ret <- checkEquivPropAndLHS expr simp
+      assertEqualM "Must be equivalent" True ret
     ]
   -- These tests fuzz the simplifier by generating a random expression,
   -- applying some simplification rules, and then using the smt encoding to
   -- check that the simplified version is semantically equivalent to the
   -- unsimplified one
   , adjustOption (\(Test.Tasty.QuickCheck.QuickCheckTests n) -> Test.Tasty.QuickCheck.QuickCheckTests (div n 2)) $ testGroup "SimplifierTests"
-    [ testProperty  "buffer-simplification" $ \(expr :: Expr Buf) -> propNoSimpNoFuzz $ do
+    [ testProperty  "buffer-simplification" $ \(expr :: Expr Buf) -> propNoSimp $ do
         let simplified = Expr.simplify expr
         checkEquivAndLHS expr simplified
-    , testProperty  "buffer-simplification-len" $ \(expr :: Expr Buf) -> propNoSimpNoFuzz $ do
+    , testProperty  "buffer-simplification-len" $ \(expr :: Expr Buf) -> propNoSimp $ do
         let simplified = Expr.simplify (BufLength expr)
         checkEquivAndLHS (BufLength expr) simplified
-    , testProperty "store-simplification" $ \(expr :: Expr Storage) -> propNoSimpNoFuzz $ do
+    , testProperty "store-simplification" $ \(expr :: Expr Storage) -> propNoSimp $ do
         let simplified = Expr.simplify expr
         checkEquivAndLHS expr simplified
-    , testProperty "load-simplification" $ \(GenWriteStorageLoad expr) -> propNoSimpNoFuzz $ do
+    , testProperty "load-simplification" $ \(GenWriteStorageLoad expr) -> propNoSimp $ do
         let simplified = Expr.simplify expr
         checkEquivAndLHS expr simplified
-    , ignoreTest $ testProperty "load-decompose" $ \(GenWriteStorageLoad expr) -> propNoSimpNoFuzz $ do
+    , ignoreTest $ testProperty "load-decompose" $ \(GenWriteStorageLoad expr) -> propNoSimp $ do
         putStrLnM $ T.unpack $ formatExpr expr
         let simp = Expr.simplify expr
         let decomposed = fromMaybe simp $ mapExprM Expr.decomposeStorage simp
@@ -691,52 +694,52 @@ tests = testGroup "hevm"
         -- putStrLnM $ T.unpack $ formatExpr decomposed
         -- putStrLnM $ "\n\n\n\n"
         checkEquiv expr decomposed
-    , testProperty "byte-simplification" $ \(expr :: Expr Byte) -> propNoSimpNoFuzz $ do
+    , testProperty "byte-simplification" $ \(expr :: Expr Byte) -> propNoSimp $ do
         let simplified = Expr.simplify expr
         checkEquivAndLHS expr simplified
-    , testProperty "word-simplification" $ \(ZeroDepthWord expr) -> propNoSimpNoFuzz $ do
+    , askOption $ \(QuickCheckTests n) -> testProperty "word-simplification" $ withMaxSuccess (min n 20) $ \(ZeroDepthWord expr) -> propNoSimp $ do
         let simplified = Expr.simplify expr
         checkEquivAndLHS expr simplified
-    , testProperty "readStorage-equivalance" $ \(store, slot) -> propNoSimpNoFuzz $ do
+    , testProperty "readStorage-equivalance" $ \(store, slot) -> propNoSimp $ do
         let simplified = Expr.readStorage' slot store
             full = SLoad slot store
         checkEquiv full simplified
-    , testProperty "writeStorage-equivalance" $ \(val, GenWriteStorageExpr (slot, store)) -> propNoSimpNoFuzz $ do
+    , testProperty "writeStorage-equivalance" $ \(val, GenWriteStorageExpr (slot, store)) -> propNoSimp $ do
         let simplified = Expr.writeStorage slot val store
             full = SStore slot val store
         checkEquiv full simplified
-    , testProperty "readWord-equivalance" $ \(buf, idx) -> propNoSimpNoFuzz $ do
+    , testProperty "readWord-equivalance" $ \(buf, idx) -> propNoSimp $ do
         let simplified = Expr.readWord idx buf
             full = ReadWord idx buf
         checkEquiv full simplified
-    , testProperty "writeWord-equivalance" $ \(idx, val, WriteWordBuf buf) -> propNoSimpNoFuzz $ do
+    , testProperty "writeWord-equivalance" $ \(idx, val, WriteWordBuf buf) -> propNoSimp $ do
         let simplified = Expr.writeWord idx val buf
             full = WriteWord idx val buf
         checkEquiv full simplified
-    , testProperty "arith-simplification" $ \(_ :: Int) -> propNoSimpNoFuzz $ do
+    , testProperty "arith-simplification" $ \(_ :: Int) -> propNoSimp $ do
         expr <- liftIO $ generate . sized $ genWordArith 15
         let simplified = Expr.simplify expr
         checkEquivAndLHS expr simplified
-    , testProperty "readByte-equivalance" $ \(buf, idx) -> propNoSimpNoFuzz $ do
+    , testProperty "readByte-equivalance" $ \(buf, idx) -> propNoSimp $ do
         let simplified = Expr.readByte idx buf
             full = ReadByte idx buf
         checkEquiv full simplified
     -- we currently only simplify concrete writes over concrete buffers so that's what we test here
-    , testProperty "writeByte-equivalance" $ \(LitOnly val, LitOnly buf, GenWriteByteIdx idx) -> propNoSimpNoFuzz $ do
+    , testProperty "writeByte-equivalance" $ \(LitOnly val, LitOnly buf, GenWriteByteIdx idx) -> propNoSimp $ do
         let simplified = Expr.writeByte idx val buf
             full = WriteByte idx val buf
         checkEquiv full simplified
-    , testProperty "copySlice-equivalance" $ \(srcOff, GenCopySliceBuf src, GenCopySliceBuf dst, LitWord @300 size) -> propNoSimpNoFuzz $ do
+    , testProperty "copySlice-equivalance" $ \(srcOff, GenCopySliceBuf src, GenCopySliceBuf dst, LitWord @300 size) -> propNoSimp $ do
         -- we bias buffers to be concrete more often than not
         dstOff <- liftIO $ generate (maybeBoundedLit 100_000)
         let simplified = Expr.copySlice srcOff dstOff size src dst
             full = CopySlice srcOff dstOff size src dst
         checkEquiv full simplified
-    , testProperty "indexWord-equivalence" $ \(src, LitWord @50 idx) -> propNoSimpNoFuzz $ do
+    , testProperty "indexWord-equivalence" $ \(src, LitWord @50 idx) -> propNoSimp $ do
         let simplified = Expr.indexWord idx src
             full = IndexWord idx src
         checkEquiv full simplified
-    , testProperty "indexWord-mask-equivalence" $ \(src :: Expr EWord, LitWord @35 idx) -> propNoSimpNoFuzz $ do
+    , testProperty "indexWord-mask-equivalence" $ \(src :: Expr EWord, LitWord @35 idx) -> propNoSimp $ do
         mask <- liftIO $ generate $ do
           pow <- arbitrary :: Gen Int
           frequency
@@ -748,7 +751,7 @@ tests = testGroup "hevm"
           simplified = Expr.indexWord idx input
           full = IndexWord idx input
         checkEquiv full simplified
-    , testProperty "toList-equivalance" $ \buf -> propNoSimpNoFuzz $ do
+    , testProperty "toList-equivalance" $ \buf -> propNoSimp $ do
         let
           -- transforms the input buffer to give it a known length
           fixLength :: Expr Buf -> Gen (Expr Buf)
@@ -777,27 +780,27 @@ tests = testGroup "hevm"
           Just asList -> do
             let asBuf = Expr.fromList asList
             checkEquiv asBuf input
-    , testProperty "simplifyProp-equivalence-lit" $ \(LitProp p) -> propNoSimpNoFuzz $ do
+    , testProperty "simplifyProp-equivalence-lit" $ \(LitProp p) -> propNoSimp $ do
         let simplified = Expr.simplifyProps [p]
         case simplified of
           [] -> checkEquivProp (PBool True) p
           [val@(PBool _)] -> checkEquivProp val p
           _ -> liftIO $ assertFailure "must evaluate down to a literal bool"
-    , testProperty "simplifyProp-equivalence-sym" $ \(p) -> propNoSimpNoFuzz $ do
+    , testProperty "simplifyProp-equivalence-sym" $ \(p) -> propNoSimp $ do
         let simplified = Expr.simplifyProp p
         checkEquivPropAndLHS p simplified
-    , testProperty "simplify-joinbytes" $ \(SymbolicJoinBytes exprList) -> propNoSimpNoFuzz $ do
+    , testProperty "simplify-joinbytes" $ \(SymbolicJoinBytes exprList) -> propNoSimp $ do
         let x = joinBytesFromList exprList
         let simplified = Expr.simplify x
         y <- checkEquiv x simplified
         assertBoolM "Must be equal" y
-    , testProperty "simpProp-equivalence-sym-Prop" $ \(ps :: [Prop]) -> propNoSimpNoFuzz $ do
+    , testProperty "simpProp-equivalence-sym-Prop" $ \(ps :: [Prop]) -> propNoSimp $ do
         let simplified = pand (Expr.simplifyProps ps)
         checkEquivPropAndLHS (pand ps) simplified
-    , testProperty "simpProp-equivalence-sym-LitProp" $ \(LitProp p) -> propNoSimpNoFuzz $ do
+    , testProperty "simpProp-equivalence-sym-LitProp" $ \(LitProp p) -> propNoSimp $ do
         let simplified = pand (Expr.simplifyProps [p])
         checkEquivPropAndLHS p simplified
-    , testProperty "storage-slot-simp-property" $ \(StorageExp s) -> propNoSimpNoFuzz $ do
+    , testProperty "storage-slot-simp-property" $ \(StorageExp s) -> propNoSimp $ do
         -- we have to run `Expr.litToKeccak` on the unsimplified system, or
         -- we'd need some form of minimal simplifier for things to work out. As long as
         -- we trust the litToKeccak, this is fine, as that function is stand-alone,
@@ -1019,6 +1022,9 @@ tests = testGroup "hevm"
         -- we should not recurse into a copySlice if the read index + 32 overlaps the sliced region
         (ReadWord (Lit 40) (CopySlice (Lit 0) (Lit 30) (Lit 12) (WriteWord (Lit 10) (Lit 0x64) (AbstractBuf "hi")) (AbstractBuf "hi")))
         (Expr.readWord (Lit 40) (CopySlice (Lit 0) (Lit 30) (Lit 12) (WriteWord (Lit 10) (Lit 0x64) (AbstractBuf "hi")) (AbstractBuf "hi")))
+    , test "read-word-copySlice-after-slice" $ assertEqualM "Read word simplification missing!"
+        (ReadWord (Lit 100) (AbstractBuf "dst"))
+        (Expr.readWord (Lit 100) (CopySlice (Var "srcOff") (Lit 12) (Lit 60) (AbstractBuf "src") (AbstractBuf "dst")))
     , test "indexword-MSB" $ assertEqualM ""
         -- 31st is the LSB byte (of 32)
         (LitByte 0x78)
@@ -1052,6 +1058,13 @@ tests = testGroup "hevm"
         case runGetOrFail (getAbi (abiValueType x)) (runPut (putAbi x)) of
           Right ("", _, x') -> x' == x
           _ -> False
+    , test "ABI-negative-small-int" $ do
+        let bs = hex "ffffd6" -- -42 as int24
+        let padded = BS.replicate (32 - BS.length bs) 0 <> bs -- padded to 32 bytes
+        let withSelector = BS.replicate 4 0 <> padded -- added extra 4 bytes, simulating selector
+        case decodeAbiValues [AbiIntType 24] withSelector of
+          [AbiInt 24 val] -> assertEqualM "Incorrectly decoded int24 value" (-42) val
+          _ -> internalError "Error in decoding function"
     ]
   , testGroup "Solidity-Expressions"
     [ test "Trivial" $
@@ -1681,8 +1694,8 @@ tests = testGroup "hevm"
                 }
               }
             |]
-        Right e <- reachableUserAsserts c Nothing
-        assertBoolM "The expression is not partial" $ Expr.containsNode isPartial e
+        r <- allBranchesFail c Nothing
+        assertBoolM "all branches must fail" (isRight r)
       ,
       -- TODO: we can't deal with symbolic jump conditions
       expectFail $ test "call-zero-inited-var-thats-a-function" $ do
@@ -1970,7 +1983,7 @@ tests = testGroup "hevm"
   , testGroup "Dapp-Tests"
     [ test "Trivial-Pass" $ do
         let testFile = "test/contracts/pass/trivial.sol"
-        runSolidityTest testFile ".*" >>= assertEqualM "test result" (True, True)
+        runForgeTest testFile ".*" >>= assertEqualM "test result" (True, True)
     , test "Foundry" $ do
         -- quick smokecheck to make sure that we can parse ForgeStdLib style build outputs
         -- return is a pair of (No Cex, No Warnings)
@@ -2002,56 +2015,59 @@ tests = testGroup "hevm"
               , ("test/contracts/fail/symbolicFail.sol",      "prove_symb_fail_allrev_selector.*", (False, False))
               , ("test/contracts/fail/symbolicFail.sol",      "prove_symb_fail_somerev_selector.*", (False, True))]
         forM_ cases $ \(testFile, match, expected) -> do
-          actual <- runSolidityTestCustom testFile match Nothing Nothing False mempty Foundry
+          actual <- runForgeTestCustom testFile match Nothing Nothing False mempty
           putStrLnM $ "Test result for " <> testFile <> " match: " <> T.unpack match <> ": " <> show actual
           assertEqualM "Must match" expected actual
     , test "Trivial-Fail" $ do
         let testFile = "test/contracts/fail/trivial.sol"
-        runSolidityTest testFile "prove_false" >>= assertEqualM "test result" (False, False)
+        runForgeTest testFile "prove_false" >>= assertEqualM "test result" (False, False)
     , test "Abstract" $ do
         let testFile = "test/contracts/pass/abstract.sol"
-        runSolidityTest testFile ".*" >>= assertEqualM "test result" (True, True)
+        runForgeTest testFile ".*" >>= assertEqualM "test result" (True, True)
     , test "Constantinople" $ do
         let testFile = "test/contracts/pass/constantinople.sol"
-        runSolidityTest testFile ".*" >>= assertEqualM "test result" (True, True)
+        runForgeTest testFile ".*" >>= assertEqualM "test result" (True, True)
     , test "ConstantinopleMin" $ do
         let testFile = "test/contracts/pass/constantinople_min.sol"
-        runSolidityTest testFile ".*" >>= assertEqualM "test result" (True, True)
+        runForgeTest testFile ".*" >>= assertEqualM "test result" (True, True)
     , test "Prove-Tests-Pass" $ do
         let testFile = "test/contracts/pass/dsProvePass.sol"
-        runSolidityTest testFile ".*" >>= assertEqualM "test result" (True, True)
+        runForgeTest testFile ".*" >>= assertEqualM "test result" (True, True)
     , test "prefix-check-for-dapp" $ do
         let testFile = "test/contracts/fail/check-prefix.sol"
-        runSolidityTest testFile "prove_trivial" >>= assertEqualM "test result" (False, False)
+        runForgeTest testFile "prove_trivial" >>= assertEqualM "test result" (False, False)
     , test "transfer-dapp" $ do
         let testFile = "test/contracts/pass/transfer.sol"
-        runSolidityTest testFile "prove_transfer" >>= assertEqualM "should prove transfer" (True, True)
+        runForgeTest testFile "prove_transfer" >>= assertEqualM "should prove transfer" (True, True)
     , test "nonce-issues" $ do
         let testFile = "test/contracts/pass/nonce-issues.sol"
-        runSolidityTest testFile "prove_prank_addr_exists" >>= assertEqualM "should not bail" (True, True)
-        runSolidityTest testFile "prove_nonce_addr_nonexistent" >>= assertEqualM "should not bail" (True, True)
+        runForgeTest testFile "prove_prank_addr_exists" >>= assertEqualM "should not bail" (True, True)
+        runForgeTest testFile "prove_nonce_addr_nonexistent" >>= assertEqualM "should not bail" (True, True)
     , test "Prove-Tests-Fail" $ do
         let testFile = "test/contracts/fail/dsProveFail.sol"
-        runSolidityTest testFile "prove_trivial" >>= assertEqualM "prove_trivial" (False, False)
-        runSolidityTest testFile "prove_trivial_dstest" >>= assertEqualM "prove_trivial_dstest" (False, False)
-        runSolidityTest testFile "prove_add" >>= assertEqualM "prove_add" (False, True)
-        runSolidityTestCustom testFile "prove_smtTimeout" (Just 1) Nothing False mempty Foundry
+        runForgeTest testFile "prove_trivial" >>= assertEqualM "prove_trivial" (False, False)
+        runForgeTest testFile "prove_trivial_dstest" >>= assertEqualM "prove_trivial_dstest" (False, False)
+        runForgeTest testFile "prove_add" >>= assertEqualM "prove_add" (False, True)
+        runForgeTestCustom testFile "prove_smtTimeout" (Just 1) Nothing False mempty
           >>= assertEqualM "prove_smtTimeout" (True, False)
-        runSolidityTest testFile "prove_multi" >>= assertEqualM "prove_multi" (False, True)
-        runSolidityTest testFile "prove_distributivity" >>= assertEqualM "prove_distributivity" (False, True)
+        runForgeTest testFile "prove_multi" >>= assertEqualM "prove_multi" (False, True)
+        runForgeTest testFile "prove_distributivity" >>= assertEqualM "prove_distributivity" (False, True)
     , test "Loop-Tests" $ do
         let testFile = "test/contracts/pass/loops.sol"
-        runSolidityTestCustom testFile "prove_loop" Nothing (Just 10) False mempty Foundry  >>= assertEqualM "test result" (True, False)
-        runSolidityTestCustom testFile "prove_loop" Nothing (Just 100) False mempty Foundry >>= assertEqualM "test result" (False, False)
+        runForgeTestCustom testFile "prove_loop" Nothing (Just 10) False mempty  >>= assertEqualM "test result" (True, False)
+        runForgeTestCustom testFile "prove_loop" Nothing (Just 100) False mempty >>= assertEqualM "test result" (False, False)
     , test "Cheat-Codes-Pass" $ do
         let testFile = "test/contracts/pass/cheatCodes.sol"
-        runSolidityTest testFile ".*" >>= assertEqualM "test result" (True, False)
+        runForgeTest testFile ".*" >>= assertEqualM "test result" (True, False)
     , test "Cheat-Codes-Fork-Pass" $ do
         let testFile = "test/contracts/pass/cheatCodesFork.sol"
-        runSolidityTest testFile ".*" >>= assertEqualM "test result" (True, True)
+        runForgeTest testFile ".*" >>= assertEqualM "test result" (True, True)
     , test "Unwind" $ do
         let testFile = "test/contracts/pass/unwind.sol"
-        runSolidityTest testFile ".*" >>= assertEqualM "test result" (True, True)
+        runForgeTest testFile ".*" >>= assertEqualM "test result" (True, True)
+    , test "Keccak" $ do
+        let testFile = "test/contracts/pass/keccak.sol"
+        runForgeTest testFile "prove_access" >>= assertEqualM "test result" (True, True)
     ]
   , testGroup "max-iterations"
     [ test "concrete-loops-reached" $ do
@@ -4342,7 +4358,6 @@ tests = testGroup "hevm"
                         case Map.lookup addr cex.store of
                           Just s -> case (Map.lookup 0 s, Map.lookup (10 + a) s) of
                                       (Just x, Just y) -> x >= y
-                                      (Just x, Nothing) -> x > 0 -- arr1 can be Nothing, it'll then be zero
                                       _ -> False
                           Nothing -> False -- arr2 must contain an element, or it'll be 0
           assertBoolM "Did not find expected storage cex" testCex
@@ -4398,35 +4413,8 @@ tests = testGroup "hevm"
           (_, [Qed]) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
           putStrLnM $ "Basic tstore check passed"
   ]
-  , testGroup "concr-fuzz"
-    [ testFuzz "fuzz-complicated-mul" $ do
-      Just c <- solcRuntime "MyContract"
-        [i|
-        contract MyContract {
-          function complicated(uint x, uint y, uint z) public {
-            uint a;
-            uint b;
-            unchecked {
-              a = x * x * x * y * y * y * z;
-              b = x * x * x * x * y * y * z * z;
-            }
-            assert(a == b);
-          }
-        }
-        |]
-      let sig = (Sig "complicated(uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256])
-      (_, [Cex (_, ctr)]) <- withCVC5Solver $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
-      let
-        x = getVar ctr "arg1"
-        y = getVar ctr "arg2"
-        z = getVar ctr "arg3"
-        a = x * x * x * y * y * y * z;
-        b = x * x * x * x * y * y * z * z;
-        val = a == b
-      assertBoolM "Must fail" (not val)
-      putStrLnM  $ "expected counterexample found, x:  " <> (show x) <> " y: " <> (show y) <> " z: " <> (show z)
-      putStrLnM  $ "cex a: " <> (show a) <> " b: " <> (show b)
-    , testFuzz "fuzz-stores" $ do
+  , testGroup "simple-checks"
+    [ test "simple-stores" $ do
       Just c <- solcRuntime "MyContract"
         [i|
         contract MyContract {
@@ -4439,7 +4427,7 @@ tests = testGroup "hevm"
       let sig = (Sig "func()" [])
       (_, [Cex (_, ctr)]) <- withCVC5Solver $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
       putStrLnM  $ "expected counterexample found.  ctr: " <> (show ctr)
-    , testFuzz "fuzz-simple-fixed-value" $ do
+    , test "simple-fixed-value" $ do
       Just c <- solcRuntime "MyContract"
         [i|
         contract MyContract {
@@ -4452,7 +4440,7 @@ tests = testGroup "hevm"
       let sig = (Sig "func(uint256)" [AbiUIntType 256])
       (_, [Cex (_, ctr)]) <- withCVC5Solver $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
       putStrLnM  $ "expected counterexample found.  ctr: " <> (show ctr)
-    , testFuzz "fuzz-simple-fixed-value2" $ do
+    , test "simple-fixed-value2" $ do
       Just c <- solcRuntime "MyContract"
         [i|
         contract MyContract {
@@ -4464,7 +4452,7 @@ tests = testGroup "hevm"
       let sig = (Sig "func(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])
       (_, [Cex (_, ctr)]) <- withCVC5Solver $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
       putStrLnM  $ "expected counterexample found.  ctr: " <> (show ctr)
-    , testFuzz "fuzz-simple-fixed-value3" $ do
+    , test "simple-fixed-value3" $ do
       Just c <- solcRuntime "MyContract"
         [i|
         contract MyContract {
@@ -4476,7 +4464,7 @@ tests = testGroup "hevm"
       let sig = (Sig "func(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])
       (_, [Cex (_, ctr1), Cex (_, ctr2)]) <- withSolvers Bitwuzla 1 1 Nothing $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
       putStrLnM  $ "expected counterexamples found.  ctr1: " <> (show ctr1) <> " ctr2: " <> (show ctr2)
-    , testFuzz "fuzz-simple-fixed-value-store1" $ do
+    , test "simple-fixed-value-store1" $ do
       Just c <- solcRuntime "MyContract"
         [i|
         contract MyContract {
@@ -4489,8 +4477,8 @@ tests = testGroup "hevm"
         |]
       let sig = (Sig "func(uint256)" [AbiUIntType 256, AbiUIntType 256])
       (_, [Cex _]) <- withCVC5Solver $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
-      putStrLnM  $ "expected counterexamples found"
-    , testFuzz "fuzz-simple-fixed-value-store2" $ do
+      putStrLnM  "expected counterexamples found"
+    , test "simple-fixed-value-store2" $ do
       Just c <- solcRuntime "MyContract"
         [i|
         contract MyContract {
@@ -4566,7 +4554,7 @@ tests = testGroup "hevm"
           Cex c -> pure c
           _ -> liftIO $ assertFailure "Must be satisfiable!"
         pure()
-    , testProperty "sign-extend-vs-smt" $ \(a :: W256, b :: W256) -> propNoSimpNoFuzz $ do
+    , testProperty "sign-extend-vs-smt" $ \(a :: W256, b :: W256) -> propNoSimp $ do
         let p = (PEq (Var "arg1") (SEx (Lit (a `mod` 50)) (Lit b)))
         withDefaultSolver $ \s -> do
           res <- checkSatWithProps s [p]
@@ -4713,7 +4701,7 @@ tests = testGroup "hevm"
                          , blockContext = mempty
                          , txContext = Map.fromList [(TxValue,0x0)]}
       putStrLnM $ "Cex found:" <> T.unpack (formatCex (AbstractBuf "txdata") Nothing mycex)
-    , testCase "correct-model-for-empty-buffer" $ runEnv (testEnv {config = testEnv.config {numCexFuzz = 0}}) $ do
+    , test "correct-model-for-empty-buffer" $ do
       withDefaultSolver $ \s -> do
         let props = [(PEq (BufLength (AbstractBuf "b")) (Lit 0x0))]
         res <- checkSatWithProps s props
@@ -4722,7 +4710,7 @@ tests = testGroup "hevm"
           _ -> liftIO $ assertFailure "Must be satisfiable!"
         let value = fromRight (error "cannot be") $ subModel cex (AbstractBuf "b")
         assertEqualM "Buffer must be empty" (ConcreteBuf "") value
-    , testCase "correct-model-for-non-empty-buffer-of-all-zeroes" $ runEnv (testEnv {config = testEnv.config {numCexFuzz = 0}}) $ do
+    , test "correct-model-for-non-empty-buffer-of-all-zeroes" $ do
       withDefaultSolver $ \s -> do
         let props = [(PAnd (PEq (ReadByte (Lit 0x0) (AbstractBuf "b")) (LitByte 0x0)) (PEq (BufLength (AbstractBuf "b")) (Lit 0x1)))]
         res <- checkSatWithProps s props
@@ -4731,7 +4719,7 @@ tests = testGroup "hevm"
           _ -> liftIO $ assertFailure "Must be satisfiable!"
         let value = fromRight (error "cannot be") $ subModel cex (AbstractBuf "b")
         assertEqualM "Buffer must have size 1 and contain zero byte" (ConcreteBuf "\0") value
-    , testCase "buffer-shrinking-does-not-loop" $ runEnv (testEnv {config = testEnv.config {numCexFuzz = 0}}) $ do
+    , test "buffer-shrinking-does-not-loop" $ do
       withDefaultSolver $ \s -> do
         let props = [(PGT (BufLength (AbstractBuf "b")) (Lit 0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeb4))]
         res <- checkSatWithProps s props
@@ -4740,7 +4728,7 @@ tests = testGroup "hevm"
             Cex _ -> True
             _ -> False
         assertBoolM "Must be satisfiable!" sat
-    , testCase "can-get-value-unrelated-to-large-buffer" $ runEnv (testEnv {config = testEnv.config {numCexFuzz = 0}}) $ do
+    , test "can-get-value-unrelated-to-large-buffer" $ do
       withDefaultSolver $ \s -> do
         let props = [(PEq (Var "a") (Lit 0x1)), (PGT (BufLength (AbstractBuf "b")) (Lit 0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeb4))]
         res <- checkSatWithProps s props
@@ -4766,7 +4754,7 @@ tests = testGroup "hevm"
           props = [PEq (Keccak buf2) (Lit 0x123)]
           concrete = concreteKeccaks props
       assertEqualM "Must find two keccaks" 2 (length concrete)
-    , testCase "store-over-concrete-buffer" $ runEnv (testEnv {config = testEnv.config {numCexFuzz = 0, simp = False}}) $ do
+    , testCase "store-over-concrete-buffer" $ runEnv (testEnv {config = testEnv.config {simp = False}}) $ do
       let
         as = AbstractStore (SymAddr "test") Nothing
         cs = ConcreteStore $ Map.fromList [(0x1,0x2)]
@@ -4883,7 +4871,7 @@ tests = testGroup "hevm"
             _     -> liftIO $ assertFailure "Must have exactly one cex"
           let def = fromRight (error "cannot be") $ defaultSymbolicValues $ subModel cex (AbstractBuf "txdata")
           let buf = prettyBuf $ Expr.concKeccakSimpExpr def
-          assertBoolM "Must start with specific string" (T.isPrefixOf "0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe0cf" buf)
+          assertBoolM "Must start with specific string" (T.isPrefixOf "0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe0c" buf)
       , test "eq-yul-simple-cex" $ do
         Right aPrgm <- liftIO $ yul ""
           [i|
@@ -5596,15 +5584,18 @@ checkEquivAndLHS orig simp = do
 
 checkEquivBase :: (Eq a, App m) => (a -> a -> Prop) -> a -> a -> Bool -> m (Maybe Bool)
 checkEquivBase mkprop l r expect = do
-  withSolvers Z3 1 1 (Just 1) $ \solvers -> do
-     res <- checkSatWithProps solvers [mkprop l r]
-     let ret = case res of
-           Qed -> Just True
-           Cex {} -> Just False
-           Error _ -> Just (not expect)
-           Unknown _ -> Nothing
-     when (ret == Just (not expect)) $ liftIO $ print res
-     pure ret
+  config <- readConfig
+  let noSimplifyEnv = Env {config = config {simp = False}}
+  liftIO $ runEnv noSimplifyEnv $ do
+    withSolvers Z3 1 1 (Just 1) $ \solvers -> do
+      res <- checkSatWithProps solvers [mkprop l r]
+      let ret = case res of
+            Qed -> Just True
+            Cex {} -> Just False
+            Error _ -> Just (not expect)
+            Unknown _ -> Nothing
+      when (ret == Just (not expect)) $ liftIO $ print res
+      pure ret
 
 -- | Takes a runtime code and calls it with the provided calldata
 
@@ -6278,7 +6269,7 @@ genBuf bound sz = oneof
 genStorage :: Int -> Gen (Expr Storage)
 genStorage 0 = oneof
   [ liftM2 AbstractStore arbitrary (pure Nothing)
-  , fmap ConcreteStore arbitrary
+  , fmap ConcreteStore $ resize 5 arbitrary
   ]
 genStorage sz = liftM3 SStore key val subStore
   where

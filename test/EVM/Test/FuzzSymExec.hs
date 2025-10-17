@@ -61,20 +61,7 @@ import EVM.Transaction qualified
 import EVM.Types hiding (Env)
 import EVM.Effects
 import Control.Monad.IO.Unlift
-import EVM.Tracing (interpretWithTrace, VMTraceStep (..) )
-
-instance JSON.ToJSON VMTraceStep where
-  toEncoding = JSON.genericToEncoding JSON.defaultOptions
-instance JSON.FromJSON VMTraceStep
-
-data VMTraceStepResult =
-  VMTraceStepResult
-  { out  :: ByteStringS
-  , gasUsed :: Data.Word.Word64
-  } deriving (Generic, Show)
-
-instance JSON.ToJSON VMTraceStepResult where
-  toEncoding = JSON.genericToEncoding JSON.defaultOptions
+import EVM.Tracing (interpretWithTrace, VMTraceStep(..), VMTraceStepResult(..))
 
 data EVMToolTrace =
   EVMToolTrace
@@ -335,13 +322,13 @@ compareTraces hevmTrace evmTrace = go hevmTrace evmTrace
     go :: [VMTraceStep] -> [EVMToolTrace] -> IO (Bool)
     go [] [] = pure True
     go (a:ax) (b:bx) = do
-      let aOp = a.traceOp
+      let aOp = a.op
           bOp = b.op
-          aPc = a.tracePc
+          aPc = a.pc
           bPc = b.pc
-          aStack = a.traceStack
+          aStack = a.stack
           bStack = b.stack
-          aGas = into a.traceGas
+          aGas = into a.gas
           bGas = b.gas
       -- putStrLn $ "hevm: " <> intToOpName aOp <> " pc: " <> show aPc <> " gas: " <> show aGas <> " stack: " <> show aStack
       -- putStrLn $ "geth: " <> intToOpName bOp <> " pc: " <> show bPc <> " gas: " <> show bGas <> " stack: " <> show bStack
@@ -356,7 +343,7 @@ compareTraces hevmTrace evmTrace = go hevmTrace evmTrace
 
       when (isJust b.error) $ do
         putStrLn $ "Error by evmtool: " <> (show b.error)
-        putStrLn $ "Error by HEVM   : " <> (show a.traceError)
+        putStrLn $ "Error by HEVM   : " <> (show a.error)
 
       when (aStack /= bStack) $ do
         putStrLn "stacks don't match:"

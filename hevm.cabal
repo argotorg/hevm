@@ -2,7 +2,7 @@ cabal-version: 3.0
 name:
   hevm
 version:
-  0.55.1
+  0.56.0
 synopsis:
   Symbolic EVM Evaluator
 description:
@@ -99,7 +99,6 @@ library
     EVM.Expr,
     EVM.SMT,
     EVM.Solvers,
-    EVM.Fuzz,
     EVM.Exec,
     EVM.Format,
     EVM.Fetch,
@@ -210,9 +209,11 @@ executable hevm
     directory                         >= 1.3.6 && < 1.4,
     filepath,
     hevm,
+    jsonl                             >= 0.2.0.0 && < 0.3.0.0,
     optparse-generic,
     optparse-applicative              >= 0.18.0.0 && < 0.20.0.0,
     text,
+    mtl,
     optics-core,
     githash                           >= 0.1.5 && < 0.2,
     witch,

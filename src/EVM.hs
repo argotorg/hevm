@@ -1189,7 +1189,9 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
   input <- readMemory inOffset inSize
   let fees = vm.block.schedule
       cost = costOfPrecompile fees preCompileAddr input
-      notImplemented = internalError $ "precompile at address " <> show preCompileAddr <> " not yet implemented"
+      notImplemented = whenSymbolicElse
+        (partial $ PrecompileMissing {pc = vm.state.pc, addr = vm.state.contract, preAddr = preCompileAddr})
+        (vmError $ NonexistentPrecompile preCompileAddr)
       precompileFail = burn' (subGas gasCap cost) $ do
                          assign' (#state % #stack) (Lit 0 : xs)
                          pushTrace $ ErrorTrace PrecompileFailure
@@ -1793,7 +1795,7 @@ cheat gas (inOffset, inSize) (outOffset, outSize) xs = do
       case Map.lookup abi' cheatActions of
         Nothing -> do
           vm <- get
-          partial $ CheatCodeMissing vm.state.pc vm.state.contract abi'
+          whenSymbolicElse (partial $ CheatCodeMissing vm.state.pc vm.state.contract abi') (vmError $ BadCheatCode "Cannot understand cheatcode." abi')
         Just action -> action input
 
 type CheatAction t s = Expr Buf -> EVM t s ()
@@ -1805,7 +1807,7 @@ cheatActions = Map.fromList
         vm <- get
         if vm.config.allowFFI then
           case decodeBuf [AbiArrayDynamicType AbiStringType] input of
-            CAbi valsArr -> case valsArr of
+            (CAbi valsArr,"") -> case valsArr of
               [AbiArrayDynamic AbiStringType strsV] ->
                 let
                   cmd = fmap
@@ -1818,7 +1820,7 @@ cheatActions = Map.fromList
                 in query (PleaseDoFFI cmd vm.osEnv cont)
               _ -> vmError (BadCheatCode "ffi(string[]) decoding of string failed" sig)
             _ -> vmError (BadCheatCode "ffi(string[]) parameter decoding failed" sig)
-        else unexpectedSymArg "ffi disabled: run again with --ffi if you want to allow tests to call external scripts" ([] :: [Expr EWord])
+        else vmError $ BadCheatCode "ffi disabled: run again with --ffi if you want to allow tests to call external scripts" sig
 
   , action "warp(uint256)" $
       \sig input -> case decodeStaticArgs 0 1 input of
@@ -1919,7 +1921,7 @@ cheatActions = Map.fromList
 
   , action "createFork(string)" $
       \sig input -> case decodeBuf [AbiStringType] input of
-        CAbi valsArr -> case valsArr of
+        (CAbi valsArr,"") -> case valsArr of
           [AbiString bytes] -> do
             forkId <- length <$> gets (.forks)
             let urlOrAlias = Char8.unpack bytes
@@ -1966,7 +1968,7 @@ cheatActions = Map.fromList
 
   , action "label(address,string)" $
       \sig input -> case decodeBuf [AbiAddressType, AbiStringType] input of
-        CAbi valsArr -> case valsArr of
+        (CAbi valsArr,"") -> case valsArr of
           [AbiAddress addr, AbiString label] -> do
             #labels %= Map.insert addr (decodeUtf8 label)
             doStop
@@ -1975,7 +1977,7 @@ cheatActions = Map.fromList
 
   , action "setEnv(string,string)" $
       \sig input -> case decodeBuf [AbiStringType, AbiStringType] input of
-        CAbi valsArr -> case valsArr of
+        (CAbi valsArr,"") -> case valsArr of
           [AbiString variable, AbiString value] -> do
             let (varStr, varVal) = (toString variable, toString value)
             #osEnv %= Map.insert varStr varVal
@@ -2002,9 +2004,9 @@ cheatActions = Map.fromList
   , $(envReadMultipleCheat "envBytes(bytes,bytes)" AbiBytesDynamicType) stringHexToByteString
   , action "assertTrue(bool)" $ \sig input ->
       case decodeBuf [AbiBoolType] input of
-        CAbi [AbiBool True] -> doStop
-        CAbi [AbiBool False] -> frameRevert "assertion failed"
-        SAbi [eword] -> case (Expr.simplify (Expr.iszero eword)) of
+        (CAbi [AbiBool True],"") -> doStop
+        (CAbi [AbiBool False],"") -> frameRevert "assertion failed"
+        (SAbi [eword],"") -> case (Expr.simplify (Expr.iszero eword)) of
           Lit 1 -> frameRevert "assertion failed"
           Lit 0 -> doStop
           ew -> branch (?conf).maxDepth ew $ \case
@@ -2013,9 +2015,9 @@ cheatActions = Map.fromList
         k -> vmError $ BadCheatCode ("assertTrue(bool) parameter decoding failed: " <> show k) sig
   , action "assertFalse(bool)" $ \sig input ->
       case decodeBuf [AbiBoolType] input of
-        CAbi [AbiBool False] -> doStop
-        CAbi [AbiBool True] -> frameRevert "assertion failed"
-        SAbi [eword] -> case (Expr.simplify (Expr.iszero eword)) of
+        (CAbi [AbiBool False],"") -> doStop
+        (CAbi [AbiBool True],"") -> frameRevert "assertion failed"
+        (SAbi [eword],"") -> case (Expr.simplify (Expr.iszero eword)) of
           Lit 0 -> frameRevert "assertion failed"
           Lit 1 -> doStop
           ew -> branch (?conf).maxDepth ew $ \case
@@ -2096,9 +2098,9 @@ cheatActions = Map.fromList
       BS8.pack (show a) <> " " <> comp <> " " <> BS8.pack (show b)
     genAssert comp exprComp invComp name abitype sig input = do
       case decodeBuf [abitype, abitype] input of
-        CAbi [a, b] | a `comp` b -> doStop
-        CAbi [a, b] -> revertErr a b invComp
-        SAbi [ew1, ew2] -> case (Expr.simplify (Expr.iszero $ exprComp ew1 ew2)) of
+        (CAbi [a, b],"") | a `comp` b -> doStop
+        (CAbi [a, b],"")-> revertErr a b invComp
+        (SAbi [ew1, ew2],"") -> case (Expr.simplify (Expr.iszero $ exprComp ew1 ew2)) of
           Lit 0 -> doStop
           Lit _ -> revertErr ew1 ew2 invComp
           ew -> branch (?conf).maxDepth ew $ \case
@@ -2117,7 +2119,7 @@ cheatActions = Map.fromList
     assertSGe =   genAssert (>=) (\a b -> Expr.iszero $ Expr.slt a b) "<" "assertGe"
     toStringCheat abitype sig input = do
       case decodeBuf [abitype] input of
-        CAbi [val] -> frameReturn $ AbiTuple $ V.fromList [AbiString $ Char8.pack $ show val]
+        (CAbi [val],"") -> frameReturn $ AbiTuple $ V.fromList [AbiString $ Char8.pack $ show val]
         _ -> vmError (BadCheatCode ("toString parameter decoding failed for " <> show abitype) sig)
 
 -- * General call implementation ("delegateCall")

@@ -2,9 +2,13 @@
 module EVM.Fetch
   ( fetchContractWithSession
   , fetchBlockWithSession
+  , fetchSlotWithSession
+  , fetchWithSession
+  , fetchQuery
   , oracle
   , Fetcher
   , RpcInfo (..)
+  , RpcQuery (..)
   , EVM.Fetch.zero
   , readMockData
   , BlockNumber (..)

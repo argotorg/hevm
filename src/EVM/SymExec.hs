@@ -1173,22 +1173,24 @@ calldataFromCex cex buf sig = do
     keccakSig = keccakBytes >>> BS.take 4
 
 prettyCalldata :: SMTCex -> Expr Buf -> Text -> [AbiType] -> Text
-prettyCalldata cex buf sig types = headErr errSig (T.splitOn "(" sig) <> "(" <> body <> ")"
+prettyCalldata cex buf sig types = headErr errSig (T.splitOn "(" sig) <> "(" <> body <> ")" <> T.pack finalErr
   where
     cd = defaultSymbolicValues $ subModel cex buf
     argdata :: Err (Expr Buf) = case cd of
       Right cd' -> Right $ Expr.drop 4 (Expr.simplify cd')
       Left e -> Left e
-    body = case argdata of
+    (body, finalErr) = case argdata of
       Right argdata' -> case decodeBuf types argdata' of
-        CAbi v -> T.intercalate "," (fmap showVal v)
-        NoVals -> case argdata' of
-            ConcreteBuf c -> T.pack (bsToHex c)
-            _ -> T.pack err
-        SAbi _ -> T.pack err
-      Left e -> T.pack e
+        (CAbi v, "") -> (T.intercalate "," (fmap showVal v), "")
+        (CAbi v, err) -> (T.intercalate "," (fmap showVal v), dash <> err)
+        (NoVals, err) -> case argdata' of
+            ConcreteBuf c -> (T.pack $ "ABI decode failed. hex calldata: 0x" <> (bsToHex c), dash <> err)
+            _ -> (T.pack defaultText, dash <> err)
+        (SAbi _, err) -> (T.pack defaultText, dash <> err)
+      Left err -> (T.pack err, "")
     headErr e l = fromMaybe (T.pack e) $ listToMaybe l
-    err = "Error: unable to produce a concrete model for calldata: " <> show buf
+    dash = " -- "
+    defaultText = "Error: unable to produce a concrete model for calldata: " <> show buf
     errSig = "Error unable to split sig: " <> show sig
 
 -- | If the expression contains any symbolic values, default them to some
