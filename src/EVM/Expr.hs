@@ -1001,20 +1001,6 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
     go (ReadByte idx buf) = readByte idx buf
     go (BufLength buf) = bufLength buf
 
-    -- We can zero out any bytes in a base ConcreteBuf that we know will be overwritten by a later write
-    -- TODO: make this fully general for entire write chains, not just a single write.
-    go o@(WriteWord (Lit idx) val (ConcreteBuf b))
-      | idx >= maxBytes = o
-      | BS.length b >= (unsafeInto idx + 32) =
-          let
-            slot = BS.take 32 (BS.drop (unsafeInto idx) b)
-            isSlotZero = BS.all (== 0) slot
-            content = if isSlotZero
-              then b
-              else (BS.take (unsafeInto idx) b)
-                <> (BS.replicate 32 0)
-                <> (BS.drop (unsafeInto idx + 32) b)
-          in writeWord (Lit idx) val (ConcreteBuf content)
     go (WriteWord a b c) = writeWord a b c
 
     go (WriteByte a b c) = writeByte a b c
