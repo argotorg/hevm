@@ -424,8 +424,7 @@ getOneExpr task inst availableInstances resChan numTasks allDone = do
     when (n' == 0) $ putTMVar allDone ()
 
 -- | Symbolic interpreter that explores all paths. Returns an
--- 'Expr End' representing the possible executions. This Expr End is NOT flattened,
---  i.e. it (likely) contains ITE-s. The only End-s possible are: Partial, Failure, Success, ITE
+-- '[Expr End]' representing the possible execution leafs.
 interpretInternal :: forall m . App m
   => InterpTask m
   -> TChan (Expr End)
