@@ -68,16 +68,13 @@ Expressions in this language can have the following types:
 - `Logs`: EVM logs
 
 ## Control Flow
-An EVM program is represented by an `Expr End`, which is either a single end
-state for a program without branches, or a series of nested if-then-else terms,
-where each leaf is an end state. Some end states (e.g. `Return`) contain copies
-of any externally observable data (i.e. returndata and post call storage).
-
-As an example the following Expr encodes a program that branches based on the
-equality of two symbolic words ("a" and "b"), and returns if they are equal and
-reverts if they are not:
+An EVM program is represented by an `[Expr End]`, which is a list of all
+possible end states for a program without branches. As an example the following
+two `Expr End`-s encode a program that branches based on the equality of two symbolic
+words ("a" and "b"), and returns if they are equal and reverts if they are not:
 ```haskell
-(ITE (Eq (Var "a") (Var "b")) (Success ...) (Failure ...))
+[ Success [PEq (Var "a") (Var "b")] ...,
+, Failure [PNeg (PEq (Var "a") (Var "b"))] ...]
 ```
 
 ## Buffers

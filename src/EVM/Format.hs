@@ -16,6 +16,7 @@ module EVM.Format
   , showTraceTree'
   , showValues
   , prettyvmresult
+  , prettyvmresults
   , showCall
   , showWordExact
   , showWordExplanation
@@ -201,7 +202,6 @@ showTraceTree dapp vm =
   in pack $ concatMap showTree traces
 
 showTraceTree' :: DappInfo -> Expr End -> Text
-showTraceTree' _ (ITE {}) = internalError "ITE does not contain a trace"
 showTraceTree' dapp leaf =
   let ?context = DappContext { info = dapp, contracts, labels }
   in let forest = traceForest' leaf
@@ -453,6 +453,10 @@ prettyvmresult (Failure _ _ err) = prettyError err
 prettyvmresult (Partial _ _ p) = T.unpack $ formatPartial p
 prettyvmresult r = internalError $ "Invalid result: " <> show r
 
+prettyvmresults :: [Expr End] -> String
+prettyvmresults results =
+  T.unpack $ indent 2 $ T.unlines $ zipWith (\i r -> T.pack ("Result " <> show (i :: Integer) <> ": " <> prettyvmresult r)) [0..] results
+
 indent :: Int -> Text -> Text
 indent n = rstrip . T.unlines . fmap (T.replicate n (T.pack [' ']) <>) . T.lines
 
@@ -565,14 +569,6 @@ formatExpr = go
       (GVar v) -> "(GVar " <> T.pack (show v) <> ")"
       LitByte w -> T.pack $ show w
 
-      ITE c t f -> T.unlines
-        [ "(ITE"
-        , indent 2 $ T.unlines
-          [ formatExpr c
-          , formatExpr t
-          , formatExpr f
-          ]
-        , ")"]
       Success asserts _ buf store -> T.unlines
         [ "(Success"
         , indent 2 $ T.unlines
