@@ -19,6 +19,8 @@ module EVM.Fetch
   , FetchCache (..)
   , addFetchCache
   , saveCache
+  , RPCContract (..)
+  , makeContractFromRPC
   ) where
 
 import Prelude hiding (Foldable(..))
@@ -41,7 +43,6 @@ import Data.Aeson.Encode.Pretty (encodePretty)
 import qualified Data.ByteString.Lazy as BSL
 import Data.Bifunctor (first)
 import Control.Exception (try, SomeException)
-import Control.Monad (join)
 
 import Control.Monad.Trans.Maybe
 import Control.Applicative (Alternative(..))
@@ -75,36 +76,11 @@ data Session = Session
   }
 
 data FetchCache = FetchCache
-  { contractCache :: Map.Map Addr Contract
+  { contractCache :: Map.Map Addr RPCContract
   , slotCache     :: Map.Map (Addr, W256) W256
   , blockCache    :: Map.Map W256 Block
   } deriving (Generic)
 
-instance ToJSON Contract where
-  toJSON c = object
-    [ "code"    .= case c.code of
-        RuntimeCode (ConcreteRuntimeCode bs) -> Just (ByteStringS bs)
-        _ -> Nothing
-    , "nonce"   .= c.nonce
-    , "balance" .= case c.balance of
-        Lit w -> Just w
-        _ -> Nothing
-    , "external" .= c.external
-    ]
-
-instance FromJSON Contract where
-  parseJSON = withObject "Contract" $ \v -> do
-    maybeCodeText <- v .:? "code"
-    let mcCode = hexText <$> join maybeCodeText
-    mcNonce <- v .: "nonce"
-    maybeBalance <- v .:? "balance"
-    let mcBalance = join maybeBalance
-    external <- v .: "external"
-    let code = maybe (RuntimeCode (ConcreteRuntimeCode "")) (RuntimeCode . ConcreteRuntimeCode) mcCode
-    pure $ initialContract code
-      & #nonce .~ mcNonce
-      & #balance .~ maybe (Lit 0) Lit mcBalance
-      & #external .~ external
 
 instance ToJSON FetchCache where
   toJSON (FetchCache cs ss bs) = object
@@ -150,11 +126,15 @@ data BlockNumber = Latest | BlockNumber W256
 deriving instance Show (RpcQuery a)
 
 data RPCContract = RPCContract
-  { mcCode    :: BS.ByteString
-  , mcNonce   :: W64
-  , mcBalance :: W256
+  { code    :: ByteStringS
+  , nonce   :: W64
+  , balance :: W256
   }
-  deriving (Eq, Show)
+  deriving (Eq, Show, Generic)
+
+instance ToJSON RPCContract
+
+instance FromJSON RPCContract
 
 data RpcInfo = RpcInfo
   { blockNumURL  :: Maybe (BlockNumber, Text) -- ^ (block number, RPC url)
@@ -196,7 +176,7 @@ instance ToRPC BlockNumber where
 readText :: Read a => Text -> a
 readText = read . unpack
 
-addFetchCache :: Session -> Addr -> Contract -> IO ()
+addFetchCache :: Session -> Addr -> RPCContract -> IO ()
 addFetchCache sess address ctrct = do
   cache <- readMVar sess.sharedCache
   liftIO $ modifyMVar_ sess.sharedCache $ \c -> pure $ c { contractCache = (Map.insert address ctrct cache.contractCache) }
@@ -296,7 +276,7 @@ fetchWithSession url sess x = do
   r <- asValue =<< NetSession.post sess (unpack url) x
   pure (r ^? (lensVL responseBody) % key "result")
 
-fetchContractWithSession :: Config -> Session -> BlockNumber -> Text -> Addr -> IO (Maybe Contract)
+fetchContractWithSession :: Config -> Session -> BlockNumber -> Text -> Addr -> IO (Maybe RPCContract)
 fetchContractWithSession conf sess nPre url addr = do
   n <- getLatestBlockNum conf sess nPre url
   cache <- readMVar sess.sharedCache
@@ -312,7 +292,7 @@ fetchContractWithSession conf sess nPre url addr = do
         code    <- MaybeT $ fetch (QueryCode addr)
         nonce   <- MaybeT $ fetch (QueryNonce addr)
         balance <- MaybeT $ fetch (QueryBalance addr)
-        let contr = makeContractFromRPC (RPCContract code nonce balance)
+        let contr = RPCContract (ByteStringS code) nonce balance
         liftIO $ modifyMVar_ sess.sharedCache $ \c ->
           pure $ c { contractCache = Map.insert addr contr c.contractCache }
         pure contr
@@ -338,7 +318,7 @@ getLatestBlockNum conf sess n url =
    _ -> pure n
 
 makeContractFromRPC :: RPCContract -> Contract
-makeContractFromRPC (RPCContract code nonce balance) =
+makeContractFromRPC (RPCContract (ByteStringS code) nonce balance) =
     initialContract (RuntimeCode (ConcreteRuntimeCode code))
       & set #nonce    (Just nonce)
       & set #balance  (Lit balance)
@@ -490,13 +470,13 @@ oracle solvers preSess rpcInfo q = do
       case Map.lookup addr cache.contractCache of
         Just c -> do
           when (conf.debug) $ liftIO $ putStrLn $ "-> Using cached contract at " ++ show addr
-          pure $ continue c
+          pure $ continue $ makeContractFromRPC c
         Nothing -> do
           when (conf.debug) $ liftIO $ putStrLn $ "Fetching contract at " ++ show addr
           when (addr == 0 && conf.verb > 0) $ liftIO $ putStrLn "Warning: fetching contract at address 0"
           contract <- case rpcInfo.blockNumURL of
             Nothing -> pure $ Just $ nothingContract base addr
-            Just (block, url) -> liftIO $ fetchContractWithSession conf sess block url addr
+            Just (block, url) -> liftIO $ fmap (fmap makeContractFromRPC) $ fetchContractWithSession conf sess block url addr
           case contract of
             Just x -> pure $ continue x
             Nothing -> internalError $ "oracle error: " ++ show q

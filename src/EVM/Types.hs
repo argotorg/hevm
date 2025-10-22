@@ -1237,7 +1237,9 @@ instance Show ByteStringS where
         T.decodeUtf8 . toStrict . toLazyByteString . byteStringHex
 
 instance JSON.FromJSON ByteStringS where
-  parseJSON (JSON.String x) = case BS16.decodeBase16Untyped (T.encodeUtf8 x) of
+  parseJSON (JSON.String x) =
+    let x' = if "0x" `T.isPrefixOf` x then T.drop 2 x else x in
+    case BS16.decodeBase16Untyped (T.encodeUtf8 x') of
                                 Left _ -> mzero
                                 Right bs -> pure (ByteStringS bs)
   parseJSON _ = mzero
