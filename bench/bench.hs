@@ -92,7 +92,7 @@ runBCTest x =
 findPanics :: App m => Solver -> Natural -> Integer -> ByteString -> m ()
 findPanics solver count iters c = do
   _ <- withSolvers solver count 1 Nothing $ \s -> do
-    let opts = defaultVeriOpts { iterConf = defaultIterConf {maxIter = Just iters, askSmtIters = iters + 1 }}
+    let opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf {maxIter = Just iters, askSmtIters = iters + 1 }}
     checkAssert s allPanicCodes c Nothing [] opts
   liftIO $ putStrLn "done"
 
