@@ -2,14 +2,14 @@ module EVM.Test.BlockchainTests where
 
 import EVM (initialContract, makeVm, setEIP4788Storage)
 import EVM.Concrete qualified as EVM
+import EVM.Effects
 import EVM.FeeSchedule (feeSchedule)
 import EVM.Fetch qualified
-import EVM.Format (hexText)
 import EVM.Stepper qualified
 import EVM.Transaction
 import EVM.UnitTest (writeTrace)
 import EVM.Types hiding (Block, Case, Env)
-import EVM.Expr (maybeLitWordSimp, maybeLitAddrSimp)
+import EVM.Expr (maybeLitAddrSimp)
 import EVM.Tracing qualified as Tracing
 import EVM.Test.FuzzSymExec (compareTraces, EVMToolTraceOutput(..), decodeTraceOutputHelper)
 
@@ -19,25 +19,24 @@ import Control.Monad
 import Control.Monad.ST (RealWorld, stToIO)
 import Control.Monad.State.Strict
 import Control.Monad.IO.Unlift
-import EVM.Effects
 import Data.Aeson ((.:), (.:?), FromJSON (..))
 import Data.Aeson qualified as JSON
 import Data.Aeson.Types qualified as JSON
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as Lazy
-import Data.ByteString.Lazy qualified as LazyByteString
 import Data.List (isInfixOf, isPrefixOf)
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Maybe (fromJust, fromMaybe, isNothing, isJust)
 import Data.Word (Word64)
+import GHC.Generics (Generic)
+import GHC.IO.Exception (ExitCode(ExitSuccess))
 import System.Environment (lookupEnv, getEnv)
 import System.FilePath.Find qualified as Find
 import System.FilePath.Posix (makeRelative, (</>))
 import System.IO (hPutStr, hClose)
 import System.IO.Temp (withSystemTempFile)
 import System.Process (readProcessWithExitCode)
-import GHC.IO.Exception (ExitCode(ExitSuccess))
 import Witch (into, unsafeInto)
 import Witherable (Filterable, catMaybes)
 
@@ -59,16 +58,45 @@ data Block = Block
   , beaconRoot  :: W256
   } deriving Show
 
+data BlockchainContract = BlockchainContract
+  { code    :: ByteStringS
+  , nonce   :: W64
+  , balance :: W256
+  , storage :: Map W256 W256
+  } deriving (Eq, Show, Generic)
+
+instance FromJSON BlockchainContract
+
+asBCContract :: Contract -> BlockchainContract
+asBCContract c = BlockchainContract code nonce balance storage
+  where
+    code = case c.code of
+      (RuntimeCode (ConcreteRuntimeCode bs)) -> ByteStringS bs
+      _ -> internalError "Expected concrete contract"
+    nonce = fromJust c.nonce
+    balance = forceLit (c.balance)
+    storage = fromConcrete c.storage
+
+makeContract :: BlockchainContract -> Contract
+makeContract (BlockchainContract (ByteStringS code) nonce balance storage) =
+    initialContract (RuntimeCode (ConcreteRuntimeCode code))
+      & set #nonce    (Just nonce)
+      & set #balance  (Lit balance)
+      & set #storage (ConcreteStore storage)
+      & set #origStorage (ConcreteStore storage)
+
+type BlockchainContracts = Map Addr BlockchainContract
+
 data Case = Case
   { vmOpts      :: VMOpts Concrete
-  , checkContracts  :: Map Addr Contract
-  , testExpectation :: Map Addr Contract
+  , checkContracts  :: BlockchainContracts
+  , testExpectation :: BlockchainContracts
   } deriving Show
 
 data BlockchainCase = BlockchainCase
   { blocks  :: [Block]
-  , pre     :: Map Addr Contract
-  , post    :: Map Addr Contract
+  , pre     :: BlockchainContracts
+  , post    :: BlockchainContracts
   , network :: String
   } deriving Show
 
@@ -99,7 +127,7 @@ testsFromFile
   :: forall m . App m
   => String -> Map String (TestTree -> TestTree) -> m [TestTree]
 testsFromFile fname problematicTests = do
-  fContents <- liftIO $ LazyByteString.readFile fname
+  fContents <- liftIO $ Lazy.readFile fname
   let parsed = parseBCSuite fContents
   liftIO $ putStrLn $ "Parsed " <> fname
   case parsed of
@@ -237,13 +265,12 @@ fromConcrete s = internalError $ "unexpected abstract store: " <> show s
 checkStateFail :: Case -> VM Concrete RealWorld -> (Bool, Bool, Bool, Bool) -> IO String
 checkStateFail x vm (okBal, okNonce, okData, okCode) = do
   let
-    printContracts :: Map Addr Contract -> IO ()
+    printContracts :: BlockchainContracts -> IO ()
     printContracts cs = putStrLn $ Map.foldrWithKey (\k c acc ->
       acc ++ "-->" <> show k ++ " : "
-                   ++ (show $ fromJust c.nonce) ++ " "
-                   ++ (show $ fromJust $ maybeLitWordSimp c.balance) ++ " "
-                   ++ (show $ fromConcrete c.storage)
-                   ++ (show $ fromConcrete c.tStorage)
+                   ++ (show c.nonce) ++ " "
+                   ++ (show c.balance) ++ " "
+                   ++ (show c.storage)
         ++ "\n") "" cs
 
     reason = map fst (filter (not . snd)
@@ -255,7 +282,7 @@ checkStateFail x vm (okBal, okNonce, okData, okCode) = do
         ])
     check = x.checkContracts
     expected = x.testExpectation
-    actual = fmap (clearZeroStorage . clearOrigStorage) $ forceConcreteAddrs vm.env.contracts
+    actual = fmap (asBCContract . clearZeroStorage) $ forceConcreteAddrs vm.env.contracts
 
   putStrLn $ "-> Failing because of: " <> (unwords reason)
   putStrLn "-> Pre balance/state: "
@@ -277,26 +304,17 @@ checkExpectation x vm = do
   else liftIO $ Just <$> checkStateFail x vm (okBal, okNonce, okStor, okCode)
 
 -- quotient account state by nullness
-(~=) :: Map Addr Contract -> Map Addr Contract -> Bool
+(~=) :: BlockchainContracts -> BlockchainContracts -> Bool
 (~=) cs1 cs2 =
-    let nullAccount = EVM.initialContract (RuntimeCode (ConcreteRuntimeCode ""))
+    let nullAccount = asBCContract $ EVM.initialContract (RuntimeCode (ConcreteRuntimeCode ""))
         padNewAccounts cs ks = Map.union cs $ Map.fromList [(k, nullAccount) | k <- ks]
         padded_cs1 = padNewAccounts cs1 (Map.keys cs2)
         padded_cs2 = padNewAccounts cs2 (Map.keys cs1)
-    in and $ zipWith (===) (Map.elems padded_cs1) (Map.elems padded_cs2)
+    in and $ zipWith (==) (Map.elems padded_cs1) (Map.elems padded_cs2)
 
-(===) :: Contract -> Contract -> Bool
-c1 === c2 =
-  codeEqual && storageEqual && c1.balance == c2.balance && c1.nonce == c2.nonce
-  where
-    storageEqual = c1.storage == c2.storage
-    codeEqual = case (c1.code, c2.code) of
-      (RuntimeCode a', RuntimeCode b') -> a' == b'
-      codes -> internalError ("unexpected code: \n" <> show codes)
-
-checkExpectedContracts :: VM Concrete RealWorld -> Map Addr Contract -> (Bool, Bool, Bool, Bool, Bool)
+checkExpectedContracts :: VM Concrete RealWorld -> BlockchainContracts -> (Bool, Bool, Bool, Bool, Bool)
 checkExpectedContracts vm expected =
-  let cs = fmap (clearZeroStorage . clearOrigStorage) $ forceConcreteAddrs vm.env.contracts
+  let cs = fmap (asBCContract . clearZeroStorage) $ forceConcreteAddrs vm.env.contracts
   in ( (expected ~= cs)
      , (clearBalance <$> expected) ~= (clearBalance <$> cs)
      , (clearNonce   <$> expected) ~= (clearNonce   <$> cs)
@@ -313,36 +331,17 @@ clearZeroStorage c = case c.storage of
                      in set #storage (ConcreteStore store) c
   _ -> internalError "Internal Error: unexpected abstract store"
 
-clearStorage :: Contract -> Contract
-clearStorage c = c { storage = clear c.storage, tStorage = clear c.tStorage }
-  where
-    clear :: Expr Storage -> Expr Storage
-    clear (ConcreteStore _) = ConcreteStore mempty
-    clear _ = internalError "Internal Error: unexpected abstract store"
+clearStorage :: BlockchainContract -> BlockchainContract
+clearStorage c = c { storage = mempty}
 
-clearBalance :: Contract -> Contract
-clearBalance c = set #balance (Lit 0) c
+clearBalance :: BlockchainContract -> BlockchainContract
+clearBalance c = c {balance = 0}
 
-clearNonce :: Contract -> Contract
-clearNonce c = set #nonce (Just 0) c
+clearNonce :: BlockchainContract -> BlockchainContract
+clearNonce c = c {nonce = 0}
 
-clearCode :: Contract -> Contract
-clearCode c = set #code (RuntimeCode (ConcreteRuntimeCode "")) c
-
-instance FromJSON Contract where
-  parseJSON (JSON.Object v) = do
-    code <- (RuntimeCode . ConcreteRuntimeCode <$> (hexText <$> v .: "code"))
-    storage <- v .: "storage"
-    balance <- v .: "balance"
-    nonce   <- v .: "nonce"
-    pure $ EVM.initialContract code
-             & #balance .~ (Lit balance)
-             & #nonce   ?~ nonce
-             & #storage .~ (ConcreteStore storage)
-             & #origStorage .~ (ConcreteStore storage)
-
-  parseJSON invalid =
-    JSON.typeMismatch "Contract" invalid
+clearCode :: BlockchainContract -> BlockchainContract
+clearCode c = c {code = (ByteStringS "")}
 
 instance FromJSON BlockchainCase where
   parseJSON (JSON.Object v) = BlockchainCase
@@ -372,7 +371,7 @@ instance FromJSON Block where
   parseJSON invalid =
     JSON.typeMismatch "Block" invalid
 
-parseContracts :: Which -> JSON.Object -> JSON.Parser (Map Addr Contract)
+parseContracts :: Which -> JSON.Object -> JSON.Parser (BlockchainContracts)
 parseContracts w v = v .: which >>= parseJSON
   where which = case w of
           Pre  -> "pre"
@@ -424,7 +423,7 @@ maxCodeSize :: W256
 maxCodeSize = 24576
 
 fromBlockchainCase' :: Block -> Transaction
-                       -> Map Addr Contract -> Map Addr Contract
+                       -> BlockchainContracts -> BlockchainContracts
                        -> Either BlockchainError Case
 fromBlockchainCase' block tx preState postState =
   let isCreate = isNothing tx.toAddr in
@@ -464,11 +463,13 @@ fromBlockchainCase' block tx preState postState =
       postState
         where
           toAddr = maybe (EVM.createAddress origin (fromJust senderNonce)) LitAddr (tx.toAddr)
-          senderNonce = view (accountAt (LitAddr origin) % #nonce) (Map.mapKeys LitAddr preState)
+          senderNonce = (.nonce) <$> Map.lookup origin preState
           toCode = Map.lookup toAddr (Map.mapKeys LitAddr preState)
           theCode = if isCreate
                     then InitCode tx.txdata mempty
-                    else maybe (RuntimeCode (ConcreteRuntimeCode "")) (.code) toCode
+                    else RuntimeCode . ConcreteRuntimeCode $ case toCode of
+                      Nothing ->  ""
+                      Just (BlockchainContract (ByteStringS bs) _ _ _) -> bs
           effectiveGasPrice = effectiveprice tx block.baseFee
           cd = if isCreate
                then mempty
@@ -495,35 +496,33 @@ maxBaseFee tx =
      EIP1559Transaction -> fromJust tx.maxFeePerGas
      _ -> fromJust tx.gasPrice
 
-checkTx :: Transaction -> Block -> Map Addr Contract -> Maybe (Map Addr Contract)
+checkTx :: Transaction -> Block -> BlockchainContracts -> Maybe (BlockchainContracts)
 checkTx tx block prestate = do
   origin <- sender tx
   validateTx tx block prestate
-  let isCreate    = isNothing tx.toAddr
-      cs          = Map.mapKeys LitAddr prestate
-      senderNonce = view (accountAt (LitAddr origin) % #nonce) cs
-      toAddr      = maybe (EVM.createAddress origin (fromJust senderNonce)) LitAddr (tx.toAddr)
-      prevCode    = view (accountAt toAddr % #code) cs
-      prevNonce   = view (accountAt toAddr % #nonce) cs
-
-      nonEmptyAccount = case prevCode of
-                        RuntimeCode (ConcreteRuntimeCode b) -> not (BS.null b)
-                        _ -> True
-      badNonce = prevNonce /= Just 0
-      initCodeSizeExceeded = BS.length tx.txdata > (unsafeInto maxCodeSize * 2)
-  if isCreate && (badNonce || nonEmptyAccount || initCodeSizeExceeded)
-  then mzero
+  if (isJust tx.toAddr) then pure prestate
   else
-    pure prestate
+    let senderNonce = (.nonce) <$> Map.lookup origin prestate
+        addr  = case EVM.createAddress origin (fromJust senderNonce) of
+                  (LitAddr a) -> a
+                  _ -> internalError "Cannot happen"
+        freshContract = BlockchainContract (ByteStringS "") 0 0 mempty
+        (BlockchainContract (ByteStringS b) prevNonce _ _) = (fromMaybe freshContract $ Map.lookup addr prestate)
+        nonEmptyAccount = not (BS.null b)
+        badNonce = prevNonce /= 0
+        initCodeSizeExceeded = BS.length tx.txdata > (unsafeInto maxCodeSize * 2)
+    in
+    if (badNonce || nonEmptyAccount || initCodeSizeExceeded) then mzero
+    else pure prestate
 
-validateTx :: Transaction -> Block -> Map Addr Contract -> Maybe ()
+validateTx :: Transaction -> Block -> BlockchainContracts -> Maybe ()
 validateTx tx block cs = do
   origin <- sender tx
-  Lit originBalance <- (.balance) <$> Map.lookup origin cs
+  originBalance <- (.balance) <$> Map.lookup origin cs
   originNonce <- (.nonce) <$> Map.lookup origin cs
   let gasDeposit = (effectiveprice tx block.baseFee) * (into tx.gasLimit)
   if gasDeposit + tx.value <= originBalance
-    && (Just (unsafeInto tx.nonce) == originNonce) && block.baseFee <= maxBaseFee tx
+    && ((unsafeInto tx.nonce) == originNonce) && block.baseFee <= maxBaseFee tx
   then Just ()
   else Nothing
 
@@ -531,7 +530,7 @@ vmForCase :: Case -> IO (VM Concrete RealWorld)
 vmForCase x = do
   vm <- stToIO $ makeVm x.vmOpts
     -- TODO: why do we override contracts here instead of using VMOpts otherContracts?
-    <&> set (#env % #contracts) (Map.mapKeys LitAddr x.checkContracts)
+    <&> set (#env % #contracts) (Map.mapKeys LitAddr $ Map.map makeContract x.checkContracts)
     -- TODO: we need to call this again because we override contracts in the
     -- previous line
     <&> setEIP4788Storage x.vmOpts
