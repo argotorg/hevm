@@ -417,7 +417,8 @@ equivalence eqOpts cOpts = do
   cores <- liftIO $ unsafeInto <$> getNumProcessors
   let solverCount = fromMaybe cores cOpts.numSolvers
   withSolvers solver solverCount cOpts.solverThreads (Just cOpts.smttimeout) $ \s -> do
-    eq <- equivalenceCheck s (fromJust bytecodeA) (fromJust bytecodeB) veriOpts calldata eqOpts.create
+    sess <- Fetch.mkSession cOpts.cacheDir Nothing
+    eq <- equivalenceCheck s (Just sess) (fromJust bytecodeA) (fromJust bytecodeB) veriOpts calldata eqOpts.create
     let anyIssues =  not (null eq.partials) || any (isUnknown . fst) eq.res  || any (isError . fst) eq.res
     liftIO $ case (any (isCex . fst) eq.res, anyIssues) of
       (False, False) -> putStrLn "   \x1b[32m[PASS]\x1b[0m Contracts behave equivalently"

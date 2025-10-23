@@ -247,3 +247,9 @@ main = do
           , "--number", "10307563", "--cache-dir", "test/contracts/fail/"]
         stdout `shouldContain` "[FAIL]"
         stderr `shouldNotContain` "CallStack"
+      it "equiv-rpc-not-null" $ do
+        let hexStr1 = "617fff600180808069040000000000000000016940000000000000000001fa166a0400000000000000000001617fff48163e00fe"
+        let hexStr2 = "600180808069040000000000000000016940000000000000000001fa617fff1648617fff166a0400000000000000000001903e00fe"
+        (_, _, stderr) <- readProcessWithExitCode "cabal" [
+          "run", "exe:hevm", "--", "equivalence", "--code-a", hexStr1, "--code-b", hexStr2] ""
+        stderr `shouldContain` "CallStack"
