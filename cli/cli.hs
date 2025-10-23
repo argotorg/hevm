@@ -646,20 +646,19 @@ vmFromCommand cOpts cExecOpts cFileOpts execOpts sess = do
           Nothing -> do
             putStrLn $ "Error: contract not found: " <> show address
             exitFailure
-          Just contract ->
+          Just rpcContract ->
             -- if both code and url is given,
             -- fetch the contract and overwrite the code
-            pure $ initialContract (mkCode $ fromJust code)
-                & set #balance  (contract.balance)
-                & set #nonce    (contract.nonce)
-                & set #external (contract.external)
+              pure $ initialContract (mkCode $ fromJust code)
+                & set #balance  (Lit rpcContract.balance)
+                & set #nonce    (Just rpcContract.nonce)
 
     (Just url, Just addr', Nothing) ->
       liftIO $ Fetch.fetchContractWithSession conf sess block url addr' >>= \case
         Nothing -> do
           putStrLn $ "Error, contract not found: " <> show address
           exitFailure
-        Just contract -> pure contract
+        Just rpcContract -> pure $ Fetch.makeContractFromRPC rpcContract
 
     (_, _, Just c)  -> do
       let code = hexByteString $ strip0x c
@@ -760,8 +759,8 @@ symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
         Nothing -> do
           putStrLn "Error, contract not found."
           exitFailure
-        Just contract' -> case codeWrapped of
-              Nothing -> pure contract'
+        Just rpcContract' -> case codeWrapped of
+              Nothing -> pure $ Fetch.makeContractFromRPC rpcContract'
               -- if both code and url is given,
               -- fetch the contract and overwrite the code
               Just c -> do
@@ -771,10 +770,8 @@ symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
                   exitFailure
                 else pure $ do
                   initialContract (mkCode $ fromJust c')
-                        & set #origStorage (contract'.origStorage)
-                        & set #balance     (contract'.balance)
-                        & set #nonce       (contract'.nonce)
-                        & set #external    (contract'.external)
+                        & set #balance (Lit rpcContract'.balance)
+                        & set #nonce (Just rpcContract'.nonce)
 
     (_, _, Just c) -> liftIO $ do
       let c' = decipher c

@@ -143,7 +143,7 @@ vmFromRpc sess blockNum calldata callvalue caller address = do
     Just b -> pure b
 
   liftIO $ stToIO (makeVm $ VMOpts
-    { contract       = ctrct
+    { contract       = makeContractFromRPC ctrct
     , otherContracts = []
     , calldata       = calldata
     , value          = callvalue
