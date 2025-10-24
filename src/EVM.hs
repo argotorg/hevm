@@ -771,20 +771,14 @@ exec1 conf = do
                     let cold_storage_cost = if acc then 0 else g_cold_sload
                     burn (storage_cost + cold_storage_cost) $ do
                       updateVMState
-
-                      unless (currentVal == newVal) $
-                        if currentVal == originalVal then
-                          when (originalVal /= 0 && newVal == 0) $
-                            refund (g_sreset + g_access_list_storage_key)
-                        else do
-                          when (originalVal /= 0) $
-                            if currentVal == 0
-                            then unRefund (g_sreset + g_access_list_storage_key)
-                            else when (newVal == 0) $ refund (g_sreset + g_access_list_storage_key)
-                          when (originalVal == newVal) $
-                            if originalVal == 0
-                            then refund (g_sset - g_sload)
-                            else refund (g_sreset - g_sload)
+                      case (originalVal, currentVal, newVal) of
+                        (o, c, n)
+                          | c == n -> pure ()
+                          | o /= 0 && n == 0 -> refund (g_sreset + g_access_list_storage_key)
+                          | o /= 0 && c == 0 -> do unRefund (g_sreset + g_access_list_storage_key); when (o == n) $ refund (g_sreset - g_sload)
+                          | o /= 0 && o == n -> refund (g_sreset - g_sload)
+                          | o == 0 && o == n -> refund (g_sset - g_sload)
+                          | otherwise -> pure ()
               in
                 whenSymbolicElse updateVMState concreteSstore
             _ -> underrun
