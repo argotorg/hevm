@@ -3,15 +3,16 @@ module EVM.Test.BlockchainTests where
 import EVM (initialContract, makeVm, setEIP4788Storage)
 import EVM.Concrete qualified as EVM
 import EVM.Effects
+import EVM.Expr (maybeLitAddrSimp)
 import EVM.FeeSchedule (feeSchedule)
 import EVM.Fetch qualified
+import EVM.Solvers (withSolvers, Solver(..))
 import EVM.Stepper qualified
-import EVM.Transaction
-import EVM.UnitTest (writeTrace)
-import EVM.Types hiding (Block, Case, Env)
-import EVM.Expr (maybeLitAddrSimp)
-import EVM.Tracing qualified as Tracing
 import EVM.Test.FuzzSymExec (compareTraces, EVMToolTraceOutput(..), decodeTraceOutputHelper)
+import EVM.Tracing qualified as Tracing
+import EVM.Transaction
+import EVM.Types hiding (Block, Case, Env)
+import EVM.UnitTest (writeTrace)
 
 import Optics.Core
 import Control.Arrow ((***), (&&&))
@@ -119,14 +120,15 @@ prepareTests = do
   isCI <- liftIO $ isJust <$> lookupEnv "CI"
   let problematicTests = if isCI then commonProblematicTests <> ciProblematicTests else commonProblematicTests
   let ignoredFiles = if isCI then ciIgnoredFiles else []
-  groups <- mapM (\f -> testGroup (makeRelative repo f) <$> (if any (`isInfixOf` f) ignoredFiles then pure [] else testsFromFile f problematicTests)) jsonFiles
+  session <- EVM.Fetch.mkSessionWithoutCache
+  groups <- mapM (\f -> testGroup (makeRelative repo f) <$> (if any (`isInfixOf` f) ignoredFiles then pure [] else testsFromFile f problematicTests session)) jsonFiles
   liftIO $ putStrLn "Loaded."
   pure $ testGroup "ethereum-tests" groups
 
 testsFromFile
   :: forall m . App m
-  => String -> Map String (TestTree -> TestTree) -> m [TestTree]
-testsFromFile fname problematicTests = do
+  => String -> Map String (TestTree -> TestTree) -> EVM.Fetch.Session -> m [TestTree]
+testsFromFile fname problematicTests session = do
   fContents <- liftIO $ Lazy.readFile fname
   let parsed = parseBCSuite fContents
   liftIO $ putStrLn $ "Parsed " <> fname
@@ -135,9 +137,10 @@ testsFromFile fname problematicTests = do
     Left _err -> pure []
     Right allTests -> mapM runTest $ Map.toList allTests
   where
+    fetcher q = withSolvers Z3 0 1 (Just 0) $ \s -> EVM.Fetch.oracle s (Just session) mempty q
     runTest :: (String, Case) -> m TestTree
     runTest (name, x) = do
-      exec <- toIO $ runVMTest x
+      exec <- toIO $ runVMTest fetcher x
       pure $ testCase' name exec
     testCase' :: String -> Assertion -> TestTree
     testCase' name assertion =
@@ -206,11 +209,11 @@ ciProblematicTests = Map.fromList
   , ("loopExp_d9g0v0_Cancun", ignoreTest)
   ]
 
-runVMTest :: App m => Case -> m ()
-runVMTest x = do
+runVMTest :: App m => EVM.Fetch.Fetcher Concrete m RealWorld -> Case -> m ()
+runVMTest fetcher x = do
   -- traceVsGeth fname name x
   vm0 <- liftIO $ vmForCase x
-  result <- EVM.Stepper.interpret (EVM.Fetch.zero 0 (Just 0)) vm0 EVM.Stepper.runFully
+  result <- EVM.Stepper.interpret fetcher vm0 EVM.Stepper.runFully
   writeTrace result
   maybeReason <- checkExpectation x result
   liftIO $ forM_ maybeReason assertFailure
