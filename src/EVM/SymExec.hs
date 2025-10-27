@@ -333,10 +333,7 @@ data InterpTask m = InterpTask
   , numTasks :: TVar Natural
   , stepper :: Stepper Symbolic RealWorld (Expr End)
   }
-data InterpreterInstance m = InterpreterInstance
-  { instanceId :: Int
-  , instanceTaskQ :: Chan (InterpTask m)
-  }
+newtype InterpreterInstance = InterpreterInstance { instanceId :: Int }
 
 interpret :: forall m . App m
   => Fetch.Fetcher Symbolic m RealWorld
@@ -346,17 +343,16 @@ interpret :: forall m . App m
   -> m [Expr End]
 interpret fetcher iterConf vm stepper = do
   conf <- readConfig
+  taskq <- liftIO newChan
 
   -- spawn interpreters. TODO: make the number of threads configurable
   instances <- liftIO $ forM [1..numCapabilities] $ \i -> do
-    taskq <- newChan
-    pure $ InterpreterInstance { instanceId = i , instanceTaskQ = taskq }
+    pure $ InterpreterInstance { instanceId = i }
 
   -- result channel
   resChan <- liftIO . atomically $ newTChan
 
   -- spawn orchestration thread with queues and flags
-  taskq <- liftIO newChan
   availableInstances <- liftIO newChan
   liftIO $ forM_ instances (writeChan availableInstances)
   numTasks <- liftIO $ newTVarIO 1
@@ -378,14 +374,14 @@ interpret fetcher iterConf vm stepper = do
   -- Wait for all done
   liftIO . atomically $ takeTMVar allDone
   liftIO $ killThread orchestrateId
-  res <- liftIO $ atomically $ whileM (not <$> isEmptyTChan resChan) (readTChan resChan)
+  res <- liftIO $ atomically $ whileM (not <$> isEmptyTChan resChan) (readTChan resChan) -- superflous, we could just pass res instead of resChan
   when (conf.debug) $ liftIO $ do
     putStrLn $ "Interpretation finished, collected " <> show (length res) <> " results."
     when (conf.verb >=2) $ putStrLn $ "Interpretation finished, collected:\n" <> prettyvmresults res
   pure res
   where
     -- orchestrator loop
-    orchestrate :: App m => Chan (InterpTask m) -> Chan (InterpreterInstance m) -> TChan (Expr End) -> TVar Natural -> TMVar () -> m b
+    orchestrate :: App m => Chan (InterpTask m) -> Chan InterpreterInstance -> TChan (Expr End) -> TVar Natural -> TMVar () -> m b
     orchestrate taskq avail resChan numTasks allDone = do
       inst <- liftIO $ readChan avail
       task <- liftIO $ readChan taskq
@@ -402,8 +398,8 @@ interpret fetcher iterConf vm stepper = do
 
 getOneExpr :: forall m . (MonadIO m, ReadConfig m, App m)
   => InterpTask m
-  -> InterpreterInstance m
-  -> Chan (InterpreterInstance m)
+  -> InterpreterInstance
+  -> Chan InterpreterInstance
   -> TChan (Expr End) -> TVar Natural -> TMVar ()
   -> m ()
 getOneExpr task inst availableInstances resChan numTasks allDone = do
