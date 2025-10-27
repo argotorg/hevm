@@ -425,8 +425,7 @@ interpretInternal :: forall m . App m
   => InterpTask m
   -> TChan (Expr End)
   -> m (Expr End)
-interpretInternal t@InterpTask{..} res = do
-  eval (Operational.view stepper)
+interpretInternal t@InterpTask{..} res = eval (Operational.view stepper)
   where
   eval :: Operational.ProgramView (Stepper.Action Symbolic RealWorld) (Expr End) -> m (Expr End)
   eval (Operational.Return x) = pure x
