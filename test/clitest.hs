@@ -247,3 +247,9 @@ main = do
           , "--number", "10307563", "--cache-dir", "test/contracts/fail/"]
         stdout `shouldContain` "[FAIL]"
         stderr `shouldNotContain` "CallStack"
+      it "bytes1-packed" $ do
+        (exitCode, stdout, stderr) <- runForge "test/contracts/fail/bytes1-packed.sol" []
+        stderr `shouldNotContain` "CallStack"
+        stdout `shouldContain` "[validated]"
+        stdout `shouldContain` "[0x37, 0x13, 0x03, 0xc0"
+        exitCode `shouldBe` (ExitFailure 1)

@@ -222,6 +222,11 @@ abiValueType = \case
 getAbi :: AbiType -> Get AbiValue
 getAbi t = label (Text.unpack (abiTypeSolidity t)) $
   case t of
+    -- Special case: static array of bytes1 is packed: `bytes, of length k [...] enc(X) = enc(k) pad_right(X)`
+    AbiArrayType n (AbiBytesType 1) -> do
+      bs <- getBytesWith256BitPadding n
+      pure $ AbiArray n (AbiBytesType 1) (Vector.fromList [AbiBytes 1 (BS.singleton (BS.index bs i)) | i <- [0..n-1]])
+
     AbiUIntType n  -> do
       let word32Count = 8 * div (n + 255) 256
       xs <- replicateM word32Count getWord32be
@@ -263,6 +268,7 @@ getAbi t = label (Text.unpack (abiTypeSolidity t)) $
 
     AbiFunctionType ->
       AbiFunction <$> getBytesWith256BitPadding (24 :: Int)
+
 
 putAbi :: AbiValue -> Put
 putAbi = \case
@@ -350,6 +356,8 @@ abiHeadSize x =
         AbiAddress _ -> 32
         AbiBool _    -> 32
         AbiTuple v   -> sum (abiHeadSize <$> v)
+        -- Special case: static array of bytes1 is packed: `bytes, of length k [...] enc(X) = enc(k) pad_right(X)`
+        AbiArray n (AbiBytesType 1) _ -> roundTo32Bytes n
         AbiArray _ _ xs -> sum (abiHeadSize <$> xs)
         AbiFunction _ -> 32
         _ -> internalError "impossible"

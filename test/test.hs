@@ -1282,7 +1282,7 @@ tests = testGroup "hevm"
           -- putStrLnM $ "y type: " <> showAlter y
           -- putStrLnM $ "hevmConcretePre: " <> show hevmConcretePre
           assertEqualM "abi encoding mismatch" solidityEncoded (AbiBytesDynamic hevmConcrete)
-    , testProperty "symbolic-abi encoding-vs-solidity-2-args" $ \(SymbolicAbiVal x', SymbolicAbiVal y') -> prop $ do
+    , testProperty "symbolic-abi-encoding-vs-solidity-2-args" $ \(SymbolicAbiVal x', SymbolicAbiVal y') -> prop $ do
           Just encoded <- runStatements [i| x = abi.encode(a, b);|] [x', y'] AbiBytesDynamicType
           let solidityEncoded = case decodeAbiValue (AbiTupleType $ V.fromList [AbiBytesDynamicType]) (BS.fromStrict encoded) of
                 AbiTuple (V.toList -> [e]) -> e
