@@ -296,9 +296,6 @@ common test-common
   build-depends:
     test-utils,
     vector,
-  other-modules:
-    EVM.Test.Utils
-    EVM.Test.BlockchainTests
 
 --- Test Suites ---
 
