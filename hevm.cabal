@@ -273,10 +273,6 @@ common test-common
     ghc-options: -threaded -with-rtsopts=-N
   build-depends:
     test-utils
-  other-modules:
-    EVM.Test.Utils
-    EVM.Test.FuzzSymExec
-    EVM.Test.BlockchainTests
 
 --- Test Suites ---
 
