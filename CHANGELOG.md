@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Fixed
 - Fix incorrect simplification rule for `PEq (Lit 1) (IsZero (LT a b))`
+- bytes of length k in ABI are packed, as per ABI spec
 
 ## Changed
 - Replaced RPC mocking by a full block cache support. This allows users to cache responses from an RPC

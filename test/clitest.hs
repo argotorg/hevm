@@ -258,3 +258,9 @@ main = do
         (_, stdout, _) <- readProcessWithExitCode "cabal" [
           "run", "exe:hevm", "--", "symbolic", "--code", hexStr1] ""
         stdout `shouldContain` "Warning: no RPC info provided"
+      it "bytes1-packed" $ do
+        (exitCode, stdout, stderr) <- runForge "test/contracts/fail/bytes1-packed.sol" []
+        stderr `shouldNotContain` "CallStack"
+        stdout `shouldContain` "[validated]"
+        stdout `shouldContain` "[0x37, 0x13, 0x03, 0xc0"
+        exitCode `shouldBe` (ExitFailure 1)
