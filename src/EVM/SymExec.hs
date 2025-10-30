@@ -376,15 +376,18 @@ interpret fetcher iterConf vm =
           PleaseAskSMT cond preconds continue -> do
             case Expr.concKeccakSimpExpr cond of
               -- is the condition concrete?
-              Lit c ->
+              Lit c -> do
+                let loc = getCodeLocation vm
+                (iteration, _) <- Map.lookup loc vm.iterations & maybe (pure (0, [])) pure
+                let vmA = vm & set (#pathsVisited % at (loc, iteration)) (Just (c > 0)) & set (#iterations % at loc) (Just (iteration+1, vm.state.stack))
                 -- have we reached max iterations, are we inside a loop?
-                case (maxIterationsReached vm iterConf.maxIter, isLoopHead iterConf.loopHeuristic vm) of
+                case (maxIterationsReached vmA iterConf.maxIter, isLoopHead iterConf.loopHeuristic vmA) of
                   -- Yes. return a partial leaf
                   (Just _, Just True) ->
-                    pure $ Partial [] (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) $ MaxIterationsReached vm.state.pc vm.state.contract
+                    pure $ Partial [] (TraceContext (Zipper.toForest vmA.traces) vmA.env.contracts vmA.labels) $ MaxIterationsReached vmA.state.pc vmA.state.contract
                   -- No. keep executing
                   _ -> do
-                    (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case (c > 0))) vm
+                    (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case (c > 0))) vmA
                     interpret fetcher iterConf vm' (k r)
 
               -- the condition is symbolic
