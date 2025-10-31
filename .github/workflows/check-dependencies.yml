@@ -20,7 +20,7 @@ jobs:
       - name: lookup nix versions
         id: nixpkgs
         run: |
-          NIXPKGS_REV="$(jq -r '.nodes.nixpkgs_2.locked.rev' < flake.lock)"
+          NIXPKGS_REV="$(jq -r '.nodes.nixpkgs.locked.rev' < flake.lock)"
           VERSIONS="$(nix eval -I "nixpkgs=https://github.com/NixOS/nixpkgs/archive/$NIXPKGS_REV.tar.gz" --impure --json \
                       --expr 'let pkgs = (import <nixpkgs> {}); in { "secp256k1" = pkgs.secp256k1.version; "ff" = pkgs.libff.version; }')"
           LIBFF_REV="$(jq .ff -r <<<"$VERSIONS")"
