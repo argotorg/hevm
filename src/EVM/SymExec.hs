@@ -374,7 +374,7 @@ interpret fetcher iterConf vm =
 
         case q of
           PleaseAskSMT cond preconds continue -> do
-            case Expr.concKeccakSimpExpr cond of
+            case cond of
               -- is the condition concrete?
               Lit c ->
                 -- have we reached max iterations, are we inside a loop?

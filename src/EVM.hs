@@ -3078,7 +3078,7 @@ instance VMOps Symbolic where
     loc <- codeloc
     pathconds <- use #constraints
     vm <- get
-    query $ PleaseAskSMT cond pathconds (runBothPaths loc vm.exploreDepth)
+    query $ PleaseAskSMT condSimpConc pathconds (runBothPaths loc vm.exploreDepth)
     where
       condSimp = Expr.simplify cond
       condSimpConc = Expr.concKeccakSimpExpr condSimp
