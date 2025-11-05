@@ -404,12 +404,62 @@ interpret fetcher iterConf vm =
                     performQuery
                   _ -> do
                     let simpProps = Expr.concKeccakSimpProps ((cond ./= Lit 0):preconds)
-                    (r, vm') <- case simpProps of
-                      [PBool False] -> liftIO $ stToIO $ runStateT (continue (Case False)) vm
-                      [] -> liftIO $ stToIO $ runStateT (continue (Case True)) vm
-                      _ -> liftIO $ stToIO $ runStateT (continue UnknownBranch) vm
+                        originalBranchResult = case simpProps of
+                          [PBool False] -> Case False
+                          [] -> Case True
+                          _ -> UnknownBranch
+                    let branchResult = decideBranchCondition cond preconds
+                    -- when (branchResult /= originalBranchResult) $ liftIO $ putStrLn ("Original: " <> show originalBranchResult <> "\nNew: " <> show branchResult)
+                    -- when (branchResult /= originalBranchResult && branchResult == UnknownBranch) $ liftIO $ putStrLn ("Facts: " <> (show $ collectFacts preconds) <> "\nCondition: " <> show cond)
+                    let finalDecision = if branchResult /= UnknownBranch then branchResult else originalBranchResult
+                    (r, vm') <- liftIO $ stToIO $ runStateT (continue finalDecision) vm
                     interpret fetcher iterConf vm' (k r)
           _ -> performQuery
+
+decideBranchCondition :: Expr EWord -> [Prop] -> BranchCondition
+decideBranchCondition condition assumptions =
+  let
+    (positiveFacts, negativeFacts) = collectFacts assumptions
+    negativeCondition = Expr.simplifyProp $ Expr.peq (Lit 0) condition
+    negativeIsFalse = Set.member negativeCondition negativeFacts
+    negativeIsTrue = Set.member negativeCondition positiveFacts
+  in
+    case (negativeIsTrue, negativeIsFalse) of
+      (True, True) -> Case False -- TODO: This should not happen!
+      (True, False) -> Case False
+      (False, True) -> Case True
+      (False, False) -> UnknownBranch
+
+
+
+collectFacts :: [Prop] -> (Set Prop, Set Prop)
+collectFacts = foldMap collectFacts'
+  where
+    collectFacts' :: Prop -> (Set Prop, Set Prop)
+    collectFacts' = go True
+
+    go :: Bool -> Prop -> (Set Prop, Set Prop)
+    go True (PAnd p q) =
+      let
+        (pos1, neg1) = go True p
+        (pos2, neg2) = go True q
+      in
+        (pos1 <> pos2, neg1 <> neg2)
+    go False (PAnd _ _) = internalError "Negation should have been pushed through conjunctions"
+    go False (POr _ _) = internalError "Negation should have been pushed through disjunctions"
+    go True (POr _ _) = (mempty, mempty)
+    go _ (PImpl _ _) = internalError "Implications should have been rewritten as disjunctions"
+    go context (PNeg p) = go (not context) p
+    go context eq@(PEq _ _) = if context then (Set.singleton eq, mempty) else (mempty, Set.singleton eq)
+    go context leq@(PLEq _ _) = if context then (Set.singleton leq, mempty) else (mempty, Set.singleton leq)
+    go context (PLT a b) = go (not context) (PLEq b a)
+    go _ PGT{} = internalError "PGT should have been rewritten at this point"
+    go _ PGEq{} = internalError "PGEq should have been rewritten at this point"
+    go context (PBool b)
+      | context /= b = (Set.singleton (PBool False), mempty)
+      | otherwise = mempty
+
+
 
 maxIterationsReached :: VM Symbolic s -> Maybe Integer -> Maybe Bool
 maxIterationsReached _ Nothing = Nothing

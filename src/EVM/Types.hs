@@ -623,7 +623,7 @@ data RunAll s where
 
 -- | The possible return values of a SMT query
 data BranchCondition = Case Bool | UnknownBranch
-  deriving Show
+  deriving (Show, Eq)
 
 instance Show (Query t s) where
   showsPrec _ = \case
