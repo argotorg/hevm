@@ -1320,8 +1320,10 @@ simplifyProps ps = if cannotBeSat then [PBool False] else simplified
 -- Also simplifies the inner Expr, if it exists
 simplifyProp :: Prop -> Prop
 simplifyProp prop =
-  let new = mapProp' go (simpInnerExpr prop)
-  in if (new == prop) then prop else simplifyProp new
+  let prop' = simpInnerExpr prop
+  -- let new = mapProp' go (simpInnerExpr prop)
+  -- in if (new == prop) then prop else simplifyProp new
+  in untilFixpoint go prop'
   where
     isBoolLike :: Expr EWord -> Bool
     isBoolLike = \case
