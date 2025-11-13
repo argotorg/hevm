@@ -1503,6 +1503,11 @@ constructWord256 bytes
     word8sToWord64 :: [Word8] -> Word64
     word8sToWord64 = foldl' (\acc byte -> (acc `shiftL` 8) .|. fromIntegral byte) 0
 
+constructWord256FromWords :: Word64 -> Word64 -> Word64 -> Word64 -> W256
+constructWord256FromWords hi_hi hi_low low_hi low_low = W256 (Word256 (Word128 hi_hi hi_low) (Word128 low_hi low_low))
+
+deconstructWord256ToWords :: W256 -> (Word64, Word64, Word64, Word64)
+deconstructWord256ToWords (W256 (Word256 (Word128 a b) (Word128 c d))) = (a,b,c,d)
 
 -- Keccak hashing ----------------------------------------------------------------------------------
 
