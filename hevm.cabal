@@ -95,6 +95,7 @@ library
     EVM.ABI,
     EVM.Assembler,
     EVM.Concrete,
+    EVM.ConcreteExecution,
     EVM.Dapp,
     EVM.Expr,
     EVM.SMT,
