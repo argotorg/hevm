@@ -69,7 +69,7 @@ Expressions in this language can have the following types:
 
 ## Control Flow
 An EVM program is represented by an `[Expr End]`, which is a list of all
-possible end states for a program without branches. As an example the following
+possible end states for a program. As an example the following
 two `Expr End`-s encode a program that branches based on the equality of two symbolic
 words ("a" and "b"), and returns if they are equal and reverts if they are not:
 ```haskell
