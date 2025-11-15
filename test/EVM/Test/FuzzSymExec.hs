@@ -793,7 +793,7 @@ checkTraceAndOutputs contract gasLimit txData = do
              putStrLn $ "simplified concretized expr      : " <> (show simplConcExpr)
              putStrLn $ "evmtoolTraceOutput.output.output : " <> (show (evmtoolTraceOutput.output.output))
              putStrLn $ "HEVM trace result output         : " <> (bsToHex (bssToBs hevmTraceResult.out))
-             putStrLn $ "ret value computed via symb+conc : " <> (intercalate "," $ map bsToHex simplConcrExprRetval)
+             putStrLn $ "ret value computed via symb+conc : " <> (bsToHex (simplConcrExprRetval !! 0))
              assertEqual "Simplified, concretized expression must match evmtool's output." True False
       else do
         putStrLn $ "Name of trace file: " <> (getTraceFileName evmDir $ fromJust evmtoolResult)
