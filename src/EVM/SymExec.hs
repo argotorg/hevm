@@ -802,11 +802,6 @@ verifyInputs solvers opts fetcher preState post = do
   when conf.debug $ liftIO $ putStrLn $ "   Exploring call " <> call
 
   ends <- executeVM fetcher opts.iterConf preState
-  -- when conf.dumpExprs $ liftIO $ T.writeFile "unsimplified.expr" (formatExpr expr)
-  -- when (conf.dumpExprs && conf.simp) $ liftIO $ do
-  --   let exprSimplified = Expr.simplify expr
-  --   T.writeFile "simplified.expr" (formatExpr exprSimplified)
-  --   T.writeFile "simplified-conc.expr" (formatExpr $ Expr.simplify $ mapExpr Expr.concKeccakOnePass exprSimplified)
 
   let partials = getPartials ends
   when conf.debug $ liftIO $ do
