@@ -773,11 +773,11 @@ verify :: App m
   -> m ([Expr End], [VerifyResult])
 verify solvers fetcher opts preState post = do
   (ends1, partials) <- verifyInputs solvers opts fetcher preState post
-  (ends2, results) <- verifyResults preState ends1
+  let (ends2, results) = verifyResults preState ends1
   pure (ends2 <> fmap snd partials, filter (not . isQed) results)
 
-verifyResults :: App m => VM Symbolic RealWorld -> [(SMTResult, Expr End)] -> m ([Expr End], [VerifyResult])
-verifyResults preState res = pure (map snd res, fmap toVRes res)
+verifyResults :: VM Symbolic RealWorld -> [(SMTResult, Expr End)] -> ([Expr End], [VerifyResult])
+verifyResults preState res = (map snd res, fmap toVRes res)
   where
     toVRes :: (SMTResult, Expr End) -> VerifyResult
     toVRes (res2, leaf) = case res2 of
