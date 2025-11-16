@@ -450,16 +450,14 @@ interpretInternal t@InterpTask{..} res = eval (Operational.view stepper)
           runOne frozen newDepth [v] = do
             conf <- readConfig
             (ra, vma) <- liftIO $ stToIO $ runStateT (continue v) frozen { result = Nothing, exploreDepth = newDepth }
-            let newT = (t :: InterpTask m) { vm = vma, stepper =  (k ra) }
             when (conf.debug) $ liftIO $ putStrLn $ "Running last task for ForkMany at depth " <> show newDepth
-            interpretInternal newT res
+            flip interpretInternal res t { vm = vma, stepper =  (k ra) }
           runOne frozen newDepth (v:rest) = do
             conf <- readConfig
             (ra, vma) <- liftIO $ stToIO $ runStateT (continue v) frozen { result = Nothing, exploreDepth = newDepth }
             liftIO $ atomically $ modifyTVar numTasks (+1)
-            let newT = (t :: InterpTask m) { vm = vma, stepper =  (k ra) }
-            liftIO $ writeChan taskq newT
-            when (conf.debug) $ liftIO $ putStrLn $ "Queued new task for ForkMany at depth " <> show newDepth
+            when (conf.debug) $ liftIO $ putStrLn $ "Queuing new task for ForkMany at depth " <> show newDepth
+            liftIO $ writeChan taskq t { vm = vma, stepper =  (k ra) }
             runOne frozen newDepth rest
           runOne _ _ [] = internalError "unreachable"
       Stepper.Fork (PleaseRunBoth continue) -> do
@@ -467,15 +465,13 @@ interpretInternal t@InterpTask{..} res = eval (Operational.view stepper)
         frozen <- liftIO $ stToIO $ freezeVM vm
         let newDepth = vm.exploreDepth+1
         (ra, vma) <- liftIO $ stToIO $ runStateT (continue True) frozen { result = Nothing, exploreDepth = newDepth }
-        let newT = (t :: InterpTask m) { vm = vma, stepper = (k ra) }
         liftIO $ atomically $ modifyTVar numTasks (+1)
-        liftIO $ writeChan taskq newT
+        liftIO $ writeChan taskq $ t { vm = vma, stepper = (k ra) }
         when (conf.debug) $ liftIO $ putStrLn $ "Queued new task for Fork at depth " <> show newDepth
 
         (rb, vmb) <- liftIO $ stToIO $ runStateT (continue False) frozen { result = Nothing, exploreDepth = newDepth }
-        let newT2 = (t :: InterpTask m) { vm = vmb, stepper = (k rb) }
         when (conf.debug) $ liftIO $ putStrLn $ "Continuing task for Fork at depth " <> show newDepth
-        interpretInternal newT2 res
+        flip interpretInternal res t { vm = vmb, stepper = (k rb) }
       Stepper.Wait q -> do
         let performQuery = do
               m <- fetcher q
