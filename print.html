@@ -203,7 +203,7 @@ the two bytecodes is the same, or gives inputs where they differ.</p>
 <p>Let's say we have a function that allows transfer of money, but no balance can
 be larger than or equal to 100. Let's see the contract and its associated check:</p>
 <pre><code class="language-solidity">pragma solidity ^0.8.19;
-import "foge-std/Test.sol";
+import "forge-std/Test.sol";
 
 contract MyContract is Test {
   mapping (address =&gt; uint) balances;
@@ -301,7 +301,7 @@ test and so this omission is not detected.</p>
 This allows one to find <em>all</em> potential failure modes of a function.</li>
 <li>Fetch remote state via RPC so your tests can be rooted in the real-world,
 calling out to other, existing contracts, with existing state and already
-deloyed bytecode.</li>
+deployed bytecode.</li>
 <li>Prove equivalence of two different bytecode objects such as two functions or
 even entire contracts.</li>
 </ul>
@@ -389,7 +389,7 @@ hidden (e.g. by a malicious developer), or that have a complicated code path
 towards them. Let's see a simple one:</p>
 <pre><code class="language-solidity">// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
-import "foge-std/Test.sol";
+import "forge-std/Test.sol";
 
 contract MyContract is Test {
   uint balance;
