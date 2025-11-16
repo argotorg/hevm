@@ -16,7 +16,6 @@ import Control.Monad (when)
 import Control.Monad.ST (ST, stToIO)
 import Control.Monad.State.Strict (StateT(..))
 import Control.Monad.Reader (ReaderT)
-import Data.List (intercalate)
 import Data.Aeson ((.:), (.:?))
 import Data.Aeson qualified as JSON
 import Data.ByteString (ByteString)
