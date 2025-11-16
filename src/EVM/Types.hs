@@ -614,11 +614,11 @@ data Query t s where
 
 -- | Execution could proceed down one of two branches
 data RunBoth s where
-  PleaseRunBoth    :: Expr EWord -> (Bool -> EVM Symbolic s ()) -> RunBoth s
+  PleaseRunBoth    :: (Bool -> EVM Symbolic s ()) -> RunBoth s
 
 -- | Execution could proceed down one of several branches
 data RunAll s where
-  PleaseRunAll    :: Expr EWord -> [Expr EWord] -> (Expr EWord -> EVM Symbolic s ()) -> RunAll s
+  PleaseRunAll    :: [Expr EWord] -> (Expr EWord -> EVM Symbolic s ()) -> RunAll s
 
 -- | The possible return values of a SMT query
 data BranchCondition = Case Bool | UnknownBranch
@@ -649,12 +649,12 @@ instance Show (Query t s) where
 
 instance Show (RunBoth s) where
   showsPrec _ = \case
-    PleaseRunBoth _ _ ->
+    PleaseRunBoth _ ->
       (("<EVM.RunBoth: system running both paths") ++)
 
 instance Show (RunAll s) where
   showsPrec _ = \case
-    PleaseRunAll _ _ _ ->
+    PleaseRunAll _ _ ->
       (("<EVM.RunAll: system running all paths for Expr EWord-s") ++)
 
 -- | The possible result states of a VM

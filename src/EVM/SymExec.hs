@@ -440,7 +440,7 @@ interpretInternal t@InterpTask{..} res = eval (Operational.view stepper)
         (r, vm') <- liftIO $ stToIO $ runStateT m vm
         let newT = (t :: InterpTask m) { vm = vm', stepper = (k r) }
         interpretInternal newT res
-      Stepper.ForkMany (PleaseRunAll expr vals continue) -> do
+      Stepper.ForkMany (PleaseRunAll vals continue) -> do
         when (length vals < 2) $ internalError "PleaseRunAll requires at least 2 branches"
         frozen <- liftIO $ stToIO $ freezeVM vm
         let newDepth = vm.exploreDepth+1
@@ -450,35 +450,30 @@ interpretInternal t@InterpTask{..} res = eval (Operational.view stepper)
           runOne frozen newDepth [v] = do
             conf <- readConfig
             (ra, vma) <- liftIO $ stToIO $ runStateT (continue v) frozen { result = Nothing, exploreDepth = newDepth }
-            let vmConst  = vma { constraints = (PEq v expr) : vma.constraints }
-            let newT = (t :: InterpTask m) { vm = vmConst, stepper =  (k ra) }
+            let newT = (t :: InterpTask m) { vm = vma, stepper =  (k ra) }
             when (conf.debug) $ liftIO $ putStrLn $ "Running last task for ForkMany at depth " <> show newDepth
             interpretInternal newT res
           runOne frozen newDepth (v:rest) = do
             conf <- readConfig
             (ra, vma) <- liftIO $ stToIO $ runStateT (continue v) frozen { result = Nothing, exploreDepth = newDepth }
-            let vmConst  = vma { constraints = (PEq v expr) : vma.constraints }
             liftIO $ atomically $ modifyTVar numTasks (+1)
-            let newT = (t :: InterpTask m) { vm = vmConst, stepper =  (k ra) }
+            let newT = (t :: InterpTask m) { vm = vma, stepper =  (k ra) }
             liftIO $ writeChan taskq newT
             when (conf.debug) $ liftIO $ putStrLn $ "Queued new task for ForkMany at depth " <> show newDepth
             runOne frozen newDepth rest
           runOne _ _ [] = internalError "unreachable"
-      Stepper.Fork (PleaseRunBoth cond continue) -> do
+      Stepper.Fork (PleaseRunBoth continue) -> do
         conf <- readConfig
         frozen <- liftIO $ stToIO $ freezeVM vm
         let newDepth = vm.exploreDepth+1
-
         (ra, vma) <- liftIO $ stToIO $ runStateT (continue True) frozen { result = Nothing, exploreDepth = newDepth }
-        let vmaConst  = vma { constraints = PNeg (PEq (Lit 0) cond) : vma.constraints }
-        let newT = (t :: InterpTask m) { vm = vmaConst, stepper = (k ra) }
+        let newT = (t :: InterpTask m) { vm = vma, stepper = (k ra) }
         liftIO $ atomically $ modifyTVar numTasks (+1)
         liftIO $ writeChan taskq newT
         when (conf.debug) $ liftIO $ putStrLn $ "Queued new task for Fork at depth " <> show newDepth
 
         (rb, vmb) <- liftIO $ stToIO $ runStateT (continue False) frozen { result = Nothing, exploreDepth = newDepth }
-        let vmbConst  = vmb { constraints = PEq (Lit 0) cond : vmb.constraints }
-        let newT2 = (t :: InterpTask m) { vm = vmbConst, stepper = (k rb) }
+        let newT2 = (t :: InterpTask m) { vm = vmb, stepper = (k rb) }
         when (conf.debug) $ liftIO $ putStrLn $ "Continuing task for Fork at depth " <> show newDepth
         interpretInternal newT2 res
       Stepper.Wait q -> do

@@ -1621,7 +1621,7 @@ onlyDeployed addrExpr fallback continue = do
     else case eqT @t @Symbolic of
       Just Refl -> do
         let deployedAddrs = map forceEAddrToEWord $ mapMaybe (codeMustExist vm) $ Map.keys vm.env.contracts
-        runAll (?conf.maxDepth) vm.exploreDepth $ PleaseRunAll addrExpr deployedAddrs runAllPaths
+        runAll (?conf.maxDepth) vm.exploreDepth $ PleaseRunAll deployedAddrs runAllPaths
       _ -> internalError "Unknown address in Concrete mode"
   where
     codeMustExist :: (VM t s) -> Expr EAddr -> Maybe (Expr EAddr)
@@ -3078,12 +3078,10 @@ instance VMOps Symbolic where
     vm <- get
     query $ PleaseAskSMT cond pathconds (runBothPaths loc vm.exploreDepth)
     where
-      condSimp = Expr.simplify cond
-      condSimpConc = Expr.concKeccakSimpExpr condSimp
       runBothPaths loc _ (Case v) = do
         assign #result Nothing
-        pushTo #constraints $ if v then Expr.simplifyProp (Lit 0 ./= condSimpConc)
-                                   else Expr.simplifyProp (Lit 0 .== condSimpConc)
+        pushTo #constraints $ if v then PNeg (PEq (Lit 0) cond)
+                                   else (PEq (Lit 0) cond)
         (iteration, _) <- use (#iterations % at loc % non (0,[]))
         stack <- use (#state % #stack)
         assign (#pathsVisited % at (loc, iteration)) (Just v)
@@ -3091,7 +3089,7 @@ instance VMOps Symbolic where
         continue v
       -- Both paths are possible; we ask for more input
       runBothPaths loc exploreDepth UnknownBranch =
-        (runBoth depthLimit exploreDepth ) . PleaseRunBoth condSimp $ (runBothPaths loc exploreDepth) . Case
+        (runBoth depthLimit exploreDepth ) . PleaseRunBoth $ (runBothPaths loc exploreDepth) . Case
 
   -- numBytes allows us to specify how many bytes of the returned value is relevant
   -- if it's e.g.a JUMP, only 2 bytes can be relevant. This allows us to avoid
@@ -3110,7 +3108,7 @@ instance VMOps Symbolic where
             assign #result Nothing
             pushTo #constraints $ Expr.simplifyProp (ewordExpr .== (Lit val))
             continue $ Just val
-          _ -> runAll maxDepth vm.exploreDepth $ PleaseRunAll ewordExpr (map Lit concVals) runAllPaths
+          _ -> runAll maxDepth vm.exploreDepth $ PleaseRunAll (map Lit concVals) runAllPaths
       Nothing -> do
         assign #result Nothing
         continue Nothing
