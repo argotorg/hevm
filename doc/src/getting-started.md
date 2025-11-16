@@ -28,7 +28,7 @@ be larger than or equal to 100. Let's see the contract and its associated check:
 
 ```solidity
 pragma solidity ^0.8.19;
-import "foge-std/Test.sol";
+import "forge-std/Test.sol";
 
 contract MyContract is Test {
   mapping (address => uint) balances;
@@ -143,7 +143,7 @@ test and so this omission is not detected.
     This allows one to find _all_ potential failure modes of a function.
 - Fetch remote state via RPC so your tests can be rooted in the real-world,
     calling out to other, existing contracts, with existing state and already
-    deloyed bytecode.
+    deployed bytecode.
 - Prove equivalence of two different bytecode objects such as two functions or
     even entire contracts.
 
