@@ -6,15 +6,19 @@ module EVM.SymExec where
 
 import Prelude hiding (Foldable(..))
 
-import GHC.Natural
 import Control.Arrow ((>>>))
+import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.Async ( mapConcurrently)
+import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
 import Control.Concurrent.Spawn (parMapIO, pool)
-import GHC.Conc (numCapabilities)
+import Control.Concurrent.STM (writeTChan, newTChan, TChan, readTChan, atomically, isEmptyTChan)
+import Control.Concurrent.STM.TVar (TVar, newTVarIO, modifyTVar, readTVar, writeTVar, readTVarIO)
+import Control.Concurrent.STM.TMVar (putTMVar, takeTMVar, TMVar, putTMVar, takeTMVar, newEmptyTMVarIO)
 import Control.Monad (when, forM_, forM)
 import Control.Monad.IO.Unlift
 import Control.Monad.Operational qualified as Operational
 import Control.Monad.ST (RealWorld, stToIO, ST)
+import Control.Monad.State.Strict
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.DoubleWord (Word256)
@@ -35,13 +39,8 @@ import Data.Tuple (swap)
 import Data.Vector qualified as V
 import Data.Vector.Storable qualified as VS
 import Data.Vector.Storable.ByteString (vectorToByteString)
-import Control.Monad.State.Strict
-
-import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
-import Control.Concurrent.STM (writeTChan, newTChan, TChan, readTChan, atomically, isEmptyTChan)
-import Control.Concurrent (forkIO, killThread)
-import Control.Concurrent.STM.TVar (TVar, newTVarIO, modifyTVar, readTVar, writeTVar, readTVarIO)
-import Control.Concurrent.STM.TMVar (putTMVar, takeTMVar, TMVar, putTMVar, takeTMVar, newEmptyTMVarIO)
+import GHC.Conc (numCapabilities)
+import GHC.Natural
 
 import EVM (makeVm, abstractContract, initialContract, getCodeLocation, isValidJumpDest)
 import EVM.Exec
