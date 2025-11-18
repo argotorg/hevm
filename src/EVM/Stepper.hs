@@ -41,10 +41,9 @@ data Action t a where
   EVM  :: EVM t a -> Action t a
   -- | Wait for a query to be resolved
   Wait :: Query t -> Action t ()
-  -- | Two things can happen
-  Fork :: RunBoth -> Action Symbolic ()
-  -- | Many (>2) things can happen
-  ForkMany :: RunAll -> Action Symbolic ()
+  -- | More than one thing can happen
+  Fork :: BranchContext -> Action Symbolic ()
+
 
 -- | Type alias for an operational monad of @Action@
 type Stepper t a = Program (Action t) a
@@ -60,11 +59,8 @@ run = exec >> evm get
 wait :: Query t -> Stepper t ()
 wait = singleton . Wait
 
-fork :: RunBoth -> Stepper Symbolic ()
+fork :: BranchContext -> Stepper Symbolic ()
 fork = singleton . Fork
-
-forkMany :: RunAll -> Stepper Symbolic ()
-forkMany = singleton . ForkMany
 
 evm :: EVM t a -> Stepper t a
 evm = singleton . EVM
@@ -88,10 +84,8 @@ runFully = do
     Nothing -> internalError "should not occur"
     Just (HandleEffect (Query q)) ->
       wait q >> runFully
-    Just (HandleEffect (RunBoth q)) ->
-      fork q >> runFully
-    Just (HandleEffect (RunAll q)) ->
-      forkMany q >> runFully
+    Just (HandleEffect (Branch context)) ->
+      fork context >> runFully
     Just _ ->
       pure vm
 
