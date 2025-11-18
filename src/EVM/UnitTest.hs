@@ -50,7 +50,7 @@ import Witch (unsafeInto, into)
 import Data.Vector qualified as V
 import Data.Char (ord)
 
-data UnitTestOptions s = UnitTestOptions
+data UnitTestOptions = UnitTestOptions
   { rpcInfo       :: Fetch.RpcInfo
   , solvers       :: SolverGroup
   , sess          :: Fetch.Session
@@ -100,18 +100,18 @@ defaultMaxCodeSize = 0xffffffff
 type ABIMethod = Text
 
 -- | Used in various places for dumping traces
-writeTraceDapp :: App m => DappInfo -> VM t RealWorld -> m ()
+writeTraceDapp :: App m => DappInfo -> VM t -> m ()
 writeTraceDapp dapp vm = do
   conf <- readConfig
   liftIO $ when conf.dumpTrace $ Text.writeFile "VM.trace" (showTraceTree dapp vm)
 
-writeTrace :: App m => VM t RealWorld -> m ()
+writeTrace :: App m => VM t -> m ()
 writeTrace vm = do
   conf <- readConfig
   liftIO $ when conf.dumpTrace $ writeFile "VM.trace" (show $ traceForest vm)
 
 -- | Generate VeriOpts from UnitTestOptions
-makeVeriOpts :: UnitTestOptions s -> VeriOpts
+makeVeriOpts :: UnitTestOptions -> VeriOpts
 makeVeriOpts opts =
    defaultVeriOpts { iterConf = defaultIterConf {maxIter = opts.maxIter, askSmtIters = opts.askSmtIters, loopHeuristic = opts.loopHeuristic}
                    , rpcInfo = opts.rpcInfo
@@ -119,7 +119,7 @@ makeVeriOpts opts =
 
 -- | Top level CLI endpoint for hevm test
 -- | Returns tuple of (No Cex, No warnings)
-unitTest :: App m => UnitTestOptions RealWorld -> BuildOutput -> m (Bool, Bool)
+unitTest :: App m => UnitTestOptions -> BuildOutput -> m (Bool, Bool)
 unitTest opts bo@(BuildOutput (Contracts cs) _) = do
   let unitTestContrs = findUnitTests opts.prefix opts.match $ Map.elems cs
   conf <- readConfig
@@ -134,7 +134,7 @@ unitTest opts bo@(BuildOutput (Contracts cs) _) = do
 
 -- | Assuming a constructor is loaded, this stepper will run the constructor
 -- to create the test contract, give it an initial balance, and run `setUp()'.
-initializeUnitTest :: UnitTestOptions s -> SolcContract -> Stepper Concrete s ()
+initializeUnitTest :: UnitTestOptions -> SolcContract -> Stepper Concrete ()
 initializeUnitTest opts theContract = do
   let addr = opts.testParams.address
 
@@ -164,9 +164,9 @@ initializeUnitTest opts theContract = do
     _ -> popTrace
 
 validateCex :: forall m . App m
-  => UnitTestOptions RealWorld
-  -> Fetch.Fetcher Concrete m RealWorld
-  -> VM Concrete RealWorld
+  => UnitTestOptions
+  -> Fetch.Fetcher Concrete m
+  -> VM Concrete
   -> ReproducibleCex
   -> m Bool
 validateCex uTestOpts fetcher vm repCex = do
@@ -203,7 +203,7 @@ validateCex uTestOpts fetcher vm repCex = do
 -- Returns tuple of (No Cex, No warnings)
 runUnitTestContract
   :: App m
-  => UnitTestOptions RealWorld
+  => UnitTestOptions
   -> BuildOutput
   -> (Text, [Sig])
   -> m [(Bool, Bool)]
@@ -216,7 +216,7 @@ runUnitTestContract
     Nothing -> internalError $ "Contract " ++ unpack name ++ " not found"
     Just solcContr -> do
       -- Construct the initial VM and begin the contract's constructor
-      vm0 :: VM Concrete RealWorld <- liftIO $ stToIO $ initialUnitTestVm opts solcContr
+      vm0 :: VM Concrete <- liftIO $ stToIO $ initialUnitTestVm opts solcContr
       vm1 <- Stepper.interpret (Fetch.oracle solvers (Just sess) rpcInfo) vm0 $ do
         Stepper.enter name
         initializeUnitTest opts solcContr
@@ -233,7 +233,7 @@ runUnitTestContract
           forM testSigs $ \s -> symRun opts vm1 s solcContr buildOut.sources
         _ -> internalError "setUp() did not end with a result"
 
-dsTestFailedSym :: Map (Expr 'EAddr) (Expr EContract) -> VM s t -> Prop
+dsTestFailedSym :: Map (Expr 'EAddr) (Expr EContract) -> VM t -> Prop
 dsTestFailedSym store vm =
   let testContract = fromMaybe (internalError "test contract not found in state") (Map.lookup vm.state.contract store)
   in case Map.lookup cheatCode store of
@@ -247,7 +247,7 @@ dsTestFailedConc store = case Map.lookup cheatCode store of
 
 -- Define the thread spawner for symbolic tests
 -- Returns tuple of (No Cex, No warnings)
-symRun :: App m => UnitTestOptions RealWorld -> VM Concrete RealWorld -> Sig -> SolcContract -> SourceCache -> m (Bool, Bool)
+symRun :: App m => UnitTestOptions -> VM Concrete -> Sig -> SolcContract -> SourceCache -> m (Bool, Bool)
 symRun opts@UnitTestOptions{..} vm sig@(Sig testName types) solcContr sourceCache = do
     let cs = callSig sig
     liftIO $ putStrLn $ "\x1b[96m[RUNNING]\x1b[0m " <> Text.unpack cs
@@ -357,7 +357,7 @@ symRun opts@UnitTestOptions{..} vm sig@(Sig testName types) solcContr sourceCach
               lhs = LitByte (c2w a)
               rhs = Expr.readByte (Lit (fromIntegral n)) b
 --
-printWarnings :: Maybe (WarningData s t) -> GetUnknownStr b => [Expr 'End] -> [ProofResult a b] -> String -> IO ()
+printWarnings :: Maybe (WarningData t) -> GetUnknownStr b => [Expr 'End] -> [ProofResult a b] -> String -> IO ()
 printWarnings warnData e results testName = do
   when (any isUnknown results || any isError results || any Expr.isPartial e) $ do
     putStrLn $ "   \x1b[33m[WARNING]\x1b[0m hevm was only able to partially explore " <> testName <> " due to: ";
@@ -374,7 +374,7 @@ getReproFailures sig@(Sig testName _) cd cexes = do
     Right fullCD -> Right $ ReproducibleCex { testName = testName, callData = fullCD}) fullCDs
 
 symFailure :: App m =>
-  UnitTestOptions RealWorld -> Text -> Expr Buf -> [AbiType] ->
+  UnitTestOptions -> Text -> Expr Buf -> [AbiType] ->
   [(Expr End, SMTCex, Err Bool)] ->
   m Text
 symFailure UnitTestOptions {..} testName cd types fails = do
@@ -408,7 +408,7 @@ indentLines n s =
   let p = Text.replicate n " "
   in Text.unlines (map (p <>) (Text.lines s))
 
-failOutput :: App m => VM t s -> UnitTestOptions s -> Text -> m Text
+failOutput :: App m => VM t -> UnitTestOptions -> Text -> m Text
 failOutput vm UnitTestOptions { .. } testName = do
   conf <- readConfig
   let ?context = DappContext { info = dapp
@@ -495,14 +495,14 @@ formatTestLog events (LogEntry _ args (topic:_)) =
                   _ -> Nothing
               _ -> Just "<symbolic decimal>"
 
-abiCall :: VMOps t => TestVMParams -> Either (Text, AbiValue) ByteString -> EVM t s ()
+abiCall :: VMOps t => TestVMParams -> Either (Text, AbiValue) ByteString -> EVM t ()
 abiCall params args =
   let cd = case args of
         Left (sig, args') -> abiMethod sig args'
         Right b -> b
   in makeTxCall params (ConcreteBuf cd, [])
 
-makeTxCall :: VMOps t => TestVMParams -> (Expr Buf, [Prop]) -> EVM t s ()
+makeTxCall :: VMOps t => TestVMParams -> (Expr Buf, [Prop]) -> EVM t ()
 makeTxCall params (cd, cdProps) = do
   resetState
   assign (#tx % #isCreate) False
@@ -517,7 +517,7 @@ makeTxCall params (cd, cdProps) = do
   vm <- get
   put $ initTx vm
 
-initialUnitTestVm :: VMOps t => UnitTestOptions s -> SolcContract -> ST s (VM t s)
+initialUnitTestVm :: VMOps t => UnitTestOptions -> SolcContract -> ST RealWorld (VM t)
 initialUnitTestVm (UnitTestOptions {..}) theContract = do
   vm <- makeVm $ VMOpts
            { contract = initialContract (InitCode theContract.creationCode mempty)

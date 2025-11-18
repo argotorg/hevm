@@ -10,7 +10,7 @@ import Prelude hiding (LT, GT)
 import GHC.TypeLits
 import Data.Proxy
 import Control.Monad
-import Control.Monad.ST (RealWorld, stToIO)
+import Control.Monad.ST (stToIO)
 import Control.Monad.State.Strict
 import Control.Monad.IO.Unlift
 import Control.Monad.Reader (ReaderT)
@@ -520,7 +520,7 @@ tests = testGroup "hevm"
         let dummyContract =
               (initialContract (RuntimeCode (ConcreteRuntimeCode mempty)))
                 { external = True }
-        vm :: VM Concrete RealWorld <- liftIO $ stToIO $ vmForEthrunCreation ""
+        vm :: VM Concrete <- liftIO $ stToIO $ vmForEthrunCreation ""
         -- perform the initial access
         let ?conf = testEnv.config
         vm1 <- liftIO $ stToIO $ execStateT (EVM.accessStorage (LitAddr 0) (Lit 0) (pure . pure ())) vm
@@ -668,6 +668,13 @@ tests = testGroup "hevm"
         simp = Expr.simplifyProp expr
       ret <- checkEquivPropAndLHS expr simp
       assertEqualM "Must be equivalent" True ret
+    , test "buffer-length-zero" $ do
+        let
+          p = PEq (BufLength (AbstractBuf "b")) (Lit 0x0)
+          simp = Expr.simplifyProp p
+        liftIO $ print simp
+        ret <-  checkEquivProp p simp
+        assertEqualM "Must be equivalent" True ret
     ]
   -- These tests fuzz the simplifier by generating a random expression,
   -- applying some simplification rules, and then using the smt encoding to
@@ -1860,7 +1867,7 @@ tests = testGroup "hevm"
           let calldata = (WriteWord (Lit 0x0) (Var "u") (ConcreteBuf ""), [])
           initVM <- liftIO $ stToIO $ abstractVM calldata initCode Nothing True
           let iterConf = IterConfig {maxIter=Nothing, askSmtIters=1, loopHeuristic=StackBased }
-          paths <- interpret (Fetch.oracle s Nothing mempty) iterConf initVM runExpr
+          paths <- interpret (Fetch.noRpcFetcher s) iterConf initVM runExpr
           let exprSimp = map Expr.simplify paths
           assertBoolM "unexptected partial execution" (not $ any isPartial exprSimp)
     , test "mixed-concrete-symbolic-args" $ do
@@ -1952,7 +1959,7 @@ tests = testGroup "hevm"
         withDefaultSolver $ \s -> do
           vm <- liftIO $ stToIO $ loadSymVM runtimecode (Lit 0) initCode False
           let iterConf = IterConfig {maxIter=Nothing, askSmtIters=1, loopHeuristic=StackBased }
-          paths <- interpret (Fetch.oracle s Nothing mempty) iterConf vm runExpr
+          paths <- interpret (Fetch.noRpcFetcher s) iterConf vm runExpr
           let exprSimp = map Expr.simplify paths
           assertBoolM "expected partial execution" (any isPartial exprSimp)
     ]
@@ -1991,7 +1998,7 @@ tests = testGroup "hevm"
               , ("test/contracts/fail/symbolicFail.sol",      "prove_symb_fail_allrev_selector.*", (False, False))
               , ("test/contracts/fail/symbolicFail.sol",      "prove_symb_fail_somerev_selector.*", (False, True))]
         forM_ cases $ \(testFile, match, expected) -> do
-          actual <- runForgeTestCustom testFile match Nothing Nothing False mempty
+          actual <- runForgeTestCustom testFile match Nothing Nothing False Fetch.noRpc
           putStrLnM $ "Test result for " <> testFile <> " match: " <> T.unpack match <> ": " <> show actual
           assertEqualM "Must match" expected actual
     , test "Trivial-Fail" $ do
@@ -2024,14 +2031,14 @@ tests = testGroup "hevm"
         runForgeTest testFile "prove_trivial" >>= assertEqualM "prove_trivial" (False, False)
         runForgeTest testFile "prove_trivial_dstest" >>= assertEqualM "prove_trivial_dstest" (False, False)
         runForgeTest testFile "prove_add" >>= assertEqualM "prove_add" (False, True)
-        runForgeTestCustom testFile "prove_smtTimeout" (Just 1) Nothing False mempty
+        runForgeTestCustom testFile "prove_smtTimeout" (Just 1) Nothing False Fetch.noRpc
           >>= assertEqualM "prove_smtTimeout" (True, False)
         runForgeTest testFile "prove_multi" >>= assertEqualM "prove_multi" (False, True)
         runForgeTest testFile "prove_distributivity" >>= assertEqualM "prove_distributivity" (False, True)
     , test "Loop-Tests" $ do
         let testFile = "test/contracts/pass/loops.sol"
-        runForgeTestCustom testFile "prove_loop" Nothing (Just 10) False mempty  >>= assertEqualM "test result" (True, False)
-        runForgeTestCustom testFile "prove_loop" Nothing (Just 100) False mempty >>= assertEqualM "test result" (False, False)
+        runForgeTestCustom testFile "prove_loop" Nothing (Just 10) False Fetch.noRpc  >>= assertEqualM "test result" (True, False)
+        runForgeTestCustom testFile "prove_loop" Nothing (Just 100) False Fetch.noRpc >>= assertEqualM "test result" (False, False)
     , test "Cheat-Codes-Pass" $ do
         let testFile = "test/contracts/pass/cheatCodes.sol"
         runForgeTest testFile ".*" >>= assertEqualM "test result" (True, False)
@@ -4163,7 +4170,7 @@ tests = testGroup "hevm"
                     <&> set (#state % #callvalue) (Lit 0)
                     <&> over (#env % #contracts)
                        (Map.insert aAddr (initialContract (RuntimeCode (ConcreteRuntimeCode a))))
-            verify s (Fetch.oracle s Nothing mempty) defaultVeriOpts vm (checkAssertions defaultPanicCodes)
+            verify s (Fetch.noRpcFetcher s) defaultVeriOpts vm (checkAssertions defaultPanicCodes)
 
           let storeCex = cex.store
               testCex = case (Map.lookup cAddr storeCex, Map.lookup aAddr storeCex) of
@@ -4239,7 +4246,7 @@ tests = testGroup "hevm"
           let yulsafeDistributivity = hex "6355a79a6260003560e01c14156016576015601f565b5b60006000fd60a1565b603d602d604435600435607c565b6039602435600435607c565b605d565b6052604b604435602435605d565b600435607c565b141515605a57fe5b5b565b6000828201821115151560705760006000fd5b82820190505b92915050565b6000818384048302146000841417151560955760006000fd5b82820290505b92915050565b"
           calldata <- mkCalldata (Just (Sig "distributivity(uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256])) []
           vm <- liftIO $ stToIO $ abstractVM calldata yulsafeDistributivity Nothing False
-          (_, []) <-  withDefaultSolver $ \s -> verify s (Fetch.oracle s Nothing mempty) defaultVeriOpts vm (checkAssertions defaultPanicCodes)
+          (_, []) <-  withDefaultSolver $ \s -> verify s (Fetch.noRpcFetcher s) defaultVeriOpts vm (checkAssertions defaultPanicCodes)
           putStrLnM "Proven"
         ,
         test "safemath-distributivity-sol" $ do
@@ -4747,7 +4754,7 @@ tests = testGroup "hevm"
           |]
         withSolvers Bitwuzla 3 1 Nothing $ \s -> do
           calldata <- mkCalldata Nothing []
-          eq <- equivalenceCheck s a b defaultVeriOpts calldata False
+          eq <- equivalenceCheck s Nothing a b defaultVeriOpts calldata False
           assertBoolM "Must have a difference" (any (isCex . fst) eq.res)
           let cexs = mapMaybe (getCex . fst) eq.res
           assertEqualM "Must have exactly one cex" (length cexs) 1
@@ -4776,7 +4783,7 @@ tests = testGroup "hevm"
           |]
         withSolvers Bitwuzla 3 1 Nothing $ \s -> do
           calldata <- mkCalldata Nothing []
-          eq <- equivalenceCheck s a b defaultVeriOpts calldata False
+          eq <- equivalenceCheck s Nothing a b defaultVeriOpts calldata False
           assertBoolM "Must have a difference" (any (isCex . fst) eq.res)
           let cexs = mapMaybe (getCex . fst) eq.res
           assertEqualM "Must have exactly one cex" (length cexs) 1
@@ -4805,7 +4812,7 @@ tests = testGroup "hevm"
           |]
         withSolvers Bitwuzla 3 1 Nothing $ \s -> do
           calldata <- mkCalldata Nothing []
-          eq <- equivalenceCheck s a b defaultVeriOpts calldata False
+          eq <- equivalenceCheck s Nothing a b defaultVeriOpts calldata False
           assertBoolM "Must have a difference" (any (isCex . fst) eq.res)
           let cexs = mapMaybe (getCex . fst) eq.res
           assertEqualM "Must have exactly one cex" (length cexs) 1
@@ -4815,7 +4822,7 @@ tests = testGroup "hevm"
             b = fromJust (hexByteString "5f356101f40115610100526020610100f3")
         withSolvers Z3 3 1 Nothing $ \s -> do
           calldata <- mkCalldata Nothing []
-          eq <- equivalenceCheck s a b defaultVeriOpts calldata False
+          eq <- equivalenceCheck s Nothing a b defaultVeriOpts calldata False
           assertBoolM "Must have a difference" (any (isCex . fst) eq.res)
           let cexs :: [SMTCex] = mapMaybe (getCex . fst) eq.res
           cex <- case cexs of
@@ -4847,7 +4854,7 @@ tests = testGroup "hevm"
           |]
         withSolvers Z3 3 1 Nothing $ \s -> do
           calldata <- mkCalldata Nothing []
-          eq <- equivalenceCheck s aPrgm bPrgm defaultVeriOpts calldata False
+          eq <- equivalenceCheck s Nothing aPrgm bPrgm defaultVeriOpts calldata False
           assertBoolM "Must have a difference" (any (isCex . fst) eq.res)
       , test "constructor-same-deployed-diff" $ do
         Just initA <- solidity "C"
@@ -4876,7 +4883,7 @@ tests = testGroup "hevm"
           |]
         withSolvers Z3 3 1 Nothing $ \s -> do
           calldata <- mkCalldata Nothing []
-          eq <- equivalenceCheck s initA initB defaultVeriOpts calldata True
+          eq <- equivalenceCheck s Nothing initA initB defaultVeriOpts calldata True
           assertBoolM "Must have difference, we return different values" (all (isCex . fst) eq.res)
       , test "constructor-same-deployed-diff2" $ do
         Just initA <- solidity "C"
@@ -4908,7 +4915,7 @@ tests = testGroup "hevm"
           |]
         withSolvers Z3 3 1 Nothing $ \s -> do
           calldata <- mkCalldata Nothing []
-          eq <- equivalenceCheck s initA initB defaultVeriOpts calldata True
+          eq <- equivalenceCheck s Nothing initA initB defaultVeriOpts calldata True
           assertBoolM "Must have difference, we return different values" (all (isCex . fst) eq.res)
       , test "constructor-same-deployed-diff3" $ do
         Just initA <- solidity "C"
@@ -4934,7 +4941,7 @@ tests = testGroup "hevm"
           |]
         withSolvers Z3 3 1 Nothing $ \s -> do
           calldata <- mkCalldata Nothing []
-          eq <- equivalenceCheck s initA initB defaultVeriOpts calldata True
+          eq <- equivalenceCheck s Nothing initA initB defaultVeriOpts calldata True
           assertBoolM "Must have difference, we return different values" (all (isCex . fst) eq.res)
       -- We set x to be 0 on deployment. Default value is also 0. So they are equivalent
       -- We cannot deal with symbolic code. However, the below will generate symbolic code,
@@ -4967,7 +4974,7 @@ tests = testGroup "hevm"
           |]
         withSolvers Z3 3 1 Nothing $ \s -> do
           calldata <- mkCalldata Nothing []
-          eq <- equivalenceCheck s initA initB defaultVeriOpts calldata True
+          eq <- equivalenceCheck s Nothing initA initB defaultVeriOpts calldata True
           assertBoolM "Must have difference" (all (isCex . fst) eq.res)
       -- We set x to be 0 on deployment. Default value is also 0. So they are equivalent
       , test "constructor-implicit" $ do
@@ -4994,7 +5001,7 @@ tests = testGroup "hevm"
           |]
         withSolvers Z3 3 1 Nothing $ \s -> do
           calldata <- mkCalldata Nothing []
-          eq <- equivalenceCheck s initA initB defaultVeriOpts calldata True
+          eq <- equivalenceCheck s Nothing initA initB defaultVeriOpts calldata True
           putStrLnM $ "Equivalence result: " <> show eq
           assertEqualM "Must have no difference" [] (map fst eq.res)
       -- We set x to be 3 vs 0 (default) on deployment.
@@ -5022,7 +5029,7 @@ tests = testGroup "hevm"
           |]
         withSolvers Z3 3 1 Nothing $ \s -> do
           calldata <- mkCalldata Nothing []
-          eq <- equivalenceCheck s initA initB defaultVeriOpts calldata True
+          eq <- equivalenceCheck s Nothing initA initB defaultVeriOpts calldata True
           let cexes = filter (isCex . fst) eq.res
           assertBoolM "Must have a difference" (not $ null cexes)
       , test "eq-sol-exp-qed" $ do
@@ -5048,7 +5055,7 @@ tests = testGroup "hevm"
           |]
         withSolvers Z3 3 1 Nothing $ \s -> do
           calldata <- mkCalldata Nothing []
-          eq <- equivalenceCheck s aPrgm bPrgm defaultVeriOpts calldata False
+          eq <- equivalenceCheck s Nothing aPrgm bPrgm defaultVeriOpts calldata False
           assertEqualM "Must have no difference" [] (map fst eq.res)
       ,
       test "eq-balance-differs" $ do
@@ -5080,7 +5087,7 @@ tests = testGroup "hevm"
           |]
         withSolvers Z3 3 1 Nothing $ \s -> do
           calldata <- mkCalldata Nothing []
-          eq <- equivalenceCheck s aPrgm bPrgm defaultVeriOpts calldata False
+          eq <- equivalenceCheck s Nothing aPrgm bPrgm defaultVeriOpts calldata False
           assertBoolM "Must differ" (all (isCex . fst) eq.res)
       ,
       -- TODO: this fails because we don't check equivalence of deployed contracts
@@ -5142,7 +5149,7 @@ tests = testGroup "hevm"
           |]
         withSolvers Z3 3 1 Nothing $ \s -> do
           calldata <- mkCalldata Nothing []
-          eq <- equivalenceCheck s aPrgm bPrgm defaultVeriOpts calldata False
+          eq <- equivalenceCheck s Nothing aPrgm bPrgm defaultVeriOpts calldata False
           assertBoolM "Must differ" (any (isCex . fst) eq.res)
       ,
       test "eq-unknown-addr" $ do
@@ -5166,7 +5173,7 @@ tests = testGroup "hevm"
           |]
         withSolvers Z3 3 1 Nothing $ \s -> do
           cd <- mkCalldata (Just (Sig "a(address,address)" [AbiAddressType, AbiAddressType])) []
-          eq <- equivalenceCheck s aPrgm bPrgm defaultVeriOpts cd False
+          eq <- equivalenceCheck s Nothing aPrgm bPrgm defaultVeriOpts cd False
           assertEqualM "Must be different" (any (isCex . fst) eq.res) True
       ,
       test "eq-sol-exp-cex" $ do
@@ -5192,7 +5199,7 @@ tests = testGroup "hevm"
           |]
         withSolvers Bitwuzla 3 1 Nothing $ \s -> do
           calldata <- mkCalldata Nothing []
-          eq <- equivalenceCheck s aPrgm bPrgm defaultVeriOpts calldata False
+          eq <- equivalenceCheck s Nothing aPrgm bPrgm defaultVeriOpts calldata False
           assertEqualM "Must be different" (any (isCex . fst) eq.res) True
       ,
       test "eq-storage-write-to-static-array-uint128" $ do
@@ -5219,7 +5226,7 @@ tests = testGroup "hevm"
           |]
         withSolvers Bitwuzla 1 1 Nothing $ \s -> do
           calldata <- mkCalldata (Just (Sig "set(uint256,uint128)" [AbiUIntType 256, AbiUIntType 128])) []
-          eq <- equivalenceCheck s aPrgm bPrgm defaultVeriOpts calldata False
+          eq <- equivalenceCheck s Nothing aPrgm bPrgm defaultVeriOpts calldata False
           assertEqualM "Must have no difference" [] (map fst eq.res)
       ,
       test "eq-storage-write-to-static-array-uint8" $ do
@@ -5246,7 +5253,7 @@ tests = testGroup "hevm"
           |]
         withSolvers Bitwuzla 1 1 Nothing $ \s -> do
           calldata <- mkCalldata (Just (Sig "set(uint256,uint8)" [AbiUIntType 256, AbiUIntType 8])) []
-          eq <- equivalenceCheck s aPrgm bPrgm defaultVeriOpts calldata False
+          eq <- equivalenceCheck s Nothing aPrgm bPrgm defaultVeriOpts calldata False
           assertEqualM "Must have no difference" [] (map fst eq.res)
       ,
       test "eq-storage-write-to-static-array-uint32" $ do
@@ -5273,7 +5280,7 @@ tests = testGroup "hevm"
           |]
         withSolvers Bitwuzla 1 1 Nothing $ \s -> do
           calldata <- mkCalldata (Just (Sig "set(uint256,uint32)" [AbiUIntType 256, AbiUIntType 32])) []
-          eq <- equivalenceCheck s aPrgm bPrgm defaultVeriOpts calldata False
+          eq <- equivalenceCheck s Nothing aPrgm bPrgm defaultVeriOpts calldata False
           assertEqualM "Must have no difference" [] (map fst eq.res)
       , test "eq-all-yul-optimization-tests" $ do
         let opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf {maxIter = Just 5, askSmtIters = 20, loopHeuristic = Naive }}
@@ -5487,7 +5494,7 @@ tests = testGroup "hevm"
           procs <- liftIO $ getNumProcessors
           withSolvers CVC5 (unsafeInto procs) 1 (Just 100) $ \s -> do
             calldata <- mkCalldata Nothing []
-            eq <- equivalenceCheck s aPrgm bPrgm opts calldata False
+            eq <- equivalenceCheck s Nothing aPrgm bPrgm opts calldata False
             let res = map fst eq.res
             end <- liftIO $ getCurrentTime
             case any isCex res of
@@ -5566,7 +5573,7 @@ runSimpleVM x ins = do
        s -> internalError $ show s
 
 -- | Takes a creation code and returns a vm with the result of executing the creation code
-loadVM :: App m => ByteString -> m (Maybe (VM Concrete RealWorld))
+loadVM :: App m => ByteString -> m (Maybe (VM Concrete))
 loadVM x = do
   vm <- liftIO $ stToIO $ vmForEthrunCreation x
   vm1 <- Stepper.interpret (Fetch.zero 0 Nothing) vm Stepper.runFully
@@ -5632,7 +5639,7 @@ runStatements stmts args t = do
     }
   |] (abiMethod s (AbiTuple $ V.fromList args))
 
-getStaticAbiArgs :: Int -> VM Symbolic s -> [Expr EWord]
+getStaticAbiArgs :: Int -> VM Symbolic -> [Expr EWord]
 getStaticAbiArgs n vm =
   let cd = vm.state.calldata
   in decodeStaticArgs 4 n cd
@@ -6281,7 +6288,7 @@ bothM f (a, a') = do
 applyPattern :: String -> TestTree  -> TestTree
 applyPattern p = localOption (TestPattern (parseExpr p))
 
-checkBadCheatCode :: Text -> Postcondition s
+checkBadCheatCode :: Text -> Postcondition
 checkBadCheatCode sig _ = \case
   (Failure _ c (Revert _)) -> case mapMaybe findBadCheatCode (concatMap flatten c.traces) of
     (s:_) -> (ConcreteBuf $ into s.unFunctionSelector) ./= (ConcreteBuf $ selector sig)
@@ -6303,7 +6310,7 @@ allBranchesFail = checkPost p
 reachableUserAsserts :: App m => ByteString -> Maybe Sig -> m (Either [SMTCex] [Expr End])
 reachableUserAsserts = checkPost (checkAssertions [0x01])
 
-checkPost :: App m => Postcondition RealWorld -> ByteString -> Maybe Sig -> m (Either [SMTCex] [Expr End])
+checkPost :: App m => Postcondition -> ByteString -> Maybe Sig -> m (Either [SMTCex] [Expr End])
 checkPost post c sig = do
   (e, res) <- withDefaultSolver $ \s -> verifyContract s c sig [] defaultVeriOpts Nothing post
   let cexs = snd <$> mapMaybe getCex res

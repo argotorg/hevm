@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## Added
+- We support RPC in equivalence checking now
+
 ## Fixed
 - Fix incorrect simplification rule for `PEq (Lit 1) (IsZero (LT a b))`
 
@@ -16,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Changed `verify*` methods to always require postcodition.
 - We now use a symbolic execution queue, so as not to run out of resources when there are
   too many branches to explore.
+- Removed type parameter of mutable memory from VM definition.
+- Removed simplification that were rewriting concrete bytes-to-be-overwritten
+  with zero bytes. Benefits were unclear while it had negative effect on
+  analysis' performance.
 
 ## [0.56.0] - 2025-10-13
 

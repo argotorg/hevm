@@ -81,7 +81,7 @@ groupIssues results = map (\g -> (into (length g), NE.head g)) grouped
     getIssue _ = Nothing
     grouped = NE.group $ sort $ mapMaybe getIssue results
 
-groupPartials :: Maybe (WarningData s t) -> [Expr End] -> [(Integer, String)]
+groupPartials :: Maybe (WarningData t) -> [Expr End] -> [(Integer, String)]
 groupPartials warnData e = map (\g -> (into (length g), NE.head g)) grouped
   where
     getPartial :: Expr End -> Maybe String
@@ -112,11 +112,8 @@ data VeriOpts = VeriOpts
 defaultVeriOpts :: VeriOpts
 defaultVeriOpts = VeriOpts
   { iterConf = defaultIterConf
-  , rpcInfo = mempty
+  , rpcInfo = Fetch.noRpc
   }
-
-rpcVeriOpts :: (Fetch.BlockNumber, Text) -> VeriOpts
-rpcVeriOpts info = defaultVeriOpts { rpcInfo  = mempty { Fetch.blockNumURL = Just info }}
 
 extractCex :: VerifyResult -> Maybe (Expr End, SMTCex)
 extractCex (Cex c) = Just c
@@ -220,9 +217,9 @@ isSt _ = False
 abstractVM
   :: (Expr Buf, [Prop])
   -> ByteString
-  -> Maybe (Precondition s)
+  -> Maybe (Precondition)
   -> Bool
-  -> ST s (VM Symbolic s)
+  -> ST RealWorld (VM Symbolic)
 abstractVM cd contractCode maybepre create = do
   let value = TxValue
   let code = if create then InitCode contractCode (fst cd) else RuntimeCode (ConcreteRuntimeCode contractCode)
@@ -237,7 +234,7 @@ loadEmptySymVM
   :: ContractCode
   -> Expr EWord
   -> (Expr Buf, [Prop])
-  -> ST s (VM Symbolic s)
+  -> ST RealWorld (VM Symbolic)
 loadEmptySymVM x callvalue cd =
   (makeVm $ VMOpts
     { contract = initialContract x
@@ -274,7 +271,7 @@ loadSymVM
   -> Expr EWord
   -> (Expr Buf, [Prop])
   -> Bool
-  -> ST s (VM Symbolic s)
+  -> ST RealWorld (VM Symbolic)
 loadSymVM x callvalue cd create =
   (makeVm $ VMOpts
     { contract = if create then initialContract x else abstractContract x (SymAddr "entrypoint")
@@ -306,16 +303,16 @@ loadSymVM x callvalue cd create =
     })
 
 -- freezes any mutable refs, making it safe to share between threads
-freezeVM :: VM Symbolic RealWorld -> ST RealWorld (VM Symbolic RealWorld)
+freezeVM :: VM Symbolic -> ST RealWorld (VM Symbolic)
 freezeVM vm = do
     state' <- do
       mem' <- freeze (vm.state.memory)
       pure $ vm.state { memory = mem' }
-    frames' <- forM (vm.frames :: [Frame Symbolic RealWorld]) $ \frame -> do
+    frames' <- forM (vm.frames :: [Frame Symbolic]) $ \frame -> do
       mem' <- freeze frame.state.memory
-      pure $ (frame :: Frame Symbolic RealWorld) { state = frame.state { memory = mem' } }
+      pure $ (frame :: Frame Symbolic) { state = frame.state { memory = mem' } }
 
-    pure (vm :: VM Symbolic RealWorld)
+    pure (vm :: VM Symbolic)
       { state = state'
       , frames = frames'
       }
@@ -426,7 +423,7 @@ interpretInternal :: forall m . App m
   -> m (Expr End)
 interpretInternal t@InterpTask{..} res = eval (Operational.view stepper)
   where
-  eval :: Operational.ProgramView (Stepper.Action Symbolic RealWorld) (Expr End) -> m (Expr End)
+  eval :: Operational.ProgramView (Stepper.Action Symbolic) (Expr End) -> m (Expr End)
   eval (Operational.Return x) = pure x
   eval (action Operational.:>>= k) =
     case action of
@@ -445,9 +442,18 @@ interpretInternal t@InterpTask{..} res = eval (Operational.view stepper)
         let newDepth = vm.exploreDepth+1
         runOne frozen newDepth vals
         where
+<<<<<<< HEAD
           runOne :: App m => VM 'Symbolic RealWorld -> Int -> [Expr EWord] -> m (Expr End)
           runOne frozen newDepth [v] = do
             conf <- readConfig
+=======
+          goITE :: [(Expr EWord, Expr End)] -> Expr End
+          goITE [] = internalError "goITE: empty list"
+          goITE [(_, end)] = end
+          goITE ((val,end):ps) = ITE (Eq expr val) end (goITE ps)
+          runOne :: App m => VM 'Symbolic -> Int -> Expr EWord -> m (Expr 'End)
+          runOne frozen newDepth v = do
+>>>>>>> main
             (ra, vma) <- liftIO $ stToIO $ runStateT (continue v) frozen { result = Nothing, exploreDepth = newDepth }
             when (conf.debug) $ liftIO $ putStrLn $ "Running last task for ForkMany at depth " <> show newDepth
             flip interpretInternal res t { vm = vma, stepper =  (k ra) }
@@ -520,7 +526,7 @@ interpretInternal t@InterpTask{..} res = eval (Operational.view stepper)
                     interpretInternal newT res
           _ -> performQuery
 
-maxIterationsReached :: VM Symbolic s -> Maybe Integer -> Maybe Bool
+maxIterationsReached :: VM Symbolic -> Maybe Integer -> Maybe Bool
 maxIterationsReached _ Nothing = Nothing
 maxIterationsReached vm (Just maxIter) =
   let codelocation = getCodeLocation vm
@@ -529,7 +535,7 @@ maxIterationsReached vm (Just maxIter) =
      then Map.lookup (codelocation, iters - 1) vm.pathsVisited
      else Nothing
 
-askSmtItersReached :: VM Symbolic s -> Integer -> Bool
+askSmtItersReached :: VM Symbolic -> Integer -> Bool
 askSmtItersReached vm askSmtIters = let
     codelocation = getCodeLocation vm
     (iters, _) = view (at codelocation % non (0, [])) vm.iterations
@@ -543,7 +549,7 @@ askSmtItersReached vm askSmtIters = let
 
  This heuristic is not perfect, and can certainly be tricked, but should generally be good enough for most compiler generated and non pathological user generated loops.
  -}
-isLoopHead :: LoopHeuristic -> VM Symbolic s -> Maybe Bool
+isLoopHead :: LoopHeuristic -> VM Symbolic -> Maybe Bool
 isLoopHead Naive _ = Just True
 isLoopHead StackBased vm = let
     loc = getCodeLocation vm
@@ -554,8 +560,8 @@ isLoopHead StackBased vm = let
        Just (_, oldStack) -> Just $ filter isValid oldStack == filter isValid vm.state.stack
        Nothing -> Nothing
 
-type Precondition s = VM Symbolic s -> Prop
-type Postcondition s = VM Symbolic s -> Expr End -> Prop
+type Precondition = VM Symbolic -> Prop
+type Postcondition = VM Symbolic -> Expr End -> Prop
 
 -- Used only in testing
 checkAssert
@@ -622,7 +628,7 @@ getExpr solvers c signature' concreteArgs opts = do
   see: https://docs.soliditylang.org/en/v0.8.6/control-structures.html?highlight=Panic#panic-via-assert-and-error-via-require
   NOTE: does not deal with e.g. `assertEq()`
 -}
-checkAssertions :: [Word256] -> Postcondition s
+checkAssertions :: [Word256] -> Postcondition
 checkAssertions errs _ = \case
   Failure _ _ (UnrecognizedOpcode 0xfe)  -> PBool False
   Failure _ _ (Revert (ConcreteBuf msg)) -> PBool $ msg `notElem` (fmap panicMsg errs)
@@ -662,9 +668,15 @@ verifyContract :: forall m . App m
   -> Maybe Sig
   -> [String]
   -> VeriOpts
+<<<<<<< HEAD
   -> Maybe (Precondition RealWorld)
   -> Postcondition RealWorld
   -> m ([Expr End], [VerifyResult])
+=======
+  -> Maybe Precondition
+  -> Postcondition
+  -> m (Expr End, [VerifyResult])
+>>>>>>> main
 verifyContract solvers theCode signature' concreteArgs opts maybepre post = do
   calldata <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ abstractVM calldata theCode maybepre False
@@ -678,8 +690,13 @@ exploreContract :: forall m . App m
   -> Maybe Sig
   -> [String]
   -> VeriOpts
+<<<<<<< HEAD
   -> Maybe (Precondition RealWorld)
   -> m [Expr End]
+=======
+  -> Maybe Precondition
+  -> m (Expr End)
+>>>>>>> main
 exploreContract solvers theCode signature' concreteArgs opts maybepre = do
   calldata <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ abstractVM calldata theCode maybepre False
@@ -687,7 +704,7 @@ exploreContract solvers theCode signature' concreteArgs opts maybepre = do
   executeVM fetcher opts.iterConf preState
 
 -- | Stepper that parses the result of Stepper.runFully into an Expr End
-runExpr :: Stepper.Stepper Symbolic RealWorld (Expr End)
+runExpr :: Stepper.Stepper Symbolic (Expr End)
 runExpr = do
   vm <- Stepper.runFully
   let traces = TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels
@@ -749,25 +766,40 @@ getPartials = mapMaybe go
 
 
 -- | Symbolically execute the VM and return the representention of the execution
+<<<<<<< HEAD
 executeVM :: forall m . App m => Fetch.Fetcher Symbolic m RealWorld -> IterConfig -> VM Symbolic RealWorld -> m [Expr End]
+=======
+executeVM :: forall m . App m => Fetch.Fetcher Symbolic m -> IterConfig -> VM Symbolic -> m (Expr End)
+>>>>>>> main
 executeVM fetcher iterConfig preState = interpret fetcher iterConfig preState runExpr
 
 -- | Symbolically execute the VM and check all endstates against the
 -- postcondition, if available.
 verify :: App m
   => SolverGroup
-  -> Fetch.Fetcher Symbolic m RealWorld
+  -> Fetch.Fetcher Symbolic m
   -> VeriOpts
+<<<<<<< HEAD
   -> VM Symbolic RealWorld
   -> Postcondition RealWorld
   -> m ([Expr End], [VerifyResult])
+=======
+  -> VM Symbolic
+  -> Postcondition
+  -> m (Expr End, [VerifyResult])
+>>>>>>> main
 verify solvers fetcher opts preState post = do
   (ends1, partials) <- verifyInputs solvers opts fetcher preState post
   let (ends2, results) = verifyResults preState ends1
   pure (ends2 <> fmap snd partials, filter (not . isQed) results)
 
+<<<<<<< HEAD
 verifyResults :: VM Symbolic RealWorld -> [(SMTResult, Expr End)] -> ([Expr End], [VerifyResult])
 verifyResults preState res = (map snd res, fmap toVRes res)
+=======
+verifyResults :: VM Symbolic -> Expr End -> [(SMTResult, Expr End)] -> (Expr End, [VerifyResult])
+verifyResults preState expr cexs = if null cexs then (expr, [Qed]) else (expr, fmap toVRes cexs)
+>>>>>>> main
   where
     toVRes :: (SMTResult, Expr End) -> VerifyResult
     toVRes (res2, leaf) = case res2 of
@@ -782,10 +814,17 @@ verifyInputs
   :: App m
   => SolverGroup
   -> VeriOpts
+<<<<<<< HEAD
   -> Fetch.Fetcher Symbolic m RealWorld
   -> VM Symbolic RealWorld
   -> Postcondition RealWorld
   -> m ([(SMTResult, Expr End)], [(PartialExec, Expr End)])
+=======
+  -> Fetch.Fetcher Symbolic m
+  -> VM Symbolic
+  -> Postcondition
+  -> m (Expr End, [(SMTResult, Expr End)], [(PartialExec, Expr End)])
+>>>>>>> main
 verifyInputs solvers opts fetcher preState post = do
   conf <- readConfig
   let call = mconcat ["prefix 0x", getCallPrefix preState.state.calldata]
@@ -832,7 +871,7 @@ verifyInputs solvers opts fetcher preState post = do
         [PBool False] -> False
         _ -> True
 
-expandCex :: VM Symbolic s -> SMTCex -> SMTCex
+expandCex :: VM Symbolic -> SMTCex -> SMTCex
 expandCex prestate c = c { store = Map.union c.store concretePreStore }
   where
     concretePreStore = Map.mapMaybe (maybeConcStoreSimp . (.storage))
@@ -865,13 +904,14 @@ instance Semigroup EqIssues where
 equivalenceCheck
   :: forall m . App m
   => SolverGroup
+  -> Maybe Fetch.Session
   -> ByteString
   -> ByteString
   -> VeriOpts
   -> (Expr Buf, [Prop])
   -> Bool
   -> m EqIssues
-equivalenceCheck solvers bytecodeA bytecodeB opts calldata create = do
+equivalenceCheck solvers sess bytecodeA bytecodeB opts calldata create = do
   conf <- readConfig
   case bytecodeA == bytecodeB of
     True -> liftIO $ do
@@ -892,16 +932,32 @@ equivalenceCheck solvers bytecodeA bytecodeB opts calldata create = do
       let branchesA = rewriteFresh "A-" branchesAorig
           branchesB = rewriteFresh "B-" branchesBorig
       let partialIssues = EqIssues mempty (filter isPartial branchesA <> filter isPartial branchesB)
+<<<<<<< HEAD
       issues <- equivalenceCheck' solvers branchesA branchesB create
       pure $ filterQeds (issues <> partialIssues)
+=======
+      issues <- equivalenceCheck' solvers sess branchesA branchesB create
+      pure $ oneQedOrNoQed issues <> partialIssues
+>>>>>>> main
   where
     -- decompiles the given bytecode into a list of branches
     getBranches :: App m => ByteString -> m [Expr End]
     getBranches bs = do
       let bytecode = if BS.null bs then BS.pack [0] else bs
       prestate <- liftIO $ stToIO $ abstractVM calldata bytecode Nothing create
+<<<<<<< HEAD
       interpret (Fetch.oracle solvers Nothing mempty) opts.iterConf prestate runExpr
     filterQeds (EqIssues res partials) = EqIssues (filter (\(r, _) -> not . isQed $ r) res) partials
+=======
+      expr <- interpret (Fetch.oracle solvers sess Fetch.noRpc) opts.iterConf prestate runExpr
+      let simpl = if conf.simp then Expr.simplify expr else expr
+      pure $ flattenExpr simpl
+    oneQedOrNoQed :: EqIssues -> EqIssues
+    oneQedOrNoQed (EqIssues res partials) =
+      let allQed = all (\(r, _) -> isQed r) res
+      in if allQed then EqIssues [(Qed, "")] partials
+          else EqIssues (filter (\(r, _) -> not $ isQed r) res) partials
+>>>>>>> main
 
 
 rewriteFresh :: Text -> [Expr a] -> [Expr a]
@@ -916,8 +972,8 @@ rewriteFresh prefix exprs = fmap (mapExpr mymap) exprs
 
 equivalenceCheck'
   :: forall m . App m
-  => SolverGroup -> [Expr End] -> [Expr End] -> Bool -> m EqIssues
-equivalenceCheck' solvers branchesA branchesB create = do
+  => SolverGroup -> Maybe Fetch.Session -> [Expr End] -> [Expr End] -> Bool -> m EqIssues
+equivalenceCheck' solvers sess branchesA branchesB create = do
       conf <- readConfig
       when conf.debug $ do
         liftIO $ printPartialIssues branchesA "codeA"
@@ -1048,7 +1104,7 @@ equivalenceCheck' solvers branchesA branchesB create = do
             liftIO $ putStrLn $ "create deployed code B: " <> bsToHex codeB
               <> " with constraints: " <> (T.unpack . T.unlines $ map formatProp bProps)
           calldata <- mkCalldata Nothing []
-          equivalenceCheck solvers codeA codeB defaultVeriOpts calldata False
+          equivalenceCheck solvers sess codeA codeB defaultVeriOpts calldata False
         _ -> internalError $ "Symbolic code returned from constructor." <> " A: " <> show simpA <> " B: " <> show simpB
 
     statesDiffer :: Map (Expr EAddr) (Expr EContract) -> Map (Expr EAddr) (Expr EContract) -> Prop

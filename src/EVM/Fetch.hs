@@ -2,23 +2,27 @@
 module EVM.Fetch
   ( fetchContractWithSession
   , fetchBlockWithSession
-  , fetchSlotWithSession
-  , fetchSlotWithCache
-  , fetchWithSession
   , fetchQuery
   , oracle
   , Fetcher
   , RpcInfo (..)
   , RpcQuery (..)
   , EVM.Fetch.zero
+  , noRpc
+  , noRpcFetcher
   , BlockNumber (..)
-  , mkRpcInfo
   , mkSession
   , mkSessionWithoutCache
   , Session (..)
   , FetchCache (..)
   , addFetchCache
   , saveCache
+  , RPCContract (..)
+  , makeContractFromRPC
+  -- Below 3 are needed for Echidna
+  , fetchSlotWithSession
+  , fetchSlotWithCache
+  , fetchWithSession
   ) where
 
 import Prelude hiding (Foldable(..))
@@ -41,10 +45,8 @@ import Data.Aeson.Encode.Pretty (encodePretty)
 import qualified Data.ByteString.Lazy as BSL
 import Data.Bifunctor (first)
 import Control.Exception (try, SomeException)
-import Control.Monad (join)
 
 import Control.Monad.Trans.Maybe
-import Control.Applicative (Alternative(..))
 import Data.Aeson hiding (Error)
 import Data.Aeson.Optics
 import Data.ByteString qualified as BS
@@ -52,7 +54,7 @@ import Data.Text (Text, unpack, pack)
 import Data.Text qualified as T
 import Data.Foldable (Foldable(..))
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, isJust, fromJust)
+import Data.Maybe (fromMaybe, isJust, fromJust, isNothing)
 import Data.Vector qualified as RegularVector
 import Network.Wreq
 import Network.Wreq.Session qualified as NetSession
@@ -65,7 +67,7 @@ import EVM.Effects
 import qualified EVM.Expr as Expr
 import Control.Concurrent.MVar (MVar, newMVar, readMVar, modifyMVar_)
 
-type Fetcher t m s = App m => Query t s -> m (EVM t s ())
+type Fetcher t m = App m => Query t -> m (EVM t ())
 
 data Session = Session
   { sess           :: NetSession.Session
@@ -75,36 +77,11 @@ data Session = Session
   }
 
 data FetchCache = FetchCache
-  { contractCache :: Map.Map Addr Contract
+  { contractCache :: Map.Map Addr RPCContract
   , slotCache     :: Map.Map (Addr, W256) W256
   , blockCache    :: Map.Map W256 Block
   } deriving (Generic)
 
-instance ToJSON Contract where
-  toJSON c = object
-    [ "code"    .= case c.code of
-        RuntimeCode (ConcreteRuntimeCode bs) -> Just (ByteStringS bs)
-        _ -> Nothing
-    , "nonce"   .= c.nonce
-    , "balance" .= case c.balance of
-        Lit w -> Just w
-        _ -> Nothing
-    , "external" .= c.external
-    ]
-
-instance FromJSON Contract where
-  parseJSON = withObject "Contract" $ \v -> do
-    maybeCodeText <- v .:? "code"
-    let mcCode = hexText <$> join maybeCodeText
-    mcNonce <- v .: "nonce"
-    maybeBalance <- v .:? "balance"
-    let mcBalance = join maybeBalance
-    external <- v .: "external"
-    let code = maybe (RuntimeCode (ConcreteRuntimeCode "")) (RuntimeCode . ConcreteRuntimeCode) mcCode
-    pure $ initialContract code
-      & #nonce .~ mcNonce
-      & #balance .~ maybe (Lit 0) Lit mcBalance
-      & #external .~ external
 
 instance ToJSON FetchCache where
   toJSON (FetchCache cs ss bs) = object
@@ -150,24 +127,21 @@ data BlockNumber = Latest | BlockNumber W256
 deriving instance Show (RpcQuery a)
 
 data RPCContract = RPCContract
-  { mcCode    :: BS.ByteString
-  , mcNonce   :: W64
-  , mcBalance :: W256
+  { code    :: ByteStringS
+  , nonce   :: W64
+  , balance :: W256
   }
-  deriving (Eq, Show)
+  deriving (Eq, Show, Generic)
 
-data RpcInfo = RpcInfo
-  { blockNumURL  :: Maybe (BlockNumber, Text) -- ^ (block number, RPC url)
-  }
+instance ToJSON RPCContract
+
+instance FromJSON RPCContract
+
+newtype RpcInfo = RpcInfo { blockNumURL  :: Maybe (BlockNumber, Text)} -- ^ (block number, RPC url)
   deriving (Show)
-instance Semigroup RpcInfo where
-  RpcInfo a1 <> RpcInfo b1 =
-    RpcInfo (a1 <|> b1)
-instance Monoid RpcInfo where
-  mempty = RpcInfo Nothing
 
-mkRpcInfo :: Maybe (BlockNumber, Text) -> RpcInfo
-mkRpcInfo blockNumURL = RpcInfo blockNumURL
+noRpc :: RpcInfo
+noRpc = RpcInfo Nothing
 
 rpc :: String -> [Value] -> Value
 rpc method args = object
@@ -196,7 +170,7 @@ instance ToRPC BlockNumber where
 readText :: Read a => Text -> a
 readText = read . unpack
 
-addFetchCache :: Session -> Addr -> Contract -> IO ()
+addFetchCache :: Session -> Addr -> RPCContract -> IO ()
 addFetchCache sess address ctrct = do
   cache <- readMVar sess.sharedCache
   liftIO $ modifyMVar_ sess.sharedCache $ \c -> pure $ c { contractCache = (Map.insert address ctrct cache.contractCache) }
@@ -296,7 +270,7 @@ fetchWithSession url sess x = do
   r <- asValue =<< NetSession.post sess (unpack url) x
   pure (r ^? (lensVL responseBody) % key "result")
 
-fetchContractWithSession :: Config -> Session -> BlockNumber -> Text -> Addr -> IO (Maybe Contract)
+fetchContractWithSession :: Config -> Session -> BlockNumber -> Text -> Addr -> IO (Maybe RPCContract)
 fetchContractWithSession conf sess nPre url addr = do
   n <- getLatestBlockNum conf sess nPre url
   cache <- readMVar sess.sharedCache
@@ -312,7 +286,7 @@ fetchContractWithSession conf sess nPre url addr = do
         code    <- MaybeT $ fetch (QueryCode addr)
         nonce   <- MaybeT $ fetch (QueryNonce addr)
         balance <- MaybeT $ fetch (QueryBalance addr)
-        let contr = makeContractFromRPC (RPCContract code nonce balance)
+        let contr = RPCContract (ByteStringS code) nonce balance
         liftIO $ modifyMVar_ sess.sharedCache $ \c ->
           pure $ c { contractCache = Map.insert addr contr c.contractCache }
         pure contr
@@ -338,12 +312,13 @@ getLatestBlockNum conf sess n url =
    _ -> pure n
 
 makeContractFromRPC :: RPCContract -> Contract
-makeContractFromRPC (RPCContract code nonce balance) =
+makeContractFromRPC (RPCContract (ByteStringS code) nonce balance) =
     initialContract (RuntimeCode (ConcreteRuntimeCode code))
       & set #nonce    (Just nonce)
       & set #balance  (Lit balance)
       & set #external True
 
+-- Needed for Echidna only
 fetchSlotWithCache :: Config -> Session -> BlockNumber -> Text -> Addr -> W256 -> IO (Maybe W256)
 fetchSlotWithCache conf sess nPre url addr slot = do
   n <- getLatestBlockNum conf sess nPre url
@@ -387,22 +362,6 @@ internalBlockFetch conf sess n url = do
       let bn = forceLit b.number
       liftIO $ modifyMVar_ sess.sharedCache $ \c ->
         pure $ c { blockCache = Map.insert bn b c.blockCache }
-      pure ret
-
-fetchSlotFrom :: App m => Session -> BlockNumber -> Text -> Addr -> W256 -> m (Maybe W256)
-fetchSlotFrom sess nPre url addr slot = do
-  conf <- readConfig
-  n <- liftIO $ getLatestBlockNum conf sess nPre url
-  cache <- liftIO $ readMVar sess.sharedCache
-  case Map.lookup (addr, slot) cache.slotCache of
-    Just s -> do
-      when (conf.debug) $ liftIO $ putStrLn $ "-> Using cached slot value for slot " <> show slot <> " at " <> show addr
-      pure $ Just s
-    Nothing -> do
-      ret <- liftIO $ fetchSlotWithSession sess.sess n url addr slot
-      when (isJust ret) $ let val = fromJust ret in
-        liftIO $ modifyMVar_ sess.sharedCache $ \c ->
-          pure $ c { slotCache = Map.insert (addr, slot) val c.slotCache }
       pure ret
 
 cacheFileName :: W256 -> FilePath
@@ -452,14 +411,17 @@ mkSessionWithoutCache :: App m => m Session
 mkSessionWithoutCache = mkSession Nothing Nothing
 
 -- Only used for testing (test.hs, BlockchainTests.hs)
-zero :: Natural -> Maybe Natural -> Fetcher t m s
+zero :: Natural -> Maybe Natural -> Fetcher t m
 zero smtjobs smttimeout q = do
   sess <- mkSessionWithoutCache
   withSolvers Z3 smtjobs 1 smttimeout $ \s ->
-    oracle s (Just sess) mempty q
+    oracle s (Just sess) noRpc q
+
+noRpcFetcher :: forall t m . App m => SolverGroup -> Fetcher t m
+noRpcFetcher sg = oracle sg Nothing noRpc
 
 -- SMT solving + RPC data fetching + reading from environment
-oracle :: forall t m s . App m => SolverGroup -> Maybe Session -> RpcInfo -> Fetcher t m s
+oracle :: forall t m . App m => SolverGroup -> Maybe Session -> RpcInfo -> Fetcher t m
 oracle solvers preSess rpcInfo q = do
   case q of
     PleaseDoFFI vals envs continue -> case vals of
@@ -484,57 +446,60 @@ oracle solvers preSess rpcInfo q = do
          let pathconds = foldl' PAnd (PBool True) pathconditions
          continue <$> getSolutions solvers symExpr numBytes pathconds
 
-    PleaseFetchContract addr base continue -> withSession addr (continue (nothingContract base addr)) $ \sess -> do
-      conf <- readConfig
-      cache <- liftIO $ readMVar sess.sharedCache
-      case Map.lookup addr cache.contractCache of
-        Just c -> do
-          when (conf.debug) $ liftIO $ putStrLn $ "-> Using cached contract at " ++ show addr
-          pure $ continue c
-        Nothing -> do
-          when (conf.debug) $ liftIO $ putStrLn $ "Fetching contract at " ++ show addr
-          when (addr == 0 && conf.verb > 0) $ liftIO $ putStrLn "Warning: fetching contract at address 0"
-          contract <- case rpcInfo.blockNumURL of
-            Nothing -> pure $ Just $ nothingContract base addr
-            Just (block, url) -> liftIO $ fetchContractWithSession conf sess block url addr
-          case contract of
-            Just x -> pure $ continue x
-            Nothing -> internalError $ "oracle error: " ++ show q
+    PleaseFetchContract addr base continue
+      | isAddressSpecial addr -> pure $ continue nothingContract
+      | isNothing rpcInfo.blockNumURL -> pure $ continue nothingContract
+      | otherwise -> do
+        let sess = fromMaybe (internalError $ "oracle: no session provided for fetch addr: " ++ show addr) preSess
+        conf <- readConfig
+        cache <- liftIO $ readMVar sess.sharedCache
+        case Map.lookup addr cache.contractCache of
+          Just c -> do
+            when (conf.debug) $ liftIO $ putStrLn $ "-> Using cached contract at " ++ show addr
+            pure $ continue $ makeContractFromRPC c
+          Nothing -> do
+            when (conf.debug) $ liftIO $ putStrLn $ "Fetching contract at " ++ show addr
+            let (block, url) = fromJust rpcInfo.blockNumURL
+            contract <- liftIO $ fmap (fmap makeContractFromRPC) $ fetchContractWithSession conf sess block url addr
+            case contract of
+              Just x -> pure $ continue x
+              Nothing -> internalError $ "oracle error: " ++ show q
+      where
+        nothingContract = case base of
+          AbstractBase -> unknownContract (LitAddr addr)
+          EmptyBase -> emptyContract
 
-    PleaseFetchSlot addr slot continue -> withSession addr (continue 0)$ \sess -> do
-      conf <- readConfig
-      cache <- liftIO $ readMVar sess.sharedCache
-      case Map.lookup (addr, slot) cache.slotCache of
-        Just s -> do
-          when (conf.debug) $ liftIO $ putStrLn $ "-> Using cached slot value for slot " <> show slot <> " at " <> show addr
-          pure $ continue s
-        Nothing -> do
-          when (conf.debug) $ liftIO $ putStrLn $ "Fetching slot " <> (show slot) <> " at " <> (show addr)
-          when (addr == 0 && conf.verb > 0) $ liftIO $ putStrLn "Warning: fetching slot from a contract at address 0"
-          case rpcInfo.blockNumURL of
-            Nothing -> pure $ continue 0
-            Just (block, url) -> fetchSlotFrom sess block url addr slot >>= \case
-                Just x  -> pure $ continue x
-                Nothing -> internalError $ "oracle error: " ++ show q
+    PleaseFetchSlot addr slot continue
+      | isAddressSpecial addr -> pure $ continue 0
+      | isNothing rpcInfo.blockNumURL -> pure $ continue 0
+      | otherwise -> do
+        let sess = fromMaybe (internalError $ "oracle: no session provided for fetch addr: " ++ show addr) preSess
+        conf <- readConfig
+        cache <- liftIO $ readMVar sess.sharedCache
+        case Map.lookup (addr, slot) cache.slotCache of
+          Just s -> do
+            when (conf.debug) $ liftIO $ putStrLn $ "-> Using cached slot value for slot " <> show slot <> " at " <> show addr
+            pure $ continue s
+          Nothing -> do
+            when (conf.debug) $ liftIO $ putStrLn $ "Fetching slot " <> (show slot) <> " at " <> (show addr)
+            let (block, url) = fromJust rpcInfo.blockNumURL
+            n <- liftIO $ getLatestBlockNum conf sess block url
+            ret <- liftIO $ fetchSlotWithSession sess.sess n url addr slot
+            when (isJust ret) $ let val = fromJust ret in
+              liftIO $ modifyMVar_ sess.sharedCache $ \c ->
+                pure $ c { slotCache = Map.insert (addr, slot) val c.slotCache }
+            case ret of
+              Just x  -> pure $ continue x
+              Nothing -> internalError $ "oracle error: " ++ show q
 
     PleaseReadEnv variable continue -> do
       value <- liftIO $ lookupEnv variable
       pure . continue $ fromMaybe "" value
 
     where
-      nothingContract base addr =
-        case base of
-          AbstractBase -> unknownContract (LitAddr addr)
-          EmptyBase -> emptyContract
-      withSession addr def f =
-        case addr of
-          -- special values such as 0, 0xdeadbeef, 0xacab, hevm cheatcodes, and the precompile addresses
-          -- do not require a session, there is nothing deployed there, it's way too small or special, RPC would be pointless
-          a | a <= 0xdeadbeef -> pure def
-          0x7109709ECfa91a80626fF3989D68f67F5b1DD12D -> pure def
-          _ -> case preSess of
-            Just sess  -> f sess
-            Nothing -> internalError $ "oracle: no session provided for fetch addr: " ++ show addr
+      -- special values such as 0, 0xdeadbeef, 0xacab, hevm cheatcodes, and the precompile addresses
+      isAddressSpecial addr = addr <= 0xdeadbeef || addr == 0x7109709ECfa91a80626fF3989D68f67F5b1DD12D  
+      
 
 getSolutions :: forall m . App m => SolverGroup -> Expr EWord -> Int -> Prop -> m (Maybe [W256])
 getSolutions solvers symExprPreSimp numBytes pathconditions = do

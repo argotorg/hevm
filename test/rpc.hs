@@ -19,7 +19,7 @@ import EVM.Stepper qualified as Stepper
 import EVM.SymExec
 import EVM.Test.Utils
 import EVM.Types hiding (BlockNumber, Env)
-import Control.Monad.ST (stToIO, RealWorld)
+import Control.Monad.ST (stToIO)
 import Control.Monad.Reader (ReaderT)
 import Control.Monad.IO.Unlift
 import EVM.Effects
@@ -82,15 +82,12 @@ tests = testGroup "rpc"
     -- https://etherscan.io/token/0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2#code
     , test "weth-conc" $ do
         let
-          blockNum = 16198552
           wad = 0x999999999999999999
           calldata' = ConcreteBuf $ abiMethod "transfer(address,uint256)" (AbiTuple (V.fromList [AbiAddress (Addr 0xdead), AbiUInt 256 wad]))
-          rpcDat = Just (BlockNumber blockNum, testRpc)
-          rpcInfo :: RpcInfo = mempty { blockNumURL = rpcDat }
         sess <- mkSessionWithoutCache
-        vm <- weth9VM sess blockNum (calldata', [])
+        vm <- weth9VM sess testBlockNumber (calldata', [])
         postVm <- withSolvers Z3 1 1 Nothing $ \solvers ->
-          Stepper.interpret (oracle solvers (Just sess) rpcInfo) vm Stepper.runFully
+          Stepper.interpret (oracle solvers (Just sess) testRpcInfo) vm Stepper.runFully
         let
           wethStore = (fromJust $ Map.lookup (LitAddr 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2) postVm.env.contracts).storage
           wethStore' = case wethStore of
@@ -109,20 +106,18 @@ tests = testGroup "rpc"
     , test "weth-sym" $ do
         calldata' <- symCalldata "transfer(address,uint256)" [AbiAddressType, AbiUIntType 256] ["0xdead"] (AbstractBuf "txdata")
         let
-          blockNum = 16198552
           postc _ (Failure _ _ (Revert _)) = PBool False
           postc _ _ = PBool True
         sess <- mkSession Nothing Nothing
-        vm <- weth9VM sess blockNum calldata'
+        vm <- weth9VM sess testBlockNumber calldata'
         (_, [Cex (_, model)]) <- withSolvers Z3 1 1 Nothing $ \s ->
-          let rpcInfo ::RpcInfo =  mempty { blockNumURL = Just (BlockNumber blockNum, testRpc) }
-          in verify s (oracle s (Just sess) rpcInfo) (rpcVeriOpts (fromJust rpcInfo.blockNumURL)) (symbolify vm) postc
+          verify s (oracle s (Just sess) testRpcInfo) (defaultVeriOpts {rpcInfo = testRpcInfo}) (symbolify vm) postc
         liftIO $ assertBool "model should exceed caller balance" (getVar model "arg2" >= 695836005599316055372648)
     ]
   ]
 
 -- call into WETH9 from 0xf04a... (a large holder)
-weth9VM :: App m => Session -> W256 -> (Expr Buf, [Prop]) -> m (VM Concrete RealWorld)
+weth9VM :: App m => Session -> BlockNumber -> (Expr Buf, [Prop]) -> m (VM Concrete)
 weth9VM sess blockNum calldata' = do
   let
     caller' = LitAddr 0xf04a5cc80b1e94c69b48f5ee68a08cd2f09a7c3e
@@ -130,20 +125,20 @@ weth9VM sess blockNum calldata' = do
     callvalue' = Lit 0
   vmFromRpc sess blockNum calldata' callvalue' caller' weth9
 
-vmFromRpc :: App m => Session -> W256 -> (Expr Buf, [Prop]) -> Expr EWord -> Expr EAddr -> Addr -> m (VM Concrete RealWorld)
+vmFromRpc :: App m => Session -> BlockNumber -> (Expr Buf, [Prop]) -> Expr EWord -> Expr EAddr -> Addr -> m (VM Concrete)
 vmFromRpc sess blockNum calldata callvalue caller address = do
   conf <- readConfig
-  ctrct <- liftIO $ fetchContractWithSession conf sess (BlockNumber blockNum) testRpc address >>= \case
+  ctrct <- liftIO $ fetchContractWithSession conf sess blockNum testRpc address >>= \case
         Nothing -> internalError $ "contract not found: " <> show address
         Just contract' -> pure contract'
 
   liftIO $ addFetchCache sess address ctrct
-  blk <- liftIO $ fetchBlockWithSession conf sess (BlockNumber blockNum) testRpc >>= \case
+  blk <- liftIO $ fetchBlockWithSession conf sess blockNum testRpc >>= \case
     Nothing -> internalError "could not fetch block"
     Just b -> pure b
 
   liftIO $ stToIO (makeVm $ VMOpts
-    { contract       = ctrct
+    { contract       = makeContractFromRPC ctrct
     , otherContracts = []
     , calldata       = calldata
     , value          = callvalue
@@ -174,6 +169,8 @@ vmFromRpc sess blockNum calldata callvalue caller address = do
 testRpc :: Text
 testRpc = "https://eth-mainnet.alchemyapi.io/v2/vpeKFsEF6PHifHzdtcwXSDbhV3ym5Ro4"
 
+testBlockNumber :: BlockNumber
+testBlockNumber = BlockNumber 16198552
+
 testRpcInfo :: RpcInfo
-testRpcInfo = let rpcDat = Just (BlockNumber 16198552, testRpc)
-  in mempty { blockNumURL = rpcDat }
+testRpcInfo = RpcInfo $ Just (testBlockNumber, testRpc)

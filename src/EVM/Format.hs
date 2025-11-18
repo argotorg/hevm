@@ -192,7 +192,7 @@ formatSBinary e = format $ Expr.concKeccakSimpExpr e
     format (AbstractBuf t) = "<" <> t <> " abstract buf>"
     format e2 = T.pack $ "Symbolic expression: " <> show e2
 
-showTraceTree :: DappInfo -> VM t s -> Text
+showTraceTree :: DappInfo -> VM t -> Text
 showTraceTree dapp vm =
   let ?context = DappContext { info = dapp
                              , contracts = vm.env.contracts
@@ -524,7 +524,7 @@ formatPartial = \case
     ]
 
 
-formatPartialDetailed :: Maybe (WarningData s t) -> PartialExec -> Text
+formatPartialDetailed :: Maybe (WarningData t) -> PartialExec -> Text
 formatPartialDetailed warnData p =
   let toTxt addr pc = pack $ getSrcInfo warnData addr pc
   in case p of
@@ -535,7 +535,7 @@ formatPartialDetailed warnData p =
     PrecompileMissing {..}     -> "Precompile at address " <> pack (show preAddr) <> " does not exist, called from" <> toTxt addr pc
     BranchTooDeep {..}         -> "Branches too deep" <> toTxt addr pc
 
-getSrcInfo :: Maybe (WarningData s t) -> Expr EAddr -> Int -> String
+getSrcInfo :: Maybe (WarningData t) -> Expr EAddr -> Int -> String
 getSrcInfo Nothing addr pc = " at addr: " <> show addr <> " at pc: " <> show pc
 getSrcInfo (Just dat) addr pc = fromMaybe (getSrcInfo Nothing addr pc) $ do
   contr <- Map.lookup addr dat.vm.env.contracts

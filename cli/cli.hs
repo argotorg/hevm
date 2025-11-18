@@ -9,7 +9,7 @@ module Main where
 
 import Control.Monad (when, forM_, unless)
 import Control.Monad.State.Strict (runStateT)
-import Control.Monad.ST (RealWorld, stToIO)
+import Control.Monad.ST (stToIO)
 import Control.Monad.IO.Unlift
 import Control.Exception (try, IOException)
 import Data.ByteString (ByteString)
@@ -25,6 +25,7 @@ import Data.Text.IO qualified as T
 import Data.Version (showVersion)
 import Data.Word (Word64)
 import GHC.Conc (getNumProcessors)
+import GitHash
 import Numeric.Natural (Natural)
 import Optics.Core ((&), set)
 import Witch (unsafeInto)
@@ -43,7 +44,6 @@ import EVM.ABI (Sig(..))
 import EVM.Dapp (dappInfo, DappInfo, emptyDapp)
 import EVM.Expr qualified as Expr
 import EVM.Concrete qualified as Concrete
-import GitHash
 import EVM.FeeSchedule (feeSchedule)
 import EVM.Fetch qualified as Fetch
 import EVM.Format (hexByteString, strip0x, formatExpr, indent)
@@ -405,19 +405,19 @@ equivalence eqOpts cOpts = do
   when (isNothing bytecodeB) $ liftIO $ do
     putStrLn "Error: invalid or no bytecode for program B. Provide a valid one with --code-b or --code-b-file"
     exitFailure
-  let veriOpts = VeriOpts { iterConf = IterConfig {
+  let veriOpts = defaultVeriOpts { iterConf = IterConfig {
                             maxIter = parseMaxIters cOpts.maxIterations
                             , askSmtIters = cOpts.askSmtIterations
                             , loopHeuristic = cOpts.loopDetectionHeuristic
                             }
-                          , rpcInfo = mempty
                           }
   calldata <- buildCalldata cOpts eqOpts.sig eqOpts.arg
   solver <- liftIO $ getSolver cOpts.solver
   cores <- liftIO $ unsafeInto <$> getNumProcessors
   let solverCount = fromMaybe cores cOpts.numSolvers
   withSolvers solver solverCount cOpts.solverThreads (Just cOpts.smttimeout) $ \s -> do
-    eq <- equivalenceCheck s (fromJust bytecodeA) (fromJust bytecodeB) veriOpts calldata eqOpts.create
+    sess <- Fetch.mkSession cOpts.cacheDir Nothing
+    eq <- equivalenceCheck s (Just sess) (fromJust bytecodeA) (fromJust bytecodeB) veriOpts calldata eqOpts.create
     let anyIssues =  not (null eq.partials) || any (isUnknown . fst) eq.res  || any (isError . fst) eq.res
     liftIO $ case (any (isCex . fst) eq.res, anyIssues) of
       (False, False) -> putStrLn "   \x1b[32m[PASS]\x1b[0m Contracts behave equivalently"
@@ -519,7 +519,7 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = do
                               , askSmtIters = cOpts.askSmtIterations
                               , loopHeuristic = cOpts.loopDetectionHeuristic
                               }
-                            , rpcInfo = mempty {Fetch.blockNumURL = blockUrlInfo}
+                            , rpcInfo = Fetch.RpcInfo blockUrlInfo
                             }
     let fetcher = Fetch.oracle solvers (Just sess) veriOpts.rpcInfo
     (expr, res) <- verify solvers fetcher veriOpts preState (checkAssertions errCodes)
@@ -578,7 +578,7 @@ launchExec cFileOpts execOpts cExecOpts cOpts = do
   let
     block = maybe Fetch.Latest Fetch.BlockNumber cExecOpts.block
     blockUrlInfo = (,) block <$> cExecOpts.rpc
-    rpcDat :: Fetch.RpcInfo = mempty { Fetch.blockNumURL = blockUrlInfo }
+    rpcDat :: Fetch.RpcInfo = Fetch.RpcInfo blockUrlInfo
 
   -- TODO: we shouldn't need solvers to execute this code
   withSolvers Z3 0 1 Nothing $ \solvers -> do
@@ -621,7 +621,7 @@ launchExec cFileOpts execOpts cExecOpts cOpts = do
         internalError "no EVM result"
 
 -- | Creates a (concrete) VM from command line options
-vmFromCommand :: App m => CommonOptions -> CommonExecOptions -> CommonFileOptions -> ExecOptions -> Fetch.Session -> m (VM Concrete RealWorld)
+vmFromCommand :: App m => CommonOptions -> CommonExecOptions -> CommonFileOptions -> ExecOptions -> Fetch.Session -> m (VM Concrete)
 vmFromCommand cOpts cExecOpts cFileOpts execOpts sess = do
   conf <- readConfig
   (miner,ts,baseFee,blockNum,prevRan) <- case cExecOpts.rpc of
@@ -649,20 +649,19 @@ vmFromCommand cOpts cExecOpts cFileOpts execOpts sess = do
           Nothing -> do
             putStrLn $ "Error: contract not found: " <> show address
             exitFailure
-          Just contract ->
+          Just rpcContract ->
             -- if both code and url is given,
             -- fetch the contract and overwrite the code
-            pure $ initialContract (mkCode $ fromJust code)
-                & set #balance  (contract.balance)
-                & set #nonce    (contract.nonce)
-                & set #external (contract.external)
+              pure $ initialContract (mkCode $ fromJust code)
+                & set #balance  (Lit rpcContract.balance)
+                & set #nonce    (Just rpcContract.nonce)
 
     (Just url, Just addr', Nothing) ->
       liftIO $ Fetch.fetchContractWithSession conf sess block url addr' >>= \case
         Nothing -> do
           putStrLn $ "Error, contract not found: " <> show address
           exitFailure
-        Just contract -> pure contract
+        Just rpcContract -> pure $ Fetch.makeContractFromRPC rpcContract
 
     (_, _, Just c)  -> do
       let code = hexByteString $ strip0x c
@@ -735,7 +734,7 @@ vmFromCommand cOpts cExecOpts cFileOpts execOpts sess = do
 
 symvmFromCommand :: App m =>
   CommonExecOptions -> SymbolicOptions -> CommonFileOptions -> Fetch.Session ->
-  (Expr Buf, [Prop]) -> m (VM EVM.Types.Symbolic RealWorld)
+  (Expr Buf, [Prop]) -> m (VM EVM.Types.Symbolic)
 symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
   conf <- readConfig
   (miner,blockNum,baseFee,prevRan) <- case cExecOpts.rpc of
@@ -763,8 +762,8 @@ symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
         Nothing -> do
           putStrLn "Error, contract not found."
           exitFailure
-        Just contract' -> case codeWrapped of
-              Nothing -> pure contract'
+        Just rpcContract' -> case codeWrapped of
+              Nothing -> pure $ Fetch.makeContractFromRPC rpcContract'
               -- if both code and url is given,
               -- fetch the contract and overwrite the code
               Just c -> do
@@ -774,10 +773,8 @@ symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
                   exitFailure
                 else pure $ do
                   initialContract (mkCode $ fromJust c')
-                        & set #origStorage (contract'.origStorage)
-                        & set #balance     (contract'.balance)
-                        & set #nonce       (contract'.nonce)
-                        & set #external    (contract'.external)
+                        & set #balance (Lit rpcContract'.balance)
+                        & set #nonce (Just rpcContract'.nonce)
 
     (_, _, Just c) -> liftIO $ do
       let c' = decipher c
@@ -837,7 +834,7 @@ symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
     word64 f def = fromMaybe def (f cExecOpts)
     eaddr f def = maybe def LitAddr (f cExecOpts)
 
-unitTestOptions :: App m => TestOptions -> CommonOptions -> SolverGroup -> Maybe BuildOutput -> m (UnitTestOptions RealWorld)
+unitTestOptions :: App m => TestOptions -> CommonOptions -> SolverGroup -> Maybe BuildOutput -> m (UnitTestOptions)
 unitTestOptions testOpts cOpts solvers buildOutput = do
   root <- liftIO $ getRoot cOpts
 
@@ -846,7 +843,7 @@ unitTestOptions testOpts cOpts solvers buildOutput = do
           (Just block, Just url) -> Just (Fetch.BlockNumber block, url)
           (Nothing, Just url) -> Just (Fetch.Latest, url)
           _ -> Nothing
-      rpcDat = Fetch.mkRpcInfo blockUrlInfo
+      rpcDat = Fetch.RpcInfo blockUrlInfo
   sess <- Fetch.mkSession cOpts.cacheDir testOpts.number
   params <- paramsFromRpc rpcDat sess
   let testn = params.number

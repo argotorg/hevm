@@ -24,7 +24,7 @@ import EVM.FeeSchedule (feeSchedule)
 
 -- benchmark hevm using tasty-bench
 
-vmFromRawByteString :: App m => ByteString -> m (VM Concrete RealWorld)
+vmFromRawByteString :: App m => ByteString -> m (VM Concrete)
 vmFromRawByteString bs = liftIO $
   bs
     & ConcreteRuntimeCode
@@ -34,7 +34,7 @@ vmFromRawByteString bs = liftIO $
     & stToIO
     & fmap EVM.Transaction.initTx
 
-vm0 :: Contract -> ST s (VM Concrete s)
+vm0 :: Contract -> ST RealWorld (VM Concrete)
 vm0 c = makeVm $ vm0Opts c
 
 vm0Opts :: Contract -> VMOpts Concrete

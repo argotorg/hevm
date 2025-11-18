@@ -13,7 +13,8 @@ concretely through Expr.simplify, then check that against evmtool's output.
 module EVM.Test.FuzzSymExec where
 
 import Control.Monad (when)
-import Control.Monad.ST (ST, stToIO)
+import Control.Monad.IO.Unlift
+import Control.Monad.ST (ST, stToIO, RealWorld)
 import Control.Monad.State.Strict (StateT(..))
 import Control.Monad.Reader (ReaderT)
 import Data.Aeson ((.:), (.:?))
@@ -29,6 +30,7 @@ import Data.Word (Word8, Word64)
 import GHC.Generics (Generic)
 import GHC.IO.Exception (ExitCode(ExitSuccess))
 import Numeric (showHex)
+import Optics.Core hiding (pre)
 import System.Directory (removeDirectoryRecursive)
 import System.FilePath ((</>))
 import System.IO.Temp (getCanonicalTemporaryDirectory, createTempDirectory)
@@ -41,8 +43,6 @@ import Test.Tasty (testGroup, after, TestTree, TestName, DependencyType(..))
 import Test.Tasty.HUnit (assertEqual, testCase, assertBool)
 import Test.Tasty.QuickCheck hiding (Failure, Success)
 import Witch (into, unsafeInto)
-
-import Optics.Core hiding (pre)
 
 import EVM (makeVm, initialContract, symbolify)
 import EVM.Assembler (assemble)
@@ -60,7 +60,6 @@ import EVM.Traversals (mapExpr)
 import EVM.Transaction qualified
 import EVM.Types hiding (Env)
 import EVM.Effects
-import Control.Monad.IO.Unlift
 import EVM.Tracing (interpretWithTrace, VMTraceStep(..), VMTraceStepResult(..))
 
 data EVMToolTrace =
@@ -283,7 +282,7 @@ getHEVMRet
   => OpContract -> ByteString -> Int -> m (Either (EvmError, [VMTraceStep]) ([Expr 'End], [VMTraceStep], VMTraceStepResult))
 getHEVMRet contr txData gaslimitExec = do
   let (txn, evmEnv, contrAlloc, fromAddress, toAddress, _) = evmSetup contr txData gaslimitExec
-  runCodeWithTrace mempty evmEnv contrAlloc txn (LitAddr fromAddress) (LitAddr toAddress)
+  runCodeWithTrace Fetch.noRpc evmEnv contrAlloc txn (LitAddr fromAddress) (LitAddr toAddress)
 
 getEVMToolRet :: FilePath -> OpContract -> ByteString -> Int -> IO (Maybe EVMToolResult)
 getEVMToolRet evmDir contr txData gaslimitExec = do
@@ -417,7 +416,7 @@ runCodeWithTrace rpcinfo evmEnv alloc txn fromAddr toAddress = withSolvers Z3 0 
     Left x -> pure $ Left (x, trace)
     Right _ -> pure $ Right (expr, trace, vmres vm)
 
-vmForRuntimeCode :: ByteString -> Expr Buf -> EVMToolEnv -> EVMToolAlloc -> EVM.Transaction.Transaction -> Expr EAddr -> Expr EAddr -> ST s (VM Concrete s)
+vmForRuntimeCode :: ByteString -> Expr Buf -> EVMToolEnv -> EVMToolAlloc -> EVM.Transaction.Transaction -> Expr EAddr -> Expr EAddr -> ST RealWorld (VM Concrete)
 vmForRuntimeCode runtimecode calldata' evmToolEnv alloc txn fromAddr toAddress =
   let contract = initialContract (RuntimeCode (ConcreteRuntimeCode runtimecode))
                  & set #balance (Lit alloc.balance)
@@ -452,7 +451,7 @@ vmForRuntimeCode runtimecode calldata' evmToolEnv alloc txn fromAddr toAddress =
              (Just (initialContract (RuntimeCode (ConcreteRuntimeCode BS.empty))))
        <&> set (#state % #calldata) calldata'
 
-vmres :: VM Concrete s -> VMTraceStepResult
+vmres :: VM Concrete -> VMTraceStepResult
 vmres vm =
   let
     gasUsed' = vm.tx.gaslimit - vm.state.gas
@@ -682,7 +681,7 @@ genContract n = do
 randItem :: [a] -> IO a
 randItem = generate . Test.QuickCheck.elements
 
-getOpFromVM :: VM t s -> Word8
+getOpFromVM :: VM t -> Word8
 getOpFromVM vm =
   let pcpos  = vm ^. #state % #pc
       code' = vm ^. #state % #code

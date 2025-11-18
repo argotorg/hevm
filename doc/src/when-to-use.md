@@ -50,7 +50,7 @@ towards them. Let's see a simple one:
 ```solidity
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
-import "foge-std/Test.sol";
+import "forge-std/Test.sol";
 
 contract MyContract is Test {
   uint balance;

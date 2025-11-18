@@ -1001,20 +1001,6 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
     go (ReadByte idx buf) = readByte idx buf
     go (BufLength buf) = bufLength buf
 
-    -- We can zero out any bytes in a base ConcreteBuf that we know will be overwritten by a later write
-    -- TODO: make this fully general for entire write chains, not just a single write.
-    go o@(WriteWord (Lit idx) val (ConcreteBuf b))
-      | idx >= maxBytes = o
-      | BS.length b >= (unsafeInto idx + 32) =
-          let
-            slot = BS.take 32 (BS.drop (unsafeInto idx) b)
-            isSlotZero = BS.all (== 0) slot
-            content = if isSlotZero
-              then b
-              else (BS.take (unsafeInto idx) b)
-                <> (BS.replicate 32 0)
-                <> (BS.drop (unsafeInto idx + 32) b)
-          in writeWord (Lit idx) val (ConcreteBuf content)
     go (WriteWord a b c) = writeWord a b c
 
     go (WriteByte a b c) = writeByte a b c
@@ -1063,6 +1049,7 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
     go (IsZero (IsZero (IsZero a))) = iszero a
     go (IsZero (IsZero (LT x y))) = lt x y
     go (IsZero (IsZero (Eq x y))) = eq x y
+    go (IsZero (IsZero a)) = lt (Lit 0) a
     go (IsZero (Xor x y)) = eq x y
     go (IsZero a) = iszero a
 
@@ -1263,35 +1250,6 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
     -- NOTE: we can't simplify (Lit 0)^k. If k is 0 it's 1, otherwise it's 0.
     --       this is encoded in SMT.hs instead, via an SMT "ite"
 
-    -- If a >= b then the value of the `Max` expression can never be < b
-    go o@(LT (Max (Lit a) _) (Lit b))
-      | a >= b = Lit 0
-      | otherwise = o
-    go o@(SLT (Sub (Max (Lit a) _) (Lit b)) (Lit c))
-      = let sa, sb, sc :: Int256
-            sa = fromIntegral a
-            sb = fromIntegral b
-            sc = fromIntegral c
-        in if sa >= sb && sa - sb >= sc
-           then Lit 0
-           else o
-
-    -- normalize all comparisons in terms of (S)LT
-    go (EVM.Types.GT a b) = lt b a
-    go (EVM.Types.GEq a b) = leq b a
-    go (EVM.Types.LEq a b) = iszero (lt b a)
-    go (SGT a b) = slt b a
-
-    -- LT
-    go (EVM.Types.LT _ (Lit 0)) = Lit 0
-    go (EVM.Types.LT a (Lit 1)) = iszero a
-    go (EVM.Types.LT (Lit 0) a) = iszero (Eq (Lit 0) a)
-    go (EVM.Types.LT a b) = lt a b
-
-    -- SLT
-    go (SLT _ (Lit a)) | a == minLitSigned = Lit 0
-    go (SLT (Lit a) _) | a == maxLitSigned = Lit 0
-    go (SLT a b) = slt a b
 
     -- simple div/mod/add/sub
     go (Div  o1 o2) = EVM.Expr.div  o1 o2
@@ -1321,6 +1279,16 @@ simplifyProp prop =
   let new = mapProp' go (simpInnerExpr prop)
   in if (new == prop) then prop else simplifyProp new
   where
+    isBoolLike :: Expr EWord -> Bool
+    isBoolLike = \case
+      LT{} -> True
+      SLT{} -> True
+      Eq{} -> True
+      IsZero{} -> True
+      GT{} -> internalError "Should not encounter GT at this point!"
+      LEq{} -> internalError "Should not encounter LEq at this point!"
+      GEq{} -> internalError "Should not encounter GEq at this point!"
+      _ -> False
     go :: Prop -> Prop
 
     -- Rewrite PGT/GEq to PLT/PLEq
@@ -1343,16 +1311,29 @@ simplifyProp prop =
     go (PLEq (Sub a b) c) | a == c = PLEq b a
     go (PLEq a (Lit 0)) = peq (Lit 0) a
     go (PLT (Max (Lit a) b) (Lit c)) | a < c = PLT b (Lit c)
-    go (PLT (Lit 0) (Eq a b)) = peq a b
-    go (PLEq a b) = pleq a b
 
-    -- when it's PLT but comparison on the RHS then it's just (PEq 1 RHS)
-    go (PLT (Lit 0) (a@LT {})) = peq (Lit 1) a
-    go (PLT (Lit 0) (a@LEq {})) = peq (Lit 1) a
-    go (PLT (Lit 0) (a@SLT {})) = peq (Lit 1) a
-    go (PLT (Lit 0) (a@GT {})) = peq (Lit 1) a
-    go (PLT (Lit 0) (a@GEq {})) = peq (Lit 1) a
-    go (PLT (Lit 0) (a@SGT {})) = peq (Lit 1) a
+    go (PLT (Lit 0) e)
+      | isBoolLike e = peq (Lit 1) e
+
+    -- all possible simplifications for PLT and PLEq have to be covered by this point
+    go p@(PLT {}) = p
+    go p@(PLEq {}) = p
+
+    go (PEq (Lit 1) (Eq a b)) = peq a b
+    go (PEq (Lit 1) (LT a b)) = PLT a b
+    go (PEq (Lit 1) (IsZero e)) = PEq (Lit 0) e
+
+    go (PEq (Lit 0) (IsZero e))
+      | isBoolLike e = PEq (Lit 1) e
+    go (PEq (Lit 0) (IsZero e)) = PNeg (PEq (Lit 0) e)
+    go (PEq (Lit 0) (Eq a b)) = PNeg (peq a b)
+    go (PEq (Lit 0) (LT a b)) = PLEq b a
+
+    go (PEq (Lit 0) (Sub a b)) = peq a b
+    go (PEq (Lit 0) (Or a b)) = peq (Lit 0) a `PAnd` peq (Lit 0) b
+    go (PEq a1 (Add a2 y)) | a1 == a2 = peq (Lit 0) y
+    go (PEq l r) = peq l r
+
     go (POr (PLEq a1 (Lit b)) (PLEq (Lit c) a2)) | a1 == a2 && c == b+1 = PBool True
 
     -- negations
@@ -1360,39 +1341,14 @@ simplifyProp prop =
     go (PNeg (PNeg a)) = a
     go (PNeg (PGT a b)) = PLEq a b
     go (PNeg (PGEq a b)) = PLT a b
-    go (PNeg (PLT a b)) = PGEq a b
-    go (PNeg (PLEq a b)) = PGT a b
+    go (PNeg (PLT a b)) = PLEq b a
+    go (PNeg (PLEq a b)) = PLT b a
     go (PNeg (PAnd a b)) = POr (PNeg a) (PNeg b)
     go (PNeg (POr a b)) = PAnd (PNeg a) (PNeg b)
-    go (PNeg (PEq (Lit 1) (IsZero b))) = PEq (Lit 0) (IsZero b)
-
-    -- Empty buf
-    go (PEq (Lit 0) (BufLength k)) = peq k (ConcreteBuf "")
-    go (PEq (Lit 0) (Or a b)) = peq (Lit 0) a `PAnd` peq (Lit 0) b
-
-    -- PEq rewrites (notice -- GT/GEq is always rewritten to LT by simplify)
-    go (PEq (Lit 1) (IsZero (LT a b))) = PLEq b a
-    go (PEq (Lit 1) (IsZero (LEq a b))) = PLT b a
-    go (PEq (Lit 0) (IsZero a)) = PLT (Lit 0) a
-    go (PEq a1 (Add a2 y)) | a1 == a2 = peq (Lit 0) y
-
-    -- solc specific stuff
-    go (PLT (Lit 0) (IsZero (Eq a b))) = PNeg (peq a b)
-
-    -- iszero(a) -> (a == 0)
-    -- iszero(iszero(a))) -> ~(a == 0) -> a > 0
-    -- iszero(iszero(a)) == 0 -> ~~(a == 0) -> a == 0
-    -- ~(iszero(iszero(a)) == 0) -> ~~~(a == 0) -> ~(a == 0) -> a > 0
-    go (PNeg (PEq (Lit 0) (IsZero (IsZero a)))) = PLT (Lit 0) a
-
-    -- iszero(a) -> (a == 0)
-    -- iszero(a) == 0 -> ~(a == 0)
-    -- ~(iszero(a) == 0) -> ~~(a == 0) -> a == 0
-    go (PNeg (PEq (Lit 0) (IsZero a))) = peq (Lit 0) a
-
-    -- a < b == 0 -> ~(a < b)
-    -- ~(a < b == 0) -> ~~(a < b) -> a < b
-    go (PNeg (PEq (Lit 0) (LT a b))) = PLT a b
+    go (PNeg (PEq (Lit 1) e))
+      | isBoolLike e = PEq (Lit 0) e
+    go (PNeg (PEq (Lit 0) e))
+      | isBoolLike e = PEq (Lit 1) e
 
     -- And/Or
     go (PAnd (PBool l) (PBool r)) = PBool (l && r)
@@ -1411,19 +1367,6 @@ simplifyProp prop =
     go (PImpl (PBool True) b) = b
     go (PImpl (PBool False) _) = PBool True
 
-    -- Double negation (no need for GT/GEq, as it's rewritten to LT/LEq)
-
-    -- Eq
-    go (PEq (Lit 0) (Eq a b)) = PNeg (peq a b)
-    go (PEq (Lit 1) (Eq a b)) = peq a b
-    go (PEq (Lit 0) (Sub a b)) = peq a b
-    go (PEq (Lit 0) (LT a b)) = PLEq b a
-    go (PEq (Lit 0) (LEq a b)) = PLT b a
-    go (PEq (Lit 1) (LT a b)) = PLT a b
-    go (PEq (Lit 1) (LEq a b)) = PLEq a b
-    go (PEq (Lit 1) (GT a b)) = PGT a b
-    go (PEq (Lit 1) (GEq a b)) = PGEq a b
-    go (PEq l r) = peq l r
 
     go p = p
 

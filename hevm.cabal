@@ -360,8 +360,6 @@ benchmark bench
     text,
     hevm,
     test-utils,
-    filemanip,
-    filepath,
     containers,
     unliftio-core
 

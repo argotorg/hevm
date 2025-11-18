@@ -4,18 +4,14 @@ import GHC.Natural
 import Control.Monad
 import Control.Monad.IO.Unlift
 import Data.Maybe
-import System.Environment (getEnv)
 
 import qualified Paths_hevm as Paths
 
 import Test.Tasty (localOption, withResource)
 import Test.Tasty.Bench
 import Data.ByteString (ByteString)
-import System.FilePath.Posix
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
-import qualified System.FilePath.Find as Find
-import qualified Data.ByteString.Lazy as LazyByteString
 
 import EVM.SymExec
 import EVM.Solidity
@@ -34,29 +30,11 @@ main = defaultMain
   , mkbench (pure vat) "vat" 0 [4]
   , mkbench (pure deposit) "deposit" 32 [4]
   , mkbench (pure uniV2Pair) "uniV2" 10 [4]
-  , withResource bcjsons (pure . const ()) blockchainTests
+  , withResource BCTests.allTestCases (pure . const ()) blockchainTests
   ]
 
 
 --- General State Tests ----------------------------------------------------------------------------
-
-
--- | loads and parses all blockchain test files
--- We pull this out into a separate stage to ensure that we only benchmark the
--- actual time spent executing tests, and not the IO & parsing overhead
-bcjsons :: IO (Map.Map FilePath (Map.Map String BCTests.Case))
-bcjsons = do
-  repo <- getEnv "HEVM_ETHEREUM_TESTS_REPO"
-  let testsDir = "BlockchainTests/GeneralStateTests"
-      dir = repo </> testsDir
-  jsons <- Find.find Find.always (Find.extension Find.==? ".json") dir
-  Map.fromList <$> mapM parseSuite jsons
-  where
-    parseSuite path = do
-      contents <- LazyByteString.readFile path
-      case BCTests.parseBCSuite contents of
-        Left _ -> pure (path, mempty)
-        Right tests -> pure (path, tests)
 
 -- | executes all provided bc tests in sequence and accumulates a boolean value representing their success.
 -- the accumulated value ensures that we actually have to execute all the tests as a part of this benchmark
@@ -65,7 +43,7 @@ blockchainTests ts = bench "blockchain-tests" $ nfIO $ do
   tests <- ts
   putStrLn "    executing blockchain tests"
   let cases = concat . Map.elems . (fmap Map.toList) $ tests
-      ignored = Map.keys BCTests.commonProblematicTests
+      ignored = Map.keys BCTests.problematicTests
   foldM (\acc (n, c) ->
       if n `elem` ignored
       then pure True
@@ -81,9 +59,7 @@ runBCTest x =
   vm0 <- liftIO $ BCTests.vmForCase x
   result <- Stepper.interpret (Fetch.zero 0 Nothing) vm0 Stepper.runFully
   writeTrace vm0
-
-  maybeReason <- BCTests.checkExpectation x result
-  pure $ isNothing maybeReason
+  pure $ isNothing $ BCTests.checkExpectation x result
 
 
 --- Helpers ----------------------------------------------------------------------------------------

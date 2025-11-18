@@ -232,10 +232,10 @@ data SrcMap = SM {
   modifierDepth :: {-# UNPACK #-} !Int
 } deriving (Show, Eq, Ord, Generic)
 
-data WarningData s t = WarningData
+data WarningData t = WarningData
   {solcContr :: SolcContract,
    sourceCache :: SourceCache,
-   vm :: VM s t
+   vm :: VM t
   }
 
 data SrcMapParseState
