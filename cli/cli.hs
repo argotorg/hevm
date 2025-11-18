@@ -405,7 +405,7 @@ equivalence eqOpts cOpts = do
   when (isNothing bytecodeB) $ liftIO $ do
     putStrLn "Error: invalid or no bytecode for program B. Provide a valid one with --code-b or --code-b-file"
     exitFailure
-  let veriOpts = defaultVeriOpts { iterConf = IterConfig {
+  let veriOpts = (defaultVeriOpts :: VeriOpts) { iterConf = IterConfig {
                             maxIter = parseMaxIters cOpts.maxIterations
                             , askSmtIters = cOpts.askSmtIterations
                             , loopHeuristic = cOpts.loopDetectionHeuristic
