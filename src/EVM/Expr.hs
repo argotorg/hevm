@@ -1063,6 +1063,47 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
       | a == b = Lit 1
       | otherwise = eq a b
 
+    -- COMPARISONS
+    -- First special cases
+
+    -- we write at least 32, so if x <= 32, it's FALSE
+    go o@(EVM.Types.LT (BufLength (WriteWord {})) (Lit x))
+      | x <= 32 = Lit 0
+      | otherwise = o
+    -- we write at least 32, so if x < 32, it's TRUE
+    go o@(EVM.Types.LT (Lit x) (BufLength (WriteWord {})))
+      | x < 32 = Lit 1
+      | otherwise = o
+
+    -- If a >= b then the value of the `Max` expression can never be < b
+    go o@(LT (Max (Lit a) _) (Lit b))
+      | a >= b = Lit 0
+      | otherwise = o
+    go o@(SLT (Sub (Max (Lit a) _) (Lit b)) (Lit c))
+      = let sa, sb, sc :: Int256
+            sa = fromIntegral a
+            sb = fromIntegral b
+            sc = fromIntegral c
+        in if sa >= sb && sa - sb >= sc
+           then Lit 0
+           else o
+
+    -- normalize all comparisons in terms of (S)LT
+    go (EVM.Types.GT a b) = lt b a
+    go (EVM.Types.GEq a b) = iszero (lt a b)
+    go (EVM.Types.LEq a b) = iszero (lt b a)
+    go (SGT a b) = slt b a
+
+    -- LT
+    go (EVM.Types.LT _ (Lit 0)) = Lit 0
+    go (EVM.Types.LT a (Lit 1)) = iszero a
+    go (EVM.Types.LT a b) = lt a b
+
+    -- SLT
+    go (SLT _ (Lit a)) | a == minLitSigned = Lit 0
+    go (SLT (Lit a) _) | a == maxLitSigned = Lit 0
+    go (SLT a b) = slt a b
+
     -- Masking as as per Solidity bit-packing of e.g. function parameters
     go (And (Lit mask1) (Or (And (Lit mask2) _) x)) | (mask1 .&. mask2 == 0)
          = And (Lit mask1) x
@@ -1209,15 +1250,6 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
       | a == (Lit 0) = b
       | b == (Lit 0) = a
       | otherwise = EVM.Expr.or a b
-
-    -- we write at least 32, so if x <= 32, it's FALSE
-    go o@(EVM.Types.LT (BufLength (WriteWord {})) (Lit x))
-      | x <= 32 = Lit 0
-      | otherwise = o
-    -- we write at least 32, so if x < 32, it's TRUE
-    go o@(EVM.Types.LT (Lit x) (BufLength (WriteWord {})))
-      | x < 32 = Lit 1
-      | otherwise = o
 
     -- Double NOT is a no-op, since it's a bitwise inversion
     go (EVM.Types.Not (EVM.Types.Not a)) = a

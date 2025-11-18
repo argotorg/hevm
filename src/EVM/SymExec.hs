@@ -322,20 +322,20 @@ freezeVM vm = do
       m@(SymbolicMemory _) -> pure m
 
 data InterpTask m = InterpTask
-  {fetcher :: Fetch.Fetcher Symbolic m RealWorld
+  {fetcher :: Fetch.Fetcher Symbolic m
   , iterConf :: IterConfig
-  , vm :: VM Symbolic RealWorld
+  , vm :: VM Symbolic
   , taskq :: Chan (InterpTask m)
   , numTasks :: TVar Natural
-  , stepper :: Stepper Symbolic RealWorld (Expr End)
+  , stepper :: Stepper Symbolic (Expr End)
   }
 newtype InterpreterInstance = InterpreterInstance { instanceId :: Int }
 
 interpret :: forall m . App m
-  => Fetch.Fetcher Symbolic m RealWorld
+  => Fetch.Fetcher Symbolic m
   -> IterConfig
-  -> VM Symbolic RealWorld
-  -> Stepper Symbolic RealWorld (Expr End)
+  -> VM Symbolic
+  -> Stepper Symbolic (Expr End)
   -> m [Expr End]
 interpret fetcher iterConf vm stepper = do
   conf <- readConfig
@@ -442,18 +442,9 @@ interpretInternal t@InterpTask{..} res = eval (Operational.view stepper)
         let newDepth = vm.exploreDepth+1
         runOne frozen newDepth vals
         where
-<<<<<<< HEAD
-          runOne :: App m => VM 'Symbolic RealWorld -> Int -> [Expr EWord] -> m (Expr End)
+          runOne :: App m => VM 'Symbolic -> Int -> [Expr EWord] -> m (Expr End)
           runOne frozen newDepth [v] = do
             conf <- readConfig
-=======
-          goITE :: [(Expr EWord, Expr End)] -> Expr End
-          goITE [] = internalError "goITE: empty list"
-          goITE [(_, end)] = end
-          goITE ((val,end):ps) = ITE (Eq expr val) end (goITE ps)
-          runOne :: App m => VM 'Symbolic -> Int -> Expr EWord -> m (Expr 'End)
-          runOne frozen newDepth v = do
->>>>>>> main
             (ra, vma) <- liftIO $ stToIO $ runStateT (continue v) frozen { result = Nothing, exploreDepth = newDepth }
             when (conf.debug) $ liftIO $ putStrLn $ "Running last task for ForkMany at depth " <> show newDepth
             flip interpretInternal res t { vm = vma, stepper =  (k ra) }
@@ -668,15 +659,9 @@ verifyContract :: forall m . App m
   -> Maybe Sig
   -> [String]
   -> VeriOpts
-<<<<<<< HEAD
-  -> Maybe (Precondition RealWorld)
-  -> Postcondition RealWorld
-  -> m ([Expr End], [VerifyResult])
-=======
   -> Maybe Precondition
   -> Postcondition
-  -> m (Expr End, [VerifyResult])
->>>>>>> main
+  -> m ([Expr End], [VerifyResult])
 verifyContract solvers theCode signature' concreteArgs opts maybepre post = do
   calldata <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ abstractVM calldata theCode maybepre False
@@ -690,13 +675,8 @@ exploreContract :: forall m . App m
   -> Maybe Sig
   -> [String]
   -> VeriOpts
-<<<<<<< HEAD
-  -> Maybe (Precondition RealWorld)
-  -> m [Expr End]
-=======
   -> Maybe Precondition
-  -> m (Expr End)
->>>>>>> main
+  -> m [Expr End]
 exploreContract solvers theCode signature' concreteArgs opts maybepre = do
   calldata <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ abstractVM calldata theCode maybepre False
@@ -766,11 +746,7 @@ getPartials = mapMaybe go
 
 
 -- | Symbolically execute the VM and return the representention of the execution
-<<<<<<< HEAD
-executeVM :: forall m . App m => Fetch.Fetcher Symbolic m RealWorld -> IterConfig -> VM Symbolic RealWorld -> m [Expr End]
-=======
-executeVM :: forall m . App m => Fetch.Fetcher Symbolic m -> IterConfig -> VM Symbolic -> m (Expr End)
->>>>>>> main
+executeVM :: forall m . App m => Fetch.Fetcher Symbolic m -> IterConfig -> VM Symbolic -> m [Expr End]
 executeVM fetcher iterConfig preState = interpret fetcher iterConfig preState runExpr
 
 -- | Symbolically execute the VM and check all endstates against the
@@ -779,27 +755,16 @@ verify :: App m
   => SolverGroup
   -> Fetch.Fetcher Symbolic m
   -> VeriOpts
-<<<<<<< HEAD
-  -> VM Symbolic RealWorld
-  -> Postcondition RealWorld
-  -> m ([Expr End], [VerifyResult])
-=======
   -> VM Symbolic
   -> Postcondition
-  -> m (Expr End, [VerifyResult])
->>>>>>> main
+  -> m ([Expr End], [VerifyResult])
 verify solvers fetcher opts preState post = do
   (ends1, partials) <- verifyInputs solvers opts fetcher preState post
   let (ends2, results) = verifyResults preState ends1
   pure (ends2 <> fmap snd partials, filter (not . isQed) results)
 
-<<<<<<< HEAD
-verifyResults :: VM Symbolic RealWorld -> [(SMTResult, Expr End)] -> ([Expr End], [VerifyResult])
+verifyResults :: VM Symbolic-> [(SMTResult, Expr End)] -> ([Expr End], [VerifyResult])
 verifyResults preState res = (map snd res, fmap toVRes res)
-=======
-verifyResults :: VM Symbolic -> Expr End -> [(SMTResult, Expr End)] -> (Expr End, [VerifyResult])
-verifyResults preState expr cexs = if null cexs then (expr, [Qed]) else (expr, fmap toVRes cexs)
->>>>>>> main
   where
     toVRes :: (SMTResult, Expr End) -> VerifyResult
     toVRes (res2, leaf) = case res2 of
@@ -814,17 +779,10 @@ verifyInputs
   :: App m
   => SolverGroup
   -> VeriOpts
-<<<<<<< HEAD
-  -> Fetch.Fetcher Symbolic m RealWorld
-  -> VM Symbolic RealWorld
-  -> Postcondition RealWorld
-  -> m ([(SMTResult, Expr End)], [(PartialExec, Expr End)])
-=======
   -> Fetch.Fetcher Symbolic m
   -> VM Symbolic
   -> Postcondition
-  -> m (Expr End, [(SMTResult, Expr End)], [(PartialExec, Expr End)])
->>>>>>> main
+  -> m ([(SMTResult, Expr End)], [(PartialExec, Expr End)])
 verifyInputs solvers opts fetcher preState post = do
   conf <- readConfig
   let call = mconcat ["prefix 0x", getCallPrefix preState.state.calldata]
@@ -932,33 +890,16 @@ equivalenceCheck solvers sess bytecodeA bytecodeB opts calldata create = do
       let branchesA = rewriteFresh "A-" branchesAorig
           branchesB = rewriteFresh "B-" branchesBorig
       let partialIssues = EqIssues mempty (filter isPartial branchesA <> filter isPartial branchesB)
-<<<<<<< HEAD
-      issues <- equivalenceCheck' solvers branchesA branchesB create
-      pure $ filterQeds (issues <> partialIssues)
-=======
       issues <- equivalenceCheck' solvers sess branchesA branchesB create
-      pure $ oneQedOrNoQed issues <> partialIssues
->>>>>>> main
+      pure $ filterQeds (issues <> partialIssues)
   where
     -- decompiles the given bytecode into a list of branches
     getBranches :: App m => ByteString -> m [Expr End]
     getBranches bs = do
       let bytecode = if BS.null bs then BS.pack [0] else bs
       prestate <- liftIO $ stToIO $ abstractVM calldata bytecode Nothing create
-<<<<<<< HEAD
-      interpret (Fetch.oracle solvers Nothing mempty) opts.iterConf prestate runExpr
+      interpret (Fetch.oracle solvers sess Fetch.noRpc) opts.iterConf prestate runExpr
     filterQeds (EqIssues res partials) = EqIssues (filter (\(r, _) -> not . isQed $ r) res) partials
-=======
-      expr <- interpret (Fetch.oracle solvers sess Fetch.noRpc) opts.iterConf prestate runExpr
-      let simpl = if conf.simp then Expr.simplify expr else expr
-      pure $ flattenExpr simpl
-    oneQedOrNoQed :: EqIssues -> EqIssues
-    oneQedOrNoQed (EqIssues res partials) =
-      let allQed = all (\(r, _) -> isQed r) res
-      in if allQed then EqIssues [(Qed, "")] partials
-          else EqIssues (filter (\(r, _) -> not $ isQed r) res) partials
->>>>>>> main
-
 
 rewriteFresh :: Text -> [Expr a] -> [Expr a]
 rewriteFresh prefix exprs = fmap (mapExpr mymap) exprs
