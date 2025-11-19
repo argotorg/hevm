@@ -12,7 +12,7 @@ import Control.Concurrent.Async ( mapConcurrently)
 import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
 import Control.Concurrent.Spawn (parMapIO, pool)
 import Control.Concurrent.STM (writeTChan, newTChan, TChan, readTChan, atomically, isEmptyTChan)
-import Control.Concurrent.STM.TVar (TVar, newTVarIO, modifyTVar, readTVar, writeTVar, readTVarIO)
+import Control.Concurrent.STM.TVar (TVar, newTVarIO, modifyTVar, readTVar, writeTVar)
 import Control.Concurrent.STM.TMVar (putTMVar, takeTMVar, TMVar, putTMVar, takeTMVar, newEmptyTMVarIO)
 import Control.Monad (when, forM_, forM)
 import Control.Monad.IO.Unlift
@@ -400,11 +400,6 @@ getOneExpr :: forall m . (MonadIO m, ReadConfig m, App m)
   -> m ()
 getOneExpr task inst availableInstances resChan numTasks allDone = do
   out <- interpretInternal task resChan
-  conf <- readConfig
-  when (conf.debug) $ liftIO $ do
-    n <- readTVarIO numTasks
-    putStrLn $ "Interpreter instance " <> (show inst.instanceId) <> " finished a task." <>
-      " Remaining tasks: " <> show (n-1)
   liftIO . atomically $ writeTChan resChan out
   liftIO $ writeChan availableInstances inst
 
@@ -446,13 +441,13 @@ interpretInternal t@InterpTask{..} res = eval (Operational.view stepper)
           runOne frozen newDepth [v] = do
             conf <- readConfig
             (ra, vma) <- liftIO $ stToIO $ runStateT (continue v) frozen { result = Nothing, exploreDepth = newDepth }
-            when (conf.debug) $ liftIO $ putStrLn $ "Running last task for ForkMany at depth " <> show newDepth
+            when (conf.debug && conf.verb >= 2) $ liftIO $ putStrLn $ "Running last task for ForkMany at depth " <> show newDepth
             flip interpretInternal res t { vm = vma, stepper =  (k ra) }
           runOne frozen newDepth (v:rest) = do
             conf <- readConfig
             (ra, vma) <- liftIO $ stToIO $ runStateT (continue v) frozen { result = Nothing, exploreDepth = newDepth }
             liftIO $ atomically $ modifyTVar numTasks (+1)
-            when (conf.debug) $ liftIO $ putStrLn $ "Queuing new task for ForkMany at depth " <> show newDepth
+            when (conf.debug && conf.verb >=2) $ liftIO $ putStrLn $ "Queuing new task for ForkMany at depth " <> show newDepth
             liftIO $ writeChan taskq t { vm = vma, stepper =  (k ra) }
             runOne frozen newDepth rest
           runOne _ _ [] = internalError "unreachable"
@@ -463,10 +458,10 @@ interpretInternal t@InterpTask{..} res = eval (Operational.view stepper)
         (ra, vma) <- liftIO $ stToIO $ runStateT (continue True) frozen { result = Nothing, exploreDepth = newDepth }
         liftIO $ atomically $ modifyTVar numTasks (+1)
         liftIO $ writeChan taskq $ t { vm = vma, stepper = (k ra) }
-        when (conf.debug) $ liftIO $ putStrLn $ "Queued new task for Fork at depth " <> show newDepth
+        when (conf.debug && conf.verb >= 2) $ liftIO $ putStrLn $ "Queued new task for Fork at depth " <> show newDepth
 
         (rb, vmb) <- liftIO $ stToIO $ runStateT (continue False) frozen { result = Nothing, exploreDepth = newDepth }
-        when (conf.debug) $ liftIO $ putStrLn $ "Continuing task for Fork at depth " <> show newDepth
+        when (conf.debug && conf.verb >=2) $ liftIO $ putStrLn $ "Continuing task for Fork at depth " <> show newDepth
         flip interpretInternal res t { vm = vmb, stepper = (k rb) }
       Stepper.Wait q -> do
         let performQuery = do
