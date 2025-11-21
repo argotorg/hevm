@@ -89,7 +89,7 @@ dynamically computed JUMP destinations can be avoided via pre-computed jump tabl
 
 **Best Practices**:
 * Use `require()` statements to concretize symbolic values
-* Avoid dynamically computed jumps -- use pre-computed jump-tables, if neccesary
+* Avoid dynamically computed jumps -- use pre-computed jump-tables, if necessary
 
 ## Jumping into symbolic code
 

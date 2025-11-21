@@ -258,7 +258,7 @@ developers define, such as:
 ```solidity
 error InsufficientBalance(uint256 requested, uint256 available);
 ....
-uint reqested = ...;
+uint requested = ...;
 uint available = ...;
 if (requested > available) {
     revert InsufficientBalance(requested, available);

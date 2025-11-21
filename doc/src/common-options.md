@@ -29,7 +29,7 @@ specific (low) number via the `--num-solvers` flag.
 ## Promising no reentrancy, ``--promise-no-reent``
 
 hevm can be instructed to assume that no reentrancy will occur during the
-execution of the contract. This is currently neccessary to fully explore
+execution of the contract. This is currently necessary to fully explore
 certain contracts. This is because value transfer is usually done via a `CALL`,
 which can be reentrant. By promising no reentrancy, the system can assume that
 no reentrancy will occur and can explore the contract more fully.
