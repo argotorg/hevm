@@ -304,9 +304,9 @@ tests = testGroup "hevm"
         }
         |]
       paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "prove_mixed_symoblic_concrete_writes(address,uint256)" [AbiAddressType, AbiUIntType 256])) [] defaultVeriOpts
-      let simpExpr = map (mapExprM Expr.decomposeStorage) paths
-      -- putStrLnM $ T.unpack $ formatExpr (fromJust simpExpr)
-      assertEqualM "Decompose did not succeed." (all isJust simpExpr) True
+      let pathsSimp = map (mapExprM (Expr.decomposeStorage . Expr.concKeccakSimpExpr . Expr.simplify)) paths
+      -- putStrLnM $ T.unpack $ formatExpr (fromJust pathsSimp)
+      assertEqualM "Decompose did not succeed." (all isJust pathsSimp) True
     , test "decompose-3" $ do
       Just c <- solcRuntime "MyContract"
         [i|
@@ -426,7 +426,8 @@ tests = testGroup "hevm"
         |]
        let sig = (Just (Sig "transfer(uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256]))
        paths <- withDefaultSolver $ \s -> getExpr s c sig [] defaultVeriOpts
-       assertEqualM "Expression is not clean." (badStoresInExpr paths) False
+       let pathsSimp = map (mapExpr (Expr.concKeccakSimpExpr . Expr.simplify)) paths
+       assertEqualM "Expression is not clean." (badStoresInExpr pathsSimp) False
     , test "simplify-storage-map-only-2" $ do
        Just c <- solcRuntime "MyContract"
         [i|
