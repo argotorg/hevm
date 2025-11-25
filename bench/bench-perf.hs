@@ -11,6 +11,7 @@ import Data.Maybe
 import Data.String.Here
 import EVM
 import EVM.ABI
+import EVM.ConcreteExecution qualified as CE (execBytecode, RuntimeCode(..), ExecutionResult, CallData(..), CallValue(..), VMSnapshot(..))
 import EVM.Effects (App, runApp)
 import EVM.Fetch qualified as Fetch
 import EVM.Solidity
@@ -100,26 +101,42 @@ callMainForBytecode bs = do
   vm <- vmFromRawByteString bs
   Stepper.interpret (Fetch.zero 0 Nothing) vm (Stepper.evm (abiCall (vmOptsToTestVMParams (vm0Opts (initialContract (RuntimeCode (ConcreteRuntimeCode bs))))) (Left ("main()", emptyAbi))) >> Stepper.execFully)
 
+callMainForBytecode' :: ByteString -> CE.ExecutionResult
+callMainForBytecode' bs = CE.execBytecode code calldata callvalue
+  where
+    code = CE.RuntimeCode bs
+    calldata = CE.CallData $ abiMethod "main()" emptyAbi
+    callvalue = CE.CallValue 0
+
+forceExecution :: ByteString -> String
+forceExecution bs =
+  let (_, snapshot) = callMainForBytecode' bs
+  in show snapshot.stack
+
 benchMain :: (String, ByteString) -> Benchmark
 benchMain (name, bs) = bench name $ nfIO $ runApp $ (\x -> if isRight x then () else internalError "failed") <$> callMainForBytecode bs
+
+benchMain' :: (String, ByteString) -> Benchmark
+benchMain' (name, bs) = bench name $ nf forceExecution bs
 
 mkBench :: (Int -> IO a) -> [Int] -> IO [(String, a)]
 mkBench f l = mapM (\n -> (show n,) <$> f n) l
 
 main :: IO ()
 main = do
+  -- bs <- arrayCreationMem 2
+  -- print $ forceExecution bs
   let f (name, prog, limit) = do
         ll <- mkBench prog [2 ^ n | n :: Int <- [1 .. fromMaybe 14 limit]]
-        pure $ bgroup name (benchMain <$> ll)
-  let benchmarks = [ 
-                     ("loop", simpleLoop, Nothing)
+        pure $ bgroup name (benchMain' <$> ll)
+  let benchmarks = [ ("loop", simpleLoop, Nothing)
                    , ("primes", primes, Nothing)
                    , ("hashes", hashes, Nothing)
                    , ("hashmem", hashmem, Nothing)
-                   , ("balanceTransfer", balanceTransfer, Nothing)
+                    -- ("balanceTransfer", balanceTransfer, Nothing)
                    , ("funcCall", funcCall, Nothing)
-                   , ("contractCreation", contractCreation, Nothing)
-                   , ("contractCreationMem", contractCreationMem, Nothing)
+                  --  , ("contractCreation", contractCreation, Nothing)
+                  --  , ("contractCreationMem", contractCreationMem, Nothing)
                    , ("arrayCreationMem", arrayCreationMem, Just 9)
                    , ("mapStorage", mapStorage, Nothing)
                    , ("swapOperations", swapOperations, Nothing)
