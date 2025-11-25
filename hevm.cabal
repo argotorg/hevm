@@ -267,6 +267,7 @@ library test-utils
     EVM.Test.Utils
     EVM.Test.FuzzSymExec
     EVM.Test.BlockchainTests
+    EVM.Test.BlockchainTestsAlt
 
 common test-common
   import: test-base
@@ -279,6 +280,7 @@ common test-common
     EVM.Test.Utils
     EVM.Test.FuzzSymExec
     EVM.Test.BlockchainTests
+    EVM.Test.BlockchainTestsAlt
 
 --- Test Suites ---
 
