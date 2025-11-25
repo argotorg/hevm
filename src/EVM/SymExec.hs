@@ -399,7 +399,7 @@ getOneExpr :: forall m . (MonadIO m, ReadConfig m, App m)
   -> TChan (Expr End) -> TVar Natural -> TMVar ()
   -> m ()
 getOneExpr task inst availableInstances resChan numTasks allDone = do
-  out <- interpretInternal task resChan
+  out <- interpretInternal resChan task
   liftIO . atomically $ writeTChan resChan out
   liftIO $ writeChan availableInstances inst
 
@@ -413,10 +413,10 @@ getOneExpr task inst availableInstances resChan numTasks allDone = do
 -- | Symbolic interpreter that explores all paths. Returns an
 -- '[Expr End]' representing the possible execution leafs.
 interpretInternal :: forall m . App m
-  => InterpTask m
-  -> TChan (Expr End)
+  => TChan (Expr End)
+  -> InterpTask m
   -> m (Expr End)
-interpretInternal t@InterpTask{..} res = eval (Operational.view stepper)
+interpretInternal res t@InterpTask{..} = eval (Operational.view stepper)
   where
   eval :: Operational.ProgramView (Stepper.Action Symbolic) (Expr End) -> m (Expr End)
   eval (Operational.Return x) = pure x
@@ -425,12 +425,10 @@ interpretInternal t@InterpTask{..} res = eval (Operational.view stepper)
       Stepper.Exec -> do
         conf <- readConfig
         (r, vm') <- liftIO $ stToIO $ runStateT (exec conf) vm
-        let newT = (t :: InterpTask m) { vm = vm', stepper =  (k r) }
-        interpretInternal newT res
+        interpretInternal res t { vm = vm', stepper =  (k r) }
       Stepper.EVM m -> do
         (r, vm') <- liftIO $ stToIO $ runStateT m vm
-        let newT = (t :: InterpTask m) { vm = vm', stepper = (k r) }
-        interpretInternal newT res
+        interpretInternal res t { vm = vm', stepper = (k r) }
       Stepper.ForkMany (PleaseRunAll vals continue) -> do
         when (length vals < 2) $ internalError "PleaseRunAll requires at least 2 branches"
         frozen <- liftIO $ stToIO $ freezeVM vm
@@ -442,13 +440,13 @@ interpretInternal t@InterpTask{..} res = eval (Operational.view stepper)
             conf <- readConfig
             (ra, vma) <- liftIO $ stToIO $ runStateT (continue v) frozen { result = Nothing, exploreDepth = newDepth }
             when (conf.debug && conf.verb >= 2) $ liftIO $ putStrLn $ "Running last task for ForkMany at depth " <> show newDepth
-            flip interpretInternal res t { vm = vma, stepper =  (k ra) }
+            interpretInternal res t { vm = vma, stepper = (k ra) }
           runOne frozen newDepth (v:rest) = do
             conf <- readConfig
             (ra, vma) <- liftIO $ stToIO $ runStateT (continue v) frozen { result = Nothing, exploreDepth = newDepth }
             liftIO $ atomically $ modifyTVar numTasks (+1)
             when (conf.debug && conf.verb >=2) $ liftIO $ putStrLn $ "Queuing new task for ForkMany at depth " <> show newDepth
-            liftIO $ writeChan taskq t { vm = vma, stepper =  (k ra) }
+            liftIO $ writeChan taskq t { vm = vma, stepper = (k ra) }
             runOne frozen newDepth rest
           runOne _ _ [] = internalError "unreachable"
       Stepper.Fork (PleaseRunBoth continue) -> do
@@ -462,13 +460,12 @@ interpretInternal t@InterpTask{..} res = eval (Operational.view stepper)
 
         (rb, vmb) <- liftIO $ stToIO $ runStateT (continue False) frozen { result = Nothing, exploreDepth = newDepth }
         when (conf.debug && conf.verb >=2) $ liftIO $ putStrLn $ "Continuing task for Fork at depth " <> show newDepth
-        flip interpretInternal res t { vm = vmb, stepper = (k rb) }
+        interpretInternal res t { vm = vmb, stepper = (k rb) }
       Stepper.Wait q -> do
         let performQuery = do
               m <- fetcher q
               (r, vm') <- liftIO$ stToIO $ runStateT m vm
-              let newT = (t :: InterpTask m) { vm = vm', stepper = (k r) }
-              interpretInternal newT res
+              interpretInternal res t { vm = vm', stepper = (k r) }
 
         case q of
           PleaseAskSMT cond preconds continue -> do
@@ -483,8 +480,7 @@ interpretInternal t@InterpTask{..} res = eval (Operational.view stepper)
                   -- No. keep executing
                   _ -> do
                     (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case (c > 0))) vm
-                    let newT = (t :: InterpTask m) { vm = vm', stepper = (k r) }
-                    interpretInternal newT res
+                    interpretInternal res t { vm = vm', stepper = (k r) }
 
               -- the condition is symbolic
               _ ->
@@ -496,8 +492,7 @@ interpretInternal t@InterpTask{..} res = eval (Operational.view stepper)
                     -- got us to this point and return a partial leaf for the other side
                     liftIO . atomically $ writeTChan res (Partial [] (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) (MaxIterationsReached vm.state.pc vm.state.contract))
                     (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case $ not n)) vm
-                    let newT = (t :: InterpTask m) { vm = vm', stepper = (k r) }
-                    interpretInternal newT res
+                    interpretInternal res t { vm = vm', stepper = (k r) }
                   -- we're in a loop and askSmtIters has been reached
                   (Just True, True, _) ->
                     -- ask the smt solver about the loop condition
@@ -508,8 +503,7 @@ interpretInternal t@InterpTask{..} res = eval (Operational.view stepper)
                       [PBool False] -> liftIO $ stToIO $ runStateT (continue (Case False)) vm
                       [] -> liftIO $ stToIO $ runStateT (continue (Case True)) vm
                       _ -> liftIO $ stToIO $ runStateT (continue UnknownBranch) vm
-                    let newT = (t :: InterpTask m) { vm = vm', stepper = (k r) }
-                    interpretInternal newT res
+                    interpretInternal res t { vm = vm', stepper = (k r) }
           _ -> performQuery
 
 maxIterationsReached :: VM Symbolic -> Maybe Integer -> Maybe Bool
