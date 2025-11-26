@@ -3074,8 +3074,9 @@ instance VMOps Symbolic where
     where
       runBothPaths loc _ (Case v) = do
         assign #result Nothing
-        pushTo #constraints $ if v then PNeg (PEq (Lit 0) cond)
-                                   else PEq (Lit 0) cond
+        let condSimp = Expr.simplify cond
+        pushTo #constraints $ if v then Expr.simplifyProp (Lit 0 ./= condSimp)
+                                   else Expr.simplifyProp (Lit 0 .== condSimp)
         (iteration, _) <- use (#iterations % at loc % non (0,[]))
         stack <- use (#state % #stack)
         assign (#pathsVisited % at (loc, iteration)) (Just v)
