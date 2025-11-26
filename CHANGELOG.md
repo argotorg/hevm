@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed simplification that were rewriting concrete bytes-to-be-overwritten
   with zero bytes. Benefits were unclear while it had negative effect on
   analysis' performance.
+- We now use the symbolic execution queue to also run the SMT solver in `test` mode,
+  and verify the results using a cexHandler
 
 ## [0.56.0] - 2025-10-13
 

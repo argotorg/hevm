@@ -522,7 +522,7 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = do
                             , rpcInfo = Fetch.RpcInfo blockUrlInfo
                             }
     let fetcher = Fetch.oracle solvers (Just sess) veriOpts.rpcInfo
-    (expr, res) <- verify solvers fetcher veriOpts preState (checkAssertions errCodes)
+    (expr, res) <- verify solvers fetcher veriOpts preState (checkAssertions errCodes) Nothing
     liftIO $ forM_ ((,) <$> cOpts.cacheDir <*> cExecOpts.block) $ \(dir, block) -> do
       cache <- readMVar sess.sharedCache
       Fetch.saveCache dir block cache
