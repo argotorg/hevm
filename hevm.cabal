@@ -143,7 +143,7 @@ library
   install-includes:
     ethjet/tinykeccak.h, ethjet/ethjet.h, ethjet/ethjet-ff.h, ethjet/blake2.h
   build-depends:
-    directory                         >=1.3.8.0 && <= 1.3.9.0,
+    directory                         >=1.3.7.0 && <= 1.3.9.0,
     system-cxx-std-lib                >= 1.0 && < 2.0,
     QuickCheck                        >= 2.13.2 && < 2.16,
     Decimal                           >= 0.5.1 && < 0.6,
