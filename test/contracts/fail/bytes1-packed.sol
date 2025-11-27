@@ -8,7 +8,8 @@ contract C {
 
   function inc() external { state++; }
 
-  function prove_callAndCheckProperty(bytes1[36] calldata arr) external {
+  // Notice: bytes1[2] is actually 48B so more than enough to read 36B of data
+  function prove_callAndCheckProperty(bytes1[2] calldata arr) external {
     address target = address(this);
     bool success;
     assembly {
