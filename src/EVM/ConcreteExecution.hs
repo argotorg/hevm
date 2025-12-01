@@ -346,27 +346,27 @@ stepVM vm = do
         accounts <- getCurrentAccounts vm
         unspentGas <- getAvailableGas finishingFrame
         (retOffset, retSize) <- getReturnInfo finishingFrame
-        let updatedFrame = nextFrame {state = nextFrame.state {accounts = accounts}}
-        writeSTRef vm.current updatedFrame
+        writeSTRef vm.current nextFrame
         writeSTRef vm.frames rest
-        currentFrame <- getCurrentFrame vm
-        unburn' currentFrame unspentGas
         case result of
           FrameSucceeded returnData -> do
+            currentFrame <- getCurrentFrame vm
+            unburn' currentFrame unspentGas
+            let updatedFrame = currentFrame {state = currentFrame.state {accounts = accounts}}
+            writeSTRef vm.current updatedFrame
             memory <- getMemory vm
             writeMemory memory retOffset (BS.take (fromIntegral retSize) returnData)
             pushST vm 1
 
           FrameErrored _ -> do
             pushST vm 0
-            internalError "TODO: Not implemented!"
         pure Nothing
 
 
 runStep :: MVM s -> Step s ()
 runStep vm = do
   byte <- liftST $ fetchByte vm
-  -- pc <- readPC vm
+  -- pc <- liftST $ readPC vm
   liftST $ advancePC vm 1
   let op = getOp byte
   burnStaticGas vm op
