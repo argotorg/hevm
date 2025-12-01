@@ -15,6 +15,7 @@ import Control.Concurrent.STM (writeTChan, newTChan, TChan, readTChan, atomicall
 import Control.Concurrent.STM.TVar (TVar, newTVarIO, modifyTVar, readTVar, writeTVar)
 import Control.Concurrent.STM.TMVar (putTMVar, takeTMVar, TMVar, putTMVar, takeTMVar, newEmptyTMVarIO)
 import Control.Monad (when, forM_, forM)
+import Control.Monad.Loops (whileM)
 import Control.Monad.IO.Unlift
 import Control.Monad.Operational qualified as Operational
 import Control.Monad.ST (RealWorld, stToIO, ST)
@@ -325,12 +326,18 @@ data InterpTask m a = InterpTask
   {fetcher :: Fetch.Fetcher Symbolic m
   , iterConf :: IterConfig
   , vm :: VM Symbolic
-  , taskq :: Chan (InterpTask m a)
+  , taskQ :: Chan (InterpTask m a)
   , numTasks :: TVar Natural
   , stepper :: Stepper Symbolic (Expr End)
   , handler :: Expr End -> m a
   }
-newtype InterpreterInstance = InterpreterInstance { instanceId :: Int }
+newtype InterpreterInstance = InterpreterInstance ()
+newtype ProcInstance = ProcInstance ()
+
+data Process m a = Process
+  { result :: Expr End
+  , handler :: Expr End -> m a
+  }
 
 interpret :: forall m a . App m
   => Fetch.Fetcher Symbolic m
@@ -341,77 +348,117 @@ interpret :: forall m a . App m
   -> m [a]
 interpret fetcher iterConf vm stepper handler = do
   conf <- readConfig
-  taskq <- liftIO newChan
+  taskQ <- liftIO newChan
+  processQ <- liftIO newChan
 
-  -- spawn interpreters. TODO: make the number of threads configurable
-  instances <- liftIO $ forM [1..numCapabilities] $ \i -> do
-    pure $ InterpreterInstance { instanceId = i }
+  -- spawn interpreters and process instances
+  let interpInstances = replicate numCapabilities $ InterpreterInstance ()
+      procInstances = replicate numCapabilities $ ProcInstance ()
 
   -- result channel
   resChan <- liftIO . atomically $ newTChan
 
   -- spawn orchestration thread with queues and flags
   availableInstances <- liftIO newChan
-  liftIO $ forM_ instances (writeChan availableInstances)
+  liftIO $ forM_ interpInstances (writeChan availableInstances)
+  availableProcs <- liftIO newChan
+  liftIO $ forM_ procInstances (writeChan availableProcs)
   numTasks <- liftIO $ newTVarIO 1
-  allDone <- liftIO newEmptyTMVarIO            -- signal when everything is complete
-  orchestrate' <- toIO $ orchestrate taskq availableInstances resChan numTasks allDone
-  orchestrateId <- liftIO $ forkIO orchestrate'
+  numProcs <- liftIO $ newTVarIO 0
+  allProcessDone <- liftIO newEmptyTMVarIO
+
+  -- spawn task orchestration thread
+  taskOrchestrate' <- toIO $ taskOrchestrate taskQ availableInstances processQ resChan numTasks numProcs
+  taskOrchestrateId <- liftIO $ forkIO taskOrchestrate'
+
+  -- spawn processing orchestration thread
+  processOrchestrate' <- toIO $ processOrchestrate processQ availableProcs resChan numProcs numTasks allProcessDone
+  processOrchestrateId <- liftIO $ forkIO processOrchestrate'
 
   -- Add in the first task, further tasks will be added by the interpreters themselves
   let interpTask = InterpTask
         { fetcher = fetcher
         , iterConf = iterConf
         , vm = vm
-        , taskq = taskq
+        , taskQ = taskQ
         , numTasks = numTasks
         , stepper = stepper
         , handler = handler
         }
-  liftIO $ writeChan taskq interpTask
+  liftIO $ writeChan taskQ interpTask
 
   -- Wait for all done
-  liftIO . atomically $ takeTMVar allDone
-  liftIO $ killThread orchestrateId
-  res <- liftIO $ atomically $ (whileM (not <$> isEmptyTChan resChan) (readTChan resChan) :: STM [a])
+  liftIO . atomically $ takeTMVar allProcessDone
+  liftIO $ killThread taskOrchestrateId
+  liftIO $ killThread processOrchestrateId
+  res <- liftIO $ atomically (whileM (not <$> isEmptyTChan resChan) (readTChan resChan) :: STM [a])
   when (conf.debug) $ liftIO $ do
     putStrLn $ "Interpretation finished, collected " <> show (length res) <> " results."
   pure res
   where
     -- orchestrator loop
-    orchestrate :: App m => Chan (InterpTask m a) -> Chan InterpreterInstance -> TChan a -> TVar Natural -> TMVar () -> m b
-    orchestrate taskq avail resChan numTasks allDone = do
+    taskOrchestrate :: App m
+      => Chan (InterpTask m a)
+      -> Chan InterpreterInstance -> Chan (Process m a)
+      -> TChan a -> TVar Natural -> TVar Natural -> m b
+    taskOrchestrate taskQ avail processQ resChan numTasks numProcs = do
       inst <- liftIO $ readChan avail
-      task <- liftIO $ readChan taskq
-      runTask' <- toIO $ getOneExpr task inst avail resChan numTasks allDone
+      task <- liftIO $ readChan taskQ
+      runTask' <- toIO $ getOneExpr task inst avail processQ numTasks numProcs
       _ <- liftIO $ forkIO runTask'
-      orchestrate taskq avail resChan numTasks allDone
+      taskOrchestrate taskQ avail processQ resChan numTasks numProcs
 
-    whileM :: Monad k => k Bool -> k b -> k [b]
-    whileM cond action = go
-      where
-        go = do
-          c <- cond
-          if c then (:) <$> action <*> go else pure []
+    -- processing orchestrator loop
+    processOrchestrate :: App m => Chan (Process m a) -> Chan ProcInstance -> TChan a -> TVar Natural -> TVar Natural -> TMVar () -> m b
+    processOrchestrate processQ availProcessors resChan numProcs numTasks allProcessDone = do
+      procInst <- liftIO $ readChan availProcessors
+      process <- liftIO $ readChan processQ
+      runProcess' <- toIO $ processOne process procInst availProcessors resChan numProcs numTasks allProcessDone
+      _ <- liftIO $ forkIO runProcess'
+      processOrchestrate processQ availProcessors resChan numProcs numTasks allProcessDone
+
+    -- process one task
+    processOne :: App m => Process m a -> ProcInstance -> Chan ProcInstance -> TChan a -> TVar Natural -> TVar Natural -> TMVar () -> m ()
+    processOne task procInst availProcs resChan numProcs numTasks allProcessDone = do
+      processed <- task.handler task.result
+      liftIO . atomically $ writeTChan resChan processed
+
+      -- Return instance to pool immediately after processing
+      liftIO $ writeChan availProcs procInst
+
+      -- Decrement and check if all done
+      liftIO $ atomically $ do
+        np <- readTVar numProcs
+        let np' = np - 1
+        writeTVar numProcs np'
+        -- Check if both interpretation and processing are done
+        nt <- readTVar numTasks
+        when (np' == 0 && nt == 0) $ putTMVar allProcessDone ()
 
 getOneExpr :: forall m a . (MonadIO m, ReadConfig m, App m)
   => InterpTask m a
   -> InterpreterInstance
   -> Chan InterpreterInstance
-  -> TChan a -> TVar Natural -> TMVar ()
+  -> Chan (Process m a)
+  -> TVar Natural
+  -> TVar Natural
   -> m ()
-getOneExpr task inst availableInstances resChan numTasks allDone = do
+getOneExpr task inst availableInstances processQ numTasks numProcs = do
   out <- interpretInternal task
-  processed <- task.handler out
-  liftIO . atomically $ writeTChan resChan processed
+
+  -- Enqueue for processing
+  let process = Process { result = out, handler = task.handler }
+  liftIO . atomically $ modifyTVar numProcs (+1)
+  liftIO $ writeChan processQ process
+
+  -- Return instance to pool immediately after interpretation
   liftIO $ writeChan availableInstances inst
 
-  -- Decrement and check if all done
+  -- Decrement interpretation tasks and check if all done
   liftIO $ atomically $ do
     n <- readTVar numTasks
     let n' = n - 1
     writeTVar numTasks n'
-    when (n' == 0) $ putTMVar allDone ()
 
 -- | Symbolic interpreter that explores all paths. Returns an
 -- '[Expr End]' representing the possible execution leafs.
@@ -448,7 +495,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
             (ra, vma) <- liftIO $ stToIO $ runStateT (continue v) frozen { result = Nothing, exploreDepth = newDepth }
             liftIO $ atomically $ modifyTVar numTasks (+1)
             when (conf.debug && conf.verb >=2) $ liftIO $ putStrLn $ "Queuing new task for ForkMany at depth " <> show newDepth
-            liftIO $ writeChan taskq t { vm = vma, stepper = (k ra) }
+            liftIO $ writeChan taskQ t { vm = vma, stepper = (k ra) }
             runOne frozen newDepth rest
           runOne _ _ [] = internalError "unreachable"
       Stepper.Fork (PleaseRunBoth continue) -> do
@@ -457,7 +504,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
         let newDepth = vm.exploreDepth+1
         (ra, vma) <- liftIO $ stToIO $ runStateT (continue True) frozen { result = Nothing, exploreDepth = newDepth }
         liftIO $ atomically $ modifyTVar numTasks (+1)
-        liftIO $ writeChan taskq $ t { vm = vma, stepper = (k ra) }
+        liftIO $ writeChan taskQ $ t { vm = vma, stepper = (k ra) }
         when (conf.debug && conf.verb >= 2) $ liftIO $ putStrLn $ "Queued new task for Fork at depth " <> show newDepth
 
         (rb, vmb) <- liftIO $ stToIO $ runStateT (continue False) frozen { result = Nothing, exploreDepth = newDepth }
@@ -494,7 +541,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
                     -- got us to this point and queue a task to return a partial leaf for the other side
                     let partialLeaf = Partial [] (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) (MaxIterationsReached vm.state.pc vm.state.contract)
                     liftIO $ atomically $ modifyTVar numTasks (+1)
-                    liftIO $ writeChan taskq $ t { vm = vm, stepper = pure partialLeaf }
+                    liftIO $ writeChan taskQ $ t { vm = vm, stepper = pure partialLeaf }
                     (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case $ not n)) vm
                     interpretInternal t { vm = vm', stepper = (k r) }
                   -- we're in a loop and askSmtIters has been reached
