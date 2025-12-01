@@ -365,14 +365,14 @@ stepVM vm = do
 
 runStep :: MVM s -> Step s ()
 runStep vm = do
-  byte <- liftST $ fetchByte vm
+  byte <- fetchByte vm
   -- pc <- liftST $ readPC vm
   liftST $ advancePC vm 1
   let op = getOp byte
   burnStaticGas vm op
   -- Debug.Trace.traceM ("Executing op " <> (show op) <> "\nPC: " <> showHex pc "")
   case op of
-    OpStop -> returnWithData vm 0 0
+    OpStop -> haltExecution vm
     OpReturn -> stepReturn vm
     OpAdd -> binOp vm (+)
     OpMul -> binOp vm (*)
@@ -648,12 +648,12 @@ stepSignExtend vm = do
   push vm extended
 
 
-fetchByte :: MVM s -> ST s Word8
+fetchByte :: MVM s -> Step s Word8
 fetchByte vm = do
-  pc <- readPC vm
-  code <- getCodeByteString vm
+  pc <- liftST $ readPC vm
+  code <- liftST $ getCodeByteString vm
   if pc >= BS.length code
-    then internalError "PC out of range"
+    then haltExecution vm
     else pure (BS.index code pc)
 
 advancePC :: MVM s -> Int -> ST s ()
@@ -826,11 +826,15 @@ stepReturn vm = do
   size <- pop vm
   returnWithData vm offset size
 
-returnWithData :: MVM s -> W256 -> W256 -> Step s ()
+returnWithData :: MVM s -> W256 -> W256 -> Step s a
 returnWithData vm offset size = do
   bs <- readMemory vm offset size
   frame <- liftST $ getCurrentFrame vm
   liftST $ writeSTRef frame.state.resultRef $ Just (FrameSucceeded bs)
+  Step $ pure Nothing
+
+haltExecution :: MVM s -> Step s a
+haltExecution vm = returnWithData vm 0 0
 
 -- isRootFrame :: MVM s -> ST s Bool
 -- isRootFrame vm = do
