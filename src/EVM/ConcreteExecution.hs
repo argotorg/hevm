@@ -1155,50 +1155,50 @@ burnStaticGas vm op = do
   let FeeSchedule {..} = vm.fees
   let cost = case op of
         OpStop -> g_zero
-        OpReturn -> g_zero
         OpAdd -> g_verylow
         OpMul -> g_low
         OpSub -> g_verylow
-        OpMod -> g_low
-        OpSmod -> g_low
         OpDiv -> g_low
         OpSdiv -> g_low
+        OpMod -> g_low
+        OpSmod -> g_low
         OpAddmod -> g_mid
         OpMulmod -> g_mid
         OpExp -> g_exp
-        OpAnd -> g_verylow
-        OpOr -> g_verylow
-        OpXor -> g_verylow
-        OpNot -> g_verylow
-        OpByte -> g_verylow
-        OpShr -> g_verylow
-        OpShl -> g_verylow
-        OpSar -> g_verylow
         OpSignextend -> g_low
-        OpPush0 -> g_base
-        OpPush _ -> g_verylow
-        OpPop -> g_base
-        OpDup _ -> g_verylow
-        OpSwap _ -> g_verylow
         OpLt -> g_verylow
         OpGt -> g_verylow
         OpSlt -> g_verylow
         OpSgt -> g_verylow
         OpEq -> g_verylow
         OpIszero -> g_verylow
-        OpJump -> g_mid
-        OpJumpi -> g_high
-        OpJumpdest -> g_jumpdest
+        OpAnd -> g_verylow
+        OpOr -> g_verylow
+        OpXor -> g_verylow
+        OpNot -> g_verylow
+        OpByte -> g_verylow
+        OpShl -> g_verylow
+        OpShr -> g_verylow
+        OpSar -> g_verylow
+        OpSha3 -> g_sha3
+        OpCallvalue -> g_base
+        OpCalldataload -> g_verylow
+        OpCalldatasize -> g_base
+        OpPop -> g_base
         OpMload -> g_verylow
         OpMstore -> g_verylow
         OpMstore8 -> g_verylow
         OpSload -> g_zero -- Custom rules
         OpSstore -> g_zero -- Custom rules
-        OpCallvalue -> g_base
-        OpCalldatasize -> g_verylow
-        OpCalldataload -> g_verylow
+        OpJump -> g_mid
+        OpJumpi -> g_high
+        OpJumpdest -> g_jumpdest
+        OpPush0 -> g_base
+        OpPush _ -> g_verylow
+        OpDup _ -> g_verylow
+        OpSwap _ -> g_verylow
         OpCall -> g_zero -- Cost for CALL depends on if we are accessing cold or warm address
-        OpSha3 -> g_sha3
+        OpReturn -> g_zero
         _ -> internalError ("Unknown opcode: " ++ show op)
   when (cost > 0) $ burn vm (Gas cost)
 
