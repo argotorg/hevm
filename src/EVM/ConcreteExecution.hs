@@ -845,6 +845,7 @@ stepMLoad :: MVM s -> Step s ()
 stepMLoad vm = do
   offset <- pop vm
   memory <- liftST $ getMemory vm
+  touchMemory vm memory (fromIntegral offset) 32 -- TODO: check size and error out if larger than 64-bit word?
   v <- liftST $ memLoad32 memory (fromIntegral offset)
   push vm v
 
@@ -853,6 +854,7 @@ stepMStore vm = do
   off <- pop vm
   val <- pop vm
   memory <- liftST $ getMemory vm
+  touchMemory vm memory (fromIntegral off) 32 -- TODO: check size and error out if larger than 64-bit word?
   liftST $ memStore32 memory off val
 
 stepMStore8 :: MVM s -> Step s ()
@@ -1104,7 +1106,7 @@ memStore1 (Memory memRef sizeRef) offset value = do
 
 -- NOTE: This assumes that required size is greater than current size, it does not check it!
 grow :: UMVec.MVector s Word8 -> Int -> ST s (UMVec.MVector s Word8)
-grow vec requiredSize = {-# SCC "grow" #-} do
+grow vec requiredSize = do
   let currentSize = UMVec.length vec
   let growthFactor = 2
   let targetSize = max requiredSize (currentSize * growthFactor)
