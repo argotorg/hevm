@@ -825,9 +825,15 @@ stepKeccak :: MVM s -> Step s ()
 stepKeccak vm = do
   offset <- pop vm
   size <- pop vm
+  burnDynamicCost size
   bs <- readMemory vm offset size
   let hash = keccak' bs
   push vm hash
+
+  where
+    burnDynamicCost size =
+      let cost = feeSchedule.g_sha3word * ceilDiv (fromIntegral size) 32 in
+        burn vm $ Gas cost
 
 stepGas :: MVM s -> Step s ()
 stepGas vm = do
