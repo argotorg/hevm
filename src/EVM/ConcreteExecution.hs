@@ -33,7 +33,7 @@ import EVM.Types (
   W256(..),
   W64(..),
   Word512,
-  EvmError (BadJumpDestination),
+  EvmError (..),
   internalError,
   GenericOp(..),
   word,
@@ -121,7 +121,8 @@ data MFrameState s = MFrameState {
   accounts :: Accounts,
   gasRemainingRef :: STRef s Gas,
   gasRefundedRef :: STRef s Gas,
-  retInfoRef :: STRef s (Maybe (W256, W256))
+  retInfoRef :: STRef s (Maybe (W256, W256)),
+  resultRef :: STRef s (Maybe FrameResult)
 }
 
 newMFrameState :: Accounts -> Gas -> ST s (MFrameState s)
@@ -133,7 +134,8 @@ newMFrameState accounts gas = do
   gasRemaining <- newSTRef gas
   gasRefunded <- newSTRef $ Gas 0
   retInfoRef <- newSTRef Nothing
-  pure $ MFrameState pcRef stackVec spRef memory accounts gasRemaining gasRefunded retInfoRef
+  resultRef <- newSTRef Nothing
+  pure $ MFrameState pcRef stackVec spRef memory accounts gasRemaining gasRefunded retInfoRef resultRef
 
 newFrameFromTransaction :: Transaction -> Accounts -> ST s (MFrame s)
 newFrameFromTransaction tx@(Transaction from maybeTo callvalue calldata maybeCode gasLimit _) accounts =
@@ -192,10 +194,53 @@ newtype TxSubState = TxSubState {
   accessedAddresses :: StrictMap.Map Addr (Set.Set W256)
 }
 
-
 data VMResult where
   VMFailure :: EvmError -> VMResult        -- ^ An operation failed
   VMSuccess :: Data -> VMResult            -- ^ Reached STOP, RETURN, or end-of-code
+
+data FrameResult = FrameSucceeded Data | FrameErrored EvmError
+
+frameToVMResult :: FrameResult -> VMResult
+frameToVMResult (FrameSucceeded bs) = VMSuccess bs
+frameToVMResult (FrameErrored err) = VMFailure err
+
+-- An operation in VM that either succeeds (and computes a result) or fails
+newtype Step s a = Step (ST s (Maybe a))
+
+instance Functor (Step s) where
+  fmap f (Step ma) = Step (fmap (fmap f) ma)
+
+instance Applicative (Step s) where
+  pure x = Step (pure (Just x))
+  Step mf <*> Step ma = Step $ do
+    mf' <- mf
+    case mf' of
+      Nothing -> pure Nothing
+      Just f  -> fmap (fmap f) ma
+
+instance Monad (Step s) where
+  (>>=) :: Step s a -> (a -> Step s b) -> Step s b
+  Step sma >>= f = Step $ do
+    ma <- sma
+    case ma of
+      Nothing -> pure Nothing
+      Just a  -> let (Step smb) = (f a) in smb
+
+liftST :: ST s a -> Step s a
+liftST st = Step $ Just <$> st
+
+stackUnderflow :: MVM s -> Step s a
+stackUnderflow vm = vmError vm StackUnderrun
+
+vmError :: MVM s -> EvmError -> Step s a
+vmError vm err = do
+  frame <- liftST $ getCurrentFrame vm
+  vmError' frame err
+
+vmError' :: MFrame s -> EvmError -> Step s a
+vmError' frame err = Step $ do
+  writeSTRef frame.state.resultRef (Just $ FrameErrored err)
+  pure Nothing
 
 execBytecode :: RuntimeCode -> CallData -> CallValue -> ExecutionResult
 execBytecode code calldata value = exec transaction worldState
@@ -279,12 +324,50 @@ runLoop vm = do
           updatedFrame = frame {state = frame.state {accounts = updatedAccounts}}
       writeSTRef vm.current updatedFrame
 
-
 stepVM :: MVM s -> ST s (Maybe VMResult)
 stepVM vm = do
-  byte <- fetchByte vm
+  let (Step stAction) = runStep vm
+  _ <- stAction
+  frame <- getCurrentFrame vm
+  maybeFrameResult <- readSTRef frame.state.resultRef
+  case maybeFrameResult of
+    Nothing -> pure Nothing
+    Just frameResult -> finishFrame vm frameResult
+
+  where
+  finishFrame :: MVM s -> FrameResult -> ST s (Maybe VMResult)
+  finishFrame vm result = do
+    frames <- readSTRef vm.frames
+    case frames of
+      [] -> pure $ Just $ frameToVMResult result
+
+      nextFrame:rest -> do
+        finishingFrame <- getCurrentFrame vm
+        accounts <- getCurrentAccounts vm
+        unspentGas <- getAvailableGas finishingFrame
+        (retOffset, retSize) <- getReturnInfo finishingFrame
+        let updatedFrame = nextFrame {state = nextFrame.state {accounts = accounts}}
+        writeSTRef vm.current updatedFrame
+        writeSTRef vm.frames rest
+        currentFrame <- getCurrentFrame vm
+        unburn' currentFrame unspentGas
+        case result of
+          FrameSucceeded returnData -> do
+            memory <- getMemory vm
+            writeMemory memory retOffset (BS.take (fromIntegral retSize) returnData)
+            pushST vm 1
+
+          FrameErrored _ -> do
+            pushST vm 0
+            internalError "TODO: Not implemented!"
+        pure Nothing
+
+
+runStep :: MVM s -> Step s ()
+runStep vm = do
+  byte <- liftST $ fetchByte vm
   -- pc <- readPC vm
-  _ <- advancePC vm 1
+  liftST $ advancePC vm 1
   let op = getOp byte
   burnStaticGas vm op
   -- Debug.Trace.traceM ("Executing op " <> (show op) <> "\nPC: " <> showHex pc "")
@@ -294,83 +377,82 @@ stepVM vm = do
     OpAdd -> binOp vm (+)
     OpMul -> binOp vm (*)
     OpSub -> binOp vm (-)
-    OpMod -> do stepMod vm; pure Nothing
-    OpSmod -> do stepSMod vm; pure Nothing
-    OpDiv -> do stepDiv vm; pure Nothing
-    OpSdiv -> do stepSDiv vm; pure Nothing
-    OpAddmod -> do stepAddMod vm; pure Nothing
-    OpMulmod -> do stepMulMod vm; pure Nothing
-    OpExp -> do stepExp vm; pure Nothing
+    OpMod -> stepMod vm
+    OpSmod -> stepSMod vm
+    OpDiv -> stepDiv vm
+    OpSdiv -> stepSDiv vm
+    OpAddmod -> stepAddMod vm
+    OpMulmod -> stepMulMod vm
+    OpExp -> stepExp vm
     OpAnd -> binOp vm (.&.)
     OpOr -> binOp vm (.|.)
     OpXor -> binOp vm (.^.)
-    OpNot -> do stepNot vm; pure Nothing
-    OpByte -> do stepByte vm; pure Nothing
-    OpShr -> do stepShr vm; pure Nothing
-    OpShl -> do stepShl vm; pure Nothing
-    OpSar -> do stepSar vm; pure Nothing
-    OpSignextend -> do stepSignExtend vm; pure Nothing
-    OpPush0 -> do push vm 0; pure Nothing
-    OpPush n -> do stepPushN vm n; pure Nothing
-    OpPop -> do _ <- pop vm; pure Nothing
-    OpDup n -> do stepDupN vm n; pure Nothing
-    OpSwap n -> do stepSwapN vm n; pure Nothing
-    OpLt -> do stepLt vm; pure Nothing
-    OpGt -> do stepGt vm; pure Nothing
-    OpSlt -> do stepSLt vm; pure Nothing
-    OpSgt -> do stepSGt vm; pure Nothing
-    OpEq -> do stepEq vm; pure Nothing
-    OpIszero -> do stepIsZero vm; pure Nothing
-    OpJump -> do stepJump vm
-    OpJumpi -> do stepJumpI vm
-    OpJumpdest -> pure Nothing
+    OpNot -> stepNot vm
+    OpByte -> stepByte vm
+    OpShr -> stepShr vm;
+    OpShl -> stepShl vm
+    OpSar -> stepSar vm
+    OpSignextend -> stepSignExtend vm
+    OpPush0 -> push vm 0
+    OpPush n -> stepPushN vm n
+    OpPop -> do _ <- pop vm; pure ()
+    OpDup n -> stepDupN vm n
+    OpSwap n -> stepSwapN vm n
+    OpLt -> stepLt vm
+    OpGt -> stepGt vm
+    OpSlt -> stepSLt vm
+    OpSgt -> stepSGt vm
+    OpEq -> stepEq vm
+    OpIszero -> stepIsZero vm
+    OpJump -> stepJump vm
+    OpJumpi -> stepJumpI vm
+    OpJumpdest -> pure ()
     OpMload -> stepMLoad vm
     OpMstore -> stepMStore vm
     OpMstore8 -> stepMStore8 vm
     OpSload -> stepSLoad vm
     OpSstore -> stepSStore vm
-    OpCallvalue -> do stepCallValue vm; pure Nothing
-    OpCalldatasize -> do stepCallDataSize vm; pure Nothing
-    OpCalldataload -> do stepCallDataLoad vm; pure Nothing
-    OpCall -> do stepCall vm; pure Nothing
-    OpSha3 -> do stepKeccak vm; pure Nothing
+    OpCallvalue -> stepCallValue vm
+    OpCalldatasize -> stepCallDataSize vm
+    OpCalldataload -> stepCallDataLoad vm
+    OpCall -> stepCall vm
+    OpSha3 -> stepKeccak vm
     _ -> internalError ("Unknown opcode: " ++ show op)
   where
     binOp vm' f = do
       x <- pop vm'
       y <- pop vm'
       push vm' (x `f` y)
-      pure Nothing
 
-stepPushN :: MVM s -> Word8 -> ST s ()
+stepPushN :: MVM s -> Word8 -> Step s ()
 stepPushN vm n = do
-  pc <- readPC vm
-  bs <- getCodeByteString vm
+  pc <- liftST $ readPC vm
+  bs <- liftST $ getCodeByteString vm
   let n' = fromIntegral n
   if pc + n' > BS.length bs
     then internalError "PUSH: not enough bytes"
     else do
       let pushValue = BS.take n' (BS.drop pc bs)
       push vm (word pushValue)
-      advancePC vm n'
+      liftST $ advancePC vm n'
 
-stepDupN :: MVM s -> Word8 -> ST s ()
+stepDupN :: MVM s -> Word8 -> Step s ()
 stepDupN vm n = do
   val <- stackSlot vm (n - 1)
   push vm val
 
-stepSwapN :: MVM s -> Word8 -> ST s ()
+stepSwapN :: MVM s -> Word8 -> Step s ()
 stepSwapN vm n = do
   topVal <- stackSlot vm 0
   otherVal <- stackSlot vm n
-  stackPointer <- getStackPointer vm
-  stack <- getStack vm
+  stackPointer <- liftST $ getStackPointer vm
+  stack <- liftST $ getStack vm
   let topSlot = stackPointer - 1
   let otherSlot = topSlot - (fromIntegral n)
-  MVec.write stack topSlot otherVal
-  MVec.write stack otherSlot topVal
+  liftST $ MVec.write stack topSlot otherVal
+  liftST $ MVec.write stack otherSlot topVal
 
-stepSLt :: MVM s -> ST s ()
+stepSLt :: MVM s -> Step s ()
 stepSLt vm = comparison vm slt
   where
     slt x y =
@@ -379,7 +461,7 @@ stepSLt vm = comparison vm slt
           sy = fromIntegral y
       in if sx < sy then 1 else 0
 
-stepSGt :: MVM s -> ST s ()
+stepSGt :: MVM s -> Step s ()
 stepSGt vm = comparison vm sgt
   where
     sgt x y =
@@ -388,66 +470,70 @@ stepSGt vm = comparison vm sgt
           sy = fromIntegral y
       in if sx > sy then 1 else 0
 
-stepLt :: MVM s -> ST s ()
+stepLt :: MVM s -> Step s ()
 stepLt vm = comparison vm (\x y -> if x < y then 1 else 0)
 
-stepGt :: MVM s -> ST s ()
+stepGt :: MVM s -> Step s ()
 stepGt vm = comparison vm (\x y -> if x > y then 1 else 0)
 
-stepEq :: MVM s -> ST s ()
+stepEq :: MVM s -> Step s ()
 stepEq vm = comparison vm (\x y -> if x == y then 1 else 0)
 
-stepIsZero :: MVM s -> ST s ()
+stepIsZero :: MVM s -> Step s ()
 stepIsZero vm = do
   current <- pop vm
   let val = if current == 0 then 1 else 0
   push vm val
 
 
-comparison :: MVM s -> (VMWord -> VMWord -> VMWord) -> ST s ()
+comparison :: MVM s -> (VMWord -> VMWord -> VMWord) -> Step s ()
 comparison vm op = do
   lhs <- pop vm
   rhs <- pop vm
   push vm (op lhs rhs)
 
 -- top slot = 0, one below is 1, and so on
-stackSlot :: MVM s -> Word8 -> ST s VMWord
+stackSlot :: MVM s -> Word8 -> Step s VMWord
 stackSlot vm n = do
-  stackPointer <- getStackPointer vm
-  stack <- getStack vm
+  stackPointer <- liftST $ getStackPointer vm
+  stack <- liftST $ getStack vm
   let slotPointer = stackPointer - (fromIntegral (n + 1))
   if slotPointer < 0
-    then internalError "stack underflow"
-    else MVec.read stack slotPointer
+    then stackUnderflow vm
+    else liftST $ MVec.read stack slotPointer
 
 
-push :: MVM s -> VMWord -> ST s ()
-push vm val = do
+push :: MVM s -> VMWord -> Step s ()
+push vm val = liftST $ pushST vm val
+
+pushST :: MVM s -> VMWord -> ST s ()
+pushST vm val = do
   current <- readSTRef vm.current
   sp <- readSTRef current.state.spRef
   stack <- getStack vm
   MVec.write stack sp val
   writeStackPointer vm (sp + 1)
 
-pop :: MVM s -> ST s VMWord
+
+pop :: MVM s -> Step s VMWord
 pop vm = do
-  sp <- getStackPointer vm
+  sp <- liftST $ getStackPointer vm
   if sp <= 0
-    then internalError "Stack underflow"
-    else do
+    then stackUnderflow vm
+    else liftST $ do
       stack <- getStack vm
       let !sp' = sp - 1
       writeStackPointer vm sp'
       MVec.read stack sp'
 
-stepMod :: MVM s -> ST s ()
+stepMod :: MVM s -> Step s ()
 stepMod vm = do
   numerator <- pop vm
   denumerator <- pop vm
   let res = if denumerator == 0 then 0 else numerator `Prelude.mod` denumerator
   push vm res
 
-stepSMod :: MVM s -> ST s ()
+stepSMod :: MVM s -> Step s ()
 stepSMod vm = do
   numerator <- pop vm
   denumerator <- pop vm
@@ -458,14 +544,14 @@ stepSMod vm = do
   push vm res
 
 
-stepDiv :: MVM s -> ST s ()
+stepDiv :: MVM s -> Step s ()
 stepDiv vm = do
   numerator <- pop vm
   denumerator <- pop vm
   let res = if denumerator == 0 then 0 else numerator `Prelude.div` denumerator
   push vm res
 
-stepSDiv :: MVM s -> ST s ()
+stepSDiv :: MVM s -> Step s ()
 stepSDiv vm = do
   numerator <- pop vm
   denumerator <- pop vm
@@ -475,7 +561,7 @@ stepSDiv vm = do
   let res = if denumerator == 0 then 0 else fromIntegral (snum `quot` sden)
   push vm res
 
-stepAddMod :: MVM s -> ST s ()
+stepAddMod :: MVM s -> Step s ()
 stepAddMod vm = do
   a <- pop vm
   b <- pop vm
@@ -483,7 +569,7 @@ stepAddMod vm = do
   let res = if n == 0 then 0 else fromIntegral $ (((fromIntegral a) :: Word512) + (fromIntegral b)) `Prelude.mod` (fromIntegral n)
   push vm res
 
-stepMulMod :: MVM s -> ST s ()
+stepMulMod :: MVM s -> Step s ()
 stepMulMod vm = do
   a <- pop vm
   b <- pop vm
@@ -491,7 +577,7 @@ stepMulMod vm = do
   let res = if n == 0 then 0 else fromIntegral $ (((fromIntegral a) :: Word512) * (fromIntegral b)) `Prelude.mod` (fromIntegral n)
   push vm res
 
-stepExp :: MVM s -> ST s ()
+stepExp :: MVM s -> Step s ()
 stepExp vm = do
   base <- pop vm
   exponent <- pop vm
@@ -499,7 +585,7 @@ stepExp vm = do
   let res = base ^ exponent
   push vm res
 
-stepNot :: MVM s -> ST s ()
+stepNot :: MVM s -> Step s ()
 stepNot vm = do
   arg <- pop vm
   push vm (complement arg)
@@ -510,7 +596,7 @@ capAsWord64 w256 = case deconstructWord256ToWords w256 of
   _ -> maxBound
 
 
-stepByte :: MVM s -> ST s ()
+stepByte :: MVM s -> Step s ()
 stepByte vm = do
   byteOffset <- pop vm
   value <- pop vm
@@ -520,21 +606,21 @@ stepByte vm = do
                 in (value `shiftR` shift) .&. 0xFF
   push vm result
 
-stepShr :: MVM s -> ST s ()
+stepShr :: MVM s -> Step s ()
 stepShr vm = do
   shift <- pop vm
   value <- pop vm
   let shifted = if shift > 255 then 0 else value `shiftR` (fromIntegral shift)
   push vm shifted
 
-stepShl :: MVM s -> ST s ()
+stepShl :: MVM s -> Step s ()
 stepShl vm = do
   shift <- pop vm
   value <- pop vm
   let shifted = if shift > 255 then 0 else value `shiftL` (fromIntegral shift)
   push vm shifted
 
-stepSar :: MVM s -> ST s ()
+stepSar :: MVM s -> Step s ()
 stepSar vm = do
   shift <- pop vm
   value <- pop vm
@@ -547,7 +633,7 @@ stepSar vm = do
                 fromIntegral $ shiftR asSigned (fromIntegral shift64)
   push vm shifted
 
-stepSignExtend :: MVM s -> ST s ()
+stepSignExtend :: MVM s -> Step s ()
 stepSignExtend vm = do
   byteIndex <- pop vm
   value <- pop vm
@@ -622,44 +708,43 @@ getCurrentAccounts vm = do
   frame <- getCurrentFrame vm
   pure frame.state.accounts
 
-stepJump :: MVM s -> ST s (Maybe VMResult)
+stepJump :: MVM s -> Step s ()
 stepJump vm = do
   jumpDest <- pop vm
   tryJump vm $ fromIntegral jumpDest
 
-stepJumpI :: MVM s -> ST s (Maybe VMResult)
+stepJumpI :: MVM s -> Step s ()
 stepJumpI vm = do
   jumpDest <- pop vm
   condition <- pop vm
-  if condition == 0 then pure Nothing else tryJump vm $ fromIntegral jumpDest
+  if condition == 0 then pure () else tryJump vm $ fromIntegral jumpDest
 
-tryJump :: MVM s -> Int -> ST s (Maybe VMResult)
+tryJump :: MVM s -> Int -> Step s ()
 tryJump vm dest = do
-  code <- getCodeByteString vm
+  code <- liftST $ getCodeByteString vm
   if isValidJumpDest code dest
   then do
-    writePC vm dest
-    pure Nothing
-  else pure $ Just $ VMFailure BadJumpDestination
+    liftST $ writePC vm dest
+  else vmError vm BadJumpDestination
   where
     isValidJumpDest code jumpDest = (fromMaybe (0 :: Word8) $ BS.indexMaybe code jumpDest) == 0x5b
 
-stepCallValue :: MVM s -> ST s ()
+stepCallValue :: MVM s -> Step s ()
 stepCallValue vm = do
-  frame <- getCurrentFrame vm
+  frame <- liftST $ getCurrentFrame vm
   let CallValue val = frame.context.callValue
   push vm val
 
-stepCallDataSize :: MVM s -> ST s ()
+stepCallDataSize :: MVM s -> Step s ()
 stepCallDataSize vm = do
-  frame <- getCurrentFrame vm
+  frame <- liftST $ getCurrentFrame vm
   let CallData dataBS = frame.context.callData
   let size = BS.length dataBS
   push vm (fromIntegral size)
 
-stepCallDataLoad :: MVM s -> ST s ()
+stepCallDataLoad :: MVM s -> Step s ()
 stepCallDataLoad vm = do
-  frame <- getCurrentFrame vm
+  frame <- liftST $ getCurrentFrame vm
   offsetWord <- pop vm
   let CallData dataBS = frame.context.callData
   let size = BS.length dataBS
@@ -676,7 +761,7 @@ stepCallDataLoad vm = do
       callDataWord = BS.foldl' (\acc b -> (acc `shiftL` 8) .|. fromIntegral b) 0 slice
   push vm callDataWord
 
-stepCall :: MVM s -> ST s ()
+stepCall :: MVM s -> Step s ()
 stepCall vm = do
   gas <- pop vm
   address <- pop vm
@@ -692,27 +777,27 @@ stepCall vm = do
   targetCode <- lookupCode vm to
   -- let RuntimeCode bs = targetCode
   -- Debug.Trace.traceM ("Calling " <> (show $ ByteStringS bs))
-  currentFrame <- getCurrentFrame vm
+  currentFrame <- liftST $ getCurrentFrame vm
   let accessCost = vm.fees.g_cold_account_access -- TODO: maintain access lists
   burn' currentFrame (Gas accessCost)
-  availableGas <- getAvailableGas currentFrame
+  availableGas <- liftST $ getAvailableGas currentFrame
   let accounts = currentFrame.state.accounts
       requestedGas = (Gas $ fromIntegral gas)
       gasToTransfer = computeGasToTransfer availableGas requestedGas
-  newFrameState <- newMFrameState accounts gasToTransfer
+  newFrameState <- liftST $ newMFrameState accounts gasToTransfer
   burn' currentFrame gasToTransfer
   let
       newFrameContext = FrameContext targetCode (CallData calldata) (CallValue value) accounts to to currentFrame.context.codeAddress -- TODO: code or sotrage address?
       newFrame = MFrame newFrameContext newFrameState
-  setReturnInfo newFrame (retOffset, retSize)
-  pushFrame vm newFrame
+  liftST $ setReturnInfo newFrame (retOffset, retSize)
+  liftST $ pushFrame vm newFrame
 
   where
     computeGasToTransfer (Gas availableGas) (Gas requestedGas) = Gas $ Prelude.min (EVM.allButOne64th availableGas) requestedGas
 
-lookupCode :: MVM s -> Addr -> ST s RuntimeCode
+lookupCode :: MVM s -> Addr -> Step s RuntimeCode
 lookupCode vm address = do
-  accounts <- getCurrentAccounts vm
+  accounts <- liftST $ getCurrentAccounts vm
   let account = fromMaybe (internalError "Lookup of unknown address") $ StrictMap.lookup address accounts
   pure account.accCode
 
@@ -727,7 +812,7 @@ getReturnInfo (MFrame _ state) = do
     Nothing -> internalError "Return error not set!"
     Just info -> pure info
 
-stepKeccak :: MVM s -> ST s ()
+stepKeccak :: MVM s -> Step s ()
 stepKeccak vm = do
   offset <- pop vm
   size <- pop vm
@@ -735,96 +820,64 @@ stepKeccak vm = do
   let hash = keccak' bs
   push vm hash
 
-stepReturn :: MVM s -> ST s (Maybe VMResult)
+stepReturn :: MVM s -> Step s ()
 stepReturn vm = do
   offset <- pop vm
   size <- pop vm
   returnWithData vm offset size
 
-returnWithData :: MVM s -> W256 -> W256 -> ST s (Maybe VMResult)
+returnWithData :: MVM s -> W256 -> W256 -> Step s ()
 returnWithData vm offset size = do
   bs <- readMemory vm offset size
-  finishFrame vm (VMSuccess bs)
-
-finishFrame :: MVM s -> VMResult -> ST s (Maybe VMResult)
-finishFrame vm result = do
-  frames <- readSTRef vm.frames
-  case frames of
-    [] -> pure $ Just result
-
-    nextFrame:rest -> do
-      finishingFrame <- getCurrentFrame vm
-      accounts <- getCurrentAccounts vm
-      unspentGas <- getAvailableGas finishingFrame
-      (retOffset, retSize) <- getReturnInfo finishingFrame
-      let updatedFrame = nextFrame {state = nextFrame.state {accounts = accounts}}
-      writeSTRef vm.current updatedFrame
-      writeSTRef vm.frames rest
-      currentFrame <- getCurrentFrame vm
-      unburn' currentFrame unspentGas
-      case result of
-        VMSuccess returnData -> do
-          memory <- getMemory vm
-          writeMemory memory retOffset (BS.take (fromIntegral retSize) returnData)
-          push vm 1
-
-        VMFailure _ -> do
-          push vm 0
-          internalError "TODO: Not implemented!"
-      pure Nothing
-
+  frame <- liftST $ getCurrentFrame vm
+  liftST $ writeSTRef frame.state.resultRef $ Just (FrameSucceeded bs)
 
 -- isRootFrame :: MVM s -> ST s Bool
 -- isRootFrame vm = do
 --   frames <- readSTRef vm.frames
 --   pure (null frames)
 
-stepMLoad :: MVM s -> ST s (Maybe VMResult)
-stepMLoad vm = {-# SCC "MLOAD" #-} do
+stepMLoad :: MVM s -> Step s ()
+stepMLoad vm = do
   offset <- pop vm
-  memory <- getMemory vm
-  v <- memLoad32 memory (fromIntegral offset)
+  memory <- liftST $ getMemory vm
+  v <- liftST $ memLoad32 memory (fromIntegral offset)
   push vm v
-  pure Nothing
 
-stepMStore :: MVM s -> ST s (Maybe VMResult)
-stepMStore vm = {-# SCC "MSTORE" #-} do
+stepMStore :: MVM s -> Step s ()
+stepMStore vm = do
   off <- pop vm
   val <- pop vm
-  memory <- getMemory vm
-  memStore32 memory off val
-  pure Nothing
+  memory <- liftST $ getMemory vm
+  liftST $ memStore32 memory off val
 
-stepMStore8 :: MVM s -> ST s (Maybe VMResult)
+stepMStore8 :: MVM s -> Step s ()
 stepMStore8 vm = do
   off <- pop vm
   val <- pop vm
-  memory <- getMemory vm
-  memStore1 memory off val
-  pure Nothing
+  memory <- liftST $ getMemory vm
+  liftST $ memStore1 memory off val
 
-stepSLoad :: MVM s -> ST s (Maybe VMResult)
+stepSLoad :: MVM s -> Step s ()
 stepSLoad vm = do
   key <- pop vm
-  store <- getCurrentStorage vm
-  isWarm <- touchCurrentStore vm key
+  store <- liftST $ getCurrentStorage vm
+  isWarm <- liftST $ touchCurrentStore vm key
   burn vm $ if isWarm then feeSchedule.g_warm_storage_read else feeSchedule.g_cold_sload
   let val = sload store key
   push vm val
-  pure Nothing
 
-stepSStore :: MVM s -> ST s (Maybe VMResult)
+stepSStore :: MVM s -> Step s ()
 stepSStore vm = do
   key <- pop vm
   val <- pop vm
-  isWarm <- touchCurrentStore vm key
+  isWarm <- liftST $ touchCurrentStore vm key
   let warmCost = warmStoreCost 0 0 val -- FIXME: get original and current value
       totalGasCost = if isWarm then warmCost else warmCost + feeSchedule.g_cold_sload
   burn vm totalGasCost
-  store <- getCurrentStorage vm
+  store <- liftST $ getCurrentStorage vm
   let updatedStore = sstore store key val
   setCurrentStorage vm updatedStore
-  pure Nothing
 
   where
     warmStoreCost originalValue currentValue newValue
@@ -861,14 +914,14 @@ getCurrentStorage vm = do
         pure account.accStorage
   pure $ fromMaybe mempty maybeStorage
 
-setCurrentStorage :: MVM s -> Storage -> ST s ()
+setCurrentStorage :: MVM s -> Storage -> Step s ()
 setCurrentStorage vm storage = do
-  frame <- getCurrentFrame vm
+  frame <- liftST $ getCurrentFrame vm
   let currentAccount = fromMaybe (internalError "Current account is unknown!") $ StrictMap.lookup frame.context.storageAddress frame.state.accounts
   let updatedAccounts = StrictMap.insert frame.context.storageAddress (currentAccount {accStorage = storage}) frame.state.accounts
       updatedState = frame.state {accounts = updatedAccounts}
       updatedFrame = frame {state = updatedState}
-  writeSTRef vm.current updatedFrame
+  liftST $ writeSTRef vm.current updatedFrame
 
 ------------- Storage Submodule --------------------------
 
@@ -891,14 +944,14 @@ newMemory = do
     size <- newSTRef 0
     pure (Memory ref size)
 
-readMemory :: MVM s -> W256 -> W256 -> ST s BS.ByteString
+readMemory :: MVM s -> W256 -> W256 -> Step s BS.ByteString
 readMemory vm offset size =
   case (,) <$> toWord64 offset <*> toWord64 size of
     Nothing -> internalError "TODO: handle properly with VMError"
     Just (offset64, size64) -> do
-      memory@(Memory memRef _) <- getMemory vm
+      memory@(Memory memRef _) <- liftST $ getMemory vm
       touchMemory vm memory offset64 size64
-      memvec <- readSTRef memRef
+      memvec <- liftST $ readSTRef memRef
       let vecsize = fromIntegral $ UMVec.length memvec
       if offset64 >= vecsize then
         -- reads past memory are all zeros
@@ -906,7 +959,7 @@ readMemory vm offset size =
       else if (vecsize - offset64) >= size64 then do
         -- whole read from memory
         let dataVec = UMVec.slice (fromIntegral offset64) (fromIntegral size64) memvec
-        frozen <- UVec.freeze dataVec
+        frozen <- liftST $ UVec.freeze dataVec
         let dataBS = BS.pack (UVec.toList frozen) -- TODO: Consider using storable vector for memory?
         pure dataBS
       else do -- partially in bounds, partially zero
@@ -914,7 +967,7 @@ readMemory vm offset size =
             missing = size64 - available -- number of zero bytes
 
         -- read the part that exists
-        prefixFrozen <- UVec.freeze (UMVec.slice (fromIntegral offset64) (fromIntegral available) memvec)
+        prefixFrozen <- liftST $ UVec.freeze (UMVec.slice (fromIntegral offset64) (fromIntegral available) memvec)
         let prefix = BS.pack (UVec.toList prefixFrozen)
         -- append missing zeros
         let suffix = BS.replicate (fromIntegral missing) 0
@@ -945,16 +998,16 @@ writeMemory (Memory memRef sizeRef) offset bs
                 writeByte (i + 1)
       writeByte 0
 
-touchMemory :: MVM s -> Memory s -> Word64 -> Word64 -> ST s ()
+touchMemory :: MVM s -> Memory s -> Word64 -> Word64 -> Step s ()
 touchMemory _ _ _ 0 = pure ()
 touchMemory vm (Memory _ sizeRef) offset size = do
-  currentSizeInBytes <- readSTRef sizeRef
+  currentSizeInBytes <- liftST $ readSTRef sizeRef
   let sizeAfterTouch = offset + size
   when (sizeAfterTouch > currentSizeInBytes) $ do
     let memoryExpansionCost = memoryCost sizeAfterTouch - memoryCost currentSizeInBytes
     when (memoryExpansionCost > 0) $ do 
       burn vm memoryExpansionCost
-      writeSTRef sizeRef sizeAfterTouch
+      liftST $ writeSTRef sizeRef sizeAfterTouch
 
 memoryCost :: Word64 -> Gas
 memoryCost sizeInBytes =
@@ -1063,16 +1116,18 @@ getGasRefund vm = do
   frame <- getCurrentFrame vm
   readSTRef frame.state.gasRefundedRef
 
-burn :: MVM s -> Gas -> ST s ()
+burn :: MVM s -> Gas -> Step s ()
 burn vm gas = do
-  frame <- getCurrentFrame vm
+  frame <- liftST $ getCurrentFrame vm
   burn' frame gas
 
-burn' :: MFrame s -> Gas -> ST s ()
+burn' :: MFrame s -> Gas -> Step s ()
 burn' frame (Gas toBurn) = do
   let gasRef = frame.state.gasRemainingRef
-  (Gas gasRemaining) <- readSTRef gasRef
-  if toBurn > gasRemaining then internalError "TODO: Handle insufficient gas!" else writeSTRef gasRef (Gas $ gasRemaining - toBurn)
+  (Gas gasRemaining) <- liftST $ readSTRef gasRef
+  if toBurn > gasRemaining
+    then vmError' frame (OutOfGas gasRemaining toBurn)
+    else liftST $ writeSTRef gasRef (Gas $ gasRemaining - toBurn)
 
 unburn' :: MFrame s -> Gas -> ST s ()
 unburn' frame (Gas toReturn) = do
@@ -1089,7 +1144,7 @@ extraExpGasCost exponent =
     in
       Gas cost
 
-burnStaticGas :: MVM s -> GenericOp Word8 -> ST s ()
+burnStaticGas :: MVM s -> GenericOp Word8 -> Step s ()
 burnStaticGas vm op = do
   let FeeSchedule {..} = vm.fees
   let cost = case op of
