@@ -417,6 +417,7 @@ runStep vm = do
     OpCalldataload -> stepCallDataLoad vm
     OpCall -> stepCall vm
     OpSha3 -> stepKeccak vm
+    OpGas -> stepGas vm
     _ -> internalError ("Unknown opcode: " ++ show op)
   where
     binOp vm' f = do
@@ -828,6 +829,12 @@ stepKeccak vm = do
   let hash = keccak' bs
   push vm hash
 
+stepGas :: MVM s -> Step s ()
+stepGas vm = do
+  frame <- liftST $ getCurrentFrame vm
+  Gas gasRemaining <- liftST $ getAvailableGas frame
+  push vm (fromIntegral gasRemaining)
+
 stepReturn :: MVM s -> Step s ()
 stepReturn vm = do
   offset <- pop vm
@@ -1200,6 +1207,7 @@ burnStaticGas vm op = do
         OpSstore -> g_zero -- Custom rules
         OpJump -> g_mid
         OpJumpi -> g_high
+        OpGas -> g_base
         OpJumpdest -> g_jumpdest
         OpPush0 -> g_base
         OpPush _ -> g_verylow
