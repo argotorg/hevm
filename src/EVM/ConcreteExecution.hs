@@ -883,6 +883,7 @@ stepMStore8 vm = do
   off <- pop vm
   val <- pop vm
   memory <- liftST $ getMemory vm
+  touchMemory vm memory (fromIntegral off) 1 -- TODO: check size and error out if larger than 64-bit word?
   liftST $ memStore1 memory off val
 
 stepSLoad :: MVM s -> Step s ()
