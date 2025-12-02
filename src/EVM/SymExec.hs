@@ -444,11 +444,14 @@ getOneExpr task availableInstances processQ numTasks numProcs = do
   -- Enqueue for processing
   let process = Process { result = out, handler = task.handler }
   liftIO . atomically $ modifyTVar numProcs (+1)
-  liftIO $ writeChan processQ process
 
   -- Return instance to pool & decrement tasks
   liftIO $ writeChan availableInstances ()
   liftIO $ atomically $ modifyTVar numTasks (subtract 1)
+
+  -- Finally write to process queue. Must be done after numTasks decrement,
+  -- or it could be that when we check in processOne, numTasks is still non-zero
+  liftIO $ writeChan processQ process
 
 -- | Symbolic interpreter that explores all paths. Returns an
 -- '[Expr End]' representing the possible execution leafs.
