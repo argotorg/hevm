@@ -13,8 +13,8 @@ import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
 import Control.Concurrent.Spawn (parMapIO, pool)
 import Control.Concurrent.STM (writeTChan, newTChan, TChan, readTChan, atomically, isEmptyTChan, STM)
 import Control.Concurrent.STM.TVar (TVar, newTVarIO, modifyTVar, readTVar, writeTVar)
-import Control.Concurrent.STM.TMVar (putTMVar, takeTMVar, TMVar, putTMVar, takeTMVar, newEmptyTMVarIO)
-import Control.Monad (when, forM_, forM)
+import Control.Concurrent.STM.TMVar (TMVar, putTMVar, takeTMVar, newEmptyTMVarIO)
+import Control.Monad (when, forM_, forM, forever)
 import Control.Monad.Loops (whileM)
 import Control.Monad.IO.Unlift
 import Control.Monad.Operational qualified as Operational
@@ -366,7 +366,7 @@ interpret fetcher iterConf vm stepper handler = do
   allProcessDone <- liftIO newEmptyTMVarIO
 
   -- spawn task orchestration thread
-  taskOrchestrate' <- toIO $ taskOrchestrate taskQ availableInstances processQ resChan numTasks numProcs
+  taskOrchestrate' <- toIO $ taskOrchestrate taskQ availableInstances processQ numTasks numProcs
   taskOrchestrateId <- liftIO $ forkIO taskOrchestrate'
 
   -- spawn processing orchestration thread
@@ -398,22 +398,20 @@ interpret fetcher iterConf vm stepper handler = do
     taskOrchestrate :: App m
       => Chan (InterpTask m a)
       -> Chan () -> Chan (Process m a)
-      -> TChan a -> TVar Natural -> TVar Natural -> m b
-    taskOrchestrate taskQ avail processQ resChan numTasks numProcs = do
+      -> TVar Natural -> TVar Natural -> m b
+    taskOrchestrate taskQ avail processQ numTasks numProcs = forever $ do
       _ <- liftIO $ readChan avail
       task <- liftIO $ readChan taskQ
       runTask' <- toIO $ getOneExpr task avail processQ numTasks numProcs
-      _ <- liftIO $ forkIO runTask'
-      taskOrchestrate taskQ avail processQ resChan numTasks numProcs
+      liftIO $ forkIO runTask'
 
     -- processing orchestrator loop
     processOrchestrate :: App m => Chan (Process m a) -> Chan () -> TChan a -> TVar Natural -> TVar Natural -> TMVar () -> m b
-    processOrchestrate processQ availProcessors resChan numProcs numTasks allProcessDone = do
+    processOrchestrate processQ availProcessors resChan numProcs numTasks allProcessDone = forever $ do
       _ <- liftIO $ readChan availProcessors
       proc <- liftIO $ readChan processQ
       runProcess' <- toIO $ processOne proc availProcessors resChan numProcs numTasks allProcessDone
-      _ <- liftIO $ forkIO runProcess'
-      processOrchestrate processQ availProcessors resChan numProcs numTasks allProcessDone
+      liftIO $ forkIO runProcess'
 
     -- process one task
     processOne :: App m => Process m a -> Chan () -> TChan a -> TVar Natural -> TVar Natural -> TMVar () -> m ()
@@ -448,14 +446,9 @@ getOneExpr task availableInstances processQ numTasks numProcs = do
   liftIO . atomically $ modifyTVar numProcs (+1)
   liftIO $ writeChan processQ process
 
-  -- Return instance to pool immediately after interpretation
+  -- Return instance to pool & decrement tasks
   liftIO $ writeChan availableInstances ()
-
-  -- Decrement interpretation tasks and check if all done
-  liftIO $ atomically $ do
-    n <- readTVar numTasks
-    let n' = n - 1
-    writeTVar numTasks n'
+  liftIO $ atomically $ modifyTVar numTasks (subtract 1)
 
 -- | Symbolic interpreter that explores all paths. Returns an
 -- '[Expr End]' representing the possible execution leafs.
