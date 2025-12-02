@@ -331,8 +331,6 @@ data InterpTask m a = InterpTask
   , stepper :: Stepper Symbolic (Expr End)
   , handler :: Expr End -> m a
   }
-newtype InterpreterInstance = InterpreterInstance ()
-newtype ProcInstance = ProcInstance ()
 
 data Process m a = Process
   { result :: Expr End
@@ -352,8 +350,8 @@ interpret fetcher iterConf vm stepper handler = do
   processQ <- liftIO newChan
 
   -- spawn interpreters and process instances
-  let interpInstances = replicate numCapabilities $ InterpreterInstance ()
-      procInstances = replicate numCapabilities $ ProcInstance ()
+  let interpInstances = replicate numCapabilities ()
+      procInstances = replicate numCapabilities ()
 
   -- result channel
   resChan <- liftIO . atomically $ newTChan
@@ -399,32 +397,32 @@ interpret fetcher iterConf vm stepper handler = do
     -- orchestrator loop
     taskOrchestrate :: App m
       => Chan (InterpTask m a)
-      -> Chan InterpreterInstance -> Chan (Process m a)
+      -> Chan () -> Chan (Process m a)
       -> TChan a -> TVar Natural -> TVar Natural -> m b
     taskOrchestrate taskQ avail processQ resChan numTasks numProcs = do
-      inst <- liftIO $ readChan avail
+      _ <- liftIO $ readChan avail
       task <- liftIO $ readChan taskQ
-      runTask' <- toIO $ getOneExpr task inst avail processQ numTasks numProcs
+      runTask' <- toIO $ getOneExpr task avail processQ numTasks numProcs
       _ <- liftIO $ forkIO runTask'
       taskOrchestrate taskQ avail processQ resChan numTasks numProcs
 
     -- processing orchestrator loop
-    processOrchestrate :: App m => Chan (Process m a) -> Chan ProcInstance -> TChan a -> TVar Natural -> TVar Natural -> TMVar () -> m b
+    processOrchestrate :: App m => Chan (Process m a) -> Chan () -> TChan a -> TVar Natural -> TVar Natural -> TMVar () -> m b
     processOrchestrate processQ availProcessors resChan numProcs numTasks allProcessDone = do
-      procInst <- liftIO $ readChan availProcessors
-      process <- liftIO $ readChan processQ
-      runProcess' <- toIO $ processOne process procInst availProcessors resChan numProcs numTasks allProcessDone
+      _ <- liftIO $ readChan availProcessors
+      proc <- liftIO $ readChan processQ
+      runProcess' <- toIO $ processOne proc availProcessors resChan numProcs numTasks allProcessDone
       _ <- liftIO $ forkIO runProcess'
       processOrchestrate processQ availProcessors resChan numProcs numTasks allProcessDone
 
     -- process one task
-    processOne :: App m => Process m a -> ProcInstance -> Chan ProcInstance -> TChan a -> TVar Natural -> TVar Natural -> TMVar () -> m ()
-    processOne task procInst availProcs resChan numProcs numTasks allProcessDone = do
+    processOne :: App m => Process m a -> Chan () -> TChan a -> TVar Natural -> TVar Natural -> TMVar () -> m ()
+    processOne task availProcs resChan numProcs numTasks allProcessDone = do
       processed <- task.handler task.result
       liftIO . atomically $ writeTChan resChan processed
 
       -- Return instance to pool immediately after processing
-      liftIO $ writeChan availProcs procInst
+      liftIO $ writeChan availProcs ()
 
       -- Decrement and check if all done
       liftIO $ atomically $ do
@@ -437,13 +435,12 @@ interpret fetcher iterConf vm stepper handler = do
 
 getOneExpr :: forall m a . (MonadIO m, ReadConfig m, App m)
   => InterpTask m a
-  -> InterpreterInstance
-  -> Chan InterpreterInstance
+  -> Chan ()
   -> Chan (Process m a)
   -> TVar Natural
   -> TVar Natural
   -> m ()
-getOneExpr task inst availableInstances processQ numTasks numProcs = do
+getOneExpr task availableInstances processQ numTasks numProcs = do
   out <- interpretInternal task
 
   -- Enqueue for processing
@@ -452,7 +449,7 @@ getOneExpr task inst availableInstances processQ numTasks numProcs = do
   liftIO $ writeChan processQ process
 
   -- Return instance to pool immediately after interpretation
-  liftIO $ writeChan availableInstances inst
+  liftIO $ writeChan availableInstances ()
 
   -- Decrement interpretation tasks and check if all done
   liftIO $ atomically $ do
