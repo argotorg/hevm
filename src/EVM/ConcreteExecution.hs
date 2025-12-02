@@ -25,7 +25,7 @@ import Data.STRef
 import Data.Vector.Unboxed qualified as UVec
 import Data.Vector.Unboxed.Mutable qualified as UMVec
 import Data.Vector.Mutable qualified as MVec
-import Data.Word (Word8, Word64)
+import Data.Word (Word8, Word32, Word64)
 import Prelude hiding (exponent)
 
 import EVM (allButOne64th, ceilDiv, log2)
@@ -407,14 +407,16 @@ runStep vm = do
     OpJump -> stepJump vm
     OpJumpi -> stepJumpI vm
     OpJumpdest -> pure ()
+    OpMsize -> stepMSize vm
     OpMload -> stepMLoad vm
     OpMstore -> stepMStore vm
     OpMstore8 -> stepMStore8 vm
     OpSload -> stepSLoad vm
     OpSstore -> stepSStore vm
     OpCallvalue -> stepCallValue vm
-    OpCalldatasize -> stepCallDataSize vm
     OpCalldataload -> stepCallDataLoad vm
+    OpCalldatasize -> stepCallDataSize vm
+    OpCalldatacopy -> stepCallDataCopy vm
     OpCall -> stepCall vm
     OpSha3 -> stepKeccak vm
     OpGas -> stepGas vm
@@ -604,6 +606,9 @@ capAsWord64 w256 = case deconstructWord256ToWords w256 of
   (0, 0, 0, w64) -> w64
   _ -> maxBound
 
+capAsInt :: Word64 -> Int
+capAsInt w64 = if w64 >= (fromIntegral (maxBound :: Int)) then (maxBound :: Int) else (fromIntegral w64)
+
 
 stepByte :: MVM s -> Step s ()
 stepByte vm = do
@@ -756,19 +761,47 @@ stepCallDataLoad vm = do
   frame <- liftST $ getCurrentFrame vm
   offsetWord <- pop vm
   let CallData dataBS = frame.context.callData
-  let size = BS.length dataBS
-      offset = fromIntegral offsetWord
-  -- Extract up to 32 bytes or fewer if out of bounds
-      slice | offset >= size = BS.replicate 32 0
-            | offset + 32 <= size = BS.take 32 (BS.drop offset dataBS)
-            | otherwise =
-                let available = BS.drop offset dataBS
-                    missing   = 32 - BS.length available
-                in available <> BS.replicate missing 0
-
-      -- Convert 32 bytes big-endian to W256
-      callDataWord = BS.foldl' (\acc b -> (acc `shiftL` 8) .|. fromIntegral b) 0 slice
+  let offset = fromIntegral offsetWord
+      -- Extract up to 32 bytes or fewer if out of bounds
+      slice = BS.take 32 (BS.drop offset dataBS)
+      -- Convert to big-endian W256
+      sliceAsWord = BS.foldl' (\acc b -> (acc `shiftL` 8) .|. fromIntegral b) 0 slice
+      callDataWord = if BS.length slice == 32 then sliceAsWord else (sliceAsWord `shiftL` (8 * (32 - BS.length slice)))
   push vm callDataWord
+
+stepCallDataCopy :: MVM s -> Step s ()
+stepCallDataCopy vm = do
+  memoryOffset <- pop vm
+  callDataOffset <- pop vm
+  size <- pop vm
+  let size64 = capAsWord64 size -- NOTE: We can cap it, larger numbers would cause of of gas anyway
+  let callDataOffset64 = capAsWord64 callDataOffset
+  let memoryOffset64 = capAsWord64 memoryOffset
+  burnDynamicCost size64
+  frame <- liftST $ getCurrentFrame vm
+  let CallData dataBS = frame.context.callData
+  -- Debug.Trace.traceM $ "calldata: " <> (show $ ByteStringS dataBS) <> " offset: " <> (show callDataOffset) <> " size: " <> (show size)
+  let bs = slicePadded dataBS (capAsInt callDataOffset64) (capAsInt size64) -- NOTE: We cap to Int, larger values would cause error anyway
+  memory <- liftST $ getMemory vm
+  touchMemory vm memory memoryOffset64 size64
+  liftST $ writeMemory memory memoryOffset bs
+
+  where
+    burnDynamicCost size = let cost = feeSchedule.g_copy * ceilDiv size 32 in
+      burn vm (Gas cost)
+
+    slicePadded :: BS.ByteString -> Int -> Int -> BS.ByteString
+    slicePadded _ _ 0 = BS.empty
+    slicePadded bs offset size =
+        let len = BS.length bs
+            slice | offset >= len = BS.replicate size 0
+                  | offset + size <= len = BS.take size (BS.drop offset bs)
+                  | otherwise =
+                    let available = BS.drop offset bs
+                        missing   = size - BS.length available
+                    in available <> BS.replicate missing 0
+        in
+        slice
 
 stepCall :: MVM s -> Step s ()
 stepCall vm = do
@@ -780,12 +813,15 @@ stepCall vm = do
   retOffset <- pop vm
   retSize <- pop vm
   calldata <- readMemory vm argsOffset argsSize
+  memory <- liftST $ getMemory vm
+  touchMemory vm memory (fromIntegral retOffset) (fromIntegral retSize) -- FIXME: Should gas be charged beforehand or only for actually used memory on return? See EIP - 5
   -- Debug.Trace.traceM $ "Call with value: " <> show value
   when (value /= 0) $ internalError "TODO: Handle calling with value"
   let to = truncateToAddr address
   targetCode <- lookupCode vm to
   -- let RuntimeCode bs = targetCode
   -- Debug.Trace.traceM ("Calling " <> (show $ ByteStringS bs))
+  -- Debug.Trace.traceM ("With call data " <> (show $ ByteStringS calldata))
   currentFrame <- liftST $ getCurrentFrame vm
   let accessCost = vm.fees.g_cold_account_access -- TODO: maintain access lists
   burn' currentFrame (Gas accessCost)
@@ -861,6 +897,12 @@ haltExecution vm = returnWithData vm 0 0
 -- isRootFrame vm = do
 --   frames <- readSTRef vm.frames
 --   pure (null frames)
+
+stepMSize :: MVM s -> Step s ()
+stepMSize vm = do
+  (Memory _ sizeRef) <- liftST $ getMemory vm
+  size <- liftST $ readSTRef sizeRef
+  push vm (fromIntegral size)
 
 stepMLoad :: MVM s -> Step s ()
 stepMLoad vm = do
@@ -1206,6 +1248,7 @@ burnStaticGas vm op = do
         OpCallvalue -> g_base
         OpCalldataload -> g_verylow
         OpCalldatasize -> g_base
+        OpCalldatacopy -> g_verylow
         OpPop -> g_base
         OpMload -> g_verylow
         OpMstore -> g_verylow
@@ -1214,6 +1257,7 @@ burnStaticGas vm op = do
         OpSstore -> g_zero -- Custom rules
         OpJump -> g_mid
         OpJumpi -> g_high
+        OpMsize -> g_base
         OpGas -> g_base
         OpJumpdest -> g_jumpdest
         OpPush0 -> g_base
