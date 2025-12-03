@@ -425,6 +425,7 @@ exec1 conf = do
         OpShl -> {-# SCC "OpShl" #-} stackOp2 g_verylow Expr.shl
         OpShr -> {-# SCC "OpShr" #-} stackOp2 g_verylow Expr.shr
         OpSar -> {-# SCC "OpSar" #-} stackOp2 g_verylow Expr.sar
+        OpClz -> {-# SCC "OpClz" #-} stackOp1 g_low Expr.clz
 
         -- more accurately referred to as KECCAK
         OpSha3 -> {-# SCC "OpSha3" #-}

@@ -45,6 +45,7 @@ intToOpName a =
     0x1b -> "SHL"
     0x1c -> "SHR"
     0x1d -> "SAR"
+    0x1e -> "CLZ"
     0x20 -> "SHA3"
     0x30 -> "ADDRESS"
     --
@@ -206,6 +207,7 @@ opString (i, o) = let showPc x | x < 0x10 = '0' : showHex x ""
   OpShl -> "SHL"
   OpShr -> "SHR"
   OpSar -> "SAR"
+  OpClz -> "CLZ"
   OpSha3 -> "SHA3"
   OpAddress -> "ADDRESS"
   OpBalance -> "BALANCE"
@@ -305,6 +307,7 @@ getOp x = case x of
   0x1b -> OpShl
   0x1c -> OpShr
   0x1d -> OpSar
+  0x1e -> OpClz
   0x20 -> OpSha3
   0x30 -> OpAddress
   0x31 -> OpBalance

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Added
 - We support RPC in equivalence checking now
+- New opcode: CLZ
 
 ## Fixed
 - Fix incorrect simplification rule for `PEq (Lit 1) (IsZero (LT a b))`
