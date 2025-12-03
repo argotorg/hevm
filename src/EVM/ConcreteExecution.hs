@@ -374,7 +374,7 @@ runStep vm = do
   case op of
     OpStop -> haltExecution vm
     OpReturn -> stepReturn vm
-    OpAdd -> binOp vm (+)
+    OpAdd -> {-# SCC "OpAdd" #-} binOp vm (+)
     OpMul -> binOp vm (*)
     OpSub -> binOp vm (-)
     OpMod -> stepMod vm
@@ -395,17 +395,17 @@ runStep vm = do
     OpSignextend -> stepSignExtend vm
     OpPush0 -> push vm 0
     OpPush n -> stepPushN vm n
-    OpPop -> do _ <- pop vm; pure ()
-    OpDup n -> stepDupN vm n
-    OpSwap n -> stepSwapN vm n
+    OpPop -> {-# SCC "OpPop" #-} do _ <- pop vm; pure ()
+    OpDup n -> {-# SCC "OpDupN" #-} stepDupN vm n
+    OpSwap n -> {-# SCC "OpSwapN" #-} stepSwapN vm n
     OpLt -> stepLt vm
     OpGt -> stepGt vm
     OpSlt -> stepSLt vm
     OpSgt -> stepSGt vm
     OpEq -> stepEq vm
-    OpIszero -> stepIsZero vm
-    OpJump -> stepJump vm
-    OpJumpi -> stepJumpI vm
+    OpIszero -> {-# SCC "OpIsZero" #-} stepIsZero vm
+    OpJump -> {-# SCC "OpJump" #-} stepJump vm
+    OpJumpi -> {-# SCC "OpJumpI" #-} stepJumpI vm
     OpJumpdest -> pure ()
     OpMsize -> stepMSize vm
     OpMload -> stepMLoad vm
@@ -428,7 +428,7 @@ runStep vm = do
       push vm' (x `f` y)
 
 stepPushN :: MVM s -> Word8 -> Step s ()
-stepPushN vm n = do
+stepPushN vm n = {-# SCC "PushN" #-} do
   pc <- liftST $ readPC vm
   bs <- liftST $ getCodeByteString vm
   let n' = fromIntegral n
@@ -490,7 +490,7 @@ stepIsZero vm = do
 
 
 comparison :: MVM s -> (VMWord -> VMWord -> VMWord) -> Step s ()
-comparison vm op = do
+comparison vm op = {-# SCC "Comparison" #-} do
   lhs <- pop vm
   rhs <- pop vm
   push vm (op lhs rhs)
@@ -519,7 +519,7 @@ pushST vm val = do
 
 
 pop :: MVM s -> Step s VMWord
-pop vm = do
+pop vm = {-# SCC "Pop" #-} do
   sp <- liftST $ getStackPointer vm
   if sp <= 0
     then stackUnderflow vm
@@ -804,7 +804,7 @@ stepCallDataCopy vm = do
         slice
 
 stepCall :: MVM s -> Step s ()
-stepCall vm = do
+stepCall vm = {-# SCC "OpCall" #-} do
   gas <- pop vm
   address <- pop vm
   value <- pop vm
@@ -929,7 +929,7 @@ stepMStore8 vm = do
   liftST $ memStore1 memory off val
 
 stepSLoad :: MVM s -> Step s ()
-stepSLoad vm = do
+stepSLoad vm = {-# SCC "SLoad" #-} do
   key <- pop vm
   store <- liftST $ getCurrentStorage vm
   isWarm <- liftST $ touchCurrentStore vm key
@@ -938,7 +938,7 @@ stepSLoad vm = do
   push vm val
 
 stepSStore :: MVM s -> Step s ()
-stepSStore vm = do
+stepSStore vm = {-# SCC "SStore" #-} do
   key <- pop vm
   val <- pop vm
   isWarm <- liftST $ touchCurrentStore vm key
@@ -1187,12 +1187,12 @@ getGasRefund vm = do
   readSTRef frame.state.gasRefundedRef
 
 burn :: MVM s -> Gas -> Step s ()
-burn vm gas = do
+burn vm gas = {-# SCC "Burn" #-} do
   frame <- liftST $ getCurrentFrame vm
   burn' frame gas
 
 burn' :: MFrame s -> Gas -> Step s ()
-burn' frame (Gas toBurn) = do
+burn' frame (Gas toBurn) = {-# SCC "Burn'" #-}do
   let gasRef = frame.state.gasRemainingRef
   (Gas gasRemaining) <- liftST $ readSTRef gasRef
   if toBurn > gasRemaining
@@ -1215,7 +1215,7 @@ extraExpGasCost exponent =
       Gas cost
 
 burnStaticGas :: MVM s -> GenericOp Word8 -> Step s ()
-burnStaticGas vm op = do
+burnStaticGas vm op = {-# SCC "BurnStaticGas" #-} do
   let FeeSchedule {..} = vm.fees
   let cost = case op of
         OpStop -> g_zero
