@@ -1659,6 +1659,8 @@ preImageLookupMap :: Map.Map W256 Word8
 preImageLookupMap = Map.fromList preImages
 data ConstState = ConstState
   { values :: Map.Map (Expr EWord) W256
+  , lowerBounds :: Map.Map (Expr EWord) W256
+  , upperBounds :: Map.Map (Expr EWord) W256
   , canBeSat :: Bool
   }
   deriving (Show)
@@ -1666,7 +1668,7 @@ data ConstState = ConstState
 -- | Performs constant propagation
 constPropagate :: [Prop] -> [Prop]
 constPropagate ps =
- let consts = collectConsts ps (ConstState mempty True)
+ let consts = collectConsts ps (ConstState mempty mempty mempty True)
  in if consts.canBeSat then substitute consts ps ++ fixVals consts
     else [PBool False]
   where
@@ -1687,20 +1689,98 @@ constPropagate ps =
 
     -- Collects all the constants in the given props, and sets canBeSat to False if UNSAT
     collectConsts ps2 startState = execState (mapM go ps2) startState
-    go :: Prop -> State ConstState ()
-    go = \case
-        PEq (Lit l) a -> do
+
+    updateLower :: Expr EWord -> W256 -> State ConstState ()
+    updateLower a l = do
+      s <- get
+      let currentL = fromMaybe 0 (Map.lookup a s.lowerBounds)
+          currentU = fromMaybe maxLit (Map.lookup a s.upperBounds)
+          newL = Prelude.max currentL l
+      if newL > currentU
+        then put s { canBeSat = False, values = mempty, lowerBounds = mempty, upperBounds = mempty }
+        else put s { lowerBounds = Map.insert a newL s.lowerBounds }
+      -- Check if equal to upper, then it's a constant
+      when (newL == currentU) $ do
+        s' <- get
+        case Map.lookup a s'.values of
+            Just v -> when (v /= newL) $ put s' { canBeSat = False, values = mempty, lowerBounds = mempty, upperBounds = mempty }
+            Nothing -> put s' { values = Map.insert a newL s'.values }
+
+    updateUpper :: Expr EWord -> W256 -> State ConstState ()
+    updateUpper a u = do
+      s <- get
+      let currentL = fromMaybe 0 (Map.lookup a s.lowerBounds)
+          currentU = fromMaybe maxLit (Map.lookup a s.upperBounds)
+          newU = Prelude.min currentU u
+      if currentL > newU
+        then put s { canBeSat = False, values = mempty, lowerBounds = mempty, upperBounds = mempty }
+        else put s { upperBounds = Map.insert a newU s.upperBounds }
+      -- Check if equal to lower, then it's a constant
+      when (currentL == newU) $ do
+        s' <- get
+        case Map.lookup a s'.values of
+            Just v -> when (v /= newU) $ put s' { canBeSat = False, values = mempty, lowerBounds = mempty, upperBounds = mempty }
+            Nothing -> put s' { values = Map.insert a newU s'.values }
+
+    genericEq :: W256 -> Expr EWord -> State ConstState ()
+    genericEq l a = do
           s <- get
           case Map.lookup a s.values of
-            Just l2 -> unless (l==l2) $ put ConstState {canBeSat=False, values=mempty}
+            Just l2 -> unless (l==l2) $ put ConstState {canBeSat=False, values=mempty, lowerBounds=mempty, upperBounds=mempty}
             Nothing -> modify (\s' -> s'{values=Map.insert a l s'.values})
+          updateLower a l
+          updateUpper a l
+
+    go :: Prop -> State ConstState ()
+    go = \case
+        -- signed inequalities
+        PEq (Lit 1) term@(SLT a (Lit 0)) -> do
+            genericEq 1 term
+            updateLower a minLitSigned
+        PEq (Lit 1) term@(SLT (Lit 0) a) -> do
+            genericEq 1 term
+            updateLower a 1
+            updateUpper a maxLitSigned
+
+        -- normal equality propagation
+        PEq (Lit l) a -> genericEq l a
         PEq a b@(Lit _) -> go (PEq b a)
+
         PNeg (PEq (Lit l) a) -> do
           s <- get
           case Map.lookup a s.values of
-            Just l2 -> when (l==l2) $ put ConstState {canBeSat=False, values=mempty}
+            Just l2 -> when (l==l2) $ put ConstState {canBeSat=False, values=mempty, lowerBounds=mempty, upperBounds=mempty}
             Nothing -> pure ()
         PNeg (PEq a b@(Lit _)) -> go $ PNeg (PEq b a)
+        
+        -- inequalities (with overflow checks to prevent wraparound)
+        -- PLT a (Lit b) means a < b, so a <= b-1
+        PLT a (Lit b) ->
+          if b == 0
+            then modify (\s -> s { canBeSat = False, values = mempty, lowerBounds = mempty, upperBounds = mempty })
+            else updateUpper a (b - 1)
+        -- PLT (Lit a) b means a < b, so b >= a+1
+        PLT (Lit a) b ->
+          if a == maxLit
+            then modify (\s -> s { canBeSat = False, values = mempty, lowerBounds = mempty, upperBounds = mempty })
+            else updateLower b (a + 1)
+        -- PLEq a (Lit b) means a <= b
+        PLEq a (Lit b) -> updateUpper a b
+        PLEq (Lit a) b -> updateLower b a
+        -- PGT a (Lit b) means a > b, so a >= b+1
+        PGT a (Lit b) ->
+          if b == maxLit
+            then modify (\s -> s { canBeSat = False, values = mempty, lowerBounds = mempty, upperBounds = mempty })
+            else updateLower a (b + 1)
+        -- PGT (Lit a) b means a > b, so b <= a-1
+        PGT (Lit a) b ->
+          if a == 0
+            then modify (\s -> s { canBeSat = False, values = mempty, lowerBounds = mempty, upperBounds = mempty })
+            else updateUpper b (a - 1)
+        -- PGEq a (Lit b) means a >= b
+        PGEq a (Lit b) -> updateLower a b
+        PGEq (Lit a) b -> updateUpper b a
+
         PAnd a b -> do
           go a
           go b
@@ -1711,7 +1791,7 @@ constPropagate ps =
             v2 = collectConsts [b] s
           unless v1.canBeSat $ go b
           unless v2.canBeSat $ go a
-        PBool False -> put $ ConstState {canBeSat=False, values=mempty}
+        PBool False -> put $ ConstState {canBeSat=False, values=mempty, lowerBounds=mempty, upperBounds=mempty}
         _ -> pure ()
 
 -- Concretize & simplify Keccak expressions until fixed-point.
@@ -1786,4 +1866,3 @@ maybeConcStoreSimp (ConcreteStore s) = Just s
 maybeConcStoreSimp e = case concKeccakSimpExpr e of
   ConcreteStore s -> Just s
   _ -> Nothing
-
