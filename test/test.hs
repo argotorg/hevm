@@ -1868,7 +1868,7 @@ tests = testGroup "hevm"
           let calldata = (WriteWord (Lit 0x0) (Var "u") (ConcreteBuf ""), [])
           initVM <- liftIO $ stToIO $ abstractVM calldata initCode Nothing True
           let iterConf = IterConfig {maxIter=Nothing, askSmtIters=1, loopHeuristic=StackBased }
-          paths <- interpret (Fetch.noRpcFetcher s) iterConf initVM runExpr
+          paths <- interpret (Fetch.noRpcFetcher s) iterConf initVM runExpr pure
           let exprSimp = map Expr.simplify paths
           assertBoolM "unexptected partial execution" (not $ any isPartial exprSimp)
     , test "mixed-concrete-symbolic-args" $ do
@@ -1960,7 +1960,7 @@ tests = testGroup "hevm"
         withDefaultSolver $ \s -> do
           vm <- liftIO $ stToIO $ loadSymVM runtimecode (Lit 0) initCode False
           let iterConf = IterConfig {maxIter=Nothing, askSmtIters=1, loopHeuristic=StackBased }
-          paths <- interpret (Fetch.noRpcFetcher s) iterConf vm runExpr
+          paths <- interpret (Fetch.noRpcFetcher s) iterConf vm runExpr pure
           let exprSimp = map Expr.simplify paths
           assertBoolM "expected partial execution" (any isPartial exprSimp)
     ]
@@ -4171,7 +4171,7 @@ tests = testGroup "hevm"
                     <&> set (#state % #callvalue) (Lit 0)
                     <&> over (#env % #contracts)
                        (Map.insert aAddr (initialContract (RuntimeCode (ConcreteRuntimeCode a))))
-            verify s (Fetch.noRpcFetcher s) defaultVeriOpts vm (checkAssertions defaultPanicCodes)
+            verify s (Fetch.noRpcFetcher s) defaultVeriOpts vm (checkAssertions defaultPanicCodes) Nothing
 
           let storeCex = cex.store
               testCex = case (Map.lookup cAddr storeCex, Map.lookup aAddr storeCex) of
@@ -4247,7 +4247,7 @@ tests = testGroup "hevm"
           let yulsafeDistributivity = hex "6355a79a6260003560e01c14156016576015601f565b5b60006000fd60a1565b603d602d604435600435607c565b6039602435600435607c565b605d565b6052604b604435602435605d565b600435607c565b141515605a57fe5b5b565b6000828201821115151560705760006000fd5b82820190505b92915050565b6000818384048302146000841417151560955760006000fd5b82820290505b92915050565b"
           calldata <- mkCalldata (Just (Sig "distributivity(uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256])) []
           vm <- liftIO $ stToIO $ abstractVM calldata yulsafeDistributivity Nothing False
-          (_, []) <-  withDefaultSolver $ \s -> verify s (Fetch.noRpcFetcher s) defaultVeriOpts vm (checkAssertions defaultPanicCodes)
+          (_, []) <-  withDefaultSolver $ \s -> verify s (Fetch.noRpcFetcher s) defaultVeriOpts vm (checkAssertions defaultPanicCodes) Nothing
           putStrLnM "Proven"
         ,
         test "safemath-distributivity-sol" $ do

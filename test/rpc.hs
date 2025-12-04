@@ -111,7 +111,7 @@ tests = testGroup "rpc"
         sess <- mkSession Nothing Nothing
         vm <- weth9VM sess testBlockNumber calldata'
         (_, [Cex (_, model)]) <- withSolvers Z3 1 1 Nothing $ \s ->
-          verify s (oracle s (Just sess) testRpcInfo) (defaultVeriOpts {rpcInfo = testRpcInfo}) (symbolify vm) postc
+          verify s (oracle s (Just sess) testRpcInfo) (defaultVeriOpts {rpcInfo = testRpcInfo}) (symbolify vm) postc Nothing
         liftIO $ assertBool "model should exceed caller balance" (getVar model "arg2" >= 695836005599316055372648)
     ]
   ]
