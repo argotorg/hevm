@@ -431,7 +431,7 @@ interpret fetcher iterConf vm stepper handler = do
         nt <- readTVar numTasks
         when (np' == 0 && nt == 0) $ putTMVar allProcessDone ()
 
-getOneExpr :: forall m a . (MonadIO m, ReadConfig m, App m)
+getOneExpr :: forall m a . App m
   => InterpTask m a
   -> Chan ()
   -> Chan (Process m a)
