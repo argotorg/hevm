@@ -361,7 +361,7 @@ stepVM vm = do
 
 runStep :: MVM s -> Step s ()
 runStep vm = do
-  byte <- fetchByte vm
+  byte <- liftST $ fetchByte vm
   -- pc <- liftST $ readPC vm
   liftST $ advancePC vm 1
   let op = getOp byte
@@ -424,16 +424,13 @@ runStep vm = do
       push vm' (x `f` y)
 
 stepPushN :: MVM s -> Word8 -> Step s ()
-stepPushN vm n = {-# SCC "PushN" #-} do
-  pc <- liftST $ readPC vm
-  bs <- liftST $ getCodeByteString vm
+stepPushN vm n = {-# SCC "PushN" #-} liftST $ do
+  pc <- readPC vm
+  bs <- getCodeByteString vm
   let n' = fromIntegral n
-  if pc + n' > BS.length bs
-    then internalError "PUSH: not enough bytes"
-    else do
-      let pushValue = BS.take n' (BS.drop pc bs)
-      push vm (word pushValue)
-      liftST $ advancePC vm n'
+  let pushValue = BS.take n' (BS.drop pc bs)
+  pushST vm (word pushValue)
+  advancePC vm n'
 
 stepDupN :: MVM s -> Word8 -> Step s ()
 stepDupN vm n = do
@@ -658,13 +655,13 @@ stepSignExtend vm = do
   push vm extended
 
 
-fetchByte :: MVM s -> Step s Word8
+fetchByte :: MVM s -> ST s Word8
 fetchByte vm = do
-  pc <- liftST $ readPC vm
-  code <- liftST $ getCodeByteString vm
-  if pc >= BS.length code
-    then haltExecution vm
-    else pure (BS.index code pc)
+  pc <- readPC vm
+  code <- getCodeByteString vm
+  pure $ if pc >= BS.length code
+    then 0
+    else BS.index code pc
 
 advancePC :: MVM s -> Int -> ST s ()
 advancePC vm n = do
@@ -1011,7 +1008,7 @@ newMemory = do
 readMemory :: MVM s -> W256 -> W256 -> Step s BS.ByteString
 readMemory vm offset size =
   case (,) <$> toWord64 offset <*> toWord64 size of
-    Nothing -> internalError "TODO: handle properly with VMError"
+    Nothing -> vmError IllegalOverflow
     Just (offset64, size64) -> do
       memory@(Memory memRef _) <- liftST $ getMemory vm
       touchMemory vm memory offset64 size64
