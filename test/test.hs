@@ -2014,6 +2014,9 @@ tests = testGroup "hevm"
     , test "ConstantinopleMin" $ do
         let testFile = "test/contracts/pass/constantinople_min.sol"
         runForgeTest testFile ".*" >>= assertEqualM "test result" (True, True)
+    , test "Fusaka" $ do
+        let testFile = "test/contracts/pass/fusaka.sol"
+        runForgeTest testFile ".*" >>= assertEqualM "test result" (True, True)
     , test "Prove-Tests-Pass" $ do
         let testFile = "test/contracts/pass/dsProvePass.sol"
         runForgeTest testFile ".*" >>= assertEqualM "test result" (True, True)

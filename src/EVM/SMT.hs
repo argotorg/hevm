@@ -478,6 +478,7 @@ exprToSMT = \case
   SHL a b -> op2 "bvshl" b a
   SHR a b -> op2 "bvlshr" b a
   SAR a b -> op2 "bvashr" b a
+  CLZ a -> op1 "clz" a
   SEx a b -> op2 "signext" a b
   Div a b -> op2CheckZero "bvudiv" a b
   SDiv a b -> op2CheckZero "bvsdiv" a b

@@ -4,7 +4,11 @@
   inputs = {
     flake-utils.url = "github:numtide/flake-utils";
     nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
-    foundry.url = "github:shazow/foundry.nix/stable";
+    foundry = {
+      url = "github:shazow/foundry.nix/stable";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.flake-utils.follows = "flake-utils";
+    };
     solidity = {
       url = "github:argotorg/solidity/8a97fa7a1db1ec509221ead6fea6802c684ee887";
       flake = false;
@@ -24,6 +28,7 @@
     solc-pkgs = {
       url = "github:hellwolf/solc.nix";
       inputs.nixpkgs.follows = "nixpkgs";
+      inputs.flake-utils.follows = "flake-utils";
     };
   };
 
@@ -35,7 +40,7 @@
           overlays = [solc-pkgs.overlay];
           config = { allowBroken = true; };
         });
-        solc = (solc-pkgs.mkDefault pkgs pkgs.solc_0_8_26);
+        solc = (solc-pkgs.mkDefault pkgs pkgs.solc_0_8_31);
         testDeps = [
           solc
           foundry.defaultPackage.${system}

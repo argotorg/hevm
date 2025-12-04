@@ -133,6 +133,7 @@ foldExpr f acc expr = acc <> (go expr)
       e@(SHL a b) -> f e <> (go a) <> (go b)
       e@(SHR a b) -> f e <> (go a) <> (go b)
       e@(SAR a b) -> f e <> (go a) <> (go b)
+      e@(CLZ a) -> f e <> (go a)
 
       -- Hashes
 
@@ -478,6 +479,9 @@ mapExprM f expr = case expr of
     a' <- mapExprM f a
     b' <- mapExprM f b
     f (SAR a' b')
+  CLZ a -> do
+    a' <- mapExprM f a
+    f (CLZ a')
 
 
   -- Hashes

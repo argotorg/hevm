@@ -42,6 +42,7 @@ assemble os = V.fromList $ concatMap go os
       OpShl -> [LitByte 0x1B]
       OpShr -> [LitByte 0x1C]
       OpSar -> [LitByte 0x1D]
+      OpClz -> [LitByte 0x1E]
       OpSha3 -> [LitByte 0x20]
       OpAddress -> [LitByte 0x30]
       OpBalance -> [LitByte 0x31]
