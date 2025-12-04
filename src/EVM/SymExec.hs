@@ -820,7 +820,9 @@ verifyInputsWithHandler
 verifyInputsWithHandler solvers opts fetcher preState post cexHandler = do
   conf <- readConfig
   let call = mconcat ["prefix 0x", getCallPrefix preState.state.calldata]
-  when conf.debug $ liftIO $ putStrLn $ "   Exploring call " <> call
+  when conf.debug $ liftIO $ do
+    putStrLn $ "   Keccak preimages in state: " <> (show $ length preState.keccakPreImgs)
+    putStrLn $ "   Exploring call " <> call
 
   results <- executeVM fetcher opts.iterConf preState $ \leaf -> do
     -- Extract partial if applicable
@@ -846,9 +848,8 @@ verifyInputsWithHandler solvers opts fetcher preState post cexHandler = do
   when conf.debug $ liftIO $ do
     putStrLn $ "   Exploration and solving finished, " <> show (length results) <> " branch(es) checked in call " <> call <> " of which partial: "
                 <> show (length smtResults)
-    putStrLn $ "   Keccak preimages in state: " <> (show $ length preState.keccakPreImgs)
     let cexs = filter (\(res, _) -> not . isQed $ res) smtResults
-    putStrLn $ "   Found " <> show (length cexs) <> " potential counterexample(s) in call " <> call
+    putStrLn $ "   Found " <> show (length cexs) <> " counterexample(s) in call " <> call
 
   pure (smtResults, catMaybes partials)
   where
