@@ -13,7 +13,7 @@ Gas(..),
 Nonce(..)
 ) where
 
-import Control.Monad (forM, when, unless)
+import Control.Monad (forM, when, unless, ap, liftM)
 import Control.Monad.ST (ST, runST)
 import Data.Bits ((.|.), (.&.), (.^.), shiftR, shiftL, testBit, complement, bit)
 import Data.ByteString qualified as BS
@@ -121,8 +121,7 @@ data MFrameState s = MFrameState {
   accounts :: Accounts,
   gasRemainingRef :: STRef s Gas,
   gasRefundedRef :: STRef s Gas,
-  retInfoRef :: STRef s (Maybe (W256, W256)),
-  resultRef :: STRef s (Maybe FrameResult)
+  retInfoRef :: STRef s (Maybe (W256, W256))
 }
 
 newMFrameState :: Accounts -> Gas -> ST s (MFrameState s)
@@ -134,8 +133,7 @@ newMFrameState accounts gas = do
   gasRemaining <- newSTRef gas
   gasRefunded <- newSTRef $ Gas 0
   retInfoRef <- newSTRef Nothing
-  resultRef <- newSTRef Nothing
-  pure $ MFrameState pcRef stackVec spRef memory accounts gasRemaining gasRefunded retInfoRef resultRef
+  pure $ MFrameState pcRef stackVec spRef memory accounts gasRemaining gasRefunded retInfoRef
 
 newFrameFromTransaction :: Transaction -> Accounts -> ST s (MFrame s)
 newFrameFromTransaction tx@(Transaction from maybeTo callvalue calldata maybeCode gasLimit _) accounts =
@@ -171,7 +169,8 @@ data MVM s = MVM
     frames :: STRef s [MFrame s],
     fees :: FeeSchedule Word64,
     transaction :: Transaction,
-    txsubstate :: STRef s TxSubState
+    txsubstate :: STRef s TxSubState,
+    terminationFlagRef :: TerminationFlag s
   }
 
 pushFrame :: MVM s -> MFrame s -> ST s ()
@@ -204,43 +203,38 @@ frameToVMResult :: FrameResult -> VMResult
 frameToVMResult (FrameSucceeded bs) = VMSuccess bs
 frameToVMResult (FrameErrored err) = VMFailure err
 
+
+type TerminationFlag s = STRef s (Maybe FrameResult)
 -- An operation in VM that either succeeds (and computes a result) or fails
-newtype Step s a = Step (ST s (Maybe a))
+newtype Step s a = Step (TerminationFlag s -> ST s a)
 
 instance Functor (Step s) where
-  fmap f (Step ma) = Step (fmap (fmap f) ma)
+  fmap = liftM
 
 instance Applicative (Step s) where
-  pure x = Step (pure (Just x))
-  Step mf <*> Step ma = Step $ do
-    mf' <- mf
-    case mf' of
-      Nothing -> pure Nothing
-      Just f  -> fmap (fmap f) ma
+  pure x = Step $ \_ -> pure x
+  (<*>) = ap
 
 instance Monad (Step s) where
   (>>=) :: Step s a -> (a -> Step s b) -> Step s b
-  Step sma >>= f = Step $ do
-    ma <- sma
-    case ma of
-      Nothing -> pure Nothing
-      Just a  -> let (Step smb) = (f a) in smb
+  Step sa >>= f = Step $ \flagRef -> do
+    a <- sa flagRef
+    maybeResult <- readSTRef flagRef
+    case maybeResult of
+      Nothing -> let (Step sb) = (f a) in sb flagRef
+      Just _ -> pure (undefined)
 
 liftST :: ST s a -> Step s a
-liftST st = Step $ Just <$> st
+liftST st = Step $ const st
 
-stackUnderflow :: MVM s -> Step s a
-stackUnderflow vm = vmError vm StackUnderrun
+stackUnderflow :: Step s a
+stackUnderflow = vmError StackUnderrun
 
-vmError :: MVM s -> EvmError -> Step s a
-vmError vm err = do
-  frame <- liftST $ getCurrentFrame vm
-  vmError' frame err
+vmError :: EvmError -> Step s a
+vmError err = stop $ FrameErrored err
 
-vmError' :: MFrame s -> EvmError -> Step s a
-vmError' frame err = Step $ do
-  writeSTRef frame.state.resultRef (Just $ FrameErrored err)
-  pure Nothing
+stop :: FrameResult -> Step s a
+stop result = Step $ \resultRef -> writeSTRef resultRef (Just result) >> pure (internalError "Should never be executed")
 
 execBytecode :: RuntimeCode -> CallData -> CallValue -> ExecutionResult
 execBytecode code calldata value = exec transaction worldState
@@ -265,7 +259,8 @@ exec tx accounts = runST $ do
   currentRef <- newSTRef initialFrame
   framesRef <- newSTRef []
   substateRef <- newSTRef (TxSubState mempty)
-  let vm = MVM currentRef framesRef feeSchedule tx substateRef
+  terminationFlagRef <- newSTRef Nothing
+  let vm = MVM currentRef framesRef feeSchedule tx substateRef terminationFlagRef
   runLoop vm
 
   where
@@ -326,10 +321,10 @@ runLoop vm = do
 
 stepVM :: MVM s -> ST s (Maybe VMResult)
 stepVM vm = do
+  let terminationFlagRef = vm.terminationFlagRef
   let (Step stAction) = runStep vm
-  _ <- stAction
-  frame <- getCurrentFrame vm
-  maybeFrameResult <- readSTRef frame.state.resultRef
+  _ <- stAction terminationFlagRef
+  maybeFrameResult <- readSTRef terminationFlagRef
   case maybeFrameResult of
     Nothing -> pure Nothing
     Just frameResult -> finishFrame vm frameResult
@@ -348,6 +343,7 @@ stepVM vm = do
         (retOffset, retSize) <- getReturnInfo finishingFrame
         writeSTRef vm.current nextFrame
         writeSTRef vm.frames rest
+        writeSTRef vm.terminationFlagRef Nothing
         case result of
           FrameSucceeded returnData -> do
             currentFrame <- getCurrentFrame vm
@@ -502,7 +498,7 @@ stackSlot vm n = do
   stack <- liftST $ getStack vm
   let slotPointer = stackPointer - (fromIntegral (n + 1))
   if slotPointer < 0
-    then stackUnderflow vm
+    then stackUnderflow
     else liftST $ MVec.read stack slotPointer
 
 
@@ -522,7 +518,7 @@ pop :: MVM s -> Step s VMWord
 pop vm = {-# SCC "Pop" #-} do
   sp <- liftST $ getStackPointer vm
   if sp <= 0
-    then stackUnderflow vm
+    then stackUnderflow
     else liftST $ do
       stack <- getStack vm
       let !sp' = sp - 1
@@ -739,7 +735,7 @@ tryJump vm dest = do
   if isValidJumpDest code dest
   then do
     liftST $ writePC vm dest
-  else vmError vm BadJumpDestination
+  else vmError BadJumpDestination
   where
     isValidJumpDest code jumpDest = (fromMaybe (0 :: Word8) $ BS.indexMaybe code jumpDest) == 0x5b
 
@@ -886,9 +882,7 @@ stepReturn vm = do
 returnWithData :: MVM s -> W256 -> W256 -> Step s a
 returnWithData vm offset size = do
   bs <- readMemory vm offset size
-  frame <- liftST $ getCurrentFrame vm
-  liftST $ writeSTRef frame.state.resultRef $ Just (FrameSucceeded bs)
-  Step $ pure Nothing
+  stop (FrameSucceeded bs)
 
 haltExecution :: MVM s -> Step s a
 haltExecution vm = returnWithData vm 0 0
@@ -1192,11 +1186,11 @@ burn vm gas = {-# SCC "Burn" #-} do
   burn' frame gas
 
 burn' :: MFrame s -> Gas -> Step s ()
-burn' frame (Gas toBurn) = {-# SCC "Burn'" #-}do
+burn' frame (Gas toBurn) = {-# SCC "Burn'" #-} do
   let gasRef = frame.state.gasRemainingRef
   (Gas gasRemaining) <- liftST $ readSTRef gasRef
   if toBurn > gasRemaining
-    then vmError' frame (OutOfGas gasRemaining toBurn)
+    then vmError (OutOfGas gasRemaining toBurn)
     else liftST $ writeSTRef gasRef (Gas $ gasRemaining - toBurn)
 
 unburn' :: MFrame s -> Gas -> ST s ()
