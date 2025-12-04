@@ -844,7 +844,7 @@ verifyInputsWithHandler solvers opts fetcher preState post cexHandler = do
 
   let (smtResults, partials) = unzip results
   when conf.debug $ liftIO $ do
-    putStrLn $ "   Exploration finished, " <> show (length results) <> " branch(es) checked in call " <> call <> " of which partial: "
+    putStrLn $ "   Exploration and solving finished, " <> show (length results) <> " branch(es) checked in call " <> call <> " of which partial: "
                 <> show (length smtResults)
     putStrLn $ "   Keccak preimages in state: " <> (show $ length preState.keccakPreImgs)
     let cexs = filter (\(res, _) -> not . isQed $ res) smtResults
