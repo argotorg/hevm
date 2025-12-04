@@ -168,7 +168,7 @@ validateCex :: forall m . App m
   -> Fetch.Fetcher Concrete m
   -> VM Concrete
   -> ReproducibleCex
-  -> m (Err Bool)
+  -> m Bool
 validateCex uTestOpts fetcher vm repCex = do
   let utoConc = uTestOpts { testParams = uTestOpts.testParams { caller = LitAddr 0xdeadbeef}}
   conf <- readConfig
@@ -198,7 +198,7 @@ validateCex uTestOpts fetcher vm repCex = do
                      in (sel `BS.isPrefixOf` msg) && ("assertion failed" `BS.isPrefixOf` (BS.drop (4+32+32) msg))
                 _ -> False
               Right _ -> utoConc.checkFailBit && (dsTestFailedConc vm3.env.contracts)
-  pure $ Right (ret /= shouldFail)
+  pure (ret /= shouldFail)
 
 -- Returns tuple of (No Cex, No warnings)
 runUnitTestContract
@@ -323,9 +323,6 @@ symRun opts@UnitTestOptions{..} vm sig@(Sig testName types) solcContr sourceCach
     liftIO $ printWarnings warnData ends results $ "the test " <> Text.unpack testName
     pure (not (any isCex results), not (warnings || unexpectedAllRevert))
     where
-      propErr action = \case
-        Left err -> pure $ Left err
-        Right val -> action val
       cexHandler :: (Expr 'Buf, [Prop])
         -> Fetch.Fetcher Concrete m
         -> VM 'Symbolic
@@ -338,7 +335,7 @@ symRun opts@UnitTestOptions{..} vm sig@(Sig testName types) solcContr sourceCach
             Nothing -> internalError "cexHandler: expected a cex"
             Just (cexEnd, smtCex) -> do
               failsToRepro <- getReproFailure (Sig testName types) (fst cd) smtCex
-              validation <- propErr (validateCex opts fetcherConc vm) failsToRepro
+              validation <- traverse (validateCex opts fetcherConc vm) failsToRepro
               txtFail <- symFailure opts testName (fst cd) types (cexEnd, smtCex, validation)
               liftIO $ Text.putStr txtFail
 
