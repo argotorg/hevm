@@ -829,7 +829,7 @@ verifyInputsWithHandler solvers opts fetcher preState post cexHandler = do
           _ -> Nothing
 
     -- Check if this leaf needs SMT checking
-    let props = toProps leaf preState post
+    let props = toProps leaf preState.keccakPreImgs post
     smtResult <- if canBeSat (props, leaf)
       then do
         res <- checkSatWithProps solvers props
@@ -855,12 +855,12 @@ verifyInputsWithHandler solvers opts fetcher preState post cexHandler = do
     getCallPrefix :: Expr Buf -> String
     getCallPrefix (WriteByte (Lit 0) (LitByte a) (WriteByte (Lit 1) (LitByte b) (WriteByte (Lit 2) (LitByte c) (WriteByte (Lit 3) (LitByte d) _)))) = mconcat $ map (printf "%02x") [a,b,c,d]
     getCallPrefix _ = "unknown"
-    toProps leaf vm post' = let
+    toProps leaf keccakPreImgs post' = let
       postCondition = post' preState leaf
-      keccakConstraints = map (\(bs, k)-> PEq (Keccak (ConcreteBuf bs)) (Lit k)) (Set.toList vm.keccakPreImgs)
+      keccakConstraints = map (\(bs, k)-> PEq (Keccak (ConcreteBuf bs)) (Lit k)) (Set.toList keccakPreImgs)
      in case postCondition of
       PBool True -> [PBool False]
-      _ -> PNeg postCondition : vm.constraints <> extractProps leaf <> keccakConstraints
+      _ -> PNeg postCondition : extractProps leaf <> keccakConstraints
 
     canBeSat (a, _) = case a of
         [PBool False] -> False
