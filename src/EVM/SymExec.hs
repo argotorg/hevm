@@ -471,7 +471,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
       Stepper.EVM m -> do
         (r, vm') <- liftIO $ stToIO $ runStateT m vm
         interpretInternal t { vm = vm', stepper = (k r) }
-      Stepper.ForkMany (PleaseRunAll vals continue) -> do
+      Stepper.Fork (PleaseRunAll vals continue) -> do
         when (length vals < 2) $ internalError "PleaseRunAll requires at least 2 branches"
         frozen <- liftIO $ stToIO $ freezeVM vm
         let newDepth = vm.exploreDepth+1
