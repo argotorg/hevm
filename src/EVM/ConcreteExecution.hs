@@ -76,6 +76,9 @@ data Account = Account {
   accNonce :: Nonce
 }
 
+emptyAccount :: Account
+emptyAccount = Account (RuntimeCode "") mempty (Wei 0) (Nonce 0)
+
 
 data VMSnapshot = VMSnapshot
   {
@@ -138,7 +141,7 @@ newMFrameState accounts gas = do
   pure $ MFrameState pcRef stackVec spRef memory accounts gasRemaining gasRefunded retInfoRef
 
 newFrameFromTransaction :: Transaction -> Accounts -> ST s (MFrame s)
-newFrameFromTransaction tx@(Transaction from maybeTo callvalue calldata maybeCode gasLimit _) accounts =
+newFrameFromTransaction tx@(Transaction from maybeTo callvalue calldata maybeCode gasLimit _ _) accounts =
   case (maybeTo, maybeCode) of
     (Just to, Just code) -> do
       let availableGas = gasLimit - (Gas $ txGasCost feeSchedule tx) -- TODO: check if limit is at least transaction cost
@@ -188,7 +191,8 @@ data Transaction = Transaction {
   txdata :: CallData,
   code :: Maybe RuntimeCode,
   gasLimit :: Gas,
-  gasPrice :: W256
+  gasPrice :: W256,
+  priorityFee :: W256
 }
 
 data BlockHeader = BlockHeader {
@@ -258,13 +262,13 @@ execBytecode code calldata value = exec executionContext worldState
     artificialAddress = Addr 0xdeadbeef
     artificialAccount = Account code mempty (Wei (fromIntegral (maxBound :: Word64))) (Nonce 0)
     worldState = StrictMap.singleton artificialAddress artificialAccount
-    transaction = Transaction (Addr 0) (Just artificialAddress ) value calldata (Just code) (Gas maxBound) 0
+    transaction = Transaction (Addr 0) (Just artificialAddress ) value calldata (Just code) (Gas maxBound) 0 0
     blockHeader = BlockHeader (Addr 0) 0 0 (Gas maxBound) 0 0
     executionContext = ExecutionContext transaction blockHeader
 
 exec :: ExecutionContext -> Accounts -> ExecutionResult
 exec executionContext accounts = runST $ do
-  -- let Transaction from to (CallValue value) (CallData calldata) maybeCode gasLimit gasPrice = executionContext.transaction
+  -- let Transaction from to (CallValue value) (CallData calldata) maybeCode gasLimit gasPrice priorityFee = executionContext.transaction
   -- let RuntimeCode bs = fromJust maybeCode
   -- Debug.Trace.traceM $ "\nNew transaction!\n"
   -- Debug.Trace.traceM $ "Value: " <> (show value)
@@ -272,6 +276,7 @@ exec executionContext accounts = runST $ do
   -- Debug.Trace.traceM $ "Code: " <> (show $ ByteStringS bs)
   -- Debug.Trace.traceM $ "Gas limit: " <> (show gasLimit)
   -- Debug.Trace.traceM $ "Gas price: " <> (show gasPrice)
+  -- Debug.Trace.traceM $ "Priority fee: " <> (show priorityFee)
   let tx = executionContext.transaction 
       updatedAccounts = transferTxValue tx $ initTransaction tx accounts
   initialFrame <- newFrameFromTransaction tx updatedAccounts
@@ -295,13 +300,7 @@ exec executionContext accounts = runST $ do
       in
         account {accBalance = updatedBalance, accNonce = updatedNonce}
     transferTxValue :: Transaction -> Accounts -> Accounts
-    transferTxValue tx accounts' =
-      let
-        (CallValue value) = tx.value
-        addTo account = account {accBalance = account.accBalance + (Wei value)}
-        subtractFrom account = account {accBalance = account.accBalance - (Wei value)}
-      in
-        if value == 0 then accounts' else StrictMap.adjust addTo (fromJust tx.to) $ StrictMap.adjust subtractFrom tx.from accounts'
+    transferTxValue tx accounts' = uncheckedTransfer accounts' tx.from (fromJust tx.to) tx.value
 
 runLoop :: MVM s -> ST s ExecutionResult
 runLoop vm = do
@@ -327,16 +326,17 @@ runLoop vm = do
 
           toRefund = remaining + finalRefund
           weiToRefund = Wei $ (fromIntegral toRefund) * gasPrice
-
-      -- TODO: gas that pays the miner (in Wei):
-      -- minerGas = gasLimit - gasRemaining - finalRefund
-      -- minerWei = minerGas * gasPrice
+          minerPay = Wei $ vm.executionContext.transaction.priorityFee * (fromIntegral gasUsed)
 
       let accounts = frame.state.accounts
           addTo account = account {accBalance = account.accBalance + weiToRefund}
-          updatedAccounts = StrictMap.adjust addTo vm.executionContext.transaction.from accounts
+          updatedAccounts = StrictMap.alter (rewardMiner minerPay) vm.executionContext.blockHeader.coinbase $ StrictMap.adjust addTo vm.executionContext.transaction.from accounts
           updatedFrame = frame {state = frame.state {accounts = updatedAccounts}}
       writeSTRef vm.current updatedFrame
+    rewardMiner reward maybeAccount =
+      case maybeAccount of
+        Nothing -> Just $ emptyAccount {accBalance = reward}
+        Just account -> Just $ account {accBalance = account.accBalance + reward}
 
 stepVM :: MVM s -> ST s (Maybe VMResult)
 stepVM vm = do
@@ -440,6 +440,7 @@ runStep vm = do
     OpNumber -> stepNumber vm
     OpPrevRandao -> stepPrevRandao vm
     OpGaslimit -> stepGasLimit vm
+    OpAddress -> stepAddress vm
     _ -> internalError ("Unknown opcode: " ++ show op)
   where
     binOp vm' f = do
@@ -833,7 +834,6 @@ stepCall vm = {-# SCC "OpCall" #-} do
   memory <- liftST $ getMemory vm
   touchMemory vm memory (fromIntegral retOffset) (fromIntegral retSize) -- FIXME: Should gas be charged beforehand or only for actually used memory on return? See EIP - 5
   -- Debug.Trace.traceM $ "Call with value: " <> show value
-  when (value /= 0) $ internalError "TODO: Handle calling with value"
   let to = truncateToAddr address
   targetCode <- lookupCode vm to
   -- let RuntimeCode bs = targetCode
@@ -841,15 +841,21 @@ stepCall vm = {-# SCC "OpCall" #-} do
   -- Debug.Trace.traceM ("With call data " <> (show $ ByteStringS calldata))
   currentFrame <- liftST $ getCurrentFrame vm
   let accessCost = vm.fees.g_cold_account_access -- TODO: maintain access lists
-  burn' currentFrame (Gas accessCost)
+      sendingValue = value /= 0
+      positiveValueCost = if sendingValue then feeSchedule.g_callvalue else 0
+      dynamicCost = accessCost + positiveValueCost
+  burn' currentFrame (Gas dynamicCost)
   availableGas <- liftST $ getAvailableGas currentFrame
   let accounts = currentFrame.state.accounts
+      callValue = CallValue value
+      accountsAfterTransfer = uncheckedTransfer accounts currentFrame.context.codeAddress to callValue
       requestedGas = (Gas $ fromIntegral gas)
-      gasToTransfer = computeGasToTransfer availableGas requestedGas
-  newFrameState <- liftST $ newMFrameState accounts gasToTransfer
-  burn' currentFrame gasToTransfer
+      myGasToTransfer = computeGasToTransfer availableGas requestedGas
+      gasToTransfer = if sendingValue then myGasToTransfer + feeSchedule.g_callstipend else myGasToTransfer
+  newFrameState <- liftST $ newMFrameState accountsAfterTransfer gasToTransfer
+  burn' currentFrame myGasToTransfer
   let
-      newFrameContext = FrameContext targetCode (CallData calldata) (CallValue value) accounts to to currentFrame.context.codeAddress -- TODO: code or sotrage address?
+      newFrameContext = FrameContext targetCode (CallData calldata) callValue accounts to to currentFrame.context.codeAddress -- TODO: code or sotrage address?
       newFrame = MFrame newFrameContext newFrameState
   liftST $ setReturnInfo newFrame (retOffset, retSize)
   liftST $ pushFrame vm newFrame
@@ -932,6 +938,12 @@ stepGasLimit :: MVM s -> Step s ()
 stepGasLimit vm = do
   let (Gas limit) = vm.executionContext.blockHeader.gaslimit
   push vm (fromIntegral limit)
+
+stepAddress :: MVM s -> Step s ()
+stepAddress vm = do
+  frame <- liftST $ getCurrentFrame vm
+  let (Addr addr) = frame.context.codeAddress
+  push vm (fromIntegral addr)
 
 -- isRootFrame :: MVM s -> ST s Bool
 -- isRootFrame vm = do
@@ -1285,6 +1297,7 @@ burnStaticGas vm op = {-# SCC "BurnStaticGas" #-} do
         OpShr -> g_verylow
         OpSar -> g_verylow
         OpSha3 -> g_sha3
+        OpAddress -> g_base
         OpCallvalue -> g_base
         OpCalldataload -> g_verylow
         OpCalldatasize -> g_base
@@ -1327,3 +1340,18 @@ txGasCost fs tx =
       nonZeroCost = fs.g_txdatanonzero
       initcodeCost = fs.g_initcodeword * fromIntegral (ceilDiv (BS.length calldata) 32)
   in baseCost + zeroCost * (fromIntegral zeroBytes) + nonZeroCost * (fromIntegral nonZeroBytes)
+
+
+----------------------- Balance transfers -------------------------------------
+
+-- Assumes both sender are receiver are already in the map
+uncheckedTransfer :: Accounts -> Addr -> Addr -> CallValue -> Accounts
+uncheckedTransfer accounts from to (CallValue value) =
+  if value == 0 then accounts else updatedAccounts
+  where
+    updatedAccounts =
+      let
+        addTo account = account {accBalance = account.accBalance + (Wei value)}
+        subtractFrom account = account {accBalance = account.accBalance - (Wei value)}
+      in
+        StrictMap.adjust addTo to $ StrictMap.adjust subtractFrom from accounts
