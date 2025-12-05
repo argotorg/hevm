@@ -7,6 +7,8 @@ CallValue(..),
 ExecutionResult,
 VMSnapshot(..),
 Transaction(..),
+BlockHeader(..),
+ExecutionContext(..),
 Account(..),
 Wei(..),
 Gas(..),
@@ -168,7 +170,7 @@ data MVM s = MVM
     current :: STRef s (MFrame s),
     frames :: STRef s [MFrame s],
     fees :: FeeSchedule Word64,
-    transaction :: Transaction,
+    executionContext :: ExecutionContext,
     txsubstate :: STRef s TxSubState,
     terminationFlagRef :: TerminationFlag s
   }
@@ -187,6 +189,20 @@ data Transaction = Transaction {
   code :: Maybe RuntimeCode,
   gasLimit :: Gas,
   gasPrice :: W256
+}
+
+data BlockHeader = BlockHeader {
+  coinbase :: Addr,
+  timestamp :: W256,
+  number :: W256,
+  gaslimit :: Gas,
+  prevRandao :: W256,
+  baseFee :: W256
+}
+
+data ExecutionContext = ExecutionContext {
+  transaction :: Transaction,
+  blockHeader :: BlockHeader
 }
 
 newtype TxSubState = TxSubState {
@@ -237,16 +253,18 @@ stop :: FrameResult -> Step s a
 stop result = Step $ \resultRef -> writeSTRef resultRef (Just result) >> pure (internalError "Should never be executed")
 
 execBytecode :: RuntimeCode -> CallData -> CallValue -> ExecutionResult
-execBytecode code calldata value = exec transaction worldState
+execBytecode code calldata value = exec executionContext worldState
   where
     artificialAddress = Addr 0xdeadbeef
     artificialAccount = Account code mempty (Wei (fromIntegral (maxBound :: Word64))) (Nonce 0)
     worldState = StrictMap.singleton artificialAddress artificialAccount
     transaction = Transaction (Addr 0) (Just artificialAddress ) value calldata (Just code) (Gas maxBound) 0
+    blockHeader = BlockHeader (Addr 0) 0 0 (Gas maxBound) 0 0
+    executionContext = ExecutionContext transaction blockHeader
 
-exec :: Transaction -> Accounts -> ExecutionResult
-exec tx accounts = runST $ do
-  -- let Transaction from to (CallValue value) (CallData calldata) maybeCode gasLimit gasPrice = tx
+exec :: ExecutionContext -> Accounts -> ExecutionResult
+exec executionContext accounts = runST $ do
+  -- let Transaction from to (CallValue value) (CallData calldata) maybeCode gasLimit gasPrice = executionContext.transaction
   -- let RuntimeCode bs = fromJust maybeCode
   -- Debug.Trace.traceM $ "\nNew transaction!\n"
   -- Debug.Trace.traceM $ "Value: " <> (show value)
@@ -254,19 +272,20 @@ exec tx accounts = runST $ do
   -- Debug.Trace.traceM $ "Code: " <> (show $ ByteStringS bs)
   -- Debug.Trace.traceM $ "Gas limit: " <> (show gasLimit)
   -- Debug.Trace.traceM $ "Gas price: " <> (show gasPrice)
-  let updatedAccounts = transferTxValue $ initTransaction accounts
+  let tx = executionContext.transaction 
+      updatedAccounts = transferTxValue tx $ initTransaction tx accounts
   initialFrame <- newFrameFromTransaction tx updatedAccounts
   currentRef <- newSTRef initialFrame
   framesRef <- newSTRef []
   substateRef <- newSTRef (TxSubState mempty)
   terminationFlagRef <- newSTRef Nothing
-  let vm = MVM currentRef framesRef feeSchedule tx substateRef terminationFlagRef
+  let vm = MVM currentRef framesRef feeSchedule executionContext substateRef terminationFlagRef
   runLoop vm
 
   where
-    initTransaction :: Accounts -> Accounts
-    initTransaction accounts' = StrictMap.adjust initiatingTransaction tx.from accounts'
-    initiatingTransaction account =
+    initTransaction :: Transaction -> Accounts -> Accounts
+    initTransaction tx accounts' = StrictMap.adjust (initiatingTransaction tx) tx.from accounts'
+    initiatingTransaction tx account =
       let
         (Wei balance) = account.accBalance
         (Gas limit) = tx.gasLimit
@@ -275,8 +294,8 @@ exec tx accounts = runST $ do
         updatedNonce = account.accNonce + 1
       in
         account {accBalance = updatedBalance, accNonce = updatedNonce}
-    transferTxValue :: Accounts -> Accounts
-    transferTxValue accounts' =
+    transferTxValue :: Transaction -> Accounts -> Accounts
+    transferTxValue tx accounts' =
       let
         (CallValue value) = tx.value
         addTo account = account {accBalance = account.accBalance + (Wei value)}
@@ -297,8 +316,8 @@ runLoop vm = do
   where
     finalizeTransaction :: MVM s -> VMResult -> ST s ()
     finalizeTransaction vm result = do
-      let Gas limit = vm.transaction.gasLimit
-          gasPrice = vm.transaction.gasPrice
+      let Gas limit = vm.executionContext.transaction.gasLimit
+          gasPrice = vm.executionContext.transaction.gasPrice
       frame <- getCurrentFrame vm
       Gas remaining <- getAvailableGas frame
       Gas refunds <- getGasRefund vm
@@ -315,7 +334,7 @@ runLoop vm = do
 
       let accounts = frame.state.accounts
           addTo account = account {accBalance = account.accBalance + weiToRefund}
-          updatedAccounts = StrictMap.adjust addTo vm.transaction.from accounts
+          updatedAccounts = StrictMap.adjust addTo vm.executionContext.transaction.from accounts
           updatedFrame = frame {state = frame.state {accounts = updatedAccounts}}
       writeSTRef vm.current updatedFrame
 
@@ -416,6 +435,11 @@ runStep vm = do
     OpCall -> stepCall vm
     OpSha3 -> stepKeccak vm
     OpGas -> stepGas vm
+    OpCoinbase -> stepCoinBase vm
+    OpTimestamp -> stepTimeStamp vm
+    OpNumber -> stepNumber vm
+    OpPrevRandao -> stepPrevRandao vm
+    OpGaslimit -> stepGasLimit vm
     _ -> internalError ("Unknown opcode: " ++ show op)
   where
     binOp vm' f = do
@@ -884,6 +908,31 @@ returnWithData vm offset size = do
 haltExecution :: MVM s -> Step s a
 haltExecution vm = returnWithData vm 0 0
 
+stepCoinBase :: MVM s -> Step s ()
+stepCoinBase vm = do
+  let (Addr val) = vm.executionContext.blockHeader.coinbase
+  push vm (fromIntegral val)
+
+stepTimeStamp :: MVM s -> Step s ()
+stepTimeStamp vm = do
+  let val = vm.executionContext.blockHeader.timestamp
+  push vm val
+
+stepNumber :: MVM s -> Step s ()
+stepNumber vm = do
+  let val = vm.executionContext.blockHeader.number
+  push vm val
+
+stepPrevRandao :: MVM s -> Step s ()
+stepPrevRandao vm = do
+  let val = vm.executionContext.blockHeader.prevRandao
+  push vm val
+
+stepGasLimit :: MVM s -> Step s ()
+stepGasLimit vm = do
+  let (Gas limit) = vm.executionContext.blockHeader.gaslimit
+  push vm (fromIntegral limit)
+
 -- isRootFrame :: MVM s -> ST s Bool
 -- isRootFrame vm = do
 --   frames <- readSTRef vm.frames
@@ -1240,6 +1289,11 @@ burnStaticGas vm op = {-# SCC "BurnStaticGas" #-} do
         OpCalldataload -> g_verylow
         OpCalldatasize -> g_base
         OpCalldatacopy -> g_verylow
+        OpCoinbase -> g_base
+        OpTimestamp -> g_base
+        OpNumber -> g_base
+        OpPrevRandao -> g_base
+        OpGaslimit -> g_base
         OpPop -> g_base
         OpMload -> g_verylow
         OpMstore -> g_verylow
