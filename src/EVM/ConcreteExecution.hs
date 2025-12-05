@@ -370,7 +370,7 @@ stepVM vm = do
             let updatedFrame = currentFrame {state = currentFrame.state {accounts = accounts}}
             writeSTRef vm.current updatedFrame
             memory <- getMemory vm
-            writeMemory memory retOffset (BS.take (fromIntegral retSize) returnData)
+            writeMemory memory (fromIntegral retOffset) (BS.take (fromIntegral retSize) returnData)
             pushST vm 1
 
           FrameErrored _ -> do
@@ -441,6 +441,11 @@ runStep vm = do
     OpPrevRandao -> stepPrevRandao vm
     OpGaslimit -> stepGasLimit vm
     OpAddress -> stepAddress vm
+    OpCaller -> stepCaller vm
+    OpOrigin -> stepOrigin vm
+    OpCodesize -> stepCodeSize vm
+    OpCodecopy -> stepCodeCopy vm
+    OpGasprice -> stepGasPrice vm
     _ -> internalError ("Unknown opcode: " ++ show op)
   where
     binOp vm' f = do
@@ -795,31 +800,10 @@ stepCallDataCopy vm = do
   let size64 = capAsWord64 size -- NOTE: We can cap it, larger numbers would cause of of gas anyway
   let callDataOffset64 = capAsWord64 callDataOffset
   let memoryOffset64 = capAsWord64 memoryOffset
-  burnDynamicCost size64
   frame <- liftST $ getCurrentFrame vm
   let CallData dataBS = frame.context.callData
-  -- Debug.Trace.traceM $ "calldata: " <> (show $ ByteStringS dataBS) <> " offset: " <> (show callDataOffset) <> " size: " <> (show size)
-  let bs = slicePadded dataBS (capAsInt callDataOffset64) (capAsInt size64) -- NOTE: We cap to Int, larger values would cause error anyway
-  memory <- liftST $ getMemory vm
-  touchMemory vm memory memoryOffset64 size64
-  liftST $ writeMemory memory memoryOffset bs
+  copyFromByteStringToMemory vm dataBS memoryOffset64 callDataOffset64 size64
 
-  where
-    burnDynamicCost size = let cost = feeSchedule.g_copy * ceilDiv size 32 in
-      burn vm (Gas cost)
-
-    slicePadded :: BS.ByteString -> Int -> Int -> BS.ByteString
-    slicePadded _ _ 0 = BS.empty
-    slicePadded bs offset size =
-        let len = BS.length bs
-            slice | offset >= len = BS.replicate size 0
-                  | offset + size <= len = BS.take size (BS.drop offset bs)
-                  | otherwise =
-                    let available = BS.drop offset bs
-                        missing   = size - BS.length available
-                    in available <> BS.replicate missing 0
-        in
-        slice
 
 stepCall :: MVM s -> Step s ()
 stepCall vm = {-# SCC "OpCall" #-} do
@@ -944,6 +928,68 @@ stepAddress vm = do
   frame <- liftST $ getCurrentFrame vm
   let (Addr addr) = frame.context.codeAddress
   push vm (fromIntegral addr)
+
+
+stepCaller :: MVM s -> Step s ()
+stepCaller vm = do
+  frame <- liftST $ getCurrentFrame vm
+  let (Addr addr) = frame.context.callerAddress
+  push vm (fromIntegral addr)
+
+stepOrigin :: MVM s -> Step s ()
+stepOrigin vm = do
+  let (Addr addr) = vm.executionContext.transaction.from
+  push vm (fromIntegral addr)
+
+stepGasPrice :: MVM s -> Step s ()
+stepGasPrice vm = do
+  let price = vm.executionContext.transaction.gasPrice
+  push vm price
+
+stepCodeSize :: MVM s -> Step s ()
+stepCodeSize vm = do
+  frame <- liftST $ getCurrentFrame vm
+  let (RuntimeCode bs) = frame.context.code
+  push vm (fromIntegral $ BS.length bs)
+
+stepCodeCopy :: MVM s -> Step s ()
+stepCodeCopy vm = do
+  memoryOffset <- pop vm
+  codeOffset <- pop vm
+  size <- pop vm
+  let size64 = capAsWord64 size -- NOTE: We can cap it, larger numbers would cause of of gas anyway
+  let codeOffset64 = capAsWord64 codeOffset
+  let memoryOffset64 = capAsWord64 memoryOffset
+  frame <- liftST $ getCurrentFrame vm
+  let RuntimeCode dataBS = frame.context.code
+  copyFromByteStringToMemory vm dataBS memoryOffset64 codeOffset64 size64
+
+
+copyFromByteStringToMemory :: MVM s -> BS.ByteString -> Word64 -> Word64 -> Word64 -> Step s ()
+copyFromByteStringToMemory vm bs memOffset bsOffset size = do
+  burnDynamicCost vm
+  let bs' = slicePadded bs (capAsInt bsOffset) (capAsInt size) -- NOTE: We cap to Int, larger values would cause error anyway
+  memory <- liftST $ getMemory vm
+  touchMemory vm memory memOffset size
+  liftST $ writeMemory memory memOffset bs'
+
+  where
+    burnDynamicCost vm' = let cost = feeSchedule.g_copy * ceilDiv size 32 in
+      burn vm' (Gas cost)
+
+slicePadded :: BS.ByteString -> Int -> Int -> BS.ByteString
+slicePadded _ _ 0 = BS.empty
+slicePadded bs offset size =
+    let len = BS.length bs
+        slice | offset >= len = BS.replicate size 0
+              | offset + size <= len = BS.take size (BS.drop offset bs)
+              | otherwise =
+                let available = BS.drop offset bs
+                    missing   = size - BS.length available
+                in available <> BS.replicate missing 0
+    in
+    slice
+
 
 -- isRootFrame :: MVM s -> ST s Bool
 -- isRootFrame vm = do
@@ -1095,7 +1141,7 @@ readMemory vm offset size =
         let suffix = BS.replicate (fromIntegral missing) 0
         pure (prefix <> suffix)
 
-writeMemory :: Memory s -> W256 -> BS.ByteString -> ST s ()
+writeMemory :: Memory s -> Word64 -> BS.ByteString -> ST s ()
 writeMemory (Memory memRef sizeRef) offset bs
   | BS.null bs = pure ()
   | otherwise = do
@@ -1298,10 +1344,15 @@ burnStaticGas vm op = {-# SCC "BurnStaticGas" #-} do
         OpSar -> g_verylow
         OpSha3 -> g_sha3
         OpAddress -> g_base
+        OpOrigin -> g_base
+        OpCaller -> g_base
         OpCallvalue -> g_base
         OpCalldataload -> g_verylow
         OpCalldatasize -> g_base
         OpCalldatacopy -> g_verylow
+        OpCodesize -> g_base
+        OpCodecopy -> g_verylow
+        OpGasprice -> g_base
         OpCoinbase -> g_base
         OpTimestamp -> g_base
         OpNumber -> g_base
