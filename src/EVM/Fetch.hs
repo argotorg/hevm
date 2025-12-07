@@ -19,10 +19,11 @@ module EVM.Fetch
   , saveCache
   , RPCContract (..)
   , makeContractFromRPC
-  -- Below 3 are needed for Echidna
+  -- Below 4 are needed for Echidna
   , fetchSlotWithSession
   , fetchSlotWithCache
   , fetchWithSession
+  , getCacheState
   ) where
 
 import Prelude hiding (Foldable(..))
@@ -55,6 +56,8 @@ import Data.Text qualified as T
 import Data.Foldable (Foldable(..))
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isJust, fromJust, isNothing)
+import Data.Set qualified as Set
+import Data.Set (Set)
 import Data.Vector qualified as RegularVector
 import Network.Wreq
 import Network.Wreq.Session qualified as NetSession
@@ -70,10 +73,14 @@ import Control.Concurrent.MVar (MVar, newMVar, readMVar, modifyMVar_)
 type Fetcher t m = App m => Query t -> m (EVM t ())
 
 data Session = Session
-  { sess           :: NetSession.Session
-  , latestBlockNum :: MVar (Maybe W256)
-  , sharedCache    :: MVar FetchCache
-  , cacheDir       :: Maybe FilePath
+  { sess            :: NetSession.Session
+  , latestBlockNum  :: MVar (Maybe W256)
+  , sharedCache     :: MVar FetchCache
+  , cacheDir        :: Maybe FilePath
+  -- Track ephemeral failures (network errors, not found, etc.)
+  -- These are NOT persisted to disk
+  , failedContracts :: MVar (Set Addr)
+  , failedSlots     :: MVar (Set (Addr, W256))
   }
 
 data FetchCache = FetchCache
@@ -270,26 +277,46 @@ fetchWithSession url sess x = do
   r <- asValue =<< NetSession.post sess (unpack url) x
   pure (r ^? (lensVL responseBody) % key "result")
 
-fetchContractWithSession :: Config -> Session -> BlockNumber -> Text -> Addr -> IO (Maybe RPCContract)
+fetchContractWithSession :: Config -> Session -> BlockNumber -> Text -> Addr -> IO (Maybe RPCContract, Bool)
 fetchContractWithSession conf sess nPre url addr = do
   n <- getLatestBlockNum conf sess nPre url
+  -- Check successful cache first
   cache <- readMVar sess.sharedCache
   case Map.lookup addr cache.contractCache of
     Just c -> do
       when (conf.debug) $ putStrLn $ "-> Using cached contract at " ++ show addr
-      pure $ Just c
+      pure (Just c, True)  -- Was cached
     Nothing -> do
-      when (conf.debug) $ putStrLn $ "-> Fetching contract at " ++ show addr
-      runMaybeT $ do
-        let fetch :: Show a => RpcQuery a -> IO (Maybe a)
-            fetch = fetchQuery n (fetchWithSession url sess.sess)
-        code    <- MaybeT $ fetch (QueryCode addr)
-        nonce   <- MaybeT $ fetch (QueryNonce addr)
-        balance <- MaybeT $ fetch (QueryBalance addr)
-        let contr = RPCContract (ByteStringS code) nonce balance
-        liftIO $ modifyMVar_ sess.sharedCache $ \c ->
-          pure $ c { contractCache = Map.insert addr contr c.contractCache }
-        pure contr
+      -- Check failure cache
+      failures <- readMVar sess.failedContracts
+      if Set.member addr failures
+      then do
+        when (conf.debug) $ putStrLn $ "-> Skipping previously failed contract " ++ show addr
+        pure (Nothing, True)  -- Cached failure
+      else do
+        -- Attempt fetch
+        when (conf.debug) $ putStrLn $ "-> Fetching contract at " ++ show addr
+        result <- runMaybeT $ do
+          let fetch :: Show a => RpcQuery a -> IO (Maybe a)
+              fetch = fetchQuery n (fetchWithSession url sess.sess)
+          code    <- MaybeT $ fetch (QueryCode addr)
+          nonce   <- MaybeT $ fetch (QueryNonce addr)
+          balance <- MaybeT $ fetch (QueryBalance addr)
+          pure $ RPCContract (ByteStringS code) nonce balance
+        case result of
+          Just contr | contr.code /= ByteStringS BS.empty -> do
+            -- Success: cache it
+            modifyMVar_ sess.sharedCache $ \c ->
+              pure $ c { contractCache = Map.insert addr contr c.contractCache }
+            pure (Just contr, False)  -- New fetch
+          Just emptyContract -> do
+            -- Empty contract = "not found", cache this failure
+            modifyMVar_ sess.failedContracts $ \f ->
+              pure $ Set.insert addr f
+            pure (Nothing, False)  -- New (failed) fetch
+          Nothing -> do
+            -- Network error, don't cache
+            pure (Nothing, False)  -- New (failed) fetch
 
 -- In case the user asks for Latest, and we have not yet established what Latest is,
 -- we fetch the block to find out. Otherwise, we update Latest to the value we have stored
@@ -319,21 +346,71 @@ makeContractFromRPC (RPCContract (ByteStringS code) nonce balance) =
       & set #external True
 
 -- Needed for Echidna only
-fetchSlotWithCache :: Config -> Session -> BlockNumber -> Text -> Addr -> W256 -> IO (Maybe W256)
+fetchSlotWithCache :: Config -> Session -> BlockNumber -> Text -> Addr -> W256 -> IO (Maybe W256, Bool)
 fetchSlotWithCache conf sess nPre url addr slot = do
   n <- getLatestBlockNum conf sess nPre url
+  -- Check successful cache
   cache <- readMVar sess.sharedCache
   case Map.lookup (addr, slot) cache.slotCache of
     Just s -> do
       when (conf.debug) $ putStrLn $ "-> Using cached slot value for slot " <> show slot <> " at " <> show addr
-      pure $ Just s
+      pure (Just s, True)  -- Was cached
     Nothing -> do
-      when (conf.debug) $ putStrLn $ "-> Fetching slot " <> show slot <> " at " <> show addr
-      ret <- fetchSlotWithSession sess.sess n url addr slot
-      when (isJust ret) $ let val = fromJust ret in
-        modifyMVar_ sess.sharedCache $ \c ->
-          pure $ c { slotCache = Map.insert (addr, slot) val c.slotCache }
-      pure ret
+      -- Check failure cache
+      failures <- readMVar sess.failedSlots
+      if Set.member (addr, slot) failures
+      then do
+        when (conf.debug) $ putStrLn $ "-> Skipping previously failed slot " <> show slot <> " at " <> show addr
+        pure (Nothing, True)  -- Cached failure
+      else do
+        -- Attempt fetch
+        when (conf.debug) $ putStrLn $ "-> Fetching slot " <> show slot <> " at " <> show addr
+        ret <- fetchSlotWithSession sess.sess n url addr slot
+        case ret of
+          Just val -> do
+            -- Success: cache it
+            modifyMVar_ sess.sharedCache $ \c ->
+              pure $ c { slotCache = Map.insert (addr, slot) val c.slotCache }
+            pure (Just val, False)  -- New fetch
+          Nothing -> do
+            -- Cache slot failures (could be network error or 0 slot)
+            -- For simplicity, always cache slot failures
+            modifyMVar_ sess.failedSlots $ \f ->
+              pure $ Set.insert (addr, slot) f
+            pure (Nothing, False)  -- New (failed) fetch
+
+-- | Get the complete cache state including both successes and failures
+-- Returns in the format expected by Echidna's UI:
+--   - Map Addr (Maybe Contract): Just = success, Nothing = failure
+--   - Map Addr (Map W256 (Maybe W256)): Just = success, Nothing = failure
+getCacheState
+  :: Session
+  -> IO (Map.Map Addr (Maybe Contract), Map.Map Addr (Map.Map W256 (Maybe W256)))
+getCacheState sess = do
+  cache <- readMVar sess.sharedCache
+  failedContracts <- readMVar sess.failedContracts
+  failedSlots <- readMVar sess.failedSlots
+
+  -- Convert contract cache
+  let successfulContracts = fmap (Just . makeContractFromRPC) cache.contractCache
+  let allContracts = successfulContracts
+                  <> Map.fromSet (const Nothing) failedContracts
+
+  -- Convert slot cache: group by address
+  let successfulSlotsByAddr = Map.foldrWithKey
+        (\(addr, slot) value acc ->
+          Map.insertWith Map.union addr (Map.singleton slot (Just value)) acc)
+        Map.empty
+        cache.slotCache
+
+  -- Add failed slots
+  let allSlots = Set.foldr
+        (\(addr, slot) acc ->
+          Map.insertWith Map.union addr (Map.singleton slot Nothing) acc)
+        successfulSlotsByAddr
+        failedSlots
+
+  pure (allContracts, allSlots)
 
 fetchSlotWithSession :: NetSession.Session -> BlockNumber -> Text -> Addr -> W256 -> IO (Maybe W256)
 fetchSlotWithSession sess n url addr slot =
@@ -405,7 +482,10 @@ mkSession cacheDir mblock = do
       _ -> pure emptyCache
   cache <- liftIO $ newMVar initialCache
   latestBlockNum <- liftIO $ newMVar Nothing
-  pure $ Session sess latestBlockNum cache cacheDir
+  -- Initialize ephemeral failure tracking
+  failedContracts <- liftIO $ newMVar Set.empty
+  failedSlots <- liftIO $ newMVar Set.empty
+  pure $ Session sess latestBlockNum cache cacheDir failedContracts failedSlots
 
 mkSessionWithoutCache :: App m => m Session
 mkSessionWithoutCache = mkSession Nothing Nothing
@@ -460,9 +540,9 @@ oracle solvers preSess rpcInfo q = do
           Nothing -> do
             when (conf.debug) $ liftIO $ putStrLn $ "Fetching contract at " ++ show addr
             let (block, url) = fromJust rpcInfo.blockNumURL
-            contract <- liftIO $ fmap (fmap makeContractFromRPC) $ fetchContractWithSession conf sess block url addr
-            case contract of
-              Just x -> pure $ continue x
+            (rpcContract, _wasCached) <- liftIO $ fetchContractWithSession conf sess block url addr
+            case rpcContract of
+              Just x -> pure $ continue (makeContractFromRPC x)
               Nothing -> internalError $ "oracle error: " ++ show q
       where
         nothingContract = case base of
