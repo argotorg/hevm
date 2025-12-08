@@ -12,6 +12,7 @@ concretely through Expr.simplify, then check that against evmtool's output.
 -}
 module EVM.Test.FuzzSymExec where
 
+import Control.Concurrent.STM.TVar (newTVarIO)
 import Control.Monad (when)
 import Control.Monad.IO.Unlift
 import Control.Monad.ST (ST, stToIO, RealWorld)
@@ -23,6 +24,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as Char8
 import Data.Maybe (fromJust, isJust, mapMaybe)
+
 import Data.Map.Strict qualified as Map
 import Data.Text.IO qualified as T
 import Data.Vector qualified as Vector
@@ -406,7 +408,9 @@ runCodeWithTrace rpcinfo evmEnv alloc txn fromAddr toAddress = withSolvers Z3 0 
       code' = alloc.code
       iterConf = IterConfig { maxIter = Nothing, askSmtIters = 1, loopHeuristic = Naive }
       fetcherSym = Fetch.oracle solvers Nothing rpcinfo
-      buildExpr vm = interpret fetcherSym iterConf vm runExpr pure
+      buildExpr vm = do
+        abortFlag <- liftIO $ newTVarIO False
+        interpret fetcherSym iterConf vm abortFlag runExpr pure
   origVM <- liftIO $ stToIO $ vmForRuntimeCode code' calldata' evmEnv alloc txn fromAddr toAddress
   expr <- buildExpr $ symbolify origVM
 
