@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Added
 - We support RPC in equivalence checking now
+- Inequality propagation in constant propagation to prune impossible execution paths earlier.
+  The constraint solver now tracks lower and upper bounds for symbolic values and detects
+  conflicts (e.g., x < 5 && x > 10), significantly reducing the number of paths explored
 
 ## Fixed
 - Fix incorrect simplification rule for `PEq (Lit 1) (IsZero (LT a b))`

@@ -895,6 +895,68 @@ tests = testGroup "hevm"
           propagated = Expr.constPropagate t
         assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
   ]
+  , testGroup "inequality-propagation-tests" [
+      test "PLT-detects-impossible-constraint" $ do
+        let
+          -- x < 0 is impossible for unsigned integers
+          t = [PLT (Var "x") (Lit 0)]
+          propagated = Expr.constPropagate t
+        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
+    , test "PLT-overflow-check" $ do
+        let
+          -- maxLit < y is impossible
+          t = [PLT (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff) (Var "y")]
+          propagated = Expr.constPropagate t
+        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
+    , test "PGT-detects-impossible-constraint" $ do
+        let
+          -- x > maxLit is impossible
+          t = [PGT (Var "x") (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff)]
+          propagated = Expr.constPropagate t
+        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
+    , test "PGT-overflow-check" $ do
+        let
+          -- 0 > y is impossible
+          t = [PGT (Lit 0) (Var "y")]
+          propagated = Expr.constPropagate t
+        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
+    , test "inequality-conflict-detection-narrow" $ do
+        let
+          -- x < 2 && x > 5 is impossible
+          t = [PLT (Var "x") (Lit 2), PGT (Var "x") (Lit 5)]
+          propagated = Expr.constPropagate t
+        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
+    , test "inequality-conflict-detection-wide" $ do
+        let
+          -- x < 5 && x > 10 is impossible
+          t = [PLT (Var "x") (Lit 5), PGT (Var "x") (Lit 10)]
+          propagated = Expr.constPropagate t
+        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
+    , test "inequality-tight-bounds-satisfied" $ do
+        let
+          -- x >= 5 && x <= 5 and x == 5 should be consistent
+          t = [PGEq (Var "x") (Lit 5), PLEq (Var "x") (Lit 5), PEq (Var "x") (Lit 5)]
+          propagated = Expr.constPropagate t
+        assertEqualM "Must not contain PBool False" False ((PBool False) `elem` propagated)
+    , test "inequality-tight-bounds-violated" $ do
+        let
+          -- x >= 5 && x <= 5 and x != 5 should be inconsistent
+          t = [PGEq (Var "x") (Lit 5), PLEq (Var "x") (Lit 5), PNeg (PEq (Var "x") (Lit 5))]
+          propagated = Expr.constPropagate t
+        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
+    , test "inequality-with-existing-equality-consistent" $ do
+        let
+          -- x == 5 && x < 10 is consistent
+          t = [PEq (Var "x") (Lit 5), PLT (Var "x") (Lit 10)]
+          propagated = Expr.constPropagate t
+        assertEqualM "Must not contain PBool False" False ((PBool False) `elem` propagated)
+    , test "inequality-with-existing-equality-inconsistent" $ do
+        let
+          -- x == 5 && x < 5 is inconsistent
+          t = [PEq (Var "x") (Lit 5), PLT (Var "x") (Lit 5)]
+          propagated = Expr.constPropagate t
+        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
+  ]
   , testGroup "simpProp-concrete-tests" [
       test "simpProp-concrete-trues" $ do
         let
