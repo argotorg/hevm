@@ -39,8 +39,8 @@ import EVM.Types (
   EvmError (..),
   internalError,
   GenericOp(..),
-  word,
   -- ByteStringS(..),
+  word,
   keccak',
   toWord64,
   constructWord256FromWords,
@@ -58,6 +58,8 @@ import EVM.FeeSchedule
 type VMWord = W256
 type Data = BS.ByteString
 newtype RuntimeCode = RuntimeCode {code :: Data}
+data Instruction = GenericInst !(GenericOp Word8) | Push !Word8 !VMWord
+newtype Instructions = Instructions (Vec.Vector Instruction)
 type MStack s = MVec.MVector s VMWord
 newtype CallData = CallData {calldata :: Data}
 newtype CallValue = CallValue {callvalue :: W256}
@@ -79,6 +81,13 @@ data Account = Account {
 
 emptyAccount :: Account
 emptyAccount = Account (RuntimeCode "") mempty (Wei 0) (Nonce 0)
+
+instance Show Instruction where
+    show (GenericInst op) =
+        show op
+
+    show (Push n w) =
+        "PUSH" ++ show n ++ " " ++ show w
 
 
 data VMSnapshot = VMSnapshot
@@ -149,13 +158,14 @@ newFrameFromTransaction tx@(Transaction from maybeTo callvalue calldata maybeCod
       -- Debug.Trace.traceM ("Available gas is " <> show availableGas)
       freshState <- newMFrameState accounts availableGas
       let frameState = freshState {accounts = accounts}
-      let ctx = FrameContext code calldata callvalue accounts to to from
+      let ctx = FrameContext code (parseByteCode code) calldata callvalue accounts to to from
       pure $ MFrame ctx frameState
     _  -> internalError "Creation transaction not supported yet"
 
 
 data FrameContext = FrameContext {
   code :: RuntimeCode,
+  instructions :: Instructions,
   callData :: CallData,
   callValue :: CallValue,
   accountsSnapshot :: Accounts,
@@ -383,93 +393,91 @@ stepVM vm = do
 
 runStep :: MVM s -> Step s ()
 runStep vm = do
-  byte <- liftST $ fetchByte vm
-  -- pc <- liftST $ readPC vm
-  liftST $ advancePC vm 1
-  let op = getOp byte
-  burnStaticGas vm op
-  -- Debug.Trace.traceM ("Executing op " <> (show op) <> "\nPC: " <> showHex pc "")
+  instruction <- liftST $ do
+    pc <- readPC vm
+    advancePC vm 1
+    getInstruction vm pc
+  burnStaticGas vm instruction
+  -- Debug.Trace.traceM ("Executing op " <> (show instruction) <> "\nPC: " <> showHex pc "")
   -- frame <- liftST $ getCurrentFrame vm
   -- Gas gas <- liftST $ readSTRef frame.state.gasRemainingRef
   -- Debug.Trace.traceM ("Remaining gas is " <> (show gas))
-  case op of
-    OpStop -> haltExecution vm
-    OpReturn -> stepReturn vm
-    OpAdd -> {-# SCC "OpAdd" #-} binOp vm (+)
-    OpMul -> binOp vm (*)
-    OpSub -> binOp vm (-)
-    OpMod -> stepMod vm
-    OpSmod -> stepSMod vm
-    OpDiv -> stepDiv vm
-    OpSdiv -> stepSDiv vm
-    OpAddmod -> stepAddMod vm
-    OpMulmod -> stepMulMod vm
-    OpExp -> stepExp vm
-    OpAnd -> binOp vm (.&.)
-    OpOr -> binOp vm (.|.)
-    OpXor -> binOp vm (.^.)
-    OpNot -> stepNot vm
-    OpByte -> stepByte vm
-    OpShr -> stepShr vm;
-    OpShl -> stepShl vm
-    OpSar -> stepSar vm
-    OpSignextend -> stepSignExtend vm
-    OpPush0 -> push vm 0
-    OpPush n -> stepPushN vm n
-    OpPop -> {-# SCC "OpPop" #-} do _ <- pop vm; pure ()
-    OpDup n -> {-# SCC "OpDupN" #-} stepDupN vm n
-    OpSwap n -> {-# SCC "OpSwapN" #-} stepSwapN vm n
-    OpLt -> stepLt vm
-    OpGt -> stepGt vm
-    OpSlt -> stepSLt vm
-    OpSgt -> stepSGt vm
-    OpEq -> stepEq vm
-    OpIszero -> {-# SCC "OpIsZero" #-} stepIsZero vm
-    OpJump -> {-# SCC "OpJump" #-} stepJump vm
-    OpJumpi -> {-# SCC "OpJumpI" #-} stepJumpI vm
-    OpJumpdest -> pure ()
-    OpMsize -> stepMSize vm
-    OpMload -> stepMLoad vm
-    OpMstore -> stepMStore vm
-    OpMstore8 -> stepMStore8 vm
-    OpSload -> stepSLoad vm
-    OpSstore -> stepSStore vm
-    OpCallvalue -> stepCallValue vm
-    OpCalldataload -> stepCallDataLoad vm
-    OpCalldatasize -> stepCallDataSize vm
-    OpCalldatacopy -> stepCallDataCopy vm
-    OpCall -> stepCall vm
-    OpDelegatecall -> stepDelegateCall vm
-    OpSha3 -> stepKeccak vm
-    OpGas -> stepGas vm
-    OpCoinbase -> stepCoinBase vm
-    OpTimestamp -> stepTimeStamp vm
-    OpNumber -> stepNumber vm
-    OpPrevRandao -> stepPrevRandao vm
-    OpGaslimit -> stepGasLimit vm
-    OpAddress -> stepAddress vm
-    OpCaller -> stepCaller vm
-    OpOrigin -> stepOrigin vm
-    OpCodesize -> stepCodeSize vm
-    OpCodecopy -> stepCodeCopy vm
-    OpGasprice -> stepGasPrice vm
-    OpPc -> stepPC vm
-    OpLog n -> stepLog vm n
-    _ -> internalError ("Unknown opcode: " ++ show op)
+  case instruction of
+    GenericInst op -> case op of
+      OpStop -> haltExecution vm
+      OpReturn -> stepReturn vm
+      OpAdd -> {-# SCC "OpAdd" #-} binOp vm (+)
+      OpMul -> binOp vm (*)
+      OpSub -> binOp vm (-)
+      OpMod -> stepMod vm
+      OpSmod -> stepSMod vm
+      OpDiv -> stepDiv vm
+      OpSdiv -> stepSDiv vm
+      OpAddmod -> stepAddMod vm
+      OpMulmod -> stepMulMod vm
+      OpExp -> stepExp vm
+      OpAnd -> binOp vm (.&.)
+      OpOr -> binOp vm (.|.)
+      OpXor -> binOp vm (.^.)
+      OpNot -> stepNot vm
+      OpByte -> stepByte vm
+      OpShr -> stepShr vm;
+      OpShl -> stepShl vm
+      OpSar -> stepSar vm
+      OpSignextend -> stepSignExtend vm
+      OpPush0 -> push vm 0
+      OpPush _ -> internalError "PushN is handled in a special way"
+      OpPop -> {-# SCC "OpPop" #-} do _ <- pop vm; pure ()
+      OpDup n -> {-# SCC "OpDupN" #-} stepDupN vm n
+      OpSwap n -> {-# SCC "OpSwapN" #-} stepSwapN vm n
+      OpLt -> stepLt vm
+      OpGt -> stepGt vm
+      OpSlt -> stepSLt vm
+      OpSgt -> stepSGt vm
+      OpEq -> stepEq vm
+      OpIszero -> {-# SCC "OpIsZero" #-} stepIsZero vm
+      OpJump -> {-# SCC "OpJump" #-} stepJump vm
+      OpJumpi -> {-# SCC "OpJumpI" #-} stepJumpI vm
+      OpJumpdest -> pure ()
+      OpMsize -> stepMSize vm
+      OpMload -> stepMLoad vm
+      OpMstore -> stepMStore vm
+      OpMstore8 -> stepMStore8 vm
+      OpSload -> stepSLoad vm
+      OpSstore -> stepSStore vm
+      OpCallvalue -> stepCallValue vm
+      OpCalldataload -> stepCallDataLoad vm
+      OpCalldatasize -> stepCallDataSize vm
+      OpCalldatacopy -> stepCallDataCopy vm
+      OpCall -> stepCall vm
+      OpDelegatecall -> stepDelegateCall vm
+      OpSha3 -> stepKeccak vm
+      OpGas -> stepGas vm
+      OpCoinbase -> stepCoinBase vm
+      OpTimestamp -> stepTimeStamp vm
+      OpNumber -> stepNumber vm
+      OpPrevRandao -> stepPrevRandao vm
+      OpGaslimit -> stepGasLimit vm
+      OpAddress -> stepAddress vm
+      OpCaller -> stepCaller vm
+      OpOrigin -> stepOrigin vm
+      OpCodesize -> stepCodeSize vm
+      OpCodecopy -> stepCodeCopy vm
+      OpGasprice -> stepGasPrice vm
+      OpPc -> stepPC vm
+      OpLog n -> stepLog vm n
+      _ -> internalError ("Unknown opcode: " ++ show op)
+    Push n payload -> stepPushN vm n payload
   where
     binOp vm' f = do
       x <- pop vm'
       y <- pop vm'
       push vm' (x `f` y)
 
-stepPushN :: MVM s -> Word8 -> Step s ()
-stepPushN vm n = {-# SCC "PushN" #-} liftST $ do
-  pc <- readPC vm
-  bs <- getCodeByteString vm
-  let n' = fromIntegral n
-  let pushValue = BS.take n' (BS.drop pc bs)
-  pushST vm (word pushValue)
-  advancePC vm n'
+stepPushN :: MVM s -> Word8 -> VMWord -> Step s ()
+stepPushN vm n value = {-# SCC "PushN" #-} liftST $ do
+  pushST vm value
+  advancePC vm (fromIntegral n)
 
 stepDupN :: MVM s -> Word8 -> Step s ()
 stepDupN vm n = do
@@ -693,15 +701,6 @@ stepSignExtend vm = do
                   _ -> value
   push vm extended
 
-
-fetchByte :: MVM s -> ST s Word8
-fetchByte vm = do
-  pc <- readPC vm
-  code <- getCodeByteString vm
-  pure $ if pc >= BS.length code
-    then 0
-    else BS.index code pc
-
 advancePC :: MVM s -> Int -> ST s ()
 advancePC vm n = do
   current <- readSTRef vm.current
@@ -733,11 +732,6 @@ getStack vm = do
   current <- readSTRef vm.current
   pure current.state.stack
 
-getCodeByteString :: MVM s -> ST s BS.ByteString
-getCodeByteString vm = do
-  current <- readSTRef vm.current
-  case current.context.code of (RuntimeCode bs) -> pure bs
-
 getMemory :: MVM s -> ST s (Memory s)
 getMemory vm = do
   current <- readSTRef vm.current
@@ -754,6 +748,11 @@ getCurrentAccounts vm = do
   frame <- getCurrentFrame vm
   pure frame.state.accounts
 
+getCurrentInstructions :: MVM s -> ST s Instructions
+getCurrentInstructions vm = do
+  frame <- getCurrentFrame vm
+  pure frame.context.instructions
+
 stepJump :: MVM s -> Step s ()
 stepJump vm = do
   jumpDest <- pop vm
@@ -763,17 +762,21 @@ stepJumpI :: MVM s -> Step s ()
 stepJumpI vm = do
   jumpDest <- pop vm
   condition <- pop vm
-  if condition == 0 then pure () else tryJump vm $ fromIntegral jumpDest
+  if condition == 0 then pure () else tryJump vm $ capAsWord64 jumpDest
 
-tryJump :: MVM s -> Int -> Step s ()
+tryJump :: MVM s -> Word64 -> Step s ()
 tryJump vm dest = do
-  code <- liftST $ getCodeByteString vm
-  if isValidJumpDest code dest
+  Instructions instructions <- liftST $ getCurrentInstructions vm
+  let instIndex = fromIntegral dest
+  if isValidJumpDest instructions instIndex
   then do
-    liftST $ writePC vm dest
+    liftST $ writePC vm instIndex
   else vmError BadJumpDestination
   where
-    isValidJumpDest code jumpDest = (fromMaybe (0 :: Word8) $ BS.indexMaybe code jumpDest) == 0x5b
+    isValidJumpDest instructions index = 
+      case instructions Vec.!? index of
+        Just (GenericInst OpJumpdest) -> True
+        _ -> False
 
 stepCallValue :: MVM s -> Step s ()
 stepCallValue vm = do
@@ -848,7 +851,7 @@ stepCall vm = {-# SCC "OpCall" #-} do
   newFrameState <- liftST $ newMFrameState accountsAfterTransfer gasToTransfer
   burn' currentFrame myGasToTransfer
   let
-      newFrameContext = FrameContext targetCode (CallData calldata) callValue accounts to to currentFrame.context.codeAddress -- TODO: code or sotrage address?
+      newFrameContext = FrameContext targetCode (parseByteCode targetCode) (CallData calldata) callValue accounts to to currentFrame.context.codeAddress -- TODO: code or sotrage address?
       newFrame = MFrame newFrameContext newFrameState
   liftST $ setReturnInfo newFrame (retOffset, retSize)
   liftST $ pushFrame vm newFrame
@@ -887,7 +890,7 @@ stepDelegateCall vm = do
   let
       callValue = currentFrame.context.callValue
       storageAddress = currentFrame.context.storageAddress
-      newFrameContext = FrameContext targetCode (CallData calldata) callValue accounts to storageAddress storageAddress
+      newFrameContext = FrameContext targetCode (parseByteCode targetCode) (CallData calldata) callValue accounts to storageAddress storageAddress
       newFrame = MFrame newFrameContext newFrameState
   liftST $ setReturnInfo newFrame (retOffset, retSize)
   liftST $ pushFrame vm newFrame
@@ -1414,73 +1417,75 @@ extraExpGasCost exponent =
     in
       Gas cost
 
-burnStaticGas :: MVM s -> GenericOp Word8 -> Step s ()
-burnStaticGas vm op = {-# SCC "BurnStaticGas" #-} do
+burnStaticGas :: MVM s -> Instruction -> Step s ()
+burnStaticGas vm instruction = {-# SCC "BurnStaticGas" #-} do
   let FeeSchedule {..} = vm.fees
-  let cost = case op of
-        OpStop -> g_zero
-        OpAdd -> g_verylow
-        OpMul -> g_low
-        OpSub -> g_verylow
-        OpDiv -> g_low
-        OpSdiv -> g_low
-        OpMod -> g_low
-        OpSmod -> g_low
-        OpAddmod -> g_mid
-        OpMulmod -> g_mid
-        OpExp -> g_exp
-        OpSignextend -> g_low
-        OpLt -> g_verylow
-        OpGt -> g_verylow
-        OpSlt -> g_verylow
-        OpSgt -> g_verylow
-        OpEq -> g_verylow
-        OpIszero -> g_verylow
-        OpAnd -> g_verylow
-        OpOr -> g_verylow
-        OpXor -> g_verylow
-        OpNot -> g_verylow
-        OpByte -> g_verylow
-        OpShl -> g_verylow
-        OpShr -> g_verylow
-        OpSar -> g_verylow
-        OpSha3 -> g_sha3
-        OpAddress -> g_base
-        OpOrigin -> g_base
-        OpCaller -> g_base
-        OpCallvalue -> g_base
-        OpCalldataload -> g_verylow
-        OpCalldatasize -> g_base
-        OpCalldatacopy -> g_verylow
-        OpCodesize -> g_base
-        OpCodecopy -> g_verylow
-        OpGasprice -> g_base
-        OpCoinbase -> g_base
-        OpTimestamp -> g_base
-        OpNumber -> g_base
-        OpPrevRandao -> g_base
-        OpGaslimit -> g_base
-        OpPop -> g_base
-        OpMload -> g_verylow
-        OpMstore -> g_verylow
-        OpMstore8 -> g_verylow
-        OpSload -> g_zero -- Custom rules
-        OpSstore -> g_zero -- Custom rules
-        OpJump -> g_mid
-        OpJumpi -> g_high
-        OpPc -> g_base
-        OpMsize -> g_base
-        OpGas -> g_base
-        OpJumpdest -> g_jumpdest
-        OpPush0 -> g_base
-        OpPush _ -> g_verylow
-        OpDup _ -> g_verylow
-        OpSwap _ -> g_verylow
-        OpLog _ -> g_log
-        OpCall -> g_zero -- Cost for CALL depends on if we are accessing cold or warm address
-        OpReturn -> g_zero
-        OpDelegatecall -> g_zero
-        _ -> internalError ("Unknown opcode: " ++ show op)
+  let cost = case instruction of
+        GenericInst op -> case op of
+          OpStop -> g_zero
+          OpAdd -> g_verylow
+          OpMul -> g_low
+          OpSub -> g_verylow
+          OpDiv -> g_low
+          OpSdiv -> g_low
+          OpMod -> g_low
+          OpSmod -> g_low
+          OpAddmod -> g_mid
+          OpMulmod -> g_mid
+          OpExp -> g_exp
+          OpSignextend -> g_low
+          OpLt -> g_verylow
+          OpGt -> g_verylow
+          OpSlt -> g_verylow
+          OpSgt -> g_verylow
+          OpEq -> g_verylow
+          OpIszero -> g_verylow
+          OpAnd -> g_verylow
+          OpOr -> g_verylow
+          OpXor -> g_verylow
+          OpNot -> g_verylow
+          OpByte -> g_verylow
+          OpShl -> g_verylow
+          OpShr -> g_verylow
+          OpSar -> g_verylow
+          OpSha3 -> g_sha3
+          OpAddress -> g_base
+          OpOrigin -> g_base
+          OpCaller -> g_base
+          OpCallvalue -> g_base
+          OpCalldataload -> g_verylow
+          OpCalldatasize -> g_base
+          OpCalldatacopy -> g_verylow
+          OpCodesize -> g_base
+          OpCodecopy -> g_verylow
+          OpGasprice -> g_base
+          OpCoinbase -> g_base
+          OpTimestamp -> g_base
+          OpNumber -> g_base
+          OpPrevRandao -> g_base
+          OpGaslimit -> g_base
+          OpPop -> g_base
+          OpMload -> g_verylow
+          OpMstore -> g_verylow
+          OpMstore8 -> g_verylow
+          OpSload -> g_zero -- Custom rules
+          OpSstore -> g_zero -- Custom rules
+          OpJump -> g_mid
+          OpJumpi -> g_high
+          OpPc -> g_base
+          OpMsize -> g_base
+          OpGas -> g_base
+          OpJumpdest -> g_jumpdest
+          OpPush0 -> g_base
+          OpPush _ -> g_verylow
+          OpDup _ -> g_verylow
+          OpSwap _ -> g_verylow
+          OpLog _ -> g_log
+          OpCall -> g_zero -- Cost for CALL depends on if we are accessing cold or warm address
+          OpReturn -> g_zero
+          OpDelegatecall -> g_zero
+          _ -> internalError ("Unknown opcode: " ++ show op)
+        Push _ _ -> g_verylow
   when (cost > 0) $ burn vm (Gas cost)
 
 
@@ -1511,3 +1516,45 @@ uncheckedTransfer accounts from to (CallValue value) =
         subtractFrom account = account {accBalance = account.accBalance - (Wei value)}
       in
         StrictMap.adjust addTo to $ StrictMap.adjust subtractFrom from accounts
+
+
+------------------------ Other --------------------------------------------------
+
+parseByteCode :: RuntimeCode -> Instructions
+parseByteCode (RuntimeCode bs) = Instructions $ runST $ do
+  let len = BS.length bs
+  vec <- Vec.thaw $ Vec.generate len (\_ -> GenericInst (OpUnknown 254)) -- 254 means invalid instruction
+      -- single pass: write actual instruction starts (PUSH start -> Push; others -> decoded op)
+  let go pc
+        | pc >= len = pure ()
+        | otherwise =
+            let byte = BS.index bs pc in
+            if isPush byte
+              then
+                let n = byte - 0x5f
+                    n' = fromIntegral n
+                    payloadStart = pc + 1
+                    payloadEnd = min len (payloadStart + n')
+                    payload = BS.take (payloadEnd - payloadStart)
+                                      (BS.drop payloadStart bs)
+                    w = word payload
+                in do
+                    MVec.write vec pc (Push n w)
+                    go payloadEnd
+              else do
+                MVec.write vec pc (GenericInst (getOp byte))
+                go (pc + 1)
+  go 0
+  Vec.freeze vec
+
+  where
+    isPush w = w >= 0x60 && w <= 0x7f
+
+getInstruction :: MVM s -> Int -> ST s Instruction
+getInstruction vm pc = do
+  frame <- getCurrentFrame vm
+  let (Instructions instructions) = frame.context.instructions
+  let len = Vec.length instructions
+  pure $ if pc >= len
+    then GenericInst OpStop
+    else Vec.unsafeIndex instructions pc
