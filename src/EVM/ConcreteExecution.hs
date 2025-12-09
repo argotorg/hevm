@@ -27,6 +27,7 @@ import Data.STRef
 import Data.Vector.Unboxed qualified as UVec
 import Data.Vector.Unboxed.Mutable qualified as UMVec
 import Data.Vector.Mutable qualified as MVec
+import Data.Vector qualified as Vec
 import Data.Word (Word8, Word32, Word64)
 import Prelude hiding (exponent)
 
@@ -145,6 +146,7 @@ newFrameFromTransaction tx@(Transaction from maybeTo callvalue calldata maybeCod
   case (maybeTo, maybeCode) of
     (Just to, Just code) -> do
       let availableGas = gasLimit - (Gas $ txGasCost feeSchedule tx) -- TODO: check if limit is at least transaction cost
+      -- Debug.Trace.traceM ("Available gas is " <> show availableGas)
       freshState <- newMFrameState accounts availableGas
       let frameState = freshState {accounts = accounts}
       let ctx = FrameContext code calldata callvalue accounts to to from
@@ -319,6 +321,7 @@ runLoop vm = do
           gasPrice = vm.executionContext.transaction.gasPrice
       frame <- getCurrentFrame vm
       Gas remaining <- getAvailableGas frame
+      -- Debug.Trace.traceM $ "Remaining gas at the end of transaction:" <> show remaining
       Gas refunds <- getGasRefund vm
       let gasUsed = limit - remaining
           refundCap = gasUsed `div` 5
@@ -386,6 +389,9 @@ runStep vm = do
   let op = getOp byte
   burnStaticGas vm op
   -- Debug.Trace.traceM ("Executing op " <> (show op) <> "\nPC: " <> showHex pc "")
+  -- frame <- liftST $ getCurrentFrame vm
+  -- Gas gas <- liftST $ readSTRef frame.state.gasRemainingRef
+  -- Debug.Trace.traceM ("Remaining gas is " <> (show gas))
   case op of
     OpStop -> haltExecution vm
     OpReturn -> stepReturn vm
@@ -433,6 +439,7 @@ runStep vm = do
     OpCalldatasize -> stepCallDataSize vm
     OpCalldatacopy -> stepCallDataCopy vm
     OpCall -> stepCall vm
+    OpDelegatecall -> stepDelegateCall vm
     OpSha3 -> stepKeccak vm
     OpGas -> stepGas vm
     OpCoinbase -> stepCoinBase vm
@@ -446,6 +453,8 @@ runStep vm = do
     OpCodesize -> stepCodeSize vm
     OpCodecopy -> stepCodeCopy vm
     OpGasprice -> stepGasPrice vm
+    OpPc -> stepPC vm
+    OpLog n -> stepLog vm n
     _ -> internalError ("Unknown opcode: " ++ show op)
   where
     binOp vm' f = do
@@ -847,6 +856,45 @@ stepCall vm = {-# SCC "OpCall" #-} do
   where
     computeGasToTransfer (Gas availableGas) (Gas requestedGas) = Gas $ Prelude.min (EVM.allButOne64th availableGas) requestedGas
 
+-- FIXME: Unify with CALL
+stepDelegateCall :: MVM s -> Step s ()
+stepDelegateCall vm = do
+  gas <- pop vm
+  address <- pop vm
+  argsOffset <- pop vm
+  argsSize <- pop vm
+  retOffset <- pop vm
+  retSize <- pop vm
+  calldata <- readMemory vm argsOffset argsSize
+  memory <- liftST $ getMemory vm
+  touchMemory vm memory (fromIntegral retOffset) (fromIntegral retSize) -- FIXME: Should gas be charged beforehand or only for actually used memory on return? See EIP - 5
+  -- Debug.Trace.traceM $ "Delegate call"
+  let to = truncateToAddr address
+  targetCode <- lookupCode vm to
+  -- let RuntimeCode bs = targetCode
+  -- Debug.Trace.traceM ("Calling " <> (show $ ByteStringS bs))
+  -- Debug.Trace.traceM ("With call data " <> (show $ ByteStringS calldata))
+  currentFrame <- liftST $ getCurrentFrame vm
+  let accessCost = vm.fees.g_cold_account_access -- TODO: maintain access lists
+      dynamicCost = accessCost
+  burn' currentFrame (Gas dynamicCost)
+  availableGas <- liftST $ getAvailableGas currentFrame
+  let accounts = currentFrame.state.accounts
+      requestedGas = (Gas $ fromIntegral gas)
+      gasToTransfer = computeGasToTransfer availableGas requestedGas
+  newFrameState <- liftST $ newMFrameState accounts gasToTransfer
+  burn' currentFrame gasToTransfer
+  let
+      callValue = currentFrame.context.callValue
+      storageAddress = currentFrame.context.storageAddress
+      newFrameContext = FrameContext targetCode (CallData calldata) callValue accounts to storageAddress storageAddress
+      newFrame = MFrame newFrameContext newFrameState
+  liftST $ setReturnInfo newFrame (retOffset, retSize)
+  liftST $ pushFrame vm newFrame
+
+  where
+    computeGasToTransfer (Gas availableGas) (Gas requestedGas) = Gas $ Prelude.min (EVM.allButOne64th availableGas) requestedGas
+
 lookupCode :: MVM s -> Addr -> Step s RuntimeCode
 lookupCode vm address = do
   accounts <- liftST $ getCurrentAccounts vm
@@ -990,6 +1038,38 @@ slicePadded bs offset size =
     in
     slice
 
+stepPC :: MVM s -> Step s ()
+stepPC vm = do
+  pcAfterThisInstruction <- liftST $ readPC vm
+  push vm (fromIntegral pcAfterThisInstruction - 1)
+
+stepLog :: MVM s -> Word8 -> Step s ()
+stepLog vm n = do
+  offset <- pop vm
+  size <- pop vm
+  bytes <- readMemory vm offset size
+  topics <- getTopics vm n
+  burnLogGas n size
+  -- TODO: keep logs?
+  pure ()
+  where
+    burnLogGas n' size' = do
+      let fees = feeSchedule
+          size64 = capAsWord64 size'
+          cost = Gas $ (fees.g_logdata * size64) + (fromIntegral n' * fees.g_logtopic)
+      burn vm cost
+    getTopics :: MVM s -> Word8 -> Step s [VMWord]
+    getTopics vm' n' = do
+      let i = fromIntegral n'
+      sp <- liftST $ getStackPointer vm'
+      if sp < i
+        then stackUnderflow
+        else liftST $ do
+          stack <- getStack vm'
+          let !sp' = sp - i
+          writeStackPointer vm' sp'
+          Vec.toList <$> Vec.freeze (MVec.slice sp' i stack)
+  
 
 -- isRootFrame :: MVM s -> ST s Bool
 -- isRootFrame vm = do
@@ -1040,10 +1120,12 @@ stepSStore vm = {-# SCC "SStore" #-} do
   key <- pop vm
   val <- pop vm
   isWarm <- liftST $ touchCurrentStore vm key
-  let warmCost = warmStoreCost 0 0 val -- FIXME: get original and current value
+  store <- liftST $ getCurrentStorage vm
+  let currentVal = sload store key
+  originalVal <- liftST $ getOriginalValue vm key
+  let warmCost = warmStoreCost originalVal currentVal val
       totalGasCost = if isWarm then warmCost else warmCost + feeSchedule.g_cold_sload
   burn vm totalGasCost
-  store <- liftST $ getCurrentStorage vm
   let updatedStore = sstore store key val
   setCurrentStorage vm updatedStore
 
@@ -1073,6 +1155,24 @@ touchCurrentStore vm slot = do
     getCurrentStorageAddress vm' = do
       frame <- getCurrentFrame vm'
       pure frame.context.storageAddress
+
+-- TODO: This could be pure if we store the original storages at the beginning of transaction
+getOriginalValue :: MVM s -> VMWord  -> ST s VMWord
+getOriginalValue vm key = do
+  firstFrame <- getFirstFrame vm
+  let accounts = firstFrame.context.accountsSnapshot
+  currentFrame <- getCurrentFrame vm
+  let storageAddress = currentFrame.context.storageAddress
+  pure $ case StrictMap.lookup storageAddress accounts of
+    Nothing -> 0
+    Just account -> StrictMap.findWithDefault 0 key account.accStorage
+  where
+    getFirstFrame vm' = do
+      frameStack <- readSTRef vm'.frames
+      case frameStack of
+        [] -> getCurrentFrame vm'
+        fs -> pure $ last fs
+      
 
 getCurrentStorage :: MVM s -> ST s Storage
 getCurrentStorage vm = do
@@ -1366,6 +1466,7 @@ burnStaticGas vm op = {-# SCC "BurnStaticGas" #-} do
         OpSstore -> g_zero -- Custom rules
         OpJump -> g_mid
         OpJumpi -> g_high
+        OpPc -> g_base
         OpMsize -> g_base
         OpGas -> g_base
         OpJumpdest -> g_jumpdest
@@ -1373,8 +1474,10 @@ burnStaticGas vm op = {-# SCC "BurnStaticGas" #-} do
         OpPush _ -> g_verylow
         OpDup _ -> g_verylow
         OpSwap _ -> g_verylow
+        OpLog _ -> g_log
         OpCall -> g_zero -- Cost for CALL depends on if we are accessing cold or warm address
         OpReturn -> g_zero
+        OpDelegatecall -> g_zero
         _ -> internalError ("Unknown opcode: " ++ show op)
   when (cost > 0) $ burn vm (Gas cost)
 
