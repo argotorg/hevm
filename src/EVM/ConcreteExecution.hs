@@ -411,17 +411,17 @@ stepVM vm = do
             writeSTRef vm.current updatedFrame
             memory <- getMemory vm
             writeMemory memory (fromIntegral retOffset) (BS.take (fromIntegral retSize) returnData)
-            pushST vm 1
+            uncheckedPush vm 1 -- We can use uncheckedPush because call must have removed some arguments from the stack, so there is space
 
           FrameReverted returnData -> do
             currentFrame <- getCurrentFrame vm
             unburn' currentFrame unspentGas
             memory <- getMemory vm
             writeMemory memory (fromIntegral retOffset) (BS.take (fromIntegral retSize) returnData)
-            pushST vm 0
+            uncheckedPush vm 0
 
           FrameErrored _ -> do
-            pushST vm 0
+            uncheckedPush vm 0
         pure Nothing
 
 
@@ -511,9 +511,9 @@ runStep vm = do
       push vm' (x `f` y)
 
 stepPushN :: MVM s -> Word8 -> VMWord -> Step s ()
-stepPushN vm n value = {-# SCC "PushN" #-} liftST $ do
-  pushST vm value
-  advancePC vm (fromIntegral n)
+stepPushN vm n value = {-# SCC "PushN" #-} do
+  push vm value
+  liftST $ advancePC vm (fromIntegral n)
 
 stepDupN :: MVM s -> Word8 -> Step s ()
 stepDupN vm n = do
@@ -581,18 +581,26 @@ stackSlot vm n = do
     then stackUnderflow
     else liftST $ MVec.read stack slotPointer
 
-
 push :: MVM s -> VMWord -> Step s ()
-push vm val = liftST $ pushST vm val
+push vm val = do
+  sp <- liftST $ getStackPointer vm
+  if sp >= 1024
+    then vmError StackLimitExceeded
+    else liftST $ do
+      stack <- getStack vm
+      MVec.write stack sp val
+      let !sp' = sp + 1
+      writeStackPointer vm sp'
 
-pushST :: MVM s -> VMWord -> ST s ()
-pushST vm val = do
-  current <- readSTRef vm.current
-  sp <- readSTRef current.state.spRef
-  stack <- getStack vm
+uncheckedPush :: MVM s -> VMWord -> ST s ()
+uncheckedPush vm val = do
+  frame <- getCurrentFrame vm
+  sp <- readSTRef frame.state.spRef
+  when (sp >= 1024) $ internalError "Stack overflow in uncheckedPush!"
+  let stack = frame.state.stack
   MVec.write stack sp val
-  writeStackPointer vm (sp + 1)
-
+  let !sp' = sp + 1
+  writeSTRef frame.state.spRef sp'
 
 pop :: MVM s -> Step s VMWord
 pop vm = {-# SCC "Pop" #-} do
