@@ -309,7 +309,7 @@ fetchContractWithSession conf sess nPre url addr = do
             modifyMVar_ sess.sharedCache $ \c ->
               pure $ c { contractCache = Map.insert addr contr c.contractCache }
             pure (Just contr, False)  -- New fetch
-          Just emptyContract -> do
+          Just _ -> do
             -- Empty contract = "not found", cache this failure
             modifyMVar_ sess.failedContracts $ \f ->
               pure $ Set.insert addr f
@@ -578,8 +578,8 @@ oracle solvers preSess rpcInfo q = do
 
     where
       -- special values such as 0, 0xdeadbeef, 0xacab, hevm cheatcodes, and the precompile addresses
-      isAddressSpecial addr = addr <= 0xdeadbeef || addr == 0x7109709ECfa91a80626fF3989D68f67F5b1DD12D  
-      
+      isAddressSpecial addr = addr <= 0xdeadbeef || addr == 0x7109709ECfa91a80626fF3989D68f67F5b1DD12D
+
 
 getSolutions :: forall m . App m => SolverGroup -> Expr EWord -> Int -> Prop -> m (Maybe [W256])
 getSolutions solvers symExprPreSimp numBytes pathconditions = do
