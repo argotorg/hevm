@@ -1015,14 +1015,16 @@ stepCodeCopy vm = do
 
 copyFromByteStringToMemory :: MVM s -> BS.ByteString -> Word64 -> Word64 -> Word64 -> Step s ()
 copyFromByteStringToMemory vm bs memOffset bsOffset size = do
-  burnDynamicCost vm
+  burnDynamicCost vm size
   let bs' = slicePadded bs (capAsInt bsOffset) (capAsInt size) -- NOTE: We cap to Int, larger values would cause error anyway
   memory <- liftST $ getMemory vm
   touchMemory vm memory memOffset size
   liftST $ writeMemory memory memOffset bs'
 
   where
-    burnDynamicCost vm' = let cost = feeSchedule.g_copy * ceilDiv size 32 in
+    burnDynamicCost _ 0 = pure ()
+    burnDynamicCost vm' size' =
+      let cost = if size' > (maxBound - 32) then maxBound else feeSchedule.g_copy * ceilDiv size' 32 in
       burn vm' (Gas cost)
 
 slicePadded :: BS.ByteString -> Int -> Int -> BS.ByteString
