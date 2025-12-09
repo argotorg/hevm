@@ -36,7 +36,6 @@ import EVM.Types (
   W256(..),
   W64(..),
   Word512,
-  EvmError (..),
   internalError,
   GenericOp(..),
   -- ByteStringS(..),
@@ -46,7 +45,9 @@ import EVM.Types (
   constructWord256FromWords,
   deconstructWord256ToWords,
   truncateToAddr,
-  Addr(..), ByteStringS (ByteStringS)
+  Addr(..),
+  ByteStringS (ByteStringS),
+  FunctionSelector
   )
 import EVM.Op (getOp)
 import EVM.FeeSchedule
@@ -225,15 +226,41 @@ newtype TxSubState = TxSubState {
   accessedAddresses :: StrictMap.Map Addr (Set.Set W256)
 }
 
+data EvmError
+  = BalanceTooLow VMWord VMWord
+  | UnrecognizedOpcode Word8
+  | SelfDestruction
+  | StackUnderrun
+  | BadJumpDestination
+  | Revert Data
+  | OutOfGas Word64 Word64
+  | StackLimitExceeded
+  | IllegalOverflow
+  | StateChangeWhileStatic
+  | InvalidMemoryAccess
+  | CallDepthLimitReached
+  | MaxCodeSizeExceeded VMWord VMWord
+  | MaxInitCodeSizeExceeded VMWord VMWord
+  | InvalidFormat
+  | PrecompileFailure
+  | NonexistentPrecompile Addr
+  | ReturnDataOutOfBounds
+  | NonceOverflow
+  | BadCheatCode String FunctionSelector
+  | NonexistentFork Int
+  deriving (Show, Eq, Ord)
+
+
 data VMResult where
   VMFailure :: EvmError -> VMResult        -- ^ An operation failed
   VMSuccess :: Data -> VMResult            -- ^ Reached STOP, RETURN, or end-of-code
 
-data FrameResult = FrameSucceeded Data | FrameErrored EvmError
+data FrameResult = FrameSucceeded Data | FrameReverted Data | FrameErrored EvmError
 
 frameToVMResult :: FrameResult -> VMResult
 frameToVMResult (FrameSucceeded bs) = VMSuccess bs
 frameToVMResult (FrameErrored err) = VMFailure err
+frameToVMResult (FrameReverted bs) = VMFailure (Revert bs)
 
 
 type TerminationFlag s = STRef s (Maybe FrameResult)
@@ -386,6 +413,13 @@ stepVM vm = do
             writeMemory memory (fromIntegral retOffset) (BS.take (fromIntegral retSize) returnData)
             pushST vm 1
 
+          FrameReverted returnData -> do
+            currentFrame <- getCurrentFrame vm
+            unburn' currentFrame unspentGas
+            memory <- getMemory vm
+            writeMemory memory (fromIntegral retOffset) (BS.take (fromIntegral retSize) returnData)
+            pushST vm 0
+
           FrameErrored _ -> do
             pushST vm 0
         pure Nothing
@@ -406,6 +440,7 @@ runStep vm = do
     GenericInst op -> case op of
       OpStop -> haltExecution vm
       OpReturn -> stepReturn vm
+      OpRevert -> stepRevert vm
       OpAdd -> {-# SCC "OpAdd" #-} binOp vm (+)
       OpMul -> binOp vm (*)
       OpSub -> binOp vm (-)
@@ -466,6 +501,7 @@ runStep vm = do
       OpGasprice -> stepGasPrice vm
       OpPc -> stepPC vm
       OpLog n -> stepLog vm n
+      OpUnknown xxx -> vmError $ UnrecognizedOpcode xxx
       _ -> internalError ("Unknown opcode: " ++ show op)
     Push n payload -> stepPushN vm n payload
   where
@@ -945,6 +981,13 @@ returnWithData :: MVM s -> W256 -> W256 -> Step s a
 returnWithData vm offset size = do
   bs <- readMemory vm offset size
   stop (FrameSucceeded bs)
+
+stepRevert :: MVM s -> Step s ()
+stepRevert vm = do
+  offset <- pop vm
+  size <- pop vm
+  bs <- readMemory vm offset size
+  stop (FrameReverted bs)
 
 haltExecution :: MVM s -> Step s a
 haltExecution vm = returnWithData vm 0 0
@@ -1484,6 +1527,8 @@ burnStaticGas vm instruction = {-# SCC "BurnStaticGas" #-} do
           OpCall -> g_zero -- Cost for CALL depends on if we are accessing cold or warm address
           OpReturn -> g_zero
           OpDelegatecall -> g_zero
+          OpRevert -> g_zero
+          OpUnknown _ -> g_zero
           _ -> internalError ("Unknown opcode: " ++ show op)
         Push _ _ -> g_verylow
   when (cost > 0) $ burn vm (Gas cost)
