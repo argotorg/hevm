@@ -692,7 +692,7 @@ expandSymbolicExp base expnt = do
     constructProduct :: [Builder] -> Builder
     constructProduct vars =
        let
-         terms = zip [0..255] vars
+         terms = zip [(0::Int)..255] vars
          mkTerm (i, p) =
             let bitCheck = "(= ((_ extract " <> Data.Text.Lazy.Builder.Int.decimal i `sp` Data.Text.Lazy.Builder.Int.decimal i <> ") e) #b1)"
             in "(ite " <> bitCheck `sp` p `sp` one <> ")"
