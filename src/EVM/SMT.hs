@@ -438,7 +438,7 @@ exprToSMT = \case
       pure $ "(ite (= " <> benc `sp` zero <> " ) " <> one `sp` zero <> ")"
     _ -> case b of
       Lit b' -> expandExp a b'
-      _ -> Left $ "Cannot encode symbolic exponent into SMT. Offending symbolic value: " <> show b
+      _ -> expandSymbolicExp a b
   Min a b -> do
     aenc <- exprToSMT a
     benc <- exprToSMT b
@@ -665,6 +665,45 @@ expandExp base expnt
     b <- exprToSMT base
     n <- expandExp base (expnt - 1)
     pure $ "(bvmul " <> b `sp` n <> ")"
+
+-- | Unrolls a symbolic exponentiation into a series of multiplications
+expandSymbolicExp :: Expr EWord -> Expr EWord -> Err Builder
+expandSymbolicExp (Lit 2) expnt = do
+  eEnc <- exprToSMT expnt
+  pure $ "(bvshl " <> one `sp` eEnc <> ")"
+expandSymbolicExp base expnt = do
+  bEnc <- exprToSMT base
+  eEnc <- exprToSMT expnt
+  let
+    buildPowers :: Int -> Builder -> ([Builder] -> Builder) -> Builder
+    buildPowers 0 _ cont =
+      let p0 = "p0"
+      in "(let ((" <> p0 `sp` bEnc <> ")) " <>
+           buildPowers 1 p0 (\vars -> cont (p0 : vars)) <> ")"
+
+    buildPowers i prevVar cont
+      | i == 256 = cont []
+      | otherwise =
+          let pi_var = "p" <> Data.Text.Lazy.Builder.Int.decimal i
+              val = "(bvmul " <> prevVar `sp` prevVar <> ")"
+          in "(let ((" <> pi_var `sp` val <> ")) " <>
+               buildPowers (i+1) pi_var (\vars -> cont (pi_var : vars)) <> ")"
+
+    constructProduct :: [Builder] -> Builder
+    constructProduct vars =
+       let
+         terms = zip [0..255] vars
+         mkTerm (i, p) =
+            let bitCheck = "(= ((_ extract " <> Data.Text.Lazy.Builder.Int.decimal i `sp` Data.Text.Lazy.Builder.Int.decimal i <> ") e) #b1)"
+            in "(ite " <> bitCheck `sp` p `sp` one <> ")"
+
+         factors = map mkTerm terms
+         multiply [] = one
+         multiply [x] = x
+         multiply (x:xs) = "(bvmul " <> x `sp` multiply xs <> ")"
+       in multiply factors
+
+  pure $ "(let ((e " <> eEnc <> ")) " <> buildPowers 0 bEnc constructProduct <> ")"
 
 -- | Concatenates a list of bytes into a larger bitvector
 concatBytes :: [Expr Byte] -> Err Builder
