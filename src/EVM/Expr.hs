@@ -9,7 +9,7 @@ module EVM.Expr where
 import Prelude hiding (LT, GT)
 import Control.Monad (unless, when)
 import Control.Monad.ST (ST)
-import Control.Monad.State (put, get, modify, execState, State)
+import Control.Monad.State (put, get, execState, State)
 import Data.Bits hiding (And, Xor)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -1694,6 +1694,13 @@ constPropagate ps =
     conflictState = ConstState mempty mempty mempty False
     conflict = put conflictState
 
+    setExactValue :: Expr EWord -> W256 -> State ConstState ()
+    setExactValue e v = do
+      s <- get
+      case Map.lookup e s.values of
+        Just old -> when (old /= v) conflict
+        _ -> put s { values = Map.insert e v s.values }
+
     updateLower :: Expr EWord -> W256 -> State ConstState ()
     updateLower a l = do
       s <- get
@@ -1703,12 +1710,7 @@ constPropagate ps =
       if newL > currentU
         then conflict
         else put s { lowerBounds = Map.insert a newL s.lowerBounds }
-      -- Check if equal to upper, then it's a constant
-      when (newL == currentU) $ do
-        s' <- get
-        case Map.lookup a s'.values of
-            Just v -> when (v /= newL) conflict
-            Nothing -> put s' { values = Map.insert a newL s'.values }
+      when (newL == currentU) $ setExactValue a newL
 
     updateUpper :: Expr EWord -> W256 -> State ConstState ()
     updateUpper a u = do
@@ -1720,35 +1722,28 @@ constPropagate ps =
         then conflict
         else put s { upperBounds = Map.insert a newU s.upperBounds }
       -- Check if equal to lower, then it's a constant
-      when (currentL == newU) $ do
-        s' <- get
-        case Map.lookup a s'.values of
-            Just v -> when (v /= newU) conflict
-            Nothing -> put s' { values = Map.insert a newU s'.values }
+      when (currentL == newU) $ setExactValue a newU
 
-    genericEq :: W256 -> Expr EWord -> State ConstState ()
-    genericEq l a = do
-          s <- get
-          case Map.lookup a s.values of
-            Just l2 -> unless (l == l2) conflict
-            Nothing -> modify (\s' -> s' { values = Map.insert a l s'.values })
-          updateLower a l
-          updateUpper a l
+    genericEq :: Expr EWord -> W256 -> State ConstState ()
+    genericEq a v = do
+      setExactValue a v
+      updateLower a v
+      updateUpper a v
 
     go :: Prop -> State ConstState ()
     go = \case
         -- signed inequalities
         PEq (Lit 1) term@(SLT a (Lit 0)) -> do
-            genericEq 1 term
+            genericEq term 1
             updateLower a minLitSigned
         PEq (Lit 1) term@(SLT (Lit 0) a) -> do
-            genericEq 1 term
+            genericEq term 1
             updateLower a 1
             updateUpper a maxLitSigned
 
         -- normal equality propagation
-        PEq (Lit l) a -> genericEq l a
-        PEq a b@(Lit _) -> go (PEq b a)
+        PEq (Lit l) a -> genericEq a l
+        PEq a (Lit l) -> genericEq a l
 
         PNeg (PEq (Lit l) a) -> do
           s <- get
