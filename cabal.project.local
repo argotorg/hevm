@@ -1,10 +1,12 @@
 constraints: ghc-bignum ==1.4,
              hashable >=1.5.0.0
 
-allow-newer: 
+allow-newer:
     base,
     ghc-bignum,
-    template-haskell
+    template-haskell,
+    data-bword,
+    data-dword
 
 with-compiler: wasm32-wasi-ghc
 with-hc-pkg: wasm32-wasi-ghc-pkg
@@ -16,6 +18,7 @@ shared: False
 executable-dynamic: False
 library-vanilla: True
 library-profiling: False
+library-for-ghci: False
 
 package *
-  ghc-options: -static -fno-shared-implib
+  ghc-options: -static -fno-shared-implib -fhide-source-paths
