@@ -875,7 +875,8 @@ stepCall vm = {-# SCC "OpCall" #-} do
   touchMemory vm memory (fromIntegral retOffset) (fromIntegral retSize) -- FIXME: Should gas be charged beforehand or only for actually used memory on return? See EIP - 5
   -- Debug.Trace.traceM $ "Call with value: " <> show value
   let to = truncateToAddr address
-  targetCode <- lookupCode vm to
+  targetAccount <- liftST $ getOrCreateAccount vm to
+  let targetCode = targetAccount.accCode
   -- let RuntimeCode bs = targetCode
   -- Debug.Trace.traceM ("Calling " <> (show $ ByteStringS bs))
   -- Debug.Trace.traceM ("With call data " <> (show $ ByteStringS calldata))
@@ -917,7 +918,8 @@ stepDelegateCall vm = do
   touchMemory vm memory (fromIntegral retOffset) (fromIntegral retSize) -- FIXME: Should gas be charged beforehand or only for actually used memory on return? See EIP - 5
   -- Debug.Trace.traceM $ "Delegate call"
   let to = truncateToAddr address
-  targetCode <- lookupCode vm to
+  targetAccount <- liftST $ getOrCreateAccount vm to
+  let targetCode = targetAccount.accCode
   -- let RuntimeCode bs = targetCode
   -- Debug.Trace.traceM ("Calling " <> (show $ ByteStringS bs))
   -- Debug.Trace.traceM ("With call data " <> (show $ ByteStringS calldata))
@@ -942,11 +944,16 @@ stepDelegateCall vm = do
   where
     computeGasToTransfer (Gas availableGas) (Gas requestedGas) = Gas $ Prelude.min (EVM.allButOne64th availableGas) requestedGas
 
-lookupCode :: MVM s -> Addr -> Step s RuntimeCode
-lookupCode vm address = do
-  accounts <- liftST $ getCurrentAccounts vm
-  let account = fromMaybe (internalError "Lookup of unknown address") $ StrictMap.lookup address accounts
-  pure account.accCode
+getOrCreateAccount :: MVM s -> Addr -> ST s Account
+getOrCreateAccount vm address = do
+  accounts <- getCurrentAccounts vm
+  let maybeAccount = StrictMap.lookup address accounts
+  case maybeAccount of
+    Nothing -> do
+      let accounts' = StrictMap.insert address emptyAccount accounts
+      modifySTRef' vm.current (\frame -> frame {state = frame.state {accounts = accounts'}})
+      pure emptyAccount
+    Just account -> pure account
 
 setReturnInfo :: MFrame s -> (W256, W256)-> ST s ()
 setReturnInfo (MFrame _ state) retInfo = do
