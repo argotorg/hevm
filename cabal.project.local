@@ -3,7 +3,8 @@ constraints: ghc-bignum ==1.4,
 
 allow-newer: 
     base,
-    ghc-bignum
+    ghc-bignum,
+    template-haskell
 
 with-compiler: wasm32-wasi-ghc
 with-hc-pkg: wasm32-wasi-ghc-pkg
