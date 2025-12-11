@@ -1140,9 +1140,9 @@ stepLog vm n = do
 
 stepMSize :: MVM s -> Step s ()
 stepMSize vm = do
-  (Memory _ sizeRef) <- liftST $ getMemory vm
-  size <- liftST $ readSTRef sizeRef
-  push vm (fromIntegral size)
+  (Memory _ wordSizeRef) <- liftST $ getMemory vm
+  wordSize <- liftST $ readSTRef wordSizeRef
+  push vm (fromIntegral $ wordSize * 32)
 
 stepMLoad :: MVM s -> Step s ()
 stepMLoad vm = do
@@ -1284,7 +1284,7 @@ sstore storage key val = if val == 0 then StrictMap.delete key storage else Stri
 ------------- Memory Submodule ---------------------------
 data Memory s = Memory {
   memRef :: STRef s (UMVec.MVector s Word8),
-  sizeRef :: STRef s Word64
+  wordSizeRef :: STRef s Word64
 }
 
 newMemory :: ST s (Memory s)
@@ -1324,22 +1324,23 @@ readMemory vm offset size =
         pure (prefix <> suffix)
 
 writeMemory :: Memory s -> Word64 -> BS.ByteString -> ST s ()
-writeMemory (Memory memRef sizeRef) offset bs
+writeMemory (Memory memRef wordSizeRef) offset bs
   | BS.null bs = pure ()
   | otherwise = do
       vec <- readSTRef memRef
-      let off = fromIntegral offset
+      let off64 = fromIntegral offset
           len = BS.length bs
-          requiredSize = off + len
+          requiredSizeWords = bytesToWords $ off64 + (fromIntegral len)
+          requiredSizeBytes = fromIntegral $ requiredSizeWords * 32
           vecSize = UMVec.length vec
-      vec' <- if requiredSize <= vecSize
+      vec' <- if requiredSizeBytes <= vecSize
               then pure vec
-              else do vec' <- grow vec requiredSize; writeSTRef memRef vec'; pure vec'
-      actualSize <- readSTRef sizeRef
+              else do vec' <- grow vec requiredSizeBytes; writeSTRef memRef vec'; pure vec'
+      actualSizeWords <- readSTRef wordSizeRef
 
-      let requiredSizeWord64 :: Word64 = fromIntegral requiredSize
-      when (requiredSizeWord64 > actualSize) $ writeSTRef sizeRef requiredSizeWord64
+      when (requiredSizeWords > actualSizeWords) $ writeSTRef wordSizeRef requiredSizeWords
       -- now write the bytes
+      let off = fromIntegral off64
       let writeByte i
             | i == len  = pure ()
             | otherwise = do
@@ -1350,20 +1351,22 @@ writeMemory (Memory memRef sizeRef) offset bs
 
 touchMemory :: MVM s -> Memory s -> Word64 -> Word64 -> Step s ()
 touchMemory _ _ _ 0 = pure ()
-touchMemory vm (Memory _ sizeRef) offset size = do
-  currentSizeInBytes <- liftST $ readSTRef sizeRef
-  let sizeAfterTouch = offset + size
-  when (sizeAfterTouch > currentSizeInBytes) $ do
-    let memoryExpansionCost = memoryCost sizeAfterTouch - memoryCost currentSizeInBytes
+touchMemory vm (Memory _ wordSizeRef) offset size = do
+  currentSizeInWords <- liftST $ readSTRef wordSizeRef
+  let wordSizeAfterTouch = bytesToWords $ offset + size
+  when (wordSizeAfterTouch > currentSizeInWords) $ do
+    let memoryExpansionCost = memoryCost wordSizeAfterTouch - memoryCost currentSizeInWords
     when (memoryExpansionCost > 0) $ do 
       burn vm memoryExpansionCost
-      liftST $ writeSTRef sizeRef sizeAfterTouch
+      liftST $ writeSTRef wordSizeRef wordSizeAfterTouch
+
+bytesToWords :: Word64 -> Word64
+bytesToWords b = ceilDiv b 32
 
 memoryCost :: Word64 -> Gas
-memoryCost sizeInBytes =
+memoryCost wordCount =
   let
     fees = feeSchedule
-    wordCount = ceilDiv sizeInBytes 32
     linearCost = fees.g_memory * wordCount
     quadraticCost = div (wordCount * wordCount) 512
   in
@@ -1398,21 +1401,22 @@ memLoad32 (Memory memRef _) offset = do
 memStore32 :: Memory s -> W256 -> W256 -> ST s ()
 memStore32 (Memory memRef sizeRef) offset value = do
   vec <- readSTRef memRef
-  let off = fromIntegral offset
-      requiredSize = off + 32
+  let off64 = fromIntegral offset
+      requiredSizeWords = bytesToWords $ off64 + 32
+      requiredSizeBytes = fromIntegral $ requiredSizeWords * 32
       vecSize = UMVec.length vec
-  vec' <- if requiredSize <= vecSize
+  vec' <- if requiredSizeBytes <= vecSize
           then pure vec
-          else do vec' <- grow vec requiredSize; writeSTRef memRef vec'; pure vec'
-  actualSize <- readSTRef sizeRef
+          else do vec' <- grow vec requiredSizeBytes; writeSTRef memRef vec'; pure vec'
+  actualWordSize <- readSTRef sizeRef
 
-  let requiredSizeWord64 :: Word64 = fromIntegral requiredSize
-  when (requiredSizeWord64 > actualSize) $ writeSTRef sizeRef requiredSizeWord64
+  when (requiredSizeWords > actualWordSize) $ writeSTRef sizeRef requiredSizeWords
 
   -- EVM stores big-endian
   let (w0, w1, w2, w3) = deconstructWord256ToWords value
 
   -- write 32 bytes using fast Word64 stores
+  let off = fromIntegral off64
   writeWord64BE vec' (off     ) w0
   writeWord64BE vec' (off +  8) w1
   writeWord64BE vec' (off + 16) w2
@@ -1432,21 +1436,21 @@ memStore32 (Memory memRef sizeRef) offset value = do
 
 
 memStore1 :: Memory s -> W256 -> W256 -> ST s ()
-memStore1 (Memory memRef sizeRef) offset value = do
+memStore1 (Memory memRef wordSizeRef) offset value = do
   vec <- readSTRef memRef
-  let off = fromIntegral offset
-      requiredSize = off + 1
+  let off64 = fromIntegral offset
+      requiredSizeWords = bytesToWords $ off64 + 1
+      requiredSizeBytes = fromIntegral $ requiredSizeWords * 32
       vecSize = UMVec.length vec
-  vec' <- if requiredSize <= vecSize
+  vec' <- if requiredSizeBytes <= vecSize
           then pure vec
-          else do vec' <- grow vec requiredSize; writeSTRef memRef vec'; pure vec'
-  actualSize <- readSTRef sizeRef
-  let requiredSizeWord64 :: Word64 = fromIntegral requiredSize
-  when (requiredSizeWord64 > actualSize) $ writeSTRef sizeRef requiredSizeWord64
+          else do vec' <- grow vec requiredSizeBytes; writeSTRef memRef vec'; pure vec'
+  actualSizeWords <- readSTRef wordSizeRef
+  when (requiredSizeWords > actualSizeWords) $ writeSTRef wordSizeRef requiredSizeWords
 
   let byte = fromIntegral (value .&. 0xff)
+      off = fromIntegral off64
   UMVec.write vec' off byte
-  writeSTRef sizeRef (fromIntegral off + 1)
 
 -- NOTE: This assumes that required size is greater than current size, it does not check it!
 grow :: UMVec.MVector s Word8 -> Int -> ST s (UMVec.MVector s Word8)
