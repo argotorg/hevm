@@ -10,3 +10,12 @@ with-compiler: wasm32-wasi-ghc
 with-hc-pkg: wasm32-wasi-ghc-pkg
 with-hsc2hs: wasm32-wasi-hsc2hs
 with-haddock: wasm32-wasi-haddock
+
+-- Disable dynamic builds for WASM (WASM only supports static linking)
+shared: False
+executable-dynamic: False
+library-vanilla: True
+library-profiling: False
+
+package *
+  ghc-options: -static -fno-shared-implib
