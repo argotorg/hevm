@@ -359,7 +359,7 @@ runLoop vm = do
       frame <- getCurrentFrame vm
       Gas remaining <- getAvailableGas frame
       -- Debug.Trace.traceM $ "Remaining gas at the end of transaction:" <> show remaining
-      Gas refunds <- getGasRefund vm
+      Gas refunds <- getGasRefund frame
       let gasUsed = limit - remaining
           refundCap = gasUsed `div` 5
           finalRefund = Prelude.min refunds refundCap
@@ -399,6 +399,7 @@ stepVM vm = do
         finishingFrame <- getCurrentFrame vm
         accounts <- getCurrentAccounts vm
         unspentGas <- getAvailableGas finishingFrame
+        gasRefund <- getGasRefund finishingFrame
         (retOffset, retSize) <- getReturnInfo finishingFrame
         writeSTRef vm.current nextFrame
         writeSTRef vm.frames rest
@@ -407,6 +408,7 @@ stepVM vm = do
           FrameSucceeded returnData -> do
             currentFrame <- getCurrentFrame vm
             unburn' currentFrame unspentGas
+            addGasRefund currentFrame gasRefund
             let updatedFrame = currentFrame {state = currentFrame.state {accounts = accounts}}
             writeSTRef vm.current updatedFrame
             memory <- getMemory vm
@@ -432,7 +434,7 @@ runStep vm = do
     advancePC vm 1
     getInstruction vm pc
   burnStaticGas vm instruction
-  -- Debug.Trace.traceM ("Executing op " <> (show instruction) <> "\nPC: " <> showHex pc "")
+  -- Debug.Trace.traceM ("Executing op " <> (show instruction))
   -- frame <- liftST $ getCurrentFrame vm
   -- Gas gas <- liftST $ readSTRef frame.state.gasRemainingRef
   -- Debug.Trace.traceM ("Remaining gas is " <> (show gas))
@@ -783,9 +785,6 @@ getMemory vm = do
 
 getCurrentFrame :: MVM s -> ST s (MFrame s)
 getCurrentFrame vm = readSTRef vm.current
-
-getAvailableGas :: MFrame s -> ST s Gas
-getAvailableGas frame = readSTRef frame.state.gasRemainingRef
 
 getCurrentAccounts :: MVM s -> ST s Accounts
 getCurrentAccounts vm = do
@@ -1189,14 +1188,34 @@ stepSStore vm = {-# SCC "SStore" #-} do
   let warmCost = warmStoreCost originalVal currentVal val
       totalGasCost = if isWarm then warmCost else warmCost + feeSchedule.g_cold_sload
   burn vm totalGasCost
+  let refund = computeRefund originalVal currentVal val
+  liftST $ addRefund vm refund
   let updatedStore = sstore store key val
-  setCurrentStorage vm updatedStore
+  liftST $ setCurrentStorage vm updatedStore
 
   where
     warmStoreCost originalValue currentValue newValue
-      | newValue == currentValue = feeSchedule.g_sload
-      | currentValue == originalValue = if originalValue == 0 then feeSchedule.g_sset else feeSchedule.g_sreset
-      | otherwise = feeSchedule.g_sload
+      | newValue == currentValue = sload'
+      | currentValue == originalValue = if originalValue == 0 then sset else sreset
+      | otherwise = sload'
+
+    computeRefund originalValue currentValue newValue
+      | currentValue == newValue                                             = 0
+      | originalValue /= 0 && newValue == 0                                  = sreset + access_list_storage_key
+      | originalValue /= 0 && currentValue == 0 && originalValue == newValue = sreset - sload' - (sreset + access_list_storage_key)
+      | originalValue /= 0 && currentValue == 0                              = -(sreset + access_list_storage_key)
+      | originalValue /= 0 && originalValue == newValue                      = sreset - sload'
+      | originalValue == 0 && newValue == 0                                  = sset - sload'
+      | otherwise = 0
+
+    sreset = feeSchedule.g_sreset
+    sset = feeSchedule.g_sset
+    access_list_storage_key = feeSchedule.g_access_list_storage_key
+    sload' = feeSchedule.g_sload
+
+    addRefund vm' value = do
+      frame <- getCurrentFrame vm'
+      addGasRefund frame value
 
 touchCurrentStore :: MVM s -> W256 -> ST s Bool
 touchCurrentStore vm slot = do
@@ -1245,14 +1264,14 @@ getCurrentStorage vm = do
         pure account.accStorage
   pure $ fromMaybe mempty maybeStorage
 
-setCurrentStorage :: MVM s -> Storage -> Step s ()
+setCurrentStorage :: MVM s -> Storage -> ST s ()
 setCurrentStorage vm storage = do
-  frame <- liftST $ getCurrentFrame vm
+  frame <- getCurrentFrame vm
   let currentAccount = fromMaybe (internalError "Current account is unknown!") $ StrictMap.lookup frame.context.storageAddress frame.state.accounts
   let updatedAccounts = StrictMap.insert frame.context.storageAddress (currentAccount {accStorage = storage}) frame.state.accounts
       updatedState = frame.state {accounts = updatedAccounts}
       updatedFrame = frame {state = updatedState}
-  liftST $ writeSTRef vm.current updatedFrame
+  writeSTRef vm.current updatedFrame
 
 ------------- Storage Submodule --------------------------
 
@@ -1442,10 +1461,14 @@ grow vec requiredSize = do
 
 ------------------- GAS helpers --------------------------------
 
-getGasRefund :: MVM s -> ST s Gas
-getGasRefund vm = do
-  frame <- getCurrentFrame vm
-  readSTRef frame.state.gasRefundedRef
+getAvailableGas :: MFrame s -> ST s Gas
+getAvailableGas frame = readSTRef frame.state.gasRemainingRef
+
+getGasRefund :: MFrame s -> ST s Gas
+getGasRefund frame = readSTRef frame.state.gasRefundedRef
+
+addGasRefund :: MFrame s -> Gas -> ST s ()
+addGasRefund frame gas= modifySTRef' frame.state.gasRefundedRef (+gas)
 
 burn :: MVM s -> Gas -> Step s ()
 burn vm gas = {-# SCC "Burn" #-} do
