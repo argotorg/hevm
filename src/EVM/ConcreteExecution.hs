@@ -19,6 +19,7 @@ import Control.Monad (forM, when, unless, ap, liftM)
 import Control.Monad.ST (ST, runST)
 import Data.Bits ((.|.), (.&.), (.^.), shiftR, shiftL, testBit, complement, bit)
 import Data.ByteString qualified as BS
+import Data.ByteString.Char8 qualified as Char8 (pack)
 import Data.DoubleWord (Int256)
 import Data.Map.Strict qualified as StrictMap
 import Data.Maybe (fromMaybe, isJust, fromJust, isNothing)
@@ -490,6 +491,7 @@ runStep vm = do
       OpDelegatecall -> stepDelegateCall vm
       OpSha3 -> stepKeccak vm
       OpGas -> stepGas vm
+      OpBlockhash -> stepBlockHash vm
       OpCoinbase -> stepCoinBase vm
       OpTimestamp -> stepTimeStamp vm
       OpNumber -> stepNumber vm
@@ -1005,6 +1007,17 @@ stepRevert vm = do
 
 haltExecution :: MVM s -> Step s a
 haltExecution vm = returnWithData vm 0 0
+
+stepBlockHash :: MVM s -> Step s ()
+stepBlockHash vm = do
+  blockNumber <- pop vm
+  let currentBlockNumber = vm.executionContext.blockHeader.number
+  let hash = if blockNumber + 256 < currentBlockNumber || blockNumber >= currentBlockNumber
+              then 0
+              else fakeHash blockNumber
+  push vm hash
+  where
+    fakeHash (W256 num) = keccak' $ Char8.pack $ show num
 
 stepCoinBase :: MVM s -> Step s ()
 stepCoinBase vm = do
@@ -1544,6 +1557,7 @@ burnStaticGas vm instruction = {-# SCC "BurnStaticGas" #-} do
           OpCodesize -> g_base
           OpCodecopy -> g_verylow
           OpGasprice -> g_base
+          OpBlockhash -> g_blockhash
           OpCoinbase -> g_base
           OpTimestamp -> g_base
           OpNumber -> g_base
