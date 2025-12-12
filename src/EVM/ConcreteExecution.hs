@@ -799,7 +799,7 @@ getCurrentInstructions vm = do
 stepJump :: MVM s -> Step s ()
 stepJump vm = do
   jumpDest <- pop vm
-  tryJump vm $ fromIntegral jumpDest
+  tryJump vm $ capAsWord64 jumpDest
 
 stepJumpI :: MVM s -> Step s ()
 stepJumpI vm = do
