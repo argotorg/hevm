@@ -33,6 +33,7 @@ import Data.Word (Word8, Word32, Word64)
 import Prelude hiding (exponent)
 
 import EVM (allButOne64th, ceilDiv, log2)
+import EVM.RLP
 import EVM.Types (
   W256(..),
   W64(..),
@@ -151,19 +152,6 @@ newMFrameState accounts gas = do
   gasRefunded <- newSTRef $ Gas 0
   retInfoRef <- newSTRef Nothing
   pure $ MFrameState pcRef stackVec spRef memory accounts gasRemaining gasRefunded retInfoRef
-
-newFrameFromTransaction :: Transaction -> Accounts -> ST s (MFrame s)
-newFrameFromTransaction tx@(Transaction from maybeTo callvalue calldata maybeCode gasLimit _ _) accounts =
-  case (maybeTo, maybeCode) of
-    (Just to, Just code) -> do
-      let availableGas = gasLimit - (Gas $ txGasCost feeSchedule tx) -- TODO: check if limit is at least transaction cost
-      -- Debug.Trace.traceM ("Available gas is " <> show availableGas)
-      freshState <- newMFrameState accounts availableGas
-      let frameState = freshState {accounts = accounts}
-      let ctx = FrameContext code (parseByteCode code) calldata callvalue accounts to to from
-      pure $ MFrame ctx frameState
-    _  -> internalError "Creation transaction not supported yet"
-
 
 data FrameContext = FrameContext {
   code :: RuntimeCode,
@@ -296,6 +284,9 @@ vmError err = stop $ FrameErrored err
 stop :: FrameResult -> Step s a
 stop result = Step $ \resultRef -> writeSTRef resultRef (Just result) >> pure (internalError "Should never be executed")
 
+isCreate :: Transaction -> Bool
+isCreate tx = isNothing tx.to
+
 execBytecode :: RuntimeCode -> CallData -> CallValue -> ExecutionResult
 execBytecode code calldata value = exec executionContext worldState
   where
@@ -317,10 +308,14 @@ exec executionContext accounts = runST $ do
   -- Debug.Trace.traceM $ "Gas limit: " <> (show gasLimit)
   -- Debug.Trace.traceM $ "Gas price: " <> (show gasPrice)
   -- Debug.Trace.traceM $ "Priority fee: " <> (show priorityFee)
-  let tx = executionContext.transaction 
-      updatedAccounts = transferTxValue tx $ initTransaction tx accounts
-  initialFrame <- newFrameFromTransaction tx updatedAccounts
-  currentRef <- newSTRef initialFrame
+  let tx = executionContext.transaction
+      accountsAfterInitiatingTransaction = StrictMap.adjust (payForInitiatingTransaction tx) tx.from accounts
+      (updatedAccounts, targetAddress) = initTransaction tx accountsAfterInitiatingTransaction
+      availableGas = tx.gasLimit - (Gas $ txGasCost feeSchedule tx)
+      code = if isCreate tx then (let CallData bs = tx.txdata in RuntimeCode bs) else fromJust tx.code
+  initialFrame <- mkFrame tx.from targetAddress tx.value tx.txdata code availableGas accountsAfterInitiatingTransaction
+  let frameAfterAccountsUpdate = initialFrame {state = initialFrame.state {accounts = updatedAccounts}}
+  currentRef <- newSTRef frameAfterAccountsUpdate
   framesRef <- newSTRef []
   substateRef <- newSTRef (TxSubState mempty)
   terminationFlagRef <- newSTRef Nothing
@@ -328,9 +323,12 @@ exec executionContext accounts = runST $ do
   runLoop vm
 
   where
-    initTransaction :: Transaction -> Accounts -> Accounts
-    initTransaction tx accounts' = StrictMap.adjust (initiatingTransaction tx) tx.from accounts'
-    initiatingTransaction tx account =
+    initTransaction :: Transaction -> Accounts -> (Accounts, Addr)
+    initTransaction tx accounts' =
+      let (afterNewAccountCreation, targetAddress) = if isCreate tx then (createNewAccount tx accounts') else (accounts', fromJust tx.to)
+          afterValueTransfer = uncheckedTransfer afterNewAccountCreation tx.from targetAddress tx.value
+      in (afterValueTransfer, targetAddress)
+    payForInitiatingTransaction tx account =
       let
         (Wei balance) = account.accBalance
         (Gas limit) = tx.gasLimit
@@ -339,8 +337,21 @@ exec executionContext accounts = runST $ do
         updatedNonce = account.accNonce + 1
       in
         account {accBalance = updatedBalance, accNonce = updatedNonce}
-    transferTxValue :: Transaction -> Accounts -> Accounts
-    transferTxValue tx accounts' = uncheckedTransfer accounts' tx.from (fromJust tx.to) tx.value
+
+    createNewAccount tx accounts' =
+      let senderAccount = fromJust $ StrictMap.lookup tx.from accounts'
+          newAddress = createAddress tx.from (senderAccount.accNonce - 1) -- NOTE: We increment sender's nonce before we get here, so we need to subtract 1
+      in (StrictMap.insert newAddress (emptyAccount {accNonce = 1}) accounts', newAddress)
+
+    mkFrame :: Addr -> Addr -> CallValue -> CallData -> RuntimeCode -> Gas -> Accounts -> ST s (MFrame s)
+    mkFrame from to callvalue calldata code availableGas accounts' = do
+      freshState <- newMFrameState accounts' availableGas
+      let ctx = FrameContext code (parseByteCode code) calldata callvalue accounts' to to from
+      pure $ MFrame ctx freshState
+
+    createAddress :: Addr -> Nonce -> Addr
+    createAddress sender (Nonce senderNonce) = Addr . fromIntegral . keccak' . rlpList $ [rlpAddrFull sender, rlpWord256 (fromIntegral senderNonce)]
+
 
 runLoop :: MVM s -> ST s ExecutionResult
 runLoop vm = do
@@ -360,20 +371,30 @@ runLoop vm = do
       frame <- getCurrentFrame vm
       Gas remaining <- getAvailableGas frame
       -- Debug.Trace.traceM $ "Remaining gas at the end of transaction:" <> show remaining
-      Gas refunds <- getGasRefund frame
-      let gasUsed = limit - remaining
-          refundCap = gasUsed `div` 5
-          finalRefund = Prelude.min refunds refundCap
+      case result of
+        VMFailure _ -> do
+          let weiToRefund = Wei $ (fromIntegral remaining) * gasPrice
+              addTo account = account {accBalance = account.accBalance + weiToRefund}
+              accounts = frame.context.accountsSnapshot
+              updatedAccounts = StrictMap.adjust addTo vm.executionContext.transaction.from accounts
+              updatedFrame = frame {state = frame.state {accounts = updatedAccounts}}
+          writeSTRef vm.current updatedFrame
+        VMSuccess _ -> do
+          Gas refunds <- getGasRefund frame
+          let gasUsed = limit - remaining
+              refundCap = gasUsed `div` 5
+              finalRefund = Prelude.min refunds refundCap
 
-          toRefund = remaining + finalRefund
-          weiToRefund = Wei $ (fromIntegral toRefund) * gasPrice
-          minerPay = Wei $ vm.executionContext.transaction.priorityFee * (fromIntegral gasUsed)
+              toRefund = remaining + finalRefund
+              weiToRefund = Wei $ (fromIntegral toRefund) * gasPrice
+              minerPay = Wei $ vm.executionContext.transaction.priorityFee * (fromIntegral gasUsed)
 
-      let accounts = frame.state.accounts
-          addTo account = account {accBalance = account.accBalance + weiToRefund}
-          updatedAccounts = StrictMap.alter (rewardMiner minerPay) vm.executionContext.blockHeader.coinbase $ StrictMap.adjust addTo vm.executionContext.transaction.from accounts
-          updatedFrame = frame {state = frame.state {accounts = updatedAccounts}}
-      writeSTRef vm.current updatedFrame
+          let accounts = frame.state.accounts
+              addTo account = account {accBalance = account.accBalance + weiToRefund}
+              updatedAccounts = StrictMap.alter (rewardMiner minerPay) vm.executionContext.blockHeader.coinbase $ StrictMap.adjust addTo vm.executionContext.transaction.from accounts
+              updatedFrame = frame {state = frame.state {accounts = updatedAccounts}}
+          writeSTRef vm.current updatedFrame
+
     rewardMiner reward maybeAccount =
       case maybeAccount of
         Nothing -> Just $ emptyAccount {accBalance = reward}
