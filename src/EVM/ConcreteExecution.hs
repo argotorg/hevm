@@ -379,7 +379,7 @@ runLoop vm = do
               updatedAccounts = StrictMap.adjust addTo vm.executionContext.transaction.from accounts
               updatedFrame = frame {state = frame.state {accounts = updatedAccounts}}
           writeSTRef vm.current updatedFrame
-        VMSuccess _ -> do
+        VMSuccess returnData -> do
           Gas refunds <- getGasRefund frame
           let gasUsed = limit - remaining
               refundCap = gasUsed `div` 5
@@ -392,7 +392,8 @@ runLoop vm = do
           let accounts = frame.state.accounts
               addTo account = account {accBalance = account.accBalance + weiToRefund}
               updatedAccounts = StrictMap.alter (rewardMiner minerPay) vm.executionContext.blockHeader.coinbase $ StrictMap.adjust addTo vm.executionContext.transaction.from accounts
-              updatedFrame = frame {state = frame.state {accounts = updatedAccounts}}
+              accountsAfteSuccessfulCreate = if isCreate vm.executionContext.transaction then (StrictMap.adjust (\account -> account{accCode = (RuntimeCode returnData)}) frame.context.codeAddress updatedAccounts) else updatedAccounts
+              updatedFrame = frame {state = frame.state {accounts = accountsAfteSuccessfulCreate}}
           writeSTRef vm.current updatedFrame
 
     rewardMiner reward maybeAccount =
