@@ -191,7 +191,6 @@ data Transaction = Transaction {
   to :: Maybe Addr,
   value :: CallValue,
   txdata :: CallData,
-  code :: Maybe RuntimeCode,
   gasLimit :: Gas,
   gasPrice :: W256,
   priorityFee :: W256
@@ -293,7 +292,7 @@ execBytecode code calldata value = exec executionContext worldState
     artificialAddress = Addr 0xdeadbeef
     artificialAccount = Account code mempty (Wei (fromIntegral (maxBound :: Word64))) (Nonce 0)
     worldState = StrictMap.singleton artificialAddress artificialAccount
-    transaction = Transaction (Addr 0) (Just artificialAddress ) value calldata (Just code) (Gas maxBound) 0 0
+    transaction = Transaction (Addr 0) (Just artificialAddress ) value calldata (Gas maxBound) 0 0
     blockHeader = BlockHeader (Addr 0) 0 0 (Gas maxBound) 0 0
     executionContext = ExecutionContext transaction blockHeader
 
@@ -312,8 +311,8 @@ exec executionContext accounts = runST $ do
       accountsAfterInitiatingTransaction = StrictMap.adjust (payForInitiatingTransaction tx) tx.from accounts
       (updatedAccounts, targetAddress) = initTransaction tx accountsAfterInitiatingTransaction
       availableGas = tx.gasLimit - (Gas $ txGasCost feeSchedule tx)
-      code = if isCreate tx then (let CallData bs = tx.txdata in RuntimeCode bs) else fromJust tx.code
-  initialFrame <- mkFrame tx.from targetAddress tx.value tx.txdata code availableGas accountsAfterInitiatingTransaction
+      targetAccount = fromMaybe (internalError "Target address not present in the known accounts") (StrictMap.lookup targetAddress updatedAccounts)
+  initialFrame <- mkFrame tx.from targetAddress tx.value tx.txdata targetAccount.accCode availableGas accountsAfterInitiatingTransaction
   let frameAfterAccountsUpdate = initialFrame {state = initialFrame.state {accounts = updatedAccounts}}
   currentRef <- newSTRef frameAfterAccountsUpdate
   framesRef <- newSTRef []
@@ -341,7 +340,8 @@ exec executionContext accounts = runST $ do
     createNewAccount tx accounts' =
       let senderAccount = fromJust $ StrictMap.lookup tx.from accounts'
           newAddress = createAddress tx.from (senderAccount.accNonce - 1) -- NOTE: We increment sender's nonce before we get here, so we need to subtract 1
-      in (StrictMap.insert newAddress (emptyAccount {accNonce = 1}) accounts', newAddress)
+      in (StrictMap.insert newAddress (emptyAccount {accNonce = 1, accCode = (asCode tx.txdata)}) accounts', newAddress)
+    asCode (CallData txdata) = RuntimeCode txdata
 
     mkFrame :: Addr -> Addr -> CallValue -> CallData -> RuntimeCode -> Gas -> Accounts -> ST s (MFrame s)
     mkFrame from to callvalue calldata code availableGas accounts' = do
