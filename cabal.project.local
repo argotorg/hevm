@@ -14,11 +14,20 @@ with-hsc2hs: wasm32-wasi-hsc2hs
 with-haddock: wasm32-wasi-haddock
 
 -- Disable dynamic builds for WASM (WASM only supports static linking)
-shared: False
+shared: True
+dynamic: True
 executable-dynamic: False
 library-vanilla: True
 library-profiling: False
 library-for-ghci: False
 
+package data-bword
+  library-vanilla: True
+  shared: True
+  
+package data-dword
+  library-vanilla: True
+  shared: True
+
 package *
-  ghc-options: -static -fno-shared-implib -fhide-source-paths
+  ghc-options: -fPIC -dynamic-too

@@ -1,3 +1,4 @@
 packages:
   .
   vendored/data-bword
+  vendored/data-dword
