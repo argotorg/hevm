@@ -161,7 +161,8 @@ data FrameContext = FrameContext {
   accountsSnapshot :: Accounts,
   codeAddress :: Addr,
   storageAddress :: Addr,
-  callerAddress :: Addr
+  callerAddress :: Addr,
+  isStatic :: Bool
 }
 
 
@@ -283,6 +284,11 @@ vmError err = stop $ FrameErrored err
 stop :: FrameResult -> Step s a
 stop result = Step $ \resultRef -> writeSTRef resultRef (Just result) >> pure (internalError "Should never be executed")
 
+checkNotStaticContext :: MVM s -> Step s ()
+checkNotStaticContext vm = do
+  frame <- liftST $ getCurrentFrame vm
+  when (frame.context.isStatic) $ vmError StateChangeWhileStatic
+
 isCreate :: Transaction -> Bool
 isCreate tx = isNothing tx.to
 
@@ -298,9 +304,10 @@ execBytecode code calldata value = exec executionContext worldState
 
 exec :: ExecutionContext -> Accounts -> ExecutionResult
 exec executionContext accounts = runST $ do
-  -- let Transaction from to (CallValue value) (CallData calldata) maybeCode gasLimit gasPrice priorityFee = executionContext.transaction
-  -- let RuntimeCode bs = fromJust maybeCode
+  -- let Transaction from to (CallValue value) (CallData calldata) gasLimit gasPrice priorityFee = executionContext.transaction
+  -- let RuntimeCode bs = (fromMaybe (internalError "IMPOSSIBLE!") $ StrictMap.lookup from accounts).accCode
   -- Debug.Trace.traceM $ "\nNew transaction!\n"
+  -- Debug.Trace.traceM $ "From: " <> (show from)
   -- Debug.Trace.traceM $ "Value: " <> (show value)
   -- Debug.Trace.traceM $ "Calldata: " <> (show $ ByteStringS calldata)
   -- Debug.Trace.traceM $ "Code: " <> (show $ ByteStringS bs)
@@ -346,7 +353,7 @@ exec executionContext accounts = runST $ do
     mkFrame :: Addr -> Addr -> CallValue -> CallData -> RuntimeCode -> Gas -> Accounts -> ST s (MFrame s)
     mkFrame from to callvalue calldata code availableGas accounts' = do
       freshState <- newMFrameState accounts' availableGas
-      let ctx = FrameContext code (parseByteCode code) calldata callvalue accounts' to to from
+      let ctx = FrameContext code (parseByteCode code) calldata callvalue accounts' to to from False
       pure $ MFrame ctx freshState
 
     createAddress :: Addr -> Nonce -> Addr
@@ -512,6 +519,7 @@ runStep vm = do
       OpCall -> stepCall vm
       OpCallcode -> stepCallCode vm
       OpDelegatecall -> stepDelegateCall vm
+      OpStaticcall -> stepStaticCall vm
       OpSha3 -> stepKeccak vm
       OpGas -> stepGas vm
       OpBlockhash -> stepBlockHash vm
@@ -894,6 +902,7 @@ stepCall vm = do
   argsSize <- pop vm
   retOffset <- pop vm
   retSize <- pop vm
+  when (value > 0) $ checkNotStaticContext vm
   makeCall vm REGULAR (Gas $ fromIntegral gas) (truncateToAddr address) (CallValue value) argsOffset argsSize retOffset retSize
 
 stepDelegateCall :: MVM s -> Step s ()
@@ -915,9 +924,21 @@ stepCallCode vm = do
   argsSize <- pop vm
   retOffset <- pop vm
   retSize <- pop vm
+  when (value > 0) $ checkNotStaticContext vm
   makeCall vm CODE (Gas $ fromIntegral gas) (truncateToAddr address) (CallValue value) argsOffset argsSize retOffset retSize
 
-data CallType = REGULAR | DELEGATE | CODE
+stepStaticCall :: MVM s -> Step s ()
+stepStaticCall vm = do
+  gas <- pop vm
+  address <- pop vm
+  argsOffset <- pop vm
+  argsSize <- pop vm
+  retOffset <- pop vm
+  retSize <- pop vm
+  makeCall vm STATIC (Gas $ fromIntegral gas) (truncateToAddr address) (CallValue 0) argsOffset argsSize retOffset retSize
+
+data CallType = REGULAR | DELEGATE | CODE | STATIC
+  deriving Eq
 
 makeCall :: MVM s -> CallType -> Gas -> Addr -> CallValue -> VMWord -> VMWord -> VMWord -> VMWord -> Step s ()
 makeCall vm callType gas to callValue@(CallValue cv') argsOffset argsSize retOffset retSize = do
@@ -944,9 +965,10 @@ makeCall vm callType gas to callValue@(CallValue cv') argsOffset argsSize retOff
   burn' currentFrame myGasToTransfer
   let
     callValue' = case callType of DELEGATE -> currentFrame.context.callValue; _ -> callValue
-    storageAddress = case callType of REGULAR -> to; _ -> currentFrame.context.storageAddress
+    storageAddress = case callType of ct | ct == REGULAR || ct == STATIC -> to; _ -> currentFrame.context.storageAddress
     caller = case callType of DELEGATE -> currentFrame.context.storageAddress; _ -> currentFrame.context.codeAddress
-    newFrameContext = FrameContext targetCode (parseByteCode targetCode) (CallData calldata) callValue' accounts to storageAddress caller
+    shouldBeStatic = (callType == STATIC || currentFrame.context.isStatic)
+    newFrameContext = FrameContext targetCode (parseByteCode targetCode) (CallData calldata) callValue' accounts to storageAddress caller shouldBeStatic
     newFrame = MFrame newFrameContext newFrameState
   liftST $ setReturnInfo newFrame (retOffset, retSize)
   liftST $ pushFrame vm newFrame
@@ -1202,6 +1224,7 @@ stepSLoad vm = {-# SCC "SLoad" #-} do
 
 stepSStore :: MVM s -> Step s ()
 stepSStore vm = {-# SCC "SStore" #-} do
+  checkNotStaticContext vm
   key <- pop vm
   val <- pop vm
   isWarm <- liftST $ touchCurrentStore vm key
@@ -1594,6 +1617,7 @@ burnStaticGas vm instruction = {-# SCC "BurnStaticGas" #-} do
           OpCallcode -> g_zero -- Cost for CALL depends on if we are accessing cold or warm address
           OpReturn -> g_zero
           OpDelegatecall -> g_zero
+          OpStaticcall -> g_zero
           OpRevert -> g_zero
           OpUnknown _ -> g_zero
           _ -> internalError ("Unknown opcode: " ++ show op)
