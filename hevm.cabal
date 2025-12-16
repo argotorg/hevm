@@ -207,7 +207,7 @@ executable hevm
   build-depends:
     base,
     bytestring,
-    -- data-dword,
+    data-dword,
     directory                         >= 1.3.6 && < 1.4,
     filepath,
     hevm,

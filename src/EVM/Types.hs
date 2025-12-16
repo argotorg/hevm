@@ -19,13 +19,13 @@ import Control.Arrow ((>>>))
 import Control.Monad (mzero)
 import Control.Monad.ST (ST, RealWorld)
 import Control.Monad.State.Strict (StateT)
-import Crypto.Hash (hash, Keccak_256, Digest)
+-- import Crypto.Hash (hash, Keccak_256, Digest) -- requires cryptonite
 import Data.Aeson qualified as JSON
 import Data.Aeson.Types qualified as JSON
 import Data.Bifunctor (first)
 import Data.Bits (Bits, FiniteBits, shiftR, shift, shiftL, (.&.), (.|.), toIntegralSized)
 import Data.Binary qualified as Binary
-import Data.ByteArray qualified as BA
+-- import Data.ByteArray qualified as BA -- requires memory, which requires foundation
 import Data.Char
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -1509,8 +1509,9 @@ constructWord256 bytes
 
 keccakBytes :: ByteString -> ByteString
 keccakBytes =
-  (hash :: ByteString -> Digest Keccak_256)
-    >>> BA.convert
+  undefined
+  -- (hash :: ByteString -> Digest Keccak_256)
+  --   >>> BA.convert
 
 word32 :: [Word8] -> Word32
 word32 xs = sum [ into x `shiftL` (8*n)

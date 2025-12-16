@@ -56,8 +56,6 @@ import Data.Foldable (Foldable(..))
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isJust, fromJust, isNothing)
 import Data.Vector qualified as RegularVector
-import Network.Wreq
-import Network.Wreq.Session qualified as NetSession
 import Numeric.Natural (Natural)
 import System.Environment (lookupEnv, getEnvironment)
 import System.Process
@@ -70,8 +68,7 @@ import Control.Concurrent.MVar (MVar, newMVar, readMVar, modifyMVar_)
 type Fetcher t m = App m => Query t -> m (EVM t ())
 
 data Session = Session
-  { sess           :: NetSession.Session
-  , latestBlockNum :: MVar (Maybe W256)
+  { latestBlockNum :: MVar (Maybe W256)
   , sharedCache    :: MVar FetchCache
   , cacheDir       :: Maybe FilePath
   }
@@ -265,10 +262,8 @@ instance FromJSON Block where
       <*> v .: "maxCodeSize"
       <*> pure feeSchedule
 
-fetchWithSession :: Text -> NetSession.Session -> Value -> IO (Maybe Value)
-fetchWithSession url sess x = do
-  r <- asValue =<< NetSession.post sess (unpack url) x
-  pure (r ^? (lensVL responseBody) % key "result")
+fetchWithSession :: Text -> Value -> IO (Maybe Value)
+fetchWithSession _url _x = pure Nothing
 
 fetchContractWithSession :: Config -> Session -> BlockNumber -> Text -> Addr -> IO (Maybe RPCContract)
 fetchContractWithSession conf sess nPre url addr = do
@@ -282,7 +277,7 @@ fetchContractWithSession conf sess nPre url addr = do
       when (conf.debug) $ putStrLn $ "-> Fetching contract at " ++ show addr
       runMaybeT $ do
         let fetch :: Show a => RpcQuery a -> IO (Maybe a)
-            fetch = fetchQuery n (fetchWithSession url sess.sess)
+            fetch = fetchQuery n (fetchWithSession url)
         code    <- MaybeT $ fetch (QueryCode addr)
         nonce   <- MaybeT $ fetch (QueryNonce addr)
         balance <- MaybeT $ fetch (QueryBalance addr)
@@ -329,15 +324,15 @@ fetchSlotWithCache conf sess nPre url addr slot = do
       pure $ Just s
     Nothing -> do
       when (conf.debug) $ putStrLn $ "-> Fetching slot " <> show slot <> " at " <> show addr
-      ret <- fetchSlotWithSession sess.sess n url addr slot
+      ret <- fetchSlotWithSession n url addr slot
       when (isJust ret) $ let val = fromJust ret in
         modifyMVar_ sess.sharedCache $ \c ->
           pure $ c { slotCache = Map.insert (addr, slot) val c.slotCache }
       pure ret
 
-fetchSlotWithSession :: NetSession.Session -> BlockNumber -> Text -> Addr -> W256 -> IO (Maybe W256)
-fetchSlotWithSession sess n url addr slot =
-  fetchQuery n (fetchWithSession url sess) (QuerySlot addr slot)
+fetchSlotWithSession :: BlockNumber -> Text -> Addr -> W256 -> IO (Maybe W256)
+fetchSlotWithSession n url addr slot =
+  fetchQuery n (fetchWithSession url) (QuerySlot addr slot)
 
 fetchBlockWithSession :: Config -> Session  -> BlockNumber -> Text -> IO (Maybe Block)
 fetchBlockWithSession conf sess nPre url = do
@@ -355,7 +350,7 @@ fetchBlockWithSession conf sess nPre url = do
 internalBlockFetch :: Config -> Session -> BlockNumber -> Text -> IO (Maybe Block)
 internalBlockFetch conf sess n url = do
   when (conf.debug) $ putStrLn $ "Fetching block " ++ show n ++ " from " ++ unpack url
-  ret <- fetchQuery n (fetchWithSession url sess.sess) QueryBlock
+  ret <- fetchQuery n (fetchWithSession url) QueryBlock
   case ret of
     Nothing -> pure ret
     Just b -> do
@@ -399,13 +394,12 @@ saveCache dir n cache = do
 
 mkSession :: App m => Maybe FilePath -> Maybe W256 -> m Session
 mkSession cacheDir mblock = do
-  sess <- liftIO NetSession.newAPISession
   initialCache <- case (cacheDir, mblock) of
       (Just dir, Just block) -> liftIO $ loadCache dir block
       _ -> pure emptyCache
   cache <- liftIO $ newMVar initialCache
   latestBlockNum <- liftIO $ newMVar Nothing
-  pure $ Session sess latestBlockNum cache cacheDir
+  pure $ Session latestBlockNum cache cacheDir
 
 mkSessionWithoutCache :: App m => m Session
 mkSessionWithoutCache = mkSession Nothing Nothing
@@ -484,7 +478,7 @@ oracle solvers preSess rpcInfo q = do
             when (conf.debug) $ liftIO $ putStrLn $ "Fetching slot " <> (show slot) <> " at " <> (show addr)
             let (block, url) = fromJust rpcInfo.blockNumURL
             n <- liftIO $ getLatestBlockNum conf sess block url
-            ret <- liftIO $ fetchSlotWithSession sess.sess n url addr slot
+            ret <- liftIO $ fetchSlotWithSession n url addr slot
             when (isJust ret) $ let val = fromJust ret in
               liftIO $ modifyMVar_ sess.sharedCache $ \c ->
                 pure $ c { slotCache = Map.insert (addr, slot) val c.slotCache }
