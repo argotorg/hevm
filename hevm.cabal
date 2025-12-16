@@ -199,7 +199,7 @@ executable hevm
     cli
   main-is:
     cli.hs
-  ghc-options: -threaded -with-rtsopts=-N
+  -- ghc-options: -threaded -with-rtsopts=-N  -- Disabled for WASM builds (no threading support)
   other-modules:
     Paths_hevm
   autogen-modules:
