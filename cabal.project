@@ -2,3 +2,11 @@ packages:
   .
   vendored/data-bword
   vendored/data-dword
+  vendored/foundation/basement
+  vendored/foundation/foundation
+  vendored/memory-0.18.0
+  vendored/cryptonite-0.30
+  vendored/crypton-1.0.4
+  vendored/cborg-0.2.10.0
+  vendored/haskell-wasm-cabal/Cabal-syntax
+  vendored/haskell-wasm-cabal/Cabal

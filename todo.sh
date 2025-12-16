@@ -3,7 +3,7 @@
 # Had to go into vendored/data-bword and do:
 # cabal --with-compiler=wasm32-wasi-ghc --with-hc-pkg=wasm32-wasi-ghc-pkg v2-build --disable-shared --disable-profiling
 # cabal --with-compiler=wasm32-wasi-ghc --with-hc-pkg=wasm32-wasi-ghc-pkg v2-build --disable-profiling
-#
+
  # cabal --with-compiler=wasm32-wasi-ghc --with-hc-pkg=wasm32-wasi-ghc-pkg v2-build \
  #  --disable-shared \
  #  --disable-profiling \
@@ -17,3 +17,15 @@
 # NOT using #ghc now -- and aiming for -dynamic-too
 # compiled bword with: cabal --with-compiler=wasm32-wasi-ghc --with-hc-pkg=wasm32-wasi-ghc-pkg v2-build --disable-profiling
 cabal --with-compiler=wasm32-wasi-ghc --with-hc-pkg=wasm32-wasi-ghc-pkg --with-hsc2hs=wasm32-wasi-hsc2hs v2-build --allow-newer=base,ghc-bignum,template-haskell --constraint="hashable>=1.5.0.0" --disable-tests --enable-library-vanilla --disable-library-for-ghci -j1 exe:hevm
+
+cabal --with-compiler=wasm32-wasi-ghc --with-hc-pkg=wasm32-wasi-ghc-pkg --with-hsc2hs=wasm32-wasi-hsc2hs v2-build --allow-newer=base,ghc-bignum,template-haskell --constraint="hashable>=1.5.0.0" --disable-tests --enable-library-vanilla --disable-library-for-ghci -j1 exe:hevm
+
+cabal --with-compiler=wasm32-wasi-ghc --with-hc-pkg=wasm32-wasi-ghc-pkg --with-hsc2hs=wasm32-wasi-hsc2hs v2-build --allow-newer=base,ghc-bignum,template-haskell --constraint="hashable>=1.5.0.0" --disable-tests --enable-library-vanilla --disable-library-for-ghci -j1 exe:hevm 2>&1 | tee /tmp/build-output.txt
+
+--> I thiink we can run it with -j2
+
+
+It will fail on data-dword. Just go into vendored/
+
+And issue first in data-bword and then in data-dword:
+cabal --with-compiler=wasm32-wasi-ghc --with-hc-pkg=wasm32-wasi-ghc-pkg v2-build . --disable-profiling -v
