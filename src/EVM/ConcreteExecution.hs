@@ -29,7 +29,7 @@ import Data.Vector.Unboxed qualified as UVec
 import Data.Vector.Unboxed.Mutable qualified as UMVec
 import Data.Vector.Mutable qualified as MVec
 import Data.Vector qualified as Vec
-import Data.Word (Word8, Word32, Word64)
+import Data.Word (Word8, Word64)
 import Prelude hiding (exponent)
 
 import EVM (allButOne64th, ceilDiv, log2)
@@ -40,7 +40,7 @@ import EVM.Types (
   Word512,
   internalError,
   GenericOp(..),
-  -- ByteStringS(..),
+  ByteStringS(..),
   word,
   keccak',
   toWord64,
@@ -48,8 +48,9 @@ import EVM.Types (
   deconstructWord256ToWords,
   truncateToAddr,
   Addr(..),
-  ByteStringS (ByteStringS),
-  FunctionSelector
+  FunctionSelector,
+  word256Bytes,
+  word160Bytes
   )
 import EVM.Op (getOp)
 import EVM.FeeSchedule
@@ -131,6 +132,12 @@ freezeVM vm = do
 
 type ExecutionResult = (VMResult, VMSnapshot)
 
+data ReturnInfo = ReturnInfo {
+  dataOffset :: VMWord,
+  dataSize :: VMWord,
+  stackValueOnSuccess :: VMWord
+}
+
 data MFrameState s = MFrameState {
   pcRef :: STRef s Int,
   stack :: MStack s,
@@ -139,7 +146,7 @@ data MFrameState s = MFrameState {
   accounts :: Accounts,
   gasRemainingRef :: STRef s Gas,
   gasRefundedRef :: STRef s Gas,
-  retInfoRef :: STRef s (Maybe (W256, W256))
+  retInfoRef :: STRef s (Maybe ReturnInfo)
 }
 
 newMFrameState :: Accounts -> Gas -> ST s (MFrameState s)
@@ -153,7 +160,11 @@ newMFrameState accounts gas = do
   retInfoRef <- newSTRef Nothing
   pure $ MFrameState pcRef stackVec spRef memory accounts gasRemaining gasRefunded retInfoRef
 
+data ContextType = INIT | RUNTIME
+  deriving Eq
+
 data FrameContext = FrameContext {
+  contextType :: ContextType,
   code :: RuntimeCode,
   instructions :: Instructions,
   callData :: CallData,
@@ -319,7 +330,9 @@ exec executionContext accounts = runST $ do
       (updatedAccounts, targetAddress) = initTransaction tx accountsAfterInitiatingTransaction
       availableGas = tx.gasLimit - (Gas $ txGasCost feeSchedule tx)
       targetAccount = fromMaybe (internalError "Target address not present in the known accounts") (StrictMap.lookup targetAddress updatedAccounts)
-  initialFrame <- mkFrame tx.from targetAddress tx.value tx.txdata targetAccount.accCode availableGas accountsAfterInitiatingTransaction
+      contextType = if isCreate tx then INIT else RUNTIME
+  -- Debug.Trace.traceM $ "Target address: " <> (show targetAddress)
+  initialFrame <- mkFrame contextType tx.from targetAddress tx.value tx.txdata targetAccount.accCode availableGas accountsAfterInitiatingTransaction
   let frameAfterAccountsUpdate = initialFrame {state = initialFrame.state {accounts = updatedAccounts}}
   currentRef <- newSTRef frameAfterAccountsUpdate
   framesRef <- newSTRef []
@@ -350,14 +363,11 @@ exec executionContext accounts = runST $ do
       in (StrictMap.insert newAddress (emptyAccount {accNonce = 1, accCode = (asCode tx.txdata)}) accounts', newAddress)
     asCode (CallData txdata) = RuntimeCode txdata
 
-    mkFrame :: Addr -> Addr -> CallValue -> CallData -> RuntimeCode -> Gas -> Accounts -> ST s (MFrame s)
-    mkFrame from to callvalue calldata code availableGas accounts' = do
+    mkFrame :: ContextType -> Addr -> Addr -> CallValue -> CallData -> RuntimeCode -> Gas -> Accounts -> ST s (MFrame s)
+    mkFrame contextType from to callvalue calldata code availableGas accounts' = do
       freshState <- newMFrameState accounts' availableGas
-      let ctx = FrameContext code (parseByteCode code) calldata callvalue accounts' to to from False
+      let ctx = FrameContext contextType code (parseByteCode code) calldata callvalue accounts' to to from False
       pure $ MFrame ctx freshState
-
-    createAddress :: Addr -> Nonce -> Addr
-    createAddress sender (Nonce senderNonce) = Addr . fromIntegral . keccak' . rlpList $ [rlpAddrFull sender, rlpWord256 (fromIntegral senderNonce)]
 
 
 runLoop :: MVM s -> ST s ExecutionResult
@@ -386,7 +396,7 @@ runLoop vm = do
               updatedAccounts = StrictMap.adjust addTo vm.executionContext.transaction.from accounts
               updatedFrame = frame {state = frame.state {accounts = updatedAccounts}}
           writeSTRef vm.current updatedFrame
-        VMSuccess returnData -> do
+        VMSuccess _ -> do
           Gas refunds <- getGasRefund frame
           let gasUsed = limit - remaining
               refundCap = gasUsed `div` 5
@@ -399,8 +409,7 @@ runLoop vm = do
           let accounts = frame.state.accounts
               addTo account = account {accBalance = account.accBalance + weiToRefund}
               updatedAccounts = StrictMap.alter (rewardMiner minerPay) vm.executionContext.blockHeader.coinbase $ StrictMap.adjust addTo vm.executionContext.transaction.from accounts
-              accountsAfteSuccessfulCreate = if isCreate vm.executionContext.transaction then (StrictMap.adjust (\account -> account{accCode = (RuntimeCode returnData)}) frame.context.codeAddress updatedAccounts) else updatedAccounts
-              updatedFrame = frame {state = frame.state {accounts = accountsAfteSuccessfulCreate}}
+              updatedFrame = frame {state = frame.state {accounts = updatedAccounts}}
           writeSTRef vm.current updatedFrame
 
     rewardMiner reward maybeAccount =
@@ -422,15 +431,17 @@ stepVM vm = do
   finishFrame :: MVM s -> FrameResult -> ST s (Maybe VMResult)
   finishFrame vm result = do
     frames <- readSTRef vm.frames
+    finalizeInitIfSucceeded
+    
     case frames of
       [] -> pure $ Just $ frameToVMResult result
 
       nextFrame:rest -> do
         finishingFrame <- getCurrentFrame vm
-        accounts <- getCurrentAccounts vm
+        let accounts = finishingFrame.state.accounts
         unspentGas <- getAvailableGas finishingFrame
         gasRefund <- getGasRefund finishingFrame
-        (retOffset, retSize) <- getReturnInfo finishingFrame
+        (ReturnInfo retOffset retSize stackRetValue) <- getReturnInfo finishingFrame
         writeSTRef vm.current nextFrame
         writeSTRef vm.frames rest
         writeSTRef vm.terminationFlagRef Nothing
@@ -439,11 +450,13 @@ stepVM vm = do
             currentFrame <- getCurrentFrame vm
             unburn' currentFrame unspentGas
             addGasRefund currentFrame gasRefund
+            let calleeContextType = finishingFrame.context.contextType
             let updatedFrame = currentFrame {state = currentFrame.state {accounts = accounts}}
             writeSTRef vm.current updatedFrame
-            memory <- getMemory vm
-            writeMemory memory (fromIntegral retOffset) (BS.take (fromIntegral retSize) returnData)
-            uncheckedPush vm 1 -- We can use uncheckedPush because call must have removed some arguments from the stack, so there is space
+            when (calleeContextType == RUNTIME) $ do 
+              memory <- getMemory vm
+              writeMemory memory (fromIntegral retOffset) (BS.take (fromIntegral retSize) returnData)
+            uncheckedPush vm stackRetValue -- We can use uncheckedPush because call must have removed some arguments from the stack, so there is space
 
           FrameReverted returnData -> do
             currentFrame <- getCurrentFrame vm
@@ -455,6 +468,15 @@ stepVM vm = do
           FrameErrored _ -> do
             uncheckedPush vm 0
         pure Nothing
+    
+    where 
+      finalizeInitIfSucceeded = do
+        finishingFrame <- getCurrentFrame vm
+        let accounts = finishingFrame.state.accounts
+        when (finishingFrame.context.contextType == INIT) $ do
+          case result of
+            FrameSucceeded returnData -> writeSTRef vm.current finishingFrame {state = finishingFrame.state {accounts = StrictMap.adjust (\acc -> acc{accCode = RuntimeCode returnData}) finishingFrame.context.codeAddress accounts}}
+            _ -> pure ()
 
 
 runStep :: MVM s -> Step s ()
@@ -536,6 +558,8 @@ runStep vm = do
       OpGasprice -> stepGasPrice vm
       OpPc -> stepPC vm
       OpLog n -> stepLog vm n
+      OpCreate -> stepCreate vm
+      OpCreate2 -> stepCreate2 vm
       OpUnknown xxx -> vmError $ UnrecognizedOpcode xxx
       _ -> internalError ("Unknown opcode: " ++ show op)
     Push n payload -> stepPushN vm n payload
@@ -968,9 +992,9 @@ makeCall vm callType gas to callValue@(CallValue cv') argsOffset argsSize retOff
     storageAddress = case callType of ct | ct == REGULAR || ct == STATIC -> to; _ -> currentFrame.context.storageAddress
     caller = case callType of DELEGATE -> currentFrame.context.storageAddress; _ -> currentFrame.context.codeAddress
     shouldBeStatic = (callType == STATIC || currentFrame.context.isStatic)
-    newFrameContext = FrameContext targetCode (parseByteCode targetCode) (CallData calldata) callValue' accounts to storageAddress caller shouldBeStatic
+    newFrameContext = FrameContext RUNTIME targetCode (parseByteCode targetCode) (CallData calldata) callValue' accounts to storageAddress caller shouldBeStatic
     newFrame = MFrame newFrameContext newFrameState
-  liftST $ setReturnInfo newFrame (retOffset, retSize)
+  liftST $ setReturnInfo newFrame (ReturnInfo retOffset retSize 1)
   liftST $ pushFrame vm newFrame
 
   where
@@ -988,15 +1012,15 @@ getOrCreateAccount vm address = do
       pure emptyAccount
     Just account -> pure account
 
-setReturnInfo :: MFrame s -> (W256, W256)-> ST s ()
+setReturnInfo :: MFrame s -> ReturnInfo -> ST s ()
 setReturnInfo (MFrame _ state) retInfo = do
   writeSTRef state.retInfoRef (Just retInfo)
 
-getReturnInfo :: MFrame s -> ST s (W256, W256)
+getReturnInfo :: MFrame s -> ST s ReturnInfo
 getReturnInfo (MFrame _ state) = do
   retInfo <- readSTRef state.retInfoRef
   case retInfo of
-    Nothing -> internalError "Return error not set!"
+    Nothing -> internalError "Return info not set!"
     Just info -> pure info
 
 stepKeccak :: MVM s -> Step s ()
@@ -1177,6 +1201,40 @@ stepLog vm n = do
           writeStackPointer vm' sp'
           Vec.toList <$> Vec.freeze (MVec.slice sp' i stack)
   
+stepCreate :: MVM s -> Step s ()
+stepCreate _vm = internalError "CREATE not implemented yet!"
+
+stepCreate2 :: MVM s -> Step s ()
+stepCreate2 vm = do
+  checkNotStaticContext vm
+  value <- pop vm
+  offset <- pop vm
+  size <- pop vm
+  salt <- pop vm
+  
+  initCode <- readMemory vm offset size
+  -- memory <- liftST $ getMemory vm
+  currentFrame <- liftST $ getCurrentFrame vm
+  availableGas <- liftST $ getAvailableGas currentFrame
+  let
+    sender = currentFrame.context.storageAddress
+    newAddress = create2Address sender salt initCode
+    (createCost, initGas) = costOfCreate availableGas size True
+  burn' currentFrame createCost
+  executeCreate vm sender initGas (CallValue value) newAddress initCode
+
+  where
+    costOfCreate :: Gas -> VMWord -> Bool -> (Gas, Gas)
+    costOfCreate availableGas codeSize hashNeeded = (createCost, initGas)
+      where
+        fees = feeSchedule
+        byteCost = if hashNeeded then fees.g_sha3word + fees.g_initcodeword else fees.g_initcodeword
+        codeCost = byteCost * (ceilDiv codeSize 32)
+        createCost = Gas . fromIntegral $ codeCost
+        (Gas remaining) = availableGas - createCost
+        initGas = Gas $ allButOne64th remaining
+
+
 
 -- isRootFrame :: MVM s -> ST s Bool
 -- isRootFrame vm = do
@@ -1613,10 +1671,12 @@ burnStaticGas vm instruction = {-# SCC "BurnStaticGas" #-} do
           OpDup _ -> g_verylow
           OpSwap _ -> g_verylow
           OpLog _ -> g_log
+          OpCreate -> g_create
           OpCall -> g_zero -- Cost for CALL depends on if we are accessing cold or warm address
           OpCallcode -> g_zero -- Cost for CALL depends on if we are accessing cold or warm address
           OpReturn -> g_zero
           OpDelegatecall -> g_zero
+          OpCreate2 -> g_create
           OpStaticcall -> g_zero
           OpRevert -> g_zero
           OpUnknown _ -> g_zero
@@ -1694,3 +1754,32 @@ getInstruction vm pc = do
   pure $ if pc >= len
     then GenericInst OpStop
     else Vec.unsafeIndex instructions pc
+
+createAddress :: Addr -> Nonce -> Addr
+createAddress sender (Nonce senderNonce) = Addr . fromIntegral . keccak' . rlpList $ [rlpAddrFull sender, rlpWord256 (fromIntegral senderNonce)]
+
+create2Address :: Addr -> VMWord -> BS.ByteString -> Addr
+create2Address sender salt initCode = 
+  truncateToAddr $ keccak' $ mconcat [BS.singleton 0xff, word160Bytes sender, word256Bytes salt, word256Bytes $ keccak' initCode]
+
+executeCreate :: MVM s -> Addr -> Gas -> CallValue -> Addr -> BS.ByteString -> Step s ()
+executeCreate vm sender initGas value newAddress code = do
+  -- TODO: check code size
+  -- TODO: check nonce overflowing
+  -- TODO: Check call stack overflowing
+  -- TODO: Check account already exists on address
+  -- TODO Check balance
+  -- Debug.Trace.traceM $ "Executing create: with address " <> (show newAddress) <> " sender is " <> (show sender) <> " code is: " <> (show $ ByteStringS code)
+  callerFrame <- liftST $ getCurrentFrame vm
+  burn' callerFrame initGas
+  let initCode = RuntimeCode code
+  let callerAccounts = callerFrame.state.accounts
+      withCalleeAccounts = StrictMap.insert newAddress (emptyAccount {accCode = initCode, accNonce = 1}) callerAccounts
+      withNonceIncremented = StrictMap.adjust (\acc -> acc{accNonce = acc.accNonce + 1})  sender withCalleeAccounts
+      calleeAccounts = uncheckedTransfer withNonceIncremented sender newAddress value
+  newFrameState <- liftST $ newMFrameState calleeAccounts initGas
+  let newFrameContext = FrameContext INIT initCode (parseByteCode initCode) (CallData BS.empty) value calleeAccounts newAddress newAddress sender False
+      newFrame = MFrame newFrameContext newFrameState
+      (Addr addrVal) = newAddress
+  liftST $ setReturnInfo newFrame (ReturnInfo 0 0 (fromIntegral addrVal))
+  liftST $ pushFrame vm newFrame
