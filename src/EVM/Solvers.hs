@@ -226,8 +226,6 @@ withSolvers solver count threads timeout cont = do
 
 getMultiSol :: forall m. (MonadIO m, ReadConfig m) => SMT2 -> MultiSol -> (Chan (Maybe [W256])) -> SolverInstance -> Chan SolverInstance -> TVar [(ThreadId, Task)] -> Int -> m ()
 getMultiSol smt2@(SMT2 cmds cexvars _) multiSol r inst availableInstances runningThreads fileCounter = do
-  tid <- liftIO myThreadId
-  let cleanup = liftIO . atomically $ modifyTVar' runningThreads (filter (\(t, _) -> t /= tid))
   conf <- readConfig
   when conf.dumpQueries $ liftIO $ writeSMT2File smt2 "." (show fileCounter)
   -- reset solver and send all lines of provided script
@@ -247,7 +245,8 @@ getMultiSol smt2@(SMT2 cmds cexvars _) multiSol r inst availableInstances runnin
   -- put the instance back in the list of available instances
   liftIO $ writeChan availableInstances inst
   -- remove thread from running threads list
-  cleanup
+  tid <- liftIO myThreadId
+  liftIO . atomically $ modifyTVar' runningThreads (filter (\(t, _) -> t /= tid))
   where
     maskFromBytesCount k
       | k <= 32 = (2 ^ (8 * k) - 1)
@@ -299,7 +298,6 @@ getMultiSol smt2@(SMT2 cmds cexvars _) multiSol r inst availableInstances runnin
 getOneSol :: (MonadIO m, ReadConfig m) => SMT2 -> Maybe [Prop] -> Chan SMTResult -> TChan CacheEntry -> SolverInstance -> Chan SolverInstance -> TVar [(ThreadId, Task)] -> Int -> m ()
 getOneSol smt2@(SMT2 cmds cexvars _) props r cacheq inst availableInstances runningThreads fileCounter = do
   conf <- readConfig
-  tid <- liftIO myThreadId
   liftIO $ do
     when (conf.dumpQueries) $ writeSMT2File smt2 "." (show fileCounter)
     -- reset solver and send all lines of provided script
@@ -330,6 +328,7 @@ getOneSol smt2@(SMT2 cmds cexvars _) props r cacheq inst availableInstances runn
     -- put the instance back in the list of available instances
     writeChan availableInstances inst
     -- remove thread from running threads list
+    tid <- liftIO myThreadId
     liftIO . atomically $ modifyTVar' runningThreads (filter (\(t, _) -> t /= tid))
 
 dumpUnsolved :: SMT2 -> Int -> Maybe FilePath -> IO ()
