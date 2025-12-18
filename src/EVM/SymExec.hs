@@ -6,7 +6,6 @@ module EVM.SymExec where
 
 import Prelude hiding (Foldable(..))
 
-import Control.Arrow ((>>>))
 import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.Async ( mapConcurrently)
 import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
@@ -16,14 +15,14 @@ import Control.Concurrent.STM.TVar (TVar, newTVarIO, modifyTVar, readTVar, write
 import Control.Concurrent.STM.TMVar (TMVar, putTMVar, takeTMVar, newEmptyTMVarIO)
 import Control.Monad (when, unless, forM_, forM, forever, void)
 import Control.Monad.Loops (whileM)
-import Control.Monad.IO.Unlift
+import Control.Monad.IO.Unlift (MonadUnliftIO, toIO, withRunInIO)
 import Control.Monad.Operational qualified as Operational
 import Control.Monad.ST (RealWorld, stToIO, ST)
-import Control.Monad.State.Strict
+import Control.Monad.State.Strict (liftIO, runStateT)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.DoubleWord (Word256)
-import Data.Foldable (Foldable(..))
+import Data.Foldable (length, foldl', foldr)
 import Data.List (sortBy, sort)
 import Data.List.NonEmpty qualified as NE
 import Data.Maybe (fromMaybe, listToMaybe, mapMaybe, catMaybes)
@@ -34,17 +33,23 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding (encodeUtf8)
 import Data.Text.IO qualified as T
 import Data.Tree.Zipper qualified as Zipper
 import Data.Tuple (swap)
 import Data.Vector qualified as V
 import Data.Vector.Storable qualified as VS
 import Data.Vector.Storable.ByteString (vectorToByteString)
-import GHC.Conc (numCapabilities)
-import GHC.Natural
+import GHC.Conc (numCapabilities, getNumProcessors)
+import GHC.Generics (Generic)
+import GHC.Num.Natural (Natural)
+import Optics.Core
+import Options.Generic (ParseField, ParseFields, ParseRecord)
+import Text.Printf (printf)
+import Witch (into, unsafeInto)
 
 import EVM (makeVm, abstractContract, initialContract, getCodeLocation, isValidJumpDest)
-import EVM.Exec
+import EVM.Exec (exec)
 import EVM.Fetch qualified as Fetch
 import EVM.ABI
 import EVM.Effects
@@ -52,20 +57,12 @@ import EVM.Expr qualified as Expr
 import EVM.FeeSchedule (feeSchedule)
 import EVM.Format (formatExpr, formatPartial, formatPartialDetailed, showVal, indent, formatBinary, formatProp, formatState, formatError)
 import EVM.SMT qualified as SMT
-import EVM.Solvers
+import EVM.Solvers (SolverGroup, checkSatWithProps)
 import EVM.Stepper (Stepper)
 import EVM.Stepper qualified as Stepper
-import EVM.Traversals
+import EVM.Traversals (mapExpr, mapExprM, foldTerm)
 import EVM.Types hiding (Comp)
 import EVM.Types qualified
-import EVM.Expr (maybeConcStoreSimp)
-import GHC.Conc (getNumProcessors)
-import GHC.Generics (Generic)
-import Optics.Core
-import Options.Generic (ParseField, ParseFields, ParseRecord)
-import Text.Printf (printf)
-import Witch (into, unsafeInto)
-import Data.Text.Encoding (encodeUtf8)
 import EVM.Solidity (WarningData (..))
 
 data LoopHeuristic
@@ -890,7 +887,7 @@ verifyInputsWithHandler solvers opts fetcher preState post cexHandler = do
 expandCex :: VM Symbolic -> SMTCex -> SMTCex
 expandCex prestate c = c { store = Map.union c.store concretePreStore }
   where
-    concretePreStore = Map.mapMaybe (maybeConcStoreSimp . (.storage))
+    concretePreStore = Map.mapMaybe (Expr.maybeConcStoreSimp . (.storage))
                      . Map.filter (\v -> Expr.containsNode isConcreteStore v.storage)
                      $ (prestate.env.contracts)
     isConcreteStore = \case
@@ -1255,7 +1252,7 @@ prettyBuf b = internalError $ "Unexpected symbolic buffer:\n" <> T.unpack (forma
 
 calldataFromCex :: App m => SMTCex -> Expr Buf -> Sig -> m (Err ByteString)
 calldataFromCex cex buf sig = do
-  let sigKeccak = keccakSig $ encodeUtf8 (callSig sig)
+  let sigKeccak = BS.take 4 $ keccakBytes $ encodeUtf8 (callSig sig)
   pure $ (sigKeccak <>) <$> body
   where
     cd = defaultSymbolicValues $ subModel cex buf
@@ -1266,8 +1263,6 @@ calldataFromCex cex buf sig = do
     forceConcrete :: (Expr Buf) -> Err ByteString
     forceConcrete (ConcreteBuf k) = Right k
     forceConcrete _ = Left "Symbolic buffer in calldata, cannot produce concrete model"
-    keccakSig :: ByteString -> ByteString
-    keccakSig = keccakBytes >>> BS.take 4
 
 prettyCalldata :: SMTCex -> Expr Buf -> Text -> [AbiType] -> Text
 prettyCalldata cex buf sig types = headErr errSig (T.splitOn "(" sig) <> "(" <> body <> ")" <> T.pack finalErr
