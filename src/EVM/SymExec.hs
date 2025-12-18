@@ -57,7 +57,7 @@ import EVM.Expr qualified as Expr
 import EVM.FeeSchedule (feeSchedule)
 import EVM.Format (formatExpr, formatPartial, formatPartialDetailed, showVal, indent, formatBinary, formatProp, formatState, formatError)
 import EVM.SMT qualified as SMT
-import EVM.Solvers (SolverGroup, checkSatWithProps)
+import EVM.Solvers (SolverGroup(..), checkSatWithProps)
 import EVM.Stepper (Stepper)
 import EVM.Stepper qualified as Stepper
 import EVM.Traversals (mapExpr, mapExprM, foldTerm)
