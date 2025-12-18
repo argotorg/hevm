@@ -9,8 +9,9 @@ import Prelude hiding (LT, GT)
 import GHC.Natural
 import GHC.IO.Handle (Handle, hFlush, hSetBuffering, BufferMode(..))
 import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
-import Control.Concurrent (forkIO, killThread)
-import Control.Concurrent.STM (writeTChan, newTChan, TChan, tryReadTChan, atomically)
+import Control.Concurrent (forkIO, killThread, ThreadId, myThreadId)
+import Control.Concurrent.STM (writeTChan, newTChan, TChan, tryReadTChan, atomically, readTVar, readTVarIO, modifyTVar', check)
+import Control.Concurrent.STM.TVar (TVar, newTVarIO)
 import Control.Monad
 import Control.Monad.State.Strict
 import Control.Monad.IO.Unlift
@@ -61,7 +62,10 @@ data SolverInstance = SolverInstance
   }
 
 -- | A channel representing a group of solvers
-newtype SolverGroup = SolverGroup (Chan Task)
+data SolverGroup = SolverGroup
+  { taskQueue :: Chan Task
+  , shouldAbort :: TVar Bool
+  }
 
 data MultiSol = MultiSol
   { maxSols :: Int
@@ -92,13 +96,13 @@ supersetAny :: Set Prop -> [Set Prop] -> Bool
 supersetAny a bs = any (`isSubsetOf` a) bs
 
 checkMulti :: SolverGroup -> Err SMT2 -> MultiSol -> IO (Maybe [W256])
-checkMulti (SolverGroup taskq) smt2 multiSol = do
+checkMulti sg smt2 multiSol = do
   if isLeft smt2 then pure Nothing
   else do
     -- prepare result channel
     resChan <- newChan
     -- send task to solver group
-    writeChan taskq (TaskMulti (MultiData (getNonError smt2) multiSol resChan))
+    writeChan sg.taskQueue (TaskMulti (MultiData (getNonError smt2) multiSol resChan))
     -- collect result
     readChan resChan
 
@@ -115,13 +119,13 @@ checkSatWithProps sg props = do
 
 -- When props is Nothing, the cache will not be filled or used
 checkSat :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> IO SMTResult
-checkSat (SolverGroup taskq) props smt2 = do
+checkSat sg props smt2 = do
   if isLeft smt2 then pure $ Error $ getError smt2
   else do
     -- prepare result channel
     resChan <- newChan
     -- send task to solver group
-    writeChan taskq (TaskSingle (SingleData (getNonError smt2) props resChan))
+    writeChan sg.taskQueue (TaskSingle (SingleData (getNonError smt2) props resChan))
     -- collect result
     readChan resChan
 
@@ -139,44 +143,91 @@ withSolvers solver count threads timeout cont = do
     taskq <- liftIO newChan
     cacheq <- liftIO . atomically $ newTChan
     availableInstances <- liftIO newChan
+    shouldAbort <- liftIO $ newTVarIO False
+    runningThreads <- liftIO $ newTVarIO ([] :: [(ThreadId, Task)])
     liftIO $ forM_ instances (writeChan availableInstances)
-    orchestrate' <- toIO $ orchestrate taskq cacheq availableInstances [] 0
+
+    -- Spawn orchestration thread
+    orchestrate' <- toIO $ orchestrate taskq cacheq availableInstances shouldAbort runningThreads [] 0
     orchestrateId <- liftIO $ forkIO orchestrate'
 
+    -- Spawn watcher thread that kills solver threads when abort flag is set
+    abortWatcher' <- toIO $ abortWatcher shouldAbort runningThreads
+    abortWatcherId <- liftIO $ forkIO abortWatcher'
+
     -- run continuation with task queue
-    res <- cont (SolverGroup taskq)
+    res <- cont (SolverGroup taskq shouldAbort)
 
     -- cleanup and return results
     liftIO $ mapM_ (stopSolver) instances
     liftIO $ killThread orchestrateId
+    liftIO $ killThread abortWatcherId
     pure res
   where
-    orchestrate :: App m => Chan Task -> TChan CacheEntry -> Chan SolverInstance -> [Set Prop] -> Int -> m b
-    orchestrate taskq cacheq avail knownUnsat fileCounter = do
+    -- Watcher thread that blocks until abort flag is set, then kills all solver threads
+    abortWatcher :: App m => TVar Bool -> TVar [(ThreadId, Task)] -> m ()
+    abortWatcher abortFlag runningThreads = do
       conf <- readConfig
-      mx <- liftIO . atomically $ tryReadTChan cacheq
-      case mx of
-        Just (CacheEntry props)  -> do
-          let knownUnsat' = (fromList props):knownUnsat
-          when conf.debug $ liftIO $ putStrLn "   adding UNSAT cache"
-          orchestrate taskq cacheq avail knownUnsat' fileCounter
-        Nothing -> do
-          task <- liftIO $ readChan taskq
+      when conf.earlyAbort $ do
+        -- Block until abort flag becomes True
+        liftIO . atomically $ do
+          abort <- readTVar abortFlag
+          check abort
+        -- Kill all running solver threads immediately and write errors to their result channels
+        tidTasks <- liftIO $ readTVarIO runningThreads
+        liftIO $ forM_ tidTasks $ \(tid, task) -> do
+          killThread tid
+          -- Write error result to the task's result channel
           case task of
-            TaskSingle (SingleData _ props r) | isJust props && supersetAny (fromList (fromJust props)) knownUnsat -> do
-              liftIO $ writeChan r Qed
-              when conf.debug $ liftIO $ putStrLn "   Qed found via cache!"
-              orchestrate taskq cacheq avail knownUnsat fileCounter
-            _ -> do
-              inst <- liftIO $ readChan avail
-              runTask' <- case task of
-                TaskSingle (SingleData smt2 props r) -> toIO $ getOneSol smt2 props r cacheq inst avail fileCounter
-                TaskMulti (MultiData smt2 multiSol r) -> toIO $ getMultiSol smt2 multiSol r inst avail fileCounter
-              _ <- liftIO $ forkIO runTask'
-              orchestrate taskq cacheq avail knownUnsat (fileCounter + 1)
+            TaskSingle (SingleData _ _ r) -> writeChan r (Error "Aborted due to early abort")
+            TaskMulti (MultiData _ _ r) -> writeChan r Nothing
+        liftIO . atomically $ modifyTVar' runningThreads (const [])
+        when conf.debug $ liftIO $ putStrLn $ "   [Abort Watcher] Killed " <> show (length tidTasks) <> " running solver thread(s) due to early abort"
 
-getMultiSol :: forall m. (MonadIO m, ReadConfig m) => SMT2 -> MultiSol -> (Chan (Maybe [W256])) -> SolverInstance -> Chan SolverInstance -> Int -> m ()
-getMultiSol smt2@(SMT2 cmds cexvars _) multiSol r inst availableInstances fileCounter = do
+    orchestrate :: App m => Chan Task -> TChan CacheEntry -> Chan SolverInstance -> TVar Bool -> TVar [(ThreadId, Task)] -> [Set Prop] -> Int -> m b
+    orchestrate taskq cacheq avail abortFlag runningThreads knownUnsat fileCounter = do
+      conf <- readConfig
+      -- Check if we should abort early
+      abort <- liftIO $ readTVarIO abortFlag
+      if (conf.earlyAbort && abort) then drainTasks taskq
+      else do
+        mx <- liftIO . atomically $ tryReadTChan cacheq
+        case mx of
+          Just (CacheEntry props)  -> do
+            let knownUnsat' = (fromList props):knownUnsat
+            when conf.debug $ liftIO $ putStrLn "   adding UNSAT cache"
+            orchestrate taskq cacheq avail abortFlag runningThreads knownUnsat' fileCounter
+          Nothing -> do
+            task <- liftIO $ readChan taskq
+            case task of
+              TaskSingle (SingleData _ props r) | isJust props && supersetAny (fromList (fromJust props)) knownUnsat -> do
+                liftIO $ writeChan r Qed
+                when conf.debug $ liftIO $ putStrLn "   Qed found via cache!"
+                orchestrate taskq cacheq avail abortFlag runningThreads knownUnsat fileCounter
+              _ -> do
+                inst <- liftIO $ readChan avail
+                runTask' <- case task of
+                  TaskSingle (SingleData smt2 props r) -> toIO $ getOneSol smt2 props r cacheq inst avail runningThreads fileCounter
+                  TaskMulti (MultiData smt2 multiSol r) -> toIO $ getMultiSol smt2 multiSol r inst avail runningThreads fileCounter
+                tid <- liftIO $ forkIO runTask'
+                liftIO . atomically $ modifyTVar' runningThreads ((tid, task):)
+                orchestrate taskq cacheq avail abortFlag runningThreads knownUnsat (fileCounter + 1)
+
+    -- Drain any pending tasks from the queue and return error results
+    drainTasks :: App m => Chan Task -> m b
+    drainTasks taskq = do
+      conf <- readConfig
+      when conf.debug $ liftIO $ putStrLn "   [Orchestrate] Draining pending tasks due to early abort"
+      forever $ do
+        task <- liftIO $ readChan taskq
+        case task of
+          TaskSingle (SingleData _ _ r) -> liftIO $ writeChan r (Error "Aborted due to early abort")
+          TaskMulti (MultiData _ _ r) -> liftIO $ writeChan r Nothing
+
+getMultiSol :: forall m. (MonadIO m, ReadConfig m) => SMT2 -> MultiSol -> (Chan (Maybe [W256])) -> SolverInstance -> Chan SolverInstance -> TVar [(ThreadId, Task)] -> Int -> m ()
+getMultiSol smt2@(SMT2 cmds cexvars _) multiSol r inst availableInstances runningThreads fileCounter = do
+  tid <- liftIO myThreadId
+  let cleanup = liftIO . atomically $ modifyTVar' runningThreads (filter (\(t, _) -> t /= tid))
   conf <- readConfig
   when conf.dumpQueries $ liftIO $ writeSMT2File smt2 "." (show fileCounter)
   -- reset solver and send all lines of provided script
@@ -195,6 +246,8 @@ getMultiSol smt2@(SMT2 cmds cexvars _) multiSol r inst availableInstances fileCo
       subRun [] smt2 sat
   -- put the instance back in the list of available instances
   liftIO $ writeChan availableInstances inst
+  -- remove thread from running threads list
+  cleanup
   where
     maskFromBytesCount k
       | k <= 32 = (2 ^ (8 * k) - 1)
@@ -243,9 +296,10 @@ getMultiSol smt2@(SMT2 cmds cexvars _) multiSol r inst availableInstances fileCo
           when conf.debug $ putStrLn $ "Unable to write SMT to solver: " <> (T.unpack err)
           writeChan r Nothing
 
-getOneSol :: (MonadIO m, ReadConfig m) => SMT2 -> Maybe [Prop] -> Chan SMTResult -> TChan CacheEntry -> SolverInstance -> Chan SolverInstance -> Int -> m ()
-getOneSol smt2@(SMT2 cmds cexvars _) props r cacheq inst availableInstances fileCounter = do
+getOneSol :: (MonadIO m, ReadConfig m) => SMT2 -> Maybe [Prop] -> Chan SMTResult -> TChan CacheEntry -> SolverInstance -> Chan SolverInstance -> TVar [(ThreadId, Task)] -> Int -> m ()
+getOneSol smt2@(SMT2 cmds cexvars _) props r cacheq inst availableInstances runningThreads fileCounter = do
   conf <- readConfig
+  tid <- liftIO myThreadId
   liftIO $ do
     when (conf.dumpQueries) $ writeSMT2File smt2 "." (show fileCounter)
     -- reset solver and send all lines of provided script
@@ -275,6 +329,8 @@ getOneSol smt2@(SMT2 cmds cexvars _) props r cacheq inst availableInstances file
 
     -- put the instance back in the list of available instances
     writeChan availableInstances inst
+    -- remove thread from running threads list
+    liftIO . atomically $ modifyTVar' runningThreads (filter (\(t, _) -> t /= tid))
 
 dumpUnsolved :: SMT2 -> Int -> Maybe FilePath -> IO ()
 dumpUnsolved fullSmt fileCounter dump = do

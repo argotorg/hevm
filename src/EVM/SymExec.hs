@@ -630,8 +630,7 @@ getExprEmptyStore solvers c signature' concreteArgs opts = do
   conf <- readConfig
   calldata <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ loadEmptySymVM (RuntimeCode (ConcreteRuntimeCode c)) (Lit 0) calldata
-  shouldAbort <- liftIO $ newTVarIO False
-  paths <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState shouldAbort runExpr pure
+  paths <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState solvers.shouldAbort runExpr pure
   if conf.simp then (pure $ map Expr.simplify paths) else pure paths
 
 -- Used only in testing
@@ -647,8 +646,7 @@ getExpr solvers c signature' concreteArgs opts = do
   conf <- readConfig
   calldata <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ abstractVM calldata c Nothing False
-  shouldAbort <- liftIO $ newTVarIO False
-  paths <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState shouldAbort runExpr pure
+  paths <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState solvers.shouldAbort runExpr pure
   if conf.simp then (pure $ map Expr.simplify paths) else pure paths
 
 {- | Checks if an assertion violation has been encountered
@@ -733,8 +731,7 @@ exploreContract solvers theCode signature' concreteArgs opts maybepre = do
   calldata <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ abstractVM calldata theCode maybepre False
   let fetcher = Fetch.oracle solvers Nothing opts.rpcInfo
-  shouldAbort <- liftIO $ newTVarIO False
-  executeVM fetcher opts.iterConf preState shouldAbort pure
+  executeVM fetcher opts.iterConf preState solvers.shouldAbort pure
 
 -- | Stepper that parses the result of Stepper.runFully into an Expr End
 runExpr :: Stepper.Stepper Symbolic (Expr End)
@@ -844,8 +841,7 @@ verifyInputsWithHandler solvers opts fetcher preState post cexHandler = do
     putStrLn $ "   Keccak preimages in state: " <> (show $ length preState.keccakPreImgs)
     putStrLn $ "   Exploring call " <> call
 
-  shouldAbort <- liftIO $ newTVarIO False
-  results <- executeVM fetcher opts.iterConf preState shouldAbort $ \leaf -> do
+  results <- executeVM fetcher opts.iterConf preState solvers.shouldAbort $ \leaf -> do
     -- Extract partial if applicable
     let mPartial = case leaf of
           Partial _ _ p -> Just (p, leaf)
@@ -861,8 +857,8 @@ verifyInputsWithHandler solvers opts fetcher preState post cexHandler = do
         case (cexHandler, res) of
           (Just handler, cex@(Cex _)) -> do
             handler preState cex leaf
-            when conf.earlyAbort $ liftIO $ atomically $ writeTVar shouldAbort True
-          (_, (Cex _)) -> when conf.earlyAbort $ liftIO $ atomically $ writeTVar shouldAbort True
+            when conf.earlyAbort $ liftIO $ atomically $ writeTVar solvers.shouldAbort True
+          (_, (Cex _)) -> when conf.earlyAbort $ liftIO $ atomically $ writeTVar solvers.shouldAbort True
           _ -> pure ()
         pure (res, leaf)
       else pure (Qed, leaf)
@@ -960,8 +956,7 @@ equivalenceCheck solvers sess bytecodeA bytecodeB opts calldata create = do
     getBranches bs = do
       let bytecode = if BS.null bs then BS.pack [0] else bs
       prestate <- liftIO $ stToIO $ abstractVM calldata bytecode Nothing create
-      shouldAbort <- liftIO $ newTVarIO False
-      interpret (Fetch.oracle solvers sess Fetch.noRpc) opts.iterConf prestate shouldAbort runExpr pure
+      interpret (Fetch.oracle solvers sess Fetch.noRpc) opts.iterConf prestate solvers.shouldAbort runExpr pure
     filterQeds (EqIssues res partials) = EqIssues (filter (\(r, _) -> not . isQed $ r) res) partials
 
 rewriteFresh :: Text -> [Expr a] -> [Expr a]

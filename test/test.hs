@@ -1930,7 +1930,7 @@ tests = testGroup "hevm"
           let calldata = (WriteWord (Lit 0x0) (Var "u") (ConcreteBuf ""), [])
           initVM <- liftIO $ stToIO $ abstractVM calldata initCode Nothing True
           let iterConf = IterConfig {maxIter=Nothing, askSmtIters=1, loopHeuristic=StackBased }
-          paths <- interpret (Fetch.noRpcFetcher s) iterConf initVM runExpr pure
+          paths <- interpret (Fetch.noRpcFetcher s) iterConf initVM s.shouldAbort runExpr pure
           let exprSimp = map Expr.simplify paths
           assertBoolM "unexptected partial execution" (not $ any isPartial exprSimp)
     , test "mixed-concrete-symbolic-args" $ do
@@ -2022,7 +2022,7 @@ tests = testGroup "hevm"
         withDefaultSolver $ \s -> do
           vm <- liftIO $ stToIO $ loadSymVM runtimecode (Lit 0) initCode False
           let iterConf = IterConfig {maxIter=Nothing, askSmtIters=1, loopHeuristic=StackBased }
-          paths <- interpret (Fetch.noRpcFetcher s) iterConf vm runExpr pure
+          paths <- interpret (Fetch.noRpcFetcher s) iterConf vm s.shouldAbort runExpr pure
           let exprSimp = map Expr.simplify paths
           assertBoolM "expected partial execution" (any isPartial exprSimp)
     ]
