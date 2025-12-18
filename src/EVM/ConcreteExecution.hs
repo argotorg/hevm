@@ -504,7 +504,7 @@ runStep vm = do
       OpSdiv -> stepSDiv vm
       OpAddmod -> stepAddMod vm
       OpMulmod -> stepMulMod vm
-      OpExp -> stepExp vm
+      OpExp -> {-# SCC "stepExp" #-} stepExp vm
       OpAnd -> binOp vm (.&.)
       OpOr -> binOp vm (.|.)
       OpXor -> binOp vm (.^.)
@@ -1248,7 +1248,7 @@ stepMSize vm = do
   push vm (fromIntegral $ wordSize * 32)
 
 stepMLoad :: MVM s -> Step s ()
-stepMLoad vm = do
+stepMLoad vm = {-# SCC "MLoad" #-} do
   offset <- pop vm
   memory <- liftST $ getMemory vm
   touchMemory vm memory (fromIntegral offset) 32 -- TODO: check size and error out if larger than 64-bit word?
@@ -1256,7 +1256,7 @@ stepMLoad vm = do
   push vm v
 
 stepMStore :: MVM s -> Step s ()
-stepMStore vm = do
+stepMStore vm = {-# SCC "MStore" #-} do
   off <- pop vm
   val <- pop vm
   memory <- liftST $ getMemory vm
