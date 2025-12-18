@@ -6,13 +6,16 @@ CallData(..),
 CallValue(..),
 ExecutionResult,
 VMSnapshot(..),
+VMResult(..),
 Transaction(..),
 BlockHeader(..),
 ExecutionContext(..),
 Account(..),
 Wei(..),
 Gas(..),
-Nonce(..)
+Nonce(..),
+Accounts,
+Storage
 ) where
 
 import Control.Monad (forM, when, unless, ap, liftM)
