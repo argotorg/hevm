@@ -734,7 +734,7 @@ stepExp vm = do
 pow256 :: W256 -> W256 -> W256
 pow256 base exponent = go base exponent 1
   where
-    go b e acc
+    go !b !e !acc
       | e == 0 = acc
       | testBit e 0 = go (b*b) (e `shiftR` 1) (acc*b)
       | otherwise   = go (b*b) (e `shiftR` 1) acc
