@@ -16,7 +16,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Nix
-        uses: nixbuild/nix-quick-install-action@v30
+        uses: nixbuild/nix-quick-install-action@v34
       - name: lookup nix versions
         id: nixpkgs
         run: |
