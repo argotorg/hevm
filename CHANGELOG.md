@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Inequality propagation in constant propagation to prune impossible execution paths earlier.
   The constraint solver now tracks lower and upper bounds for symbolic values and detects
   conflicts (e.g., x < 5 && x > 10), significantly reducing the number of paths explored
+- Early-abort flag `--early-abort` to stop symbolic execution as soon as a counterexample is found.
+  This is useful when only one counterexample is needed.
 
 ## Fixed
 - Fix incorrect simplification rule for `PEq (Lit 1) (IsZero (LT a b))`
