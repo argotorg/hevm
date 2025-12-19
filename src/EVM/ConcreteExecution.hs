@@ -295,8 +295,15 @@ stackUnderflow = vmError StackUnderrun
 vmError :: EvmError -> Step s a
 vmError err = stop $ FrameErrored err
 
+vmError' :: MVM s -> EvmError -> ST s ()
+vmError' vm err = stop' vm $ FrameErrored err
+
+
 stop :: FrameResult -> Step s a
 stop result = Step $ \resultRef -> writeSTRef resultRef (Just result) >> pure (internalError "Should never be executed")
+
+stop' :: MVM s -> FrameResult -> ST s ()
+stop' vm result = writeSTRef vm.terminationFlagRef (Just result)
 
 checkNotStaticContext :: MVM s -> Step s ()
 checkNotStaticContext vm = do
@@ -487,8 +494,9 @@ runStep vm = do
   instruction <- liftST $ do
     pc <- readPC vm
     advancePC vm 1
-    getInstruction vm pc
-  burnStaticGas vm instruction
+    inst <- getInstruction vm pc
+    burnStaticGas vm inst
+    pure inst
   -- Debug.Trace.traceM ("Executing op " <> (show instruction))
   -- frame <- liftST $ getCurrentFrame vm
   -- Gas gas <- liftST $ readSTRef frame.state.gasRemainingRef
@@ -730,7 +738,7 @@ stepExp :: MVM s -> Step s ()
 stepExp vm = do
   base <- pop vm
   exponent <- pop vm
-  unless (exponent == 0) $ burn vm (extraExpGasCost exponent)
+  unless (exponent == 0) $ liftST $ burn vm (extraExpGasCost exponent)
   let res = pow256 base exponent
   push vm res
 
@@ -982,14 +990,14 @@ makeCall vm callType gas to callValue@(CallValue cv') argsOffset argsSize retOff
       sendingValue = cv' /= 0
       positiveValueCost = if sendingValue then feeSchedule.g_callvalue else 0
       dynamicCost = accessCost + positiveValueCost
-  burn' currentFrame (Gas dynamicCost)
+  liftST $ burn vm (Gas dynamicCost)
   availableGas <- liftST $ getAvailableGas currentFrame
   let accounts = currentFrame.state.accounts
       accountsAfterTransfer = uncheckedTransfer accounts currentFrame.context.codeAddress to callValue
       myGasToTransfer = computeGasToTransfer availableGas gas
       gasToTransfer = if sendingValue then myGasToTransfer + feeSchedule.g_callstipend else myGasToTransfer
   newFrameState <- liftST $ newMFrameState accountsAfterTransfer gasToTransfer
-  burn' currentFrame myGasToTransfer
+  liftST $ burn vm myGasToTransfer
   let
     callValue' = case callType of DELEGATE -> currentFrame.context.callValue; _ -> callValue
     storageAddress = case callType of ct | ct == REGULAR || ct == STATIC -> to; _ -> currentFrame.context.storageAddress
@@ -1030,7 +1038,7 @@ stepKeccak :: MVM s -> Step s ()
 stepKeccak vm = do
   offset <- pop vm
   size <- pop vm
-  burnDynamicCost size
+  liftST $ burnDynamicCost size
   bs <- readMemory vm offset size
   let hash = keccak' bs
   push vm hash
@@ -1147,7 +1155,7 @@ stepCodeCopy vm = do
 
 copyFromByteStringToMemory :: MVM s -> BS.ByteString -> Word64 -> Word64 -> Word64 -> Step s ()
 copyFromByteStringToMemory vm bs memOffset bsOffset size = do
-  burnDynamicCost vm size
+  liftST $ burnDynamicCost vm size
   let bs' = slicePadded bs (capAsInt bsOffset) (capAsInt size) -- NOTE: We cap to Int, larger values would cause error anyway
   memory <- liftST $ getMemory vm
   touchMemory vm memory memOffset size
@@ -1183,7 +1191,7 @@ stepLog vm n = do
   size <- pop vm
   bytes <- readMemory vm offset size
   topics <- getTopics vm n
-  burnLogGas n size
+  liftST $ burnLogGas n size
   -- TODO: keep logs?
   pure ()
   where
@@ -1223,7 +1231,7 @@ stepCreate2 vm = do
     sender = currentFrame.context.storageAddress
     newAddress = create2Address sender salt initCode
     (createCost, initGas) = costOfCreate availableGas size True
-  burn' currentFrame createCost
+  liftST $ burn vm createCost
   executeCreate vm sender initGas (CallValue value) newAddress initCode
 
   where
@@ -1277,10 +1285,11 @@ stepMStore8 vm = do
 stepSLoad :: MVM s -> Step s ()
 stepSLoad vm = {-# SCC "SLoad" #-} do
   key <- pop vm
-  store <- liftST $ getCurrentStorage vm
-  isWarm <- liftST $ touchCurrentStore vm key
-  burn vm $ if isWarm then feeSchedule.g_warm_storage_read else feeSchedule.g_cold_sload
-  let val = sload store key
+  val <- liftST $ do
+    store <- getCurrentStorage vm
+    isWarm <- touchCurrentStore vm key
+    burn vm $ if isWarm then feeSchedule.g_warm_storage_read else feeSchedule.g_cold_sload
+    pure $ sload store key
   push vm val
 
 stepSStore :: MVM s -> Step s ()
@@ -1288,17 +1297,18 @@ stepSStore vm = {-# SCC "SStore" #-} do
   checkNotStaticContext vm
   key <- pop vm
   val <- pop vm
-  isWarm <- liftST $ touchCurrentStore vm key
-  store <- liftST $ getCurrentStorage vm
-  let currentVal = sload store key
-  originalVal <- liftST $ getOriginalValue vm key
-  let warmCost = warmStoreCost originalVal currentVal val
-      totalGasCost = if isWarm then warmCost else warmCost + feeSchedule.g_cold_sload
-  burn vm totalGasCost
-  let refund = computeRefund originalVal currentVal val
-  liftST $ addRefund vm refund
-  let updatedStore = sstore store key val
-  liftST $ setCurrentStorage vm updatedStore
+  liftST $ do
+    isWarm <- touchCurrentStore vm key
+    store <-  getCurrentStorage vm
+    let currentVal = sload store key
+    originalVal <- getOriginalValue vm key
+    let warmCost = warmStoreCost originalVal currentVal val
+        totalGasCost = if isWarm then warmCost else warmCost + feeSchedule.g_cold_sload
+    burn vm totalGasCost
+    let refund = computeRefund originalVal currentVal val
+    addRefund vm refund
+    let updatedStore = sstore store key val
+    setCurrentStorage vm updatedStore
 
   where
     warmStoreCost originalValue currentValue newValue
@@ -1458,14 +1468,14 @@ writeMemory (Memory memRef wordSizeRef) offset bs
 
 touchMemory :: MVM s -> Memory s -> Word64 -> Word64 -> Step s ()
 touchMemory _ _ _ 0 = pure ()
-touchMemory vm (Memory _ wordSizeRef) offset size = do
-  currentSizeInWords <- liftST $ readSTRef wordSizeRef
+touchMemory vm (Memory _ wordSizeRef) offset size = liftST $ do
+  currentSizeInWords <- readSTRef wordSizeRef
   let wordSizeAfterTouch = bytesToWords $ offset + size
   when (wordSizeAfterTouch > currentSizeInWords) $ do
     let memoryExpansionCost = memoryCost wordSizeAfterTouch - memoryCost currentSizeInWords
     when (memoryExpansionCost > 0) $ do 
       burn vm memoryExpansionCost
-      liftST $ writeSTRef wordSizeRef wordSizeAfterTouch
+      writeSTRef wordSizeRef wordSizeAfterTouch
 
 bytesToWords :: Word64 -> Word64
 bytesToWords b = ceilDiv b 32
@@ -1581,18 +1591,14 @@ getGasRefund frame = readSTRef frame.state.gasRefundedRef
 addGasRefund :: MFrame s -> Gas -> ST s ()
 addGasRefund frame gas= modifySTRef' frame.state.gasRefundedRef (+gas)
 
-burn :: MVM s -> Gas -> Step s ()
-burn vm gas = {-# SCC "Burn" #-} do
-  frame <- liftST $ getCurrentFrame vm
-  burn' frame gas
-
-burn' :: MFrame s -> Gas -> Step s ()
-burn' frame (Gas toBurn) = {-# SCC "Burn'" #-} do
+burn :: MVM s -> Gas -> ST s ()
+burn vm (Gas toBurn) = {-# SCC "Burn" #-} do
+  frame <- getCurrentFrame vm
   let gasRef = frame.state.gasRemainingRef
-  (Gas gasRemaining) <- liftST $ readSTRef gasRef
+  (Gas gasRemaining) <- readSTRef gasRef
   if toBurn > gasRemaining
-    then vmError (OutOfGas gasRemaining toBurn)
-    else liftST $ writeSTRef gasRef (Gas $ gasRemaining - toBurn)
+    then vmError' vm (OutOfGas gasRemaining toBurn)
+    else writeSTRef gasRef (Gas $ gasRemaining - toBurn)
 
 unburn' :: MFrame s -> Gas -> ST s ()
 unburn' frame (Gas toReturn) = do
@@ -1609,7 +1615,7 @@ extraExpGasCost exponent =
     in
       Gas cost
 
-burnStaticGas :: MVM s -> Instruction -> Step s ()
+burnStaticGas :: MVM s -> Instruction -> ST s ()
 burnStaticGas vm instruction = {-# SCC "BurnStaticGas" #-} do
   let FeeSchedule {..} = vm.fees
   let cost = case instruction of
@@ -1774,7 +1780,7 @@ executeCreate vm sender initGas value newAddress code = do
   -- TODO Check balance
   -- Debug.Trace.traceM $ "Executing create: with address " <> (show newAddress) <> " sender is " <> (show sender) <> " code is: " <> (show $ ByteStringS code)
   callerFrame <- liftST $ getCurrentFrame vm
-  burn' callerFrame initGas
+  liftST $ burn vm initGas
   let initCode = RuntimeCode code
   let callerAccounts = callerFrame.state.accounts
       withCalleeAccounts = StrictMap.insert newAddress (emptyAccount {accCode = initCode, accNonce = 1}) callerAccounts
