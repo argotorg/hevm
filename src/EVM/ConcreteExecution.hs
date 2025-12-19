@@ -318,8 +318,14 @@ execBytecode code calldata value = exec executionContext worldState
 
 exec :: ExecutionContext -> Accounts -> ExecutionResult
 exec executionContext accounts = runST $ do
-  -- let Transaction from to (CallValue value) (CallData calldata) gasLimit gasPrice priorityFee = executionContext.transaction
-  -- let RuntimeCode bs = (fromMaybe (internalError "IMPOSSIBLE!") $ StrictMap.lookup from accounts).accCode
+  let tx = executionContext.transaction
+      accountsAfterInitiatingTransaction = StrictMap.adjust (payForInitiatingTransaction tx) tx.from accounts
+      (updatedAccounts, targetAddress) = initTransaction tx accountsAfterInitiatingTransaction
+      availableGas = tx.gasLimit - (Gas $ txGasCost feeSchedule tx)
+      targetAccount = fromMaybe (internalError "Target address not present in the known accounts") (StrictMap.lookup targetAddress updatedAccounts)
+      contextType = if isCreate tx then INIT else RUNTIME
+  -- let Transaction from _ (CallValue value) (CallData calldata) gasLimit gasPrice priorityFee = executionContext.transaction
+  -- let RuntimeCode bs = targetAccount.accCode
   -- Debug.Trace.traceM $ "\nNew transaction!\n"
   -- Debug.Trace.traceM $ "From: " <> (show from)
   -- Debug.Trace.traceM $ "Value: " <> (show value)
@@ -328,12 +334,6 @@ exec executionContext accounts = runST $ do
   -- Debug.Trace.traceM $ "Gas limit: " <> (show gasLimit)
   -- Debug.Trace.traceM $ "Gas price: " <> (show gasPrice)
   -- Debug.Trace.traceM $ "Priority fee: " <> (show priorityFee)
-  let tx = executionContext.transaction
-      accountsAfterInitiatingTransaction = StrictMap.adjust (payForInitiatingTransaction tx) tx.from accounts
-      (updatedAccounts, targetAddress) = initTransaction tx accountsAfterInitiatingTransaction
-      availableGas = tx.gasLimit - (Gas $ txGasCost feeSchedule tx)
-      targetAccount = fromMaybe (internalError "Target address not present in the known accounts") (StrictMap.lookup targetAddress updatedAccounts)
-      contextType = if isCreate tx then INIT else RUNTIME
   -- Debug.Trace.traceM $ "Target address: " <> (show targetAddress)
   initialFrame <- mkFrame contextType tx.from targetAddress tx.value tx.txdata targetAccount.accCode availableGas accountsAfterInitiatingTransaction
   let frameAfterAccountsUpdate = initialFrame {state = initialFrame.state {accounts = updatedAccounts}}
