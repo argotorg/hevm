@@ -276,6 +276,13 @@ instance Functor (Step s) where
 instance Applicative (Step s) where
   pure x = Step $ \_ -> pure x
   (<*>) = ap
+  (*>) :: Step s a -> Step s b -> Step s b
+  Step sa *> Step sb = Step $ \flagRef -> do
+      _ <- sa flagRef
+      maybeResult <- readSTRef flagRef
+      case maybeResult of
+        Nothing -> sb flagRef
+        Just _  -> pure (undefined)
 
 instance Monad (Step s) where
   (>>=) :: Step s a -> (a -> Step s b) -> Step s b
@@ -285,6 +292,7 @@ instance Monad (Step s) where
     case maybeResult of
       Nothing -> let (Step sb) = (f a) in sb flagRef
       Just _ -> pure (undefined)
+  (>>) = (*>)
 
 liftST :: ST s a -> Step s a
 liftST st = Step $ const st
