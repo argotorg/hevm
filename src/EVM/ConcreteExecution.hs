@@ -259,6 +259,7 @@ data VMResult where
   VMSuccess :: Data -> VMResult            -- ^ Reached STOP, RETURN, or end-of-code
 
 data FrameResult = FrameSucceeded Data | FrameReverted Data | FrameErrored EvmError
+  deriving Show
 
 frameToVMResult :: FrameResult -> VMResult
 frameToVMResult (FrameSucceeded bs) = VMSuccess bs
@@ -452,7 +453,11 @@ stepVM vm = do
     finalizeInitIfSucceeded
     
     case frames of
-      [] -> pure $ Just $ frameToVMResult result
+      [] -> do
+        case result of
+          FrameErrored _ -> burnRemainingGas
+          _ -> pure ()
+        pure $ Just $ frameToVMResult result
 
       nextFrame:rest -> do
         finishingFrame <- getCurrentFrame vm
@@ -487,7 +492,11 @@ stepVM vm = do
             uncheckedPush vm 0
         pure Nothing
     
-    where 
+    where
+      burnRemainingGas = do
+        frame <- getCurrentFrame vm
+        writeSTRef frame.state.gasRemainingRef 0
+
       finalizeInitIfSucceeded = do
         finishingFrame <- getCurrentFrame vm
         let accounts = finishingFrame.state.accounts
@@ -503,9 +512,10 @@ runStep vm = do
     pc <- readPC vm
     advancePC vm 1
     inst <- getInstruction vm pc
+    -- Debug.Trace.traceM ("Executing op " <> (show inst))
+    -- Debug.Trace.traceM ("PC is " <> (showHex pc ""))
     burnStaticGas vm inst
     pure inst
-  -- Debug.Trace.traceM ("Executing op " <> (show instruction))
   -- frame <- liftST $ getCurrentFrame vm
   -- Gas gas <- liftST $ readSTRef frame.state.gasRemainingRef
   -- Debug.Trace.traceM ("Remaining gas is " <> (show gas))
