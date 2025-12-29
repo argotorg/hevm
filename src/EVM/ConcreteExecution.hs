@@ -355,7 +355,7 @@ exec executionContext accounts = runST $ do
   let frameAfterAccountsUpdate = initialFrame {state = initialFrame.state {accounts = updatedAccounts}}
   currentRef <- newSTRef frameAfterAccountsUpdate
   framesRef <- newSTRef []
-  let warmAddresses = [tx.from, targetAddress] ++ [1..9]
+  let warmAddresses = [tx.from, targetAddress, executionContext.blockHeader.coinbase] ++ [1..9]
         -- TODO: ++ (Map.keys txaccessList)
   substateRef <- newSTRef (TxSubState $ StrictMap.fromList [(address, mempty) | address <- warmAddresses])
   terminationFlagRef <- newSTRef Nothing
@@ -1014,7 +1014,9 @@ makeCall vm callType gas to callValue@(CallValue cv') argsOffset argsSize retOff
     -- Debug.Trace.traceM ("Calling " <> (show $ ByteStringS bs))
     -- Debug.Trace.traceM ("With call data " <> (show $ ByteStringS calldata))
     currentFrame <- liftST $ getCurrentFrame vm
-    let accessCost = vm.fees.g_cold_account_access -- TODO: maintain access lists
+    isWarm <- liftST $ accessAccountForGas vm to
+    let fees = vm.fees
+    let accessCost = if isWarm then fees.g_warm_storage_read else fees.g_cold_account_access
         sendingValue = cv' /= 0
         positiveValueCost = if sendingValue then feeSchedule.g_callvalue else 0
         dynamicCost = accessCost + positiveValueCost
