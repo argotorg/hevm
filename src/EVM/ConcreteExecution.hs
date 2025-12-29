@@ -1536,6 +1536,7 @@ newMemory = do
     pure (Memory ref size)
 
 readMemory :: MVM s -> W256 -> W256 -> Step s BS.ByteString
+readMemory _ _ 0 = pure BS.empty
 readMemory vm offset size =
   case (,) <$> toWord64 offset <*> toWord64 size of
     Nothing -> vmError IllegalOverflow
