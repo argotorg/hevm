@@ -355,7 +355,9 @@ exec executionContext accounts = runST $ do
   let frameAfterAccountsUpdate = initialFrame {state = initialFrame.state {accounts = updatedAccounts}}
   currentRef <- newSTRef frameAfterAccountsUpdate
   framesRef <- newSTRef []
-  substateRef <- newSTRef (TxSubState mempty)
+  let warmAddresses = [tx.from, targetAddress] ++ [1..9]
+        -- TODO: ++ (Map.keys txaccessList)
+  substateRef <- newSTRef (TxSubState $ StrictMap.fromList [(address, mempty) | address <- warmAddresses])
   terminationFlagRef <- newSTRef Nothing
   let vm = MVM currentRef framesRef feeSchedule executionContext substateRef terminationFlagRef
   runLoop vm
@@ -581,6 +583,7 @@ runStep vm = do
       OpPrevRandao -> stepPrevRandao vm
       OpGaslimit -> stepGasLimit vm
       OpAddress -> stepAddress vm
+      OpBalance -> stepBalance vm
       OpCaller -> stepCaller vm
       OpOrigin -> stepOrigin vm
       OpCodesize -> stepCodeSize vm
@@ -996,38 +999,40 @@ data CallType = REGULAR | DELEGATE | CODE | STATIC
   deriving Eq
 
 makeCall :: MVM s -> CallType -> Gas -> Addr -> CallValue -> VMWord -> VMWord -> VMWord -> VMWord -> Step s ()
-makeCall vm callType gas to callValue@(CallValue cv') argsOffset argsSize retOffset retSize = do
-  calldata <- readMemory vm argsOffset argsSize
-  liftST $ do
-    memory <- getMemory vm
-    touchMemory vm memory (fromIntegral retOffset) (fromIntegral retSize) -- FIXME: Should gas be charged beforehand or only for actually used memory on return? See EIP - 5
-  targetAccount <- liftST $ getOrCreateAccount vm to
-  let targetCode = targetAccount.accCode
-  -- let RuntimeCode bs = targetCode
-  -- Debug.Trace.traceM ("Calling " <> (show $ ByteStringS bs))
-  -- Debug.Trace.traceM ("With call data " <> (show $ ByteStringS calldata))
-  currentFrame <- liftST $ getCurrentFrame vm
-  let accessCost = vm.fees.g_cold_account_access -- TODO: maintain access lists
-      sendingValue = cv' /= 0
-      positiveValueCost = if sendingValue then feeSchedule.g_callvalue else 0
-      dynamicCost = accessCost + positiveValueCost
-  liftST $ burn vm (Gas dynamicCost)
-  availableGas <- liftST $ getAvailableGas currentFrame
-  let accounts = currentFrame.state.accounts
-      accountsAfterTransfer = uncheckedTransfer accounts currentFrame.context.codeAddress to callValue
-      myGasToTransfer = computeGasToTransfer availableGas gas
-      gasToTransfer = if sendingValue then myGasToTransfer + feeSchedule.g_callstipend else myGasToTransfer
-  newFrameState <- liftST $ newMFrameState accountsAfterTransfer gasToTransfer
-  liftST $ burn vm myGasToTransfer
-  let
-    callValue' = case callType of DELEGATE -> currentFrame.context.callValue; _ -> callValue
-    storageAddress = case callType of ct | ct == REGULAR || ct == STATIC -> to; _ -> currentFrame.context.storageAddress
-    caller = case callType of DELEGATE -> currentFrame.context.storageAddress; _ -> currentFrame.context.codeAddress
-    shouldBeStatic = (callType == STATIC || currentFrame.context.isStatic)
-    newFrameContext = FrameContext RUNTIME targetCode (parseByteCode targetCode) (CallData calldata) callValue' accounts to storageAddress caller shouldBeStatic
-    newFrame = MFrame newFrameContext newFrameState
-  liftST $ setReturnInfo newFrame (ReturnInfo retOffset retSize 1)
-  liftST $ pushFrame vm newFrame
+makeCall vm callType gas to callValue@(CallValue cv') argsOffset argsSize retOffset retSize
+  | isPrecompile to = internalError "Precompiles not supported yet!"
+  | otherwise = do
+    calldata <- readMemory vm argsOffset argsSize
+    liftST $ do
+      memory <- getMemory vm
+      touchMemory vm memory (fromIntegral retOffset) (fromIntegral retSize) -- FIXME: Should gas be charged beforehand or only for actually used memory on return? See EIP - 5
+    targetAccount <- liftST $ getOrCreateAccount vm to
+    let targetCode = targetAccount.accCode
+    -- let RuntimeCode bs = targetCode
+    -- Debug.Trace.traceM ("Calling " <> (show $ ByteStringS bs))
+    -- Debug.Trace.traceM ("With call data " <> (show $ ByteStringS calldata))
+    currentFrame <- liftST $ getCurrentFrame vm
+    let accessCost = vm.fees.g_cold_account_access -- TODO: maintain access lists
+        sendingValue = cv' /= 0
+        positiveValueCost = if sendingValue then feeSchedule.g_callvalue else 0
+        dynamicCost = accessCost + positiveValueCost
+    liftST $ burn vm (Gas dynamicCost)
+    availableGas <- liftST $ getAvailableGas currentFrame
+    let accounts = currentFrame.state.accounts
+        accountsAfterTransfer = uncheckedTransfer accounts currentFrame.context.codeAddress to callValue
+        myGasToTransfer = computeGasToTransfer availableGas gas
+        gasToTransfer = if sendingValue then myGasToTransfer + feeSchedule.g_callstipend else myGasToTransfer
+    newFrameState <- liftST $ newMFrameState accountsAfterTransfer gasToTransfer
+    liftST $ burn vm myGasToTransfer
+    let
+      callValue' = case callType of DELEGATE -> currentFrame.context.callValue; _ -> callValue
+      storageAddress = case callType of ct | ct == REGULAR || ct == STATIC -> to; _ -> currentFrame.context.storageAddress
+      caller = case callType of DELEGATE -> currentFrame.context.storageAddress; _ -> currentFrame.context.codeAddress
+      shouldBeStatic = (callType == STATIC || currentFrame.context.isStatic)
+      newFrameContext = FrameContext RUNTIME targetCode (parseByteCode targetCode) (CallData calldata) callValue' accounts to storageAddress caller shouldBeStatic
+      newFrame = MFrame newFrameContext newFrameState
+    liftST $ setReturnInfo newFrame (ReturnInfo retOffset retSize 1)
+    liftST $ pushFrame vm newFrame
 
   where
     computeGasToTransfer (Gas availableGas) (Gas requestedGas) = Gas $ Prelude.min (EVM.allButOne64th availableGas) requestedGas
@@ -1138,6 +1143,21 @@ stepAddress vm = do
   let (Addr addr) = frame.context.codeAddress
   push vm (fromIntegral addr)
 
+stepBalance :: MVM s -> Step s ()
+stepBalance vm = do
+  address <- pop vm
+  let address' = truncateToAddr address
+  liftST $ do
+    isWarm <- accessAccountForGas vm address'
+    let fees = vm.fees
+    burn vm (Gas $ if isWarm then fees.g_warm_storage_read else fees.g_cold_account_access)
+  (Wei balance) <- liftST $ do
+    frame <- getCurrentFrame vm
+    let accounts = frame.state.accounts
+    pure $ case StrictMap.lookup address' accounts of
+            Nothing -> Wei 0
+            Just account -> account.accBalance
+  push vm (fromIntegral balance)
 
 stepCaller :: MVM s -> Step s ()
 stepCaller vm = do
@@ -1696,6 +1716,7 @@ burnStaticGas vm instruction = {-# SCC "BurnStaticGas" #-} do
           OpSar -> g_verylow
           OpSha3 -> g_sha3
           OpAddress -> g_base
+          OpBalance -> g_zero
           OpOrigin -> g_base
           OpCaller -> g_base
           OpCallvalue -> g_base
@@ -1844,3 +1865,16 @@ executeCreate vm sender initGas value newAddress code = do
 
 cappedSum :: Word64 -> Word64 -> Word64
 cappedSum a b = let s = a + b in if s < a then maxBound else s
+
+accessAccountForGas :: MVM s -> Addr -> ST s Bool
+accessAccountForGas vm address = do
+  substate <- readSTRef vm.txsubstate
+  let accessed = substate.accessedAddresses
+      present = StrictMap.member address accessed
+  unless present $ do
+    let updatedAccessList = StrictMap.insert address mempty accessed
+    writeSTRef vm.txsubstate substate {accessedAddresses = updatedAccessList}
+  pure present
+
+isPrecompile :: Addr -> Bool
+isPrecompile addr = 0x0 < addr && addr <= 0x09
