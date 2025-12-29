@@ -46,6 +46,7 @@ data Config = Config
   , verb             :: Int
   , simp             :: Bool
   , onlyDeployed     :: Bool
+  , earlyAbort       :: Bool
   }
   deriving (Show, Eq)
 
@@ -65,6 +66,7 @@ defaultConfig = Config
   , verb = 0
   , simp = True
   , onlyDeployed = False
+  , earlyAbort = False
   }
 
 -- Write to the console
