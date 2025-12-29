@@ -1235,10 +1235,12 @@ stepExtCodeCopy vm = do
 copyFromByteStringToMemory :: MVM s -> BS.ByteString -> Word64 -> Word64 -> Word64 -> ST s ()
 copyFromByteStringToMemory vm bs memOffset bsOffset size = do
   burnDynamicCost vm size
-  let bs' = slicePadded bs (capAsInt bsOffset) (capAsInt size) -- NOTE: We cap to Int, larger values would cause error anyway
-  memory <- getMemory vm
-  touchMemory vm memory memOffset size
-  writeMemory memory memOffset bs'
+  maybeResult <- readSTRef vm.terminationFlagRef
+  when (isNothing maybeResult) $ do
+    let bs' = slicePadded bs (capAsInt bsOffset) (capAsInt size) -- NOTE: We cap to Int, larger values would cause error anyway
+    memory <- getMemory vm
+    touchMemory vm memory memOffset size
+    writeMemory memory memOffset bs'
 
   where
     burnDynamicCost _ 0 = pure ()
