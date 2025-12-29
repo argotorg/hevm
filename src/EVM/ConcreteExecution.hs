@@ -591,6 +591,7 @@ runStep vm = do
       OpGasprice -> stepGasPrice vm
       OpExtcodesize -> stepExtCodeSize vm
       OpExtcodecopy -> stepExtCodeCopy vm
+      OpExtcodehash -> stepExtCodeHash vm
       OpPc -> stepPC vm
       OpLog n -> stepLog vm n
       OpCreate -> stepCreate vm
@@ -1234,6 +1235,23 @@ stepExtCodeCopy vm = do
     let (RuntimeCode bs) = account.accCode
     copyFromByteStringToMemory vm bs memoryOffset64 codeOffset64 size64
 
+stepExtCodeHash :: MVM s -> Step s ()
+stepExtCodeHash vm = do
+  address <- pop vm
+  let address' = truncateToAddr address
+  liftST $ do
+    isWarm <- accessAccountForGas vm address'
+    let fees = vm.fees
+    burn vm (Gas $ if isWarm then fees.g_warm_storage_read else fees.g_cold_account_access)
+  frame <- liftST $ getCurrentFrame vm
+  let accounts = frame.state.accounts
+  let maybeAccount = StrictMap.lookup address' accounts
+  let hash = case maybeAccount of
+        Just account -> let (RuntimeCode bs) = account.accCode in keccak' bs
+        Nothing -> 0
+  push vm hash
+
+
 copyFromByteStringToMemory :: MVM s -> BS.ByteString -> Word64 -> Word64 -> Word64 -> ST s ()
 copyFromByteStringToMemory vm bs memOffset bsOffset size = do
   burnDynamicCost vm size
@@ -1769,6 +1787,7 @@ burnStaticGas vm instruction = {-# SCC "BurnStaticGas" #-} do
           OpGasprice -> g_base
           OpExtcodesize -> g_zero
           OpExtcodecopy -> g_zero
+          OpExtcodehash -> g_zero
           OpBlockhash -> g_blockhash
           OpCoinbase -> g_base
           OpTimestamp -> g_base
