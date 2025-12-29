@@ -561,6 +561,7 @@ runStep vm = do
       OpMload -> stepMLoad vm
       OpMstore -> stepMStore vm
       OpMstore8 -> stepMStore8 vm
+      OpMcopy -> stepMCopy vm
       OpSload -> stepSLoad vm
       OpSstore -> stepSStore vm
       OpCallvalue -> stepCallValue vm
@@ -941,9 +942,10 @@ stepCallDataCopy vm = do
   let size64 = capAsWord64 size -- NOTE: We can cap it, larger numbers would cause of of gas anyway
   let callDataOffset64 = capAsWord64 callDataOffset
   let memoryOffset64 = capAsWord64 memoryOffset
-  frame <- liftST $ getCurrentFrame vm
-  let CallData dataBS = frame.context.callData
-  copyFromByteStringToMemory vm dataBS memoryOffset64 callDataOffset64 size64
+  liftST $ do
+    frame <- getCurrentFrame vm
+    let CallData dataBS = frame.context.callData
+    copyFromByteStringToMemory vm dataBS memoryOffset64 callDataOffset64 size64
 
 
 stepCall :: MVM s -> Step s ()
@@ -996,8 +998,9 @@ data CallType = REGULAR | DELEGATE | CODE | STATIC
 makeCall :: MVM s -> CallType -> Gas -> Addr -> CallValue -> VMWord -> VMWord -> VMWord -> VMWord -> Step s ()
 makeCall vm callType gas to callValue@(CallValue cv') argsOffset argsSize retOffset retSize = do
   calldata <- readMemory vm argsOffset argsSize
-  memory <- liftST $ getMemory vm
-  touchMemory vm memory (fromIntegral retOffset) (fromIntegral retSize) -- FIXME: Should gas be charged beforehand or only for actually used memory on return? See EIP - 5
+  liftST $ do
+    memory <- getMemory vm
+    touchMemory vm memory (fromIntegral retOffset) (fromIntegral retSize) -- FIXME: Should gas be charged beforehand or only for actually used memory on return? See EIP - 5
   targetAccount <- liftST $ getOrCreateAccount vm to
   let targetCode = targetAccount.accCode
   -- let RuntimeCode bs = targetCode
@@ -1166,18 +1169,19 @@ stepCodeCopy vm = do
   let size64 = capAsWord64 size -- NOTE: We can cap it, larger numbers would cause of of gas anyway
   let codeOffset64 = capAsWord64 codeOffset
   let memoryOffset64 = capAsWord64 memoryOffset
-  frame <- liftST $ getCurrentFrame vm
-  let RuntimeCode dataBS = frame.context.code
-  copyFromByteStringToMemory vm dataBS memoryOffset64 codeOffset64 size64
+  liftST $ do
+    frame <- getCurrentFrame vm
+    let RuntimeCode dataBS = frame.context.code
+    copyFromByteStringToMemory vm dataBS memoryOffset64 codeOffset64 size64
 
 
-copyFromByteStringToMemory :: MVM s -> BS.ByteString -> Word64 -> Word64 -> Word64 -> Step s ()
+copyFromByteStringToMemory :: MVM s -> BS.ByteString -> Word64 -> Word64 -> Word64 -> ST s ()
 copyFromByteStringToMemory vm bs memOffset bsOffset size = do
-  liftST $ burnDynamicCost vm size
+  burnDynamicCost vm size
   let bs' = slicePadded bs (capAsInt bsOffset) (capAsInt size) -- NOTE: We cap to Int, larger values would cause error anyway
-  memory <- liftST $ getMemory vm
+  memory <- getMemory vm
   touchMemory vm memory memOffset size
-  liftST $ writeMemory memory memOffset bs'
+  writeMemory memory memOffset bs'
 
   where
     burnDynamicCost _ 0 = pure ()
@@ -1276,29 +1280,43 @@ stepMSize vm = do
   wordSize <- liftST $ readSTRef wordSizeRef
   push vm (fromIntegral $ wordSize * 32)
 
+stepMCopy :: MVM s -> Step s ()
+stepMCopy vm = do
+  destOff <- pop vm
+  sourceOff <- pop vm
+  size <- pop vm
+  let size' = capAsWord64 size
+  let destOff' = capAsWord64 destOff
+  when (size > 0) $ do
+    buf <- readMemory vm sourceOff size
+    liftST $ copyFromByteStringToMemory vm buf destOff' 0 size'
+
 stepMLoad :: MVM s -> Step s ()
 stepMLoad vm = {-# SCC "MLoad" #-} do
   offset <- pop vm
-  memory <- liftST $ getMemory vm
-  touchMemory vm memory (fromIntegral offset) 32 -- TODO: check size and error out if larger than 64-bit word?
-  v <- liftST $ memLoad32 memory (fromIntegral offset)
+  v <- liftST $ do
+     memory <- getMemory vm
+     touchMemory vm memory (fromIntegral offset) 32 -- TODO: check size and error out if larger than 64-bit word?
+     memLoad32 memory (fromIntegral offset)
   push vm v
 
 stepMStore :: MVM s -> Step s ()
 stepMStore vm = {-# SCC "MStore" #-} do
   off <- pop vm
   val <- pop vm
-  memory <- liftST $ getMemory vm
-  touchMemory vm memory (fromIntegral off) 32 -- TODO: check size and error out if larger than 64-bit word?
-  liftST $ memStore32 memory off val
+  liftST $ do
+    memory <-getMemory vm
+    touchMemory vm memory (fromIntegral off) 32 -- TODO: check size and error out if larger than 64-bit word?
+    memStore32 memory off val
 
 stepMStore8 :: MVM s -> Step s ()
 stepMStore8 vm = do
   off <- pop vm
   val <- pop vm
-  memory <- liftST $ getMemory vm
-  touchMemory vm memory (fromIntegral off) 1 -- TODO: check size and error out if larger than 64-bit word?
-  liftST $ memStore1 memory off val
+  liftST $ do
+    memory <-getMemory vm
+    touchMemory vm memory (fromIntegral off) 1 -- TODO: check size and error out if larger than 64-bit word?
+    memStore1 memory off val
 
 stepSLoad :: MVM s -> Step s ()
 stepSLoad vm = {-# SCC "SLoad" #-} do
@@ -1434,10 +1452,10 @@ readMemory :: MVM s -> W256 -> W256 -> Step s BS.ByteString
 readMemory vm offset size =
   case (,) <$> toWord64 offset <*> toWord64 size of
     Nothing -> vmError IllegalOverflow
-    Just (offset64, size64) -> do
-      memory@(Memory memRef _) <- liftST $ getMemory vm
+    Just (offset64, size64) -> liftST $ do
+      memory@(Memory memRef _) <- getMemory vm
       touchMemory vm memory offset64 size64
-      memvec <- liftST $ readSTRef memRef
+      memvec <- readSTRef memRef
       let vecsize = fromIntegral $ UMVec.length memvec
       if offset64 >= vecsize then
         -- reads past memory are all zeros
@@ -1445,7 +1463,7 @@ readMemory vm offset size =
       else if (vecsize - offset64) >= size64 then do
         -- whole read from memory
         let dataVec = UMVec.slice (fromIntegral offset64) (fromIntegral size64) memvec
-        frozen <- liftST $ UVec.freeze dataVec
+        frozen <- UVec.freeze dataVec
         let dataBS = BS.pack (UVec.toList frozen) -- TODO: Consider using storable vector for memory?
         pure dataBS
       else do -- partially in bounds, partially zero
@@ -1453,7 +1471,7 @@ readMemory vm offset size =
             missing = size64 - available -- number of zero bytes
 
         -- read the part that exists
-        prefixFrozen <- liftST $ UVec.freeze (UMVec.slice (fromIntegral offset64) (fromIntegral available) memvec)
+        prefixFrozen <- UVec.freeze (UMVec.slice (fromIntegral offset64) (fromIntegral available) memvec)
         let prefix = BS.pack (UVec.toList prefixFrozen)
         -- append missing zeros
         let suffix = BS.replicate (fromIntegral missing) 0
@@ -1485,19 +1503,21 @@ writeMemory (Memory memRef wordSizeRef) offset bs
                 writeByte (i + 1)
       writeByte 0
 
-touchMemory :: MVM s -> Memory s -> Word64 -> Word64 -> Step s ()
+touchMemory :: MVM s -> Memory s -> Word64 -> Word64 -> ST s ()
 touchMemory _ _ _ 0 = pure ()
-touchMemory vm (Memory _ wordSizeRef) offset size = liftST $ do
+touchMemory vm (Memory _ wordSizeRef) offset size = do
   currentSizeInWords <- readSTRef wordSizeRef
-  let wordSizeAfterTouch = bytesToWords $ offset + size
+  let wordSizeAfterTouch = bytesToWords $ cappedSum offset size
   when (wordSizeAfterTouch > currentSizeInWords) $ do
     let memoryExpansionCost = memoryCost wordSizeAfterTouch - memoryCost currentSizeInWords
-    when (memoryExpansionCost > 0) $ do 
+    when (memoryExpansionCost > 0) $ do
       burn vm memoryExpansionCost
       writeSTRef wordSizeRef wordSizeAfterTouch
 
 bytesToWords :: Word64 -> Word64
-bytesToWords b = ceilDiv b 32
+bytesToWords b
+  | b <= maxBound - 32 = ceilDiv b 32
+  | otherwise = maxBound `div` 32
 
 memoryCost :: Word64 -> Gas
 memoryCost wordCount =
@@ -1703,6 +1723,7 @@ burnStaticGas vm instruction = {-# SCC "BurnStaticGas" #-} do
           OpMsize -> g_base
           OpGas -> g_base
           OpJumpdest -> g_jumpdest
+          OpMcopy -> g_verylow
           OpPush0 -> g_base
           OpPush _ -> g_verylow
           OpDup _ -> g_verylow
@@ -1820,3 +1841,6 @@ executeCreate vm sender initGas value newAddress code = do
       (Addr addrVal) = newAddress
   liftST $ setReturnInfo newFrame (ReturnInfo 0 0 (fromIntegral addrVal))
   liftST $ pushFrame vm newFrame
+
+cappedSum :: Word64 -> Word64 -> Word64
+cappedSum a b = let s = a + b in if s < a then maxBound else s
