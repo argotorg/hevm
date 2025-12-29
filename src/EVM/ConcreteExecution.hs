@@ -589,6 +589,8 @@ runStep vm = do
       OpCodesize -> stepCodeSize vm
       OpCodecopy -> stepCodeCopy vm
       OpGasprice -> stepGasPrice vm
+      OpExtcodesize -> stepExtCodeSize vm
+      OpExtcodecopy -> stepExtCodeCopy vm
       OpPc -> stepPC vm
       OpLog n -> stepLog vm n
       OpCreate -> stepCreate vm
@@ -1195,6 +1197,41 @@ stepCodeCopy vm = do
     copyFromByteStringToMemory vm dataBS memoryOffset64 codeOffset64 size64
 
 
+stepExtCodeSize :: MVM s -> Step s ()
+stepExtCodeSize vm = do
+  address <- pop vm
+  let address' = truncateToAddr address
+  liftST $ do
+    isWarm <- accessAccountForGas vm address'
+    let fees = vm.fees
+    burn vm (Gas $ if isWarm then fees.g_warm_storage_read else fees.g_cold_account_access)
+  frame <- liftST $ getCurrentFrame vm
+  let accounts = frame.state.accounts
+  let account = StrictMap.findWithDefault emptyAccount address' accounts
+  let (RuntimeCode bs) = account.accCode
+  push vm (fromIntegral $ BS.length bs)
+
+stepExtCodeCopy :: MVM s -> Step s ()
+stepExtCodeCopy vm = do
+  address <- pop vm
+  memoryOffset <- pop vm
+  codeOffset <- pop vm
+  size <- pop vm
+  let size64 = capAsWord64 size -- NOTE: We can cap it, larger numbers would cause of of gas anyway
+  let codeOffset64 = capAsWord64 codeOffset
+  let memoryOffset64 = capAsWord64 memoryOffset
+  let address' = truncateToAddr address
+  liftST $ do
+    isWarm <- accessAccountForGas vm address'
+    let fees = vm.fees
+    burn vm (Gas $ if isWarm then fees.g_warm_storage_read else fees.g_cold_account_access)
+  liftST $ do
+    frame <- getCurrentFrame vm
+    let accounts = frame.state.accounts
+    let account = StrictMap.findWithDefault emptyAccount address' accounts
+    let (RuntimeCode bs) = account.accCode
+    copyFromByteStringToMemory vm bs memoryOffset64 codeOffset64 size64
+
 copyFromByteStringToMemory :: MVM s -> BS.ByteString -> Word64 -> Word64 -> Word64 -> ST s ()
 copyFromByteStringToMemory vm bs memOffset bsOffset size = do
   burnDynamicCost vm size
@@ -1726,6 +1763,8 @@ burnStaticGas vm instruction = {-# SCC "BurnStaticGas" #-} do
           OpCodesize -> g_base
           OpCodecopy -> g_verylow
           OpGasprice -> g_base
+          OpExtcodesize -> g_zero
+          OpExtcodecopy -> g_zero
           OpBlockhash -> g_blockhash
           OpCoinbase -> g_base
           OpTimestamp -> g_base
