@@ -408,24 +408,25 @@ runLoop vm = do
           gasPrice = vm.executionContext.transaction.gasPrice
       frame <- getCurrentFrame vm
       Gas remaining <- getAvailableGas frame
+      let gasUsed = limit - remaining
+          minerPay = Wei $ vm.executionContext.transaction.priorityFee * (fromIntegral gasUsed)
       -- Debug.Trace.traceM $ "Remaining gas at the end of transaction:" <> show remaining
+      -- Debug.Trace.traceM $ "Coinbase: " <> (show vm.executionContext.blockHeader.coinbase)
       case result of
         VMFailure _ -> do
           let weiToRefund = Wei $ (fromIntegral remaining) * gasPrice
               addTo account = account {accBalance = account.accBalance + weiToRefund}
               accounts = frame.context.accountsSnapshot
-              updatedAccounts = StrictMap.adjust addTo vm.executionContext.transaction.from accounts
+              updatedAccounts = StrictMap.alter (rewardMiner minerPay) vm.executionContext.blockHeader.coinbase $ StrictMap.adjust addTo vm.executionContext.transaction.from accounts
               updatedFrame = frame {state = frame.state {accounts = updatedAccounts}}
           writeSTRef vm.current updatedFrame
         VMSuccess _ -> do
           Gas refunds <- getGasRefund frame
-          let gasUsed = limit - remaining
-              refundCap = gasUsed `div` 5
+          let refundCap = gasUsed `div` 5
               finalRefund = Prelude.min refunds refundCap
 
               toRefund = remaining + finalRefund
               weiToRefund = Wei $ (fromIntegral toRefund) * gasPrice
-              minerPay = Wei $ vm.executionContext.transaction.priorityFee * (fromIntegral gasUsed)
 
           let accounts = frame.state.accounts
               addTo account = account {accBalance = account.accBalance + weiToRefund}
