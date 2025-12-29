@@ -1315,7 +1315,22 @@ stepLog vm n = do
           Vec.toList <$> Vec.freeze (MVec.slice sp' i stack)
   
 stepCreate :: MVM s -> Step s ()
-stepCreate _vm = internalError "CREATE not implemented yet!"
+stepCreate vm = do
+  checkNotStaticContext vm
+  value <- pop vm
+  offset <- pop vm
+  size <- pop vm
+  initCode <- readMemory vm offset size
+  currentFrame <- liftST $ getCurrentFrame vm
+  availableGas <- liftST $ getAvailableGas currentFrame
+  let
+    sender = currentFrame.context.storageAddress
+    maybeAccount = StrictMap.lookup sender currentFrame.state.accounts
+    nonce = (fromMaybe (internalError "Sender not found among known accounts") maybeAccount).accNonce
+    newAddress = createAddress sender nonce
+    (createCost, initGas) = costOfCreate availableGas size False
+  liftST $ burn vm createCost
+  executeCreate vm sender initGas (CallValue value) newAddress initCode
 
 stepCreate2 :: MVM s -> Step s ()
 stepCreate2 vm = do
@@ -1326,7 +1341,6 @@ stepCreate2 vm = do
   salt <- pop vm
   
   initCode <- readMemory vm offset size
-  -- memory <- liftST $ getMemory vm
   currentFrame <- liftST $ getCurrentFrame vm
   availableGas <- liftST $ getAvailableGas currentFrame
   let
@@ -1336,16 +1350,15 @@ stepCreate2 vm = do
   liftST $ burn vm createCost
   executeCreate vm sender initGas (CallValue value) newAddress initCode
 
+costOfCreate :: Gas -> VMWord -> Bool -> (Gas, Gas)
+costOfCreate availableGas codeSize hashNeeded = (createCost, initGas)
   where
-    costOfCreate :: Gas -> VMWord -> Bool -> (Gas, Gas)
-    costOfCreate availableGas codeSize hashNeeded = (createCost, initGas)
-      where
-        fees = feeSchedule
-        byteCost = if hashNeeded then fees.g_sha3word + fees.g_initcodeword else fees.g_initcodeword
-        codeCost = byteCost * (ceilDiv codeSize 32)
-        createCost = Gas . fromIntegral $ codeCost
-        (Gas remaining) = availableGas - createCost
-        initGas = Gas $ allButOne64th remaining
+    fees = feeSchedule
+    byteCost = if hashNeeded then fees.g_sha3word + fees.g_initcodeword else fees.g_initcodeword
+    codeCost = byteCost * (ceilDiv codeSize 32)
+    createCost = Gas . fromIntegral $ codeCost
+    (Gas remaining) = availableGas - createCost
+    initGas = Gas $ allButOne64th remaining
 
 
 
