@@ -1313,11 +1313,12 @@ stepSLoad vm = {-# SCC "SLoad" #-} do
 stepSStore :: MVM s -> Step s ()
 stepSStore vm = {-# SCC "SStore" #-} do
   checkNotStaticContext vm
+  ensureGas vm (Gas vm.fees.g_callstipend)
   key <- pop vm
   val <- pop vm
   liftST $ do
     isWarm <- touchCurrentStore vm key
-    store <-  getCurrentStorage vm
+    store <- getCurrentStorage vm
     let currentVal = sload store key
     originalVal <- getOriginalValue vm key
     let warmCost = warmStoreCost originalVal currentVal val
@@ -1617,6 +1618,15 @@ burn vm (Gas toBurn) = {-# SCC "Burn" #-} do
   if toBurn > gasRemaining
     then vmError' vm (OutOfGas gasRemaining toBurn)
     else writeSTRef gasRef (Gas $ gasRemaining - toBurn)
+
+ensureGas :: MVM s -> Gas -> Step s ()
+ensureGas vm (Gas amount) = liftST $ do
+  frame <- getCurrentFrame vm
+  let gasRef = frame.state.gasRemainingRef
+  (Gas gasRemaining) <- readSTRef gasRef
+  -- NOTE: Here we are also out of gas when requested amount is equal to the remaining gas
+  when (amount >= gasRemaining) $ vmError' vm (OutOfGas gasRemaining amount)
+
 
 unburn' :: MFrame s -> Gas -> ST s ()
 unburn' frame (Gas toReturn) = do
