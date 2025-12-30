@@ -65,6 +65,7 @@ import EVM.FeeSchedule
 type VMWord = W256
 type Data = BS.ByteString
 newtype RuntimeCode = RuntimeCode {code :: Data}
+  deriving Show
 data Instruction = GenericInst !(GenericOp Word8) | Push !Word8 !VMWord
 newtype Instructions = Instructions (Vec.Vector Instruction)
 type MStack s = MVec.MVector s VMWord
@@ -74,9 +75,9 @@ type Storage = StrictMap.Map W256 W256
 type Accounts = StrictMap.Map Addr Account
 type TStorages = StrictMap.Map Addr Storage
 newtype Wei = Wei {value :: W256}
-  deriving (Num, Eq, Ord)
+  deriving (Num, Eq, Ord, Show)
 newtype Nonce = Nonce {value :: W64}
-  deriving (Num, Eq, Ord)
+  deriving (Num, Eq, Ord, Show)
 
 newtype Gas = Gas {value :: Word64}
   deriving (Num, Eq, Ord, Show)
@@ -85,7 +86,7 @@ data Account = Account {
   accStorage :: Storage,
   accBalance :: Wei,
   accNonce :: Nonce
-}
+} deriving Show
 
 emptyAccount :: Account
 emptyAccount = Account (RuntimeCode "") mempty (Wei 0) (Nonce 0)
@@ -1032,7 +1033,7 @@ makeCall vm callType gas to callValue@(CallValue cv') argsOffset argsSize retOff
     targetAccount <- liftST $ getOrCreateAccount vm to
     let targetCode = targetAccount.accCode
     -- let RuntimeCode bs = targetCode
-    -- Debug.Trace.traceM ("Calling " <> (show $ ByteStringS bs))
+    -- Debug.Trace.traceM ("Calling " <>  (show to) <> " with code " <> (show $ ByteStringS bs))
     -- Debug.Trace.traceM ("With call data " <> (show $ ByteStringS calldata))
     currentFrame <- liftST $ getCurrentFrame vm
     isWarm <- liftST $ accessAccountForGas vm to
