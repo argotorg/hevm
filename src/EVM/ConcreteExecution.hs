@@ -1026,7 +1026,7 @@ makeCall vm callType gas to callValue@(CallValue cv') argsOffset argsSize retOff
     liftST $ burn vm (Gas dynamicCost)
     availableGas <- liftST $ getAvailableGas currentFrame
     let accounts = currentFrame.state.accounts
-        accountsAfterTransfer = uncheckedTransfer accounts currentFrame.context.codeAddress to callValue
+        accountsAfterTransfer = case callType of REGULAR -> uncheckedTransfer accounts currentFrame.context.codeAddress to callValue; _ -> accounts
         myGasToTransfer = computeGasToTransfer availableGas gas
         gasToTransfer = if sendingValue then myGasToTransfer + feeSchedule.g_callstipend else myGasToTransfer
     newFrameState <- liftST $ newMFrameState accountsAfterTransfer currentFrame.state.transientStorage gasToTransfer
