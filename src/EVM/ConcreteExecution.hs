@@ -1979,21 +1979,32 @@ executeCreate vm sender initGas value newAddress code = do
   -- TODO: check nonce overflowing
   -- TODO: Check call stack overflowing
   -- TODO: Check account already exists on address
-  -- TODO Check balance
   -- Debug.Trace.traceM $ "Executing create: with address " <> (show newAddress) <> " sender is " <> (show sender) <> " code is: " <> (show $ ByteStringS code)
   callerFrame <- liftST $ getCurrentFrame vm
-  liftST $ burn vm initGas
-  let initCode = RuntimeCode code
-  let callerAccounts = callerFrame.state.accounts
-      withCalleeAccounts = StrictMap.insert newAddress (emptyAccount {accCode = initCode, accNonce = 1}) callerAccounts
-      withNonceIncremented = StrictMap.adjust (\acc -> acc{accNonce = acc.accNonce + 1})  sender withCalleeAccounts
-      calleeAccounts = uncheckedTransfer withNonceIncremented sender newAddress value
-  newFrameState <- liftST $ newMFrameState calleeAccounts callerFrame.state.transientStorage initGas
-  let newFrameContext = FrameContext INIT initCode (parseByteCode initCode) (CallData BS.empty) value calleeAccounts newAddress newAddress sender False
-      newFrame = MFrame newFrameContext newFrameState
-      (Addr addrVal) = newAddress
-  liftST $ setReturnInfo newFrame (ReturnInfo 0 0 (fromIntegral addrVal))
-  liftST $ pushFrame vm newFrame
+  hasSufficientBalance <- liftST $ checkSufficientBalance callerFrame sender value
+  if hasSufficientBalance
+    then do
+      liftST $ burn vm initGas
+      let initCode = RuntimeCode code
+      let callerAccounts = callerFrame.state.accounts
+          withCalleeAccounts = StrictMap.insert newAddress (emptyAccount {accCode = initCode, accNonce = 1}) callerAccounts
+          withNonceIncremented = StrictMap.adjust (\acc -> acc{accNonce = acc.accNonce + 1})  sender withCalleeAccounts
+          calleeAccounts = uncheckedTransfer withNonceIncremented sender newAddress value
+      liftST $ do
+        newFrameState <- newMFrameState calleeAccounts callerFrame.state.transientStorage initGas
+        let newFrameContext = FrameContext INIT initCode (parseByteCode initCode) (CallData BS.empty) value calleeAccounts newAddress newAddress sender False
+            newFrame = MFrame newFrameContext newFrameState
+            (Addr addrVal) = newAddress
+        setReturnInfo newFrame (ReturnInfo 0 0 (fromIntegral addrVal))
+        pushFrame vm newFrame
+    else
+      push vm 0
+
+checkSufficientBalance :: MFrame s -> Addr -> CallValue -> ST s Bool
+checkSufficientBalance frame address (CallValue amount) = do
+  let account = fromMaybe (internalError "Caller must be known!") $ StrictMap.lookup address frame.state.accounts
+  let (Wei balance) = account.accBalance
+  pure (balance >= amount)
 
 cappedSum :: Word64 -> Word64 -> Word64
 cappedSum a b = let s = a + b in if s < a then maxBound else s
