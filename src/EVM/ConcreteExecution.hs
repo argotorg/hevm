@@ -72,6 +72,7 @@ newtype CallData = CallData {calldata :: Data}
 newtype CallValue = CallValue {callvalue :: W256}
 type Storage = StrictMap.Map W256 W256
 type Accounts = StrictMap.Map Addr Account
+type TStorages = StrictMap.Map Addr Storage
 newtype Wei = Wei {value :: W256}
   deriving (Num, Eq, Ord)
 newtype Nonce = Nonce {value :: W64}
@@ -128,7 +129,7 @@ freezeVM vm = do
       logicalSize <- readSTRef sizeRef
       let logicalSizeInt = fromIntegral logicalSize
       frozen <- UVec.freeze $ if logicalSizeInt > vecsize then vec else (UMVec.slice 0 logicalSizeInt) vec
-      let bs = BS.pack (UVec.toList frozen) 
+      let bs = BS.pack (UVec.toList frozen)
       pure $ if logicalSizeInt > vecsize then bs <> (BS.replicate (logicalSizeInt - vecsize) 0) else bs
 
 
@@ -147,13 +148,14 @@ data MFrameState s = MFrameState {
   spRef :: STRef s Int,  -- stack pointer (beyond stack top slot)
   memory :: Memory s,
   accounts :: Accounts,
+  transientStorage :: TStorages,
   gasRemainingRef :: STRef s Gas,
   gasRefundedRef :: STRef s Gas,
   retInfoRef :: STRef s (Maybe ReturnInfo)
 }
 
-newMFrameState :: Accounts -> Gas -> ST s (MFrameState s)
-newMFrameState accounts gas = do
+newMFrameState :: Accounts -> TStorages -> Gas -> ST s (MFrameState s)
+newMFrameState accounts tstorage gas = do
   pcRef <- newSTRef 0
   stackVec <- MVec.new 1024
   spRef <- newSTRef 0
@@ -161,7 +163,7 @@ newMFrameState accounts gas = do
   gasRemaining <- newSTRef gas
   gasRefunded <- newSTRef $ Gas 0
   retInfoRef <- newSTRef Nothing
-  pure $ MFrameState pcRef stackVec spRef memory accounts gasRemaining gasRefunded retInfoRef
+  pure $ MFrameState pcRef stackVec spRef memory accounts tstorage gasRemaining gasRefunded retInfoRef
 
 data ContextType = INIT | RUNTIME
   deriving Eq
@@ -307,7 +309,6 @@ vmError err = stop $ FrameErrored err
 vmError' :: MVM s -> EvmError -> ST s ()
 vmError' vm err = stop' vm $ FrameErrored err
 
-
 stop :: FrameResult -> Step s a
 stop result = Step $ \resultRef -> writeSTRef resultRef (Just result) >> pure (internalError "Should never be executed")
 
@@ -386,7 +387,7 @@ exec executionContext accounts = runST $ do
 
     mkFrame :: ContextType -> Addr -> Addr -> CallValue -> CallData -> RuntimeCode -> Gas -> Accounts -> ST s (MFrame s)
     mkFrame contextType from to callvalue calldata code availableGas accounts' = do
-      freshState <- newMFrameState accounts' availableGas
+      freshState <- newMFrameState accounts' mempty availableGas
       let ctx = FrameContext contextType code (parseByteCode code) calldata callvalue accounts' to to from False
       pure $ MFrame ctx freshState
 
@@ -454,7 +455,7 @@ stepVM vm = do
   finishFrame vm result = do
     frames <- readSTRef vm.frames
     finalizeInitIfSucceeded
-    
+
     case frames of
       [] -> do
         case result of
@@ -465,6 +466,7 @@ stepVM vm = do
       nextFrame:rest -> do
         finishingFrame <- getCurrentFrame vm
         let accounts = finishingFrame.state.accounts
+        let tstorage = finishingFrame.state.transientStorage
         unspentGas <- getAvailableGas finishingFrame
         gasRefund <- getGasRefund finishingFrame
         (ReturnInfo retOffset retSize stackRetValue) <- getReturnInfo finishingFrame
@@ -477,9 +479,9 @@ stepVM vm = do
             unburn' currentFrame unspentGas
             addGasRefund currentFrame gasRefund
             let calleeContextType = finishingFrame.context.contextType
-            let updatedFrame = currentFrame {state = currentFrame.state {accounts = accounts}}
+            let updatedFrame = currentFrame {state = currentFrame.state {accounts = accounts, transientStorage = tstorage}}
             writeSTRef vm.current updatedFrame
-            when (calleeContextType == RUNTIME) $ do 
+            when (calleeContextType == RUNTIME) $ do
               memory <- getMemory vm
               writeMemory memory (fromIntegral retOffset) (BS.take (fromIntegral retSize) returnData)
             uncheckedPush vm stackRetValue -- We can use uncheckedPush because call must have removed some arguments from the stack, so there is space
@@ -494,7 +496,7 @@ stepVM vm = do
           FrameErrored _ -> do
             uncheckedPush vm 0
         pure Nothing
-    
+
     where
       burnRemainingGas = do
         frame <- getCurrentFrame vm
@@ -567,6 +569,8 @@ runStep vm = do
       OpMcopy -> stepMCopy vm
       OpSload -> stepSLoad vm
       OpSstore -> stepSStore vm
+      OpTload -> stepTLoad vm
+      OpTstore -> stepTStore vm
       OpCallvalue -> stepCallValue vm
       OpCalldataload -> stepCallDataLoad vm
       OpCalldatasize -> stepCallDataSize vm
@@ -910,7 +914,7 @@ tryJump vm dest = do
     liftST $ writePC vm instIndex
   else vmError BadJumpDestination
   where
-    isValidJumpDest instructions index = 
+    isValidJumpDest instructions index =
       case instructions Vec.!? index of
         Just (GenericInst OpJumpdest) -> True
         _ -> False
@@ -1025,7 +1029,7 @@ makeCall vm callType gas to callValue@(CallValue cv') argsOffset argsSize retOff
         accountsAfterTransfer = uncheckedTransfer accounts currentFrame.context.codeAddress to callValue
         myGasToTransfer = computeGasToTransfer availableGas gas
         gasToTransfer = if sendingValue then myGasToTransfer + feeSchedule.g_callstipend else myGasToTransfer
-    newFrameState <- liftST $ newMFrameState accountsAfterTransfer gasToTransfer
+    newFrameState <- liftST $ newMFrameState accountsAfterTransfer currentFrame.state.transientStorage gasToTransfer
     liftST $ burn vm myGasToTransfer
     let
       callValue' = case callType of DELEGATE -> currentFrame.context.callValue; _ -> callValue
@@ -1307,7 +1311,7 @@ stepLog vm n = do
           let !sp' = sp - i
           writeStackPointer vm' sp'
           Vec.toList <$> Vec.freeze (MVec.slice sp' i stack)
-  
+
 stepCreate :: MVM s -> Step s ()
 stepCreate vm = do
   checkNotStaticContext vm
@@ -1333,7 +1337,7 @@ stepCreate2 vm = do
   offset <- pop vm
   size <- pop vm
   salt <- pop vm
-  
+
   initCode <- readMemory vm offset size
   currentFrame <- liftST $ getCurrentFrame vm
   availableGas <- liftST $ getAvailableGas currentFrame
@@ -1458,6 +1462,25 @@ stepSStore vm = {-# SCC "SStore" #-} do
       frame <- getCurrentFrame vm'
       addGasRefund frame value
 
+stepTLoad :: MVM s -> Step s ()
+stepTLoad vm = do
+  key <- pop vm
+  val <- liftST $ do
+    store <- getCurrentTStorage vm
+    pure $ sload store key
+  push vm val
+
+stepTStore :: MVM s -> Step s ()
+stepTStore vm = do
+  checkNotStaticContext vm
+  key <- pop vm
+  val <- pop vm
+  liftST $ do
+    store <- getCurrentTStorage vm
+    let updatedStore = sstore store key val
+    setCurrentTStorage vm updatedStore
+
+
 touchCurrentStore :: MVM s -> W256 -> ST s Bool
 touchCurrentStore vm slot = do
   address <- getCurrentStorageAddress vm
@@ -1495,7 +1518,7 @@ getOriginalValue vm key = do
       case frameStack of
         [] -> getCurrentFrame vm'
         fs -> pure $ last fs
-      
+
 
 getCurrentStorage :: MVM s -> ST s Storage
 getCurrentStorage vm = do
@@ -1513,6 +1536,21 @@ setCurrentStorage vm storage = do
       updatedState = frame.state {accounts = updatedAccounts}
       updatedFrame = frame {state = updatedState}
   writeSTRef vm.current updatedFrame
+
+getCurrentTStorage :: MVM s -> ST s Storage
+getCurrentTStorage vm = do
+  frame <- getCurrentFrame vm
+  let maybeStorage = StrictMap.lookup frame.context.storageAddress frame.state.transientStorage
+  pure $ fromMaybe mempty maybeStorage
+
+setCurrentTStorage :: MVM s -> Storage -> ST s ()
+setCurrentTStorage vm storage = do
+  frame <- getCurrentFrame vm
+  let updatedTStorage = StrictMap.insert frame.context.storageAddress storage frame.state.transientStorage
+      updatedState = frame.state {transientStorage = updatedTStorage}
+      updatedFrame = frame {state = updatedState}
+  writeSTRef vm.current updatedFrame
+
 
 ------------- Storage Submodule --------------------------
 
@@ -1817,6 +1855,8 @@ burnStaticGas vm instruction = {-# SCC "BurnStaticGas" #-} do
           OpMsize -> g_base
           OpGas -> g_base
           OpJumpdest -> g_jumpdest
+          OpTload -> g_warm_storage_read
+          OpTstore -> g_sload
           OpMcopy -> g_verylow
           OpPush0 -> g_base
           OpPush _ -> g_verylow
@@ -1911,7 +1951,7 @@ createAddress :: Addr -> Nonce -> Addr
 createAddress sender (Nonce senderNonce) = Addr . fromIntegral . keccak' . rlpList $ [rlpAddrFull sender, rlpWord256 (fromIntegral senderNonce)]
 
 create2Address :: Addr -> VMWord -> BS.ByteString -> Addr
-create2Address sender salt initCode = 
+create2Address sender salt initCode =
   truncateToAddr $ keccak' $ mconcat [BS.singleton 0xff, word160Bytes sender, word256Bytes salt, word256Bytes $ keccak' initCode]
 
 executeCreate :: MVM s -> Addr -> Gas -> CallValue -> Addr -> BS.ByteString -> Step s ()
@@ -1929,7 +1969,7 @@ executeCreate vm sender initGas value newAddress code = do
       withCalleeAccounts = StrictMap.insert newAddress (emptyAccount {accCode = initCode, accNonce = 1}) callerAccounts
       withNonceIncremented = StrictMap.adjust (\acc -> acc{accNonce = acc.accNonce + 1})  sender withCalleeAccounts
       calleeAccounts = uncheckedTransfer withNonceIncremented sender newAddress value
-  newFrameState <- liftST $ newMFrameState calleeAccounts initGas
+  newFrameState <- liftST $ newMFrameState calleeAccounts callerFrame.state.transientStorage initGas
   let newFrameContext = FrameContext INIT initCode (parseByteCode initCode) (CallData BS.empty) value calleeAccounts newAddress newAddress sender False
       newFrame = MFrame newFrameContext newFrameState
       (Addr addrVal) = newAddress
