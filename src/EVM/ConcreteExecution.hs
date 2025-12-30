@@ -448,13 +448,15 @@ stepVM vm = do
   maybeFrameResult <- readSTRef terminationFlagRef
   case maybeFrameResult of
     Nothing -> pure Nothing
-    Just frameResult -> finishFrame vm frameResult
+    Just _ -> finishFrame vm
 
   where
-  finishFrame :: MVM s -> FrameResult -> ST s (Maybe VMResult)
-  finishFrame vm result = do
+  finishFrame :: MVM s -> ST s (Maybe VMResult)
+  finishFrame vm = do
     frames <- readSTRef vm.frames
     finalizeInitIfSucceeded
+    maybeFrameResult <- readSTRef vm.terminationFlagRef
+    let result = fromMaybe (internalError "Result must be present at this point") maybeFrameResult
 
     case frames of
       [] -> do
@@ -484,6 +486,10 @@ stepVM vm = do
             when (calleeContextType == RUNTIME) $ do
               memory <- getMemory vm
               writeMemory memory (fromIntegral retOffset) (BS.take (fromIntegral retSize) returnData)
+            when (calleeContextType == INIT) $ do
+              let address = truncateToAddr stackRetValue
+              _ <- accessAccountForGas vm address -- TODO: explicit function to make address warm
+              pure ()
             uncheckedPush vm stackRetValue -- We can use uncheckedPush because call must have removed some arguments from the stack, so there is space
 
           FrameReverted returnData -> do
@@ -503,12 +509,24 @@ stepVM vm = do
         writeSTRef frame.state.gasRemainingRef 0
 
       finalizeInitIfSucceeded = do
+        maybeFrameResult <- readSTRef vm.terminationFlagRef
+        let result = forceResult maybeFrameResult
         finishingFrame <- getCurrentFrame vm
         let accounts = finishingFrame.state.accounts
         when (finishingFrame.context.contextType == INIT) $ do
           case result of
-            FrameSucceeded returnData -> writeSTRef vm.current finishingFrame {state = finishingFrame.state {accounts = StrictMap.adjust (\acc -> acc{accCode = RuntimeCode returnData}) finishingFrame.context.codeAddress accounts}}
+            FrameSucceeded returnData -> do
+              -- TODO: Check code size
+              let codeSize = BS.length returnData
+              burn vm (Gas $ vm.fees.g_codedeposit * (fromIntegral codeSize))
+              maybeFrameResult' <- readSTRef vm.terminationFlagRef
+              let result' = forceResult maybeFrameResult'
+              case result' of
+                FrameSucceeded returnData' -> writeSTRef vm.current finishingFrame {state = finishingFrame.state {accounts = StrictMap.adjust (\acc -> acc{accCode = RuntimeCode returnData'}) finishingFrame.context.codeAddress accounts}}
+                _ -> pure ()
             _ -> pure ()
+
+      forceResult = fromMaybe (internalError "Result must be present at this point")
 
 
 runStep :: MVM s -> Step s ()
