@@ -34,7 +34,6 @@ import EVM (initialContract, unknownContract)
 import EVM.ABI
 import EVM.FeeSchedule (feeSchedule)
 import EVM.Format (hexText)
-import EVM.SMT
 import EVM.Solvers
 import EVM.Types hiding (ByteStringS)
 import EVM.Types (ByteStringS(..))
@@ -588,21 +587,14 @@ oracle solvers preSess rpcInfo q = do
 
 getSolutions :: forall m . App m => SolverGroup -> Expr EWord -> Int -> Prop -> m (Maybe [W256])
 getSolutions solvers symExprPreSimp numBytes pathconditions = do
-  conf <- readConfig
-  liftIO $ do
-    let symExpr = Expr.concKeccakSimpExpr symExprPreSimp
-    -- when conf.debug $ putStrLn $ "Collecting solutions to symbolic query: " <> show symExpr
-    ret <- collectSolutions symExpr pathconditions conf
-    case ret of
-      Nothing -> pure Nothing
-      Just r -> case length r of
-        0 -> pure Nothing
-        _ -> pure $ Just r
-    where
-      collectSolutions :: Expr EWord -> Prop -> Config -> IO (Maybe [W256])
-      collectSolutions symExpr conds conf = do
-        let smt2 = assertProps conf [(PEq (Var "multiQueryVar") symExpr) .&& conds]
-        checkMulti solvers smt2 $ MultiSol { maxSols = conf.maxWidth , numBytes = numBytes , var = "multiQueryVar" }
+  let symExpr = Expr.concKeccakSimpExpr symExprPreSimp
+  ret <- collectSolutions solvers symExpr pathconditions numBytes
+  case ret of
+    Nothing -> pure Nothing
+    Just r -> case length r of
+      0 -> pure Nothing
+      _ -> pure $ Just r
+      
 
 -- | Checks which branches are satisfiable, checking the pathconditions for consistency
 -- if the third argument is true.

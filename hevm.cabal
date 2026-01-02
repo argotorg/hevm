@@ -122,6 +122,7 @@ library
     EVM.CheatsTH,
     EVM.SMT.Types,
     EVM.SMT.SMTLIB,
+    EVM.Solvers.Internal,
     Paths_hevm
   autogen-modules:
     Paths_hevm
