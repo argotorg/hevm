@@ -5,10 +5,11 @@ import EVM.Effects
 import EVM.SMT
 import EVM.Types (SMTResult, ProofResult(..), SMTCex(..), Prop, W256, Expr(..), BufModel(..), CompressedBuf(..), internalError)
 
+import Control.Applicative ((<|>))
 import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, takeMVar, putMVar)
-import Control.Concurrent.STM (writeTChan, newTChan, TChan, tryReadTChan, atomically)
+import Control.Concurrent.STM (writeTChan, newTChan, TChan, readTChan, atomically)
 import Control.Monad (when, forM_)
 import Control.Monad.IO.Unlift (toIO)
 import Control.Monad.State.Strict
@@ -90,7 +91,7 @@ withSolvers solver count threads timeout cont = do
     -- spawn solvers
     instances <- mapM (const $ liftIO $ spawnSolver solver threads timeout) [1..count]
     -- spawn orchestration thread
-    taskq <- liftIO newChan
+    taskq <- liftIO . atomically $ newTChan
     cacheq <- liftIO . atomically $ newTChan
     availableInstances <- liftIO newChan
     liftIO $ forM_ instances (writeChan availableInstances)
@@ -105,28 +106,28 @@ withSolvers solver count threads timeout cont = do
     liftIO $ mapM_ (stopSolver) instances
     pure res
   where
-    solveSingleTask :: Chan Task -> SMT2 -> Maybe[Prop] -> IO SMTResult
+    solveSingleTask :: TChan Task -> SMT2 -> Maybe[Prop] -> IO SMTResult
     solveSingleTask taskq smt2 maybeProps = do
       resVar <- newEmptyMVar
-      writeChan taskq (TaskSingle (SingleData smt2 maybeProps resVar))
+      atomically $ writeTChan taskq (TaskSingle (SingleData smt2 maybeProps resVar))
       takeMVar resVar
-    collectSolutionsTask :: Chan Task -> SMT2 -> MultiSol -> IO (Maybe [W256])
+    collectSolutionsTask :: TChan Task -> SMT2 -> MultiSol -> IO (Maybe [W256])
     collectSolutionsTask taskq smt2 multiSol = do
       resVar <- newEmptyMVar
-      writeChan taskq (TaskMulti (MultiData smt2 multiSol resVar))
+      atomically $ writeTChan taskq (TaskMulti (MultiData smt2 multiSol resVar))
       takeMVar resVar
 
-    orchestrate :: App m => Chan Task -> TChan CacheEntry -> Chan SolverInstance -> [Set Prop] -> Int -> m b
+    orchestrate :: App m => TChan Task -> TChan CacheEntry -> Chan SolverInstance -> [Set Prop] -> Int -> m b
     orchestrate taskq cacheq avail knownUnsat fileCounter = do
+      let nextEventSTM = (Left <$> readTChan cacheq) <|> (Right <$> readTChan taskq)
+      event <- liftIO . atomically $ nextEventSTM
       conf <- readConfig
-      mx <- liftIO . atomically $ tryReadTChan cacheq
-      case mx of
-        Just (CacheEntry props)  -> do
+      case event of
+        Left (CacheEntry props) -> do
           let knownUnsat' = (fromList props):knownUnsat
           when conf.debug $ liftIO $ putStrLn "   adding UNSAT cache"
           orchestrate taskq cacheq avail knownUnsat' fileCounter
-        Nothing -> do
-          task <- liftIO $ readChan taskq
+        Right task ->
           case task of
             TaskSingle (SingleData _ props r) | isJust props && supersetAny (fromList (fromJust props)) knownUnsat -> do
               liftIO $ putMVar r Qed
