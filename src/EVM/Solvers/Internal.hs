@@ -67,24 +67,13 @@ data MultiSol = MultiSol
   , var :: String
   }
 
--- | A script to be executed, a list of models to be extracted in the case of a sat result, and a channel where the result should be written
-data Task = TaskSingle SingleData | TaskMulti MultiData
+
+data Task
+  = TaskSingle SMT2 (Maybe [Prop]) (MVar SMTResult)
+  | TaskMulti SMT2 MultiSol (MVar (Maybe [W256]))
 
 newtype CacheEntry = CacheEntry [Prop]
   deriving (Show, Eq)
-
-data MultiData = MultiData
-  { _smt2 :: SMT2
-  , _multiSol :: MultiSol
-  , _resultVar :: MVar (Maybe [W256])
-  }
-
-data SingleData = SingleData
-  { _smt2 :: SMT2
-  , _props :: Maybe [Prop]
-  , _resultVar :: MVar SMTResult
-  }
-
 
 withSolvers :: App m => Solver -> Natural -> Natural -> Maybe Natural -> (SolverGroup -> m a) -> m a
 withSolvers solver count threads timeout cont = do
@@ -109,12 +98,12 @@ withSolvers solver count threads timeout cont = do
     solveSingleTask :: TChan Task -> SMT2 -> Maybe[Prop] -> IO SMTResult
     solveSingleTask taskq smt2 maybeProps = do
       resVar <- newEmptyMVar
-      atomically $ writeTChan taskq (TaskSingle (SingleData smt2 maybeProps resVar))
+      atomically $ writeTChan taskq (TaskSingle smt2 maybeProps resVar)
       takeMVar resVar
     collectSolutionsTask :: TChan Task -> SMT2 -> MultiSol -> IO (Maybe [W256])
     collectSolutionsTask taskq smt2 multiSol = do
       resVar <- newEmptyMVar
-      atomically $ writeTChan taskq (TaskMulti (MultiData smt2 multiSol resVar))
+      atomically $ writeTChan taskq (TaskMulti smt2 multiSol resVar)
       takeMVar resVar
 
     orchestrate :: App m => TChan Task -> TChan CacheEntry -> Chan SolverInstance -> [Set Prop] -> Int -> m b
@@ -129,15 +118,15 @@ withSolvers solver count threads timeout cont = do
           orchestrate taskq cacheq avail knownUnsat' fileCounter
         Right task ->
           case task of
-            TaskSingle (SingleData _ props r) | isJust props && supersetAny (fromList (fromJust props)) knownUnsat -> do
+            TaskSingle _ props r | isJust props && supersetAny (fromList (fromJust props)) knownUnsat -> do
               liftIO $ putMVar r Qed
               when conf.debug $ liftIO $ putStrLn "   Qed found via cache!"
               orchestrate taskq cacheq avail knownUnsat fileCounter
             _ -> do
               inst <- liftIO $ readChan avail
               runTask' <- case task of
-                TaskSingle (SingleData smt2 props r) -> toIO $ getOneSol smt2 props r cacheq inst avail fileCounter
-                TaskMulti (MultiData smt2 multiSol r) -> toIO $ getMultiSol smt2 multiSol r inst avail fileCounter
+                TaskSingle smt2 props r -> toIO $ getOneSol smt2 props r cacheq inst avail fileCounter
+                TaskMulti smt2 multiSol r -> toIO $ getMultiSol smt2 multiSol r inst avail fileCounter
               _ <- liftIO $ forkIO runTask'
               orchestrate taskq cacheq avail knownUnsat (fileCounter + 1)
 
