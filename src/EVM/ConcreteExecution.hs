@@ -1025,43 +1025,51 @@ data CallType = REGULAR | DELEGATE | CODE | STATIC
   deriving Eq
 
 makeCall :: MVM s -> CallType -> Gas -> Addr -> CallValue -> VMWord -> VMWord -> VMWord -> VMWord -> Step s ()
-makeCall vm callType gas to callValue@(CallValue cv') argsOffset argsSize retOffset retSize
-  | isPrecompile to = internalError "Precompiles not supported yet!"
-  | otherwise = do
-    calldata <- readMemory vm argsOffset argsSize
-    touchMemory vm (fromIntegral retOffset) (fromIntegral retSize) -- FIXME: Should gas be charged beforehand or only for actually used memory on return? See EIP - 5
-    targetAccount <- liftST $ getOrCreateAccount vm to
-    let targetCode = targetAccount.accCode
-    -- let RuntimeCode bs = targetCode
-    -- Debug.Trace.traceM ("Calling " <>  (show to) <> " with code " <> (show $ ByteStringS bs))
-    -- Debug.Trace.traceM ("With call data " <> (show $ ByteStringS calldata))
-    currentFrame <- liftST $ getCurrentFrame vm
-    isWarm <- liftST $ accessAccountForGas vm to
+makeCall vm callType gas to callValue@(CallValue cv') argsOffset argsSize retOffset retSize = do
+  calldata <- readMemory vm argsOffset argsSize
+  touchMemory vm (fromIntegral retOffset) (fromIntegral retSize) -- FIXME: Should gas be charged beforehand or only for actually used memory on return? See EIP - 5
+
+  let callToPrecompile = isPrecompile to
+  let sendingValue = cv' /= 0
+  liftST $ do
+    isWarm <- if callToPrecompile then pure True else accessAccountForGas vm to
     let fees = vm.fees
-    let accessCost = if isWarm then fees.g_warm_storage_read else fees.g_cold_account_access
-        sendingValue = cv' /= 0
+        accessCost = if isWarm then fees.g_warm_storage_read else fees.g_cold_account_access
         positiveValueCost = if sendingValue then feeSchedule.g_callvalue else 0
         dynamicCost = accessCost + positiveValueCost
-    liftST $ burn vm (Gas dynamicCost)
-    availableGas <- liftST $ getAvailableGas currentFrame
-    let accounts = currentFrame.state.accounts
+    burn vm (Gas dynamicCost)
+  currentFrame <- liftST $ getCurrentFrame vm
+  availableGas <- liftST $ getAvailableGas currentFrame
+  let
+    myGasToTransfer = computeGasToTransfer availableGas gas
+    gasToTransfer = if sendingValue then myGasToTransfer + feeSchedule.g_callstipend else myGasToTransfer
+  liftST $ burn vm myGasToTransfer
+
+  if callToPrecompile
+    then executePrecompile
+    else do
+      targetAccount <- liftST $ getOrCreateAccount vm to
+      let targetCode = targetAccount.accCode
+      -- let RuntimeCode bs = targetCode
+      -- Debug.Trace.traceM ("Calling " <>  (show to) <> " with code " <> (show $ ByteStringS bs))
+      -- Debug.Trace.traceM ("With call data " <> (show $ ByteStringS calldata))
+
+      let
+        callValue' = case callType of DELEGATE -> currentFrame.context.callValue; _ -> callValue
+        accounts = currentFrame.state.accounts
         accountsAfterTransfer = case callType of REGULAR -> uncheckedTransfer accounts currentFrame.context.codeAddress to callValue; _ -> accounts
-        myGasToTransfer = computeGasToTransfer availableGas gas
-        gasToTransfer = if sendingValue then myGasToTransfer + feeSchedule.g_callstipend else myGasToTransfer
-    newFrameState <- liftST $ newMFrameState accountsAfterTransfer currentFrame.state.transientStorage gasToTransfer
-    liftST $ burn vm myGasToTransfer
-    let
-      callValue' = case callType of DELEGATE -> currentFrame.context.callValue; _ -> callValue
-      storageAddress = case callType of ct | ct == REGULAR || ct == STATIC -> to; _ -> currentFrame.context.storageAddress
-      caller = case callType of DELEGATE -> currentFrame.context.storageAddress; _ -> currentFrame.context.codeAddress
-      shouldBeStatic = (callType == STATIC || currentFrame.context.isStatic)
-      newFrameContext = FrameContext RUNTIME targetCode (parseByteCode targetCode) (CallData calldata) callValue' accounts to storageAddress caller shouldBeStatic
-      newFrame = MFrame newFrameContext newFrameState
-    liftST $ setReturnInfo newFrame (ReturnInfo retOffset retSize 1)
-    liftST $ pushFrame vm newFrame
+        storageAddress = case callType of ct | ct == REGULAR || ct == STATIC -> to; _ -> currentFrame.context.storageAddress
+        caller = case callType of DELEGATE -> currentFrame.context.storageAddress; _ -> currentFrame.context.codeAddress
+        shouldBeStatic = (callType == STATIC || currentFrame.context.isStatic)
+        newFrameContext = FrameContext RUNTIME targetCode (parseByteCode targetCode) (CallData calldata) callValue' accounts to storageAddress caller shouldBeStatic
+      newFrameState <- liftST $ newMFrameState accountsAfterTransfer currentFrame.state.transientStorage gasToTransfer
+      let newFrame = MFrame newFrameContext newFrameState
+      liftST $ setReturnInfo newFrame (ReturnInfo retOffset retSize 1) >> pushFrame vm newFrame
 
   where
     computeGasToTransfer (Gas availableGas) (Gas requestedGas) = Gas $ Prelude.min (EVM.allButOne64th availableGas) requestedGas
+
+    executePrecompile = internalError "Precompile not supported yet!"
 
 
 getOrCreateAccount :: MVM s -> Addr -> ST s Account
