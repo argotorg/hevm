@@ -21,6 +21,7 @@ Storage
 import Control.Monad (forM, when, unless, ap, liftM)
 import Control.Monad.ST (ST, runST)
 import Data.Bits ((.|.), (.&.), (.^.), shiftR, shiftL, testBit, complement, bit)
+import Data.ByteArray qualified as BA
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as Char8 (pack)
 import Data.DoubleWord (Int256)
@@ -35,7 +36,15 @@ import Data.Vector qualified as Vec
 import Data.Word (Word8, Word64)
 import Prelude hiding (exponent)
 
-import EVM (allButOne64th, ceilDiv, log2)
+import Crypto.Hash (Digest, SHA256, RIPEMD160)
+import Crypto.Hash qualified as Crypto
+import Crypto.Number.ModArithmetic (expFast)
+
+
+import EVM (allButOne64th, ceilDiv, log2, concreteModexpGasFee, lazySlice, asInteger, truncpadlit, parseModexpLength, isZero)
+import EVM.FeeSchedule
+import EVM.Op (getOp)
+import EVM.Precompiled qualified
 import EVM.RLP (rlpList, rlpAddrFull, rlpWord256)
 import EVM.Types (
   W256(..),
@@ -53,10 +62,10 @@ import EVM.Types (
   Addr(..),
   FunctionSelector,
   word256Bytes,
-  word160Bytes
+  word160Bytes,
+  asBE,
+  padLeft
   )
-import EVM.Op (getOp)
-import EVM.FeeSchedule
 
 -- import Debug.Trace qualified (traceM, trace)
 -- import Numeric (showHex)
@@ -987,6 +996,7 @@ stepCall vm = do
   retOffset <- pop vm
   retSize <- pop vm
   when (value > 0) $ checkNotStaticContext vm
+  -- Debug.Trace.traceM $ "Gas: " <> (show gas) <> "\nAddress: " <> (show address) <> "\nValue: " <> (show value) <> "\nargoffset: " <> (show argsOffset) <> "\nargsize: " <> (show argsSize) <> "\nretoffset: " <> (show retOffset) <> "\nretsize: " <> (show retSize)
   makeCall vm REGULAR (Gas $ fromIntegral gas) (truncateToAddr address) (CallValue value) argsOffset argsSize retOffset retSize
 
 stepDelegateCall :: MVM s -> Step s ()
@@ -1030,30 +1040,55 @@ makeCall vm callType gas to callValue@(CallValue cv') argsOffset argsSize retOff
   touchMemory vm (fromIntegral retOffset) (fromIntegral retSize) -- FIXME: Should gas be charged beforehand or only for actually used memory on return? See EIP - 5
 
   let callToPrecompile = isPrecompile to
-  let sendingValue = cv' /= 0
+  let valuePositive = cv' /= 0
+  let transferingValue = valuePositive && callType == REGULAR -- TODO: Check that this is correct on normal codes, not only precompiles
   liftST $ do
     isWarm <- if callToPrecompile then pure True else accessAccountForGas vm to
+    recipientExists <- accountExists vm to
     let fees = vm.fees
         accessCost = if isWarm then fees.g_warm_storage_read else fees.g_cold_account_access
-        positiveValueCost = if sendingValue then feeSchedule.g_callvalue else 0
-        dynamicCost = accessCost + positiveValueCost
+        positiveValueCost = if valuePositive then fees.g_callvalue else 0
+        accountCreationCost = if transferingValue && (not recipientExists) then fees.g_newaccount else 0
+        dynamicCost = accessCost + positiveValueCost + accountCreationCost
     burn vm (Gas dynamicCost)
-  currentFrame <- liftST $ getCurrentFrame vm
-  availableGas <- liftST $ getAvailableGas currentFrame
+  availableGas <- liftST $ (getCurrentFrame vm) >>= getAvailableGas
   let
     myGasToTransfer = computeGasToTransfer availableGas gas
-    gasToTransfer = if sendingValue then myGasToTransfer + feeSchedule.g_callstipend else myGasToTransfer
-  liftST $ burn vm myGasToTransfer
+    gasToTransfer = if valuePositive then myGasToTransfer + feeSchedule.g_callstipend else myGasToTransfer
 
   if callToPrecompile
-    then executePrecompile
+    then do
+      -- Debug.Trace.traceM ("Calling precompile " <>  (show to) <> " with data " <> (show $ ByteStringS calldata))
+      maybeResult <- executePrecompile vm to calldata gasToTransfer
+      -- FIXME: Find better way to handle gas in this case
+      when valuePositive (liftST $ getCurrentFrame vm >>= (flip unburn' (Gas vm.fees.g_callstipend)))
+      case maybeResult of
+        Nothing -> push vm 0 -- Call failed
+        Just bs -> do -- Call succeeded
+          -- FIXME: Set return data of the current frame
+          push vm 1
+          liftST $ do
+            memory <- getMemory vm
+            -- TODO: Safe conversion for offset and size
+            writeMemory memory (fromIntegral retOffset) (BS.take (fromIntegral retSize) bs)
+          when (transferingValue) $ liftST $ do
+            -- ensure the account exists
+            _ <- getOrCreateAccount vm to
+            currentFrame <- getCurrentFrame vm
+            let
+              accounts = currentFrame.state.accounts
+              accountsAfterTransfer = uncheckedTransfer accounts currentFrame.context.codeAddress to callValue
+            writeSTRef vm.current currentFrame {state = currentFrame.state {accounts = accountsAfterTransfer}}
+
     else do
+      liftST $ burn vm myGasToTransfer
       targetAccount <- liftST $ getOrCreateAccount vm to
       let targetCode = targetAccount.accCode
       -- let RuntimeCode bs = targetCode
       -- Debug.Trace.traceM ("Calling " <>  (show to) <> " with code " <> (show $ ByteStringS bs))
       -- Debug.Trace.traceM ("With call data " <> (show $ ByteStringS calldata))
 
+      currentFrame <- liftST $ getCurrentFrame vm
       let
         callValue' = case callType of DELEGATE -> currentFrame.context.callValue; _ -> callValue
         accounts = currentFrame.state.accounts
@@ -1068,20 +1103,6 @@ makeCall vm callType gas to callValue@(CallValue cv') argsOffset argsSize retOff
 
   where
     computeGasToTransfer (Gas availableGas) (Gas requestedGas) = Gas $ Prelude.min (EVM.allButOne64th availableGas) requestedGas
-
-    executePrecompile = internalError "Precompile not supported yet!"
-
-
-getOrCreateAccount :: MVM s -> Addr -> ST s Account
-getOrCreateAccount vm address = do
-  accounts <- getCurrentAccounts vm
-  let maybeAccount = StrictMap.lookup address accounts
-  case maybeAccount of
-    Nothing -> do
-      let accounts' = StrictMap.insert address emptyAccount accounts
-      modifySTRef' vm.current (\frame -> frame {state = frame.state {accounts = accounts'}})
-      pure emptyAccount
-    Just account -> pure account
 
 setReturnInfo :: MFrame s -> ReturnInfo -> ST s ()
 setReturnInfo (MFrame _ state) retInfo = do
@@ -1112,6 +1133,7 @@ stepGas :: MVM s -> Step s ()
 stepGas vm = do
   frame <- liftST $ getCurrentFrame vm
   Gas gasRemaining <- liftST $ getAvailableGas frame
+  -- Debug.Trace.traceM $ "Gas remaining: " <> (show gasRemaining)
   push vm (fromIntegral gasRemaining)
 
 stepReturn :: MVM s -> Step s ()
@@ -2027,5 +2049,109 @@ accessAccountForGas vm address = do
     writeSTRef vm.txsubstate substate {accessedAddresses = updatedAccessList}
   pure present
 
+getOrCreateAccount :: MVM s -> Addr -> ST s Account
+getOrCreateAccount vm address = do
+  accounts <- getCurrentAccounts vm
+  let maybeAccount = StrictMap.lookup address accounts
+  case maybeAccount of
+    Nothing -> do
+      let accounts' = StrictMap.insert address emptyAccount accounts
+      modifySTRef' vm.current (\frame -> frame {state = frame.state {accounts = accounts'}})
+      pure emptyAccount
+    Just account -> pure account
+
+accountExists :: MVM s -> Addr -> ST s Bool
+accountExists vm address = do
+  accounts <- getCurrentAccounts vm
+  pure $ isJust $ StrictMap.lookup address accounts
+-------------------- PRECOMPILES --------------------------------
+
 isPrecompile :: Addr -> Bool
 isPrecompile addr = 0x0 < addr && addr <= 0x09
+
+executePrecompile :: MVM s -> Addr -> BS.ByteString -> Gas -> Step s (Maybe BS.ByteString)
+executePrecompile vm addr input gasAvailable = do
+  let cost = costOfPrecompile vm.fees addr input
+  if cost > gasAvailable then (liftST $ burn vm gasAvailable) >> pure Nothing
+  else do
+    let output = execute
+    case output of
+      Left _ -> vmError $ NonexistentPrecompile addr
+      Right maybeResult -> let toBurn = case maybeResult of Nothing -> gasAvailable; _ -> cost in liftST $ burn vm toBurn >> pure maybeResult
+
+  where
+    execute = case addr of
+      -- ECRECOVER
+      0x1 -> Right $ Just . (fromMaybe mempty) $ EVM.Precompiled.execute 0x1 (truncpadlit 128 input) 32
+      -- SHA2-256
+      0x2 -> Right $ let hash = sha256Buf input
+                         sha256Buf x = BA.convert (Crypto.hash x :: Digest SHA256)
+                     in Just hash
+      -- RIPEMD-160
+      0x3 -> Right $ let
+                      padding = BS.pack $ replicate 12 0
+                      hash' = BA.convert (Crypto.hash input :: Digest RIPEMD160)
+                      hash  = padding <> hash'
+                    in Just hash
+      -- IDENTITY
+      0x4 -> Right $ Just input
+      -- MODEXP
+      0x5 -> Right $
+        let
+        (lenb, lene, lenm) = parseModexpLength input
+
+        output =
+          if isZero (96 + lenb + lene) lenm input
+          then truncpadlit (fromIntegral lenm) (asBE (0 :: Int))
+          else
+            let
+              b = asInteger $ lazySlice 96 lenb input
+              e = asInteger $ lazySlice (96 + lenb) lene input
+              m = asInteger $ lazySlice (96 + lenb + lene) lenm input
+            in
+              padLeft (fromIntegral lenm) (asBE (expFast b e m))
+        in Just output
+      -- ECADD
+      0x6 -> Right $ case EVM.Precompiled.execute 0x6 (truncpadlit 128 input) 64 of
+                      Nothing -> Nothing
+                      Just output -> Just $ truncpadlit 64 output
+      -- ECMUL
+      0x7 -> Right $ case EVM.Precompiled.execute 0x7 (truncpadlit 96 input) 64 of
+                      Nothing -> Nothing
+                      Just output -> Just $ truncpadlit 64 output
+      -- ECPAIRING
+      0x8 -> Right $ case EVM.Precompiled.execute 0x8 input 32 of
+                      Nothing -> Nothing
+                      Just output -> Just $ truncpadlit 32 output
+      -- BLAKE2
+      0x9 -> Right $ case (BS.length input, 1 >= BS.last input) of
+                      (213, True) -> case EVM.Precompiled.execute 0x9 input 64 of
+                                        Nothing -> Nothing
+                                        Just output -> Just $ truncpadlit 64 output
+                      _ -> Nothing
+      _ -> Left ()
+
+-- Gas cost of precompiles
+costOfPrecompile :: FeeSchedule Word64 -> Addr -> BS.ByteString -> Gas
+costOfPrecompile (FeeSchedule {..}) precompileAddr input =
+  let inputLen = fromIntegral $ BS.length input
+  in Gas $ case precompileAddr of
+    -- ECRECOVER
+    0x1 -> 3000
+    -- SHA2-256
+    0x2 -> (((inputLen + 31) `div` 32) * 12) + 60
+    -- RIPEMD-160
+    0x3 -> (((inputLen + 31) `div` 32) * 120) + 600
+    -- IDENTITY
+    0x4 -> (((inputLen + 31) `div` 32) * 3) + 15
+    -- MODEXP
+    0x5 -> concreteModexpGasFee input
+    -- ECADD
+    0x6 -> g_ecadd
+    -- ECMUL
+    0x7 -> g_ecmul
+    -- ECPAIRING
+    0x8 -> (inputLen `div` 192) * g_pairing_point + g_pairing_base
+    -- BLAKE2
+    0x9 -> g_fround * (fromIntegral $ asInteger $ lazySlice 0 4 input)
+    _ -> internalError $ "unimplemented precompiled contract " ++ show precompileAddr
