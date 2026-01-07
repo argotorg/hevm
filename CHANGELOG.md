@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Inequality propagation in constant propagation to prune impossible execution paths earlier.
   The constraint solver now tracks lower and upper bounds for symbolic values and detects
   conflicts (e.g., x < 5 && x > 10), significantly reducing the number of paths explored
-- Concretize symbolic EXP exponents up to 255 in SMT encoding
+- Encode symbolic power of 2 as bit-shift in SMT encoding.
 
 ## Fixed
 - Fix incorrect simplification rule for `PEq (Lit 1) (IsZero (LT a b))`
