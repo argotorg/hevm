@@ -438,7 +438,11 @@ exprToSMT = \case
       pure $ "(ite (= " <> benc `sp` zero <> " ) " <> one `sp` zero <> ")"
     _ -> case b of
       Lit b' -> expandExp a b'
-      _ -> Left $ "Cannot encode symbolic exponent into SMT. Offending symbolic value: " <> show b
+      _ -> case a of
+        Lit 2 -> do
+          benc <- exprToSMT b
+          pure $ "(bvshl " <> one `sp` benc <> ")"
+        _ -> Left $ "Cannot encode symbolic exponent into SMT. Offending symbolic value: " <> show b
   Min a b -> do
     aenc <- exprToSMT a
     benc <- exprToSMT b
