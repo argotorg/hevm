@@ -670,7 +670,6 @@ expandExp base expnt
     n <- expandExp base (expnt - 1)
     pure $ "(bvmul " <> b `sp` n <> ")"
 
-
 -- | Concatenates a list of bytes into a larger bitvector
 concatBytes :: [Expr Byte] -> Err Builder
 concatBytes bytes = do
