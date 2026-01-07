@@ -177,7 +177,7 @@ not :: Expr EWord -> Expr EWord
 not = op1 Not complement
 
 shl :: Expr EWord -> Expr EWord -> Expr EWord
-shl = op2 SHL (\x y -> if x > 256 then 0 else shiftL y (fromIntegral x))
+shl = op2 SHL (\x y -> if x >= 256 then 0 else shiftL y (fromIntegral x))
 
 shr :: Expr EWord -> Expr EWord -> Expr EWord
 shr = op2
@@ -1195,12 +1195,6 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
       where l = sort [a, b, c]
             an = EVM.Expr.and
 
-    -- A special pattern sometimes generated from Solidity that uses exponentiation to simulate bit shift.
-    -- We can rewrite the exponentiation into a bit-shift under certain conditions.
-    go (Exp (Lit 0x100) offset@(Mul (Lit a) (Mod _ (Lit b))))
-      | a * b <= 32 && (maxWord256 `Prelude.div` a) > b = shl (mul (Lit 8) offset) (Lit 1)
-    go (Exp (Lit 0x100) offset@(Mod _ (Lit 32))) = (shl (mul (Lit 8) offset)) (Lit 1)
-
     -- redundant add / sub
     go (Sub (Add a b) c)
       | a == c = b
@@ -1275,13 +1269,21 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
     go (SDiv _ (Lit 0)) = Lit 0 -- divide anything by 0 is zero in EVM
     go (SDiv a (Lit 1)) = a
     -- NOTE: Div x x is NOT 1, because Div 0 0 is 0, not 1.
-    --
+
+    --- Some trivial exp eliminations
     go (Exp _ (Lit 0)) = Lit 1 -- everything, including 0, to the power of 0 is 1
     go (Exp a (Lit 1)) = a -- everything, including 0, to the power of 1 is itself
     go (Exp (Lit 1) _) = Lit 1 -- 1 to any value (including 0) is 1
     -- NOTE: we can't simplify (Lit 0)^k. If k is 0 it's 1, otherwise it's 0.
     --       this is encoded in SMT.hs instead, via an SMT "ite"
-
+    --
+    -- A special pattern sometimes generated from Solidity that uses exponentiation to simulate bit shift.
+    -- We can rewrite the exponentiation into a bit-shift under certain conditions.
+    go (Exp (Lit 0x100) offset@(Mul (Lit a) (Mod _ (Lit b))))
+      | a * b <= 32 && (maxWord256 `Prelude.div` a) > b = shl (mul (Lit 8) offset) (Lit 1)
+    go (Exp (Lit 0x100) offset@(Mod _ (Lit 32))) = (shl (mul (Lit 8) offset)) (Lit 1)
+    go (Exp (Lit 2) k) = shl k (Lit 1)
+    go (Exp a b) = EVM.Expr.exp a b
 
     -- simple div/mod/add/sub
     go (Div  o1 o2) = EVM.Expr.div  o1 o2
@@ -1751,7 +1753,7 @@ constPropagate ps =
             Just l2 -> when (l == l2) conflict
             Nothing -> pure ()
         PNeg (PEq a b@(Lit _)) -> go $ PNeg (PEq b a)
-        
+
         -- inequalities (with overflow checks to prevent wraparound)
         -- PLT a (Lit b) means a < b, so a <= b-1
         PLT a (Lit b) ->

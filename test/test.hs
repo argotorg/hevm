@@ -747,6 +747,16 @@ tests = testGroup "hevm"
         let simplified = Expr.indexWord idx src
             full = IndexWord idx src
         checkEquiv full simplified
+    , testProperty "pow-base2-simp" $ \(_ :: Int) -> propNoSimp $ do
+        expo <- liftIO $ generate . sized $ genWordArith 15
+        let full = Exp (Lit 2) expo
+            simplified = Expr.simplify full
+        checkEquiv full simplified
+    , testProperty "pow-low-exponent-simp" $ \(LitWord @100 expo) -> propNoSimp $ do
+        base <- liftIO $ generate . sized $ genWordArith 15
+        let full = Exp base expo
+            simplified = Expr.simplify full
+        checkEquiv full simplified
     , testProperty "indexWord-mask-equivalence" $ \(src :: Expr EWord, LitWord @35 idx) -> propNoSimp $ do
         mask <- liftIO $ generate $ do
           pow <- arbitrary :: Gen Int
