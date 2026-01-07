@@ -432,17 +432,17 @@ exprToSMT = \case
   Sub a b -> op2 "bvsub" a b
   Mul a b -> op2 "bvmul" a b
   Exp a b -> case a of
-    -- Lit 1 has already been handled via Expr.simplify
     Lit 0 -> do
       benc <- exprToSMT b
       pure $ "(ite (= " <> benc `sp` zero <> " ) " <> one `sp` zero <> ")"
+    Lit 1 -> pure one
+    Lit 2 -> do
+        benc <- exprToSMT b
+        pure $ "(bvshl " <> one `sp` benc <> ")"
     _ -> case b of
-      Lit b' -> expandExp a b'
-      _ -> case a of
-        Lit 2 -> do
-          benc <- exprToSMT b
-          pure $ "(bvshl " <> one `sp` benc <> ")"
-        _ -> Left $ "Cannot encode symbolic exponent into SMT. Offending symbolic value: " <> show b
+      -- b is limited below, otherwise SMT query will be huge, and eventually Haskell stack overflows
+      Lit b' | b' < 1000 -> expandExp a b'
+      _ -> Left $ "Cannot encode symbolic exponent into SMT. Offending symbolic value: " <> show b
   Min a b -> do
     aenc <- exprToSMT a
     benc <- exprToSMT b
