@@ -1247,6 +1247,61 @@ tests = testGroup "hevm"
         let numErrs = sum $ map (fromEnum . isError) ret
         assertEqualM "number of counterexamples" 0 numCexes
         assertEqualM "number of errors" 0 numErrs
+    , test "base-2-exp-uint8" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function fun(uint8 x) public {
+              unchecked {
+                require(x < 10);
+                uint256 y = 2**x;
+                assert (y <= 512);
+              }
+            }
+          } |]
+        let sig = Just $ Sig "fun(uint8)" [AbiUIntType 8]
+        (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        assertBoolM "The expression must not be partial" $ not (any isPartial e)
+        let numCexes = sum $ map (fromEnum . isCex) ret
+        let numErrs = sum $ map (fromEnum . isError) ret
+        assertEqualM "number of counterexamples" 0 numCexes
+        assertEqualM "number of errors" 0 numErrs
+    , test "base-2-exp-no-rollaround" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function fun(uint256 x) public {
+              unchecked {
+                require(x > 10);
+                require(x < 256);
+                uint256 y = 2**x;
+                assert (y > 512);
+              }
+            }
+          } |]
+        let sig = Just $ Sig "fun(uint256)" [AbiUIntType 256]
+        (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        assertBoolM "The expression must not be partial" $ not (any isPartial e)
+        let numCexes = sum $ map (fromEnum . isCex) ret
+        let numErrs = sum $ map (fromEnum . isError) ret
+        assertEqualM "number of counterexamples" 0 numCexes
+        assertEqualM "number of errors" 0 numErrs
+    , test "base-2-exp-rollaround" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function fun(uint256 x) public {
+              unchecked {
+                require(x == 256);
+                uint256 y = 2**x;
+                assert (y > 512);
+              }
+            }
+          } |]
+        let sig = Just $ Sig "fun(uint256)" [AbiUIntType 256]
+        (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        assertBoolM "The expression must not be partial" $ not (any isPartial e)
+        let numCexes = sum $ map (fromEnum . isCex) ret
+        let numErrs = sum $ map (fromEnum . isError) ret
+        assertEqualM "number of counterexamples" 1 numCexes
+        assertEqualM "number of errors" 0 numErrs
     , test "unsigned-int8-range" $ do
         Just c <- solcRuntime "C" [i|
           contract C {
