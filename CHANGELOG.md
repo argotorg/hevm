@@ -15,7 +15,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Encode symbolic power of 2 as bit-shift in SMT encoding.
 - Limit the expansion of the EXP operation to avoid blow-up in the size of the SMT expressions.
 - New EXP rewrite rule for base-2 exponents
-- Use `bvshl` in SMT for base-2 exponentiation so we can explore more.
 
 ## Fixed
 - Fix incorrect simplification rule for `PEq (Lit 1) (IsZero (LT a b))`
