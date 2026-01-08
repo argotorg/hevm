@@ -80,6 +80,7 @@ newtype Instructions = Instructions (Vec.Vector Instruction)
 type MStack s = MVec.MVector s VMWord
 newtype CallData = CallData {calldata :: Data}
 newtype CallValue = CallValue {callvalue :: W256}
+newtype ReturnData = ReturnData {calldata :: Data}
 type Storage = StrictMap.Map W256 W256
 type Accounts = StrictMap.Map Addr Account
 type TStorages = StrictMap.Map Addr Storage
@@ -161,6 +162,7 @@ data MFrameState s = MFrameState {
   transientStorage :: TStorages,
   gasRemainingRef :: STRef s Gas,
   gasRefundedRef :: STRef s Gas,
+  returnData :: ReturnData,
   retInfoRef :: STRef s (Maybe ReturnInfo)
 }
 
@@ -173,7 +175,8 @@ newMFrameState accounts tstorage gas = do
   gasRemaining <- newSTRef gas
   gasRefunded <- newSTRef $ Gas 0
   retInfoRef <- newSTRef Nothing
-  pure $ MFrameState pcRef stackVec spRef memory accounts tstorage gasRemaining gasRefunded retInfoRef
+  let returnData = ReturnData mempty
+  pure $ MFrameState pcRef stackVec spRef memory accounts tstorage gasRemaining gasRefunded returnData retInfoRef
 
 data ContextType = INIT | RUNTIME
   deriving Eq
@@ -491,7 +494,7 @@ stepVM vm = do
             unburn' currentFrame unspentGas
             addGasRefund currentFrame gasRefund
             let calleeContextType = finishingFrame.context.contextType
-            let updatedFrame = currentFrame {state = currentFrame.state {accounts = accounts, transientStorage = tstorage}}
+            let updatedFrame = currentFrame {state = currentFrame.state {accounts = accounts, transientStorage = tstorage, returnData = ReturnData returnData}}
             writeSTRef vm.current updatedFrame
             when (calleeContextType == RUNTIME) $ do
               memory <- getMemory vm
@@ -507,9 +510,14 @@ stepVM vm = do
             unburn' currentFrame unspentGas
             memory <- getMemory vm
             writeMemory memory (fromIntegral retOffset) (BS.take (fromIntegral retSize) returnData)
+            let updatedFrame = currentFrame {state = currentFrame.state {returnData = ReturnData returnData}}
+            writeSTRef vm.current updatedFrame
             uncheckedPush vm 0
 
           FrameErrored _ -> do
+            currentFrame <- getCurrentFrame vm
+            let updatedFrame = currentFrame {state = currentFrame.state {returnData = ReturnData BS.empty}}
+            writeSTRef vm.current updatedFrame
             uncheckedPush vm 0
         pure Nothing
 
@@ -527,6 +535,7 @@ stepVM vm = do
           case result of
             FrameSucceeded returnData -> do
               -- TODO: Check code size
+              -- TODO: Do we need to set return data here?
               let codeSize = BS.length returnData
               burn vm (Gas $ vm.fees.g_codedeposit * (fromIntegral codeSize))
               maybeFrameResult' <- readSTRef vm.terminationFlagRef
@@ -603,6 +612,8 @@ runStep vm = do
       OpCalldataload -> stepCallDataLoad vm
       OpCalldatasize -> stepCallDataSize vm
       OpCalldatacopy -> stepCallDataCopy vm
+      OpReturndatasize -> stepReturnDataSize vm
+      OpReturndatacopy -> stepReturnDataCopy vm
       OpCall -> stepCall vm
       OpCallcode -> stepCallCode vm
       OpDelegatecall -> stepDelegateCall vm
@@ -985,6 +996,24 @@ stepCallDataCopy vm = do
   let CallData dataBS = frame.context.callData
   copyFromByteStringToMemory vm dataBS memoryOffset64 callDataOffset64 size64
 
+stepReturnDataSize :: MVM s -> Step s ()
+stepReturnDataSize vm = do
+  frame <- liftST $ getCurrentFrame vm
+  let ReturnData dataBS = frame.state.returnData
+  let size = BS.length dataBS
+  push vm (fromIntegral size)
+
+stepReturnDataCopy :: MVM s -> Step s ()
+stepReturnDataCopy vm = do
+  memoryOffset <- pop vm
+  returnDataOffset <- pop vm
+  size <- pop vm
+  let size64 = capAsWord64 size -- NOTE: We can cap it, larger numbers would cause of of gas anyway
+  let callDataOffset64 = capAsWord64 returnDataOffset
+  let memoryOffset64 = capAsWord64 memoryOffset
+  frame <- liftST $ getCurrentFrame vm
+  let ReturnData dataBS = frame.state.returnData
+  copyFromByteStringToMemory vm dataBS memoryOffset64 callDataOffset64 size64
 
 stepCall :: MVM s -> Step s ()
 stepCall vm = do
@@ -1063,10 +1092,10 @@ makeCall vm callType gas to callValue@(CallValue cv') argsOffset argsSize retOff
       -- FIXME: Find better way to handle gas in this case
       when valuePositive (liftST $ getCurrentFrame vm >>= (flip unburn' (Gas vm.fees.g_callstipend)))
       case maybeResult of
-        Nothing -> push vm 0 -- Call failed
+        Nothing -> (liftST $ setReturnData vm mempty) >> push vm 0 -- Call failed
         Just bs -> do -- Call succeeded
           -- FIXME: Set return data of the current frame
-          push vm 1
+          (liftST $ setReturnData vm bs) >> push vm 1
           liftST $ do
             memory <- getMemory vm
             -- TODO: Safe conversion for offset and size
@@ -1114,6 +1143,11 @@ getReturnInfo (MFrame _ state) = do
   case retInfo of
     Nothing -> internalError "Return info not set!"
     Just info -> pure info
+
+setReturnData :: MVM s -> BS.ByteString -> ST s ()
+setReturnData vm bs = do
+  frame <- getCurrentFrame vm
+  writeSTRef vm.current frame {state = frame.state {returnData = ReturnData bs}}
 
 stepKeccak :: MVM s -> Step s ()
 stepKeccak vm = do
@@ -1885,6 +1919,8 @@ burnStaticGas vm instruction = {-# SCC "BurnStaticGas" #-} do
           OpGasprice -> g_base
           OpExtcodesize -> g_zero
           OpExtcodecopy -> g_zero
+          OpReturndatasize -> g_base
+          OpReturndatacopy -> g_verylow
           OpExtcodehash -> g_zero
           OpBlockhash -> g_blockhash
           OpCoinbase -> g_base
