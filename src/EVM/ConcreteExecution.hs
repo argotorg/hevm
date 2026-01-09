@@ -101,6 +101,9 @@ data Account = Account {
 emptyAccount :: Account
 emptyAccount = Account (RuntimeCode "") mempty (Wei 0) (Nonce 0)
 
+isEmpty :: Account -> Bool
+isEmpty (Account (RuntimeCode bs) _ (Wei w) (Nonce n)) = BS.null bs && w == 0 && n == 0
+
 instance Show Instruction where
     show (GenericInst op) =
         show op
@@ -240,8 +243,9 @@ data ExecutionContext = ExecutionContext {
   blockHeader :: BlockHeader
 }
 
-newtype TxSubState = TxSubState {
-  accessedAddresses :: StrictMap.Map Addr (Set.Set W256)
+data TxSubState = TxSubState {
+  accessedAddresses :: StrictMap.Map Addr (Set.Set W256),
+  touchedAccounts :: Set.Set Addr
 }
 
 data EvmError
@@ -371,7 +375,7 @@ exec executionContext accounts = runST $ do
   framesRef <- newSTRef []
   let warmAddresses = [tx.from, targetAddress, executionContext.blockHeader.coinbase] ++ [1..9]
         -- TODO: ++ (Map.keys txaccessList)
-  substateRef <- newSTRef (TxSubState $ StrictMap.fromList [(address, mempty) | address <- warmAddresses])
+  substateRef <- newSTRef (TxSubState (StrictMap.fromList [(address, mempty) | address <- warmAddresses]) mempty)
   terminationFlagRef <- newSTRef Nothing
   let vm = MVM currentRef framesRef feeSchedule executionContext substateRef terminationFlagRef
   runLoop vm
@@ -447,11 +451,21 @@ runLoop vm = do
               updatedAccounts = StrictMap.alter (rewardMiner minerPay) vm.executionContext.blockHeader.coinbase $ StrictMap.adjust addTo vm.executionContext.transaction.from accounts
               updatedFrame = frame {state = frame.state {accounts = updatedAccounts}}
           writeSTRef vm.current updatedFrame
+          touchAccount vm vm.executionContext.blockHeader.coinbase
+          finalAccountsCleanup vm
 
     rewardMiner reward maybeAccount =
       case maybeAccount of
         Nothing -> Just $ emptyAccount {accBalance = reward}
         Just account -> Just $ account {accBalance = account.accBalance + reward}
+    finalAccountsCleanup vm' = do
+      frame <- getCurrentFrame vm'
+      txstate <- readSTRef vm'.txsubstate
+      let touchedAccounts = txstate.touchedAccounts
+      -- Debug.Trace.traceM ("Touched accounts: " <> (show touchedAccounts))
+      let accounts = frame.state.accounts
+      let nonemptyAccounts = StrictMap.filterWithKey (\k v -> not (isEmpty v && k `elem` touchedAccounts)) accounts
+      writeSTRef vm'.current frame { state = frame.state { accounts = nonemptyAccounts }}
 
 stepVM :: MVM s -> ST s (Maybe VMResult)
 stepVM vm = do
@@ -1126,6 +1140,8 @@ makeCall vm callType gas to callValue@(CallValue cv') argsOffset argsSize retOff
         caller = case callType of DELEGATE -> currentFrame.context.storageAddress; _ -> currentFrame.context.codeAddress
         shouldBeStatic = (callType == STATIC || currentFrame.context.isStatic)
         newFrameContext = FrameContext RUNTIME targetCode (parseByteCode targetCode) (CallData calldata) callValue' accounts to storageAddress caller shouldBeStatic
+      when (callType == REGULAR || callType == STATIC) $ liftST $ touchAccount vm to
+      -- TODO: touch caller?
       newFrameState <- liftST $ newMFrameState accountsAfterTransfer currentFrame.state.transientStorage gasToTransfer
       let newFrame = MFrame newFrameContext newFrameState
       liftST $ setReturnInfo newFrame (ReturnInfo retOffset retSize 1) >> pushFrame vm newFrame
@@ -2100,6 +2116,13 @@ accountExists :: MVM s -> Addr -> ST s Bool
 accountExists vm address = do
   accounts <- getCurrentAccounts vm
   pure $ isJust $ StrictMap.lookup address accounts
+
+touchAccount :: MVM s -> Addr -> ST s ()
+touchAccount vm addr = do
+  -- Debug.Trace.traceM $ "Touching account " <> (show addr)
+  txstate <- readSTRef vm.txsubstate
+  writeSTRef vm.txsubstate txstate {touchedAccounts = (Set.insert addr txstate.touchedAccounts)}
+
 -------------------- PRECOMPILES --------------------------------
 
 isPrecompile :: Addr -> Bool
