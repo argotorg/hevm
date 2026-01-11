@@ -13,7 +13,7 @@ import Control.Monad
 import Control.Monad.ST (stToIO)
 import Control.Monad.State.Strict
 import Control.Monad.IO.Unlift
-import Control.Monad.Reader (ReaderT)
+import Control.Monad.Reader (ReaderT, local, MonadReader)
 import Data.Bits hiding (And, Xor)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -5673,9 +5673,15 @@ checkEquivAndLHS orig simp = do
 checkEquivBase :: (Eq a, App m) => (a -> a -> Prop) -> a -> a -> Bool -> m (Maybe Bool)
 checkEquivBase mkprop l r expect = do
   config <- readConfig
-  let noSimplifyEnv = Env {config = config {simp = False}}
+  sStr <- liftIO $ fromMaybe "z3" <$> lookupEnv "HEVM_FUZZ_SOLVER"
+  let solver = case sStr of
+                 "yices" -> Yices
+                 "cvc5" -> CVC5
+                 "bitwuzla" -> Bitwuzla
+                 _ -> Z3
+  let noSimplifyEnv = Env {config = config {simp = False, solver = solver}}
   liftIO $ runEnv noSimplifyEnv $ do
-    withSolvers Z3 1 1 (Just 1) $ \solvers -> do
+    withSolvers solver 1 1 (Just 1) $ \solvers -> do
       res <- checkSatWithProps solvers [mkprop l r]
       let ret = case res of
             Qed -> Just True
