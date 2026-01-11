@@ -56,7 +56,7 @@ import EVM.Types hiding (word, Env, Symbolic)
 import EVM.Types qualified
 import EVM.UnitTest
 import EVM.Effects
-import EVM.SMT.Types hiding (Config)
+import EVM.SMT.Types
 import EVM.Expr (maybeLitWordSimp, maybeLitAddrSimp)
 import EVM.Tracing (interpretWithTrace, VMTraceStepResult(..))
 

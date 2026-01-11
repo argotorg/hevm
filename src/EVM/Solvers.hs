@@ -348,8 +348,8 @@ getModel inst cexvars = do
           -- TODO: do I need to check the write idx here?
           (Write _ idx next) -> idx <= 32 && go (Comp next)
 
-mkTimeout :: Maybe Natural -> Text
-mkTimeout t = T.pack $ show $ (1000 *)$ case t of
+mkTimeout :: Maybe Natural -> Natural -> Text
+mkTimeout t multiplier = T.pack $ show $ (multiplier *)$ case t of
   Nothing -> 300 :: Natural
   Just t' -> t'
 
@@ -359,7 +359,7 @@ solverArgs solver threads timeout = case solver of
   Bitwuzla ->
     [ "--lang=smt2"
     , "--produce-models"
-    , "--time-limit-per=" <> mkTimeout timeout
+    , "--time-limit-per=" <> mkTimeout timeout 1000
     , "--bv-solver=preprop"
     , "--bv-output-format=16"
     ]
@@ -373,12 +373,13 @@ solverArgs solver threads timeout = case solver of
     , "--print-success"
     , "--interactive"
     , "--incremental"
-    , "--tlimit-per=" <> mkTimeout timeout
+    , "--tlimit-per=" <> mkTimeout timeout 1000
     , "--arrays-exp"
     ]
   Yices ->
     [ "--incremental"
     , "--smt2-model-format"
+    , "--timeout=" <> mkTimeout timeout 1
     , "--bvconst-in-decimal"
     ]
   EmptySolver -> []
@@ -406,7 +407,7 @@ spawnSolver solver threads timeout = do
     EmptySolver -> pure solverInstance
     Z3 -> do
       _ <- sendCommand solverInstance $ SMTCommand "(set-option :print-success true)"
-      _ <- sendCommand solverInstance $ SMTCommand ("(set-option :timeout " <> (fromLazyText $ mkTimeout timeout) <> ")")
+      _ <- sendCommand solverInstance $ SMTCommand ("(set-option :timeout " <> (fromLazyText $ mkTimeout timeout 1000) <> ")")
       pure solverInstance
     Yices -> do
       _ <- sendCommand solverInstance $ SMTCommand "(set-option :print-success true)"
