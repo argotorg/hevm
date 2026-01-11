@@ -61,6 +61,7 @@ import EVM.Transaction qualified
 import EVM.Types hiding (Env)
 import EVM.Effects
 import EVM.Tracing (interpretWithTrace, VMTraceStep(..), VMTraceStepResult(..))
+import EVM.SMT.Types (Solver(..))
 
 data EVMToolTrace =
   EVMToolTrace

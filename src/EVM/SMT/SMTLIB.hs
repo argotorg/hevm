@@ -11,16 +11,19 @@ import Data.Text.Lazy.Builder
 
 import EVM.SMT.Types
 
-prelude :: SMT2
-prelude =  SMT2 src mempty mempty
+prelude :: Solver -> SMT2
+prelude solver =  SMT2 src mempty mempty
   where
   src = SMTScript $ header <> types <> macros
-  header = fmap SMTCommand [
-    "(set-info :smt-lib-version 2.6)",
-    "(set-logic ALL)",
+  header = fmap SMTCommand $ [
+    "(set-info :smt-lib-version 2.6)"
+    ] <> logic <> [
     "(set-info :source |\n Generator: hevm\n Application: hevm symbolic execution system\n |)",
     "(set-info :category \"industrial\")"
     ]
+  logic = case solver of
+    Yices -> ["(set-logic QF_AUFBV)"]
+    _ -> ["(set-logic ALL)"]
   types = (SMTComment "types") : (fmap SMTCommand [
     "(define-sort Byte () (_ BitVec 8))",
     "(define-sort Word () (_ BitVec 256))",
@@ -30,7 +33,13 @@ prelude =  SMT2 src mempty mempty
     <> (fmap SMTCommand [
         "(declare-fun keccak (Buf Word) Word)",
         "(declare-fun sha256 (Buf Word) Word)"
-    ])
+    ]) <> zeroBuf <> zeroStorage
+  zeroBuf = case solver of
+    Yices -> [ SMTCommand "(declare-fun zero_buf () Buf)" ]
+    _ -> [ SMTCommand "(define-fun zero_buf () Buf ((as const Buf) (_ bv0 8)))" ]
+  zeroStorage = case solver of
+    Yices -> [ SMTCommand "(declare-fun zero_storage () Storage)" ]
+    _ -> [ SMTCommand "(define-fun zero_storage () Storage ((as const Storage) (_ bv0 256)))" ]
   macros = fmap SMTCommand [
     "(define-fun max ((a (_ BitVec 256)) (b (_ BitVec 256))) (_ BitVec 256) (ite (bvult a b) b a))",
     "(define-fun indexWord31 ((w Word)) Byte ((_ extract 7 0) w))",

@@ -56,6 +56,7 @@ import EVM.Types hiding (word, Env, Symbolic)
 import EVM.Types qualified
 import EVM.UnitTest
 import EVM.Effects
+import EVM.SMT.Types hiding (Config)
 import EVM.Expr (maybeLitWordSimp, maybeLitAddrSimp)
 import EVM.Tracing (interpretWithTrace, VMTraceStepResult(..))
 
@@ -357,6 +358,7 @@ main = do
       when (cOpts.maxBufSize < 0) $ do
         putStrLn "Error: maxBufSize must be at least 0. Negative values do not make sense. A value of zero means at most 1 byte long buffers"
         exitFailure
+      solver <- getSolver cOpts.solver
       pure Env { config = defaultConfig
         { dumpQueries = cOpts.smtdebug
         , dumpUnsolved = cOpts.dumpUnsolved
@@ -372,6 +374,7 @@ main = do
         , verb = cOpts.verb
         , simp = Prelude.not cOpts.noSimplify
         , onlyDeployed = cOpts.onlyDeployed
+        , solver = solver
         } }
 
 
@@ -445,6 +448,7 @@ equivalence eqOpts cOpts = do
 getSolver :: Text -> IO Solver
 getSolver s = case T.unpack s of
   "z3" -> pure Z3
+  "yices" -> pure Yices
   "cvc5" -> pure CVC5
   "bitwuzla" -> pure Bitwuzla
   "empty" -> pure EmptySolver

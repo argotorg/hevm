@@ -25,6 +25,7 @@ import EVM.Types (internalError)
 import System.Environment (lookupEnv)
 import EVM.Fetch (RpcInfo, noRpc)
 import EVM.Fetch qualified as Fetch
+import EVM.SMT.Types hiding (Config)
 
 -- Returns tuple of (No cex, No warnings)
 runForgeTestCustom

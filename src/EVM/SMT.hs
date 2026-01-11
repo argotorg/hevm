@@ -115,8 +115,8 @@ declareIntermediates bufs stores = do
 --         need unconcretized Props
 assertProps :: Config -> [Prop] -> Err SMT2
 assertProps conf ps =
-  if not conf.simp then assertPropsHelper False ps
-  else assertPropsHelper True (decompose ps)
+  if not conf.simp then assertPropsHelper conf ps
+  else assertPropsHelper conf (decompose ps)
   where
     decompose :: [Prop] -> [Prop]
     decompose props = if conf.decomposeStorage && safeExprs && safeProps
@@ -131,15 +131,15 @@ assertProps conf ps =
 -- Note: we need a version that does NOT call simplify,
 -- because we make use of it to verify the correctness of our simplification
 -- passes through property-based testing.
-assertPropsHelper :: Bool -> [Prop]  -> Err SMT2
-assertPropsHelper simp psPreConc = do
+assertPropsHelper :: Config -> [Prop]  -> Err SMT2
+assertPropsHelper conf psPreConc = do
  encs <- mapM propToSMT psElim
  intermediates <- declareIntermediates bufs stores
  readAssumes' <- readAssumes
  keccakAssertions' <- keccakAssertions
  frameCtxs <- (declareFrameContext . nubOrd $ foldl' (<>) [] frameCtx)
  blockCtxs <- (declareBlockContext . nubOrd $ foldl' (<>) [] blockCtx)
- pure $ prelude
+ pure $ prelude (conf.solver)
   <> SMT2 (SMTScript (declareAbstractStores abstractStores)) mempty mempty
   <> declareConstrainAddrs addresses
   <> (declareBufs toDeclarePsElim bufs stores)
@@ -153,7 +153,7 @@ assertPropsHelper simp psPreConc = do
   <> SMT2 (SMTScript (fmap (\p -> SMTCommand("(assert " <> p <> ")")) encs)) (cexInfo storageReads) ps
 
   where
-    ps = if simp then Expr.concKeccakSimpProps psPreConc else Expr.concKeccakProps psPreConc
+    ps = if conf.simp then Expr.concKeccakSimpProps psPreConc else Expr.concKeccakProps psPreConc
     (psElim, bufs, stores) = eliminateProps ps
 
     -- Props storing info that need declaration(s)
@@ -547,9 +547,10 @@ exprToSMT = \case
                pure $ fromLazyText ("(indexWord" <> T.pack (show (into n :: Integer))) `sp` enc <> ")"
              else exprToSMT (LitByte 0)
     _ -> op2 "indexWord" idx w
+  ReadByte _ (ConcreteBuf "") -> exprToSMT (LitByte 0)
   ReadByte idx src -> op2 "select" src idx
 
-  ConcreteBuf "" -> pure "((as const Buf) #b00000000)"
+  ConcreteBuf "" -> pure "zero_buf"
   ConcreteBuf bs -> writeBytes bs mempty
   AbstractBuf s -> pure $ fromText s
   ReadWord idx prev -> op2 "readWord" idx prev
@@ -692,7 +693,7 @@ writeBytes bytes buf =  do
   pure $ snd ret
   where
     -- we don't need to store zeros if the base buffer is empty
-    skipZeros = buf == mempty
+    skipZeros = False
     wrap :: (Int, Builder) -> Word8 -> (Int, Builder)
     wrap (idx, acc) byte =
       if skipZeros && byte == 0
@@ -702,7 +703,7 @@ writeBytes bytes buf =  do
         !idx' = idx + 1
 
 encodeConcreteStore :: Map W256 W256 -> Err Builder
-encodeConcreteStore s = foldM encodeWrite ("((as const Storage) #x0000000000000000000000000000000000000000000000000000000000000000)") (Map.toList s)
+encodeConcreteStore s = foldM encodeWrite ("zero_storage") (Map.toList s)
   where
     encodeWrite :: Builder -> (W256, W256) -> Err Builder
     encodeWrite prev (key, val) = do
@@ -723,14 +724,6 @@ formatEAddr = \case
 
 -- ** Cex parsing ** --------------------------------------------------------------------------------
 
-parseAddr :: SpecConstant -> Addr
-parseAddr = parseSC
-
-parseW256 :: SpecConstant -> W256
-parseW256 = parseSC
-
-parseW8 :: SpecConstant -> Word8
-parseW8 = parseSC
 
 readOrError :: (Num a, Eq a) => ReadS a -> TS.Text -> a
 readOrError reader val = fst . headErr . reader . T.unpack . T.fromStrict $ val
@@ -741,6 +734,19 @@ parseSC :: (Num a, Eq a) => SpecConstant -> a
 parseSC (SCHexadecimal a) = readOrError Numeric.readHex a
 parseSC (SCBinary a) = readOrError Numeric.readBin a
 parseSC sc = internalError $ "cannot parse: " <> show sc
+
+parseTermVal :: (Num a, Eq a) => Term -> a
+parseTermVal (TermSpecConstant sc) = parseSC sc
+parseTermVal (TermQualIdentifier (Unqualified (IdIndexed val (IxNumeral _ :| []))))
+    | TS.isPrefixOf "bv" val = fromInteger (read (TS.unpack (TS.drop 2 val)))
+parseTermVal t = internalError $ "cannot parse term value: " <> show t
+
+parseAddr :: Term -> Addr
+parseAddr = parseTermVal
+
+parseW256 :: Term -> W256
+parseW256 = parseTermVal
+
 
 parseErr :: (Show a) => a -> b
 parseErr res = internalError $ "cannot parse solver response: " <> show res
@@ -778,7 +784,7 @@ getAddrs parseName getVal names = Map.mapKeys parseName <$> foldM (getOne parseA
 getVars :: (TS.Text -> Expr EWord) -> (Text -> IO Text) -> [TS.Text] -> IO (Map (Expr EWord) W256)
 getVars parseName getVal names = Map.mapKeys parseName <$> foldM (getOne parseW256 getVal) mempty names
 
-getOne :: (SpecConstant -> a) -> (Text -> IO Text) -> Map TS.Text a -> TS.Text -> IO (Map TS.Text a)
+getOne :: (Term -> a) -> (Text -> IO Text) -> Map TS.Text a -> TS.Text -> IO (Map TS.Text a)
 getOne parseVal getVal acc name = do
   raw <- getVal (T.fromStrict name)
   let
@@ -788,9 +794,9 @@ getOne parseVal getVal acc name = do
     val = case parsed of
       (TermQualIdentifier (
         Unqualified (IdSymbol symbol)),
-        TermSpecConstant sc)
+        term)
           -> if symbol == name
-             then parseVal sc
+             then parseVal term
              else internalError "solver did not return model for requested value"
       r -> parseErr r
   pure $ Map.insert name val acc
@@ -809,9 +815,9 @@ getBufs getVal bufs = foldM getBuf mempty bufs
       val <- getVal (name <> "_length ")
       pure $ case parseCommentFreeFileMsg getValueRes (T.toStrict val) of
         Right (ResSpecific (parsed :| [])) -> case parsed of
-          (TermQualIdentifier (Unqualified (IdSymbol symbol)), (TermSpecConstant sc))
+          (TermQualIdentifier (Unqualified (IdSymbol symbol)), valTerm)
             -> if symbol == (T.toStrict $ name <> "_length")
-               then parseW256 sc
+               then parseW256 valTerm
                else internalError "solver did not return model for requested value"
           res -> parseErr res
         res -> parseErr res
@@ -842,17 +848,23 @@ getBufs getVal bufs = foldM getBuf mempty bufs
                 SortSymbol (IdIndexed "BitVec" (IxNumeral "256" :| []))
                 :| [SortSymbol (IdIndexed "BitVec" (IxNumeral "8" :| []))]
               )
-            )) ((TermSpecConstant val :| [])))
-            -> Base (parseW8 val) len
+            )) ((valTerm :| [])))
+            -> Base (fromInteger (parseTermVal valTerm)) len
+
+          (TermApplication (
+            Qualified (IdSymbol "const") (
+              SortSymbol (IdSymbol "Buf")
+            )) ((valTerm :| [])))
+            -> Base (fromInteger (parseTermVal valTerm)) len
 
           -- writing a byte over some array
           (TermApplication
             (Unqualified (IdSymbol "store"))
-            (base :| [TermSpecConstant idx, TermSpecConstant val])
+            (base :| [idxTerm, valTerm])
             ) -> let
               pbase = go env base
-              pidx = parseW256 idx
-              pval = parseW8 val
+              pidx = fromInteger (parseTermVal idxTerm)
+              pval = fromInteger (parseTermVal valTerm)
             in Write pval pidx pbase
 
           -- binding a new name
@@ -905,7 +917,7 @@ queryValue getVal w = do
   raw <- getVal expr
   let valTxt = fromMaybe (internalError $ "failed to parse value from get-val response: " <> show raw) $ extractValue raw
   case parseString specConstant (T.toStrict valTxt) of
-    Right sc -> pure $ parseW256 sc
+    Right sc -> pure $ parseW256 (TermSpecConstant sc)
     r -> parseErr r
   where
     extractValue getValResponse = (T.stripSuffix "))") $ snd $ T.breakOnEnd " " $ T.stripEnd getValResponse
@@ -926,8 +938,8 @@ interpretNDArray interp env = \case
   TermApplication asconst (val :| []) | isArrConst asconst ->
     \_ -> interp env val
   -- (store arr ind val)
-  TermApplication store (arr :| [TermSpecConstant ind, val]) | isStore store ->
-    \x -> if x == parseW256 ind then interp env val else interpretNDArray interp env arr x
+  TermApplication store (arr :| [indTerm, val]) | isStore store ->
+    \x -> if x == parseW256 indTerm then interp env val else interpretNDArray interp env arr x
   t -> internalError $ "cannot parse array value. Unexpected term: " <> (show t)
 
   where
@@ -945,9 +957,8 @@ interpret1DArray :: (Map Symbol Term) -> Term -> (W256 -> W256)
 interpret1DArray = interpretNDArray interpretW256
   where
     interpretW256 :: (Map Symbol Term) -> Term -> W256
-    interpretW256 _ (TermSpecConstant val) = parseW256 val
     interpretW256 env (TermQualIdentifier (Unqualified (IdSymbol s))) =
       case Map.lookup s env of
         Just t -> interpretW256 env t
         Nothing -> internalError "unknown identifier, cannot parse array"
-    interpretW256 _ t = internalError $ "cannot parse array value. Unexpected term: " <> (show t)
+    interpretW256 _ t = parseW256 t

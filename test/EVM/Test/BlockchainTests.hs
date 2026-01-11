@@ -6,7 +6,8 @@ import EVM.Effects
 import EVM.Expr (maybeLitAddrSimp)
 import EVM.FeeSchedule (feeSchedule)
 import EVM.Fetch qualified
-import EVM.Solvers (withSolvers, Solver(..))
+import EVM.Solvers (withSolvers)
+import EVM.SMT.Types (Solver(..))
 import EVM.Stepper qualified
 import EVM.Transaction
 import EVM.Types hiding (Block, Case, Env)

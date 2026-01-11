@@ -37,19 +37,6 @@ import EVM.SMT
 import EVM.Types
 
 -- | Supported solvers
-data Solver
-  = Z3
-  | CVC5
-  | Bitwuzla
-  | EmptySolver
-  | Custom Text
-
-instance Show Solver where
-  show Z3 = "z3"
-  show CVC5 = "cvc5"
-  show Bitwuzla = "bitwuzla"
-  show EmptySolver = "empty-smt-solver"
-  show (Custom s) = T.unpack s
 
 
 -- | A running solver instance
@@ -389,6 +376,11 @@ solverArgs solver threads timeout = case solver of
     , "--tlimit-per=" <> mkTimeout timeout
     , "--arrays-exp"
     ]
+  Yices ->
+    [ "--incremental"
+    , "--smt2-model-format"
+    , "--bvconst-in-decimal"
+    ]
   EmptySolver -> []
   Custom _ -> []
 
@@ -415,6 +407,9 @@ spawnSolver solver threads timeout = do
     Z3 -> do
       _ <- sendCommand solverInstance $ SMTCommand "(set-option :print-success true)"
       _ <- sendCommand solverInstance $ SMTCommand ("(set-option :timeout " <> (fromLazyText $ mkTimeout timeout) <> ")")
+      pure solverInstance
+    Yices -> do
+      _ <- sendCommand solverInstance $ SMTCommand "(set-option :print-success true)"
       pure solverInstance
     Custom _ -> pure solverInstance
 
