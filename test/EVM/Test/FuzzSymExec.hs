@@ -22,7 +22,7 @@ import Data.Aeson qualified as JSON
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as Char8
-import Data.Maybe (fromJust, isJust, mapMaybe)
+import Data.Maybe (fromJust, isJust, mapMaybe, fromMaybe)
 import Data.Map.Strict qualified as Map
 import Data.Text.IO qualified as T
 import Data.Vector qualified as Vector
@@ -35,6 +35,7 @@ import System.Directory (removeDirectoryRecursive)
 import System.FilePath ((</>))
 import System.IO.Temp (getCanonicalTemporaryDirectory, createTempDirectory)
 import System.Process (readCreateProcessWithExitCode, proc, CreateProcess(..))
+import System.Environment (lookupEnv)
 import Test.QuickCheck (elements)
 import Test.QuickCheck.Instances.Text()
 import Test.QuickCheck.Instances.Natural()
@@ -402,20 +403,27 @@ runCodeWithTrace
   :: App m
   => Fetch.RpcInfo -> EVMToolEnv -> EVMToolAlloc -> EVM.Transaction.Transaction
   -> Expr EAddr -> Expr EAddr -> m (Either (EvmError, [VMTraceStep]) (([Expr 'End], [VMTraceStep], VMTraceStepResult)))
-runCodeWithTrace rpcinfo evmEnv alloc txn fromAddr toAddress = withSolvers Z3 0 1 Nothing $ \solvers -> do
-  let calldata' = ConcreteBuf txn.txdata
-      code' = alloc.code
-      iterConf = IterConfig { maxIter = Nothing, askSmtIters = 1, loopHeuristic = Naive }
-      fetcherSym = Fetch.oracle solvers Nothing rpcinfo
-      buildExpr vm = interpret fetcherSym iterConf vm runExpr pure
-  origVM <- liftIO $ stToIO $ vmForRuntimeCode code' calldata' evmEnv alloc txn fromAddr toAddress
-  expr <- buildExpr $ symbolify origVM
-
-  let fetcherConc = Fetch.oracle solvers Nothing rpcinfo
-  (res, (vm, trace)) <- runStateT (interpretWithTrace fetcherConc Stepper.execFully) (origVM, [])
-  case res of
-    Left x -> pure $ Left (x, trace)
-    Right _ -> pure $ Right (expr, trace, vmres vm)
+runCodeWithTrace rpcinfo evmEnv alloc txn fromAddr toAddress = do
+  solverStr <- liftIO $ fromMaybe "z3" <$> lookupEnv "HEVM_FUZZ_SOLVER"
+  let solver = case solverStr of
+                 "yices" -> Yices
+                 "cvc5" -> CVC5
+                 "bitwuzla" -> Bitwuzla
+                 _ -> Z3
+  withSolvers solver 0 1 Nothing $ \solvers -> do
+    let calldata' = ConcreteBuf txn.txdata
+        code' = alloc.code
+        iterConf = IterConfig { maxIter = Nothing, askSmtIters = 1, loopHeuristic = Naive }
+        fetcherSym = Fetch.oracle solvers Nothing rpcinfo
+        buildExpr vm = interpret fetcherSym iterConf vm runExpr pure
+    origVM <- liftIO $ stToIO $ vmForRuntimeCode code' calldata' evmEnv alloc txn fromAddr toAddress
+    expr <- buildExpr $ symbolify origVM
+  
+    let fetcherConc = Fetch.oracle solvers Nothing rpcinfo
+    (res, (vm, trace)) <- runStateT (interpretWithTrace fetcherConc Stepper.execFully) (origVM, [])
+    case res of
+      Left x -> pure $ Left (x, trace)
+      Right _ -> pure $ Right (expr, trace, vmres vm)
 
 vmForRuntimeCode :: ByteString -> Expr Buf -> EVMToolEnv -> EVMToolAlloc -> EVM.Transaction.Transaction -> Expr EAddr -> Expr EAddr -> ST RealWorld (VM Concrete)
 vmForRuntimeCode runtimecode calldata' evmToolEnv alloc txn fromAddr toAddress =
