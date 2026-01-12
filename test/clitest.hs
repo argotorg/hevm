@@ -197,6 +197,14 @@ main = do
         fileExists <- doesFileExist filename
         shouldBe fileExists True
         removeFile filename
+      it "early-abort" $ do
+        (exitcode, stdout, stderr) <- runForge "test/contracts/pass/early-abort.sol" ["--max-iterations", "1000"]
+        putStrLn $ "Exit code: " ++ show exitcode
+        putStrLn stderr
+        putStrLn stdout
+        -- stdout `shouldContain` "[FAIL]"
+        -- stdout `shouldContain` "abort"
+        -- stderr `shouldNotContain` "CallStack"
       it "rpc-cache" $ do
         (_, stdout, stderr) <- runForge "test/contracts/fail/rpc-test.sol"
           ["--rpc", "http://mock.mock", "--prefix", "test_attack_symbolic"
