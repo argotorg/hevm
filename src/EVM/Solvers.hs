@@ -10,6 +10,8 @@ import GHC.Natural
 import GHC.IO.Handle (Handle, hFlush, hSetBuffering, BufferMode(..))
 import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
 import Control.Concurrent (forkIO, killThread)
+import Control.Concurrent.QSem (QSem, newQSem, waitQSem, signalQSem)
+import Control.Exception (bracket, bracket_)
 import Control.Concurrent.STM (writeTChan, newTChan, TChan, tryReadTChan, atomically)
 import Control.Monad
 import Control.Monad.State.Strict
@@ -133,92 +135,69 @@ writeSMT2File smt2 path postfix = do
 
 withSolvers :: App m => Solver -> Natural -> Natural -> Maybe Natural -> (SolverGroup -> m a) -> m a
 withSolvers solver count threads timeout cont = do
-    -- spawn solvers
-    instances <- mapM (const $ liftIO $ spawnSolver solver threads timeout) [1..count]
     -- spawn orchestration thread
     taskq <- liftIO newChan
     cacheq <- liftIO . atomically $ newTChan
-    availableInstances <- liftIO newChan
-    liftIO $ forM_ instances (writeChan availableInstances)
-    orchestrate' <- toIO $ orchestrate taskq cacheq availableInstances [] 0
+    sem <- liftIO $ newQSem (fromIntegral count)
+    orchestrate' <- toIO $ orchestrate solver threads timeout taskq cacheq sem [] 0
     orchestrateId <- liftIO $ forkIO orchestrate'
 
     -- run continuation with task queue
     res <- cont (SolverGroup taskq)
 
     -- cleanup and return results
-    liftIO $ mapM_ (stopSolver) instances
     liftIO $ killThread orchestrateId
     pure res
   where
-    orchestrate :: App m => Chan Task -> TChan CacheEntry -> Chan SolverInstance -> [Set Prop] -> Int -> m b
-    orchestrate taskq cacheq avail knownUnsat fileCounter = do
+    orchestrate :: App m => Solver -> Natural -> Maybe Natural -> Chan Task -> TChan CacheEntry -> QSem -> [Set Prop] -> Int -> m b
+    orchestrate solver threads timeout taskq cacheq sem knownUnsat fileCounter = do
       conf <- readConfig
       mx <- liftIO . atomically $ tryReadTChan cacheq
       case mx of
         Just (CacheEntry props)  -> do
           let knownUnsat' = (fromList props):knownUnsat
           when conf.debug $ liftIO $ putStrLn "   adding UNSAT cache"
-          orchestrate taskq cacheq avail knownUnsat' fileCounter
+          orchestrate solver threads timeout taskq cacheq sem knownUnsat' fileCounter
         Nothing -> do
           task <- liftIO $ readChan taskq
           case task of
             TaskSingle (SingleData _ props r) | isJust props && supersetAny (fromList (fromJust props)) knownUnsat -> do
               liftIO $ writeChan r Qed
               when conf.debug $ liftIO $ putStrLn "   Qed found via cache!"
-              orchestrate taskq cacheq avail knownUnsat fileCounter
+              orchestrate solver threads timeout taskq cacheq sem knownUnsat fileCounter
             _ -> do
-              inst <- liftIO $ readChan avail
               runTask' <- case task of
-                TaskSingle (SingleData smt2 props r) -> toIO $ getOneSol smt2 props r cacheq inst avail fileCounter
-                TaskMulti (MultiData smt2 multiSol r) -> toIO $ getMultiSol smt2 multiSol r inst avail fileCounter
+                TaskSingle (SingleData smt2 props r) -> toIO $ getOneSol solver threads timeout smt2 props r cacheq sem fileCounter
+                TaskMulti (MultiData smt2 multiSol r) -> toIO $ getMultiSol solver threads timeout smt2 multiSol r sem fileCounter
               _ <- liftIO $ forkIO runTask'
-              orchestrate taskq cacheq avail knownUnsat (fileCounter + 1)
+              orchestrate solver threads timeout taskq cacheq sem knownUnsat (fileCounter + 1)
 
-getMultiSol :: forall m. (MonadIO m, ReadConfig m) => SMT2 -> MultiSol -> (Chan (Maybe [W256])) -> SolverInstance -> Chan SolverInstance -> Int -> m ()
-getMultiSol smt2@(SMT2 cmds cexvars _) multiSol r inst availableInstances fileCounter = do
+getMultiSol :: forall m. (MonadIO m, ReadConfig m) => Solver -> Natural -> Maybe Natural -> SMT2 -> MultiSol -> Chan (Maybe [W256]) -> QSem -> Int -> m ()
+getMultiSol solver threads timeout smt2@(SMT2 cmds cexvars _) multiSol r sem fileCounter = do
   conf <- readConfig
-  when conf.dumpQueries $ liftIO $ writeSMT2File smt2 "." (show fileCounter)
-  -- reset solver and send all lines of provided script
-  out <- liftIO $ do
-    resetRes <- sendScript inst $ SMTScript [SMTCommand "(reset)"]
-    case resetRes of
-      e@(Left _) -> pure e
-      _ -> sendScript inst cmds
-  case out of
-    Left err -> liftIO $ do
-      when conf.debug $ putStrLn $ "Unable to write SMT to solver: " <> (T.unpack err)
-      writeChan r Nothing
-    Right _ -> do
-      sat <- liftIO $ sendCommand inst $ SMTCommand "(check-sat)"
-      when conf.dumpQueries $ liftIO $ writeSMT2File smt2 "." (show fileCounter <> "-origquery")
-      subRun [] smt2 sat
-  -- put the instance back in the list of available instances
-  liftIO $ writeChan availableInstances inst
-  where
+  let
     maskFromBytesCount k
       | k <= 32 = (2 ^ (8 * k) - 1)
       | otherwise = internalError "Byte length exceeds 256-bit capacity"
-    subRun :: (MonadIO m, ReadConfig m) => [W256] -> SMT2 -> Text -> m ()
-    subRun vals fullSmt sat = do
-      conf <- readConfig
+    subRun :: SolverInstance -> [W256] -> SMT2 -> Text -> IO ()
+    subRun inst vals fullSmt sat = do
       case sat of
-        "unsat" -> liftIO $ do
+        "unsat" -> do
           when conf.debug $ putStrLn $ "No more solutions to query, returning: " <> show vals
-          liftIO $ writeChan r (Just vals)
-        "timeout" -> liftIO $ do
+          writeChan r (Just vals)
+        "timeout" -> do
            when conf.debug $ putStrLn "Timeout inside SMT solver."
            writeChan r Nothing
-        "unknown" -> liftIO $ do
+        "unknown" -> do
            when conf.debug $ putStrLn "Unknown result by SMT solver."
            dumpUnsolved fullSmt fileCounter conf.dumpUnsolved
            writeChan r Nothing
         "sat" -> do
-          if length vals >= multiSol.maxSols then liftIO $ do
+          if length vals >= multiSol.maxSols then do
             when conf.debug $ putStrLn "Too many solutions to symbolic query."
             writeChan r Nothing
           else do
-            cex <- liftIO $ getModel inst cexvars
+            cex <- getModel inst cexvars
             case Map.lookup (Var (TStrict.pack multiSol.var)) cex.vars of
               Just v -> do
                 let hexMask = maskFromBytesCount multiSol.numBytes
@@ -227,54 +206,77 @@ getMultiSol smt2@(SMT2 cmds cexvars _) multiSol r inst availableInstances fileCo
                     maskedVar = "(bvand " <> fromString multiSol.var <> " (_ bv" <> toSMT hexMask <> " 256))"
                     restrict = SMTCommand $ "(assert (not (= " <> maskedVar <> " (_ bv" <> toSMT maskedVal <> " 256))))"
                     newSmt = fullSmt <> SMT2 (SMTScript [restrict]) mempty mempty
-                when conf.debug $ liftIO $ putStrLn $ "Got one solution to symbolic query, val: 0x" <> (showHex maskedVal "") <>
+                when conf.debug $ putStrLn $ "Got one solution to symbolic query, val: 0x" <> (showHex maskedVal "") <>
                   " now have " <> show (length vals + 1) <> " solution(s), max is: " <> show multiSol.maxSols
-                when conf.dumpQueries $ liftIO $ writeSMT2File newSmt "." (show fileCounter <> "-sol" <> show (length vals))
-                out <- liftIO $ sendCommand inst restrict
+                when conf.dumpQueries $ writeSMT2File newSmt "." (show fileCounter <> "-sol" <> show (length vals))
+                out <- sendCommand inst restrict
                 case out of
                   "success" -> do
-                    out2 <- liftIO $ sendCommand inst  (SMTCommand "(check-sat)")
-                    subRun (maskedVal:vals) newSmt out2
-                  err -> liftIO $ do
+                    out2 <- sendCommand inst  (SMTCommand "(check-sat)")
+                    subRun inst (maskedVal:vals) newSmt out2
+                  err -> do
                     when conf.debug $ putStrLn $ "Unable to write SMT to solver: " <> (T.unpack err)
                     writeChan r Nothing
               Nothing -> internalError $ "variable " <>  multiSol.var <> " not part of model (i.e. cex) ... that's not possible"
-        err -> liftIO $ do
+        err -> do
           when conf.debug $ putStrLn $ "Unable to write SMT to solver: " <> (T.unpack err)
           writeChan r Nothing
+  liftIO $ bracket_
+    (waitQSem sem)
+    (signalQSem sem)
+    (do
+      when conf.dumpQueries $ writeSMT2File smt2 "." (show fileCounter)
+      bracket
+        (spawnSolver solver threads timeout)
+        (stopSolver)
+        (\inst -> do
+          -- NO RESET - fresh process
+          out <- sendScript inst cmds
+          case out of
+            Left err -> do
+              when conf.debug $ putStrLn $ "Unable to write SMT to solver: " <> (T.unpack err)
+              writeChan r Nothing
+            Right _ -> do
+              sat <- sendCommand inst $ SMTCommand "(check-sat)"
+              when conf.dumpQueries $ writeSMT2File smt2 "." (show fileCounter <> "-origquery")
+              subRun inst [] smt2 sat
+        )
+    )
 
-getOneSol :: (MonadIO m, ReadConfig m) => SMT2 -> Maybe [Prop] -> Chan SMTResult -> TChan CacheEntry -> SolverInstance -> Chan SolverInstance -> Int -> m ()
-getOneSol smt2@(SMT2 cmds cexvars _) props r cacheq inst availableInstances fileCounter = do
+getOneSol :: (MonadIO m, ReadConfig m) => Solver -> Natural -> Maybe Natural -> SMT2 -> Maybe [Prop] -> Chan SMTResult -> TChan CacheEntry -> QSem -> Int -> m ()
+getOneSol solver threads timeout smt2@(SMT2 cmds cexvars _) props r cacheq sem fileCounter = do
   conf <- readConfig
-  liftIO $ do
-    when (conf.dumpQueries) $ writeSMT2File smt2 "." (show fileCounter)
-    -- reset solver and send all lines of provided script
-    out <- do
-      resetRes <- sendScript inst $ SMTScript [SMTCommand "(reset)"]
-      case resetRes of
-        e@(Left _) -> pure e
-        _ -> sendScript inst cmds
-    case out of
-      -- if we got an error then return it
-      Left e -> writeChan r (Error $ "Error while writing SMT to solver: " <> T.unpack e)
-      -- otherwise call (check-sat), parse the result, and send it down the result channel
-      Right () -> do
-        sat <- sendCommand inst $ SMTCommand "(check-sat)"
-        res <- do
-            case sat of
-              "unsat" -> do
-                when (isJust props) $ liftIO . atomically $ writeTChan cacheq (CacheEntry (fromJust props))
-                pure Qed
-              "timeout" -> pure $ Unknown "Result timeout by SMT solver"
-              "unknown" -> do
-                dumpUnsolved smt2 fileCounter conf.dumpUnsolved
-                pure $ Unknown "Result unknown by SMT solver"
-              "sat" -> Cex <$> getModel inst cexvars
-              _ -> pure . Error $ "Unable to parse SMT solver output: " <> T.unpack sat
-        writeChan r res
-
-    -- put the instance back in the list of available instances
-    writeChan availableInstances inst
+  liftIO $ bracket_
+    (waitQSem sem)
+    (signalQSem sem)
+    (do
+      when (conf.dumpQueries) $ writeSMT2File smt2 "." (show fileCounter)
+      bracket
+        (spawnSolver solver threads timeout)
+        (stopSolver)
+        (\inst -> do
+          -- NO RESET - fresh process
+          out <- sendScript inst cmds
+          case out of
+            -- if we got an error then return it
+            Left e -> writeChan r (Error $ "Error while writing SMT to solver: " <> T.unpack e)
+            -- otherwise call (check-sat), parse the result, and send it down the result channel
+            Right () -> do
+              sat <- sendCommand inst $ SMTCommand "(check-sat)"
+              res <- do
+                  case sat of
+                    "unsat" -> do
+                      when (isJust props) $ liftIO . atomically $ writeTChan cacheq (CacheEntry (fromJust props))
+                      pure Qed
+                    "timeout" -> pure $ Unknown "Result timeout by SMT solver"
+                    "unknown" -> do
+                      dumpUnsolved smt2 fileCounter conf.dumpUnsolved
+                      pure $ Unknown "Result unknown by SMT solver"
+                    "sat" -> Cex <$> getModel inst cexvars
+                    _ -> pure . Error $ "Unable to parse SMT solver output: " <> T.unpack sat
+              writeChan r res
+        )
+    )
 
 dumpUnsolved :: SMT2 -> Int -> Maybe FilePath -> IO ()
 dumpUnsolved fullSmt fileCounter dump = do
