@@ -24,7 +24,6 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as Char8
 import Data.Maybe (fromJust, isJust, mapMaybe)
-
 import Data.Map.Strict qualified as Map
 import Data.Text.IO qualified as T
 import Data.Vector qualified as Vector
