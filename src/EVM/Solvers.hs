@@ -30,7 +30,6 @@ import Data.Text.Lazy.Builder
 import qualified Data.Text.Lazy.Builder.Int (decimal)
 import System.Process (createProcess, cleanupProcess, proc, ProcessHandle, std_in, std_out, std_err, StdStream(..), createPipe)
 import System.FilePath ((</>))
-import System.IO.Error (isEOFError)
 import EVM.Effects
 import Data.Bits ((.&.))
 import Numeric (showHex)
@@ -141,7 +140,7 @@ withSolvers solver count timeout maxMemory cont = do
     taskq <- liftIO newChan
     cacheq <- liftIO . atomically $ newTChan
     sem <- liftIO $ newQSem (fromIntegral count)
-    orchestrate' <- toIO $ orchestrate solver timeout maxMemory taskq cacheq sem [] 0
+    orchestrate' <- toIO $ orchestrate taskq cacheq sem [] 0
     orchestrateId <- liftIO $ forkIO orchestrate'
 
     -- run continuation with task queue
@@ -151,28 +150,28 @@ withSolvers solver count timeout maxMemory cont = do
     liftIO $ killThread orchestrateId
     pure res
   where
-    orchestrate :: App m => Solver -> Maybe Natural -> Natural -> Chan Task -> TChan CacheEntry -> QSem -> [Set Prop] -> Int -> m b
-    orchestrate solver timeout maxMemory taskq cacheq sem knownUnsat fileCounter = do
+    orchestrate :: App m => Chan Task -> TChan CacheEntry -> QSem -> [Set Prop] -> Int -> m b
+    orchestrate taskq cacheq sem knownUnsat fileCounter = do
       conf <- readConfig
       mx <- liftIO . atomically $ tryReadTChan cacheq
       case mx of
         Just (CacheEntry props)  -> do
           let knownUnsat' = (fromList props):knownUnsat
           when conf.debug $ liftIO $ putStrLn "   adding UNSAT cache"
-          orchestrate solver timeout maxMemory taskq cacheq sem knownUnsat' fileCounter
+          orchestrate taskq cacheq sem knownUnsat' fileCounter
         Nothing -> do
           task <- liftIO $ readChan taskq
           case task of
             TaskSingle (SingleData _ props r) | isJust props && supersetAny (fromList (fromJust props)) knownUnsat -> do
               liftIO $ writeChan r Qed
               when conf.debug $ liftIO $ putStrLn "   Qed found via cache!"
-              orchestrate solver timeout maxMemory taskq cacheq sem knownUnsat fileCounter
+              orchestrate taskq cacheq sem knownUnsat fileCounter
             _ -> do
               runTask' <- case task of
                 TaskSingle (SingleData smt2 props r) -> toIO $ getOneSol solver timeout maxMemory smt2 props r cacheq sem fileCounter
                 TaskMulti (MultiData smt2 multiSol r) -> toIO $ getMultiSol solver timeout maxMemory smt2 multiSol r sem fileCounter
               _ <- liftIO $ forkIO runTask'
-              orchestrate solver timeout maxMemory taskq cacheq sem knownUnsat (fileCounter + 1)
+              orchestrate taskq cacheq sem knownUnsat (fileCounter + 1)
 
 getMultiSol :: forall m. (MonadIO m, ReadConfig m) => Solver -> Maybe Natural -> Natural -> SMT2 -> MultiSol -> Chan (Maybe [W256]) -> QSem -> Int -> m ()
 getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r sem fileCounter = do
