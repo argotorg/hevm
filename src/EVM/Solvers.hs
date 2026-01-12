@@ -230,7 +230,6 @@ getMultiSol solver timeout smt2@(SMT2 cmds cexvars _) multiSol r sem fileCounter
         (spawnSolver solver timeout)
         (stopSolver)
         (\inst -> do
-          -- NO RESET - fresh process
           out <- sendScript inst cmds
           case out of
             Left err -> do
@@ -255,12 +254,9 @@ getOneSol solver timeout smt2@(SMT2 cmds cexvars _) props r cacheq sem fileCount
         (spawnSolver solver timeout)
         (stopSolver)
         (\inst -> do
-          -- NO RESET - fresh process
           out <- sendScript inst cmds
           case out of
-            -- if we got an error then return it
             Left e -> writeChan r (Error $ "Error while writing SMT to solver: " <> T.unpack e)
-            -- otherwise call (check-sat), parse the result, and send it down the result channel
             Right () -> do
               sat <- sendCommand inst $ SMTCommand "(check-sat)"
               res <- do
