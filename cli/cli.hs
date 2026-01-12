@@ -88,7 +88,6 @@ data CommonOptions = CommonOptions
   , verb          ::Int
   , root          ::Maybe String
   , assertionType ::AssertionType
-  , solverThreads ::Natural
   , smttimeout    ::Natural
   , smtdebug      ::Bool
   , dumpUnsolved  ::Maybe String
@@ -118,7 +117,6 @@ commonOptions = CommonOptions
   <*> (option auto $ long "verb"            <> showDefault <> value 1 <> help "Append call trace: {1} failures {2} all")
   <*> (optional $ strOption $ long "root"   <> help "Path to  project root directory")
   <*> (option auto $ long "assertion-type"  <> showDefault <> value Forge <> help "Assertions as per Forge or DSTest")
-  <*> (option auto $ long "solver-threads"  <> showDefault <> value 1 <> help "Number of threads for each solver instance. Only respected for Z3")
   <*> (option auto $ long "smttimeout"      <> value 300 <> help "Timeout given to SMT solver in seconds")
   <*> (switch $ long "smtdebug"             <> help "Print smt queries sent to the solver")
   <*> (optional $ strOption $ long "dump-unsolved" <> help "Dump unsolved SMT queries to this (relative) path")
@@ -332,7 +330,7 @@ main = do
       solver <- getSolver cOpts.solver
       cores <- liftIO $ unsafeInto <$> getNumProcessors
       let solverCount = fromMaybe cores cOpts.numSolvers
-      runEnv env $ withSolvers solver solverCount cOpts.solverThreads (Just cOpts.smttimeout) $ \solvers -> do
+      runEnv env $ withSolvers solver solverCount (Just cOpts.smttimeout) $ \solvers -> do
         buildOut <- readBuildOutput root testOpts.projectType
         case buildOut of
           Left e -> liftIO $ do
@@ -418,7 +416,7 @@ equivalence eqOpts cOpts = do
   solver <- liftIO $ getSolver cOpts.solver
   cores <- liftIO $ unsafeInto <$> getNumProcessors
   let solverCount = fromMaybe cores cOpts.numSolvers
-  withSolvers solver solverCount cOpts.solverThreads (Just cOpts.smttimeout) $ \s -> do
+  withSolvers solver solverCount (Just cOpts.smttimeout) $ \s -> do
     sess <- Fetch.mkSession cOpts.cacheDir Nothing
     eq <- equivalenceCheck s (Just sess) (fromJust bytecodeA) (fromJust bytecodeB) veriOpts calldata eqOpts.create
     let anyIssues =  not (null eq.partials) || any (isUnknown . fst) eq.res  || any (isError . fst) eq.res
@@ -516,7 +514,7 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = do
   cores <- liftIO $ unsafeInto <$> getNumProcessors
   let solverCount = fromMaybe cores cOpts.numSolvers
   solver <- liftIO $ getSolver cOpts.solver
-  withSolvers solver solverCount cOpts.solverThreads (Just cOpts.smttimeout) $ \solvers -> do
+  withSolvers solver solverCount (Just cOpts.smttimeout) $ \solvers -> do
     let veriOpts = VeriOpts { iterConf = IterConfig {
                               maxIter = parseMaxIters cOpts.maxIterations
                               , askSmtIters = cOpts.askSmtIterations
@@ -584,7 +582,7 @@ launchExec cFileOpts execOpts cExecOpts cOpts = do
     rpcDat :: Fetch.RpcInfo = Fetch.RpcInfo blockUrlInfo
 
   -- TODO: we shouldn't need solvers to execute this code
-  withSolvers Z3 0 1 Nothing $ \solvers -> do
+  withSolvers Z3 0 Nothing $ \solvers -> do
     let fetcher = Fetch.oracle solvers (Just sess) rpcDat
     vm' <- if execOpts.jsonTrace
            then do

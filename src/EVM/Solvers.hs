@@ -133,13 +133,13 @@ writeSMT2File smt2 path postfix = do
         fullPath = path </> "query-" <> postfix <> ".smt2"
     T.writeFile fullPath content
 
-withSolvers :: App m => Solver -> Natural -> Natural -> Maybe Natural -> (SolverGroup -> m a) -> m a
-withSolvers solver count threads timeout cont = do
+withSolvers :: App m => Solver -> Natural -> Maybe Natural -> (SolverGroup -> m a) -> m a
+withSolvers solver count timeout cont = do
     -- spawn orchestration thread
     taskq <- liftIO newChan
     cacheq <- liftIO . atomically $ newTChan
     sem <- liftIO $ newQSem (fromIntegral count)
-    orchestrate' <- toIO $ orchestrate solver threads timeout taskq cacheq sem [] 0
+    orchestrate' <- toIO $ orchestrate solver timeout taskq cacheq sem [] 0
     orchestrateId <- liftIO $ forkIO orchestrate'
 
     -- run continuation with task queue
@@ -149,31 +149,31 @@ withSolvers solver count threads timeout cont = do
     liftIO $ killThread orchestrateId
     pure res
   where
-    orchestrate :: App m => Solver -> Natural -> Maybe Natural -> Chan Task -> TChan CacheEntry -> QSem -> [Set Prop] -> Int -> m b
-    orchestrate solver threads timeout taskq cacheq sem knownUnsat fileCounter = do
+    orchestrate :: App m => Solver -> Maybe Natural -> Chan Task -> TChan CacheEntry -> QSem -> [Set Prop] -> Int -> m b
+    orchestrate solver timeout taskq cacheq sem knownUnsat fileCounter = do
       conf <- readConfig
       mx <- liftIO . atomically $ tryReadTChan cacheq
       case mx of
         Just (CacheEntry props)  -> do
           let knownUnsat' = (fromList props):knownUnsat
           when conf.debug $ liftIO $ putStrLn "   adding UNSAT cache"
-          orchestrate solver threads timeout taskq cacheq sem knownUnsat' fileCounter
+          orchestrate solver timeout taskq cacheq sem knownUnsat' fileCounter
         Nothing -> do
           task <- liftIO $ readChan taskq
           case task of
             TaskSingle (SingleData _ props r) | isJust props && supersetAny (fromList (fromJust props)) knownUnsat -> do
               liftIO $ writeChan r Qed
               when conf.debug $ liftIO $ putStrLn "   Qed found via cache!"
-              orchestrate solver threads timeout taskq cacheq sem knownUnsat fileCounter
+              orchestrate solver timeout taskq cacheq sem knownUnsat fileCounter
             _ -> do
               runTask' <- case task of
-                TaskSingle (SingleData smt2 props r) -> toIO $ getOneSol solver threads timeout smt2 props r cacheq sem fileCounter
-                TaskMulti (MultiData smt2 multiSol r) -> toIO $ getMultiSol solver threads timeout smt2 multiSol r sem fileCounter
+                TaskSingle (SingleData smt2 props r) -> toIO $ getOneSol solver timeout smt2 props r cacheq sem fileCounter
+                TaskMulti (MultiData smt2 multiSol r) -> toIO $ getMultiSol solver timeout smt2 multiSol r sem fileCounter
               _ <- liftIO $ forkIO runTask'
-              orchestrate solver threads timeout taskq cacheq sem knownUnsat (fileCounter + 1)
+              orchestrate solver timeout taskq cacheq sem knownUnsat (fileCounter + 1)
 
-getMultiSol :: forall m. (MonadIO m, ReadConfig m) => Solver -> Natural -> Maybe Natural -> SMT2 -> MultiSol -> Chan (Maybe [W256]) -> QSem -> Int -> m ()
-getMultiSol solver threads timeout smt2@(SMT2 cmds cexvars _) multiSol r sem fileCounter = do
+getMultiSol :: forall m. (MonadIO m, ReadConfig m) => Solver -> Maybe Natural -> SMT2 -> MultiSol -> Chan (Maybe [W256]) -> QSem -> Int -> m ()
+getMultiSol solver timeout smt2@(SMT2 cmds cexvars _) multiSol r sem fileCounter = do
   conf <- readConfig
   let
     maskFromBytesCount k
@@ -227,7 +227,7 @@ getMultiSol solver threads timeout smt2@(SMT2 cmds cexvars _) multiSol r sem fil
     (do
       when conf.dumpQueries $ writeSMT2File smt2 "." (show fileCounter)
       bracket
-        (spawnSolver solver threads timeout)
+        (spawnSolver solver timeout)
         (stopSolver)
         (\inst -> do
           -- NO RESET - fresh process
@@ -243,8 +243,8 @@ getMultiSol solver threads timeout smt2@(SMT2 cmds cexvars _) multiSol r sem fil
         )
     )
 
-getOneSol :: (MonadIO m, ReadConfig m) => Solver -> Natural -> Maybe Natural -> SMT2 -> Maybe [Prop] -> Chan SMTResult -> TChan CacheEntry -> QSem -> Int -> m ()
-getOneSol solver threads timeout smt2@(SMT2 cmds cexvars _) props r cacheq sem fileCounter = do
+getOneSol :: (MonadIO m, ReadConfig m) => Solver -> Maybe Natural -> SMT2 -> Maybe [Prop] -> Chan SMTResult -> TChan CacheEntry -> QSem -> Int -> m ()
+getOneSol solver timeout smt2@(SMT2 cmds cexvars _) props r cacheq sem fileCounter = do
   conf <- readConfig
   liftIO $ bracket_
     (waitQSem sem)
@@ -252,7 +252,7 @@ getOneSol solver threads timeout smt2@(SMT2 cmds cexvars _) props r cacheq sem f
     (do
       when (conf.dumpQueries) $ writeSMT2File smt2 "." (show fileCounter)
       bracket
-        (spawnSolver solver threads timeout)
+        (spawnSolver solver timeout)
         (stopSolver)
         (\inst -> do
           -- NO RESET - fresh process
@@ -369,8 +369,8 @@ mkTimeout t = T.pack $ show $ (1000 *)$ case t of
   Just t' -> t'
 
 -- | Arguments used when spawning a solver instance
-solverArgs :: Solver -> Natural -> Maybe Natural -> [Text]
-solverArgs solver threads timeout = case solver of
+solverArgs :: Solver -> Maybe Natural -> [Text]
+solverArgs solver timeout = case solver of
   Bitwuzla ->
     [ "--lang=smt2"
     , "--produce-models"
@@ -380,7 +380,6 @@ solverArgs solver threads timeout = case solver of
     ]
   Z3 ->
     [ "-st"
-    , "smt.threads=" <> (T.pack $ show threads)
     , "-in" ]
   CVC5 ->
     [ "--lang=smt"
@@ -395,11 +394,11 @@ solverArgs solver threads timeout = case solver of
   Custom _ -> []
 
 -- | Spawns a solver instance, and sets the various global config options that we use for our queries
-spawnSolver :: Solver -> Natural -> Maybe (Natural) -> IO SolverInstance
-spawnSolver solver threads timeout = do
+spawnSolver :: Solver -> Maybe (Natural) -> IO SolverInstance
+spawnSolver solver timeout = do
   (readout, writeout) <- createPipe
   let cmd
-        = (proc (show solver) (fmap T.unpack $ solverArgs solver threads timeout ))
+        = (proc (show solver) (fmap T.unpack $ solverArgs solver timeout ))
             { std_in = CreatePipe
             , std_out = UseHandle writeout
             , std_err = UseHandle writeout

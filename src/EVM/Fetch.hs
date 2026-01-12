@@ -498,7 +498,7 @@ mkSessionWithoutCache = mkSession Nothing Nothing
 zero :: Natural -> Maybe Natural -> Fetcher t m
 zero smtjobs smttimeout q = do
   sess <- mkSessionWithoutCache
-  withSolvers Z3 smtjobs 1 smttimeout $ \s ->
+  withSolvers Z3 smtjobs smttimeout $ \s ->
     oracle s (Just sess) noRpc q
 
 noRpcFetcher :: forall t m . App m => SolverGroup -> Fetcher t m
