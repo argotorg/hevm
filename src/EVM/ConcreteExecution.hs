@@ -156,12 +156,17 @@ data ReturnInfo = ReturnInfo {
   stackValueOnSuccess :: VMWord
 }
 
+type AccessedAddresses = StrictMap.Map Addr (Set.Set W256)
+type TouchedAccounts = Set.Set Addr
+
 data MFrameState s = MFrameState {
   pcRef :: STRef s Int,
   stack :: MStack s,
   spRef :: STRef s Int,  -- stack pointer (beyond stack top slot)
   memory :: Memory s,
   accounts :: Accounts,
+  accessedAddresses :: AccessedAddresses,
+  touchedAccounts :: TouchedAccounts,
   transientStorage :: TStorages,
   gasRemainingRef :: STRef s Gas,
   gasRefundedRef :: STRef s Gas,
@@ -169,8 +174,8 @@ data MFrameState s = MFrameState {
   retInfoRef :: STRef s (Maybe ReturnInfo)
 }
 
-newMFrameState :: Accounts -> TStorages -> Gas -> ST s (MFrameState s)
-newMFrameState accounts tstorage gas = do
+newMFrameState :: Accounts -> AccessedAddresses -> TouchedAccounts -> TStorages -> Gas -> ST s (MFrameState s)
+newMFrameState accounts accessedAddresses touchedAccounts tstorage gas = do
   pcRef <- newSTRef 0
   stackVec <- MVec.new 1024
   spRef <- newSTRef 0
@@ -179,7 +184,7 @@ newMFrameState accounts tstorage gas = do
   gasRefunded <- newSTRef $ Gas 0
   retInfoRef <- newSTRef Nothing
   let returnData = ReturnData mempty
-  pure $ MFrameState pcRef stackVec spRef memory accounts tstorage gasRemaining gasRefunded returnData retInfoRef
+  pure $ MFrameState pcRef stackVec spRef memory accounts accessedAddresses touchedAccounts tstorage gasRemaining gasRefunded returnData retInfoRef
 
 data ContextType = INIT | RUNTIME
   deriving Eq
@@ -209,7 +214,6 @@ data MVM s = MVM
     frames :: STRef s [MFrame s],
     fees :: FeeSchedule Word64,
     executionContext :: ExecutionContext,
-    txsubstate :: STRef s TxSubState,
     terminationFlagRef :: TerminationFlag s
   }
 
@@ -241,11 +245,6 @@ data BlockHeader = BlockHeader {
 data ExecutionContext = ExecutionContext {
   transaction :: Transaction,
   blockHeader :: BlockHeader
-}
-
-data TxSubState = TxSubState {
-  accessedAddresses :: StrictMap.Map Addr (Set.Set W256),
-  touchedAccounts :: Set.Set Addr
 }
 
 data EvmError
@@ -369,15 +368,16 @@ exec executionContext accounts = runST $ do
   -- Debug.Trace.traceM $ "Gas price: " <> (show gasPrice)
   -- Debug.Trace.traceM $ "Priority fee: " <> (show priorityFee)
   -- Debug.Trace.traceM $ "Target address: " <> (show targetAddress)
+  -- Debug.Trace.traceM $ "Available gas: " <> (show availableGas)
   initialFrame <- mkFrame contextType tx.from targetAddress tx.value tx.txdata targetAccount.accCode availableGas accountsAfterInitiatingTransaction
-  let frameAfterAccountsUpdate = initialFrame {state = initialFrame.state {accounts = updatedAccounts}}
-  currentRef <- newSTRef frameAfterAccountsUpdate
-  framesRef <- newSTRef []
   let warmAddresses = [tx.from, targetAddress, executionContext.blockHeader.coinbase] ++ [1..9]
         -- TODO: ++ (Map.keys txaccessList)
-  substateRef <- newSTRef (TxSubState (StrictMap.fromList [(address, mempty) | address <- warmAddresses]) mempty)
+  let warmAccounts = StrictMap.fromList [(address, mempty) | address <- warmAddresses]
+  let initialFrame' = initialFrame {state = initialFrame.state {accounts = updatedAccounts, accessedAddresses = warmAccounts}}
+  currentRef <- newSTRef initialFrame'
+  framesRef <- newSTRef []
   terminationFlagRef <- newSTRef Nothing
-  let vm = MVM currentRef framesRef feeSchedule executionContext substateRef terminationFlagRef
+  let vm = MVM currentRef framesRef feeSchedule executionContext terminationFlagRef
   runLoop vm
 
   where
@@ -404,7 +404,7 @@ exec executionContext accounts = runST $ do
 
     mkFrame :: ContextType -> Addr -> Addr -> CallValue -> CallData -> RuntimeCode -> Gas -> Accounts -> ST s (MFrame s)
     mkFrame contextType from to callvalue calldata code availableGas accounts' = do
-      freshState <- newMFrameState accounts' mempty availableGas
+      freshState <- newMFrameState accounts' mempty mempty mempty availableGas
       let ctx = FrameContext contextType code (parseByteCode code) calldata callvalue accounts' to to from False
       pure $ MFrame ctx freshState
 
@@ -440,11 +440,13 @@ runLoop vm = do
           writeSTRef vm.current updatedFrame
         VMSuccess _ -> do
           Gas refunds <- getGasRefund frame
+          -- Debug.Trace.traceM $ "Gas refund accumulated: " <> (show refunds)
           let refundCap = gasUsed `div` 5
               finalRefund = Prelude.min refunds refundCap
 
               toRefund = remaining + finalRefund
               weiToRefund = Wei $ (fromIntegral toRefund) * gasPrice
+          -- Debug.Trace.traceM $ "Final refund: " <> (show finalRefund)
 
           let accounts = frame.state.accounts
               addTo account = account {accBalance = account.accBalance + weiToRefund}
@@ -460,8 +462,7 @@ runLoop vm = do
         Just account -> Just $ account {accBalance = account.accBalance + reward}
     finalAccountsCleanup vm' = do
       frame <- getCurrentFrame vm'
-      txstate <- readSTRef vm'.txsubstate
-      let touchedAccounts = txstate.touchedAccounts
+      let touchedAccounts = frame.state.touchedAccounts
       -- Debug.Trace.traceM ("Touched accounts: " <> (show touchedAccounts))
       let accounts = frame.state.accounts
       let nonemptyAccounts = StrictMap.filterWithKey (\k v -> not (isEmpty v && k `elem` touchedAccounts)) accounts
@@ -496,6 +497,8 @@ stepVM vm = do
         finishingFrame <- getCurrentFrame vm
         let accounts = finishingFrame.state.accounts
         let tstorage = finishingFrame.state.transientStorage
+        let touchedAccounts = finishingFrame.state.touchedAccounts
+        let accessedAddresses = finishingFrame.state.accessedAddresses
         unspentGas <- getAvailableGas finishingFrame
         gasRefund <- getGasRefund finishingFrame
         (ReturnInfo retOffset retSize stackRetValue) <- getReturnInfo finishingFrame
@@ -508,7 +511,7 @@ stepVM vm = do
             unburn' currentFrame unspentGas
             addGasRefund currentFrame gasRefund
             let calleeContextType = finishingFrame.context.contextType
-            let updatedFrame = currentFrame {state = currentFrame.state {accounts = accounts, transientStorage = tstorage, returnData = ReturnData returnData}}
+            let updatedFrame = currentFrame {state = currentFrame.state {accounts = accounts, touchedAccounts = touchedAccounts, accessedAddresses = accessedAddresses, transientStorage = tstorage, returnData = ReturnData returnData}}
             writeSTRef vm.current updatedFrame
             when (calleeContextType == RUNTIME) $ do
               memory <- getMemory vm
@@ -1125,6 +1128,7 @@ makeCall vm callType gas to callValue@(CallValue cv') argsOffset argsSize retOff
 
     else do
       liftST $ burn vm myGasToTransfer
+      when (callType == REGULAR || callType == STATIC) $ liftST $ touchAccount vm to
       targetAccount <- liftST $ getOrCreateAccount vm to
       let targetCode = targetAccount.accCode
       -- let RuntimeCode bs = targetCode
@@ -1133,16 +1137,16 @@ makeCall vm callType gas to callValue@(CallValue cv') argsOffset argsSize retOff
 
       currentFrame <- liftST $ getCurrentFrame vm
       let
+        currentState = currentFrame.state
         callValue' = case callType of DELEGATE -> currentFrame.context.callValue; _ -> callValue
-        accounts = currentFrame.state.accounts
+        accounts = currentState.accounts
         accountsAfterTransfer = case callType of REGULAR -> uncheckedTransfer accounts currentFrame.context.codeAddress to callValue; _ -> accounts
         storageAddress = case callType of ct | ct == REGULAR || ct == STATIC -> to; _ -> currentFrame.context.storageAddress
         caller = case callType of DELEGATE -> currentFrame.context.storageAddress; _ -> currentFrame.context.codeAddress
         shouldBeStatic = (callType == STATIC || currentFrame.context.isStatic)
         newFrameContext = FrameContext RUNTIME targetCode (parseByteCode targetCode) (CallData calldata) callValue' accounts to storageAddress caller shouldBeStatic
-      when (callType == REGULAR || callType == STATIC) $ liftST $ touchAccount vm to
       -- TODO: touch caller?
-      newFrameState <- liftST $ newMFrameState accountsAfterTransfer currentFrame.state.transientStorage gasToTransfer
+      newFrameState <- liftST $ newMFrameState accountsAfterTransfer currentState.accessedAddresses currentState.touchedAccounts currentState.transientStorage gasToTransfer
       let newFrame = MFrame newFrameContext newFrameState
       liftST $ setReturnInfo newFrame (ReturnInfo retOffset retSize 1) >> pushFrame vm newFrame
 
@@ -1587,14 +1591,14 @@ touchCurrentStore vm slot = do
 
   where
     access vm' address slot' = do
-      substate <- readSTRef vm'.txsubstate
-      let accessed = substate.accessedAddresses
+      frame <- getCurrentFrame vm'
+      let accessed = frame.state.accessedAddresses
           present = case StrictMap.lookup address accessed of
             Nothing -> False
             Just slots -> Set.member slot' slots
       unless present $ do
         let updatedAccessList = StrictMap.insertWith (\_ oldSet -> Set.insert slot' oldSet) address (Set.singleton slot') accessed
-        writeSTRef vm'.txsubstate substate {accessedAddresses = updatedAccessList}
+        writeSTRef vm'.current frame {state = frame.state{accessedAddresses = updatedAccessList}}
       pure present
 
     getCurrentStorageAddress vm' = do
@@ -2068,12 +2072,13 @@ executeCreate vm sender initGas value newAddress code = do
     then do
       liftST $ burn vm initGas
       let initCode = RuntimeCode code
-      let callerAccounts = callerFrame.state.accounts
+          callerState = callerFrame.state
+          callerAccounts = callerState.accounts
           withCalleeAccounts = StrictMap.insert newAddress (emptyAccount {accCode = initCode, accNonce = 1}) callerAccounts
           withNonceIncremented = StrictMap.adjust (\acc -> acc{accNonce = acc.accNonce + 1})  sender withCalleeAccounts
           calleeAccounts = uncheckedTransfer withNonceIncremented sender newAddress value
       liftST $ do
-        newFrameState <- newMFrameState calleeAccounts callerFrame.state.transientStorage initGas
+        newFrameState <- newMFrameState calleeAccounts callerState.accessedAddresses callerState.touchedAccounts callerState.transientStorage initGas
         let newFrameContext = FrameContext INIT initCode (parseByteCode initCode) (CallData BS.empty) value calleeAccounts newAddress newAddress sender False
             newFrame = MFrame newFrameContext newFrameState
             (Addr addrVal) = newAddress
@@ -2093,12 +2098,12 @@ cappedSum a b = let s = a + b in if s < a then maxBound else s
 
 accessAccountForGas :: MVM s -> Addr -> ST s Bool
 accessAccountForGas vm address = do
-  substate <- readSTRef vm.txsubstate
-  let accessed = substate.accessedAddresses
+  frame <- getCurrentFrame vm
+  let accessed = frame.state.accessedAddresses
       present = StrictMap.member address accessed
   unless present $ do
     let updatedAccessList = StrictMap.insert address mempty accessed
-    writeSTRef vm.txsubstate substate {accessedAddresses = updatedAccessList}
+    writeSTRef vm.current frame {state = frame.state{accessedAddresses = updatedAccessList}}
   pure present
 
 getOrCreateAccount :: MVM s -> Addr -> ST s Account
@@ -2120,8 +2125,8 @@ accountExists vm address = do
 touchAccount :: MVM s -> Addr -> ST s ()
 touchAccount vm addr = do
   -- Debug.Trace.traceM $ "Touching account " <> (show addr)
-  txstate <- readSTRef vm.txsubstate
-  writeSTRef vm.txsubstate txstate {touchedAccounts = (Set.insert addr txstate.touchedAccounts)}
+  frame <- getCurrentFrame vm
+  writeSTRef vm.current frame {state = frame.state {touchedAccounts = (Set.insert addr frame.state.touchedAccounts)}}
 
 -------------------- PRECOMPILES --------------------------------
 
