@@ -2,6 +2,7 @@
     Module: EVM.Solvers
     Description: Solver orchestration
 -}
+{-# LANGUAGE CPP #-}
 module EVM.Solvers where
 
 import Prelude hiding (LT, GT)
@@ -11,7 +12,7 @@ import GHC.IO.Handle (Handle, hFlush, hSetBuffering, BufferMode(..))
 import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
 import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.QSem (QSem, newQSem, waitQSem, signalQSem)
-import Control.Exception (bracket, bracket_)
+import Control.Exception (bracket, bracket_, try, IOException)
 import Control.Concurrent.STM (writeTChan, newTChan, TChan, tryReadTChan, atomically)
 import Control.Monad
 import Control.Monad.State.Strict
@@ -29,6 +30,7 @@ import Data.Text.Lazy.Builder
 import qualified Data.Text.Lazy.Builder.Int (decimal)
 import System.Process (createProcess, cleanupProcess, proc, ProcessHandle, std_in, std_out, std_err, StdStream(..), createPipe)
 import System.FilePath ((</>))
+import System.IO.Error (isEOFError)
 import EVM.Effects
 import Data.Bits ((.&.))
 import Numeric (showHex)
@@ -133,13 +135,13 @@ writeSMT2File smt2 path postfix = do
         fullPath = path </> "query-" <> postfix <> ".smt2"
     T.writeFile fullPath content
 
-withSolvers :: App m => Solver -> Natural -> Maybe Natural -> (SolverGroup -> m a) -> m a
-withSolvers solver count timeout cont = do
+withSolvers :: App m => Solver -> Natural -> Maybe Natural -> Natural -> (SolverGroup -> m a) -> m a
+withSolvers solver count timeout maxMemory cont = do
     -- spawn orchestration thread
     taskq <- liftIO newChan
     cacheq <- liftIO . atomically $ newTChan
     sem <- liftIO $ newQSem (fromIntegral count)
-    orchestrate' <- toIO $ orchestrate solver timeout taskq cacheq sem [] 0
+    orchestrate' <- toIO $ orchestrate solver timeout maxMemory taskq cacheq sem [] 0
     orchestrateId <- liftIO $ forkIO orchestrate'
 
     -- run continuation with task queue
@@ -149,31 +151,31 @@ withSolvers solver count timeout cont = do
     liftIO $ killThread orchestrateId
     pure res
   where
-    orchestrate :: App m => Solver -> Maybe Natural -> Chan Task -> TChan CacheEntry -> QSem -> [Set Prop] -> Int -> m b
-    orchestrate solver timeout taskq cacheq sem knownUnsat fileCounter = do
+    orchestrate :: App m => Solver -> Maybe Natural -> Natural -> Chan Task -> TChan CacheEntry -> QSem -> [Set Prop] -> Int -> m b
+    orchestrate solver timeout maxMemory taskq cacheq sem knownUnsat fileCounter = do
       conf <- readConfig
       mx <- liftIO . atomically $ tryReadTChan cacheq
       case mx of
         Just (CacheEntry props)  -> do
           let knownUnsat' = (fromList props):knownUnsat
           when conf.debug $ liftIO $ putStrLn "   adding UNSAT cache"
-          orchestrate solver timeout taskq cacheq sem knownUnsat' fileCounter
+          orchestrate solver timeout maxMemory taskq cacheq sem knownUnsat' fileCounter
         Nothing -> do
           task <- liftIO $ readChan taskq
           case task of
             TaskSingle (SingleData _ props r) | isJust props && supersetAny (fromList (fromJust props)) knownUnsat -> do
               liftIO $ writeChan r Qed
               when conf.debug $ liftIO $ putStrLn "   Qed found via cache!"
-              orchestrate solver timeout taskq cacheq sem knownUnsat fileCounter
+              orchestrate solver timeout maxMemory taskq cacheq sem knownUnsat fileCounter
             _ -> do
               runTask' <- case task of
-                TaskSingle (SingleData smt2 props r) -> toIO $ getOneSol solver timeout smt2 props r cacheq sem fileCounter
-                TaskMulti (MultiData smt2 multiSol r) -> toIO $ getMultiSol solver timeout smt2 multiSol r sem fileCounter
+                TaskSingle (SingleData smt2 props r) -> toIO $ getOneSol solver timeout maxMemory smt2 props r cacheq sem fileCounter
+                TaskMulti (MultiData smt2 multiSol r) -> toIO $ getMultiSol solver timeout maxMemory smt2 multiSol r sem fileCounter
               _ <- liftIO $ forkIO runTask'
-              orchestrate solver timeout taskq cacheq sem knownUnsat (fileCounter + 1)
+              orchestrate solver timeout maxMemory taskq cacheq sem knownUnsat (fileCounter + 1)
 
-getMultiSol :: forall m. (MonadIO m, ReadConfig m) => Solver -> Maybe Natural -> SMT2 -> MultiSol -> Chan (Maybe [W256]) -> QSem -> Int -> m ()
-getMultiSol solver timeout smt2@(SMT2 cmds cexvars _) multiSol r sem fileCounter = do
+getMultiSol :: forall m. (MonadIO m, ReadConfig m) => Solver -> Maybe Natural -> Natural -> SMT2 -> MultiSol -> Chan (Maybe [W256]) -> QSem -> Int -> m ()
+getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r sem fileCounter = do
   conf <- readConfig
   let
     maskFromBytesCount k
@@ -227,7 +229,7 @@ getMultiSol solver timeout smt2@(SMT2 cmds cexvars _) multiSol r sem fileCounter
     (do
       when conf.dumpQueries $ writeSMT2File smt2 "." (show fileCounter)
       bracket
-        (spawnSolver solver timeout)
+        (spawnSolver solver timeout maxMemory)
         (stopSolver)
         (\inst -> do
           out <- sendScript inst cmds
@@ -242,8 +244,8 @@ getMultiSol solver timeout smt2@(SMT2 cmds cexvars _) multiSol r sem fileCounter
         )
     )
 
-getOneSol :: (MonadIO m, ReadConfig m) => Solver -> Maybe Natural -> SMT2 -> Maybe [Prop] -> Chan SMTResult -> TChan CacheEntry -> QSem -> Int -> m ()
-getOneSol solver timeout smt2@(SMT2 cmds cexvars _) props r cacheq sem fileCounter = do
+getOneSol :: (MonadIO m, ReadConfig m) => Solver -> Maybe Natural -> Natural -> SMT2 -> Maybe [Prop] -> Chan SMTResult -> TChan CacheEntry -> QSem -> Int -> m ()
+getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) props r cacheq sem fileCounter = do
   conf <- readConfig
   liftIO $ bracket_
     (waitQSem sem)
@@ -251,7 +253,7 @@ getOneSol solver timeout smt2@(SMT2 cmds cexvars _) props r cacheq sem fileCount
     (do
       when (conf.dumpQueries) $ writeSMT2File smt2 "." (show fileCounter)
       bracket
-        (spawnSolver solver timeout)
+        (spawnSolver solver timeout maxMemory)
         (stopSolver)
         (\inst -> do
           out <- sendScript inst cmds
@@ -361,7 +363,7 @@ getModel inst cexvars = do
 
 mkTimeout :: Maybe Natural -> Text
 mkTimeout t = T.pack $ show $ (1000 *)$ case t of
-  Nothing -> 300 :: Natural
+  Nothing -> 3600000 :: Natural -- max is 1000 hours (~40 days)
   Just t' -> t'
 
 -- | Arguments used when spawning a solver instance
@@ -390,15 +392,35 @@ solverArgs solver timeout = case solver of
   Custom _ -> []
 
 -- | Spawns a solver instance, and sets the various global config options that we use for our queries
-spawnSolver :: Solver -> Maybe (Natural) -> IO SolverInstance
-spawnSolver solver timeout = do
+spawnSolver :: Solver -> Maybe (Natural) -> Natural -> IO SolverInstance
+spawnSolver solver timeout maxMemoryMB = do
   (readout, writeout) <- createPipe
-  let cmd
-        = (proc (show solver) (fmap T.unpack $ solverArgs solver timeout ))
+  let timeoutSeconds = case timeout of
+        Nothing -> 300 :: Natural
+        Just t' -> t'
+      maxMemoryKB = maxMemoryMB * 1024  -- Convert MB to KB for ulimit -v
+      solverCmd = show solver
+      solverArgsStr = fmap T.unpack $ solverArgs solver timeout
+#if defined(mingw32_HOST_OS)
+      -- Windows: no ulimit available, rely on solver-specific timeouts and memory management
+      cmd = (proc solverCmd solverArgsStr)
             { std_in = CreatePipe
             , std_out = UseHandle writeout
             , std_err = UseHandle writeout
             }
+#else
+      -- Unix-like (Linux, macOS): Wrap with shell that sets CPU time and memory limits via ulimit
+      -- ulimit -t sets RLIMIT_CPU (kernel-enforced CPU time limit in seconds)
+      -- ulimit -v sets RLIMIT_AS (kernel-enforced virtual memory limit in KB)
+      -- Use sh -c to execute ulimit followed by exec to replace the shell with the solver
+      shellCmd = "sh"
+      shellArgs = ["-c", "ulimit -t " ++ show timeoutSeconds ++ "; ulimit -v " ++ show maxMemoryKB ++ "; exec \"$@\"", "--", solverCmd] ++ solverArgsStr
+      cmd = (proc shellCmd shellArgs)
+            { std_in = CreatePipe
+            , std_out = UseHandle writeout
+            , std_err = UseHandle writeout
+            }
+#endif
   (Just stdin, Nothing, Nothing, process) <- createProcess cmd
   hSetBuffering stdin (BlockBuffering (Just 1000000))
   let solverInstance = SolverInstance solver stdin readout process
@@ -445,12 +467,22 @@ stripCarriageReturn :: Text -> Text
 stripCarriageReturn t = fromMaybe t $ T.stripSuffix "\r" t
 
 -- | Sends a string to the solver and appends a newline, returns the first available line from the output buffer
+-- Returns "unknown" if the solver process has died (timeout, crash, etc.)
 sendCommand :: SolverInstance -> SMTEntry -> IO Text
 sendCommand _ (SMTComment _) = internalError "Attempting to send a comment as a command to SMT solver"
 sendCommand (SolverInstance _ stdin stdout _) (SMTCommand cmd) = do
-  T.hPutStrLn stdin $ toLazyText cmd
-  hFlush stdin
-  stripCarriageReturn <$> (T.hGetLine stdout)
+  result <- try $ T.hPutStrLn stdin $ toLazyText cmd
+  case result of
+    Left (_ :: IOException) -> pure "unknown"  -- Write failed
+    Right _ -> do
+      flushResult <- try $ hFlush stdin
+      case flushResult of
+        Left (_ :: IOException) -> pure "unknown"  -- Flush failed
+        Right _ -> do
+          lineResult <- try $ stripCarriageReturn <$> T.hGetLine stdout
+          case lineResult of
+            Left (_ :: IOException) -> pure "unknown"  -- Process died
+            Right txt -> pure txt
 
 -- | Returns a string representation of the model for the requested variable
 getValue :: SolverInstance -> Text -> IO Text
@@ -460,8 +492,13 @@ getValue (SolverInstance _ stdin stdout _) var = do
   fmap (T.unlines . reverse) (readSExpr stdout)
 
 -- | Reads lines from h until we have a balanced sexpr
+-- Returns ["unknown"] if the solver process has died
 readSExpr :: Handle -> IO [Text]
-readSExpr h = go 0 0 []
+readSExpr h = do
+  result <- try $ go 0 0 []
+  case result of
+    Left (_ :: IOException) -> pure ["unknown"]  -- Solver died (timeout, crash, etc.)
+    Right txts -> pure txts
   where
     go 0 0 _ = do
       line <- T.hGetLine h

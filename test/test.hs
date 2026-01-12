@@ -119,13 +119,13 @@ propNoSimp a = let testEnvNoSimp = Env { config = testEnv.config { simp = False 
   in ioProperty $ runEnv testEnvNoSimp a
 
 withDefaultSolver :: App m => (SolverGroup -> m a) -> m a
-withDefaultSolver = withSolvers Z3 3 Nothing
+withDefaultSolver = withSolvers Z3 3 Nothing 1024
 
 withCVC5Solver :: App m => (SolverGroup -> m a) -> m a
-withCVC5Solver = withSolvers CVC5 3 Nothing
+withCVC5Solver = withSolvers CVC5 3 Nothing 1024
 
 withBitwuzlaSolver :: App m => (SolverGroup -> m a) -> m a
-withBitwuzlaSolver = withSolvers Bitwuzla 3 Nothing
+withBitwuzlaSolver = withSolvers Bitwuzla 3 Nothing 1024
 
 main :: IO ()
 main = defaultMain tests
@@ -1321,7 +1321,7 @@ tests = testGroup "hevm"
               }
              }
             |]
-        (_, [Cex (_, ctr)]) <- withSolvers Bitwuzla 1 Nothing $ \s -> checkAssert s [0x12] c (Just (Sig "fun(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
+        (_, [Cex (_, ctr)]) <- withSolvers Bitwuzla 1 Nothing 1024 $ \s -> checkAssert s [0x12] c (Just (Sig "fun(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
         assertEqualM "Division by 0 needs b=0" (getVar ctr "arg2") 0
         putStrLnM "expected counterexample found"
      ,
@@ -1334,7 +1334,7 @@ tests = testGroup "hevm"
                }
              }
              |]
-         (_, [Cex _]) <- withSolvers Bitwuzla 1 Nothing $ \s -> checkAssert s [0x1] c Nothing [] defaultVeriOpts
+         (_, [Cex _]) <- withSolvers Bitwuzla 1 Nothing 1024 $ \s -> checkAssert s [0x1] c Nothing [] defaultVeriOpts
          putStrLnM "expected counterexample found"
      , test "gas-decrease-monotone" $ do
         Just c <- solcRuntime "MyContract"
@@ -1360,7 +1360,7 @@ tests = testGroup "hevm"
               }
              }
             |]
-        (_, [Cex (_, ctr)]) <- withSolvers Bitwuzla 1 Nothing $ \s -> checkAssert s [0x21] c (Just (Sig "fun(uint256)" [AbiUIntType 256])) [] defaultVeriOpts
+        (_, [Cex (_, ctr)]) <- withSolvers Bitwuzla 1 Nothing 1024 $ \s -> checkAssert s [0x21] c (Just (Sig "fun(uint256)" [AbiUIntType 256])) [] defaultVeriOpts
         assertBoolM "Enum is only defined for 0 and 1" $ (getVar ctr "arg1") > 1
         putStrLnM "expected counterexample found"
      ,
@@ -1726,7 +1726,7 @@ tests = testGroup "hevm"
                 }
             }
           |]
-        withSolvers Bitwuzla 1 Nothing $ \s -> do
+        withSolvers Bitwuzla 1 Nothing 1024 $ \s -> do
           let calldata = (WriteWord (Lit 0x0) (Var "u") (ConcreteBuf ""), [])
           initVM <- liftIO $ stToIO $ abstractVM calldata initCode Nothing True
           let iterConf = IterConfig {maxIter=Nothing, askSmtIters=1, loopHeuristic=StackBased }
@@ -3510,7 +3510,7 @@ tests = testGroup "hevm"
                     }
                     |]
             Right c <- liftIO $ yulRuntime "Neg" src
-            (res, []) <- withSolvers Z3 4 Nothing $ \s -> checkAssert s defaultPanicCodes c (Just (Sig "hello(address)" [AbiAddressType])) [] defaultVeriOpts
+            (res, []) <- withSolvers Z3 4 Nothing 1024 $ \s -> checkAssert s defaultPanicCodes c (Just (Sig "hello(address)" [AbiAddressType])) [] defaultVeriOpts
             putStrLnM $ "successfully explored: " <> show (length res) <> " paths"
         ,
         test "catch-storage-collisions-noproblem" $ do
@@ -4138,7 +4138,7 @@ tests = testGroup "hevm"
               }
             |]
 
-          (_, []) <- withSolvers Bitwuzla 1 (Just 99999999) $ \s -> checkAssert s defaultPanicCodes c (Just (Sig "distributivity(uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
+          (_, []) <- withSolvers Bitwuzla 1 (Just 99999999) 1024 $ \s -> checkAssert s defaultPanicCodes c (Just (Sig "distributivity(uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
           putStrLnM "Proven"
         ,
         test "storage-cex-1" $ do
@@ -4288,7 +4288,7 @@ tests = testGroup "hevm"
         }
         |]
       let sig = (Sig "func(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])
-      (_, [Cex (_, ctr1), Cex (_, ctr2)]) <- withSolvers Bitwuzla 1 Nothing $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
+      (_, [Cex (_, ctr1), Cex (_, ctr2)]) <- withSolvers Bitwuzla 1 Nothing 1024 $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
       putStrLnM  $ "expected counterexamples found.  ctr1: " <> (show ctr1) <> " ctr2: " <> (show ctr2)
     , test "simple-fixed-value-store1" $ do
       Just c <- solcRuntime "MyContract"
@@ -4568,7 +4568,7 @@ tests = testGroup "hevm"
               }
             }
           |]
-        withSolvers Bitwuzla 3 Nothing $ \s -> do
+        withSolvers Bitwuzla 3 Nothing 1024 $ \s -> do
           calldata <- mkCalldata Nothing []
           eq <- equivalenceCheck s Nothing a b defaultVeriOpts calldata False
           assertBoolM "Must have a difference" (any (isCex . fst) eq.res)
@@ -4597,7 +4597,7 @@ tests = testGroup "hevm"
               }
             }
           |]
-        withSolvers Bitwuzla 3 Nothing $ \s -> do
+        withSolvers Bitwuzla 3 Nothing 1024 $ \s -> do
           calldata <- mkCalldata Nothing []
           eq <- equivalenceCheck s Nothing a b defaultVeriOpts calldata False
           assertBoolM "Must have a difference" (any (isCex . fst) eq.res)
@@ -4626,7 +4626,7 @@ tests = testGroup "hevm"
               }
             }
           |]
-        withSolvers Bitwuzla 3 Nothing $ \s -> do
+        withSolvers Bitwuzla 3 Nothing 1024 $ \s -> do
           calldata <- mkCalldata Nothing []
           eq <- equivalenceCheck s Nothing a b defaultVeriOpts calldata False
           assertBoolM "Must have a difference" (any (isCex . fst) eq.res)
@@ -4636,7 +4636,7 @@ tests = testGroup "hevm"
       , test "eq-issue-with-length-cex-bug679" $ do
         let a = fromJust (hexByteString "5f610100526020610100f3")
             b = fromJust (hexByteString "5f356101f40115610100526020610100f3")
-        withSolvers Z3 3 Nothing $ \s -> do
+        withSolvers Z3 3 Nothing 1024 $ \s -> do
           calldata <- mkCalldata Nothing []
           eq <- equivalenceCheck s Nothing a b defaultVeriOpts calldata False
           assertBoolM "Must have a difference" (any (isCex . fst) eq.res)
@@ -4668,7 +4668,7 @@ tests = testGroup "hevm"
             default { invalid() }
           }
           |]
-        withSolvers Z3 3 Nothing $ \s -> do
+        withSolvers Z3 3 Nothing 1024 $ \s -> do
           calldata <- mkCalldata Nothing []
           eq <- equivalenceCheck s Nothing aPrgm bPrgm defaultVeriOpts calldata False
           assertBoolM "Must have a difference" (any (isCex . fst) eq.res)
@@ -4697,7 +4697,7 @@ tests = testGroup "hevm"
               }
             }
           |]
-        withSolvers Z3 3 Nothing $ \s -> do
+        withSolvers Z3 3 Nothing 1024 $ \s -> do
           calldata <- mkCalldata Nothing []
           eq <- equivalenceCheck s Nothing initA initB defaultVeriOpts calldata True
           assertBoolM "Must have difference, we return different values" (all (isCex . fst) eq.res)
@@ -4729,7 +4729,7 @@ tests = testGroup "hevm"
               }
             }
           |]
-        withSolvers Z3 3 Nothing $ \s -> do
+        withSolvers Z3 3 Nothing 1024 $ \s -> do
           calldata <- mkCalldata Nothing []
           eq <- equivalenceCheck s Nothing initA initB defaultVeriOpts calldata True
           assertBoolM "Must have difference, we return different values" (all (isCex . fst) eq.res)
@@ -4755,7 +4755,7 @@ tests = testGroup "hevm"
               }
             }
           |]
-        withSolvers Z3 3 Nothing $ \s -> do
+        withSolvers Z3 3 Nothing 1024 $ \s -> do
           calldata <- mkCalldata Nothing []
           eq <- equivalenceCheck s Nothing initA initB defaultVeriOpts calldata True
           assertBoolM "Must have difference, we return different values" (all (isCex . fst) eq.res)
@@ -4788,7 +4788,7 @@ tests = testGroup "hevm"
               }
             }
           |]
-        withSolvers Z3 3 Nothing $ \s -> do
+        withSolvers Z3 3 Nothing 1024 $ \s -> do
           calldata <- mkCalldata Nothing []
           eq <- equivalenceCheck s Nothing initA initB defaultVeriOpts calldata True
           assertBoolM "Must have difference" (all (isCex . fst) eq.res)
@@ -4815,7 +4815,7 @@ tests = testGroup "hevm"
               }
             }
           |]
-        withSolvers Z3 3 Nothing $ \s -> do
+        withSolvers Z3 3 Nothing 1024 $ \s -> do
           calldata <- mkCalldata Nothing []
           eq <- equivalenceCheck s Nothing initA initB defaultVeriOpts calldata True
           putStrLnM $ "Equivalence result: " <> show eq
@@ -4843,7 +4843,7 @@ tests = testGroup "hevm"
               }
             }
           |]
-        withSolvers Z3 3 Nothing $ \s -> do
+        withSolvers Z3 3 Nothing 1024 $ \s -> do
           calldata <- mkCalldata Nothing []
           eq <- equivalenceCheck s Nothing initA initB defaultVeriOpts calldata True
           let cexes = filter (isCex . fst) eq.res
@@ -4869,7 +4869,7 @@ tests = testGroup "hevm"
               }
             }
           |]
-        withSolvers Z3 3 Nothing $ \s -> do
+        withSolvers Z3 3 Nothing 1024 $ \s -> do
           calldata <- mkCalldata Nothing []
           eq <- equivalenceCheck s Nothing aPrgm bPrgm defaultVeriOpts calldata False
           assertEqualM "Must have no difference" [] (map fst eq.res)
@@ -4901,7 +4901,7 @@ tests = testGroup "hevm"
               }
             }
           |]
-        withSolvers Z3 3 Nothing $ \s -> do
+        withSolvers Z3 3 Nothing 1024 $ \s -> do
           calldata <- mkCalldata Nothing []
           eq <- equivalenceCheck s Nothing aPrgm bPrgm defaultVeriOpts calldata False
           assertBoolM "Must differ" (all (isCex . fst) eq.res)
@@ -4963,7 +4963,7 @@ tests = testGroup "hevm"
               }
             }
           |]
-        withSolvers Z3 3 Nothing $ \s -> do
+        withSolvers Z3 3 Nothing 1024 $ \s -> do
           calldata <- mkCalldata Nothing []
           eq <- equivalenceCheck s Nothing aPrgm bPrgm defaultVeriOpts calldata False
           assertBoolM "Must differ" (any (isCex . fst) eq.res)
@@ -4987,7 +4987,7 @@ tests = testGroup "hevm"
               }
             }
           |]
-        withSolvers Z3 3 Nothing $ \s -> do
+        withSolvers Z3 3 Nothing 1024 $ \s -> do
           cd <- mkCalldata (Just (Sig "a(address,address)" [AbiAddressType, AbiAddressType])) []
           eq <- equivalenceCheck s Nothing aPrgm bPrgm defaultVeriOpts cd False
           assertEqualM "Must be different" (any (isCex . fst) eq.res) True
@@ -5013,7 +5013,7 @@ tests = testGroup "hevm"
                 }
               }
           |]
-        withSolvers Bitwuzla 3 Nothing $ \s -> do
+        withSolvers Bitwuzla 3 Nothing 1024 $ \s -> do
           calldata <- mkCalldata Nothing []
           eq <- equivalenceCheck s Nothing aPrgm bPrgm defaultVeriOpts calldata False
           assertEqualM "Must be different" (any (isCex . fst) eq.res) True
@@ -5040,7 +5040,7 @@ tests = testGroup "hevm"
                 }
               }
           |]
-        withSolvers Bitwuzla 1 Nothing $ \s -> do
+        withSolvers Bitwuzla 1 Nothing 1024 $ \s -> do
           calldata <- mkCalldata (Just (Sig "set(uint256,uint128)" [AbiUIntType 256, AbiUIntType 128])) []
           eq <- equivalenceCheck s Nothing aPrgm bPrgm defaultVeriOpts calldata False
           assertEqualM "Must have no difference" [] (map fst eq.res)
@@ -5067,7 +5067,7 @@ tests = testGroup "hevm"
                 }
               }
           |]
-        withSolvers Bitwuzla 1 Nothing $ \s -> do
+        withSolvers Bitwuzla 1 Nothing 1024 $ \s -> do
           calldata <- mkCalldata (Just (Sig "set(uint256,uint8)" [AbiUIntType 256, AbiUIntType 8])) []
           eq <- equivalenceCheck s Nothing aPrgm bPrgm defaultVeriOpts calldata False
           assertEqualM "Must have no difference" [] (map fst eq.res)
@@ -5094,7 +5094,7 @@ tests = testGroup "hevm"
                 }
               }
           |]
-        withSolvers Bitwuzla 1 Nothing $ \s -> do
+        withSolvers Bitwuzla 1 Nothing 1024 $ \s -> do
           calldata <- mkCalldata (Just (Sig "set(uint256,uint32)" [AbiUIntType 256, AbiUIntType 32])) []
           eq <- equivalenceCheck s Nothing aPrgm bPrgm defaultVeriOpts calldata False
           assertEqualM "Must have no difference" [] (map fst eq.res)
@@ -5308,7 +5308,7 @@ tests = testGroup "hevm"
           Right aPrgm <- liftIO $ yul "" $ T.pack $ unlines filteredASym
           Right bPrgm <- liftIO $ yul "" $ T.pack $ unlines filteredBSym
           procs <- liftIO $ getNumProcessors
-          withSolvers CVC5 (unsafeInto procs) (Just 100) $ \s -> do
+          withSolvers CVC5 (unsafeInto procs) (Just 100) 1024 $ \s -> do
             calldata <- mkCalldata Nothing []
             eq <- equivalenceCheck s Nothing aPrgm bPrgm opts calldata False
             let res = map fst eq.res
@@ -5363,7 +5363,7 @@ checkEquivBase mkprop l r expect = do
   config <- readConfig
   let noSimplifyEnv = Env {config = config {simp = False}}
   liftIO $ runEnv noSimplifyEnv $ do
-    withSolvers Z3 1 (Just 1) $ \solvers -> do
+    withSolvers CVC5 1 (Just 1) 1024 $ \solvers -> do
       res <- checkSatWithProps solvers [mkprop l r]
       let ret = case res of
             Qed -> Just True
@@ -5383,7 +5383,7 @@ runSimpleVM x ins = do
     Just vm -> do
      let calldata = (ConcreteBuf ins)
          vm' = set (#state % #calldata) calldata vm
-     res <- Stepper.interpret (Fetch.zero 0 Nothing) vm' Stepper.execFully
+     res <- Stepper.interpret (Fetch.zero 0 Nothing 1024) vm' Stepper.execFully
      case res of
        Right (ConcreteBuf bs) -> pure $ Just bs
        s -> internalError $ show s
@@ -5392,11 +5392,11 @@ runSimpleVM x ins = do
 loadVM :: App m => ByteString -> m (Maybe (VM Concrete))
 loadVM x = do
   vm <- liftIO $ stToIO $ vmForEthrunCreation x
-  vm1 <- Stepper.interpret (Fetch.zero 0 Nothing) vm Stepper.runFully
+  vm1 <- Stepper.interpret (Fetch.zero 0 Nothing 1024) vm Stepper.runFully
   case vm1.result of
     Just (VMSuccess (ConcreteBuf targetCode)) -> do
       let target = vm1.state.contract
-      vm2 <- Stepper.interpret (Fetch.zero 0 Nothing) vm1 (prepVm target targetCode)
+      vm2 <- Stepper.interpret (Fetch.zero 0 Nothing 1024) vm1 (prepVm target targetCode)
       writeTrace vm2
       pure $ Just vm2
     _ -> pure Nothing

@@ -108,7 +108,7 @@ prepareTests = do
 
     runTest :: App m => (String, Case) -> m TestTree
     runTest (name, x) = do
-      let fetcher q = withSolvers Z3 0 (Just 0) $ \s -> EVM.Fetch.noRpcFetcher s q
+      let fetcher q = withSolvers Z3 0 (Just 0) 1024 $ \s -> EVM.Fetch.noRpcFetcher s q
       exec <- toIO $ runVMTest fetcher x
       pure $ testCase' name exec
     testCase' :: String -> Assertion -> TestTree
