@@ -13,7 +13,7 @@ import Control.Monad
 import Control.Monad.ST (stToIO)
 import Control.Monad.State.Strict
 import Control.Monad.IO.Unlift
-import Control.Monad.Reader (ReaderT, local, MonadReader)
+import Control.Monad.Reader (ReaderT)
 import Data.Bits hiding (And, Xor)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
