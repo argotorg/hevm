@@ -205,7 +205,6 @@ sar = op2 SAR (\x y ->
 clz :: Expr EWord -> Expr EWord
 clz = op1 CLZ (\x -> if x == 0 then 256 else fromIntegral $ countLeadingZeros x)
 
-
 -- Props
 
 peq :: (Typeable a) => Expr a -> Expr a -> Prop
@@ -1233,9 +1232,7 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
        | a == (Lit 0) = v
        | v == (Lit 0) = v
        | otherwise = sar a v
-    go (CLZ v)
-       | v == (Lit 0) = Lit 256
-       | otherwise = clz v
+    go (CLZ v) = clz v
 
     -- Bitwise AND & OR. These MUST preserve bitwise equivalence
     go (And a b)
