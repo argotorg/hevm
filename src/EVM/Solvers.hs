@@ -216,11 +216,11 @@ getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r sem f
                     out2 <- sendCommand inst  (SMTCommand "(check-sat)")
                     subRun inst (maskedVal:vals) newSmt out2
                   err -> do
-                    when conf.debug $ putStrLn $ "Unable to write SMT to solver: " <> (T.unpack err)
+                    when conf.debug $ putStrLn $ "Error while writing SMT to solver: " <> (T.unpack err)
                     writeChan r Nothing
               Nothing -> internalError $ "variable " <>  multiSol.var <> " not part of model (i.e. cex) ... that's not possible"
         err -> do
-          when conf.debug $ putStrLn $ "Unable to write SMT to solver: " <> (T.unpack err)
+          when conf.debug $ putStrLn $ "Error while writing SMT to solver: " <> (T.unpack err)
           writeChan r Nothing
   liftIO $ bracket_
     (waitQSem sem)
@@ -234,7 +234,7 @@ getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r sem f
           out <- sendScript inst cmds
           case out of
             Left err -> do
-              when conf.debug $ putStrLn $ "Unable to write SMT to solver: " <> (T.unpack err)
+              when conf.debug $ putStrLn $ "Error while writing SMT to solver: " <> (T.unpack err)
               writeChan r Nothing
             Right _ -> do
               sat <- sendCommand inst $ SMTCommand "(check-sat)"
@@ -362,16 +362,15 @@ getModel inst cexvars = do
 
 mkTimeout :: Maybe Natural -> Text
 mkTimeout t = T.pack $ show $ (1000 *)$ case t of
-  Nothing -> 3600000 :: Natural -- max is 1000 hours (~40 days)
+  Nothing -> 300 :: Natural
   Just t' -> t'
 
 -- | Arguments used when spawning a solver instance
-solverArgs :: Solver -> Maybe Natural -> [Text]
-solverArgs solver timeout = case solver of
+solverArgs :: Solver -> [Text]
+solverArgs solver = case solver of
   Bitwuzla ->
     [ "--lang=smt2"
     , "--produce-models"
-    , "--time-limit-per=" <> mkTimeout timeout
     , "--bv-solver=preprop"
     , "--bv-output-format=16"
     ]
@@ -384,7 +383,6 @@ solverArgs solver timeout = case solver of
     , "--print-success"
     , "--interactive"
     , "--incremental"
-    , "--tlimit-per=" <> mkTimeout timeout
     , "--arrays-exp"
     ]
   EmptySolver -> []
@@ -394,12 +392,10 @@ solverArgs solver timeout = case solver of
 spawnSolver :: Solver -> Maybe (Natural) -> Natural -> IO SolverInstance
 spawnSolver solver timeout maxMemoryMB = do
   (readout, writeout) <- createPipe
-  let timeoutSeconds = case timeout of
-        Nothing -> 300 :: Natural
-        Just t' -> t'
+  let timeoutSeconds = mkTimeout timeout
       maxMemoryKB = maxMemoryMB * 1024  -- Convert MB to KB for ulimit -v
       solverCmd = show solver
-      solverArgsStr = fmap T.unpack $ solverArgs solver timeout
+      solverArgsStr = fmap T.unpack $ solverArgs solver
 #if defined(mingw32_HOST_OS)
       -- Windows: no ulimit available, rely on solver-specific timeouts and memory management
       cmd = (proc solverCmd solverArgsStr)
