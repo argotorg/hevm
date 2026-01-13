@@ -192,7 +192,7 @@ main = do
            }
           |])
         let hexStr = Types.bsToHex c
-        _ <- readProcessWithExitCode "cabal" ["run", "exe:hevm", "--", "symbolic", "--code", hexStr, "--smttimeout", "1", "--dump-unsolved", "."] ""
+        _ <- readProcessWithExitCode "cabal" ["run", "exe:hevm", "--", "symbolic", "--code", hexStr, "--smt-timeout", "1", "--dump-unsolved", "."] ""
         let filename = "query-unsolved-0.smt2"
         fileExists <- doesFileExist filename
         shouldBe fileExists True
