@@ -111,7 +111,7 @@ tests = testGroup "rpc"
         sess <- mkSession Nothing Nothing
         vm <- weth9VM sess testBlockNumber calldata'
         (_, [Cex (_, model)]) <- withSolvers Z3 1 1 Nothing $ \s ->
-          verify s (oracle s (Just sess) testRpcInfo) (defaultVeriOpts {rpcInfo = testRpcInfo}) (symbolify vm) postc
+          verify s (oracle s (Just sess) testRpcInfo) (defaultVeriOpts {rpcInfo = testRpcInfo}) (symbolify vm) postc Nothing
         liftIO $ assertBool "model should exceed caller balance" (getVar model "arg2" >= 695836005599316055372648)
     ]
   ]
@@ -129,8 +129,9 @@ vmFromRpc :: App m => Session -> BlockNumber -> (Expr Buf, [Prop]) -> Expr EWord
 vmFromRpc sess blockNum calldata callvalue caller address = do
   conf <- readConfig
   ctrct <- liftIO $ fetchContractWithSession conf sess blockNum testRpc address >>= \case
-        Nothing -> internalError $ "contract not found: " <> show address
-        Just contract' -> pure contract'
+        FetchFailure _ -> internalError $ "contract not found: " <> show address
+        FetchError e -> internalError $ "rpc error: " <> show e
+        FetchSuccess contract' _ -> pure contract'
 
   liftIO $ addFetchCache sess address ctrct
   blk <- liftIO $ fetchBlockWithSession conf sess blockNum testRpc >>= \case

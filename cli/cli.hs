@@ -522,7 +522,7 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = do
                             , rpcInfo = Fetch.RpcInfo blockUrlInfo
                             }
     let fetcher = Fetch.oracle solvers (Just sess) veriOpts.rpcInfo
-    (expr, res) <- verify solvers fetcher veriOpts preState (checkAssertions errCodes)
+    (expr, res) <- verify solvers fetcher veriOpts preState (checkAssertions errCodes) Nothing
     liftIO $ forM_ ((,) <$> cOpts.cacheDir <*> cExecOpts.block) $ \(dir, block) -> do
       cache <- readMVar sess.sharedCache
       Fetch.saveCache dir block cache
@@ -646,10 +646,13 @@ vmFromCommand cOpts cExecOpts cFileOpts execOpts sess = do
         exitFailure
       else
         Fetch.fetchContractWithSession conf sess block url addr' >>= \case
-          Nothing -> do
+          Fetch.FetchFailure _ -> do
             putStrLn $ "Error: contract not found: " <> show address
             exitFailure
-          Just rpcContract ->
+          Fetch.FetchError e -> do
+            putStrLn $ "Error: RPC failure: " <> show e
+            exitFailure
+          Fetch.FetchSuccess rpcContract _ ->
             -- if both code and url is given,
             -- fetch the contract and overwrite the code
               pure $ initialContract (mkCode $ fromJust code)
@@ -658,10 +661,13 @@ vmFromCommand cOpts cExecOpts cFileOpts execOpts sess = do
 
     (Just url, Just addr', Nothing) ->
       liftIO $ Fetch.fetchContractWithSession conf sess block url addr' >>= \case
-        Nothing -> do
+        Fetch.FetchFailure _ -> do
           putStrLn $ "Error, contract not found: " <> show address
           exitFailure
-        Just rpcContract -> pure $ Fetch.makeContractFromRPC rpcContract
+        Fetch.FetchError e -> do
+          putStrLn $ "Error: RPC failure: " <> show e
+          exitFailure
+        Fetch.FetchSuccess rpcContract _ -> pure $ Fetch.makeContractFromRPC rpcContract
 
     (_, _, Just c)  -> do
       let code = hexByteString $ strip0x c
@@ -759,10 +765,13 @@ symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
   contract <- case (cExecOpts.rpc, cExecOpts.address, codeWrapped) of
     (Just url, Just addr', _) ->
       liftIO $ Fetch.fetchContractWithSession conf sess block url addr' >>= \case
-        Nothing -> do
+        Fetch.FetchFailure _ -> do
           putStrLn "Error, contract not found."
           exitFailure
-        Just rpcContract' -> case codeWrapped of
+        Fetch.FetchError e -> do
+          putStrLn $ "Error: RPC failure: " <> show e
+          exitFailure
+        Fetch.FetchSuccess rpcContract' _ -> case codeWrapped of
               Nothing -> pure $ Fetch.makeContractFromRPC rpcContract'
               -- if both code and url is given,
               -- fetch the contract and overwrite the code

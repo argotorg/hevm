@@ -1372,18 +1372,10 @@ getCodeLocation vm = (vm.state.contract, vm.state.pc)
 query :: Query t -> EVM t ()
 query q = assign #result $ Just $ HandleEffect (Query q)
 
-runBoth :: Maybe Int -> Int -> RunBoth -> EVM Symbolic ()
-runBoth depthLimit exploreDepth c = do
+fork :: Maybe Int -> Int -> BranchContext -> EVM Symbolic ()
+fork depthLimit exploreDepth forkContext = do
   if (isNothing depthLimit || (exploreDepth < fromJust depthLimit)) then do
-    assign #result $ Just $ HandleEffect (RunBoth c)
-  else do
-    vm <- get
-    assign #result $ Just $ Unfinished (BranchTooDeep {pc = vm.state.pc, addr = vm.state.contract})
-
-runAll :: Maybe Int -> Int -> RunAll -> EVM Symbolic ()
-runAll depthLimit exploreDepth c = do
-  if (isNothing depthLimit || (exploreDepth < fromJust depthLimit)) then do
-    assign #result $ Just $ HandleEffect (RunAll c)
+    assign #result $ Just $ HandleEffect (Branch forkContext)
   else do
     vm <- get
     assign #result $ Just $ Unfinished (BranchTooDeep {pc = vm.state.pc, addr = vm.state.contract})
@@ -1616,7 +1608,7 @@ onlyDeployed addrExpr fallback continue = do
     else case eqT @t @Symbolic of
       Just Refl -> do
         let deployedAddrs = map forceEAddrToEWord $ mapMaybe (codeMustExist vm) $ Map.keys vm.env.contracts
-        runAll (?conf.maxDepth) vm.exploreDepth $ PleaseRunAll deployedAddrs runAllPaths
+        fork (?conf.maxDepth) vm.exploreDepth $ PleaseRunAll deployedAddrs runAllPaths
       _ -> internalError "Unknown address in Concrete mode"
   where
     codeMustExist :: (VM t) -> Expr EAddr -> Maybe (Expr EAddr)
@@ -3085,7 +3077,7 @@ instance VMOps Symbolic where
         continue v
       -- Both paths are possible; we ask for more input
       runBothPaths loc exploreDepth UnknownBranch =
-        (runBoth depthLimit exploreDepth ) . PleaseRunBoth $ (runBothPaths loc exploreDepth) . Case
+        (fork depthLimit exploreDepth ) . PleaseRunBoth $ (runBothPaths loc exploreDepth) . Case
 
   -- numBytes allows us to specify how many bytes of the returned value is relevant
   -- if it's e.g.a JUMP, only 2 bytes can be relevant. This allows us to avoid
@@ -3104,7 +3096,7 @@ instance VMOps Symbolic where
             assign #result Nothing
             pushTo #constraints $ Expr.simplifyProp (ewordExpr .== (Lit val))
             continue $ Just val
-          _ -> runAll maxDepth vm.exploreDepth $ PleaseRunAll (map Lit concVals) runAllPaths
+          _ -> fork maxDepth vm.exploreDepth $ PleaseRunAll (map Lit concVals) runAllPaths
       Nothing -> do
         assign #result Nothing
         continue Nothing

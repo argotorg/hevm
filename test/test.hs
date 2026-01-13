@@ -747,6 +747,16 @@ tests = testGroup "hevm"
         let simplified = Expr.indexWord idx src
             full = IndexWord idx src
         checkEquiv full simplified
+    , testProperty "pow-base2-simp" $ \(_ :: Int) -> propNoSimp $ do
+        expo <- liftIO $ generate . sized $ genWordArith 15
+        let full = Exp (Lit 2) expo
+            simplified = Expr.simplify full
+        checkEquiv full simplified
+    , testProperty "pow-low-exponent-simp" $ \(LitWord @100 expo) -> propNoSimp $ do
+        base <- liftIO $ generate . sized $ genWordArith 15
+        let full = Exp base expo
+            simplified = Expr.simplify full
+        checkEquiv full simplified
     , testProperty "indexWord-mask-equivalence" $ \(src :: Expr EWord, LitWord @35 idx) -> propNoSimp $ do
         mask <- liftIO $ generate $ do
           pow <- arbitrary :: Gen Int
@@ -892,6 +902,68 @@ tests = testGroup "hevm"
     , test "equality-and-disequality" $ do
         let
           t = [PEq (Lit 1) (Var "arg1"), PNeg (PEq (Lit 1) (Var "arg1"))]
+          propagated = Expr.constPropagate t
+        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
+  ]
+  , testGroup "inequality-propagation-tests" [
+      test "PLT-detects-impossible-constraint" $ do
+        let
+          -- x < 0 is impossible for unsigned integers
+          t = [PLT (Var "x") (Lit 0)]
+          propagated = Expr.constPropagate t
+        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
+    , test "PLT-overflow-check" $ do
+        let
+          -- maxLit < y is impossible
+          t = [PLT (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff) (Var "y")]
+          propagated = Expr.constPropagate t
+        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
+    , test "PGT-detects-impossible-constraint" $ do
+        let
+          -- x > maxLit is impossible
+          t = [PGT (Var "x") (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff)]
+          propagated = Expr.constPropagate t
+        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
+    , test "PGT-overflow-check" $ do
+        let
+          -- 0 > y is impossible
+          t = [PGT (Lit 0) (Var "y")]
+          propagated = Expr.constPropagate t
+        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
+    , test "inequality-conflict-detection-narrow" $ do
+        let
+          -- x < 2 && x > 5 is impossible
+          t = [PLT (Var "x") (Lit 2), PGT (Var "x") (Lit 5)]
+          propagated = Expr.constPropagate t
+        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
+    , test "inequality-conflict-detection-wide" $ do
+        let
+          -- x < 5 && x > 10 is impossible
+          t = [PLT (Var "x") (Lit 5), PGT (Var "x") (Lit 10)]
+          propagated = Expr.constPropagate t
+        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
+    , test "inequality-tight-bounds-satisfied" $ do
+        let
+          -- x >= 5 && x <= 5 and x == 5 should be consistent
+          t = [PGEq (Var "x") (Lit 5), PLEq (Var "x") (Lit 5), PEq (Var "x") (Lit 5)]
+          propagated = Expr.constPropagate t
+        assertEqualM "Must not contain PBool False" False ((PBool False) `elem` propagated)
+    , test "inequality-tight-bounds-violated" $ do
+        let
+          -- x >= 5 && x <= 5 and x != 5 should be inconsistent
+          t = [PGEq (Var "x") (Lit 5), PLEq (Var "x") (Lit 5), PNeg (PEq (Var "x") (Lit 5))]
+          propagated = Expr.constPropagate t
+        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
+    , test "inequality-with-existing-equality-consistent" $ do
+        let
+          -- x == 5 && x < 10 is consistent
+          t = [PEq (Var "x") (Lit 5), PLT (Var "x") (Lit 10)]
+          propagated = Expr.constPropagate t
+        assertEqualM "Must not contain PBool False" False ((PBool False) `elem` propagated)
+    , test "inequality-with-existing-equality-inconsistent" $ do
+        let
+          -- x == 5 && x < 5 is inconsistent
+          t = [PEq (Var "x") (Lit 5), PLT (Var "x") (Lit 5)]
           propagated = Expr.constPropagate t
         assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
   ]
@@ -1184,6 +1256,61 @@ tests = testGroup "hevm"
         let numCexes = sum $ map (fromEnum . isCex) ret
         let numErrs = sum $ map (fromEnum . isError) ret
         assertEqualM "number of counterexamples" 0 numCexes
+        assertEqualM "number of errors" 0 numErrs
+    , test "base-2-exp-uint8" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function fun(uint8 x) public {
+              unchecked {
+                require(x < 10);
+                uint256 y = 2**x;
+                assert (y <= 512);
+              }
+            }
+          } |]
+        let sig = Just $ Sig "fun(uint8)" [AbiUIntType 8]
+        (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        assertBoolM "The expression must not be partial" $ not (any isPartial e)
+        let numCexes = sum $ map (fromEnum . isCex) ret
+        let numErrs = sum $ map (fromEnum . isError) ret
+        assertEqualM "number of counterexamples" 0 numCexes
+        assertEqualM "number of errors" 0 numErrs
+    , test "base-2-exp-no-rollaround" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function fun(uint256 x) public {
+              unchecked {
+                require(x > 10);
+                require(x < 256);
+                uint256 y = 2**x;
+                assert (y > 512);
+              }
+            }
+          } |]
+        let sig = Just $ Sig "fun(uint256)" [AbiUIntType 256]
+        (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        assertBoolM "The expression must not be partial" $ not (any isPartial e)
+        let numCexes = sum $ map (fromEnum . isCex) ret
+        let numErrs = sum $ map (fromEnum . isError) ret
+        assertEqualM "number of counterexamples" 0 numCexes
+        assertEqualM "number of errors" 0 numErrs
+    , test "base-2-exp-rollaround" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function fun(uint256 x) public {
+              unchecked {
+                require(x == 256);
+                uint256 y = 2**x;
+                assert (y > 512);
+              }
+            }
+          } |]
+        let sig = Just $ Sig "fun(uint256)" [AbiUIntType 256]
+        (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        assertBoolM "The expression must not be partial" $ not (any isPartial e)
+        let numCexes = sum $ map (fromEnum . isCex) ret
+        let numErrs = sum $ map (fromEnum . isError) ret
+        assertEqualM "number of counterexamples" 1 numCexes
         assertEqualM "number of errors" 0 numErrs
     , test "unsigned-int8-range" $ do
         Just c <- solcRuntime "C" [i|
@@ -1868,7 +1995,7 @@ tests = testGroup "hevm"
           let calldata = (WriteWord (Lit 0x0) (Var "u") (ConcreteBuf ""), [])
           initVM <- liftIO $ stToIO $ abstractVM calldata initCode Nothing True
           let iterConf = IterConfig {maxIter=Nothing, askSmtIters=1, loopHeuristic=StackBased }
-          paths <- interpret (Fetch.noRpcFetcher s) iterConf initVM runExpr
+          paths <- interpret (Fetch.noRpcFetcher s) iterConf initVM runExpr pure
           let exprSimp = map Expr.simplify paths
           assertBoolM "unexptected partial execution" (not $ any isPartial exprSimp)
     , test "mixed-concrete-symbolic-args" $ do
@@ -1960,7 +2087,7 @@ tests = testGroup "hevm"
         withDefaultSolver $ \s -> do
           vm <- liftIO $ stToIO $ loadSymVM runtimecode (Lit 0) initCode False
           let iterConf = IterConfig {maxIter=Nothing, askSmtIters=1, loopHeuristic=StackBased }
-          paths <- interpret (Fetch.noRpcFetcher s) iterConf vm runExpr
+          paths <- interpret (Fetch.noRpcFetcher s) iterConf vm runExpr pure
           let exprSimp = map Expr.simplify paths
           assertBoolM "expected partial execution" (any isPartial exprSimp)
     ]
@@ -4174,7 +4301,7 @@ tests = testGroup "hevm"
                     <&> set (#state % #callvalue) (Lit 0)
                     <&> over (#env % #contracts)
                        (Map.insert aAddr (initialContract (RuntimeCode (ConcreteRuntimeCode a))))
-            verify s (Fetch.noRpcFetcher s) defaultVeriOpts vm (checkAssertions defaultPanicCodes)
+            verify s (Fetch.noRpcFetcher s) defaultVeriOpts vm (checkAssertions defaultPanicCodes) Nothing
 
           let storeCex = cex.store
               testCex = case (Map.lookup cAddr storeCex, Map.lookup aAddr storeCex) of
@@ -4250,7 +4377,7 @@ tests = testGroup "hevm"
           let yulsafeDistributivity = hex "6355a79a6260003560e01c14156016576015601f565b5b60006000fd60a1565b603d602d604435600435607c565b6039602435600435607c565b605d565b6052604b604435602435605d565b600435607c565b141515605a57fe5b5b565b6000828201821115151560705760006000fd5b82820190505b92915050565b6000818384048302146000841417151560955760006000fd5b82820290505b92915050565b"
           calldata <- mkCalldata (Just (Sig "distributivity(uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256])) []
           vm <- liftIO $ stToIO $ abstractVM calldata yulsafeDistributivity Nothing False
-          (_, []) <-  withDefaultSolver $ \s -> verify s (Fetch.noRpcFetcher s) defaultVeriOpts vm (checkAssertions defaultPanicCodes)
+          (_, []) <-  withDefaultSolver $ \s -> verify s (Fetch.noRpcFetcher s) defaultVeriOpts vm (checkAssertions defaultPanicCodes) Nothing
           putStrLnM "Proven"
         ,
         test "safemath-distributivity-sol" $ do

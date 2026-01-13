@@ -8,8 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
-- We support RPC in equivalence checking now
 - New opcode: CLZ
+
+## [0.57.0] - 2026-01-08
+
+## Added
+- We support RPC in equivalence checking now
+- Inequality propagation in constant propagation to prune impossible execution paths earlier.
+  The constraint solver now tracks lower and upper bounds for symbolic values and detects
+  conflicts (e.g., x < 5 && x > 10), significantly reducing the number of paths explored
+- Encode symbolic power of 2 as bit-shift in SMT encoding.
+- Limit the expansion of the EXP operation to avoid blow-up in the size of the SMT expressions.
+- New EXP rewrite rule for base-2 exponents
 
 ## Fixed
 - Fix incorrect simplification rule for `PEq (Lit 1) (IsZero (LT a b))`
@@ -24,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed simplification that were rewriting concrete bytes-to-be-overwritten
   with zero bytes. Benefits were unclear while it had negative effect on
   analysis' performance.
+- We now use the symbolic execution queue to also run the SMT solver in `test` mode,
+  and verify the results using a cexHandler
 
 ## [0.56.0] - 2025-10-13
 

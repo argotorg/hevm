@@ -15,7 +15,7 @@ import EVM.FeeSchedule (feeSchedule)
 import EVM.Fetch qualified as Fetch
 import EVM.Format
 import EVM.Solidity
-import EVM.SymExec (defaultVeriOpts, symCalldata, verify, extractCex, prettyCalldata, calldataFromCex, panicMsg, VeriOpts(..), groupIssues, groupPartials, IterConfig(..), defaultIterConf, LoopHeuristic)
+import EVM.SymExec (defaultVeriOpts, symCalldata, verify, verifyResult, extractCex, prettyCalldata, calldataFromCex, panicMsg, VeriOpts(..), groupIssues, groupPartials, IterConfig(..), LoopHeuristic, defaultIterConf)
 import EVM.Types
 import EVM.Transaction (initTx)
 import EVM.Stepper (Stepper)
@@ -247,7 +247,7 @@ dsTestFailedConc store = case Map.lookup cheatCode store of
 
 -- Define the thread spawner for symbolic tests
 -- Returns tuple of (No Cex, No warnings)
-symRun :: App m => UnitTestOptions -> VM Concrete -> Sig -> SolcContract -> SourceCache -> m (Bool, Bool)
+symRun :: forall m . App m => UnitTestOptions -> VM Concrete -> Sig -> SolcContract -> SourceCache -> m (Bool, Bool)
 symRun opts@UnitTestOptions{..} vm sig@(Sig testName types) solcContr sourceCache = do
     let cs = callSig sig
     liftIO $ putStrLn $ "\x1b[96m[RUNNING]\x1b[0m " <> Text.unpack cs
@@ -285,7 +285,7 @@ symRun opts@UnitTestOptions{..} vm sig@(Sig testName types) solcContr sourceCach
 
     -- check postconditions against vm
     let fetcherSym = Fetch.oracle solvers (Just sess) rpcInfo
-    (ends, results) <- verify solvers fetcherSym (makeVeriOpts opts) (symbolify vm') postcondition
+    (ends, results) <- verify solvers fetcherSym (makeVeriOpts opts) (symbolify vm') postcondition (Just $ cexHandler cd fetcherConc)
     conf <- readConfig
     when (conf.debug) $ liftIO $ do
       putStrLn $ "   \x1b[94m[EXPLORATION COMPLETE]\x1b[0m " <> Text.unpack testName <> " -- explored " <> show (length ends) <> " paths."
@@ -307,16 +307,7 @@ symRun opts@UnitTestOptions{..} vm sig@(Sig testName types) solcContr sourceCach
         -- happy case
         pure $ "   \x1b[32m[PASS]\x1b[0m " <> Text.unpack testName <> "\n"
       (True, _, _) -> do
-        -- there are counterexamples (and maybe other things, but Cex is most important)
-        let x = mapMaybe extractCex results
-        failsToRepro <- getReproFailures (Sig testName types) (fst cd) (map snd x)
-
-
-        validation <- mapM (traverse $ validateCex opts fetcherConc vm) failsToRepro
-        when conf.debug $ liftIO $ putStrLn $ "Cex reproduction runs' results are: " <> show validation
-        let toPrintData = zipWith (\(a, b) c -> (a, b, c)) x validation
-        txtFails <- symFailure opts testName (fst cd) types toPrintData
-        pure $ "   \x1b[31m[FAIL]\x1b[0m " <> Text.unpack testName <> "\n" <> Text.unpack txtFails
+        pure $ "   \x1b[31m[FAIL]\x1b[0m " <> Text.unpack testName <> "\n"
       (_, True, _) -> do
         -- There are errors/unknowns/partials, we fail them
         pure $ "   \x1b[31m[FAIL]\x1b[0m " <> Text.unpack testName <> "\n"
@@ -332,6 +323,22 @@ symRun opts@UnitTestOptions{..} vm sig@(Sig testName types) solcContr sourceCach
     liftIO $ printWarnings warnData ends results $ "the test " <> Text.unpack testName
     pure (not (any isCex results), not (warnings || unexpectedAllRevert))
     where
+      cexHandler :: (Expr 'Buf, [Prop])
+        -> Fetch.Fetcher Concrete m
+        -> VM 'Symbolic
+        -> SMTResult
+        -> Expr 'End
+        -> m ()
+      cexHandler cd fetcherConc preState smtRes end = do
+          let verifRes = snd $ verifyResult preState (smtRes, end)
+          case extractCex verifRes of
+            Nothing -> internalError "cexHandler: expected a cex"
+            Just (cexEnd, smtCex) -> do
+              failsToRepro <- getReproFailure (Sig testName types) (fst cd) smtCex
+              validation <- traverse (validateCex opts fetcherConc vm) failsToRepro
+              txtFail <- symFailure opts testName (fst cd) types (cexEnd, smtCex, validation)
+              liftIO $ Text.putStr txtFail
+
       -- The offset of the text is: the selector (4B), the offset value (aligned to 32B), and the length of the string (aligned to 32B)
       txtOffset = 4+32+32
       symbolicFail :: Expr Buf -> Prop
@@ -366,20 +373,20 @@ printWarnings warnData e results testName = do
     forM_ (groupPartials warnData e) $ \(num, str) -> putStrLn $ "      " <> show num <> "x -> " <> str
   putStrLn ""
 
-getReproFailures :: App m => Sig -> Expr Buf -> [SMTCex] -> m [Err ReproducibleCex]
-getReproFailures sig@(Sig testName _) cd cexes = do
-  fullCDs <- mapM (\cex -> calldataFromCex cex cd sig) cexes
-  pure $ map (\case
+getReproFailure :: App m => Sig -> Expr Buf -> SMTCex -> m (Err ReproducibleCex)
+getReproFailure sig@(Sig testName _) cd cex = do
+  bs <- calldataFromCex cex cd sig
+  pure $ (\case
     Left err -> Left err
-    Right fullCD -> Right $ ReproducibleCex { testName = testName, callData = fullCD}) fullCDs
+    Right fullCD -> Right $ ReproducibleCex { testName = testName, callData = fullCD}) bs
 
 symFailure :: App m =>
   UnitTestOptions -> Text -> Expr Buf -> [AbiType] ->
-  [(Expr End, SMTCex, Err Bool)] ->
+  (Expr End, SMTCex, Err Bool) ->
   m Text
-symFailure UnitTestOptions {..} testName cd types fails = do
+symFailure UnitTestOptions {..} testName cd types failure = do
   conf <- readConfig
-  pure $ mconcat [ Text.concat $ indentLines 3 . mkMsg conf <$> fails ]
+  pure $ mconcat [ indentLines 3 $ mkMsg conf failure ]
   where
       showRes = \case
         Success _ _ _ _ -> if "proveFail" `isPrefixOf` testName

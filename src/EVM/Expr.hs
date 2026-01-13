@@ -9,7 +9,7 @@ module EVM.Expr where
 import Prelude hiding (LT, GT)
 import Control.Monad (unless, when)
 import Control.Monad.ST (ST)
-import Control.Monad.State (put, get, modify, execState, State)
+import Control.Monad.State (put, get, execState, State)
 import Data.Bits hiding (And, Xor)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -177,7 +177,7 @@ not :: Expr EWord -> Expr EWord
 not = op1 Not complement
 
 shl :: Expr EWord -> Expr EWord -> Expr EWord
-shl = op2 SHL (\x y -> if x > 256 then 0 else shiftL y (fromIntegral x))
+shl = op2 SHL (\x y -> if x >= 256 then 0 else shiftL y (fromIntegral x))
 
 shr :: Expr EWord -> Expr EWord -> Expr EWord
 shr = op2
@@ -1198,12 +1198,6 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
       where l = sort [a, b, c]
             an = EVM.Expr.and
 
-    -- A special pattern sometimes generated from Solidity that uses exponentiation to simulate bit shift.
-    -- We can rewrite the exponentiation into a bit-shift under certain conditions.
-    go (Exp (Lit 0x100) offset@(Mul (Lit a) (Mod _ (Lit b))))
-      | a * b <= 32 && (maxWord256 `Prelude.div` a) > b = shl (mul (Lit 8) offset) (Lit 1)
-    go (Exp (Lit 0x100) offset@(Mod _ (Lit 32))) = (shl (mul (Lit 8) offset)) (Lit 1)
-
     -- redundant add / sub
     go (Sub (Add a b) c)
       | a == c = b
@@ -1281,13 +1275,21 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
     go (SDiv _ (Lit 0)) = Lit 0 -- divide anything by 0 is zero in EVM
     go (SDiv a (Lit 1)) = a
     -- NOTE: Div x x is NOT 1, because Div 0 0 is 0, not 1.
-    --
+
+    --- Some trivial exp eliminations
     go (Exp _ (Lit 0)) = Lit 1 -- everything, including 0, to the power of 0 is 1
     go (Exp a (Lit 1)) = a -- everything, including 0, to the power of 1 is itself
     go (Exp (Lit 1) _) = Lit 1 -- 1 to any value (including 0) is 1
     -- NOTE: we can't simplify (Lit 0)^k. If k is 0 it's 1, otherwise it's 0.
     --       this is encoded in SMT.hs instead, via an SMT "ite"
-
+    --
+    -- A special pattern sometimes generated from Solidity that uses exponentiation to simulate bit shift.
+    -- We can rewrite the exponentiation into a bit-shift under certain conditions.
+    go (Exp (Lit 0x100) offset@(Mul (Lit a) (Mod _ (Lit b))))
+      | a * b <= 32 && (maxWord256 `Prelude.div` a) > b = shl (mul (Lit 8) offset) (Lit 1)
+    go (Exp (Lit 0x100) offset@(Mod _ (Lit 32))) = (shl (mul (Lit 8) offset)) (Lit 1)
+    go (Exp (Lit 2) k) = shl k (Lit 1)
+    go (Exp a b) = EVM.Expr.exp a b
 
     -- simple div/mod/add/sub
     go (Div  o1 o2) = EVM.Expr.div  o1 o2
@@ -1663,8 +1665,11 @@ preImages = [(keccak' (word256Bytes . into $ i), i) | i <- [0..255]]
 -- | images of keccak(bytes32(x)) where 0 <= x < 256
 preImageLookupMap :: Map.Map W256 Word8
 preImageLookupMap = Map.fromList preImages
+
 data ConstState = ConstState
   { values :: Map.Map (Expr EWord) W256
+  , lowerBounds :: Map.Map (Expr EWord) W256
+  , upperBounds :: Map.Map (Expr EWord) W256
   , canBeSat :: Bool
   }
   deriving (Show)
@@ -1672,7 +1677,7 @@ data ConstState = ConstState
 -- | Performs constant propagation
 constPropagate :: [Prop] -> [Prop]
 constPropagate ps =
- let consts = collectConsts ps (ConstState mempty True)
+ let consts = collectConsts ps emptyState
  in if consts.canBeSat then substitute consts ps ++ fixVals consts
     else [PBool False]
   where
@@ -1685,7 +1690,7 @@ constPropagate ps =
     --       hence we need the fixVals function to add them back in
     substitute :: ConstState -> [Prop] -> [Prop]
     substitute cs ps2 = map (mapProp (subsGo cs)) ps2
-    subsGo :: ConstState -> Expr a-> Expr a
+    subsGo :: ConstState -> Expr a -> Expr a
     subsGo cs (Var v) = case Map.lookup (Var v) cs.values of
       Just x -> Lit x
       Nothing -> Var v
@@ -1693,20 +1698,96 @@ constPropagate ps =
 
     -- Collects all the constants in the given props, and sets canBeSat to False if UNSAT
     collectConsts ps2 startState = execState (mapM go ps2) startState
+    emptyState = ConstState mempty mempty mempty True
+    conflictState = ConstState mempty mempty mempty False
+    conflict = put conflictState
+
+    setExactValue :: Expr EWord -> W256 -> State ConstState ()
+    setExactValue e v = do
+      s <- get
+      case Map.lookup e s.values of
+        Just old -> when (old /= v) conflict
+        _ -> put s { values = Map.insert e v s.values }
+
+    updateLower :: Expr EWord -> W256 -> State ConstState ()
+    updateLower a l = do
+      s <- get
+      let currentL = fromMaybe 0 (Map.lookup a s.lowerBounds)
+          currentU = fromMaybe maxLit (Map.lookup a s.upperBounds)
+          newL = Prelude.max currentL l
+      if newL > currentU
+        then conflict
+        else put s { lowerBounds = Map.insert a newL s.lowerBounds }
+      when (newL == currentU) $ setExactValue a newL
+
+    updateUpper :: Expr EWord -> W256 -> State ConstState ()
+    updateUpper a u = do
+      s <- get
+      let currentL = fromMaybe 0 (Map.lookup a s.lowerBounds)
+          currentU = fromMaybe maxLit (Map.lookup a s.upperBounds)
+          newU = Prelude.min currentU u
+      if currentL > newU
+        then conflict
+        else put s { upperBounds = Map.insert a newU s.upperBounds }
+      -- Check if equal to lower, then it's a constant
+      when (currentL == newU) $ setExactValue a newU
+
+    genericEq :: Expr EWord -> W256 -> State ConstState ()
+    genericEq a v = do
+      setExactValue a v
+      updateLower a v
+      updateUpper a v
+
     go :: Prop -> State ConstState ()
     go = \case
-        PEq (Lit l) a -> do
-          s <- get
-          case Map.lookup a s.values of
-            Just l2 -> unless (l==l2) $ put ConstState {canBeSat=False, values=mempty}
-            Nothing -> modify (\s' -> s'{values=Map.insert a l s'.values})
-        PEq a b@(Lit _) -> go (PEq b a)
+        -- signed inequalities
+        PEq (Lit 1) term@(SLT a (Lit 0)) -> do
+            genericEq term 1
+            updateLower a minLitSigned
+        PEq (Lit 1) term@(SLT (Lit 0) a) -> do
+            genericEq term 1
+            updateLower a 1
+            updateUpper a maxLitSigned
+
+        -- normal equality propagation
+        PEq (Lit l) a -> genericEq a l
+        PEq a (Lit l) -> genericEq a l
+
         PNeg (PEq (Lit l) a) -> do
           s <- get
           case Map.lookup a s.values of
-            Just l2 -> when (l==l2) $ put ConstState {canBeSat=False, values=mempty}
+            Just l2 -> when (l == l2) conflict
             Nothing -> pure ()
         PNeg (PEq a b@(Lit _)) -> go $ PNeg (PEq b a)
+
+        -- inequalities (with overflow checks to prevent wraparound)
+        -- PLT a (Lit b) means a < b, so a <= b-1
+        PLT a (Lit b) ->
+          if b == 0
+            then conflict
+            else updateUpper a (b - 1)
+        -- PLT (Lit a) b means a < b, so b >= a+1
+        PLT (Lit a) b ->
+          if a == maxLit
+            then conflict
+            else updateLower b (a + 1)
+        -- PLEq a (Lit b) means a <= b
+        PLEq a (Lit b) -> updateUpper a b
+        PLEq (Lit a) b -> updateLower b a
+        -- PGT a (Lit b) means a > b, so a >= b+1
+        PGT a (Lit b) ->
+          if b == maxLit
+            then conflict
+            else updateLower a (b + 1)
+        -- PGT (Lit a) b means a > b, so b <= a-1
+        PGT (Lit a) b ->
+          if a == 0
+            then conflict
+            else updateUpper b (a - 1)
+        -- PGEq a (Lit b) means a >= b
+        PGEq a (Lit b) -> updateLower a b
+        PGEq (Lit a) b -> updateUpper b a
+
         PAnd a b -> do
           go a
           go b
@@ -1717,7 +1798,7 @@ constPropagate ps =
             v2 = collectConsts [b] s
           unless v1.canBeSat $ go b
           unless v2.canBeSat $ go a
-        PBool False -> put $ ConstState {canBeSat=False, values=mempty}
+        PBool False -> conflict
         _ -> pure ()
 
 -- Concretize & simplify Keccak expressions until fixed-point.
@@ -1792,4 +1873,3 @@ maybeConcStoreSimp (ConcreteStore s) = Just s
 maybeConcStoreSimp e = case concKeccakSimpExpr e of
   ConcreteStore s -> Just s
   _ -> Nothing
-

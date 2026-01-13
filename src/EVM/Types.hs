@@ -600,8 +600,7 @@ data PartialExec
 -- | Effect types used by the vm implementation for side effects & control flow
 data Effect t where
   Query :: Query t -> Effect t
-  RunBoth :: RunBoth -> Effect Symbolic
-  RunAll :: RunAll -> Effect Symbolic
+  Branch :: BranchContext -> Effect Symbolic
 deriving instance Show (Effect t)
 
 -- | Queries halt execution until resolved through RPC calls or SMT queries
@@ -613,13 +612,9 @@ data Query t where
   PleaseDoFFI         :: [String] -> Map String String -> (ByteString -> EVM t ()) -> Query t
   PleaseReadEnv       :: String -> (String -> EVM t ()) -> Query t
 
--- | Execution could proceed down one of two branches
-data RunBoth where
-  PleaseRunBoth    :: (Bool -> EVM Symbolic ()) -> RunBoth
-
--- | Execution could proceed down one of several branches
-data RunAll where
-  PleaseRunAll    :: [Expr EWord] -> (Expr EWord -> EVM Symbolic ()) -> RunAll
+data BranchContext where
+  PleaseRunBoth :: (Bool -> EVM Symbolic ()) -> BranchContext
+  PleaseRunAll  :: [Expr EWord] -> (Expr EWord -> EVM Symbolic ()) -> BranchContext
 
 -- | The possible return values of a SMT query
 data BranchCondition = Case Bool | UnknownBranch
@@ -648,13 +643,11 @@ instance Show (Query t) where
     PleaseReadEnv variable _ ->
       (("<EVM.Query: read env: " ++ variable) ++)
 
-instance Show (RunBoth) where
+instance Show (BranchContext) where
   showsPrec _ = \case
     PleaseRunBoth _ ->
       (("<EVM.RunBoth: system running both paths") ++)
 
-instance Show (RunAll) where
-  showsPrec _ = \case
     PleaseRunAll _ _ ->
       (("<EVM.RunAll: system running all paths for Expr EWord-s") ++)
 
