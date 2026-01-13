@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SMT queries now run in separate processes, which allows us to better manage
   timeouts and memory usage by the SMT solver.
 
+## Changed
+- The option `--smttimeout` is now called `--smt-timeout` for consistency with other
+  options.
+
 ## [0.57.0] - 2026-01-08
 
 ## Added
