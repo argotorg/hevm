@@ -1,0 +1,16 @@
+name: Free disk space
+description: Free disk space on Linux runners
+runs:
+  using: composite
+  steps:
+    - name: Free disk space (Linux runners only)
+      if: runner.os == 'Linux'
+      uses: jlumbroso/free-disk-space@v1.3.1
+      with:
+        android: true
+        dotnet: false
+        haskell: true
+        large-packages: false
+        swap-storage: false
+        tool-cache: false
+        docker-images: false

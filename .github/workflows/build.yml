@@ -60,14 +60,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-
-      - name: Free disk space (Ubuntu runners only)
-        if: matrix.os == 'ubuntu-latest'
-        uses: jlumbroso/free-disk-space@v1.3.1
-        with:
-          large-packages: false
-          swap-storage: false
-          tool-cache: true
+      - uses: ./.github/actions/free-disk-space
 
       - name: Install Nix
         uses: nixbuild/nix-quick-install-action@v34
@@ -289,6 +282,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: ./.github/actions/free-disk-space
       - name: Install Nix
         uses: nixbuild/nix-quick-install-action@v34
       - name: Nix cache
