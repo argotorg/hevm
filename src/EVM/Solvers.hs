@@ -397,7 +397,7 @@ spawnSolver solver timeout maxMemoryMB = do
       solverCmd = show solver
       solverArgsStr = fmap T.unpack $ solverArgs solver
 #if defined(mingw32_HOST_OS)
-      -- Windows: no ulimit available, rely on solver-specific timeouts and memory management
+      -- Windows: no ulimit available
       cmd = (proc solverCmd solverArgsStr)
             { std_in = CreatePipe
             , std_out = UseHandle writeout
