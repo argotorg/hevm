@@ -88,12 +88,12 @@ callProcessCwd cmd args cwd = do
 compileWithForge :: App m => FilePath -> FilePath -> m (Either String BuildOutput)
 compileWithForge root src = do
   (res, out, err) <- liftIO $ do
-    writeFile (root </> "foundry.toml") "[profile.default]\nsolc_version = \"0.8.20\"\nevm_version = \"osaka\"\n"
     createDirectory (root </> "src")
+    writeFile (root </> "foundry.toml") "[profile.default]\nevm_version = \"Osaka\"\nast = true\n"
     writeFile (root </> "src" </> "unit-tests.t.sol") =<< readFile =<< Paths.getDataFileName src
     initLib (root </> "lib" </> "tokens") ("test" </> "contracts" </> "lib" </> "erc20.sol") "erc20.sol"
     initStdForgeDir (root </> "lib" </> "forge-std")
-    readProcessWithExitCode "forge" ["build", "--ast", "--root", root] ""
+    readProcessWithExitCode "forge" ["build", "--root", root] ""
   case res of
     ExitFailure _ -> pure . Left $ "compilation failed: " <> "exit code: " <> show res <> "\n\nstdout:\n" <> out <> "\n\nstderr:\n" <> err
     ExitSuccess -> readFilteredBuildOutput root (\path -> "unit-tests.t.sol" `Data.List.isInfixOf` path) Foundry
