@@ -652,23 +652,6 @@ exprToSMT = \case
       benc <- exprToSMT b
       pure $ "(ite (= " <> benc <> " (_ bv0 256)) (_ bv0 256) " <>  "(" <> op `sp` aenc `sp` benc <> "))"
 
-    copySlice :: Expr EWord -> Expr EWord -> Expr EWord -> Builder -> Builder -> Err Builder
-    copySlice srcOffset dstOffset (Lit size) src dst = do
-      sz <- internal size
-      pure $ "(let ((src " <> src <> ")) " <> sz <> ")"
-      where
-        internal 0 = pure dst
-        internal idx = do
-          let idx' = idx - 1
-          encDstOff <- offset idx' dstOffset
-          encSrcOff <- offset idx' srcOffset
-          child <- internal idx'
-          pure $ "(store " <> child `sp` encDstOff `sp` "(select src " <> encSrcOff <> "))"
-        offset :: W256 -> Expr EWord -> Err Builder
-        offset o (Lit b) = pure $ wordAsBV $ o + b
-        offset o e = exprToSMT $ Expr.add (Lit o) e
-    copySlice _ _ _ _ _ = Left "CopySlice with a symbolically sized region not currently implemented"
-
 sp :: Builder -> Builder -> Builder
 a `sp` b = a <> (fromText " ") <> b
 
@@ -713,7 +696,22 @@ propToSMT = \case
 
 
 -- | Stores a region of src into dst
-
+copySlice :: Expr EWord -> Expr EWord -> Expr EWord -> Builder -> Builder -> Err Builder
+copySlice srcOffset dstOffset (Lit size) src dst = do
+  sz <- internal size
+  pure $ "(let ((src " <> src <> ")) " <> sz <> ")"
+  where
+    internal 0 = pure dst
+    internal idx = do
+      let idx' = idx - 1
+      encDstOff <- offset idx' dstOffset
+      encSrcOff <- offset idx' srcOffset
+      child <- internal idx'
+      pure $ "(store " <> child `sp` encDstOff `sp` "(select src " <> encSrcOff <> "))"
+    offset :: W256 -> Expr EWord -> Err Builder
+    offset o (Lit b) = pure $ wordAsBV $ o + b
+    offset o e = exprToSMT $ Expr.add (Lit o) e
+copySlice _ _ _ _ _ = Left "CopySlice with a symbolically sized region not currently implemented"
 
 -- | Unrolls an exponentiation into a series of multiplications
 expandExp :: Expr EWord -> W256 -> Err Builder
