@@ -409,7 +409,6 @@ spawnSolver :: Solver -> Maybe (Natural) -> Natural -> IO SolverInstance
 spawnSolver solver timeout maxMemoryMB = do
   (readout, writeout) <- createPipe
   let timeoutSeconds = mkTimeout timeout
-      maxMemoryKB = maxMemoryMB * 1024  -- Convert MB to KB for ulimit -v
       solverCmd = show solver
       solverArgsStr = fmap T.unpack $ solverArgs solver
 #if defined(mingw32_HOST_OS)
@@ -428,6 +427,7 @@ spawnSolver solver timeout maxMemoryMB = do
 #else
       -- Linux: both CPU and memory limits work
       -- ulimit -v sets RLIMIT_AS (kernel-enforced virtual memory limit in KB)
+      maxMemoryKB = maxMemoryMB * 1024  -- Convert MB to KB for ulimit -v
       shellCmd = "sh"
       shellArgs = ["-c", "ulimit -t " ++ show timeoutSeconds ++ "; ulimit -v " ++ show maxMemoryKB ++ "; exec \"$0\" \"$@\"", solverCmd] ++ solverArgsStr
 #endif
