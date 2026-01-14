@@ -22,6 +22,7 @@ prelude solver =  SMT2 src mempty mempty
     "(set-info :category \"industrial\")"
     ]
   logic = case solver of
+    -- Use QF_AUFBV for Yices (it doesn't support quantifiers)
     Yices -> ["(set-logic QF_AUFBV)"]
     _ -> ["(set-logic ALL)"]
   types = (SMTComment "types") : (fmap SMTCommand [
@@ -34,6 +35,10 @@ prelude solver =  SMT2 src mempty mempty
         "(declare-fun keccak (Buf Word) Word)",
         "(declare-fun sha256 (Buf Word) Word)"
     ]) <> zeroBuf <> zeroStorage
+  -- For Yices, we only declare zero_buf/zero_storage here. Yices doesn't support
+  -- const arrays or quantifiers, so zero-initialization constraints are added
+  -- dynamically in SMT.hs based on which indices are actually accessed.
+  -- See `zeroConstraints` in EVM.SMT for the constraint generation.
   zeroBuf = case solver of
     Yices -> [ SMTCommand "(declare-fun zero_buf () Buf)" ]
     _ -> [ SMTCommand "(define-fun zero_buf () Buf ((as const Buf) (_ bv0 8)))" ]

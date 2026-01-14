@@ -141,6 +141,7 @@ assertPropsHelper conf psPreConc = do
  blockCtxs <- (declareBlockContext . nubOrd $ foldl' (<>) [] blockCtx)
  pure $ prelude (conf.solver)
   <> SMT2 (SMTScript (declareAbstractStores abstractStores)) mempty mempty
+  <> SMT2 (SMTScript (zeroConstraints conf.solver ps bufs stores)) mempty mempty
   <> declareConstrainAddrs addresses
   <> (declareBufs toDeclarePsElim bufs stores)
   <> (declareVars . nubOrd $ foldl' (<>) [] allVars)
@@ -389,6 +390,59 @@ declareAbstractStores :: [Builder] -> [SMTEntry]
 declareAbstractStores names = [SMTComment "abstract base stores"] <> fmap declare names
   where
     declare n = SMTCommand $ "(declare-fun " <> n <> " () Storage)"
+
+-- | For Yices, generate constraints that zero_buf and zero_storage return 0 at
+-- all concrete indices that appear in the props. This is necessary because Yices
+-- doesn't support const arrays or quantifiers. Other solvers use const arrays
+-- that guarantee all elements are zero.
+zeroConstraints :: Solver -> [Prop] -> BufEnv -> StoreEnv -> [SMTEntry]
+zeroConstraints solver props bufs stores = case solver of
+  Yices -> [SMTComment "yices zero_buf/zero_storage constraints"]
+           <> fmap zeroBufConstraint (Set.toList bufIndices)
+           <> fmap zeroStorageConstraint (Set.toList storageIndices)
+  _ -> []
+  where
+    -- Collect concrete indices from props, bufs, and stores
+    -- We collect indices 0-255 as a baseline for buffer operations (covers most memory access patterns)
+    -- plus any concrete indices that appear in the expressions
+    bufIndices :: Set W256
+    bufIndices = Set.fromList [0..255]
+                 <> foldl' (<>) mempty (fmap collectBufIndices props)
+                 <> foldl' (<>) mempty (fmap collectBufIndices (Map.elems bufs))
+                 <> foldl' (<>) mempty (fmap collectBufIndices (Map.elems stores))
+
+    -- For storage, we collect indices 0-31 as baseline (common storage slots)
+    -- plus any concrete indices that appear in the expressions
+    storageIndices :: Set W256
+    storageIndices = Set.fromList [0..31]
+                     <> foldl' (<>) mempty (fmap collectStorageIndices props)
+                     <> foldl' (<>) mempty (fmap collectStorageIndices (Map.elems bufs))
+                     <> foldl' (<>) mempty (fmap collectStorageIndices (Map.elems stores))
+
+    collectBufIndices :: TraversableTerm a => a -> Set W256
+    collectBufIndices = foldTerm go mempty
+      where
+        go :: Expr x -> Set W256
+        go = \case
+          Lit w -> Set.singleton w
+          ReadByte (Lit idx) _ -> Set.singleton idx
+          WriteByte (Lit idx) _ _ -> Set.singleton idx
+          WriteWord (Lit idx) _ _ -> Set.fromList [idx..idx+31]
+          _ -> mempty
+
+    collectStorageIndices :: TraversableTerm a => a -> Set W256
+    collectStorageIndices = foldTerm go mempty
+      where
+        go :: Expr x -> Set W256
+        go = \case
+          SLoad (Lit idx) _ -> Set.singleton idx
+          SStore (Lit idx) _ _ -> Set.singleton idx
+          _ -> mempty
+
+    zeroBufConstraint idx =
+      SMTCommand $ "(assert (= (select zero_buf " <> wordAsBV idx <> ") (_ bv0 8)))"
+    zeroStorageConstraint idx =
+      SMTCommand $ "(assert (= (select zero_storage " <> wordAsBV idx <> ") (_ bv0 256)))"
 
 declareBlockContext :: [(Builder, [Prop])] -> Err SMT2
 declareBlockContext names = do
@@ -779,8 +833,9 @@ writeBytes bytes buf =  do
   let ret = BS.foldl wrap (0, smtText) bytes
   pure $ snd ret
   where
-    -- we don't need to store zeros if the base buffer is empty
-    skipZeros = False
+    -- We can skip storing zeros if the base buffer is empty (zero_buf),
+    -- since zero_buf is constrained to be all zeros for all solvers.
+    skipZeros = buf == mempty
     wrap :: (Int, Builder) -> Word8 -> (Int, Builder)
     wrap (idx, acc) byte =
       if skipZeros && byte == 0
