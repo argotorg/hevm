@@ -15,6 +15,7 @@ import Control.Concurrent.QSem (QSem, newQSem, waitQSem, signalQSem)
 import Control.Exception (bracket, bracket_, try, IOException)
 import Control.Concurrent.STM (writeTChan, newTChan, TChan, tryReadTChan, atomically)
 import Control.Monad
+import Control.Monad.Trans.Maybe (MaybeT(..), runMaybeT)
 import Control.Monad.State.Strict
 import Control.Monad.IO.Unlift
 import Data.Map (Map)
@@ -198,27 +199,31 @@ getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r sem f
             when conf.debug $ putStrLn "Too many solutions to symbolic query."
             writeChan r Nothing
           else do
-            cex <- getModel inst cexvars
-            case Map.lookup (Var (TStrict.pack multiSol.var)) cex.vars of
-              Just v -> do
-                let hexMask = maskFromBytesCount multiSol.numBytes
-                    maskedVal = v .&. hexMask
-                    toSMT n = Data.Text.Lazy.Builder.Int.decimal n
-                    maskedVar = "(bvand " <> fromString multiSol.var <> " (_ bv" <> toSMT hexMask <> " 256))"
-                    restrict = SMTCommand $ "(assert (not (= " <> maskedVar <> " (_ bv" <> toSMT maskedVal <> " 256))))"
-                    newSmt = fullSmt <> SMT2 (SMTScript [restrict]) mempty mempty
-                when conf.debug $ putStrLn $ "Got one solution to symbolic query, val: 0x" <> (showHex maskedVal "") <>
-                  " now have " <> show (length vals + 1) <> " solution(s), max is: " <> show multiSol.maxSols
-                when conf.dumpQueries $ writeSMT2File newSmt "." (show fileCounter <> "-sol" <> show (length vals))
-                out <- sendCommand inst restrict
-                case out of
-                  "success" -> do
-                    out2 <- sendCommand inst  (SMTCommand "(check-sat)")
-                    subRun inst (maskedVal:vals) newSmt out2
-                  err -> do
-                    when conf.debug $ putStrLn $ "Error while writing SMT to solver: " <> (T.unpack err)
-                    writeChan r Nothing
-              Nothing -> internalError $ "variable " <>  multiSol.var <> " not part of model (i.e. cex) ... that's not possible"
+            mcex <- getModel inst cexvars
+            case mcex of
+              Nothing -> do
+                when conf.debug $ putStrLn "Solver died while extracting model."
+                writeChan r Nothing
+              Just cex -> case Map.lookup (Var (TStrict.pack multiSol.var)) cex.vars of
+                Just v -> do
+                  let hexMask = maskFromBytesCount multiSol.numBytes
+                      maskedVal = v .&. hexMask
+                      toSMT n = Data.Text.Lazy.Builder.Int.decimal n
+                      maskedVar = "(bvand " <> fromString multiSol.var <> " (_ bv" <> toSMT hexMask <> " 256))"
+                      restrict = SMTCommand $ "(assert (not (= " <> maskedVar <> " (_ bv" <> toSMT maskedVal <> " 256))))"
+                      newSmt = fullSmt <> SMT2 (SMTScript [restrict]) mempty mempty
+                  when conf.debug $ putStrLn $ "Got one solution to symbolic query, val: 0x" <> (showHex maskedVal "") <>
+                    " now have " <> show (length vals + 1) <> " solution(s), max is: " <> show multiSol.maxSols
+                  when conf.dumpQueries $ writeSMT2File newSmt "." (show fileCounter <> "-sol" <> show (length vals))
+                  out <- sendCommand inst restrict
+                  case out of
+                    "success" -> do
+                      out2 <- sendCommand inst  (SMTCommand "(check-sat)")
+                      subRun inst (maskedVal:vals) newSmt out2
+                    err -> do
+                      when conf.debug $ putStrLn $ "Error while writing SMT to solver: " <> (T.unpack err)
+                      writeChan r Nothing
+                Nothing -> internalError $ "variable " <>  multiSol.var <> " not part of model (i.e. cex) ... that's not possible"
         err -> do
           when conf.debug $ putStrLn $ "Error while writing SMT to solver: " <> (T.unpack err)
           writeChan r Nothing
@@ -269,7 +274,11 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) props r cacheq sem
                     "unknown" -> do
                       dumpUnsolved smt2 fileCounter conf.dumpUnsolved
                       pure $ Unknown "Result unknown by SMT solver"
-                    "sat" -> Cex <$> getModel inst cexvars
+                    "sat" -> do
+                      mmodel <- getModel inst cexvars
+                      case mmodel of
+                        Just model -> pure $ Cex model
+                        Nothing -> pure $ Unknown "Solver died while extracting model"
                     _ -> pure . Error $ "Unable to parse SMT solver output: " <> T.unpack sat
               writeChan r res
         )
@@ -281,8 +290,8 @@ dumpUnsolved fullSmt fileCounter dump = do
      Just path -> writeSMT2File fullSmt path $ "unsolved-" <> show fileCounter
      Nothing -> pure ()
 
-getModel :: SolverInstance -> CexVars -> IO SMTCex
-getModel inst cexvars = do
+getModel :: SolverInstance -> CexVars -> IO (Maybe SMTCex)
+getModel inst cexvars = runMaybeT $ do
   -- get an initial version of the model from the solver
   initialModel <- getRaw
   -- check the sizes of buffer models and shrink if needed
@@ -290,17 +299,18 @@ getModel inst cexvars = do
   then pure initialModel
   else do
     -- get concrete values for each buffers max read index
-    hints <- capHints <$> queryMaxReads (getValue inst) cexvars.buffers
-    snd <$> runStateT (shrinkModel hints) initialModel
+    hints <- MaybeT $ queryMaxReads (getValue inst) cexvars.buffers
+    let cappedHints = capHints hints
+    snd <$> lift (runStateT (shrinkModel cappedHints) initialModel)
   where
-    getRaw :: IO SMTCex
+    getRaw :: MaybeT IO SMTCex
     getRaw = do
-      vars <- getVars parseVar (getValue inst) (fmap T.toStrict cexvars.calldata)
-      addrs <- getAddrs parseEAddr (getValue inst) (fmap T.toStrict cexvars.addrs)
-      buffers <- getBufs (getValue inst) (Map.keys cexvars.buffers)
-      storage <- getStore (getValue inst) cexvars.storeReads
-      blockctx <- getVars parseBlockCtx (getValue inst) (fmap T.toStrict cexvars.blockContext)
-      txctx <- getVars parseTxCtx (getValue inst) (fmap T.toStrict cexvars.txContext)
+      vars <- MaybeT $ getVars parseVar (getValue inst) (fmap T.toStrict cexvars.calldata)
+      addrs <- MaybeT $ getAddrs parseEAddr (getValue inst) (fmap T.toStrict cexvars.addrs)
+      buffers <- MaybeT $ getBufs (getValue inst) (Map.keys cexvars.buffers)
+      storage <- MaybeT $ getStore (getValue inst) cexvars.storeReads
+      blockctx <- MaybeT $ getVars parseBlockCtx (getValue inst) (fmap T.toStrict cexvars.blockContext)
+      txctx <- MaybeT $ getVars parseTxCtx (getValue inst) (fmap T.toStrict cexvars.txContext)
       pure $ SMTCex vars addrs buffers storage blockctx txctx
 
     -- sometimes the solver might give us back a model for the max read index
@@ -337,8 +347,10 @@ getModel inst cexvars = do
         sendCommand inst $ SMTCommand "(check-sat)"
       case answer of
         "sat" -> do
-          model <- liftIO getRaw
-          put model
+          mmodel <- liftIO $ runMaybeT getRaw
+          case mmodel of
+            Just model -> put model
+            Nothing -> pure ()  -- solver died, keep current model
         "unsat" -> do
           liftIO $ checkCommand inst $ SMTCommand "(pop 1)"
           let nextHint = if hint == 0 then 1 else hint * 2
@@ -480,11 +492,17 @@ sendCommand (SolverInstance _ stdin stdout _) (SMTCommand cmd) = do
             Right txt -> pure txt
 
 -- | Returns a string representation of the model for the requested variable
+-- Returns "unknown" if the solver process has died (timeout, crash, etc.)
 getValue :: SolverInstance -> Text -> IO Text
 getValue (SolverInstance _ stdin stdout _) var = do
-  T.hPutStrLn stdin (T.append (T.append "(get-value (" var) "))")
-  hFlush stdin
-  fmap (T.unlines . reverse) (readSExpr stdout)
+  result <- try $ T.hPutStrLn stdin (T.append (T.append "(get-value (" var) "))")
+  case result of
+    Left (_ :: IOException) -> pure "unknown"  -- Write failed
+    Right _ -> do
+      flushResult <- try $ hFlush stdin
+      case flushResult of
+        Left (_ :: IOException) -> pure "unknown"  -- Flush failed
+        Right _ -> fmap (T.unlines . reverse) (readSExpr stdout)
 
 -- | Reads lines from h until we have a balanced sexpr
 -- Returns ["unknown"] if the solver process has died
