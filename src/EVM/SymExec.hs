@@ -496,7 +496,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
             (ra, vma) <- liftIO $ stToIO $ runStateT (continue v) frozen { result = Nothing, exploreDepth = newDepth }
             -- Check abort flag before queuing new task
             abortFlag <- liftIO $ readTVarIO shouldAbort
-            unless (conf.earlyAbort && abortFlag) $ do
+            unless abortFlag $ do
               liftIO $ atomically $ modifyTVar numTasks (+1)
               when (conf.debug && conf.verb >=2) $ liftIO $ putStrLn $ "Queuing new task for ForkMany at depth " <> show newDepth
               liftIO $ writeChan taskQ t { vm = vma, stepper = (k ra) }
@@ -509,7 +509,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
         (ra, vma) <- liftIO $ stToIO $ runStateT (continue True) frozen { result = Nothing, exploreDepth = newDepth }
         -- Check abort flag before queuing new task
         abortFlag <- liftIO $ readTVarIO shouldAbort
-        unless (conf.earlyAbort && abortFlag) $ do
+        unless abortFlag $ do
           liftIO $ atomically $ modifyTVar numTasks (+1)
           liftIO $ writeChan taskQ $ t { vm = vma, stepper = (k ra) }
           when (conf.debug && conf.verb >= 2) $ liftIO $ putStrLn $ "Queued new task for Fork at depth " <> show newDepth
