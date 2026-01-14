@@ -23,6 +23,7 @@ import Data.Map qualified as Map
 import Data.Set (Set, isSubsetOf, fromList, toList)
 import Data.Maybe (fromMaybe, isJust, fromJust)
 import Data.Either (isLeft)
+import Data.Foldable (for_)
 import Data.Text qualified as TStrict
 import Data.Text.Lazy (Text)
 import Data.Text.Lazy qualified as T
@@ -352,9 +353,7 @@ getModel inst cexvars = runMaybeT $ do
           case answer of
             "sat" -> do
               mmodel <- liftIO $ runMaybeT getRaw
-              case mmodel of
-                Just model -> put model
-                Nothing -> pure ()  -- solver died, keep current model
+              for_ mmodel put  -- solver died, keep current model
             "unsat" -> do
               mpop <- liftIO $ checkCommand inst $ SMTCommand "(pop 1)"
               case mpop of
@@ -415,14 +414,14 @@ spawnSolver solver timeout maxMemoryMB = do
       maxMemoryKB = maxMemoryMB * 1024  -- Convert MB to KB for ulimit -v
       solverCmd = show solver
       solverArgsStr = fmap T.unpack $ solverArgs solver
-#if defined(mingw32_HOST_OS)
-      -- Windows: no ulimit available
-      cmd = (proc solverCmd solverArgsStr)
-            { std_in = CreatePipe
-            , std_out = UseHandle writeout
-            , std_err = UseHandle writeout
-            }
-#else
+
+
+
+
+
+
+
+
       -- Unix-like (Linux, macOS): Wrap with shell that sets CPU time and memory limits via ulimit
       -- ulimit -t sets RLIMIT_CPU (kernel-enforced CPU time limit in seconds)
       -- ulimit -v sets RLIMIT_AS (kernel-enforced virtual memory limit in KB)
@@ -434,7 +433,7 @@ spawnSolver solver timeout maxMemoryMB = do
             , std_out = UseHandle writeout
             , std_err = UseHandle writeout
             }
-#endif
+
   (Just stdin, Nothing, Nothing, process) <- createProcess cmd
   hSetBuffering stdin (BlockBuffering (Just 1000000))
   let solverInstance = SolverInstance solver stdin readout process
