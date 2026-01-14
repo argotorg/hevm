@@ -378,10 +378,8 @@ getModel inst cexvars = runMaybeT $ do
           -- TODO: do I need to check the write idx here?
           (Write _ idx next) -> idx <= 32 && go (Comp next)
 
-mkTimeout :: Maybe Natural -> Text
-mkTimeout t = T.pack $ show $ case t of
-  Nothing -> 300 :: Natural
-  Just t' -> t'
+mkTimeout :: Maybe Natural -> Natural
+mkTimeout = fromMaybe 300
 
 -- | Arguments used when spawning a solver instance
 solverArgs :: Solver -> [Text]
@@ -447,7 +445,6 @@ spawnSolver solver timeout maxMemoryMB = do
     EmptySolver -> pure solverInstance
     Z3 -> do
       _ <- sendCommand solverInstance $ SMTCommand "(set-option :print-success true)"
-      _ <- sendCommand solverInstance $ SMTCommand ("(set-option :timeout " <> (fromLazyText $ mkTimeout timeout) <> ")")
       pure solverInstance
     Custom _ -> pure solverInstance
 
