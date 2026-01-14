@@ -420,12 +420,19 @@ spawnSolver solver timeout maxMemoryMB = do
             , std_err = UseHandle writeout
             }
 #else
-      -- Unix-like (Linux, macOS): Wrap with shell that sets CPU time and memory limits via ulimit
+#if defined(darwin_HOST_OS)
+      -- macOS: memory limit not possible, but CPU limits work
       -- ulimit -t sets RLIMIT_CPU (kernel-enforced CPU time limit in seconds)
-      -- ulimit -v sets RLIMIT_AS (kernel-enforced virtual memory limit in KB)
-      -- Use sh -c to execute ulimit followed by exec to replace the shell with the solver
       shellCmd = "sh"
-      shellArgs = ["-c", "ulimit -t " ++ show timeoutSeconds ++ "; ulimit -v " ++ show maxMemoryKB ++ "; exec \"$@\"", "--", solverCmd] ++ solverArgsStr
+      shellArgs = ["-c", "ulimit -t " ++ show timeoutSeconds ++ "; exec \"$0\" \"$@\"", solverCmd] ++ solverArgsStr
+#else
+      -- Linux: both CPU and memory limits work
+      -- ulimit -v sets RLIMIT_AS (kernel-enforced virtual memory limit in KB)
+      shellCmd = "sh"
+      shellArgs = ["-c", "ulimit -t " ++ show timeoutSeconds ++ "; ulimit -v " ++ show maxMemoryKB ++ "; exec \"$0\" \"$@\"", solverCmd] ++ solverArgsStr
+#endif
+      -- Unix-like (Linux, macOS): Wrap with shell that sets CPU time and memory limits via ulimit
+      -- Use sh -c to execute ulimit followed by exec to replace the shell with the solver
       cmd = (proc shellCmd shellArgs)
             { std_in = CreatePipe
             , std_out = UseHandle writeout
