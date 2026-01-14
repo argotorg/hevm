@@ -257,7 +257,8 @@ common test-base
     optics-core,
     witch,
     unliftio-core,
-    exceptions
+    exceptions,
+    stm
 
 library test-utils
   import: test-base
@@ -266,8 +267,6 @@ library test-utils
     EVM.Test.Utils
     EVM.Test.FuzzSymExec
     EVM.Test.BlockchainTests
-  build-depends:
-    stm,
 
 common test-common
   import: test-base
@@ -280,8 +279,6 @@ common test-common
     EVM.Test.Utils
     EVM.Test.FuzzSymExec
     EVM.Test.BlockchainTests
-  build-depends:
-    stm,
 
 --- Test Suites ---
 
