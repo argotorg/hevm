@@ -341,25 +341,32 @@ getModel inst cexvars = runMaybeT $ do
     shrinkBuf :: Text -> W256 -> StateT SMTCex IO ()
     shrinkBuf buf hint = do
       let encBound = "(_ bv" <> Data.Text.Lazy.Builder.Int.decimal hint <> " 256)"
-      answer <- liftIO $ do
-        checkCommand inst $ SMTCommand "(push 1)"
-        checkCommand inst $ SMTCommand ("(assert (bvule " <> (fromLazyText buf) <> "_length " <> encBound <> "))")
-        sendCommand inst $ SMTCommand "(check-sat)"
-      case answer of
-        "sat" -> do
-          mmodel <- liftIO $ runMaybeT getRaw
-          case mmodel of
-            Just model -> put model
-            Nothing -> pure ()  -- solver died, keep current model
-        "unsat" -> do
-          liftIO $ checkCommand inst $ SMTCommand "(pop 1)"
-          let nextHint = if hint == 0 then 1 else hint * 2
-          if nextHint < hint || nextHint > 1_073_741_824
-            then pure () -- overflow or over 1GB
-            else shrinkBuf buf nextHint
-        _ -> do -- unexpected answer -> clean up and do not change the model
-          liftIO $ checkCommand inst $ SMTCommand "(pop 1)"
-          pure ()
+      -- Try to push and assert; if either fails, solver died, keep current model
+      setup <- liftIO $ runMaybeT $ do
+        MaybeT $ checkCommand inst $ SMTCommand "(push 1)"
+        MaybeT $ checkCommand inst $ SMTCommand ("(assert (bvule " <> (fromLazyText buf) <> "_length " <> encBound <> "))")
+      case setup of
+        Nothing -> pure ()  -- solver died during setup, keep current model
+        Just () -> do
+          answer <- liftIO $ sendCommand inst $ SMTCommand "(check-sat)"
+          case answer of
+            "sat" -> do
+              mmodel <- liftIO $ runMaybeT getRaw
+              case mmodel of
+                Just model -> put model
+                Nothing -> pure ()  -- solver died, keep current model
+            "unsat" -> do
+              mpop <- liftIO $ checkCommand inst $ SMTCommand "(pop 1)"
+              case mpop of
+                Nothing -> pure ()  -- solver died, keep current model
+                Just () -> do
+                  let nextHint = if hint == 0 then 1 else hint * 2
+                  if nextHint < hint || nextHint > 1_073_741_824
+                    then pure () -- overflow or over 1GB
+                    else shrinkBuf buf nextHint
+            _ -> do -- unexpected answer -> clean up and do not change the model
+              _ <- liftIO $ checkCommand inst $ SMTCommand "(pop 1)"
+              pure ()
 
 
     -- we set a pretty arbitrary upper limit (of 32) to decide if we need to do some shrinking
@@ -461,12 +468,11 @@ sendScript solver (SMTScript entries) = do
         "success" -> go cs
         e -> pure $ Left $ "Solver returned an error:\n" <> e <> "\nwhile sending the following command: " <> toLazyText command
 
-checkCommand :: SolverInstance -> SMTEntry -> IO ()
+-- | Returns Nothing if the solver died or returned an error
+checkCommand :: SolverInstance -> SMTEntry -> IO (Maybe ())
 checkCommand inst cmd = do
   res <- sendCommand inst cmd
-  case res of
-    "success" -> pure ()
-    _ -> internalError $ "Unexpected solver output: " <> T.unpack res
+  pure $ if res == "success" then Just () else Nothing
 
 
 -- | Strips trailing \r, if present
