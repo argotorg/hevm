@@ -361,7 +361,7 @@ getModel inst cexvars = do
           (Write _ idx next) -> idx <= 32 && go (Comp next)
 
 mkTimeout :: Maybe Natural -> Text
-mkTimeout t = T.pack $ show $ (1000 *)$ case t of
+mkTimeout t = T.pack $ show $ case t of
   Nothing -> 300 :: Natural
   Just t' -> t'
 
