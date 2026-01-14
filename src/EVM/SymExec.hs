@@ -11,7 +11,7 @@ import Control.Concurrent.Async ( mapConcurrently)
 import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
 import Control.Concurrent.Spawn (parMapIO, pool)
 import Control.Concurrent.STM (writeTChan, newTChan, TChan, readTChan, atomically, isEmptyTChan, STM)
-import Control.Concurrent.STM.TVar (TVar, newTVarIO, modifyTVar, readTVar, writeTVar)
+import Control.Concurrent.STM.TVar (TVar, newTVarIO, modifyTVar, readTVar, readTVarIO, writeTVar)
 import Control.Concurrent.STM.TMVar (TMVar, putTMVar, takeTMVar, newEmptyTMVarIO)
 import Control.Monad (when, unless, forM_, forM, forever, void)
 import Control.Monad.Loops (whileM)
@@ -402,7 +402,7 @@ interpret fetcher iterConf vm shouldAbort stepper handler = do
     taskOrchestrate taskQ avail processQ numTasks numProcs = forever $ do
       _ <- liftIO $ readChan avail
       task <- liftIO $ readChan taskQ
-      abortFlag <- liftIO $ atomically $ readTVar shouldAbort
+      abortFlag <- liftIO $ readTVarIO shouldAbort
       if abortFlag
         then liftIO $ writeChan avail ()
         else do
@@ -414,7 +414,7 @@ interpret fetcher iterConf vm shouldAbort stepper handler = do
     processOrchestrate processQ avail resChan numProcs numTasks allProcessDone = forever $ do
       _ <- liftIO $ readChan avail
       proc <- liftIO $ readChan processQ
-      abortFlag <- liftIO $ atomically $ readTVar shouldAbort
+      abortFlag <- liftIO $ readTVarIO shouldAbort
       if abortFlag
         then liftIO $ writeChan avail ()
         else do
@@ -495,7 +495,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
             conf <- readConfig
             (ra, vma) <- liftIO $ stToIO $ runStateT (continue v) frozen { result = Nothing, exploreDepth = newDepth }
             -- Check abort flag before queuing new task
-            abortFlag <- liftIO $ atomically $ readTVar shouldAbort
+            abortFlag <- liftIO $ readTVarIO shouldAbort
             unless (conf.earlyAbort && abortFlag) $ do
               liftIO $ atomically $ modifyTVar numTasks (+1)
               when (conf.debug && conf.verb >=2) $ liftIO $ putStrLn $ "Queuing new task for ForkMany at depth " <> show newDepth
@@ -508,7 +508,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
         let newDepth = vm.exploreDepth+1
         (ra, vma) <- liftIO $ stToIO $ runStateT (continue True) frozen { result = Nothing, exploreDepth = newDepth }
         -- Check abort flag before queuing new task
-        abortFlag <- liftIO $ atomically $ readTVar shouldAbort
+        abortFlag <- liftIO $ readTVarIO shouldAbort
         unless (conf.earlyAbort && abortFlag) $ do
           liftIO $ atomically $ modifyTVar numTasks (+1)
           liftIO $ writeChan taskQ $ t { vm = vma, stepper = (k ra) }
