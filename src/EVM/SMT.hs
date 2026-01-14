@@ -601,16 +601,12 @@ exprToSMT = \case
                pure $ fromLazyText ("(indexWord" <> T.pack (show (into n :: Integer))) `sp` enc <> ")"
              else exprToSMT (LitByte 0)
     _ -> op2 "indexWord" idx w
-  ReadByte idx src -> do
-    idxEnc <- exprToSMT idx
-    encodeReadByte idxEnc src
+  ReadByte idx src -> op2 "select" src idx
 
   ConcreteBuf "" -> pure "zero_buf"
   ConcreteBuf bs -> writeBytes bs mempty
   AbstractBuf s -> pure $ fromText s
-  ReadWord idx prev -> do
-    idxEnc <- exprToSMT idx
-    encodeReadWord idxEnc prev
+  ReadWord idx prev -> op2 "readWord" idx prev
   BufLength (AbstractBuf b) -> pure $ fromText b <> "_length"
   BufLength (GVar (BufVar n)) -> pure $ fromLazyText $ "buf" <> (T.pack . show $ n) <> "_length"
   BufLength b -> exprToSMT (bufLength b)
@@ -625,8 +621,9 @@ exprToSMT = \case
     encPrev <- exprToSMT prev
     pure $ "(writeWord " <> encIdx `sp` encVal `sp` encPrev <> ")"
   CopySlice srcIdx dstIdx size src dst -> do
+    srcSMT <- exprToSMT src
     dstSMT <- exprToSMT dst
-    copySlice srcIdx dstIdx size (\idx -> encodeReadByte idx src) dstSMT
+    copySlice srcIdx dstIdx size srcSMT dstSMT
 
   -- we need to do a bit of processing here.
   ConcreteStore s -> encodeConcreteStore s
@@ -636,9 +633,7 @@ exprToSMT = \case
     encVal  <- exprToSMT val
     encPrev <- exprToSMT prev
     pure $ "(store" `sp` encPrev `sp` encIdx `sp` encVal <> ")"
-  SLoad idx store -> do
-    idxEnc <- exprToSMT idx
-    encodeSLoad idxEnc store
+  SLoad idx store -> op2 "select" store idx
   LitAddr n -> pure $ fromLazyText $ "(_ bv" <> T.pack (show (into n :: Integer)) <> " 160)"
   CodeHash a@(LitAddr _) -> pure $ fromLazyText "codehash_" <> formatEAddr a
   Gas prefix var -> pure $ fromLazyText $ "gas_" <> T.pack (TS.unpack prefix) <> T.pack (show var)
@@ -656,90 +651,11 @@ exprToSMT = \case
       aenc <- exprToSMT a
       benc <- exprToSMT b
       pure $ "(ite (= " <> benc <> " (_ bv0 256)) (_ bv0 256) " <>  "(" <> op `sp` aenc `sp` benc <> "))"
-    encodeReadWord :: Builder -> Expr Buf -> Err Builder
-    encodeReadWord idxEnc buf = case buf of
-       ConcreteBuf _ -> do
-          bytes <- mapM (\i -> do
-             let off = "(bvadd " <> idxEnc `sp` "(_ bv" <> Data.Text.Lazy.Builder.Int.decimal i <> " 256))"
-             encodeReadByte off buf
-             ) [(0::Int)..31]
-          
-          let foldConcat :: Builder -> Builder -> Builder
-              foldConcat acc b = "(concat " <> b `sp` acc <> ")"
-          
-          case reverse bytes of
-             [] -> pure "(_ bv0 256)"
-             (l:rest) -> pure $ foldl foldConcat l rest
-       
-       _ -> do
-         bufEnc <- exprToSMT buf
-         pure $ "(readWord " <> idxEnc `sp` bufEnc <> ")"
 
-    encodeReadByte :: Builder -> Expr Buf -> Err Builder
-    encodeReadByte idxEnc buf = case buf of
-      ConcreteBuf bs -> do
-        if BS.null bs then pure "(_ bv0 8)"
-        else do
-          let len = BS.length bs
-          baseEnc <- exprToSMT buf
-          pure $ "(ite (bvult " <> idxEnc `sp` "(_ bv" <> Data.Text.Lazy.Builder.Int.decimal len <> " 256))"
-              `sp` "(select " <> baseEnc `sp` idxEnc <> ")"
-              `sp` "(_ bv0 8))"
-
-      WriteByte i v parent -> do
-         iEnc <- exprToSMT i
-         vEnc <- exprToSMT v
-         parentRead <- encodeReadByte idxEnc parent
-         pure $ "(ite (= " <> idxEnc `sp` iEnc <> ") " <> vEnc `sp` parentRead <> ")"
-
-      WriteWord i v parent -> do
-         iEnc <- exprToSMT i
-         vEnc <- exprToSMT v
-         parentRead <- encodeReadByte idxEnc parent
-         let diff = "(bvsub " <> idxEnc `sp` iEnc <> ")"
-         pure $ "(ite (bvult " <> diff `sp` "(_ bv32 256)) (indexWord " <> diff `sp` vEnc <> ") " <> parentRead <> ")"
-
-      CopySlice srcIdx dstIdx size src dst -> do
-         srcIdxEnc <- exprToSMT srcIdx
-         dstIdxEnc <- exprToSMT dstIdx
-         sizeEnc <- exprToSMT size
-         
-         let offset = "(bvsub " <> idxEnc `sp` dstIdxEnc <> ")"
-         let srcReadIdx = "(bvadd " <> srcIdxEnc `sp` offset <> ")"
-         
-         srcRead <- encodeReadByte srcReadIdx src
-         dstRead <- encodeReadByte idxEnc dst
-         
-         pure $ "(ite (bvult " <> offset `sp` sizeEnc <> ") " <> srcRead `sp` dstRead <> ")"
-
-      _ -> do
-        bufEnc <- exprToSMT buf
-        pure $ "(select " <> bufEnc `sp` idxEnc <> ")"
-
-    encodeSLoad :: Builder -> Expr Storage -> Err Builder
-    encodeSLoad idxEnc store = case store of
-      ConcreteStore s -> do
-        let zeroVal = "(_ bv0 256)"
-        foldM (\acc (k, v) -> do
-           kEnc <- exprToSMT (Lit k)
-           vEnc <- exprToSMT (Lit v)
-           pure $ "(ite (= " <> idxEnc `sp` kEnc <> ") " <> vEnc `sp` acc <> ")"
-           ) zeroVal (Map.toList s)
-
-      SStore idx val prev -> do
-        idxS <- exprToSMT idx
-        valS <- exprToSMT val
-        prevS <- encodeSLoad idxEnc prev
-        pure $ "(ite (= " <> idxEnc `sp` idxS <> ") " <> valS `sp` prevS <> ")"
-
-      _ -> do
-        storeEnc <- exprToSMT store
-        pure $ "(select " <> storeEnc `sp` idxEnc <> ")"
-
-    copySlice :: Expr EWord -> Expr EWord -> Expr EWord -> (Builder -> Err Builder) -> Builder -> Err Builder
-    copySlice srcOffset dstOffset (Lit size) readSrc dst = do
+    copySlice :: Expr EWord -> Expr EWord -> Expr EWord -> Builder -> Builder -> Err Builder
+    copySlice srcOffset dstOffset (Lit size) src dst = do
       sz <- internal size
-      pure $ sz
+      pure $ "(let ((src " <> src <> ")) " <> sz <> ")"
       where
         internal 0 = pure dst
         internal idx = do
@@ -747,9 +663,7 @@ exprToSMT = \case
           encDstOff <- offset idx' dstOffset
           encSrcOff <- offset idx' srcOffset
           child <- internal idx'
-          
-          srcVal <- readSrc encSrcOff
-          pure $ "(store " <> child `sp` encDstOff `sp` srcVal <> ")"
+          pure $ "(store " <> child `sp` encDstOff `sp` "(select src " <> encSrcOff <> "))"
         offset :: W256 -> Expr EWord -> Err Builder
         offset o (Lit b) = pure $ wordAsBV $ o + b
         offset o e = exprToSMT $ Expr.add (Lit o) e
