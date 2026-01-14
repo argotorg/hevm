@@ -414,14 +414,14 @@ spawnSolver solver timeout maxMemoryMB = do
       maxMemoryKB = maxMemoryMB * 1024  -- Convert MB to KB for ulimit -v
       solverCmd = show solver
       solverArgsStr = fmap T.unpack $ solverArgs solver
-
-
-
-
-
-
-
-
+#if defined(mingw32_HOST_OS)
+      -- Windows: no ulimit available
+      cmd = (proc solverCmd solverArgsStr)
+            { std_in = CreatePipe
+            , std_out = UseHandle writeout
+            , std_err = UseHandle writeout
+            }
+#else
       -- Unix-like (Linux, macOS): Wrap with shell that sets CPU time and memory limits via ulimit
       -- ulimit -t sets RLIMIT_CPU (kernel-enforced CPU time limit in seconds)
       -- ulimit -v sets RLIMIT_AS (kernel-enforced virtual memory limit in KB)
@@ -433,6 +433,7 @@ spawnSolver solver timeout maxMemoryMB = do
             , std_out = UseHandle writeout
             , std_err = UseHandle writeout
             }
+#endif
 
   (Just stdin, Nothing, Nothing, process) <- createProcess cmd
   hSetBuffering stdin (BlockBuffering (Just 1000000))
