@@ -202,9 +202,6 @@ main = do
         putStrLn $ "Exit code: " ++ show exitcode
         putStrLn stderr
         putStrLn stdout
-        -- stdout `shouldContain` "[FAIL]"
-        -- stdout `shouldContain` "abort"
-        -- stderr `shouldNotContain` "CallStack"
       it "rpc-cache" $ do
         (_, stdout, stderr) <- runForge "test/contracts/fail/rpc-test.sol"
           ["--rpc", "http://mock.mock", "--prefix", "test_attack_symbolic"
