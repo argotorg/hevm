@@ -29,8 +29,7 @@ prelude =  SMT2 src mempty mempty
     ]) <> [(SMTComment "slot -> value"), SMTCommand "(define-sort Storage () (Array Word Word))"]
     <> (fmap SMTCommand [
         "(declare-fun keccak (Buf Word) Word)",
-        "(declare-fun sha256 (Buf Word) Word)",
-        "(declare-fun clz (Word) Word)"
+        "(declare-fun sha256 (Buf Word) Word)"
     ])
   macros = fmap SMTCommand [
     "(define-fun max ((a (_ BitVec 256)) (b (_ BitVec 256))) (_ BitVec 256) (ite (bvult a b) b a))",
