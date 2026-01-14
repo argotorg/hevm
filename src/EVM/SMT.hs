@@ -778,18 +778,7 @@ formatEAddr = \case
 
 -- ** Cex parsing ** --------------------------------------------------------------------------------
 
-
-readOrError :: (Num a, Eq a) => ReadS a -> TS.Text -> a
-readOrError reader val = fst . headErr . reader . T.unpack . T.fromStrict $ val
-  where
-    headErr x = fromMaybe (internalError "error reading empty result") $ listToMaybe x
-
-parseSC :: (Num a, Eq a) => SpecConstant -> a
-parseSC (SCHexadecimal a) = readOrError Numeric.readHex a
-parseSC (SCBinary a) = readOrError Numeric.readBin a
-parseSC (SCNumeral a) = readOrError Numeric.readDec a
-parseSC sc = internalError $ "cannot parse: " <> show sc
-
+-- | Parse a Term value (handles both SpecConstant and Yices bv<N> format)
 parseTermVal :: (Num a, Eq a) => Term -> a
 parseTermVal (TermSpecConstant sc) = parseSC sc
 parseTermVal (TermQualIdentifier (Unqualified (IdIndexed val (IxNumeral _ :| []))))
@@ -802,6 +791,16 @@ parseAddr = parseTermVal
 parseW256 :: Term -> W256
 parseW256 = parseTermVal
 
+readOrError :: (Num a, Eq a) => ReadS a -> TS.Text -> a
+readOrError reader val = fst . headErr . reader . T.unpack . T.fromStrict $ val
+  where
+    headErr x = fromMaybe (internalError "error reading empty result") $ listToMaybe x
+
+parseSC :: (Num a, Eq a) => SpecConstant -> a
+parseSC (SCHexadecimal a) = readOrError Numeric.readHex a
+parseSC (SCBinary a) = readOrError Numeric.readBin a
+parseSC (SCNumeral a) = readOrError Numeric.readDec a
+parseSC sc = internalError $ "cannot parse: " <> show sc
 
 parseErr :: (Show a) => a -> b
 parseErr res = internalError $ "cannot parse solver response: " <> show res
