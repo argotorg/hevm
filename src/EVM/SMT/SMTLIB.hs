@@ -11,16 +11,20 @@ import Data.Text.Lazy.Builder
 
 import EVM.SMT.Types
 
-prelude :: SMT2
-prelude =  SMT2 src mempty mempty
+prelude :: Solver -> SMT2
+prelude solver =  SMT2 src mempty mempty
   where
   src = SMTScript $ header <> types <> macros
-  header = fmap SMTCommand [
-    "(set-info :smt-lib-version 2.6)",
-    "(set-logic ALL)",
+  header = fmap SMTCommand $ [
+    "(set-info :smt-lib-version 2.6)"
+    ] <> logic <> [
     "(set-info :source |\n Generator: hevm\n Application: hevm symbolic execution system\n |)",
     "(set-info :category \"industrial\")"
     ]
+  logic = case solver of
+    -- Use QF_AUFBV for Yices (it doesn't support quantifiers)
+    Yices -> ["(set-logic QF_AUFBV)"]
+    _ -> ["(set-logic ALL)"]
   types = (SMTComment "types") : (fmap SMTCommand [
     "(define-sort Byte () (_ BitVec 8))",
     "(define-sort Word () (_ BitVec 256))",
@@ -30,7 +34,17 @@ prelude =  SMT2 src mempty mempty
     <> (fmap SMTCommand [
         "(declare-fun keccak (Buf Word) Word)",
         "(declare-fun sha256 (Buf Word) Word)"
-    ])
+    ]) <> zeroBuf <> zeroStorage
+  -- For Yices, we only declare zero_buf/zero_storage here. Yices doesn't support
+  -- const arrays or quantifiers, so zero-initialization constraints are added
+  -- dynamically in SMT.hs based on which indices are actually accessed.
+  -- See `zeroConstraints` in EVM.SMT for the constraint generation.
+  zeroBuf = case solver of
+    Yices -> [ SMTCommand "(declare-fun zero_buf () Buf)" ]
+    _ -> [ SMTCommand "(define-fun zero_buf () Buf ((as const Buf) (_ bv0 8)))" ]
+  zeroStorage = case solver of
+    Yices -> [ SMTCommand "(declare-fun zero_storage () Storage)" ]
+    _ -> [ SMTCommand "(define-fun zero_storage () Storage ((as const Storage) (_ bv0 256)))" ]
   macros = fmap SMTCommand [
     "(define-fun max ((a (_ BitVec 256)) (b (_ BitVec 256))) (_ BitVec 256) (ite (bvult a b) b a))",
     "(define-fun indexWord31 ((w Word)) Byte ((_ extract 7 0) w))",

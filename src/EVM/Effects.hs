@@ -21,6 +21,7 @@ import Control.Monad.IO.Unlift
 import Data.Text (Text)
 import Data.Text.IO qualified as T
 import System.IO (stderr)
+import EVM.SMT.Types (Solver(..))
 
 
 -- Abstract Effects --------------------------------------------------------------------------------
@@ -46,6 +47,7 @@ data Config = Config
   , verb             :: Int
   , simp             :: Bool
   , onlyDeployed     :: Bool
+  , solver           :: Solver
   }
   deriving (Show, Eq)
 
@@ -65,6 +67,7 @@ defaultConfig = Config
   , verb = 0
   , simp = True
   , onlyDeployed = False
+  , solver = Z3
   }
 
 -- Write to the console

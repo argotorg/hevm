@@ -23,6 +23,7 @@ import qualified EVM.Stepper as Stepper
 import qualified EVM.Fetch as Fetch
 
 import EVM.Test.BlockchainTests qualified as BCTests
+import EVM.SMT (Solver(..))
 
 main :: IO ()
 main = defaultMain

@@ -102,6 +102,7 @@ library
     EVM.Exec,
     EVM.Format,
     EVM.Fetch,
+    EVM.SMT.Types,
     EVM.FeeSchedule,
     EVM.Op,
     EVM.Precompiled,
@@ -120,7 +121,6 @@ library
     EVM.Effects,
   other-modules:
     EVM.CheatsTH,
-    EVM.SMT.Types,
     EVM.SMT.SMTLIB,
     Paths_hevm
   autogen-modules:

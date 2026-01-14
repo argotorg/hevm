@@ -1,6 +1,6 @@
 module EVM.SMT.Types where
 
-import Data.Text.Lazy (Text)
+import Data.Text.Lazy (Text, unpack)
 import Data.Text.Lazy.Builder
 import Data.Map (Map)
 import Data.Map qualified as Map (unionWith)
@@ -65,3 +65,21 @@ instance Monoid CexVars where
       , blockContext = mempty
       , txContext = mempty
       }
+
+-- | Supported solvers
+data Solver
+  = Z3
+  | Yices
+  | CVC5
+  | Bitwuzla
+  | EmptySolver
+  | Custom Text
+  deriving (Eq, Ord)
+
+instance Show Solver where
+  show Z3 = "z3"
+  show Yices = "yices-smt2"
+  show CVC5 = "cvc5"
+  show Bitwuzla = "bitwuzla"
+  show EmptySolver = "empty-smt-solver"
+  show (Custom s) = Data.Text.Lazy.unpack s
