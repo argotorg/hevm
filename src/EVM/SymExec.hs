@@ -326,24 +326,24 @@ data InterpTask m a = InterpTask
   , taskQ :: Chan (InterpTask m a)
   , numTasks :: TVar Natural
   , stepper :: Stepper Symbolic (Expr End)
-  , handler :: Expr End -> m a
+  , handler :: Expr End -> TVar Bool -> m a
   , shouldAbort :: TVar Bool
   }
 
 data Process m a = Process
   { result :: Expr End
-  , handler :: Expr End -> m a
+  , handler :: Expr End -> TVar Bool -> m a
   }
 
 interpret :: forall m a . App m
   => Fetch.Fetcher Symbolic m
   -> IterConfig
   -> VM Symbolic
-  -> TVar Bool
   -> Stepper Symbolic (Expr End)
-  -> (Expr End -> m a)
+  -> (Expr End -> TVar Bool -> m a)
   -> m [a]
-interpret fetcher iterConf vm shouldAbort stepper handler = do
+interpret fetcher iterConf vm stepper handler = do
+  shouldAbort <- liftIO $ newTVarIO False
   conf <- readConfig
   taskQ <- liftIO newChan
   processQ <- liftIO newChan
@@ -365,11 +365,11 @@ interpret fetcher iterConf vm shouldAbort stepper handler = do
   allProcessDone <- liftIO newEmptyTMVarIO
 
   -- spawn task orchestration thread
-  taskOrchestrate' <- toIO $ taskOrchestrate taskQ availableInstances processQ numTasks numProcs
+  taskOrchestrate' <- toIO $ taskOrchestrate taskQ shouldAbort availableInstances processQ numTasks numProcs
   taskOrchestrateId <- liftIO $ forkIO taskOrchestrate'
 
   -- spawn processing orchestration thread
-  processOrchestrate' <- toIO $ processOrchestrate processQ availableProcs resChan numProcs numTasks allProcessDone
+  processOrchestrate' <- toIO $ processOrchestrate processQ shouldAbort availableProcs resChan numProcs numTasks allProcessDone
   processOrchestrateId <- liftIO $ forkIO processOrchestrate'
 
   -- Add in the first task, further tasks will be added by the interpreters themselves
@@ -397,9 +397,10 @@ interpret fetcher iterConf vm shouldAbort stepper handler = do
     -- orchestrator loop
     taskOrchestrate :: App m
       => Chan (InterpTask m a)
+      -> TVar Bool
       -> Chan () -> Chan (Process m a)
       -> TVar Natural -> TVar Natural -> m ()
-    taskOrchestrate taskQ avail processQ numTasks numProcs = forever $ do
+    taskOrchestrate taskQ shouldAbort avail processQ numTasks numProcs = forever $ do
       _ <- liftIO $ readChan avail
       task <- liftIO $ readChan taskQ
       abortFlag <- liftIO $ readTVarIO shouldAbort
@@ -410,21 +411,23 @@ interpret fetcher iterConf vm shouldAbort stepper handler = do
           void $ liftIO $ forkIO runTask'
 
     -- processing orchestrator loop
-    processOrchestrate :: App m => Chan (Process m a) -> Chan () -> TChan a -> TVar Natural -> TVar Natural -> TMVar () -> m ()
-    processOrchestrate processQ avail resChan numProcs numTasks allProcessDone = forever $ do
+    processOrchestrate :: App m
+      => Chan (Process m a) -> TVar Bool -> Chan () -> TChan a
+      -> TVar Natural -> TVar Natural -> TMVar () -> m ()
+    processOrchestrate processQ shouldAbort avail resChan numProcs numTasks allProcessDone = forever $ do
       _ <- liftIO $ readChan avail
       proc <- liftIO $ readChan processQ
       abortFlag <- liftIO $ readTVarIO shouldAbort
       if abortFlag
         then liftIO $ writeChan avail ()
         else do
-          runProcess' <- toIO $ processOne proc avail resChan numProcs numTasks allProcessDone
+          runProcess' <- toIO $ processOne proc shouldAbort avail resChan numProcs numTasks allProcessDone
           void $ liftIO $ forkIO runProcess'
 
     -- process one task
-    processOne :: App m => Process m a -> Chan () -> TChan a -> TVar Natural -> TVar Natural -> TMVar () -> m ()
-    processOne task avail resChan numProcs numTasks allProcessDone = do
-      processed <- task.handler task.result
+    processOne :: App m => Process m a -> TVar Bool -> Chan () -> TChan a -> TVar Natural -> TVar Natural -> TMVar () -> m ()
+    processOne task shouldAbort avail resChan numProcs numTasks allProcessDone = do
+      processed <- task.handler task.result shouldAbort
       liftIO . atomically $ writeTChan resChan processed
 
       -- Return instance to pool immediately after processing
@@ -627,8 +630,7 @@ getExprEmptyStore solvers c signature' concreteArgs opts = do
   conf <- readConfig
   calldata <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ loadEmptySymVM (RuntimeCode (ConcreteRuntimeCode c)) (Lit 0) calldata
-  shouldAbort <- liftIO $ newTVarIO False
-  paths <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState shouldAbort runExpr pure
+  paths <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState runExpr (pure . pure)
   if conf.simp then (pure $ map Expr.simplify paths) else pure paths
 
 -- Used only in testing
@@ -644,8 +646,7 @@ getExpr solvers c signature' concreteArgs opts = do
   conf <- readConfig
   calldata <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ abstractVM calldata c Nothing False
-  shouldAbort <- liftIO $ newTVarIO False
-  paths <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState shouldAbort runExpr pure
+  paths <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState runExpr (pure . pure)
   if conf.simp then (pure $ map Expr.simplify paths) else pure paths
 
 {- | Checks if an assertion violation has been encountered
@@ -730,8 +731,7 @@ exploreContract solvers theCode signature' concreteArgs opts maybepre = do
   calldata <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ abstractVM calldata theCode maybepre False
   let fetcher = Fetch.oracle solvers Nothing opts.rpcInfo
-  shouldAbort <- liftIO $ newTVarIO False
-  executeVM fetcher opts.iterConf preState shouldAbort pure
+  executeVM fetcher opts.iterConf preState (pure . pure)
 
 -- | Stepper that parses the result of Stepper.runFully into an Expr End
 runExpr :: Stepper.Stepper Symbolic (Expr End)
@@ -796,8 +796,8 @@ getPartials = mapMaybe go
 
 
 -- | Symbolically execute the VM and return the representention of the execution
-executeVM :: forall m a . App m => Fetch.Fetcher Symbolic m -> IterConfig -> VM Symbolic -> TVar Bool -> (Expr End -> m a) -> m [a]
-executeVM fetcher iterConfig preState shouldAbort handlePath = interpret fetcher iterConfig preState shouldAbort runExpr handlePath
+executeVM :: forall m a . App m => Fetch.Fetcher Symbolic m -> IterConfig -> VM Symbolic -> (Expr End -> TVar Bool -> m a) -> m [a]
+executeVM fetcher iterConfig preState handlePath = interpret fetcher iterConfig preState runExpr handlePath
 
 -- | Symbolically execute the VM and check all endstates against the
 -- postcondition, if available.
@@ -841,8 +841,7 @@ verifyInputsWithHandler solvers opts fetcher preState post cexHandler = do
     putStrLn $ "   Keccak preimages in state: " <> (show $ length preState.keccakPreImgs)
     putStrLn $ "   Exploring call " <> call
 
-  shouldAbort <- liftIO $ newTVarIO False
-  results <- executeVM fetcher opts.iterConf preState shouldAbort $ \leaf -> do
+  results <- executeVM fetcher opts.iterConf preState $ \leaf shouldAbort -> do
     -- Extract partial if applicable
     let mPartial = case leaf of
           Partial _ _ p -> Just (p, leaf)
@@ -957,8 +956,7 @@ equivalenceCheck solvers sess bytecodeA bytecodeB opts calldata create = do
     getBranches bs = do
       let bytecode = if BS.null bs then BS.pack [0] else bs
       prestate <- liftIO $ stToIO $ abstractVM calldata bytecode Nothing create
-      shouldAbort <- liftIO $ newTVarIO False
-      interpret (Fetch.oracle solvers sess Fetch.noRpc) opts.iterConf prestate shouldAbort runExpr pure
+      interpret (Fetch.oracle solvers sess Fetch.noRpc) opts.iterConf prestate runExpr (pure . pure)
     filterQeds (EqIssues res partials) = EqIssues (filter (\(r, _) -> not . isQed $ r) res) partials
 
 rewriteFresh :: Text -> [Expr a] -> [Expr a]
