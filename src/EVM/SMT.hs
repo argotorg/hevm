@@ -744,9 +744,6 @@ parseSC (SCHexadecimal a) = readOrError Numeric.readHex a
 parseSC (SCBinary a) = readOrError Numeric.readBin a
 parseSC sc = internalError $ "cannot parse: " <> show sc
 
--- Note: parseErr was removed because it's always OK for the SMT solver to be killed
--- All parsing functions now return Maybe instead of calling parseErr
-
 parseVar :: TS.Text -> Expr EWord
 parseVar = Var
 
@@ -787,13 +784,11 @@ getVars parseName getVal names = runMaybeT $ do
 getOne :: (SpecConstant -> a) -> (Text -> IO Text) -> Map TS.Text a -> TS.Text -> MaybeT IO (Map TS.Text a)
 getOne parseVal getVal acc name = do
   raw <- lift $ getVal (T.fromStrict name)
-  parsed <- hoistMaybe $ case parseCommentFreeFileMsg getValueRes (T.toStrict raw) of
-    Right (ResSpecific (valParsed :| [])) -> Just valParsed
-    _ -> Nothing
-  val <- hoistMaybe $ case parsed of
-    (TermQualIdentifier (Unqualified (IdSymbol symbol)), TermSpecConstant sc)
-      -> if symbol == name then Just $ parseVal sc else Nothing
-    _ -> Nothing
+  val <- hoistMaybe $ do
+    Right (ResSpecific (valParsed :| [])) <- pure $ parseCommentFreeFileMsg getValueRes (T.toStrict raw)
+    (TermQualIdentifier (Unqualified (IdSymbol symbol)), TermSpecConstant sc) <- pure valParsed
+    guard (symbol == name)
+    pure $ parseVal sc
   pure $ Map.insert name val acc
 
 -- | Queries the solver for models for each of the expressions representing the
@@ -808,27 +803,21 @@ getBufs getVal bufs = runMaybeT $ foldM getBuf mempty bufs
     getLength :: Text -> MaybeT IO W256
     getLength name = do
       val <- lift $ getVal (name <> "_length ")
-      hoistMaybe $ case parseCommentFreeFileMsg getValueRes (T.toStrict val) of
-        Right (ResSpecific (parsed :| [])) -> case parsed of
-          (TermQualIdentifier (Unqualified (IdSymbol symbol)), (TermSpecConstant sc))
-            -> if symbol == (T.toStrict $ name <> "_length")
-               then Just $ parseW256 sc
-               else Nothing
-          _ -> Nothing
-        _ -> Nothing
+      hoistMaybe $ do
+        Right (ResSpecific (parsed :| [])) <- pure $ parseCommentFreeFileMsg getValueRes (T.toStrict val)
+        (TermQualIdentifier (Unqualified (IdSymbol symbol)), TermSpecConstant sc) <- pure parsed
+        guard (symbol == T.toStrict (name <> "_length"))
+        pure $ parseW256 sc
 
     getBuf :: Map (Expr Buf) BufModel -> Text -> MaybeT IO (Map (Expr Buf) BufModel)
     getBuf acc name = do
       len <- getLength name
       val <- lift $ getVal name
-      buf <- hoistMaybe $ case parseCommentFreeFileMsg getValueRes (T.toStrict val) of
-        Right (ResSpecific (valParsed :| [])) -> case valParsed of
-          (TermQualIdentifier (Unqualified (IdSymbol symbol)), term)
-            -> if (T.fromStrict symbol) == name
-               then parseBuf len term
-               else Nothing
-          _ -> Nothing
-        _ -> Nothing
+      buf <- hoistMaybe $ do
+        Right (ResSpecific (valParsed :| [])) <- pure $ parseCommentFreeFileMsg getValueRes (T.toStrict val)
+        (TermQualIdentifier (Unqualified (IdSymbol symbol)), term) <- pure valParsed
+        guard (T.fromStrict symbol == name)
+        parseBuf len term
       pure $ Map.insert (AbstractBuf $ T.toStrict name) buf acc
 
     parseBuf :: W256 -> Term -> Maybe BufModel
@@ -878,15 +867,10 @@ getStore getVal (StorageReads innerMap) = runMaybeT $ do
     let name = toLazyText (storeName addr idx)
     raw <- lift $ getVal name
     fun <- hoistMaybe $ do
-      parsed <- case parseCommentFreeFileMsg getValueRes (T.toStrict raw) of
-                  Right (ResSpecific (valParsed :| [])) -> Just valParsed
-                  _ -> Nothing
-      case parsed of
-        (TermQualIdentifier (Unqualified (IdSymbol symbol)), term) ->
-          if symbol == (T.toStrict name)
-          then Just $ interpret1DArray Map.empty term
-          else Nothing
-        _ -> Nothing
+      Right (ResSpecific (valParsed :| [])) <- pure $ parseCommentFreeFileMsg getValueRes (T.toStrict raw)
+      (TermQualIdentifier (Unqualified (IdSymbol symbol)), term) <- pure valParsed
+      guard (symbol == T.toStrict name)
+      pure $ interpret1DArray Map.empty term
     -- create a map by adding only the locations that are read by the program
     store <- foldM (\m slot -> do
       slot' <- MaybeT $ queryValue getVal slot
@@ -903,9 +887,8 @@ queryValue getVal w = do
   raw <- getVal expr
   pure $ do
     valTxt <- extractValue raw
-    case parseString specConstant (T.toStrict valTxt) of
-      Right sc -> Just $ parseW256 sc
-      _ -> Nothing
+    Right sc <- pure $ parseString specConstant (T.toStrict valTxt)
+    pure $ parseW256 sc
   where
     extractValue getValResponse = (T.stripSuffix "))") $ snd $ T.breakOnEnd " " $ T.stripEnd getValResponse
 
