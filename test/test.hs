@@ -119,13 +119,13 @@ propNoSimp a = let testEnvNoSimp = Env { config = testEnv.config { simp = False 
   in ioProperty $ runEnv testEnvNoSimp a
 
 withDefaultSolver :: App m => (SolverGroup -> m a) -> m a
-withDefaultSolver = withSolvers Z3 3 Nothing 1024
+withDefaultSolver = withSolvers Z3 5 Nothing 1024
 
 withCVC5Solver :: App m => (SolverGroup -> m a) -> m a
-withCVC5Solver = withSolvers CVC5 3 Nothing 1024
+withCVC5Solver = withSolvers CVC5 5 Nothing 1024
 
 withBitwuzlaSolver :: App m => (SolverGroup -> m a) -> m a
-withBitwuzlaSolver = withSolvers Bitwuzla 3 Nothing 1024
+withBitwuzlaSolver = withSolvers Bitwuzla 5 Nothing 1024
 
 main :: IO ()
 main = defaultMain tests
