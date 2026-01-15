@@ -257,8 +257,7 @@ common test-base
     optics-core,
     witch,
     unliftio-core,
-    exceptions,
-    stm
+    exceptions
 
 library test-utils
   import: test-base
