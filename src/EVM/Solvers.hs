@@ -280,7 +280,7 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) props r cacheq sem
                       case mmodel of
                         Just model -> pure $ Cex model
                         Nothing -> pure $ Unknown "Solver died while extracting model"
-                    _ -> pure . Error $ "Unable to parse SMT solver output: " <> T.unpack sat
+                    _ -> pure . Unknown $ "Unable to parse SMT solver output: " <> T.unpack sat
               writeChan r res
         )
     )
