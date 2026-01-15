@@ -240,7 +240,7 @@ getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r sem f
           out <- sendScript inst cmds
           case out of
             Left err -> do
-              when conf.debug $ putStrLn $ "Error while writing SMT to solver: " <> (T.unpack err)
+              when conf.debug $ putStrLn $ "Issue while writing SMT to solver (maybe it got killed)?: " <> (T.unpack err)
               writeChan r Nothing
             Right _ -> do
               sat <- sendCommand inst $ SMTCommand "(check-sat)"
@@ -263,7 +263,7 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) props r cacheq sem
         (\inst -> do
           out <- sendScript inst cmds
           case out of
-            Left e -> writeChan r (Error $ "Error while writing SMT to solver: " <> T.unpack e)
+            Left e -> writeChan r (Unknown $ "Issue while writing SMT to solver (maybe it got killed?): " <> T.unpack e)
             Right () -> do
               sat <- sendCommand inst $ SMTCommand "(check-sat)"
               res <- do
