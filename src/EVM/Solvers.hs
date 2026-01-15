@@ -423,7 +423,7 @@ spawnSolver solver timeout maxMemoryMB = do
 #if defined(darwin_HOST_OS)
       -- macOS: memory limit not possible, but CPU limits work
       -- ulimit -t sets RLIMIT_CPU (kernel-enforced CPU time limit in seconds)
-      let _ =-maxMemoryMB  -- avoid unused variable warning
+      let _ = maxMemoryMB  -- avoid unused variable warning
       shellArgs = ["-c", "ulimit -t " ++ show timeoutSeconds ++ "; exec \"$0\" \"$@\"", solverCmd] ++ solverArgsStr
 #else
       -- Linux: both CPU and memory limits work
