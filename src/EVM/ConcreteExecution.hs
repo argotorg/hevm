@@ -1481,7 +1481,7 @@ stepMCopy vm = do
   size <- pop vm
   let size' = capAsWord64 size
   let destOff' = capAsWord64 destOff
-  when (size > 0) $ do
+  when (size > 0) $ do -- TODO: Replace with copyMemory primitive
     buf <- readMemory vm sourceOff size
     copyFromByteStringToMemory vm buf destOff' 0 size'
 
