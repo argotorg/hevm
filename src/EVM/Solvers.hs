@@ -406,40 +406,49 @@ solverArgs solver = case solver of
 
 -- | Spawns a solver instance, and sets the various global config options that we use for our queries
 spawnSolver :: Solver -> Maybe (Natural) -> Natural -> IO SolverInstance
-spawnSolver solver timeout maxMemoryMB = do
-  (readout, writeout) <- createPipe
-  let timeoutSeconds = mkTimeout timeout
-      solverCmd = show solver
-      solverArgsStr = fmap T.unpack $ solverArgs solver
 #if defined(mingw32_HOST_OS)
+spawnSolver solver _ _ = do
+  (readout, writeout) <- createPipe
+  let solverCmd = show solver
+      solverArgsStr = fmap T.unpack $ solverArgs solver
       -- Windows: no ulimit available
       cmd = (proc solverCmd solverArgsStr)
             { std_in = CreatePipe
             , std_out = UseHandle writeout
             , std_err = UseHandle writeout
             }
-#else
-      shellCmd = "sh"
-#if defined(darwin_HOST_OS)
+#elif defined(darwin_HOST_OS)
+spawnSolver solver timeout _ = do
+  (readout, writeout) <- createPipe
+  let timeoutSeconds = mkTimeout timeout
+      solverCmd = show solver
+      solverArgsStr = fmap T.unpack $ solverArgs solver
       -- macOS: memory limit not possible, but CPU limits work
       -- ulimit -t sets RLIMIT_CPU (kernel-enforced CPU time limit in seconds)
-      let _ = maxMemoryMB  -- avoid unused variable warning
+      shellCmd = "sh"
       shellArgs = ["-c", "ulimit -t " ++ show timeoutSeconds ++ "; exec \"$0\" \"$@\"", solverCmd] ++ solverArgsStr
+      cmd = (proc shellCmd shellArgs)
+            { std_in = CreatePipe
+            , std_out = UseHandle writeout
+            , std_err = UseHandle writeout
+            }
 #else
+spawnSolver solver timeout maxMemoryMB = do
+  (readout, writeout) <- createPipe
+  let timeoutSeconds = mkTimeout timeout
+      solverCmd = show solver
+      solverArgsStr = fmap T.unpack $ solverArgs solver
       -- Linux: both CPU and memory limits work
       -- ulimit -v sets RLIMIT_AS (kernel-enforced virtual memory limit in KB)
+      shellCmd = "sh"
       maxMemoryKB = maxMemoryMB * 1024  -- Convert MB to KB for ulimit -v
       shellArgs = ["-c", "ulimit -t " ++ show timeoutSeconds ++ "; ulimit -v " ++ show maxMemoryKB ++ "; exec \"$0\" \"$@\"", solverCmd] ++ solverArgsStr
-#endif
-      -- Unix-like (Linux, macOS): Wrap with shell that sets CPU time and memory limits via ulimit
-      -- Use sh -c to execute ulimit followed by exec to replace the shell with the solver
       cmd = (proc shellCmd shellArgs)
             { std_in = CreatePipe
             , std_out = UseHandle writeout
             , std_err = UseHandle writeout
             }
 #endif
-
   (Just stdin, Nothing, Nothing, process) <- createProcess cmd
   hSetBuffering stdin (BlockBuffering (Just 1000000))
   let solverInstance = SolverInstance solver stdin readout process
