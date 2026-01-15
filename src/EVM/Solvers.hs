@@ -280,10 +280,10 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) props r cacheq sem
                       case mmodel of
                         Just model -> pure $ Cex model
                         Nothing -> pure $ Unknown "Solver died while extracting model"
-                    ret -> let  supportIssue =
-                                  ("does not yet support" `T.isInfixOf` ret)
-                                  || ("unsupported" `T.isInfixOf` ret)
-                                  || ("not support" `T.isInfixOf` ret)
+                    _ -> let  supportIssue =
+                                  ("does not yet support" `T.isInfixOf` sat)
+                                  || ("unsupported" `T.isInfixOf` sat)
+                                  || ("not support" `T.isInfixOf` sat)
                       in case supportIssue of
                        True -> pure . Error $ "SMT solver reported unsupported operation: " <> T.unpack sat
                        False -> pure . Unknown $ "Unable to parse SMT solver output (maybe it got killed?): " <> T.unpack sat
