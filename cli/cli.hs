@@ -101,6 +101,7 @@ data CommonOptions = CommonOptions
   , noSimplify    ::Bool
   , onlyDeployed  ::Bool
   , cacheDir      ::Maybe String
+  , earlyAbort    ::Bool
   }
 
 commonOptions :: Parser CommonOptions
@@ -130,6 +131,7 @@ commonOptions = CommonOptions
   <*> (switch $ long "no-simplify" <> help "Don't perform simplification of expressions")
   <*> (switch $ long "only-deployed" <> help "When trying to resolve unknown addresses, only use addresses of deployed contracts")
   <*> (optional $ strOption $ long "cache-dir" <> help "Directory to save and load RPC cache")
+  <*> (switch $  long "early-abort" <> help "Stop exploration immediately upon finding the first counterexample")
 
 data CommonExecOptions = CommonExecOptions
   { address       ::Maybe Addr
@@ -372,6 +374,7 @@ main = do
         , verb = cOpts.verb
         , simp = Prelude.not cOpts.noSimplify
         , onlyDeployed = cOpts.onlyDeployed
+        , earlyAbort = cOpts.earlyAbort
         } }
 
 
