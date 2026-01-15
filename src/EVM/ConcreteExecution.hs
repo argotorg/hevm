@@ -20,6 +20,7 @@ Storage
 
 import Control.Monad (forM, when, unless, ap, liftM)
 import Control.Monad.ST (ST, runST)
+import Control.Monad.ST.Unsafe (unsafeSTToIO, unsafeIOToST)
 import Data.Bits ((.|.), (.&.), (.^.), shiftR, shiftL, testBit, complement, bit)
 import Data.ByteArray qualified as BA
 import Data.ByteString qualified as BS
@@ -27,13 +28,15 @@ import Data.ByteString.Char8 qualified as Char8 (pack)
 import Data.DoubleWord (Int256)
 import Data.Map.Strict qualified as StrictMap
 import Data.Maybe (fromMaybe, isJust, fromJust, isNothing)
+import Data.Primitive.ByteArray (MutableByteArray)
+import Data.Primitive.ByteArray qualified as PBA
 import Data.Set qualified as Set
 import Data.STRef
-import Data.Vector.Unboxed qualified as UVec
-import Data.Vector.Unboxed.Mutable qualified as UMVec
 import Data.Vector.Mutable qualified as MVec
 import Data.Vector qualified as Vec
 import Data.Word (Word8, Word64)
+import Foreign.Ptr (Ptr, plusPtr)
+import Foreign.Marshal.Utils (fillBytes)
 import Prelude hiding (exponent)
 
 import Crypto.Hash (Digest, SHA256, RIPEMD160)
@@ -138,13 +141,12 @@ freezeVM vm = do
       forM [0 .. stackEnd - 1] (MVec.read vec)
     freezeMemory frame = do
       let (Memory memRef sizeRef) = frame.state.memory
-      vec <- readSTRef memRef
-      let vecsize = UMVec.length vec
-      logicalSize <- readSTRef sizeRef
-      let logicalSizeInt = fromIntegral logicalSize
-      frozen <- UVec.freeze $ if logicalSizeInt > vecsize then vec else (UMVec.slice 0 logicalSizeInt) vec
-      let bs = BS.pack (UVec.toList frozen)
-      pure $ if logicalSizeInt > vecsize then bs <> (BS.replicate (logicalSizeInt - vecsize) 0) else bs
+      mba <- readSTRef memRef
+      physicalSize <- PBA.getSizeofMutableByteArray mba
+      logicalSize <- fromIntegral <$> readSTRef sizeRef
+      bytes <- readSlice mba 0 (min physicalSize logicalSize)
+      let bs = BA.convert bytes
+      pure $ if logicalSize > physicalSize then bs <> (BS.replicate (logicalSize - physicalSize) 0) else bs
 
 
 
@@ -1082,7 +1084,7 @@ data CallType = REGULAR | DELEGATE | CODE | STATIC
 
 makeCall :: MVM s -> CallType -> Gas -> Addr -> CallValue -> VMWord -> VMWord -> VMWord -> VMWord -> Step s ()
 makeCall vm callType gas to callValue@(CallValue cv') argsOffset argsSize retOffset retSize = do
-  calldata <- readMemory vm argsOffset argsSize
+  calldata <- BA.convert <$> readMemory vm argsOffset argsSize
   touchMemory vm (fromIntegral retOffset) (fromIntegral retSize) -- FIXME: Should gas be charged beforehand or only for actually used memory on return? See EIP - 5
 
   let callToPrecompile = isPrecompile to
@@ -1174,7 +1176,7 @@ stepKeccak vm = do
   offset <- pop vm
   size <- pop vm
   liftST $ burnDynamicCost size
-  bs <- readMemory vm offset size
+  bs <- BA.convert <$> readMemory vm offset size
   let hash = keccak' bs
   push vm hash
 
@@ -1198,14 +1200,14 @@ stepReturn vm = do
 
 returnWithData :: MVM s -> W256 -> W256 -> Step s a
 returnWithData vm offset size = do
-  bs <- readMemory vm offset size
+  bs <- BA.convert <$> readMemory vm offset size
   stop (FrameSucceeded bs)
 
 stepRevert :: MVM s -> Step s ()
 stepRevert vm = do
   offset <- pop vm
   size <- pop vm
-  bs <- readMemory vm offset size
+  bs <- BA.convert <$> readMemory vm offset size
   stop (FrameReverted bs)
 
 haltExecution :: MVM s -> Step s a
@@ -1421,7 +1423,7 @@ stepCreate vm = do
   value <- pop vm
   offset <- pop vm
   size <- pop vm
-  initCode <- readMemory vm offset size
+  initCode <- BA.convert <$> readMemory vm offset size
   currentFrame <- liftST $ getCurrentFrame vm
   availableGas <- liftST $ getAvailableGas currentFrame
   let
@@ -1441,7 +1443,7 @@ stepCreate2 vm = do
   size <- pop vm
   salt <- pop vm
 
-  initCode <- readMemory vm offset size
+  initCode <- BA.convert <$> readMemory vm offset size
   currentFrame <- liftST $ getCurrentFrame vm
   availableGas <- liftST $ getAvailableGas currentFrame
   let
@@ -1482,7 +1484,7 @@ stepMCopy vm = do
   let size' = capAsWord64 size
   let destOff' = capAsWord64 destOff
   when (size > 0) $ do -- TODO: Replace with copyMemory primitive
-    buf <- readMemory vm sourceOff size
+    buf <- BA.convert <$> readMemory vm sourceOff size
     copyFromByteStringToMemory vm buf destOff' 0 size'
 
 stepMLoad :: MVM s -> Step s ()
@@ -1665,73 +1667,68 @@ sstore storage key val = if val == 0 then StrictMap.delete key storage else Stri
 
 ------------- Memory Submodule ---------------------------
 data Memory s = Memory {
-  memRef :: STRef s (UMVec.MVector s Word8),
-  wordSizeRef :: STRef s Word64
+  _memArrayRef :: STRef s (MutableByteArray s), -- underlying representation (think capacity)
+  _wordSizeRef :: STRef s Word64 -- actual size in words
 }
 
 newMemory :: ST s (Memory s)
 newMemory = do
-    v <- UMVec.new 0
-    ref <- newSTRef v
+    mba <- PBA.newByteArray 0
+    arrRef <- newSTRef mba
     size <- newSTRef 0
-    pure (Memory ref size)
+    pure (Memory arrRef size)
 
-readMemory :: MVM s -> W256 -> W256 -> Step s BS.ByteString
-readMemory _ _ 0 = pure BS.empty
+readMemory :: MVM s -> W256 -> W256 -> Step s BA.Bytes
+readMemory _ _ 0 = pure $ BA.empty
 readMemory vm offset size =
   case (,) <$> toWord64 offset <*> toWord64 size of
     Nothing -> vmError IllegalOverflow
     Just (offset64, size64) -> do
       touchMemory vm offset64 size64
       liftST $ do
-        Memory memRef _ <- getMemory vm
-        memvec <- readSTRef memRef
-        let vecsize = fromIntegral $ UMVec.length memvec
-        if offset64 >= vecsize then
-          -- reads past memory are all zeros
-          pure $ BS.replicate (fromIntegral size) 0
-        else if (vecsize - offset64) >= size64 then do
-          -- whole read from memory
-          let dataVec = UMVec.slice (fromIntegral offset64) (fromIntegral size64) memvec
-          frozen <- UVec.freeze dataVec
-          let dataBS = BS.pack (UVec.toList frozen) -- TODO: Consider using storable vector for memory?
-          pure dataBS
-        else do -- partially in bounds, partially zero
-          let available = vecsize - offset64
-              missing = size64 - available -- number of zero bytes
+        Memory mbaRef _ <- getMemory vm
+        mba <- readSTRef mbaRef
+        readSlice mba (fromIntegral offset64) (fromIntegral size64)
 
-          -- read the part that exists
-          prefixFrozen <- UVec.freeze (UMVec.slice (fromIntegral offset64) (fromIntegral available) memvec)
-          let prefix = BS.pack (UVec.toList prefixFrozen)
-          -- append missing zeros
-          let suffix = BS.replicate (fromIntegral missing) 0
-          pure (prefix <> suffix)
 
-writeMemory :: Memory s -> Word64 -> BS.ByteString -> ST s ()
-writeMemory (Memory memRef wordSizeRef) offset bs
-  | BS.null bs = pure ()
-  | otherwise = do
-      vec <- readSTRef memRef
-      let off64 = fromIntegral offset
-          len = BS.length bs
-          requiredSizeWords = bytesToWords $ off64 + (fromIntegral len)
+readSlice :: MutableByteArray s -> Int -> Int -> ST s BA.Bytes
+readSlice mba offset size = do
+    total <- PBA.getSizeofMutableByteArray mba
+    if offset >= total then
+      -- reads past memory are all zeros
+      pure $ BA.zero size
+    else if (total - offset) >= size then
+      -- whole read from memory
+      -- PBA.freezeByteArray offset size mba
+      pure $ BA.allocAndFreeze size $ \dst -> unsafeSTToIO $ PBA.copyMutableByteArrayToAddr dst mba offset size
+    else do -- partially in bounds, partially zero
+      let available = total - offset
+          missing = size - available -- number of zero bytes
+
+      pure $ BA.allocAndFreeze size $ \dst -> do
+        unsafeSTToIO $ PBA.copyMutableByteArrayToAddr dst mba offset available
+        fillBytes (dst `plusPtr` available) 0 missing
+
+writeMemory :: BA.ByteArrayAccess ba => Memory s -> Word64 -> ba -> ST s ()
+writeMemory (Memory mbaRef wordSizeRef) offset ba
+  | BA.null ba = pure ()
+  | otherwise = do -- TODO: Should we touchMemory?
+      mba <- readSTRef mbaRef
+      memLen <- PBA.getSizeofMutableByteArray mba
+      let len = BA.length ba
+          requiredSizeWords = bytesToWords $ offset + (fromIntegral len)
           requiredSizeBytes = fromIntegral $ requiredSizeWords * 32
-          vecSize = UMVec.length vec
-      vec' <- if requiredSizeBytes <= vecSize
-              then pure vec
-              else do vec' <- grow vec requiredSizeBytes; writeSTRef memRef vec'; pure vec'
+      mba' <- if requiredSizeBytes <= memLen
+        then pure mba
+        else do
+          newArr <- growMemory mba requiredSizeBytes
+          writeSTRef mbaRef newArr
+          pure newArr
       actualSizeWords <- readSTRef wordSizeRef
 
       when (requiredSizeWords > actualSizeWords) $ writeSTRef wordSizeRef requiredSizeWords
       -- now write the bytes
-      let off = fromIntegral off64
-      let writeByte i
-            | i == len  = pure ()
-            | otherwise = do
-                let b = BS.index bs i
-                UMVec.unsafeWrite vec' (off + i) b
-                writeByte (i + 1)
-      writeByte 0
+      unsafeIOToST $ BA.withByteArray ba $ \(ptr :: Ptr Word8) -> unsafeSTToIO $ PBA.copyPtrToMutableByteArray mba' (fromIntegral offset) ptr len
 
 touchMemory :: MVM s -> Word64 -> Word64 -> Step s ()
 touchMemory _ _ 0 = pure ()
@@ -1761,9 +1758,9 @@ memoryCost wordCount =
 
 memLoad32 :: Memory s -> W256 -> ST s W256
 memLoad32 (Memory memRef _) offset = do
-  vec <- readSTRef memRef
-  let !len = UMVec.length vec
-      !off = fromIntegral offset
+  mba <- readSTRef memRef
+  len <- PBA.getSizeofMutableByteArray mba
+  let !off = fromIntegral offset
 
       -- Read 8 bytes starting at `base` into a Word64
       load64 base = go (0 :: Word64) 0
@@ -1773,8 +1770,8 @@ memLoad32 (Memory memRef _) offset = do
             | otherwise = do
                 let !idx = base + i
                 !b <- if idx < len
-                      then UMVec.unsafeRead vec idx
-                      else pure 0
+                      then PBA.readByteArray mba idx
+                      else pure (0 :: Word8)
                 let !acc' = (acc `shiftL` 8) .|. fromIntegral b
                 go acc' (i + 1)
 
@@ -1786,69 +1783,82 @@ memLoad32 (Memory memRef _) offset = do
   pure $ constructWord256FromWords w0 w1 w2 w3
 
 memStore32 :: Memory s -> W256 -> W256 -> ST s ()
-memStore32 (Memory memRef sizeRef) offset value = do
-  vec <- readSTRef memRef
+memStore32 (Memory mbaRef wordSizeRef) offset value = do
+  mba <- readSTRef mbaRef
+  memLen <- PBA.getSizeofMutableByteArray mba
   let off64 = fromIntegral offset
       requiredSizeWords = bytesToWords $ off64 + 32
       requiredSizeBytes = fromIntegral $ requiredSizeWords * 32
-      vecSize = UMVec.length vec
-  vec' <- if requiredSizeBytes <= vecSize
-          then pure vec
-          else do vec' <- grow vec requiredSizeBytes; writeSTRef memRef vec'; pure vec'
-  actualWordSize <- readSTRef sizeRef
+  mba' <- if requiredSizeBytes <= memLen
+    then pure mba
+    else do
+      newArr <- growMemory mba requiredSizeBytes
+      writeSTRef mbaRef newArr
+      pure newArr
+  actualSizeWords <- readSTRef wordSizeRef
 
-  when (requiredSizeWords > actualWordSize) $ writeSTRef sizeRef requiredSizeWords
+  when (requiredSizeWords > actualSizeWords) $ writeSTRef wordSizeRef requiredSizeWords
 
   -- EVM stores big-endian
   let (w0, w1, w2, w3) = deconstructWord256ToWords value
 
   -- write 32 bytes using fast Word64 stores
   let off = fromIntegral off64
-  writeWord64BE vec' (off     ) w0
-  writeWord64BE vec' (off +  8) w1
-  writeWord64BE vec' (off + 16) w2
-  writeWord64BE vec' (off + 24) w3
+  writeWord64BE mba' (off     ) w0
+  writeWord64BE mba' (off +  8) w1
+  writeWord64BE mba' (off + 16) w2
+  writeWord64BE mba' (off + 24) w3
 
   where
-    writeWord64BE :: UMVec.MVector s Word8 -> Int -> Word64 -> ST s ()
-    writeWord64BE vec off w = do
-      UMVec.unsafeWrite vec (off    ) (fromIntegral (w `shiftR` 56))
-      UMVec.unsafeWrite vec (off + 1) (fromIntegral (w `shiftR` 48))
-      UMVec.unsafeWrite vec (off + 2) (fromIntegral (w `shiftR` 40))
-      UMVec.unsafeWrite vec (off + 3) (fromIntegral (w `shiftR` 32))
-      UMVec.unsafeWrite vec (off + 4) (fromIntegral (w `shiftR` 24))
-      UMVec.unsafeWrite vec (off + 5) (fromIntegral (w `shiftR` 16))
-      UMVec.unsafeWrite vec (off + 6) (fromIntegral (w `shiftR` 8))
-      UMVec.unsafeWrite vec (off + 7) (fromIntegral w)
+    writeWord64BE :: MutableByteArray s -> Int -> Word64 -> ST s ()
+    writeWord64BE mba off w = do
+      PBA.writeByteArray mba (off    ) (asWord8 (w `shiftR` 56))
+      PBA.writeByteArray mba (off + 1) (asWord8 (w `shiftR` 48))
+      PBA.writeByteArray mba (off + 2) (asWord8 (w `shiftR` 40))
+      PBA.writeByteArray mba (off + 3) (asWord8 (w `shiftR` 32))
+      PBA.writeByteArray mba (off + 4) (asWord8 (w `shiftR` 24))
+      PBA.writeByteArray mba (off + 5) (asWord8 (w `shiftR` 16))
+      PBA.writeByteArray mba (off + 6) (asWord8 (w `shiftR` 8))
+      PBA.writeByteArray mba (off + 7) (asWord8 w)
+
+    asWord8 :: Word64 -> Word8
+    asWord8 = fromIntegral
 
 
 memStore1 :: Memory s -> W256 -> W256 -> ST s ()
-memStore1 (Memory memRef wordSizeRef) offset value = do
-  vec <- readSTRef memRef
+memStore1 (Memory mbaRef wordSizeRef) offset value = do
+  mba <- readSTRef mbaRef
+  memLen <- PBA.getSizeofMutableByteArray mba
   let off64 = fromIntegral offset
       requiredSizeWords = bytesToWords $ off64 + 1
       requiredSizeBytes = fromIntegral $ requiredSizeWords * 32
-      vecSize = UMVec.length vec
-  vec' <- if requiredSizeBytes <= vecSize
-          then pure vec
-          else do vec' <- grow vec requiredSizeBytes; writeSTRef memRef vec'; pure vec'
+  mba' <- if requiredSizeBytes <= memLen
+    then pure mba
+    else do
+      newArr <- growMemory mba requiredSizeBytes
+      writeSTRef mbaRef newArr
+      pure newArr
   actualSizeWords <- readSTRef wordSizeRef
+
   when (requiredSizeWords > actualSizeWords) $ writeSTRef wordSizeRef requiredSizeWords
 
-  let byte = fromIntegral (value .&. 0xff)
+  let byte :: Word8 = fromIntegral (value .&. 0xff)
       off = fromIntegral off64
-  UMVec.write vec' off byte
+  PBA.writeByteArray mba' off byte
 
 -- NOTE: This assumes that required size is greater than current size, it does not check it!
-grow :: UMVec.MVector s Word8 -> Int -> ST s (UMVec.MVector s Word8)
-grow vec requiredSize = do
-  let currentSize = UMVec.length vec
+growMemory :: MutableByteArray s -> Int -> ST s (MutableByteArray s)
+growMemory mba requiredSize = do
+  currentSize <- PBA.getSizeofMutableByteArray mba
   let growthFactor = 2
   let targetSize = max requiredSize (currentSize * growthFactor)
   -- Always grow at least 8k
   let toGrow = max 8192 $ targetSize - currentSize
-  UMVec.grow vec toGrow
-
+  let newSize = currentSize + toGrow
+  newMba <- PBA.newByteArray newSize
+  PBA.copyMutableByteArray newMba 0 mba 0 currentSize
+  PBA.fillByteArray newMba currentSize (newSize - currentSize) 0
+  pure newMba
 
 ------------------- GAS helpers --------------------------------
 
@@ -2133,7 +2143,7 @@ touchAccount vm addr = do
 isPrecompile :: Addr -> Bool
 isPrecompile addr = 0x0 < addr && addr <= 0x09
 
-executePrecompile :: MVM s -> Addr -> BS.ByteString -> Gas -> Step s (Maybe BS.ByteString)
+executePrecompile :: BA.ByteArrayAccess ba => MVM s -> Addr -> ba -> Gas -> Step s (Maybe BS.ByteString)
 executePrecompile vm addr input gasAvailable = do
   let cost = costOfPrecompile vm.fees addr input
   if cost > gasAvailable then (liftST $ burn vm gasAvailable) >> pure Nothing
@@ -2144,9 +2154,10 @@ executePrecompile vm addr input gasAvailable = do
       Right maybeResult -> let toBurn = case maybeResult of Nothing -> gasAvailable; _ -> cost in liftST $ burn vm toBurn >> pure maybeResult
 
   where
+    input' = BA.convert input
     execute = case addr of
       -- ECRECOVER
-      0x1 -> Right $ Just . (fromMaybe mempty) $ EVM.Precompiled.execute 0x1 (truncpadlit 128 input) 32
+      0x1 -> Right $ Just . (fromMaybe mempty) $ EVM.Precompiled.execute 0x1 (truncpadlit 128 input') 32
       -- SHA2-256
       0x2 -> Right $ let hash = sha256Buf input
                          sha256Buf x = BA.convert (Crypto.hash x :: Digest SHA256)
@@ -2158,47 +2169,47 @@ executePrecompile vm addr input gasAvailable = do
                       hash  = padding <> hash'
                     in Just hash
       -- IDENTITY
-      0x4 -> Right $ Just input
+      0x4 -> Right $ Just input'
       -- MODEXP
       0x5 -> Right $
         let
-        (lenb, lene, lenm) = parseModexpLength input
+        (lenb, lene, lenm) = parseModexpLength input'
 
         output =
-          if isZero (96 + lenb + lene) lenm input
+          if isZero (96 + lenb + lene) lenm input'
           then truncpadlit (fromIntegral lenm) (asBE (0 :: Int))
           else
             let
-              b = asInteger $ lazySlice 96 lenb input
-              e = asInteger $ lazySlice (96 + lenb) lene input
-              m = asInteger $ lazySlice (96 + lenb + lene) lenm input
+              b = asInteger $ lazySlice 96 lenb input'
+              e = asInteger $ lazySlice (96 + lenb) lene input'
+              m = asInteger $ lazySlice (96 + lenb + lene) lenm input'
             in
               padLeft (fromIntegral lenm) (asBE (expFast b e m))
         in Just output
       -- ECADD
-      0x6 -> Right $ case EVM.Precompiled.execute 0x6 (truncpadlit 128 input) 64 of
+      0x6 -> Right $ case EVM.Precompiled.execute 0x6 (truncpadlit 128 input') 64 of
                       Nothing -> Nothing
                       Just output -> Just $ truncpadlit 64 output
       -- ECMUL
-      0x7 -> Right $ case EVM.Precompiled.execute 0x7 (truncpadlit 96 input) 64 of
+      0x7 -> Right $ case EVM.Precompiled.execute 0x7 (truncpadlit 96 input') 64 of
                       Nothing -> Nothing
                       Just output -> Just $ truncpadlit 64 output
       -- ECPAIRING
-      0x8 -> Right $ case EVM.Precompiled.execute 0x8 input 32 of
+      0x8 -> Right $ case EVM.Precompiled.execute 0x8 input' 32 of
                       Nothing -> Nothing
                       Just output -> Just $ truncpadlit 32 output
       -- BLAKE2
-      0x9 -> Right $ case (BS.length input, 1 >= BS.last input) of
-                      (213, True) -> case EVM.Precompiled.execute 0x9 input 64 of
+      0x9 -> Right $ case (BS.length input', 1 >= BS.last input') of
+                      (213, True) -> case EVM.Precompiled.execute 0x9 input' 64 of
                                         Nothing -> Nothing
                                         Just output -> Just $ truncpadlit 64 output
                       _ -> Nothing
       _ -> Left ()
 
 -- Gas cost of precompiles
-costOfPrecompile :: FeeSchedule Word64 -> Addr -> BS.ByteString -> Gas
+costOfPrecompile :: BA.ByteArrayAccess ba => FeeSchedule Word64 -> Addr -> ba -> Gas
 costOfPrecompile (FeeSchedule {..}) precompileAddr input =
-  let inputLen = fromIntegral $ BS.length input
+  let inputLen = fromIntegral $ BA.length input
   in Gas $ case precompileAddr of
     -- ECRECOVER
     0x1 -> 3000
@@ -2209,7 +2220,7 @@ costOfPrecompile (FeeSchedule {..}) precompileAddr input =
     -- IDENTITY
     0x4 -> (((inputLen + 31) `div` 32) * 3) + 15
     -- MODEXP
-    0x5 -> concreteModexpGasFee input
+    0x5 -> concreteModexpGasFee $ BA.convert input
     -- ECADD
     0x6 -> g_ecadd
     -- ECMUL
@@ -2217,5 +2228,5 @@ costOfPrecompile (FeeSchedule {..}) precompileAddr input =
     -- ECPAIRING
     0x8 -> (inputLen `div` 192) * g_pairing_point + g_pairing_base
     -- BLAKE2
-    0x9 -> g_fround * (fromIntegral $ asInteger $ lazySlice 0 4 input)
+    0x9 -> g_fround * (fromIntegral $ asInteger $ lazySlice 0 4 (BA.convert input))
     _ -> internalError $ "unimplemented precompiled contract " ++ show precompileAddr
