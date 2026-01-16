@@ -406,7 +406,7 @@ runCodeWithTrace rpcinfo evmEnv alloc txn fromAddr toAddress = withSolvers Z3 0 
       code' = alloc.code
       iterConf = IterConfig { maxIter = Nothing, askSmtIters = 1, loopHeuristic = Naive }
       fetcherSym = Fetch.oracle solvers Nothing rpcinfo
-      buildExpr vm = interpret fetcherSym iterConf vm runExpr (pure . pure)
+      buildExpr vm = interpret fetcherSym iterConf vm runExpr noopPathHandler
   origVM <- liftIO $ stToIO $ vmForRuntimeCode code' calldata' evmEnv alloc txn fromAddr toAddress
   expr <- buildExpr $ symbolify origVM
 
