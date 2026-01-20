@@ -654,6 +654,7 @@ formatExpr = go
       Eq a b -> fmt "Eq" [a, b]
       EqByte a b -> fmt "EqByte" [a, b]
       IsZero a -> fmt "IsZero" [a]
+      ITE c t el -> fmt "ITE" [c, t, el]
 
       And a b -> fmt "And" [a, b]
       Or a b -> fmt "Or" [a, b]
