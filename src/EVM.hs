@@ -469,26 +469,33 @@ tryMergeForwardJump conf currentPC jumpTarget cond stackAfterPop = do
         Just vmFalse -> do
           let falseStack = vmFalse.state.stack
               -- SOUNDNESS CHECKS: Only merge if NO side effects occurred
-              -- Check memory unchanged
+              -- Be VERY conservative - any state change means we refuse to merge
+
+              -- FrameState checks
               memoryUnchanged = case (vm0.state.memory, vmFalse.state.memory) of
                 (SymbolicMemory m1, SymbolicMemory m2) -> m1 == m2
                 _ -> False  -- Concrete memory can't be easily compared, refuse merge
-              -- Check memory size unchanged
               memorySizeUnchanged = vm0.state.memorySize == vmFalse.state.memorySize
-              -- Check storage unchanged
+              returndataUnchanged = vm0.state.returndata == vmFalse.state.returndata
+
+              -- VM state checks
               storageUnchanged = vm0.env.contracts == vmFalse.env.contracts
-              -- Check no logs emitted
               logsUnchanged = vm0.logs == vmFalse.logs
-              -- Check no new constraints added (critical for soundness!)
               constraintsUnchanged = vm0.constraints == vmFalse.constraints
-              -- Check keccak preimages unchanged
               keccakUnchanged = vm0.keccakPreImgs == vmFalse.keccakPreImgs
-              -- Check no new symbolic variables created
               freshVarUnchanged = vm0.freshVar == vmFalse.freshVar
+
+              -- Call stack must be unchanged (no nested CALLs completed)
+              framesUnchanged = length vm0.frames == length vmFalse.frames
+
+              -- SubState checks (selfdestructs, touched accounts, refunds, created contracts)
+              subStateUnchanged = vm0.tx.subState == vmFalse.tx.subState
+
               -- All soundness checks must pass
-              soundnessOK = memoryUnchanged && memorySizeUnchanged && storageUnchanged
-                         && logsUnchanged && constraintsUnchanged && keccakUnchanged
-                         && freshVarUnchanged
+              soundnessOK = memoryUnchanged && memorySizeUnchanged && returndataUnchanged
+                         && storageUnchanged && logsUnchanged && constraintsUnchanged
+                         && keccakUnchanged && freshVarUnchanged
+                         && framesUnchanged && subStateUnchanged
           -- Check merge conditions: same stack depth AND no side effects
           if length trueStack == length falseStack && soundnessOK
             then do
