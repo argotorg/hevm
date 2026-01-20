@@ -114,7 +114,7 @@ showAbiValue :: (?context :: DappContext) => AbiValue -> Text
 showAbiValue (AbiString bs) = formatBytes bs
 showAbiValue (AbiBytesDynamic bs) = formatBytes bs
 showAbiValue (AbiBytes _ bs) = formatBytes bs
-showAbiValue (AbiAddress addr) = ppAddr (LitAddr addr) False
+showAbiValue (AbiAddress addr) = ppAddr addr False
 showAbiValue v = pack $ show v
 
 textAbiValues :: (?context :: DappContext) => Vector AbiValue -> [Text]
