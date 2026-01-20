@@ -1978,14 +1978,16 @@ cheatActions = Map.fromList
         _ -> vmError (BadCheatCode "setEnv(string,string) parameter decoding failed" sig)
 
   , action "etch(address,bytes)" $
-      \sig input -> case decodeBuf [AbiAddressType, AbiBytesDynamicType] input of
-        (CAbi valsArr,"") -> case valsArr of
-          [AbiAddress addr, AbiBytesDynamic bytes] -> do
-            fetchAccount (LitAddr addr) $ \_ -> do
-              replaceCode (LitAddr addr) (RuntimeCode (ConcreteRuntimeCode bytes))
-              doStop
+      \sig input ->  case decodeBuf [AbiAddressType, AbiBytesDynamicType] input of
+          (CAbi valsArr,"") -> case valsArr of
+            [AbiAddress addr, AbiBytesDynamic bytes] -> fetchAccount (LitAddr addr) $ \_ -> do
+                replaceCodeEtch (LitAddr addr) (RuntimeCode (ConcreteRuntimeCode bytes))
+                doStop
+            [AbiAddressSymb symAddr, AbiBytesDynamic bytes] -> fetchAccount symAddr $ \_ -> do
+                replaceCodeEtch symAddr (RuntimeCode (ConcreteRuntimeCode bytes))
+                doStop
+            _ -> vmError (BadCheatCode "etch(address,bytes) address decoding failed" sig)
           _ -> vmError (BadCheatCode "etch(address,bytes) address decoding failed" sig)
-        _ -> vmError (BadCheatCode "etch(address,bytes) address decoding failed" sig)
 
   -- Single-value environment read cheat actions
   , $(envReadSingleCheat "envBool(string)") AbiBool stringToBool
@@ -2355,6 +2357,21 @@ replaceCode target newCode =
           internalError "Can't replace unknown code"
       Nothing ->
         internalError "Can't replace code of nonexistent contract"
+
+
+replaceCodeEtch :: Expr EAddr -> ContractCode -> EVM t ()
+replaceCodeEtch target newCode =
+  zoom (#env % #contracts % at target) $
+    get >>= \case
+      Just now -> case now.code of
+        InitCode _ _ -> internalError "Can't etch code of contract in init code phase"
+        RuntimeCode _ -> do
+          put . Just $
+            ((now :: Contract)
+              { code = newCode
+              })
+        UnknownCode _ -> internalError "Can't etch unknown code"
+      Nothing -> internalError "Can't replace code of nonexistent contract"
 
 replaceCodeOfSelf :: ContractCode -> EVM t ()
 replaceCodeOfSelf newCode = do

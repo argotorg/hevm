@@ -1682,6 +1682,76 @@ tests = testGroup "hevm"
           checkAssert s [0x41] c (Just (Sig "fun(uint256)" [AbiUIntType 256])) [] defaultVeriOpts
         putStrLnM "expected counterexample found"
       ,
+      test "vm.etch-success" $ do
+        Just c <- solcRuntime "C"
+          [i|
+            interface Vm {
+              function etch(address,bytes calldata) external;
+            }
+            contract A {
+              function getX() external returns (uint) {
+                  return 10;
+              }
+            }
+            contract B {
+              function getX() external returns (uint) {
+                  return 20;
+              }
+            }
+            contract C {
+              A a;
+              B b;
+              function fun() external {
+                  a = new A();
+                  b = new B();
+                  Vm vm = Vm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
+
+                  assert(a.getX() == 10);
+                  vm.etch(address(a), address(b).code);
+                  assert(a.getX() == 20);
+              }
+            }
+          |]
+
+        let sig = Just (Sig "fun()" [])
+        (e, []) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        assertBoolM "The expression must NOT contain Partial." $ Prelude.not $ any isPartial e
+      ,
+      test "vm.etch-fail" $ do
+        Just c <- solcRuntime "C"
+          [i|
+            interface Vm {
+              function etch(address,bytes calldata) external;
+            }
+            contract A {
+              function getX() external returns (uint) {
+                  return 10;
+              }
+            }
+            contract B {
+              function getX() external returns (uint) {
+                  return 20;
+              }
+            }
+            contract C {
+              A a;
+              B b;
+              function fun() external {
+                  a = new A();
+                  b = new B();
+                  Vm vm = Vm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
+
+                  assert(a.getX() == 10);
+                  vm.etch(address(a), address(b).code);
+                  assert(a.getX() == 10);
+              }
+            }
+          |]
+
+        let sig = Just (Sig "fun()" [])
+        (e, [Cex _]) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        assertBoolM "The expression must NOT contain Partial." $ Prelude.not $ any isPartial e
+      ,
       test "vm.deal unknown address" $ do
         Just c <- solcRuntime "C"
           [i|
