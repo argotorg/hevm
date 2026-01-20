@@ -288,6 +288,8 @@ test-suite test
     exitcode-stdio-1.0
   main-is:
     test.hs
+  other-modules:
+    EVM.Expr.ExprTests
   build-depends:
     base16,
     binary,
