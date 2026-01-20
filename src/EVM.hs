@@ -479,8 +479,16 @@ tryMergeForwardJump conf currentPC jumpTarget cond stackAfterPop = do
               storageUnchanged = vm0.env.contracts == vmFalse.env.contracts
               -- Check no logs emitted
               logsUnchanged = vm0.logs == vmFalse.logs
+              -- Check no new constraints added (critical for soundness!)
+              constraintsUnchanged = vm0.constraints == vmFalse.constraints
+              -- Check keccak preimages unchanged
+              keccakUnchanged = vm0.keccakPreImgs == vmFalse.keccakPreImgs
+              -- Check no new symbolic variables created
+              freshVarUnchanged = vm0.freshVar == vmFalse.freshVar
               -- All soundness checks must pass
-              soundnessOK = memoryUnchanged && memorySizeUnchanged && storageUnchanged && logsUnchanged
+              soundnessOK = memoryUnchanged && memorySizeUnchanged && storageUnchanged
+                         && logsUnchanged && constraintsUnchanged && keccakUnchanged
+                         && freshVarUnchanged
           -- Check merge conditions: same stack depth AND no side effects
           if length trueStack == length falseStack && soundnessOK
             then do
@@ -490,9 +498,10 @@ tryMergeForwardJump conf currentPC jumpTarget cond stackAfterPop = do
                     | t == f    = t
                     | otherwise = ITE condSimp t f
                   mergedStack = zipWith mergeExpr trueStack falseStack
-              -- Use vmFalse as base (it has the right PC = jumpTarget)
+              -- Use vm0 as base (safer) and update only PC and stack
               when conf.debug $ traceM $ "Merged at PC " ++ show jumpTarget
-              put vmFalse
+              put vm0
+              assign (#state % #pc) jumpTarget
               assign (#state % #stack) mergedStack
               assign #result Nothing  -- Clear any result
               assign (#mergeState % #msActive) False  -- Reset merge mode
