@@ -2120,8 +2120,10 @@ cheatActions = Map.fromList
     assertSGe =   genAssert (>=) (\a b -> Expr.iszero $ Expr.slt a b) "<" "assertGe"
     toStringCheat abitype sig input = do
       case decodeBuf [abitype] input of
-        (CAbi [val],"") -> frameReturn $ AbiTuple $ V.fromList [AbiString $ Char8.pack $ show val]
+        (CAbi [(AbiAddress (LitAddr val))],"") -> ret val
+        (CAbi [val],"") -> ret val
         _ -> vmError (BadCheatCode ("toString parameter decoding failed for " <> show abitype) sig)
+      where ret val = frameReturn $ AbiTuple $ V.fromList [AbiString $ Char8.pack $ show val]
 
 -- * General call implementation ("delegateCall")
 -- note that the continuation is ignored in the precompile case
