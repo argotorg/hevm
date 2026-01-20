@@ -1977,6 +1977,16 @@ cheatActions = Map.fromList
           _ -> vmError (BadCheatCode "setEnv(string,string) address decoding failed" sig)
         _ -> vmError (BadCheatCode "setEnv(string,string) parameter decoding failed" sig)
 
+  , action "etch(address,bytes)" $
+      \sig input -> case decodeBuf [AbiAddressType, AbiBytesDynamicType] input of
+        (CAbi valsArr,"") -> case valsArr of
+          [AbiAddress addr, AbiBytesDynamic bytes] -> do
+            fetchAccount (LitAddr addr) $ \_ -> do
+              replaceCode (LitAddr addr) (RuntimeCode (ConcreteRuntimeCode bytes))
+              doStop
+          _ -> vmError (BadCheatCode "etch(address,bytes) address decoding failed" sig)
+        _ -> vmError (BadCheatCode "etch(address,bytes) address decoding failed" sig)
+
   -- Single-value environment read cheat actions
   , $(envReadSingleCheat "envBool(string)") AbiBool stringToBool
   , $(envReadSingleCheat "envUint(string)") (AbiUInt 256) stringToWord256
