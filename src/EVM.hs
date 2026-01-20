@@ -2357,7 +2357,6 @@ replaceCode target newCode =
       Nothing ->
         internalError "Can't replace code of nonexistent contract"
 
-
 replaceCodeEtch :: Expr EAddr -> ContractCode -> EVM t ()
 replaceCodeEtch target newCode =
   zoom (#env % #contracts % at target) $

@@ -606,12 +606,8 @@ decodeDynamicArg t offset buf = case t of
            then Left $ "could not get all concrete bytes (got " ++ show (length concreteBytes) ++ " of " ++ show byteCount ++ ")"
            else Right $ AbiBytesDynamic (BS.pack concreteBytes)
 
-  AbiStringType -> do
-    -- String is encoded the same as bytes
-    result <- decodeDynamicArg AbiBytesDynamicType offset buf
-    case result of
-      AbiBytesDynamic bs -> Right $ AbiString bs
-      _ -> Left "unexpected result from bytes decoding"
+  -- String is encoded the same as bytes
+  AbiStringType -> decodeDynamicArg AbiBytesDynamicType offset buf
 
   _ -> Left $ "dynamic type not yet supported: " ++ show t
 
