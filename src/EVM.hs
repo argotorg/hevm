@@ -468,8 +468,21 @@ tryMergeForwardJump conf currentPC jumpTarget cond stackAfterPop = do
           return False
         Just vmFalse -> do
           let falseStack = vmFalse.state.stack
-          -- Check merge conditions: same stack depth
-          if length trueStack == length falseStack
+              -- SOUNDNESS CHECKS: Only merge if NO side effects occurred
+              -- Check memory unchanged
+              memoryUnchanged = case (vm0.state.memory, vmFalse.state.memory) of
+                (SymbolicMemory m1, SymbolicMemory m2) -> m1 == m2
+                _ -> False  -- Concrete memory can't be easily compared, refuse merge
+              -- Check memory size unchanged
+              memorySizeUnchanged = vm0.state.memorySize == vmFalse.state.memorySize
+              -- Check storage unchanged
+              storageUnchanged = vm0.env.contracts == vmFalse.env.contracts
+              -- Check no logs emitted
+              logsUnchanged = vm0.logs == vmFalse.logs
+              -- All soundness checks must pass
+              soundnessOK = memoryUnchanged && memorySizeUnchanged && storageUnchanged && logsUnchanged
+          -- Check merge conditions: same stack depth AND no side effects
+          if length trueStack == length falseStack && soundnessOK
             then do
               -- Merge stacks using ITE expressions
               let condSimp = Expr.simplify cond
@@ -485,7 +498,7 @@ tryMergeForwardJump conf currentPC jumpTarget cond stackAfterPop = do
               assign (#mergeState % #msActive) False  -- Reset merge mode
               return True
             else do
-              -- Stack depths differ - can't merge
+              -- Can't merge: stack depth, memory, or storage differs
               put vm0
               return False
 
