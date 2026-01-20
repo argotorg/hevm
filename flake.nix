@@ -35,7 +35,7 @@
           overlays = [solc-pkgs.overlay];
           config = { allowBroken = true; };
         });
-        solc = (solc-pkgs.mkDefault pkgs pkgs.solc_0_8_26);
+        solc = (solc-pkgs.mkDefault pkgs pkgs.solc_0_8_31);
         testDeps = [
           solc
           foundry.defaultPackage.${system}
