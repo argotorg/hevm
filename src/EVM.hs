@@ -26,6 +26,9 @@ import EVM.Concrete qualified as Concrete
 import EVM.CheatsTH
 import EVM.Effects (Config (..))
 
+import Unsafe.Coerce (unsafeCoerce)
+import Debug.Trace (traceM)
+
 import Control.Monad (unless, when)
 import Control.Monad.ST (ST, RealWorld)
 import Control.Monad.State.Strict (MonadState, State, get, gets, lift, modify', put)
@@ -198,6 +201,7 @@ makeVm o = do
     , exploreDepth = 0
     , keccakPreImgs = fromList []
     , pathsVisited = mempty
+    , mergeState = defaultMergeState
     }
     where
     env = Env
@@ -337,6 +341,153 @@ getOpW8 state = case state.code of
 
 getOpName :: forall (t :: VMType) . FrameState t -> [Char]
 getOpName state = intToOpName $ fromEnum $ getOpW8 state
+
+-- | Check if executing from current state quickly leads to a REVERT
+-- This is used to detect error-handling paths during merge mode
+-- Returns True if the path reverts within maxSteps instructions
+quicklyReverts :: Config -> Int -> EVM Symbolic Bool
+quicklyReverts conf maxSteps = go maxSteps
+  where
+    go 0 = return False
+    go n = do
+      result <- use #result
+      case result of
+        Just (VMFailure _) -> return True
+        Just (VMSuccess _) -> return False
+        Just _ -> return False
+        Nothing -> do
+          exec1 conf
+          go (n - 1)
+
+-- | Execute instructions speculatively until target PC is reached or we hit a branch/error
+-- Uses budget-based exploration that tries both paths for nested JUMPIs
+-- Parameters mergeMaxBudget and mergeMaxDepth are configured via Config
+execUntilPCSymbolic :: Config -> Int -> EVM Symbolic (Maybe (VM Symbolic))
+execUntilPCSymbolic conf targetPC = do
+    -- Initialize merge state for this speculation
+    let budget = conf.mergeMaxBudget
+    modifying #mergeState $ \ms -> ms
+      { msActive = True
+      , msTargetPC = targetPC
+      , msRemainingBudget = budget
+      , msNestingDepth = 0
+      }
+    result <- speculateLoop conf targetPC
+    -- Reset merge state
+    modifying #mergeState $ \ms -> ms { msActive = False }
+    return result
+
+-- | Inner loop for speculative execution with budget tracking
+speculateLoop :: Config -> Int -> EVM Symbolic (Maybe (VM Symbolic))
+speculateLoop conf targetPC = do
+    ms <- use #mergeState
+    if ms.msRemainingBudget <= 0
+      then return Nothing  -- Budget exhausted
+      else do
+        pc <- use (#state % #pc)
+        result <- use #result
+        case result of
+          Just _ -> return Nothing  -- Hit error/return
+          Nothing
+            | pc == targetPC -> Just <$> get  -- Reached target
+            | otherwise -> do
+                -- Decrement budget and execute one instruction
+                modifying #mergeState $ \s -> s { msRemainingBudget = s.msRemainingBudget - 1 }
+                exec1 conf
+                speculateLoop conf targetPC
+
+-- | When hitting nested JUMPI during speculation, try both paths
+-- Returns Just vmState if a path to targetPC was found, Nothing otherwise
+exploreNestedBranch :: Config -> Int -> Int -> Expr EWord -> [Expr EWord] -> EVM Symbolic (Maybe (VM Symbolic))
+exploreNestedBranch conf nestedJumpTarget targetPC _cond stackAfterPop = do
+    ms <- use #mergeState
+    let maxDepth = conf.mergeMaxDepth
+
+    -- Check limits
+    if ms.msRemainingBudget <= 0 || ms.msNestingDepth >= maxDepth
+      then return Nothing
+      else do
+        vm0 <- get
+        -- Save original merge state for proper backtracking
+        let originalDepth = ms.msNestingDepth
+            originalBudget = ms.msRemainingBudget
+
+        -- Try fall-through first (more thorough exploration)
+        put vm0
+        assign' (#state % #stack) stackAfterPop
+        modifying' (#state % #pc) (+ 1)  -- Move past JUMPI
+        modifying #mergeState $ \s -> s { msNestingDepth = s.msNestingDepth + 1 }
+
+        resultFallThrough <- speculateLoop conf targetPC
+
+        case resultFallThrough of
+          Just vm -> return (Just vm)  -- Fall-through converged
+          Nothing -> do
+            -- Fall-through failed, try jump path
+            -- Restore VM state AND merge state to original values
+            put vm0
+            assign (#state % #pc) nestedJumpTarget
+            assign' (#state % #stack) stackAfterPop
+            -- Restore merge state to original, then increment depth for jump path
+            -- Give jump path half of the original budget
+            modifying #mergeState $ \_ -> ms
+              { msNestingDepth = originalDepth + 1
+              , msRemainingBudget = max 10 (originalBudget `div` 2)
+              }
+
+            speculateLoop conf targetPC
+
+-- | Try to merge a forward jump (skip block pattern) for Symbolic execution
+-- Returns True if merge succeeded, False if we should fall back to forking
+tryMergeForwardJump :: Config -> Int -> Int -> Expr EWord -> [Expr EWord] -> EVM Symbolic Bool
+tryMergeForwardJump conf currentPC jumpTarget cond stackAfterPop = do
+  -- Only handle forward jumps (skip block pattern)
+  if jumpTarget <= currentPC
+    then return False  -- Not a forward jump
+    else do
+      vm0 <- get
+
+      -- Execute true branch (jump taken - skip the block)
+      -- Just set PC to jump target
+      assign (#state % #pc) jumpTarget
+      assign' (#state % #stack) stackAfterPop
+      vmTrue <- get
+      let trueStack = vmTrue.state.stack
+
+      -- Execute false branch (fall through - execute the block)
+      put vm0
+      assign' (#state % #stack) stackAfterPop
+      modifying' (#state % #pc) (+ 1)  -- Move past JUMPI
+      -- Now execute until we reach the jump target using budget-based exploration
+      maybeVmFalse <- execUntilPCSymbolic conf jumpTarget
+
+      case maybeVmFalse of
+        Nothing -> do
+          -- Couldn't converge - restore and return False
+          put vm0
+          return False
+        Just vmFalse -> do
+          let falseStack = vmFalse.state.stack
+          -- Check merge conditions: same stack depth
+          if length trueStack == length falseStack
+            then do
+              -- Merge stacks using ITE expressions
+              let condSimp = Expr.simplify cond
+                  mergeExpr t f
+                    | t == f    = t
+                    | otherwise = ITE condSimp t f
+                  mergedStack = zipWith mergeExpr trueStack falseStack
+              -- Use vmFalse as base (it has the right PC = jumpTarget)
+              when conf.debug $ traceM $ "Merged at PC " ++ show jumpTarget
+              put vmFalse
+              assign (#state % #stack) mergedStack
+              assign #result Nothing  -- Clear any result
+              assign (#mergeState % #msActive) False  -- Reset merge mode
+              return True
+            else do
+              -- Stack depths differ - can't merge
+              put vm0
+              return False
 
 -- | Executes the EVM one step
 exec1 :: forall (t :: VMType). (VMOps t, Typeable t) => Config ->  EVM t ()
@@ -866,14 +1017,41 @@ exec1 conf = do
 
         OpJumpi -> {-# SCC "OpJumpi" #-}
           case stk of
-            x:y:xs -> forceConcreteLimitSz x 2 "JUMPI: symbolic jumpdest" $ \x' ->
-              burn g_high $
-                let jump :: Bool -> EVM t ()
-                    jump False = assign' (#state % #stack) xs >> next
-                    jump _    = case tryInto x' of
-                      Left _ -> vmError BadJumpDestination
-                      Right i -> checkJump i xs
-                in branch conf.maxDepth y jump
+            x:y:xs ->
+              forceConcreteLimitSz x 2 "JUMPI: symbolic jumpdest" $ \x' ->
+              burn g_high $ case tryInto x' of
+                Left _ -> vmError BadJumpDestination
+                Right jumpTarget ->
+                  let jump :: Bool -> EVM t ()
+                      jump False = assign' (#state % #stack) xs >> next
+                      jump _    = checkJump jumpTarget xs
+                      -- For Symbolic execution, try forward-jump merge first
+                      symbolicMerge :: EVM Symbolic ()
+                      symbolicMerge = do
+                        -- Check if we're already in merge mode (speculative execution)
+                        ms <- use #mergeState
+                        let alreadyMerging = ms.msActive
+                        if alreadyMerging
+                          then do
+                            -- Inside speculation: try both paths using budget-based exploration
+                            result <- exploreNestedBranch conf jumpTarget ms.msTargetPC y xs
+                            case result of
+                              Just vmFinal -> put vmFinal
+                              Nothing -> do
+                                -- Neither path converged - signal failure by setting a result
+                                -- This will cause speculateLoop to return Nothing
+                                assign #result $ Just $ VMFailure BadJumpDestination
+                          else do
+                            merged <- tryMergeForwardJump conf vm.state.pc jumpTarget y xs
+                            unless merged $ do
+                              -- Define Symbolic-specific jump for fallback
+                              let jumpSym :: Bool -> EVM Symbolic ()
+                                  jumpSym False = assign' (#state % #stack) xs >> next
+                                  jumpSym _    = checkJump jumpTarget xs
+                              branch conf.maxDepth y jumpSym
+                  in whenSymbolicElse
+                       (unsafeCoerce symbolicMerge :: EVM t ())
+                       (branch conf.maxDepth y jump)
             _ -> underrun
 
         OpPc -> {-# SCC "OpPc" #-}
@@ -3172,10 +3350,36 @@ instance VMOps Symbolic where
 
   partial e = assign #result $ Just (Unfinished e)
   branch depthLimit cond continue = do
+    vm0 <- get
     loc <- codeloc
-    pathconds <- use #constraints
-    vm <- get
-    query $ PleaseAskSMT cond pathconds (runBothPaths loc vm.exploreDepth)
+
+    -- Try path merging: execute both branches speculatively
+    continue True
+    truePC <- use (#state % #pc)
+    trueStack <- use (#state % #stack)
+
+    put vm0
+    continue False
+    falsePC <- use (#state % #pc)
+    falseStack <- use (#state % #stack)
+
+    -- Check if immediate merge is possible (same PC, same stack depth)
+    -- Note: Memory comparison skipped for now (Memory lacks Eq instance)
+    if truePC == falsePC && length trueStack == length falseStack
+      then do
+        -- Merge stacks using ITE expressions
+        let condSimp = Expr.simplify cond
+            mergeExpr t f
+              | t == f    = t
+              | otherwise = ITE condSimp t f
+            mergedStack = zipWith mergeExpr trueStack falseStack
+        assign (#state % #stack) mergedStack
+        -- PC is already correct (same on both branches)
+      else do
+        -- Fall back to original forking behavior
+        put vm0
+        pathconds <- use #constraints
+        query $ PleaseAskSMT cond pathconds (runBothPaths loc vm0.exploreDepth)
     where
       runBothPaths loc _ (Case v) = do
         assign #result Nothing

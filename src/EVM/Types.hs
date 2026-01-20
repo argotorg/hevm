@@ -259,6 +259,9 @@ data Expr (a :: EType) where
   Eq             :: Expr EWord -> Expr EWord -> Expr EWord
   IsZero         :: Expr EWord -> Expr EWord
 
+  -- conditional (if-then-else for path merging)
+  ITE            :: Expr EWord -> Expr EWord -> Expr EWord -> Expr EWord
+
   -- bits
 
   And            :: Expr EWord -> Expr EWord -> Expr EWord
@@ -663,6 +666,17 @@ deriving instance Show (VMResult t)
 
 -- VM State ----------------------------------------------------------------------------------------
 
+-- | State tracking for speculative merge execution
+data MergeState = MergeState
+  { msActive          :: Bool   -- ^ Inside speculative execution
+  , msTargetPC        :: Int    -- ^ PC we're trying to reach
+  , msRemainingBudget :: Int    -- ^ Instructions remaining in budget
+  , msNestingDepth    :: Int    -- ^ Current nested branch depth
+  } deriving (Show, Eq, Generic)
+
+defaultMergeState :: MergeState
+defaultMergeState = MergeState False 0 0 0
+
 data VMType = Symbolic | Concrete
 
 type family Gas (t :: VMType) = r | r -> t where
@@ -694,6 +708,8 @@ data VM (t :: VMType) = VM
   --   during symbolic execution. See e.g. OpStaticcall
   , exploreDepth   :: Int
   , keccakPreImgs  :: Set (ByteString, W256)
+  , mergeState :: MergeState
+  -- ^ State for speculative merge execution (try-both-paths approach)
   }
   deriving (Generic)
 

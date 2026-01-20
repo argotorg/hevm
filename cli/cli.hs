@@ -101,6 +101,8 @@ data CommonOptions = CommonOptions
   , onlyDeployed  ::Bool
   , cacheDir      ::Maybe String
   , earlyAbort    ::Bool
+  , mergeMaxBudget ::Int
+  , mergeMaxDepth  ::Int
   }
 
 commonOptions :: Parser CommonOptions
@@ -131,6 +133,8 @@ commonOptions = CommonOptions
   <*> (switch $ long "only-deployed" <> help "When trying to resolve unknown addresses, only use addresses of deployed contracts")
   <*> (optional $ strOption $ long "cache-dir" <> help "Directory to save and load RPC cache")
   <*> (switch $  long "early-abort" <> help "Stop exploration immediately upon finding the first counterexample")
+  <*> (option auto $ long "merge-max-budget" <> showDefault <> value 1000 <> help "Max instructions for speculative merge exploration during path merging")
+  <*> (option auto $ long "merge-max-depth" <> showDefault <> value 5 <> help "Max nested branch depth during merge speculation")
 
 data CommonExecOptions = CommonExecOptions
   { address       ::Maybe Addr
@@ -374,6 +378,8 @@ main = do
         , simp = Prelude.not cOpts.noSimplify
         , onlyDeployed = cOpts.onlyDeployed
         , earlyAbort = cOpts.earlyAbort
+        , mergeMaxBudget = cOpts.mergeMaxBudget
+        , mergeMaxDepth = cOpts.mergeMaxDepth
         } }
 
 
