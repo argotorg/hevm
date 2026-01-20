@@ -567,8 +567,8 @@ decodeStaticArgExpr :: AbiType -> Expr EWord -> Err AbiValue
 decodeStaticArgExpr t expr = case maybeLitWordSimp expr of
   Just v -> decodeStaticArgConcrete t v
   Nothing -> case t of
-    -- For address type, we can handle WAddr specially
-    AbiAddressType -> case expr of
+    -- For address type, we must handle WAddr specially
+    AbiAddressType -> case simplify expr of
       WAddr (LitAddr a) -> Right $ AbiAddress (LitAddr a)
       WAddr a -> Right $ AbiAddress a
       _ -> Left $ "could not decode address from: " ++ show expr
@@ -608,7 +608,6 @@ decodeDynamicArg t offset buf = case t of
 
   -- String is encoded the same as bytes
   AbiStringType -> decodeDynamicArg AbiBytesDynamicType offset buf
-
   _ -> Left $ "dynamic type not yet supported: " ++ show t
 
 decodeStaticArgs :: Int -> Int -> Expr Buf -> [Expr EWord]
