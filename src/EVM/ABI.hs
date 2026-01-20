@@ -96,7 +96,6 @@ import Text.Megaparsec qualified as P
 import Text.Megaparsec.Char qualified as P
 import Text.ParserCombinators.ReadP
 import Witch (unsafeInto, into)
-import Debug.Trace (trace, traceM)
 
 -- | A method name, and the (ordered) types of it's arguments
 data Sig = Sig Text [AbiType]
@@ -522,11 +521,11 @@ decodeBuf tps (ConcreteBuf b) =
     Left (_, _, err) -> (NoVals, "error decoding abi: " ++ err)
 decodeBuf tps b = case simplify b of
   ConcreteBuf buf -> decodeBuf tps (ConcreteBuf buf)
-  buf -> (trace $ "here, buf: " <> show buf) $ if any isDynamic tps then tryDecodeDynamic tps buf
+  buf -> if any isDynamic tps then tryDecodeDynamic tps buf
     else let
         vs = decodeStaticArgs 0 (length tps) buf
         asBS = mconcat $ fmap word256Bytes (mapMaybe maybeLitWordSimp vs)
-      in (trace $ "here decodebuf: " <> show vs) $ if not (all isLitWord vs)
+      in if not (all isLitWord vs)
          then (SAbi vs, "")
          else decodeBuf tps (ConcreteBuf asBS)
     where
@@ -539,7 +538,7 @@ tryDecodeDynamic tps buf =
   let headVals = decodeStaticArgs 0 (length tps) buf
       headSimp = map simplify headVals
   in case decodeWithExprs 0 tps headSimp buf of
-    Left err -> (trace $ "left tyrdec: " <> show err) $ (NoVals, err)
+    Left err -> (NoVals, err)
     Right abiVals -> (CAbi abiVals, "")
 
 -- | Decode types using head expressions
