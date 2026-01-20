@@ -511,16 +511,7 @@ tests = testGroup "hevm"
        assertEqualM "Expression should simplify to value." simp (Lit 0xacab)
     ]
   , testGroup "StorageTests"
-    [ test "read-from-sstore" $ assertEqualM ""
-        (Lit 0xab)
-        (Expr.readStorage' (Lit 0x0) (SStore (Lit 0x0) (Lit 0xab) (AbstractStore (LitAddr 0x0) Nothing)))
-    , test "read-from-concrete" $ assertEqualM ""
-        (Lit 0xab)
-        (Expr.readStorage' (Lit 0x0) (ConcreteStore $ Map.fromList [(0x0, 0xab)]))
-    , test "read-past-write" $ assertEqualM ""
-        (Lit 0xab)
-        (Expr.readStorage' (Lit 0x0) (SStore (Lit 0x1) (Var "b") (ConcreteStore $ Map.fromList [(0x0, 0xab)])))
-    , test "accessStorage uses fetchedStorage" $ do
+    [ test "accessStorage uses fetchedStorage" $ do
         let dummyContract =
               (initialContract (RuntimeCode (ConcreteRuntimeCode mempty)))
                 { external = True }
@@ -550,16 +541,6 @@ tests = testGroup "hevm"
         let e = ReadByte (Lit 0x0) (WriteWord (Lit 0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffd) (Lit 0x0) (ConcreteBuf "\255\255\255\255"))
         b <- checkEquiv e (Expr.simplify e)
         assertBoolM "Simplifier failed" b
-    , test "copyslice-simps" $ do
-        let e a b =  CopySlice (Lit 0) (Lit 0) (BufLength (AbstractBuf "buff")) (CopySlice (Lit 0) (Lit 0) (BufLength (AbstractBuf "buff")) (AbstractBuf "buff") (ConcreteBuf a)) (ConcreteBuf b)
-            expr1 = e "" ""
-            expr2 = e "" "aasdfasdf"
-            expr3 = e "9832478932" ""
-            expr4 = e "9832478932" "aasdfasdf"
-        assertEqualM "Not full simp" (Expr.simplify expr1) (AbstractBuf "buff")
-        assertEqualM "Not full simp" (Expr.simplify expr2) $ CopySlice (Lit 0x0) (Lit 0x0) (BufLength (AbstractBuf "buff")) (AbstractBuf "buff") (ConcreteBuf "aasdfasdf")
-        assertEqualM "Not full simp" (Expr.simplify expr3) (AbstractBuf "buff")
-        assertEqualM "Not full simp" (Expr.simplify expr4) $ CopySlice (Lit 0x0) (Lit 0x0) (BufLength (AbstractBuf "buff")) (AbstractBuf "buff") (ConcreteBuf "aasdfasdf")
     , test "buffer-length-copy-slice-beyond-source1" $ do
         let e = BufLength (CopySlice (Lit 0x2) (Lit 0x2) (Lit 0x1) (ConcreteBuf "a") (ConcreteBuf ""))
         b <- checkEquiv e (Expr.simplify e)
@@ -568,13 +549,6 @@ tests = testGroup "hevm"
         let e = BufLength (CopySlice (Lit 0x2) (Lit 0x2) (Lit 0x1) (ConcreteBuf "") (ConcreteBuf ""))
         b <- checkEquiv e (Expr.simplify e)
         assertBoolM "Simplifier failed" b
-    , test "simp-readByte1" $ do
-      let srcOffset = (ReadWord (Lit 0x1) (AbstractBuf "stuff1"))
-          size = (ReadWord (Lit 0x1) (AbstractBuf "stuff2"))
-          src = (AbstractBuf "stuff2")
-          e = ReadByte (Lit 0x0) (CopySlice srcOffset (Lit 0x10) size src (AbstractBuf "dst"))
-          simp = Expr.simplify e
-      assertEqualM "readByte simplification" simp (ReadByte (Lit 0x0) (AbstractBuf "dst"))
     , test "simp-readByte2" $ do
       let srcOffset = (ReadWord (Lit 0x1) (AbstractBuf "stuff1"))
           size = (Lit 0x1)
@@ -598,48 +572,6 @@ tests = testGroup "hevm"
           simp = Expr.simplify e
       res <- checkEquiv e simp
       assertEqualM "readWord simplification"  res True
-    , test "simp-max-buflength" $ do
-      let simp = Expr.simplify $ Max (Lit 0) (BufLength (AbstractBuf "txdata"))
-      assertEqualM "max-buflength rules" simp $ BufLength (AbstractBuf "txdata")
-    , test "simp-PLT-max" $ do
-      let simp = Expr.simplifyProp $ PLT (Max (Lit 5) (BufLength (AbstractBuf "txdata"))) (Lit 99)
-      assertEqualM "max-buflength rules" simp $ PLT (BufLength (AbstractBuf "txdata")) (Lit 99)
-    , test "simp-assoc-add1" $ do
-      let simp = Expr.simplify $        Add (Add (Var "c") (Var "a")) (Var "b")
-      assertEqualM "assoc rules" simp $ Add (Var "a") (Add (Var "b") (Var "c"))
-    , test "simp-assoc-add2" $ do
-      let simp = Expr.simplify $        Add (Add (Lit 1) (Var "c")) (Var "b")
-      assertEqualM "assoc rules" simp $ Add (Lit 1) (Add (Var "b") (Var "c"))
-    , test "simp-assoc-add3" $ do
-      let simp = Expr.simplify $        Add (Lit 1) (Add (Lit 2) (Var "c"))
-      assertEqualM "assoc rules" simp $ Add (Lit 3) (Var "c")
-    , test "simp-assoc-add4" $ do
-      let simp = Expr.simplify $        Add (Lit 1) (Add (Var "b") (Lit 2))
-      assertEqualM "assoc rules" simp $ Add (Lit 3) (Var "b")
-    , test "simp-assoc-add5" $ do
-      let simp = Expr.simplify $        Add (Var "a") (Add (Lit 1) (Lit 2))
-      assertEqualM "assoc rules" simp $ Add (Lit 3) (Var "a")
-    , test "simp-assoc-add6" $ do
-      let simp = Expr.simplify $        Add (Lit 7) (Add (Lit 1) (Lit 2))
-      assertEqualM "assoc rules" simp $ Lit 10
-    , test "simp-assoc-add-7" $ do
-      let simp = Expr.simplify $        Add (Var "a") (Add (Var "b") (Lit 2))
-      assertEqualM "assoc rules" simp $ Add (Lit 2) (Add (Var "a") (Var "b"))
-    , test "simp-assoc-add8" $ do
-      let simp = Expr.simplify $        Add (Add (Var "a") (Add (Lit 0x2) (Var "b"))) (Add (Var "c") (Add (Lit 0x2) (Var "d")))
-      assertEqualM "assoc rules" simp $ Add (Lit 4) (Add (Var "a") (Add (Var "b") (Add (Var "c") (Var "d"))))
-    , test "simp-assoc-mul1" $ do
-      let simp = Expr.simplify $        Mul (Mul (Var "b") (Var "a")) (Var "c")
-      assertEqualM "assoc rules" simp $ Mul (Var "a") (Mul (Var "b") (Var "c"))
-    , test "simp-assoc-mul2" $ do
-      let simp = Expr.simplify       $  Mul (Lit 2) (Mul (Var "a") (Lit 3))
-      assertEqualM "assoc rules" simp $ Mul (Lit 6) (Var "a")
-    , test "simp-assoc-xor1" $ do
-      let simp = Expr.simplify       $  Xor (Lit 2) (Xor (Var "a") (Lit 3))
-      assertEqualM "assoc rules" simp $ Xor (Lit 1) (Var "a")
-    , test "simp-assoc-xor2" $ do
-      let simp = Expr.simplify       $  Xor (Lit 2) (Xor (Var "b") (Xor (Var "a") (Lit 3)))
-      assertEqualM "assoc rules" simp $ Xor (Lit 1) (Xor (Var "a") (Var "b"))
     , test "simp-zero-write-extend-buffer-len" $ do
         let
           expr = BufLength $ CopySlice (Lit 0) (Lit 0x10) (Lit 0) (AbstractBuf "buffer") (ConcreteBuf "bimm")

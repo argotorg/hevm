@@ -3,6 +3,9 @@ module EVM.Expr.ExprTests (tests) where
 import Test.Tasty
 import Test.Tasty.ExpectedFailure (ignoreTest)
 import Test.Tasty.HUnit
+
+import Data.Map.Strict qualified as Map
+
 import EVM.Expr qualified as Expr
 import EVM.Types
 
@@ -12,17 +15,99 @@ tests = testGroup "Expr"
 
 unitTests :: TestTree
 unitTests = testGroup "Unit tests"
-  [
-      simplificationTests
-      , constantPropagationTests
-      , boundPropagationTests
+  [ simplificationTests
+  , constantPropagationTests
+  , boundPropagationTests
   ]
 
 simplificationTests :: TestTree
 simplificationTests = testGroup "Expr-rewriting"
-  [
-
+  [ storageTests
+  , copySliceTests
+  , basicSimplificationTests
   ]
+
+storageTests :: TestTree
+storageTests = testGroup "Storage tests"
+  [
+    testCase "read-from-sstore" $ assertEqual errorMsg
+        (Lit 0xab)
+        (Expr.readStorage' (Lit 0x0) (SStore (Lit 0x0) (Lit 0xab) (AbstractStore (LitAddr 0x0) Nothing)))
+    , testCase "read-from-concrete" $ assertEqual errorMsg
+        (Lit 0xab)
+        (Expr.readStorage' (Lit 0x0) (ConcreteStore $ Map.fromList [(0x0, 0xab)]))
+    , testCase "read-past-write" $ assertEqual errorMsg
+        (Lit 0xab)
+        (Expr.readStorage' (Lit 0x0) (SStore (Lit 0x1) (Var "b") (ConcreteStore $ Map.fromList [(0x0, 0xab)])))
+  ]
+  where errorMsg = "Storage read expression not simplified correctly"
+
+copySliceTests :: TestTree
+copySliceTests = testGroup "CopySlice tests"
+  [ testCase "copyslice-simps" $ do
+        let e a b =  CopySlice (Lit 0) (Lit 0) (BufLength (AbstractBuf "buff")) (CopySlice (Lit 0) (Lit 0) (BufLength (AbstractBuf "buff")) (AbstractBuf "buff") (ConcreteBuf a)) (ConcreteBuf b)
+            expr1 = e "" ""
+            expr2 = e "" "aasdfasdf"
+            expr3 = e "9832478932" ""
+            expr4 = e "9832478932" "aasdfasdf"
+        assertEqual "Not full simp" (Expr.simplify expr1) (AbstractBuf "buff")
+        assertEqual "Not full simp" (Expr.simplify expr2) $ CopySlice (Lit 0x0) (Lit 0x0) (BufLength (AbstractBuf "buff")) (AbstractBuf "buff") (ConcreteBuf "aasdfasdf")
+        assertEqual "Not full simp" (Expr.simplify expr3) (AbstractBuf "buff")
+        assertEqual "Not full simp" (Expr.simplify expr4) $ CopySlice (Lit 0x0) (Lit 0x0) (BufLength (AbstractBuf "buff")) (AbstractBuf "buff") (ConcreteBuf "aasdfasdf")
+  ]
+basicSimplificationTests :: TestTree
+basicSimplificationTests = testGroup "Basic simplification tests"
+  [ testCase "simp-readByte1" $ do
+      let srcOffset = (ReadWord (Lit 0x1) (AbstractBuf "stuff1"))
+          size = (ReadWord (Lit 0x1) (AbstractBuf "stuff2"))
+          src = (AbstractBuf "stuff2")
+          e = ReadByte (Lit 0x0) (CopySlice srcOffset (Lit 0x10) size src (AbstractBuf "dst"))
+          simp = Expr.simplify e
+      assertEqual "readByte simplification" simp (ReadByte (Lit 0x0) (AbstractBuf "dst"))
+  , testCase "simp-max-buflength" $ do
+      let simp = Expr.simplify $ Max (Lit 0) (BufLength (AbstractBuf "txdata"))
+      assertEqual "max-buflength rules" simp $ BufLength (AbstractBuf "txdata")
+  , testCase "simp-PLT-max" $ do
+      let simp = Expr.simplifyProp $ PLT (Max (Lit 5) (BufLength (AbstractBuf "txdata"))) (Lit 99)
+      assertEqual "max-buflength rules" simp $ PLT (BufLength (AbstractBuf "txdata")) (Lit 99)
+  , testCase "simp-assoc-add1" $ do
+      let simp = Expr.simplify $ Add (Add (Var "c") (Var "a")) (Var "b")
+      assertEqual "assoc rules" simp $ Add (Var "a") (Add (Var "b") (Var "c"))
+  , testCase "simp-assoc-add2" $ do
+      let simp = Expr.simplify $ Add (Add (Lit 1) (Var "c")) (Var "b")
+      assertEqual "assoc rules" simp $ Add (Lit 1) (Add (Var "b") (Var "c"))
+  , testCase "simp-assoc-add3" $ do
+      let simp = Expr.simplify $ Add (Lit 1) (Add (Lit 2) (Var "c"))
+      assertEqual "assoc rules" simp $ Add (Lit 3) (Var "c")
+  , testCase "simp-assoc-add4" $ do
+      let simp = Expr.simplify $ Add (Lit 1) (Add (Var "b") (Lit 2))
+      assertEqual "assoc rules" simp $ Add (Lit 3) (Var "b")
+  , testCase "simp-assoc-add5" $ do
+      let simp = Expr.simplify $ Add (Var "a") (Add (Lit 1) (Lit 2))
+      assertEqual "assoc rules" simp $ Add (Lit 3) (Var "a")
+  , testCase "simp-assoc-add6" $ do
+      let simp = Expr.simplify $ Add (Lit 7) (Add (Lit 1) (Lit 2))
+      assertEqual "assoc rules" simp $ Lit 10
+  , testCase "simp-assoc-add-7" $ do
+      let simp = Expr.simplify $ Add (Var "a") (Add (Var "b") (Lit 2))
+      assertEqual "assoc rules" simp $ Add (Lit 2) (Add (Var "a") (Var "b"))
+  , testCase "simp-assoc-add8" $ do
+      let simp = Expr.simplify $ Add (Add (Var "a") (Add (Lit 0x2) (Var "b"))) (Add (Var "c") (Add (Lit 0x2) (Var "d")))
+      assertEqual "assoc rules" simp $ Add (Lit 4) (Add (Var "a") (Add (Var "b") (Add (Var "c") (Var "d"))))
+  , testCase "simp-assoc-mul1" $ do
+      let simp = Expr.simplify $ Mul (Mul (Var "b") (Var "a")) (Var "c")
+      assertEqual "assoc rules" simp $ Mul (Var "a") (Mul (Var "b") (Var "c"))
+  , testCase "simp-assoc-mul2" $ do
+      let simp = Expr.simplify $ Mul (Lit 2) (Mul (Var "a") (Lit 3))
+      assertEqual "assoc rules" simp $ Mul (Lit 6) (Var "a")
+  , testCase "simp-assoc-xor1" $ do
+      let simp = Expr.simplify $ Xor (Lit 2) (Xor (Var "a") (Lit 3))
+      assertEqual "assoc rules" simp $ Xor (Lit 1) (Var "a")
+  , testCase "simp-assoc-xor2" $ do
+      let simp = Expr.simplify $ Xor (Lit 2) (Xor (Var "b") (Xor (Var "a") (Lit 3)))
+      assertEqual "assoc rules" simp $ Xor (Lit 1) (Xor (Var "a") (Var "b"))
+  ]
+
 constantPropagationTests :: TestTree
 constantPropagationTests = testGroup "isUnsat-concrete-tests"
   [
