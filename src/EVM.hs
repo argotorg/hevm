@@ -1060,15 +1060,25 @@ exec1 conf = do
           case stk of
             x:y:xs ->
               forceConcreteLimitSz x 2 "JUMPI: symbolic jumpdest" $ \x' ->
-              burn g_high $ case tryInto x' of
-                Left _ -> vmError BadJumpDestination
-                Right jumpTarget ->
-                  let jump :: Bool -> EVM t ()
-                      jump False = assign' (#state % #stack) xs >> next
-                      jump _    = checkJump jumpTarget xs
-                      -- For Symbolic execution, try forward-jump merge first
-                      symbolicMerge :: EVM Symbolic ()
-                      symbolicMerge = do
+              burn g_high $
+                -- Note: We must NOT check tryInto x' unconditionally!
+                -- Per EVM semantics, if condition is 0, we just fall through
+                -- without validating the destination. Only validate when jumping.
+                let jump :: Bool -> EVM t ()
+                    jump False = assign' (#state % #stack) xs >> next
+                    jump _    = case tryInto x' of
+                      Left _ -> vmError BadJumpDestination
+                      Right i -> checkJump i xs
+                    -- For Symbolic execution, try forward-jump merge first
+                    symbolicMerge :: EVM Symbolic ()
+                    symbolicMerge = case tryInto x' of
+                      Left _ ->
+                        -- Invalid destination - but we only error if we try to jump
+                        -- Use branch to decide based on condition
+                        branch conf.maxDepth y $ \case
+                          False -> assign' (#state % #stack) xs >> next
+                          True -> vmError BadJumpDestination
+                      Right jumpTarget -> do
                         -- Check if we're already in merge mode (speculative execution)
                         ms <- use #mergeState
                         let alreadyMerging = ms.msActive
@@ -1090,9 +1100,9 @@ exec1 conf = do
                                   jumpSym False = assign' (#state % #stack) xs >> next
                                   jumpSym _    = checkJump jumpTarget xs
                               branch conf.maxDepth y jumpSym
-                  in whenSymbolicElse
-                       (unsafeCoerce symbolicMerge :: EVM t ())
-                       (branch conf.maxDepth y jump)
+                in whenSymbolicElse
+                     (unsafeCoerce symbolicMerge :: EVM t ())
+                     (branch conf.maxDepth y jump)
             _ -> underrun
 
         OpPc -> {-# SCC "OpPc" #-}
