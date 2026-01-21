@@ -3384,17 +3384,30 @@ instance VMOps Symbolic where
 
     -- Try path merging: execute both branches speculatively
     continue True
+    trueResult <- use #result
     truePC <- use (#state % #pc)
     trueStack <- use (#state % #stack)
 
     put vm0
     continue False
+    falseResult <- use #result
     falsePC <- use (#state % #pc)
     falseStack <- use (#state % #stack)
 
-    -- Check if immediate merge is possible (same PC, same stack depth)
+    -- Check if either branch triggered a query (HandleEffect) or ended in an error
+    -- If so, we can't safely merge and must fall back to normal forking
+    let trueHasEffect = case trueResult of
+          Just (HandleEffect _) -> True
+          Just (VMFailure _) -> True
+          _ -> False
+        falseHasEffect = case falseResult of
+          Just (HandleEffect _) -> True
+          Just (VMFailure _) -> True
+          _ -> False
+
+    -- Check if immediate merge is possible (same PC, same stack depth, no effects)
     -- Note: Memory comparison skipped for now (Memory lacks Eq instance)
-    if truePC == falsePC && length trueStack == length falseStack
+    if not trueHasEffect && not falseHasEffect && truePC == falsePC && length trueStack == length falseStack
       then do
         -- Merge stacks using ITE expressions
         let condSimp = Expr.simplify cond
