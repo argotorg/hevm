@@ -1979,10 +1979,10 @@ cheatActions = Map.fromList
 
   , action "etch(address,bytes)" $
       \sig input ->  case decodeBuf [AbiAddressType, AbiBytesDynamicType] input of
-          (CAbi [AbiAddress addr, AbiBytesDynamic bytes],"") -> fetchAccount addr $ \_ -> do
-                replaceCodeEtch addr (RuntimeCode (ConcreteRuntimeCode bytes))
-                doStop
-          _ -> vmError (BadCheatCode "etch(address,bytes) address decoding failed" sig)
+        (CAbi [AbiAddress addr, AbiBytesDynamic bytes],"") -> fetchAccount (LitAddr addr) $ \_ -> do
+            replaceCodeEtch (LitAddr addr) (RuntimeCode (ConcreteRuntimeCode bytes))
+            doStop
+        _ -> vmError (BadCheatCode "etch(address,bytes) address decoding failed" sig)
 
   -- Single-value environment read cheat actions
   , $(envReadSingleCheat "envBool(string)") AbiBool stringToBool
@@ -2084,7 +2084,7 @@ cheatActions = Map.fromList
     stringToInt256 :: String -> Either ByteString Int256
     stringToInt256 s = maybeToEither "invalid Int256 value" $ readMaybe s
     stringToAddress :: String -> Either ByteString Addr
-    stringToAddress s = maybeToEither "invalid address value" $ readMaybe s
+    stringToAddress s = fmap Addr $ maybeToEither "invalid address value" $ readMaybe s
     stringToBytes32 :: String -> Either ByteString ByteString
     stringToBytes32 s = fmap word256Bytes $ maybeToEither "invalid bytes32 value" $ readMaybe s
     stringToByteString :: String -> Either ByteString ByteString
@@ -2118,9 +2118,8 @@ cheatActions = Map.fromList
     assertSGe =   genAssert (>=) (\a b -> Expr.iszero $ Expr.slt a b) "<" "assertGe"
     toStringCheat abitype sig input = do
       case decodeBuf [abitype] input of
-        (CAbi [val],"") -> ret val
+        (CAbi [val],"") -> frameReturn $ AbiTuple $ V.fromList [AbiString $ Char8.pack $ show val]
         _ -> vmError (BadCheatCode ("toString parameter decoding failed for " <> show abitype) sig)
-      where ret val = frameReturn $ AbiTuple $ V.fromList [AbiString $ Char8.pack $ show val]
 
 -- * General call implementation ("delegateCall")
 -- note that the continuation is ignored in the precompile case

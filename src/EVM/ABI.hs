@@ -556,16 +556,11 @@ decodeWithExprs headPos (t:ts) (v:vs) buf = do
 -- For dynamic types, the expression must be a concrete offset
 decodeOneArgExpr :: AbiType -> Expr EWord -> Expr Buf -> Err AbiValue
 decodeOneArgExpr t expr buf = case abiKind t of
-  Static -> decodeStaticArgExpr t expr
-  Dynamic -> case maybeLitWordSimp expr of
-    Just offset -> decodeDynamicArg t (unsafeInto offset) buf
-    Nothing -> Left $ "dynamic type requires concrete offset, got: " ++ show expr
-
--- | Decode a static type from an expression (tries to concretize)
-decodeStaticArgExpr :: AbiType -> Expr EWord -> Err AbiValue
-decodeStaticArgExpr t expr = case maybeLitWordSimp expr of
-  Just v -> decodeStaticArgConcrete t v
-  Nothing -> Left $ "static type requires concrete value, got: " ++ show expr
+  Static -> maybe (Left $ "static type requires concrete value, got: " ++ show expr)
+    (decodeStaticArgConcrete t) simpExpr
+  Dynamic -> maybe (Left $ "dynamic type requires concrete offset, got: " ++ show expr)
+    (\o -> decodeDynamicArg t (unsafeInto o) buf) simpExpr
+  where simpExpr = maybeLitWordSimp expr
 
 -- | Decode a static type from a concrete 32-byte word value
 decodeStaticArgConcrete :: AbiType -> W256 -> Err AbiValue
@@ -665,8 +660,7 @@ instance Arbitrary AbiValue where
     AbiBytesDynamic b -> AbiBytesDynamic . BS.pack <$> shrinkList shrinkIntegral (BS.unpack b)
     AbiString b -> AbiString . BS.pack <$> shrinkList shrinkIntegral (BS.unpack b)
     AbiBytes n a | n <= 32 -> shrink $ AbiUInt (n * 8) (word256 a)
-    --bytesN for N > 32 don't really exist right now anyway..
-    AbiBytes _ _ | otherwise -> []
+    AbiBytes n a -> AbiBytes n . BS.pack <$> shrinkList shrinkIntegral (BS.unpack a)
     AbiArray _ t v ->
       Vector.toList v ++
         map (\x -> AbiArray (length x) t (Vector.fromList x))
