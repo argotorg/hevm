@@ -72,6 +72,8 @@ import Data.Binary.Put (Put, runPut, putWord8, putWord32be)
 import Data.Bits (shiftL, shiftR, (.&.), testBit, bit, complement, (.|.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.DoubleWord (Word160(..), Word128(..))
+import Data.Serialize qualified as Cereal
 import Data.ByteString.Base16 qualified as BS16
 import Data.ByteString.Char8 qualified as Char8
 import Data.ByteString.Lazy qualified as BSLazy
@@ -112,7 +114,7 @@ data AbiValue
   | AbiArrayDynamic AbiType (Vector AbiValue)
   | AbiArray        Int AbiType (Vector AbiValue)
   | AbiTuple        (Vector AbiValue)
-  | AbiFunction     BS.ByteString
+  | AbiFunction     Addr FunctionSelector
   deriving (Read, Eq, Ord, Generic)
 
 class ShowAlter a where
@@ -133,7 +135,7 @@ instance Show AbiValue where
     "[" ++ intercalate ", " (show <$> Vector.toList v) ++ "]"
   show (AbiTuple v) =
     "(" ++ intercalate ", " (show <$> Vector.toList v) ++ ")"
-  show (AbiFunction b)       = show (ByteStringS b)
+  show (AbiFunction addr sel) = show (ByteStringS (word160Bytes addr <> word32Bytes sel))
 
 -- | Pretty-print some 'AbiValue'.
 instance ShowAlter AbiValue where
@@ -151,7 +153,7 @@ instance ShowAlter AbiValue where
     "[" ++ intercalate ", " (showAlter <$> Vector.toList v) ++ "]"
   showAlter (AbiTuple v) = "AbiTuple" <>
     "(" ++ intercalate ", " (show <$> Vector.toList v) ++ ")"
-  showAlter (AbiFunction b)       = "AbiFunction " <> show (ByteStringS b)
+  showAlter (AbiFunction addr sel) = "AbiFunction " <> show (ByteStringS (word160Bytes addr <> word32Bytes sel))
 
 data AbiType
   = AbiUIntType         Int
@@ -217,7 +219,7 @@ abiValueType = \case
   AbiArrayDynamic t _ -> AbiArrayDynamicType t
   AbiArray n t _      -> AbiArrayType n t
   AbiTuple v          -> AbiTupleType (abiValueType <$> v)
-  AbiFunction _       -> AbiFunctionType
+  AbiFunction _ _     -> AbiFunctionType
 
 getAbi :: AbiType -> Get AbiValue
 getAbi t = label (Text.unpack (abiTypeSolidity t)) $
@@ -261,8 +263,12 @@ getAbi t = label (Text.unpack (abiTypeSolidity t)) $
     AbiTupleType ts ->
       AbiTuple <$> getAbiSeq (Vector.length ts) (Vector.toList ts)
 
-    AbiFunctionType ->
-      AbiFunction <$> getBytesWith256BitPadding (24 :: Int)
+    AbiFunctionType -> do
+      addrBytes <- BS.pack <$> replicateM 20 getWord8
+      sel <- FunctionSelector <$> getWord32be
+      skip 8  -- padding to 32 bytes
+      let addr = bytesToAddr addrBytes
+      pure (AbiFunction addr sel)
 
 putAbi :: AbiValue -> Put
 putAbi = \case
@@ -296,8 +302,10 @@ putAbi = \case
   AbiTuple v ->
     putAbiSeq v
 
-  AbiFunction b -> do
-    putAbi (AbiBytes 24 b)
+  AbiFunction addr (FunctionSelector sel) -> do
+    forM_ (BS.unpack (word160Bytes addr)) putWord8
+    putWord32be sel
+    replicateM_ 8 (putWord8 0)  -- padding to 32 bytes
 
 -- | Decode a sequence type (e.g. tuple / array). Will fail for non sequence types
 getAbiSeq :: Int -> [AbiType] -> Get (Vector AbiValue)
@@ -351,7 +359,7 @@ abiHeadSize x =
         AbiBool _    -> 32
         AbiTuple v   -> sum (abiHeadSize <$> v)
         AbiArray _ _ xs -> sum (abiHeadSize <$> xs)
-        AbiFunction _ -> 32
+        AbiFunction _ _ -> 32
         _ -> internalError "impossible"
 
 putAbiSeq :: Vector AbiValue -> Put
@@ -409,9 +417,9 @@ basicType v =
     , P.string "bool"    $> AbiBoolType
     , P.string "string"  $> AbiStringType
 
-    , sizedType "uint" AbiUIntType
-    , sizedType "int"  AbiIntType
-    , sizedType "bytes" AbiBytesType
+    , sizedType "uint" AbiUIntType (const True)
+    , sizedType "int"  AbiIntType (const True)
+    , sizedType "bytes" AbiBytesType (\n -> n >= 1 && n <= 32)
 
     , P.string "bytes" $> AbiBytesDynamicType
     , P.string "tuple" $> AbiTupleType v
@@ -419,10 +427,11 @@ basicType v =
     ]
 
   where
-    sizedType :: Text -> (Int -> AbiType) -> P.Parsec () Text AbiType
-    sizedType s f = P.try $ do
+    sizedType :: Text -> (Int -> AbiType) -> (Int -> Bool) -> P.Parsec () Text AbiType
+    sizedType s f valid = P.try $ do
       void (P.string s)
-      fmap (f . read) (P.some P.digitChar)
+      n <- read <$> P.some P.digitChar
+      if valid n then pure (f n) else P.empty
 
 pack32 :: Int -> [Word32] -> Word256
 pack32 n xs =
@@ -439,6 +448,19 @@ getWord256 = pack32 8 <$> replicateM 8 getWord32be
 
 roundTo32Bytes :: Integral a => a -> a
 roundTo32Bytes n = 32 * div (n + 31) 32
+
+word32Bytes :: FunctionSelector -> ByteString
+word32Bytes (FunctionSelector w) = BSLazy.toStrict $ runPut $ putWord32be w
+
+bytesToAddr :: ByteString -> Addr
+bytesToAddr bs = case Cereal.runGet m bs of
+  Right addr -> addr
+  Left _ -> internalError "bytesToAddr: failed to parse 20 bytes"
+  where
+    m = do a <- Cereal.getWord32be
+           b <- Cereal.getWord64be
+           c <- Cereal.getWord64be
+           pure $ Addr (Word160 a (Word128 b c))
 
 emptyAbi :: AbiValue
 emptyAbi = AbiTuple mempty
@@ -481,7 +503,9 @@ parseAbiValue AbiBoolType = (do W256 w <- readS_to_P reads
                             <|> (do Boolz b <- readS_to_P reads
                                     pure $ AbiBool b)
 parseAbiValue (AbiBytesType n) = AbiBytes n <$> do ByteStringS bytes <- bytesP
-                                                   pure bytes
+                                                   if BS.length bytes == n
+                                                     then pure bytes
+                                                     else pfail
 parseAbiValue AbiBytesDynamicType = AbiBytesDynamic <$> do ByteStringS bytes <- bytesP
                                                            pure bytes
 parseAbiValue AbiStringType = AbiString <$> do Char8.pack <$> readS_to_P reads
@@ -492,8 +516,13 @@ parseAbiValue (AbiArrayType n typ) =
   AbiArray n typ <$> do a <- listP (parseAbiValue typ)
                         pure $ Vector.fromList a
 parseAbiValue (AbiTupleType _) = internalError "tuple types not supported"
-parseAbiValue AbiFunctionType = AbiFunction <$> do ByteStringS bytes <- bytesP
-                                                   pure bytes
+parseAbiValue AbiFunctionType = do
+  ByteStringS bytes <- bytesP
+  if BS.length bytes == 24
+    then let addr = bytesToAddr (BS.take 20 bytes)
+             sel = FunctionSelector (word32 (BS.unpack (BS.drop 20 bytes)))
+         in pure (AbiFunction addr sel)
+    else pfail
 
 listP :: ReadP a -> ReadP [a]
 listP parser = between (char '[') (char ']') ((do skipSpaces
@@ -573,8 +602,10 @@ decodeStaticArgConcrete t v = case t of
     let bs = BS.take n (word256Bytes v)
     in Right $ AbiBytes n bs
   AbiFunctionType ->
-    let bs = BS.take 24 (word256Bytes v)
-    in Right $ AbiFunction bs
+    let bs = word256Bytes v
+        addr = bytesToAddr (BS.take 20 bs)
+        sel = FunctionSelector (word32 (BS.unpack (BS.drop 20 (BS.take 24 bs))))
+    in Right $ AbiFunction addr sel
   _ -> Left $ "unexpected static type: " ++ show t
 
 -- | Decode a dynamic type from buffer at given offset
@@ -628,9 +659,12 @@ genAbiValue = \case
        replicateM n (scale (`div` 3) (genAbiValue t))
    AbiTupleType ts ->
      AbiTuple <$> mapM genAbiValue ts
-   AbiFunctionType ->
-     do xs <- replicateM 24 arbitrary
-        pure (AbiFunction (BS.pack xs))
+   AbiFunctionType -> do
+     addrBytes <- BS.pack <$> replicateM 20 arbitrary
+     selBytes <- replicateM 4 arbitrary
+     let addr = bytesToAddr addrBytes
+         sel = FunctionSelector (word32 selBytes)
+     pure (AbiFunction addr sel)
   where
     genUInt :: Int -> Gen Word256
     genUInt n = arbitraryIntegralWithMax (2^n-1) :: Gen Word256
@@ -671,7 +705,9 @@ instance Arbitrary AbiValue where
     AbiInt n a -> AbiInt n <$> (shrinkIntegral a)
     AbiBool b -> AbiBool <$> shrink b
     AbiAddress a -> [AbiAddress 0xacab, AbiAddress a, AbiAddress 0xbabeface, AbiAddress 0xdeadbeef]
-    AbiFunction b -> shrink $ AbiBytes 24 b
+    AbiFunction addr (FunctionSelector sel) ->
+      [AbiFunction a (FunctionSelector s) | a <- shrinkIntegral addr, s <- [sel]]
+      ++ [AbiFunction a (FunctionSelector s) | a <- [addr], s <- shrinkIntegral sel]
 
 -- A modification of 'arbitrarySizedBoundedIntegral' quickcheck library
 -- which takes the maxbound explicitly rather than relying on a Bounded instance.

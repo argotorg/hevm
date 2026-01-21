@@ -18,6 +18,7 @@ import Data.Bits hiding (And, Xor)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Base16 qualified as BS16
+import Data.ByteString.Lazy qualified as BSLazy
 import Data.Binary.Put (runPut)
 import Data.Binary.Get (runGetOrFail)
 import Data.DoubleWord
@@ -50,6 +51,7 @@ import Test.Tasty.Runners hiding (Failure, Success)
 import Test.Tasty.ExpectedFailure
 import Text.RE.TDFA.String
 import Text.RE.Replace
+import Text.ParserCombinators.ReadP (readP_to_S)
 import Witch (unsafeInto, into)
 import Data.Containers.ListUtils (nubOrd)
 
@@ -991,6 +993,60 @@ tests = testGroup "hevm"
         case decodeAbiValues [AbiIntType 24] withSelector of
           [AbiInt 24 val] -> assertEqualM "Incorrectly decoded int24 value" (-42) val
           _ -> internalError "Error in decoding function"
+    , test "ABI-function-roundtrip" $ do
+        -- Test that AbiFunction encodes/decodes correctly
+        let addr = 0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+        let sel = 0x12345678
+        let funcVal = AbiFunction addr sel
+        case runGetOrFail (getAbi AbiFunctionType) (runPut (putAbi funcVal)) of
+          Right ("", _, decoded) -> assertEqualM "Function roundtrip failed" funcVal decoded
+          Left (_, _, err) -> internalError $ "Decoding error: " <> err
+          Right (leftover, _, _) -> internalError $ "Leftover bytes: " <> show leftover
+    , test "ABI-function-encoding" $ do
+        -- Test that AbiFunction encodes to correct 32-byte padded format
+        let addr = 0x1234567890abcdef1234567890abcdef12345678
+        let sel = 0xaabbccdd
+        let funcVal = AbiFunction addr sel
+        let encoded = BSLazy.toStrict $ runPut (putAbi funcVal)
+        -- Should be 32 bytes: 20 addr + 4 selector + 8 padding
+        assertEqualM "Encoded length should be 32" 32 (BS.length encoded)
+        -- First 20 bytes should be address
+        assertEqualM "Address bytes" (hex "1234567890abcdef1234567890abcdef12345678") (BS.take 20 encoded)
+        -- Next 4 bytes should be selector
+        assertEqualM "Selector bytes" (hex "aabbccdd") (BS.take 4 $ BS.drop 20 encoded)
+        -- Last 8 bytes should be zero padding
+        assertEqualM "Padding bytes" (BS.replicate 8 0) (BS.drop 24 encoded)
+    , test "ABI-function-parsing" $ do
+        -- Test parseAbiValue for function type
+        let hexStr = "0x1234567890abcdef1234567890abcdef12345678aabbccdd"
+        case readP_to_S (parseAbiValue AbiFunctionType) hexStr of
+          [(AbiFunction addr sel, "")] -> do
+            assertEqualM "Parsed address" 0x1234567890abcdef1234567890abcdef12345678 addr
+            assertEqualM "Parsed selector" 0xaabbccdd sel
+          [] -> internalError "Failed to parse function value"
+          other -> internalError $ "Unexpected parse result: " <> show other
+    , test "ABI-function-parsing-rejects-wrong-length" $ do
+        -- 23 bytes (too short)
+        let shortHex = "0x1234567890abcdef1234567890abcdef123456aabbcc"
+        case readP_to_S (parseAbiValue AbiFunctionType) shortHex of
+          [] -> pure ()  -- Expected: parsing should fail
+          _ -> internalError "Should reject 23-byte function value"
+        -- 25 bytes (too long)
+        let longHex = "0x1234567890abcdef1234567890abcdef12345678aabbccddee"
+        case readP_to_S (parseAbiValue AbiFunctionType) longHex of
+          [(_, "")] -> internalError "Should reject 25-byte function value"
+          _ -> pure ()  -- Expected: either fails or has leftover
+    , test "ABI-bytes-parsing-validates-length" $ do
+        -- bytes4 should require exactly 4 bytes
+        let fourBytes = "0xaabbccdd"
+        case readP_to_S (parseAbiValue (AbiBytesType 4)) fourBytes of
+          [(AbiBytes 4 bs, "")] -> assertEqualM "bytes4 value" (hex "aabbccdd") bs
+          _ -> internalError "Failed to parse bytes4"
+        -- bytes4 should reject 3 bytes
+        let threeBytes = "0xaabbcc"
+        case readP_to_S (parseAbiValue (AbiBytesType 4)) threeBytes of
+          [] -> pure ()  -- Expected: parsing should fail
+          _ -> internalError "Should reject 3-byte value for bytes4"
     ]
   , testGroup "Solidity-Expressions"
     [ test "Trivial" $
