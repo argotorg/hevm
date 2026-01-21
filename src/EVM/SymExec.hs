@@ -164,7 +164,7 @@ symCalldata sig typesignature concreteArgs base = do
       case makeAbiValue typ arg of
         AbiUInt _ w -> St [] . Lit . into $ w
         AbiInt _ w -> St [] . Lit . unsafeInto $ w
-        AbiAddress (LitAddr e) -> St [] . Lit . into $ e
+        AbiAddress e -> St [] . Lit . into $ e
         AbiBool w -> St [] . Lit $ if w then 1 else 0
         _ -> internalError "TODO"
     calldatas = zipWith3 mkArg typesignature args [1..]

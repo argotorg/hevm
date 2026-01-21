@@ -1961,7 +1961,7 @@ cheatActions = Map.fromList
   , action "label(address,string)" $
       \sig input -> case decodeBuf [AbiAddressType, AbiStringType] input of
         (CAbi valsArr,"") -> case valsArr of
-          [AbiAddress (LitAddr addr), AbiString label] -> do
+          [AbiAddress addr, AbiString label] -> do
             #labels %= Map.insert addr (decodeUtf8 label)
             doStop
           _ -> vmError (BadCheatCode "label(address,string) address decoding failed" sig)
@@ -1980,8 +1980,8 @@ cheatActions = Map.fromList
   , action "etch(address,bytes)" $
       \sig input ->  case decodeBuf [AbiAddressType, AbiBytesDynamicType] input of
           (CAbi valsArr,"") -> case valsArr of
-            [AbiAddress addr, AbiBytesDynamic bytes] -> fetchAccount addr $ \_ -> do
-                replaceCodeEtch addr (RuntimeCode (ConcreteRuntimeCode bytes))
+            [AbiAddress addr, AbiBytesDynamic bytes] -> fetchAccount (LitAddr addr) $ \_ -> do
+                replaceCodeEtch (LitAddr addr) (RuntimeCode (ConcreteRuntimeCode bytes))
                 doStop
             _ -> vmError (BadCheatCode "etch(address,bytes) address decoding failed" sig)
           _ -> vmError (BadCheatCode "etch(address,bytes) address decoding failed" sig)
@@ -2085,8 +2085,8 @@ cheatActions = Map.fromList
     stringToWord256 s = maybeToEither "invalid W256 value" $ readMaybe s
     stringToInt256 :: String -> Either ByteString Int256
     stringToInt256 s = maybeToEither "invalid Int256 value" $ readMaybe s
-    stringToAddress :: String -> Either ByteString (Expr EAddr)
-    stringToAddress s = fmap LitAddr $ maybeToEither "invalid address value" $ readMaybe s
+    stringToAddress :: String -> Either ByteString Addr
+    stringToAddress s = maybeToEither "invalid address value" $ readMaybe s
     stringToBytes32 :: String -> Either ByteString ByteString
     stringToBytes32 s = fmap word256Bytes $ maybeToEither "invalid bytes32 value" $ readMaybe s
     stringToByteString :: String -> Either ByteString ByteString
@@ -2120,7 +2120,6 @@ cheatActions = Map.fromList
     assertSGe =   genAssert (>=) (\a b -> Expr.iszero $ Expr.slt a b) "<" "assertGe"
     toStringCheat abitype sig input = do
       case decodeBuf [abitype] input of
-        (CAbi [(AbiAddress (LitAddr val))],"") -> ret val
         (CAbi [val],"") -> ret val
         _ -> vmError (BadCheatCode ("toString parameter decoding failed for " <> show abitype) sig)
       where ret val = frameReturn $ AbiTuple $ V.fromList [AbiString $ Char8.pack $ show val]

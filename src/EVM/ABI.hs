@@ -104,7 +104,7 @@ data Sig = Sig Text [AbiType]
 data AbiValue
   = AbiUInt         Int Word256
   | AbiInt          Int Int256
-  | AbiAddress      (Expr EAddr)
+  | AbiAddress      Addr
   | AbiBool         Bool
   | AbiBytes        Int BS.ByteString
   | AbiBytesDynamic BS.ByteString
@@ -113,7 +113,7 @@ data AbiValue
   | AbiArray        Int AbiType (Vector AbiValue)
   | AbiTuple        (Vector AbiValue)
   | AbiFunction     BS.ByteString
-  deriving (Eq, Ord, Generic)
+  deriving (Read, Eq, Ord, Generic)
 
 class ShowAlter a where
   showAlter :: a -> String
@@ -234,7 +234,7 @@ getAbi t = label (Text.unpack (abiTypeSolidity t)) $
       let signExtend n' w' = if testBit w' (n' - 1) then w' .|. complement (bit n' - 1) else w'
       pure (AbiInt n (fromIntegral $ (signExtend n) . (truncate' n) $ w))
 
-    AbiAddressType -> asUInt 256 (AbiAddress . LitAddr)
+    AbiAddressType -> asUInt 256 AbiAddress
     AbiBoolType    -> asUInt 256 (AbiBool . (> (0 :: Integer)))
 
     AbiBytesType n ->
@@ -271,8 +271,7 @@ putAbi = \case
       putWord32be (unsafeInto (shiftR x (i * 32) .&. 0xffffffff))
 
   AbiInt n x   -> putAbi (AbiUInt n (fromIntegral x))
-  AbiAddress (LitAddr x) -> putAbi (AbiUInt 160 (fromIntegral x))
-  AbiAddress _ -> internalError "cannot put non-literal address"
+  AbiAddress x -> putAbi (AbiUInt 160 (fromIntegral x))
   AbiBool x    -> putAbi (AbiUInt 8 (if x then 1 else 0))
 
   AbiBytes n xs -> do
@@ -476,7 +475,7 @@ parseAbiValue (AbiUIntType n) = do W256 w <- readS_to_P reads
                                    pure $ AbiUInt n w
 parseAbiValue (AbiIntType n) = do W256 w <- readS_to_P reads
                                   pure $ AbiInt n (unsafeInto w)
-parseAbiValue AbiAddressType = AbiAddress . LitAddr <$> readS_to_P reads
+parseAbiValue AbiAddressType = AbiAddress <$> readS_to_P reads
 parseAbiValue AbiBoolType = (do W256 w <- readS_to_P reads
                                 pure $ AbiBool (w /= 0))
                             <|> (do Boolz b <- readS_to_P reads
@@ -566,20 +565,14 @@ decodeOneArgExpr t expr buf = case abiKind t of
 decodeStaticArgExpr :: AbiType -> Expr EWord -> Err AbiValue
 decodeStaticArgExpr t expr = case maybeLitWordSimp expr of
   Just v -> decodeStaticArgConcrete t v
-  Nothing -> case t of
-    -- For address type, we must handle WAddr specially
-    AbiAddressType -> case simplify expr of
-      WAddr (LitAddr a) -> Right $ AbiAddress (LitAddr a)
-      WAddr a -> Right $ AbiAddress a
-      _ -> Left $ "could not decode address from: " ++ show expr
-    _ -> Left $ "static type requires concrete value, got: " ++ show expr
+  Nothing -> Left $ "static type requires concrete value, got: " ++ show expr
 
 -- | Decode a static type from a concrete 32-byte word value
 decodeStaticArgConcrete :: AbiType -> W256 -> Err AbiValue
 decodeStaticArgConcrete t v = case t of
   AbiUIntType n -> Right $ AbiUInt n (fromIntegral v)
   AbiIntType n -> Right $ AbiInt n (fromIntegral v)
-  AbiAddressType -> Right $ AbiAddress . LitAddr $ fromIntegral v
+  AbiAddressType -> Right $ AbiAddress $ fromIntegral v
   AbiBoolType -> Right $ AbiBool (v > 0)
   AbiBytesType n ->
     let bs = BS.take n (word256Bytes v)
@@ -622,8 +615,7 @@ genAbiValue = \case
    AbiIntType n -> do
      x <- genUInt n
      pure $ AbiInt n (signedWord (x - 2^(n-1)))
-   AbiAddressType ->
-     AbiAddress . LitAddr . fromIntegral <$> genUInt 20
+   AbiAddressType -> AbiAddress . fromIntegral <$> genUInt 20
    AbiBoolType ->
      elements [AbiBool False, AbiBool True]
    AbiBytesType n ->
@@ -683,7 +675,7 @@ instance Arbitrary AbiValue where
     AbiUInt n a -> AbiUInt n <$> (shrinkIntegral a)
     AbiInt n a -> AbiInt n <$> (shrinkIntegral a)
     AbiBool b -> AbiBool <$> shrink b
-    AbiAddress a -> [AbiAddress (LitAddr 0xacab), AbiAddress a, AbiAddress (LitAddr 0xbabeface)]
+    AbiAddress a -> [AbiAddress 0xacab, AbiAddress a, AbiAddress 0xbabeface]
     AbiFunction b -> shrink $ AbiBytes 24 b
 
 -- A modification of 'arbitrarySizedBoundedIntegral' quickcheck library

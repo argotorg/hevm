@@ -1682,81 +1682,6 @@ tests = testGroup "hevm"
           checkAssert s [0x41] c (Just (Sig "fun(uint256)" [AbiUIntType 256])) [] defaultVeriOpts
         putStrLnM "expected counterexample found"
       ,
-      test "vm.etch-success" $ do
-        Just c <- solcRuntime "C"
-          [i|
-            interface Vm {
-              function etch(address,bytes calldata) external;
-            }
-            contract A {
-              function getX() external returns (uint) {
-                  return 10;
-              }
-            }
-            contract B {
-              function getX() external returns (uint) {
-                  return 20;
-              }
-            }
-            contract C {
-              A a;
-              B b;
-              function fun() external {
-                  a = new A();
-                  b = new B();
-                  bytes memory bCode = address(b).code;
-                  Vm vm = Vm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
-
-                  assert(a.getX() == 10);
-                  vm.etch(address(a), bCode);
-                  assert(address(a).code.length == address(b).code.length);
-                  bytes memory aCode = address(a).code;
-                  assert(keccak256(aCode) == keccak256(bCode));
-                  assert(a.getX() == 20);
-              }
-            }
-          |]
-
-        let sig = Just (Sig "fun()" [])
-        (e, []) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        assertBoolM "The expression must NOT contain Partial." $ Prelude.not $ any isPartial e
-      ,
-      test "vm.etch-fail" $ do
-        Just c <- solcRuntime "C"
-          [i|
-            interface Vm {
-              function etch(address,bytes calldata) external;
-            }
-            contract A {
-              function getX() external returns (uint) {
-                  return 10;
-              }
-            }
-            contract B {
-              function getX() external returns (uint) {
-                  return 20;
-              }
-            }
-            contract C {
-              A a;
-              B b;
-              function fun() external {
-                  a = new A();
-                  b = new B();
-                  Vm vm = Vm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
-
-                  assert(a.getX() == 10);
-                  vm.etch(address(a), address(b).code);
-                  assert(address(a).code.length == address(b).code.length);
-                  assert(a.getX() == 10);
-              }
-            }
-          |]
-
-        let sig = Just (Sig "fun()" [])
-        (e, [Cex _]) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        assertBoolM "The expression must NOT contain Partial." $ Prelude.not $ any isPartial e
-      ,
       test "vm.deal unknown address" $ do
         Just c <- solcRuntime "C"
           [i|
@@ -2199,7 +2124,11 @@ tests = testGroup "hevm"
               , ("test/contracts/fail/symbolicFail.sol",      "prove_symb_fail_allrev_text.*", (False, False))
               , ("test/contracts/fail/symbolicFail.sol",      "prove_symb_fail_somerev_text.*", (False, True))
               , ("test/contracts/fail/symbolicFail.sol",      "prove_symb_fail_allrev_selector.*", (False, False))
-              , ("test/contracts/fail/symbolicFail.sol",      "prove_symb_fail_somerev_selector.*", (False, True))]
+              , ("test/contracts/fail/symbolicFail.sol",      "prove_symb_fail_somerev_selector.*", (False, True))
+              -- vm.etch
+              , ("test/contracts/pass/etch.sol",          "prove_etch.*", (True, True))
+              , ("test/contracts/fail/etchFail.sol",      "prove_etch_fail.*", (False, True))
+              ]
         forM_ cases $ \(testFile, match, expected) -> do
           actual <- runForgeTestCustom testFile match Nothing Nothing False Fetch.noRpc
           putStrLnM $ "Test result for " <> testFile <> " match: " <> T.unpack match <> ": " <> show actual
