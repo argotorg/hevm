@@ -1970,7 +1970,11 @@ tests = testGroup "hevm"
               , ("test/contracts/fail/symbolicFail.sol",      "prove_symb_fail_allrev_text.*", (False, False))
               , ("test/contracts/fail/symbolicFail.sol",      "prove_symb_fail_somerev_text.*", (False, True))
               , ("test/contracts/fail/symbolicFail.sol",      "prove_symb_fail_allrev_selector.*", (False, False))
-              , ("test/contracts/fail/symbolicFail.sol",      "prove_symb_fail_somerev_selector.*", (False, True))]
+              , ("test/contracts/fail/symbolicFail.sol",      "prove_symb_fail_somerev_selector.*", (False, True))
+              -- vm.etch
+              , ("test/contracts/pass/etch.sol",          "prove_etch.*", (True, True))
+              , ("test/contracts/fail/etchFail.sol",      "prove_etch_fail.*", (False, True))
+              ]
         forM_ cases $ \(testFile, match, expected) -> do
           actual <- runForgeTestCustom testFile match Nothing Nothing False Fetch.noRpc
           putStrLnM $ "Test result for " <> testFile <> " match: " <> T.unpack match <> ": " <> show actual

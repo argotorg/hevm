@@ -61,9 +61,9 @@ module EVM.ABI
 
 import Prelude hiding (Foldable(..))
 
-import EVM.Expr (readWord, isLitWord)
+import EVM.Expr (readWord, readByte, isLitWord, simplify)
 import EVM.Types
-import EVM.Expr (maybeLitWordSimp)
+import EVM.Expr (maybeLitWordSimp, maybeLitByteSimp)
 
 import Control.Applicative ((<|>))
 import Control.Monad (replicateM, replicateM_, forM_, void)
@@ -518,17 +518,85 @@ decodeBuf tps (ConcreteBuf b) =
     Right ("", _, args) -> (CAbi (toList args), "")
     Right (str, _, args) -> (CAbi (toList args), "with trailing bytes: " ++ show (BSLazy.unpack str))
     Left (_, _, err) -> (NoVals, "error decoding abi: " ++ err)
-decodeBuf tps buf =
-  if any isDynamic tps then (NoVals, "dynamic types not supported in symbolic decoding")
-  else
-    let
-      vs = decodeStaticArgs 0 (length tps) buf
-      asBS = mconcat $ fmap word256Bytes (mapMaybe maybeLitWordSimp vs)
-    in if not (all isLitWord vs)
-       then (SAbi vs, "")
-       else decodeBuf tps (ConcreteBuf asBS)
-  where
-    isDynamic t = abiKind t == Dynamic
+decodeBuf tps b = case simplify b of
+  ConcreteBuf buf -> decodeBuf tps (ConcreteBuf buf)
+  buf -> if any isDynamic tps then tryDecodeDynamic tps buf
+    else let
+        vs = decodeStaticArgs 0 (length tps) buf
+        asBS = mconcat $ fmap word256Bytes (mapMaybe maybeLitWordSimp vs)
+      in if not (all isLitWord vs)
+         then (SAbi vs, "")
+         else decodeBuf tps (ConcreteBuf asBS)
+    where
+      isDynamic t = abiKind t == Dynamic
+
+-- | Try to decode arguments including dynamic types like bytes/string
+-- For dynamic types, reads offset from head, then length and data from that offset
+tryDecodeDynamic :: [AbiType] -> Expr Buf -> (AbiVals, String)
+tryDecodeDynamic tps buf =
+  let headVals = decodeStaticArgs 0 (length tps) buf
+      headSimp = map simplify headVals
+  in case decodeWithExprs 0 tps headSimp buf of
+    Left err -> (NoVals, err)
+    Right abiVals -> (CAbi abiVals, "")
+
+-- | Decode types using head expressions
+-- For static types, the expression is the value
+-- For dynamic types, the expression must be a concrete offset
+decodeWithExprs :: Int -> [AbiType] -> [Expr EWord] -> Expr Buf -> Err [AbiValue]
+decodeWithExprs _ [] [] _ = Right []
+decodeWithExprs _ [] _ _ = Left "mismatched types and values"
+decodeWithExprs _ _ [] _ = Left "mismatched types and values"
+decodeWithExprs headPos (t:ts) (v:vs) buf = do
+  val <- decodeOneArgExpr t v buf
+  rest <- decodeWithExprs (headPos + 32) ts vs buf
+  pure (val : rest)
+
+-- | Decode a single argument from its head expression
+-- For dynamic types, the expression must be a concrete offset
+decodeOneArgExpr :: AbiType -> Expr EWord -> Expr Buf -> Err AbiValue
+decodeOneArgExpr t expr buf = case abiKind t of
+  Static -> maybe (Left $ "static type requires concrete value, got: " ++ show expr)
+    (decodeStaticArgConcrete t) simpExpr
+  Dynamic -> maybe (Left $ "dynamic type requires concrete offset, got: " ++ show expr)
+    (\o -> decodeDynamicArg t (unsafeInto o) buf) simpExpr
+  where simpExpr = maybeLitWordSimp expr
+
+-- | Decode a static type from a concrete 32-byte word value
+decodeStaticArgConcrete :: AbiType -> W256 -> Err AbiValue
+decodeStaticArgConcrete t v = case t of
+  AbiUIntType n -> Right $ AbiUInt n (fromIntegral v)
+  AbiIntType n -> Right $ AbiInt n (fromIntegral v)
+  AbiAddressType -> Right $ AbiAddress $ fromIntegral v
+  AbiBoolType -> Right $ AbiBool (v > 0)
+  AbiBytesType n ->
+    let bs = BS.take n (word256Bytes v)
+    in Right $ AbiBytes n bs
+  AbiFunctionType ->
+    let bs = BS.take 24 (word256Bytes v)
+    in Right $ AbiFunction bs
+  _ -> Left $ "unexpected static type: " ++ show t
+
+-- | Decode a dynamic type from buffer at given offset
+decodeDynamicArg :: AbiType -> Int -> Expr Buf -> Err AbiValue
+decodeDynamicArg t offset buf = case t of
+  AbiBytesDynamicType -> do
+    -- Read length at offset
+    let lenExpr = simplify $ readWord (Lit $ unsafeInto offset) buf
+    case maybeLitWordSimp lenExpr of
+      Nothing -> Left "could not get concrete length for bytes"
+      Just len ->
+        let dataOffset = offset + 32
+            byteCount = unsafeInto len :: Int
+            bytes = [simplify $ readByte (Lit $ unsafeInto (dataOffset + i)) buf | i <- [0 .. byteCount - 1]]
+            concreteBytes = mapMaybe maybeLitByteSimp bytes
+        in if length concreteBytes /= byteCount
+           then Left $ "could not get all concrete bytes (got " ++ show (length concreteBytes) ++ " of " ++ show byteCount ++ ")"
+           else Right $ AbiBytesDynamic (BS.pack concreteBytes)
+
+  -- String is encoded the same as bytes
+  AbiStringType -> decodeDynamicArg AbiBytesDynamicType offset buf
+  _ -> Left $ "dynamic type not yet supported: " ++ show t
 
 decodeStaticArgs :: Int -> Int -> Expr Buf -> [Expr EWord]
 decodeStaticArgs offset numArgs b =
@@ -542,8 +610,7 @@ genAbiValue = \case
    AbiIntType n -> do
      x <- genUInt n
      pure $ AbiInt n (signedWord (x - 2^(n-1)))
-   AbiAddressType ->
-     AbiAddress . fromIntegral <$> genUInt 20
+   AbiAddressType -> AbiAddress . fromIntegral <$> genUInt 20
    AbiBoolType ->
      elements [AbiBool False, AbiBool True]
    AbiBytesType n ->
@@ -603,8 +670,7 @@ instance Arbitrary AbiValue where
     AbiUInt n a -> AbiUInt n <$> (shrinkIntegral a)
     AbiInt n a -> AbiInt n <$> (shrinkIntegral a)
     AbiBool b -> AbiBool <$> shrink b
-    AbiAddress a -> [AbiAddress 0xacab, AbiAddress 0xdeadbeef, AbiAddress 0xbabeface]
-      <> (AbiAddress <$> shrinkIntegral a)
+    AbiAddress a -> [AbiAddress 0xacab, AbiAddress a, AbiAddress 0xbabeface, AbiAddress 0xdeadbeef]
     AbiFunction b -> shrink $ AbiBytes 24 b
 
 -- A modification of 'arbitrarySizedBoundedIntegral' quickcheck library
