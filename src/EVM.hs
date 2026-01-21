@@ -27,8 +27,6 @@ import EVM.Concrete qualified as Concrete
 import EVM.CheatsTH
 import EVM.Effects (Config (..))
 
-import Unsafe.Coerce (unsafeCoerce)
-
 import Control.Monad (unless, when)
 import Control.Monad.ST (ST, RealWorld)
 import Control.Monad.State.Strict (MonadState, State, get, gets, lift, modify', put)
@@ -912,9 +910,9 @@ exec1 conf = do
                                   jumpSym False = assign' (#state % #stack) xs >> next
                                   jumpSym _    = checkJump jumpTarget xs
                               branch conf.maxDepth y jumpSym
-                in whenSymbolicElse
-                     (unsafeCoerce symbolicMerge :: EVM t ())
-                     (branch conf.maxDepth y jump)
+                in case eqT @t @Symbolic of
+                     Just Refl -> symbolicMerge
+                     Nothing -> branch conf.maxDepth y jump
             _ -> underrun
 
         OpPc -> {-# SCC "OpPc" #-}
