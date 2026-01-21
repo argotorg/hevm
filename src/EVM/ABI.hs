@@ -660,7 +660,8 @@ instance Arbitrary AbiValue where
     AbiBytesDynamic b -> AbiBytesDynamic . BS.pack <$> shrinkList shrinkIntegral (BS.unpack b)
     AbiString b -> AbiString . BS.pack <$> shrinkList shrinkIntegral (BS.unpack b)
     AbiBytes n a | n <= 32 -> shrink $ AbiUInt (n * 8) (word256 a)
-    AbiBytes n a -> AbiBytes n . BS.pack <$> shrinkList shrinkIntegral (BS.unpack a)
+    --bytesN for N > 32 don't really exist right now anyway..
+    AbiBytes _ _ | otherwise -> []
     AbiArray _ t v ->
       Vector.toList v ++
         map (\x -> AbiArray (length x) t (Vector.fromList x))
@@ -669,7 +670,7 @@ instance Arbitrary AbiValue where
     AbiUInt n a -> AbiUInt n <$> (shrinkIntegral a)
     AbiInt n a -> AbiInt n <$> (shrinkIntegral a)
     AbiBool b -> AbiBool <$> shrink b
-    AbiAddress a -> [AbiAddress 0xacab, AbiAddress a, AbiAddress 0xbabeface]
+    AbiAddress a -> [AbiAddress 0xacab, AbiAddress a, AbiAddress 0xbabeface, AbiAddress 0xdeadbeef]
     AbiFunction b -> shrink $ AbiBytes 24 b
 
 -- A modification of 'arbitrarySizedBoundedIntegral' quickcheck library
