@@ -1979,11 +1979,9 @@ cheatActions = Map.fromList
 
   , action "etch(address,bytes)" $
       \sig input ->  case decodeBuf [AbiAddressType, AbiBytesDynamicType] input of
-          (CAbi valsArr,"") -> case valsArr of
-            [AbiAddress addr, AbiBytesDynamic bytes] -> fetchAccount (LitAddr addr) $ \_ -> do
-                replaceCodeEtch (LitAddr addr) (RuntimeCode (ConcreteRuntimeCode bytes))
+          (CAbi [AbiAddress addr, AbiBytesDynamic bytes],"") -> fetchAccount addr $ \_ -> do
+                replaceCodeEtch addr (RuntimeCode (ConcreteRuntimeCode bytes))
                 doStop
-            _ -> vmError (BadCheatCode "etch(address,bytes) address decoding failed" sig)
           _ -> vmError (BadCheatCode "etch(address,bytes) address decoding failed" sig)
 
   -- Single-value environment read cheat actions
