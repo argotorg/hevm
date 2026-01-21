@@ -408,34 +408,40 @@ exploreNestedBranch conf nestedJumpTarget targetPC _cond stackAfterPop = do
       then return Nothing
       else do
         vm0 <- get
-        -- Save original merge state for proper backtracking
-        let originalDepth = ms.msNestingDepth
-            originalBudget = ms.msRemainingBudget
 
-        -- Try fall-through first (more thorough exploration)
-        put vm0
-        assign' (#state % #stack) stackAfterPop
-        modifying' (#state % #pc) (+ 1)  -- Move past JUMPI
-        modifying #mergeState $ \s -> s { msNestingDepth = s.msNestingDepth + 1 }
+        -- CRITICAL: Skip if memory is mutable (ConcreteMemory)
+        -- Mutable memory is not properly restored by `put vm0`
+        case vm0.state.memory of
+          ConcreteMemory _ -> return Nothing  -- Can't safely explore with mutable memory
+          SymbolicMemory _ -> do
+            -- Save original merge state for proper backtracking
+            let originalDepth = ms.msNestingDepth
+                originalBudget = ms.msRemainingBudget
 
-        resultFallThrough <- speculateLoop conf targetPC
-
-        case resultFallThrough of
-          Just vm -> return (Just vm)  -- Fall-through converged
-          Nothing -> do
-            -- Fall-through failed, try jump path
-            -- Restore VM state AND merge state to original values
+            -- Try fall-through first (more thorough exploration)
             put vm0
-            assign (#state % #pc) nestedJumpTarget
             assign' (#state % #stack) stackAfterPop
-            -- Restore merge state to original, then increment depth for jump path
-            -- Give jump path half of the original budget
-            modifying #mergeState $ \_ -> ms
-              { msNestingDepth = originalDepth + 1
-              , msRemainingBudget = max 10 (originalBudget `div` 2)
-              }
+            modifying' (#state % #pc) (+ 1)  -- Move past JUMPI
+            modifying #mergeState $ \s -> s { msNestingDepth = s.msNestingDepth + 1 }
 
-            speculateLoop conf targetPC
+            resultFallThrough <- speculateLoop conf targetPC
+
+            case resultFallThrough of
+              Just vm -> return (Just vm)  -- Fall-through converged
+              Nothing -> do
+                -- Fall-through failed, try jump path
+                -- Restore VM state AND merge state to original values
+                put vm0
+                assign (#state % #pc) nestedJumpTarget
+                assign' (#state % #stack) stackAfterPop
+                -- Restore merge state to original, then increment depth for jump path
+                -- Give jump path half of the original budget
+                modifying #mergeState $ \_ -> ms
+                  { msNestingDepth = originalDepth + 1
+                  , msRemainingBudget = max 10 (originalBudget `div` 2)
+                  }
+
+                speculateLoop conf targetPC
 
 -- | Try to merge a forward jump (skip block pattern) for Symbolic execution
 -- Returns True if merge succeeded, False if we should fall back to forking
@@ -447,76 +453,82 @@ tryMergeForwardJump conf currentPC jumpTarget cond stackAfterPop = do
     else do
       vm0 <- get
 
-      -- Execute true branch (jump taken - skip the block)
-      -- Just set PC to jump target
-      assign (#state % #pc) jumpTarget
-      assign' (#state % #stack) stackAfterPop
-      vmTrue <- get
-      let trueStack = vmTrue.state.stack
+      -- CRITICAL: Skip merge if memory is mutable (ConcreteMemory)
+      -- Mutable memory is not properly restored by `put vm0` since only the
+      -- reference is restored, not the contents. This can cause state corruption.
+      case vm0.state.memory of
+        ConcreteMemory _ -> return False  -- Can't safely merge with mutable memory
+        SymbolicMemory _ -> do
+          -- Execute true branch (jump taken - skip the block)
+          -- Just set PC to jump target
+          assign (#state % #pc) jumpTarget
+          assign' (#state % #stack) stackAfterPop
+          vmTrue <- get
+          let trueStack = vmTrue.state.stack
 
-      -- Execute false branch (fall through - execute the block)
-      put vm0
-      assign' (#state % #stack) stackAfterPop
-      modifying' (#state % #pc) (+ 1)  -- Move past JUMPI
-      -- Now execute until we reach the jump target using budget-based exploration
-      maybeVmFalse <- execUntilPCSymbolic conf jumpTarget
-
-      case maybeVmFalse of
-        Nothing -> do
-          -- Couldn't converge - restore and return False
+          -- Execute false branch (fall through - execute the block)
           put vm0
-          return False
-        Just vmFalse -> do
-          let falseStack = vmFalse.state.stack
-              -- SOUNDNESS CHECKS: Only merge if NO side effects occurred
-              -- Be VERY conservative - any state change means we refuse to merge
+          assign' (#state % #stack) stackAfterPop
+          modifying' (#state % #pc) (+ 1)  -- Move past JUMPI
+          -- Now execute until we reach the jump target using budget-based exploration
+          maybeVmFalse <- execUntilPCSymbolic conf jumpTarget
 
-              -- FrameState checks
-              memoryUnchanged = case (vm0.state.memory, vmFalse.state.memory) of
-                (SymbolicMemory m1, SymbolicMemory m2) -> m1 == m2
-                _ -> False  -- Concrete memory can't be easily compared, refuse merge
-              memorySizeUnchanged = vm0.state.memorySize == vmFalse.state.memorySize
-              returndataUnchanged = vm0.state.returndata == vmFalse.state.returndata
-
-              -- VM state checks
-              storageUnchanged = vm0.env.contracts == vmFalse.env.contracts
-              logsUnchanged = vm0.logs == vmFalse.logs
-              constraintsUnchanged = vm0.constraints == vmFalse.constraints
-              keccakUnchanged = vm0.keccakPreImgs == vmFalse.keccakPreImgs
-              freshVarUnchanged = vm0.freshVar == vmFalse.freshVar
-
-              -- Call stack must be unchanged (no nested CALLs completed)
-              framesUnchanged = length vm0.frames == length vmFalse.frames
-
-              -- SubState checks (selfdestructs, touched accounts, refunds, created contracts)
-              subStateUnchanged = vm0.tx.subState == vmFalse.tx.subState
-
-              -- All soundness checks must pass
-              soundnessOK = memoryUnchanged && memorySizeUnchanged && returndataUnchanged
-                         && storageUnchanged && logsUnchanged && constraintsUnchanged
-                         && keccakUnchanged && freshVarUnchanged
-                         && framesUnchanged && subStateUnchanged
-          -- Check merge conditions: same stack depth AND no side effects
-          if length trueStack == length falseStack && soundnessOK
-            then do
-              -- Merge stacks using ITE expressions
-              let condSimp = Expr.simplify cond
-                  mergeExpr t f
-                    | t == f    = t
-                    | otherwise = ITE condSimp t f
-                  mergedStack = zipWith mergeExpr trueStack falseStack
-              -- Use vm0 as base (safer) and update only PC and stack
-              when conf.debug $ traceM $ "Merged at PC " ++ show jumpTarget
-              put vm0
-              assign (#state % #pc) jumpTarget
-              assign (#state % #stack) mergedStack
-              assign #result Nothing  -- Clear any result
-              assign (#mergeState % #msActive) False  -- Reset merge mode
-              return True
-            else do
-              -- Can't merge: stack depth, memory, or storage differs
+          case maybeVmFalse of
+            Nothing -> do
+              -- Couldn't converge - restore and return False
               put vm0
               return False
+            Just vmFalse -> do
+              let falseStack = vmFalse.state.stack
+                  -- SOUNDNESS CHECKS: Only merge if NO side effects occurred
+                  -- Be VERY conservative - any state change means we refuse to merge
+
+                  -- FrameState checks
+                  memoryUnchanged = case (vm0.state.memory, vmFalse.state.memory) of
+                    (SymbolicMemory m1, SymbolicMemory m2) -> m1 == m2
+                    _ -> False  -- Concrete memory can't be easily compared, refuse merge
+                  memorySizeUnchanged = vm0.state.memorySize == vmFalse.state.memorySize
+                  returndataUnchanged = vm0.state.returndata == vmFalse.state.returndata
+
+                  -- VM state checks
+                  storageUnchanged = vm0.env.contracts == vmFalse.env.contracts
+                  logsUnchanged = vm0.logs == vmFalse.logs
+                  constraintsUnchanged = vm0.constraints == vmFalse.constraints
+                  keccakUnchanged = vm0.keccakPreImgs == vmFalse.keccakPreImgs
+                  freshVarUnchanged = vm0.freshVar == vmFalse.freshVar
+
+                  -- Call stack must be unchanged (no nested CALLs completed)
+                  framesUnchanged = length vm0.frames == length vmFalse.frames
+
+                  -- SubState checks (selfdestructs, touched accounts, refunds, created contracts)
+                  subStateUnchanged = vm0.tx.subState == vmFalse.tx.subState
+
+                  -- All soundness checks must pass
+                  soundnessOK = memoryUnchanged && memorySizeUnchanged && returndataUnchanged
+                             && storageUnchanged && logsUnchanged && constraintsUnchanged
+                             && keccakUnchanged && freshVarUnchanged
+                             && framesUnchanged && subStateUnchanged
+              -- Check merge conditions: same stack depth AND no side effects
+              if length trueStack == length falseStack && soundnessOK
+                then do
+                  -- Merge stacks using ITE expressions
+                  let condSimp = Expr.simplify cond
+                      mergeExpr t f
+                        | t == f    = t
+                        | otherwise = ITE condSimp t f
+                      mergedStack = zipWith mergeExpr trueStack falseStack
+                  -- Use vm0 as base (safer) and update only PC and stack
+                  when conf.debug $ traceM $ "Merged at PC " ++ show jumpTarget
+                  put vm0
+                  assign (#state % #pc) jumpTarget
+                  assign (#state % #stack) mergedStack
+                  assign #result Nothing  -- Clear any result
+                  assign (#mergeState % #msActive) False  -- Reset merge mode
+                  return True
+                else do
+                  -- Can't merge: stack depth, memory, or storage differs
+                  put vm0
+                  return False
 
 -- | Executes the EVM one step
 exec1 :: forall (t :: VMType). (VMOps t, Typeable t) => Config ->  EVM t ()
@@ -3382,46 +3394,54 @@ instance VMOps Symbolic where
     vm0 <- get
     loc <- codeloc
 
-    -- Try path merging: execute both branches speculatively
-    continue True
-    trueResult <- use #result
-    truePC <- use (#state % #pc)
-    trueStack <- use (#state % #stack)
-
-    put vm0
-    continue False
-    falseResult <- use #result
-    falsePC <- use (#state % #pc)
-    falseStack <- use (#state % #stack)
-
-    -- Check if either branch triggered a query (HandleEffect) or ended in an error
-    -- If so, we can't safely merge and must fall back to normal forking
-    let trueHasEffect = case trueResult of
-          Just (HandleEffect _) -> True
-          Just (VMFailure _) -> True
-          _ -> False
-        falseHasEffect = case falseResult of
-          Just (HandleEffect _) -> True
-          Just (VMFailure _) -> True
-          _ -> False
-
-    -- Check if immediate merge is possible (same PC, same stack depth, no effects)
-    -- Note: Memory comparison skipped for now (Memory lacks Eq instance)
-    if not trueHasEffect && not falseHasEffect && truePC == falsePC && length trueStack == length falseStack
-      then do
-        -- Merge stacks using ITE expressions
-        let condSimp = Expr.simplify cond
-            mergeExpr t f
-              | t == f    = t
-              | otherwise = ITE condSimp t f
-            mergedStack = zipWith mergeExpr trueStack falseStack
-        assign (#state % #stack) mergedStack
-        -- PC is already correct (same on both branches)
-      else do
-        -- Fall back to original forking behavior
-        put vm0
+    -- CRITICAL: Skip merge optimization if memory is mutable (ConcreteMemory)
+    -- Mutable memory is not properly restored by `put vm0`
+    case vm0.state.memory of
+      ConcreteMemory _ -> do
+        -- Fall back to original forking behavior (no speculative execution)
         pathconds <- use #constraints
         query $ PleaseAskSMT cond pathconds (runBothPaths loc vm0.exploreDepth)
+      SymbolicMemory _ -> do
+        -- Try path merging: execute both branches speculatively
+        continue True
+        trueResult <- use #result
+        truePC <- use (#state % #pc)
+        trueStack <- use (#state % #stack)
+
+        put vm0
+        continue False
+        falseResult <- use #result
+        falsePC <- use (#state % #pc)
+        falseStack <- use (#state % #stack)
+
+        -- Check if either branch triggered a query (HandleEffect) or ended in an error
+        -- If so, we can't safely merge and must fall back to normal forking
+        let trueHasEffect = case trueResult of
+              Just (HandleEffect _) -> True
+              Just (VMFailure _) -> True
+              _ -> False
+            falseHasEffect = case falseResult of
+              Just (HandleEffect _) -> True
+              Just (VMFailure _) -> True
+              _ -> False
+
+        -- Check if immediate merge is possible (same PC, same stack depth, no effects)
+        -- Note: Memory comparison skipped for now (Memory lacks Eq instance)
+        if not trueHasEffect && not falseHasEffect && truePC == falsePC && length trueStack == length falseStack
+          then do
+            -- Merge stacks using ITE expressions
+            let condSimp = Expr.simplify cond
+                mergeExpr t f
+                  | t == f    = t
+                  | otherwise = ITE condSimp t f
+                mergedStack = zipWith mergeExpr trueStack falseStack
+            assign (#state % #stack) mergedStack
+            -- PC is already correct (same on both branches)
+          else do
+            -- Fall back to original forking behavior
+            put vm0
+            pathconds <- use #constraints
+            query $ PleaseAskSMT cond pathconds (runBothPaths loc vm0.exploreDepth)
     where
       runBothPaths loc _ (Case v) = do
         assign #result Nothing
