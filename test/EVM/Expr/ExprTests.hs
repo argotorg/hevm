@@ -5,6 +5,7 @@ import Test.Tasty.ExpectedFailure (ignoreTest)
 import Test.Tasty.HUnit
 
 import Data.Containers.ListUtils (nubOrd)
+import Data.List qualified as List (nub)
 import Data.Map.Strict qualified as Map
 
 import EVM.Expr qualified as Expr
@@ -19,6 +20,7 @@ unitTests = testGroup "Unit tests"
   [ simplificationTests
   , constantPropagationTests
   , boundPropagationTests
+  , comparisonTests
   ]
 
 simplificationTests :: TestTree
@@ -61,28 +63,28 @@ copySliceTests = testGroup "CopySlice tests"
 
 memoryTests :: TestTree
 memoryTests = testGroup "Memory tests"
-  [ testCase "read-write-same-byte"  $ assertEqual ""
+  [ testCase "read-write-same-byte" $ assertEqual ""
       (LitByte 0x12)
       (Expr.readByte (Lit 0x20) (WriteByte (Lit 0x20) (LitByte 0x12) mempty))
-  , testCase "read-write-same-word"  $ assertEqual ""
+  , testCase "read-write-same-word" $ assertEqual ""
       (Lit 0x12)
       (Expr.readWord (Lit 0x20) (WriteWord (Lit 0x20) (Lit 0x12) mempty))
-  , testCase "read-byte-write-word"  $ assertEqual ""
+  , testCase "read-byte-write-word" $ assertEqual ""
       -- reading at byte 31 a word that's been written should return LSB
       (LitByte 0x12)
       (Expr.readByte (Lit 0x1f) (WriteWord (Lit 0x0) (Lit 0x12) mempty))
-  , testCase "read-byte-write-word2"  $ assertEqual ""
+  , testCase "read-byte-write-word2" $ assertEqual ""
       -- Same as above, but offset not 0
       (LitByte 0x12)
       (Expr.readByte (Lit 0x20) (WriteWord (Lit 0x1) (Lit 0x12) mempty))
-  ,testCase "read-write-with-offset"  $ assertEqual ""
+  , testCase "read-write-with-offset" $ assertEqual ""
       -- 0x3F = 63 decimal, 0x20 = 32. 0x12 = 18
       --    We write 128bits (32 Bytes), representing 18 at offset 32.
       --    Hence, when reading out the 63rd byte, we should read out the LSB 8 bits
       --           which is 0x12
       (LitByte 0x12)
       (Expr.readByte (Lit 0x3F) (WriteWord (Lit 0x20) (Lit 0x12) mempty))
-  ,testCase "read-write-with-offset2"  $ assertEqual ""
+  , testCase "read-write-with-offset2" $ assertEqual ""
       --  0x20 = 32, 0x3D = 61
       --  we write 128 bits (32 Bytes) representing 0x10012, at offset 32.
       --  we then read out a byte at offset 61.
@@ -187,6 +189,17 @@ basicSimplificationTests = testGroup "Basic simplification tests"
   , testCase "simp-assoc-xor2" $ do
       let simp = Expr.simplify $ Xor (Lit 2) (Xor (Var "b") (Xor (Var "a") (Lit 3)))
       assertEqual "assoc rules" simp $ Xor (Lit 1) (Xor (Var "a") (Var "b"))
+  , testCase "sign-extend-conc-1" $ do
+      let p = Expr.sex (Lit 0) (Lit 0xff)
+      assertEqual "stuff" p (Lit Expr.maxLit)
+      let p2 = Expr.sex (Lit 30) (Lit 0xff)
+      assertEqual "stuff" p2 (Lit 0xff)
+      let p3 = Expr.sex (Lit 1) (Lit 0xff)
+      assertEqual "stuff" p3 (Lit 0xff)
+      let p4 = Expr.sex (Lit 0) (Lit 0x1)
+      assertEqual "stuff" p4 (Lit 0x1)
+      let p5 = Expr.sex (Lit 0) (Lit 0x0)
+      assertEqual "stuff" p5 (Lit 0x0)
   ]
 
 propSimplificationTests :: TestTree
@@ -412,3 +425,26 @@ boundPropagationTests =  testGroup "inequality-propagation-tests" [
   where
     mustContainFalse props = assertBool "Expression must simplify to False" $ (PBool False) `elem` props
     mustNotContainFalse props = assertBool "Expression must NOT simplify to False" $ (PBool False) `notElem` props
+
+comparisonTests :: TestTree
+comparisonTests = testGroup "Prop comparison tests"
+  [
+    testCase "nubOrd-Prop-PLT" $ do
+        let a = [ PLT (Lit 0x0) (ReadWord (ReadWord (Lit 0x0) (AbstractBuf "txdata")) (AbstractBuf "txdata"))
+                , PLT (Lit 0x1) (ReadWord (ReadWord (Lit 0x0) (AbstractBuf "txdata")) (AbstractBuf "txdata"))
+                , PLT (Lit 0x2) (ReadWord (ReadWord (Lit 0x0) (AbstractBuf "txdata")) (AbstractBuf "txdata"))
+                , PLT (Lit 0x0) (ReadWord (ReadWord (Lit 0x0) (AbstractBuf "txdata")) (AbstractBuf "txdata"))]
+        let simp = nubOrd a
+            simp2 = List.nub a
+        assertEqual "Must be 3-length" 3 (length simp)
+        assertEqual "Must be 3-length" 3 (length simp2)
+    , testCase "nubOrd-Prop-PEq" $ do
+        let a = [ PEq (Lit 0x0) (ReadWord (Lit 0x0) (AbstractBuf "txdata"))
+                , PEq (Lit 0x0) (ReadWord (Lit 0x1) (AbstractBuf "txdata"))
+                , PEq (Lit 0x0) (ReadWord (Lit 0x2) (AbstractBuf "txdata"))
+                , PEq (Lit 0x0) (ReadWord (Lit 0x0) (AbstractBuf "txdata"))]
+        let simp = nubOrd a
+            simp2 = List.nub a
+        assertEqual "Must be 3-length" 3 (length simp)
+        assertEqual "Must be 3-length" 3 (length simp2)
+  ]

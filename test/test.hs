@@ -51,7 +51,6 @@ import Test.Tasty.ExpectedFailure
 import Text.RE.TDFA.String
 import Text.RE.Replace
 import Witch (unsafeInto, into)
-import Data.Containers.ListUtils (nubOrd)
 
 import Optics.Core hiding (pre, re, elements)
 import Optics.State
@@ -4262,38 +4261,9 @@ tests = testGroup "hevm"
   ]
   , testGroup "prop-and-expr-properties"
   [
-    test "nubOrd-Prop-PLT" $ do
-        let a = [ PLT (Lit 0x0) (ReadWord (ReadWord (Lit 0x0) (AbstractBuf "txdata")) (AbstractBuf "txdata"))
-                , PLT (Lit 0x1) (ReadWord (ReadWord (Lit 0x0) (AbstractBuf "txdata")) (AbstractBuf "txdata"))
-                , PLT (Lit 0x2) (ReadWord (ReadWord (Lit 0x0) (AbstractBuf "txdata")) (AbstractBuf "txdata"))
-                , PLT (Lit 0x0) (ReadWord (ReadWord (Lit 0x0) (AbstractBuf "txdata")) (AbstractBuf "txdata"))]
-        let simp = nubOrd a
-            simp2 = List.nub a
-        assertEqualM "Must be 3-length" 3 (length simp)
-        assertEqualM "Must be 3-length" 3 (length simp2)
-    , test "nubOrd-Prop-PEq" $ do
-        let a = [ PEq (Lit 0x0) (ReadWord (Lit 0x0) (AbstractBuf "txdata"))
-                , PEq (Lit 0x0) (ReadWord (Lit 0x1) (AbstractBuf "txdata"))
-                , PEq (Lit 0x0) (ReadWord (Lit 0x2) (AbstractBuf "txdata"))
-                , PEq (Lit 0x0) (ReadWord (Lit 0x0) (AbstractBuf "txdata"))]
-        let simp = nubOrd a
-            simp2 = List.nub a
-        assertEqualM "Must be 3-length" 3 (length simp)
-        assertEqualM "Must be 3-length" 3 (length simp2)
     -- we run these without the simplifier inside `checkSatWithProps`, so
     -- we can test the SMT solver's ability to handle sign extension
-    , test "sign-extend-conc-1" $ do
-      let p = Expr.sex (Lit 0) (Lit 0xff)
-      assertEqualM "stuff" p (Expr.simplify (Sub (Lit 0) (Lit 1)))
-      let p2 = Expr.sex (Lit 30) (Lit 0xff)
-      assertEqualM "stuff" p2 (Lit 0xff)
-      let p3 = Expr.sex (Lit 1) (Lit 0xff)
-      assertEqualM "stuff" p3 (Lit 0xff)
-      let p4 = Expr.sex (Lit 0) (Lit 0x1)
-      assertEqualM "stuff" p4 (Lit 0x1)
-      let p5 = Expr.sex (Lit 0) (Lit 0x0)
-      assertEqualM "stuff" p5 (Lit 0x0)
-    , testNoSimplify "sign-extend-1" $ do
+    testNoSimplify "sign-extend-1" $ do
         let p = (PEq (Lit 1) (SLT (Lit 1774544) (SEx (Lit 2) (Lit 1774567))))
         let simp = Expr.simplifyProps [p]
         assertEqualM "Must simplify to PBool True" simp []
