@@ -1,7 +1,6 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE ImplicitParams #-}
-{-# LANGUAGE TypeAbstractions #-}
 
 module Main where
 
@@ -4165,8 +4164,9 @@ tests = testGroup "hevm"
         }
         |]
       let sig = (Sig "func(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])
-      (_, [Cex (_, ctr1), Cex (_, ctr2)]) <- withSolvers Bitwuzla 1 Nothing defMemLimit $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
-      putStrLnM  $ "expected counterexamples found.  ctr1: " <> (show ctr1) <> " ctr2: " <> (show ctr2)
+      (_, cexs) <- withSolvers Bitwuzla 1 Nothing defMemLimit $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
+      liftIO $ assertBool ("Expected at least 1 counterexample, got " ++ show (length cexs)) (length cexs >= 1)
+      putStrLnM  $ "expected counterexamples found (" <> show (length cexs) <> "): " <> show cexs
     , test "simple-fixed-value-store1" $ do
       Just c <- solcRuntime "MyContract"
         [i|

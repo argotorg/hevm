@@ -113,6 +113,7 @@ library
     EVM.Traversals,
     EVM.CSE,
     EVM.Keccak,
+    EVM.Merge,
     EVM.Transaction,
     EVM.Types,
     EVM.UnitTest,

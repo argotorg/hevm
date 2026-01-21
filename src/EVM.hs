@@ -16,6 +16,7 @@ import EVM.Expr (readStorage, concStoreContains, writeStorage, readByte, readWor
 import EVM.Expr qualified as Expr
 import EVM.FeeSchedule (FeeSchedule (..))
 import EVM.FeeSchedule qualified as Fees (feeSchedule)
+import EVM.Merge qualified as Merge
 import EVM.Op
 import EVM.Precompiled qualified
 import EVM.Solidity
@@ -27,7 +28,6 @@ import EVM.CheatsTH
 import EVM.Effects (Config (..))
 
 import Unsafe.Coerce (unsafeCoerce)
-import Debug.Trace (traceM)
 
 import Control.Monad (unless, when)
 import Control.Monad.ST (ST, RealWorld)
@@ -341,234 +341,6 @@ getOpW8 state = case state.code of
 
 getOpName :: forall (t :: VMType) . FrameState t -> [Char]
 getOpName state = intToOpName $ fromEnum $ getOpW8 state
-
--- | Check if executing from current state quickly leads to a REVERT
--- This is used to detect error-handling paths during merge mode
--- Returns True if the path reverts within maxSteps instructions
-quicklyReverts :: Config -> Int -> EVM Symbolic Bool
-quicklyReverts conf maxSteps = go maxSteps
-  where
-    go 0 = return False
-    go n = do
-      result <- use #result
-      case result of
-        Just (VMFailure _) -> return True
-        Just (VMSuccess _) -> return False
-        Just _ -> return False
-        Nothing -> do
-          exec1 conf
-          go (n - 1)
-
--- | Execute instructions speculatively until target PC is reached or we hit a branch/error
--- Uses budget-based exploration that tries both paths for nested JUMPIs
--- Parameters mergeMaxBudget and mergeMaxDepth are configured via Config
-execUntilPCSymbolic :: Config -> Int -> EVM Symbolic (Maybe (VM Symbolic))
-execUntilPCSymbolic conf targetPC = do
-    -- Initialize merge state for this speculation
-    let budget = conf.mergeMaxBudget
-    modifying #mergeState $ \ms -> ms
-      { msActive = True
-      , msTargetPC = targetPC
-      , msRemainingBudget = budget
-      , msNestingDepth = 0
-      }
-    result <- speculateLoop conf targetPC
-    -- Reset merge state
-    modifying #mergeState $ \ms -> ms { msActive = False }
-    return result
-
--- | Inner loop for speculative execution with budget tracking
-speculateLoop :: Config -> Int -> EVM Symbolic (Maybe (VM Symbolic))
-speculateLoop conf targetPC = do
-    ms <- use #mergeState
-    if ms.msRemainingBudget <= 0
-      then return Nothing  -- Budget exhausted
-      else do
-        pc <- use (#state % #pc)
-        result <- use #result
-        case result of
-          Just _ -> return Nothing  -- Hit error/return
-          Nothing
-            | pc == targetPC -> Just <$> get  -- Reached target
-            | otherwise -> do
-                -- Decrement budget and execute one instruction
-                modifying #mergeState $ \s -> s { msRemainingBudget = s.msRemainingBudget - 1 }
-                exec1 conf
-                speculateLoop conf targetPC
-
--- | When hitting nested JUMPI during speculation, try both paths
--- Returns Just vmState if BOTH paths converge to targetPC, Nothing otherwise
--- SOUNDNESS: We MUST require both paths to converge and merge them with ITE.
--- Picking one path arbitrarily would lose path constraint information.
-exploreNestedBranch :: Config -> Int -> Int -> Expr EWord -> [Expr EWord] -> EVM Symbolic (Maybe (VM Symbolic))
-exploreNestedBranch conf nestedJumpTarget targetPC cond stackAfterPop = do
-    ms <- use #mergeState
-    let maxDepth = conf.mergeMaxDepth
-
-    -- Check limits
-    if ms.msRemainingBudget <= 0 || ms.msNestingDepth >= maxDepth
-      then return Nothing
-      else do
-        vm0 <- get
-
-        -- CRITICAL: Skip if memory is mutable (ConcreteMemory)
-        -- Mutable memory is not properly restored by `put vm0`
-        case vm0.state.memory of
-          ConcreteMemory _ -> return Nothing  -- Can't safely explore with mutable memory
-          SymbolicMemory _ -> do
-            -- Save original merge state for proper backtracking
-            let originalDepth = ms.msNestingDepth
-                originalBudget = ms.msRemainingBudget
-                halfBudget = max 10 (originalBudget `div` 2)
-
-            -- Try fall-through path (cond == 0)
-            put vm0
-            assign' (#state % #stack) stackAfterPop
-            modifying' (#state % #pc) (+ 1)  -- Move past JUMPI
-            modifying #mergeState $ \s -> s
-              { msNestingDepth = s.msNestingDepth + 1
-              , msRemainingBudget = halfBudget
-              }
-
-            resultFallThrough <- speculateLoop conf targetPC
-
-            -- Restore state for jump path
-            put vm0
-            assign (#state % #pc) nestedJumpTarget
-            assign' (#state % #stack) stackAfterPop
-            modifying #mergeState $ \_ -> ms
-              { msNestingDepth = originalDepth + 1
-              , msRemainingBudget = halfBudget
-              }
-
-            -- Try jump path (cond != 0)
-            resultJump <- speculateLoop conf targetPC
-
-            -- SOUNDNESS: Both paths MUST converge for merge to be valid
-            case (resultFallThrough, resultJump) of
-              (Just vmFalse, Just vmTrue) -> do
-                -- Both paths converged - merge them using ITE
-                let falseStack = vmFalse.state.stack
-                    trueStack = vmTrue.state.stack
-                -- Check that stacks have same depth and no side effects
-                if length falseStack == length trueStack
-                   && checkNoSideEffects vm0 vmFalse
-                   && checkNoSideEffects vm0 vmTrue
-                  then do
-                    -- Merge stacks using ITE with the branch condition
-                    let condSimp = Expr.simplify cond
-                        mergeExpr t f
-                          | t == f    = t
-                          | otherwise = ITE condSimp t f
-                        mergedStack = zipWith mergeExpr trueStack falseStack
-                    -- Use vm0 as base and update PC and stack
-                    put vm0
-                    assign (#state % #pc) targetPC
-                    assign (#state % #stack) mergedStack
-                    assign #result Nothing
-                    modifying #mergeState $ \_ -> ms
-                      { msNestingDepth = originalDepth
-                      , msRemainingBudget = originalBudget - (originalBudget - halfBudget) * 2
-                      }
-                    Just <$> get
-                  else do
-                    -- Side effects or stack mismatch - can't merge
-                    put vm0
-                    return Nothing
-              _ -> do
-                -- One or both paths didn't converge - can't merge
-                put vm0
-                return Nothing
-  where
-    -- Check that execution had no side effects (storage, memory, logs, etc.)
-    checkNoSideEffects vm0 vmAfter =
-      let memoryUnchanged = case (vm0.state.memory, vmAfter.state.memory) of
-            (SymbolicMemory m1, SymbolicMemory m2) -> m1 == m2
-            _ -> False
-          memorySizeUnchanged = vm0.state.memorySize == vmAfter.state.memorySize
-          returndataUnchanged = vm0.state.returndata == vmAfter.state.returndata
-          storageUnchanged = vm0.env.contracts == vmAfter.env.contracts
-          logsUnchanged = vm0.logs == vmAfter.logs
-          constraintsUnchanged = vm0.constraints == vmAfter.constraints
-          keccakUnchanged = vm0.keccakPreImgs == vmAfter.keccakPreImgs
-          freshVarUnchanged = vm0.freshVar == vmAfter.freshVar
-          framesUnchanged = length vm0.frames == length vmAfter.frames
-          subStateUnchanged = vm0.tx.subState == vmAfter.tx.subState
-      in memoryUnchanged && memorySizeUnchanged && returndataUnchanged
-         && storageUnchanged && logsUnchanged && constraintsUnchanged
-         && keccakUnchanged && freshVarUnchanged
-         && framesUnchanged && subStateUnchanged
-
--- | Try to merge a forward jump (skip block pattern) for Symbolic execution
--- Returns True if merge succeeded, False if we should fall back to forking
--- SOUNDNESS: Both paths (jump and fall-through) must converge to the same PC,
--- have the same stack depth, and have no side effects. Only then can we merge.
-tryMergeForwardJump :: Config -> Int -> Int -> Expr EWord -> [Expr EWord] -> EVM Symbolic Bool
-tryMergeForwardJump conf currentPC jumpTarget cond stackAfterPop = do
-  -- Only handle forward jumps (skip block pattern)
-  if jumpTarget <= currentPC
-    then return False  -- Not a forward jump
-    else do
-      vm0 <- get
-
-      -- CRITICAL: Skip merge if memory is mutable (ConcreteMemory)
-      case vm0.state.memory of
-        ConcreteMemory _ -> return False
-        SymbolicMemory _ -> do
-          -- True branch (jump taken): Just sets PC to target, no execution needed
-          let trueStack = stackAfterPop  -- Stack after popping JUMPI args
-
-          -- False branch (fall through): Execute until we reach jump target
-          assign' (#state % #stack) stackAfterPop
-          modifying' (#state % #pc) (+ 1)  -- Move past JUMPI
-          maybeVmFalse <- execUntilPCSymbolic conf jumpTarget
-
-          case maybeVmFalse of
-            Nothing -> do
-              -- Couldn't converge - restore and return False
-              put vm0
-              return False
-            Just vmFalse -> do
-              let falseStack = vmFalse.state.stack
-                  -- SOUNDNESS CHECKS: Only merge if NO side effects occurred
-                  memoryUnchanged = case (vm0.state.memory, vmFalse.state.memory) of
-                    (SymbolicMemory m1, SymbolicMemory m2) -> m1 == m2
-                    _ -> False
-                  memorySizeUnchanged = vm0.state.memorySize == vmFalse.state.memorySize
-                  returndataUnchanged = vm0.state.returndata == vmFalse.state.returndata
-                  storageUnchanged = vm0.env.contracts == vmFalse.env.contracts
-                  logsUnchanged = vm0.logs == vmFalse.logs
-                  constraintsUnchanged = vm0.constraints == vmFalse.constraints
-                  keccakUnchanged = vm0.keccakPreImgs == vmFalse.keccakPreImgs
-                  freshVarUnchanged = vm0.freshVar == vmFalse.freshVar
-                  framesUnchanged = length vm0.frames == length vmFalse.frames
-                  subStateUnchanged = vm0.tx.subState == vmFalse.tx.subState
-                  soundnessOK = memoryUnchanged && memorySizeUnchanged && returndataUnchanged
-                             && storageUnchanged && logsUnchanged && constraintsUnchanged
-                             && keccakUnchanged && freshVarUnchanged
-                             && framesUnchanged && subStateUnchanged
-
-              -- Check merge conditions: same stack depth AND no side effects
-              if length trueStack == length falseStack && soundnessOK
-                then do
-                  -- Merge stacks using ITE expressions
-                  let condSimp = Expr.simplify cond
-                      mergeExpr t f
-                        | t == f    = t
-                        | otherwise = ITE condSimp t f
-                      mergedStack = zipWith mergeExpr trueStack falseStack
-                  -- Use vm0 as base and update only PC and stack
-                  when conf.debug $ traceM $ "Merged forward jump at PC " ++ show jumpTarget
-                  put vm0
-                  assign (#state % #pc) jumpTarget
-                  assign (#state % #stack) mergedStack
-                  assign #result Nothing
-                  assign (#mergeState % #msActive) False
-                  return True
-                else do
-                  -- Can't merge: stack depth or state differs
-                  put vm0
-                  return False
 
 -- | Executes the EVM one step
 exec1 :: forall (t :: VMType). (VMOps t, Typeable t) => Config ->  EVM t ()
@@ -1125,7 +897,7 @@ exec1 conf = do
                         if alreadyMerging
                           then do
                             -- Inside speculation: try both paths using budget-based exploration
-                            result <- exploreNestedBranch conf jumpTarget ms.msTargetPC y xs
+                            result <- Merge.exploreNestedBranch conf (exec1 conf) jumpTarget ms.msTargetPC y xs
                             case result of
                               Just vmFinal -> put vmFinal
                               Nothing -> do
@@ -1133,7 +905,7 @@ exec1 conf = do
                                 -- This will cause speculateLoop to return Nothing
                                 assign #result $ Just $ VMFailure BadJumpDestination
                           else do
-                            merged <- tryMergeForwardJump conf vm.state.pc jumpTarget y xs
+                            merged <- Merge.tryMergeForwardJump conf (exec1 conf) vm.state.pc jumpTarget y xs
                             unless merged $ do
                               -- Define Symbolic-specific jump for fallback
                               let jumpSym :: Bool -> EVM Symbolic ()
