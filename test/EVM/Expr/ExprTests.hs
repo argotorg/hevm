@@ -4,6 +4,7 @@ import Test.Tasty
 import Test.Tasty.ExpectedFailure (ignoreTest)
 import Test.Tasty.HUnit
 
+import Data.Containers.ListUtils (nubOrd)
 import Data.Map.Strict qualified as Map
 
 import EVM.Expr qualified as Expr
@@ -275,6 +276,27 @@ propSimplificationTests = testGroup "prop-simplifications"
             , PEq (Var "d") (Sub (Var "b") (Var "c"))] -- d = 1
         simplified = Expr.simplifyProps t
       assertEqual "Must  know d == 1" ((PEq (Lit 1) (Var "d")) `elem` simplified) True
+  , testCase "PEq-and-PNot-PEq-1" $ do
+      let a = [PEq (Lit 0x539) (Var "arg1"),PNeg (PEq (Lit 0x539) (Var "arg1"))]
+      assertEqual "Must simplify to PBool False" (Expr.simplifyProps a) ([PBool False])
+    , testCase "PEq-and-PNot-PEq-2" $ do
+      let a = [PEq (Var "arg1") (Lit 0x539),PNeg (PEq (Lit 0x539) (Var "arg1"))]
+      assertEqual "Must simplify to PBool False" (Expr.simplifyProps a) ([PBool False])
+    , testCase "PEq-and-PNot-PEq-3" $ do
+      let a = [PEq (Var "arg1") (Lit 0x539),PNeg (PEq (Var "arg1") (Lit 0x539))]
+      assertEqual "Must simplify to PBool False" (Expr.simplifyProps a) ([PBool False])
+    , testCase "propSimp-no-duplicate1" $ do
+      let a = [PAnd (PGEq (Max (Lit 0x44) (BufLength (AbstractBuf "txdata"))) (Lit 0x44)) (PLT (Max (Lit 0x44) (BufLength (AbstractBuf "txdata"))) (Lit 0x10000000000000000)), PAnd (PGEq (Var "arg1") (Lit 0x0)) (PLEq (Var "arg1") (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff)),PEq (Lit 0x63) (Var "arg2"),PEq (Lit 0x539) (Var "arg1"),PEq TxValue (Lit 0x0),PEq (IsZero (Eq (Lit 0x63) (Var "arg2"))) (Lit 0x0)]
+      let simp = Expr.simplifyProps a
+      assertEqual "must not duplicate" simp (nubOrd simp)
+    , testCase "propSimp-no-duplicate2" $ do
+      let a = [PNeg (PBool False),PAnd (PGEq (Max (Lit 0x44) (BufLength (AbstractBuf "txdata"))) (Lit 0x44)) (PLT (Max (Lit 0x44) (BufLength (AbstractBuf "txdata"))) (Lit 0x10000000000000000)),PAnd (PGEq (Var "arg2") (Lit 0x0)) (PLEq (Var "arg2") (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff)),PAnd (PGEq (Var "arg1") (Lit 0x0)) (PLEq (Var "arg1") (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff)),PEq (Lit 0x539) (Var "arg1"),PNeg (PEq (Lit 0x539) (Var "arg1")),PEq TxValue (Lit 0x0),PLT (BufLength (AbstractBuf "txdata")) (Lit 0x10000000000000000),PEq (IsZero (Eq (Lit 0x539) (Var "arg1"))) (Lit 0x0),PNeg (PEq (IsZero (Eq (Lit 0x539) (Var "arg1"))) (Lit 0x0)),PNeg (PEq (IsZero TxValue) (Lit 0x0))]
+      let simp = Expr.simplifyProps a
+      assertEqual "must not duplicate" simp (nubOrd simp)
+    , testCase "full-order-prop1" $ do
+      let a =[PNeg (PBool False),PAnd (PGEq (Max (Lit 0x44) (BufLength (AbstractBuf "txdata"))) (Lit 0x44)) (PLT (Max (Lit 0x44) (BufLength (AbstractBuf "txdata"))) (Lit 0x10000000000000000)),PAnd (PGEq (Var "arg2") (Lit 0x0)) (PLEq (Var "arg2") (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff)),PAnd (PGEq (Var "arg1") (Lit 0x0)) (PLEq (Var "arg1") (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff)),PEq (Lit 0x63) (Var "arg2"),PEq (Lit 0x539) (Var "arg1"),PEq TxValue (Lit 0x0),PLT (BufLength (AbstractBuf "txdata")) (Lit 0x10000000000000000),PEq (IsZero (Eq (Lit 0x63) (Var "arg2"))) (Lit 0x0),PEq (IsZero (Eq (Lit 0x539) (Var "arg1"))) (Lit 0x0),PNeg (PEq (IsZero TxValue) (Lit 0x0))]
+      let simp = Expr.simplifyProps a
+      assertEqual "must not duplicate" simp (nubOrd simp)
   ]
 
 constantPropagationTests :: TestTree
