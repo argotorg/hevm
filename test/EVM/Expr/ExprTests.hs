@@ -24,7 +24,9 @@ simplificationTests :: TestTree
 simplificationTests = testGroup "Expr-rewriting"
   [ storageTests
   , copySliceTests
+  , memoryTests
   , basicSimplificationTests
+  , propSimplificationTests
   ]
 
 storageTests :: TestTree
@@ -55,6 +57,84 @@ copySliceTests = testGroup "CopySlice tests"
         assertEqual "Not full simp" (Expr.simplify expr3) (AbstractBuf "buff")
         assertEqual "Not full simp" (Expr.simplify expr4) $ CopySlice (Lit 0x0) (Lit 0x0) (BufLength (AbstractBuf "buff")) (AbstractBuf "buff") (ConcreteBuf "aasdfasdf")
   ]
+
+memoryTests :: TestTree
+memoryTests = testGroup "Memory tests"
+  [ testCase "read-write-same-byte"  $ assertEqual ""
+      (LitByte 0x12)
+      (Expr.readByte (Lit 0x20) (WriteByte (Lit 0x20) (LitByte 0x12) mempty))
+  , testCase "read-write-same-word"  $ assertEqual ""
+      (Lit 0x12)
+      (Expr.readWord (Lit 0x20) (WriteWord (Lit 0x20) (Lit 0x12) mempty))
+  , testCase "read-byte-write-word"  $ assertEqual ""
+      -- reading at byte 31 a word that's been written should return LSB
+      (LitByte 0x12)
+      (Expr.readByte (Lit 0x1f) (WriteWord (Lit 0x0) (Lit 0x12) mempty))
+  , testCase "read-byte-write-word2"  $ assertEqual ""
+      -- Same as above, but offset not 0
+      (LitByte 0x12)
+      (Expr.readByte (Lit 0x20) (WriteWord (Lit 0x1) (Lit 0x12) mempty))
+  ,testCase "read-write-with-offset"  $ assertEqual ""
+      -- 0x3F = 63 decimal, 0x20 = 32. 0x12 = 18
+      --    We write 128bits (32 Bytes), representing 18 at offset 32.
+      --    Hence, when reading out the 63rd byte, we should read out the LSB 8 bits
+      --           which is 0x12
+      (LitByte 0x12)
+      (Expr.readByte (Lit 0x3F) (WriteWord (Lit 0x20) (Lit 0x12) mempty))
+  ,testCase "read-write-with-offset2"  $ assertEqual ""
+      --  0x20 = 32, 0x3D = 61
+      --  we write 128 bits (32 Bytes) representing 0x10012, at offset 32.
+      --  we then read out a byte at offset 61.
+      --  So, at 63 we'd read 0x12, at 62 we'd read 0x00, at 61 we should read 0x1
+      (LitByte 0x1)
+      (Expr.readByte (Lit 0x3D) (WriteWord (Lit 0x20) (Lit 0x10012) mempty))
+  , testCase "read-write-with-extension-to-zero" $ assertEqual ""
+      -- write word and read it at the same place (i.e. 0 offset)
+      (Lit 0x12)
+      (Expr.readWord (Lit 0x0) (WriteWord (Lit 0x0) (Lit 0x12) mempty))
+  , testCase "read-write-with-extension-to-zero-with-offset" $ assertEqual ""
+      -- write word and read it at the same offset of 4
+      (Lit 0x12)
+      (Expr.readWord (Lit 0x4) (WriteWord (Lit 0x4) (Lit 0x12) mempty))
+  , testCase "read-write-with-extension-to-zero-with-offset2" $ assertEqual ""
+      -- write word and read it at the same offset of 16
+      (Lit 0x12)
+      (Expr.readWord (Lit 0x20) (WriteWord (Lit 0x20) (Lit 0x12) mempty))
+  , testCase "read-word-over-write-byte" $ assertEqual ""
+      (ReadWord (Lit 0x4) (AbstractBuf "abs"))
+      (Expr.readWord (Lit 0x4) (WriteByte (Lit 0x1) (LitByte 0x12) (AbstractBuf "abs")))
+  , testCase "read-word-copySlice-overlap" $ assertEqual ""
+      -- we should not recurse into a copySlice if the read index + 32 overlaps the sliced region
+      (ReadWord (Lit 40) (CopySlice (Lit 0) (Lit 30) (Lit 12) (WriteWord (Lit 10) (Lit 0x64) (AbstractBuf "hi")) (AbstractBuf "hi")))
+      (Expr.readWord (Lit 40) (CopySlice (Lit 0) (Lit 30) (Lit 12) (WriteWord (Lit 10) (Lit 0x64) (AbstractBuf "hi")) (AbstractBuf "hi")))
+  , testCase "read-word-copySlice-after-slice" $ assertEqual "Read word simplification missing!"
+      (ReadWord (Lit 100) (AbstractBuf "dst"))
+      (Expr.readWord (Lit 100) (CopySlice (Var "srcOff") (Lit 12) (Lit 60) (AbstractBuf "src") (AbstractBuf "dst")))
+  , testCase "indexword-MSB" $ assertEqual ""
+      -- 31st is the LSB byte (of 32)
+      (LitByte 0x78)
+      (Expr.indexWord (Lit 31) (Lit 0x12345678))
+  , testCase "indexword-LSB" $ assertEqual ""
+      -- 0th is the MSB byte (of 32), Lit 0xff22bb... is exactly 32 Bytes.
+      (LitByte 0xff)
+      (Expr.indexWord (Lit 0) (Lit 0xff22bb4455667788990011223344556677889900112233445566778899001122))
+  , testCase "indexword-LSB2" $ assertEqual ""
+      -- same as above, but with offset 2
+      (LitByte 0xbb)
+      (Expr.indexWord (Lit 2) (Lit 0xff22bb4455667788990011223344556677889900112233445566778899001122))
+  , testCase "indexword-oob-sym" $ assertEqual ""
+      -- indexWord should return 0 for oob access
+      (LitByte 0x0)
+      (Expr.indexWord (Lit 100) (JoinBytes
+        (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0)
+        (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0)
+        (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0)
+        (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0)))
+  , testCase "stripbytes-concrete-bug" $ assertEqual ""
+      (Expr.simplifyReads (ReadByte (Lit 0) (ConcreteBuf "5")))
+      (LitByte 53)
+  ]
+
 basicSimplificationTests :: TestTree
 basicSimplificationTests = testGroup "Basic simplification tests"
   [ testCase "simp-readByte1" $ do
@@ -106,6 +186,95 @@ basicSimplificationTests = testGroup "Basic simplification tests"
   , testCase "simp-assoc-xor2" $ do
       let simp = Expr.simplify $ Xor (Lit 2) (Xor (Var "b") (Xor (Var "a") (Lit 3)))
       assertEqual "assoc rules" simp $ Xor (Lit 1) (Xor (Var "a") (Var "b"))
+  ]
+
+propSimplificationTests :: TestTree
+propSimplificationTests = testGroup "prop-simplifications"
+  [ testCase "simpProp-concrete-trues" $ do
+      let
+        t = [PBool True, PBool True]
+        simplified = Expr.simplifyProps t
+      assertEqual "Must be equal" [] simplified
+  , testCase "simpProp-concrete-false1" $ do
+      let
+        t = [PBool True, PBool False]
+        simplified = Expr.simplifyProps t
+      assertEqual "Must be equal" [PBool False] simplified
+  , testCase "simpProp-concrete-false2" $ do
+      let
+        t = [PBool False, PBool False]
+        simplified = Expr.simplifyProps t
+      assertEqual "Must be equal" [PBool False] simplified
+  , testCase "simpProp-concrete-or-1" $ do
+      let
+        -- a = 5 && (a=4 || a=3)  -> False
+        t = [PEq (Lit 5) (Var "a"), POr (PEq (Var "a") (Lit 4)) (PEq (Var "a") (Lit 3))]
+        simplified = Expr.simplifyProps t
+      assertEqual "Must be equal" [PBool False] simplified
+  , ignoreTest $ testCase "simpProp-concrete-or-2" $ do
+      let
+        -- Currently does not work, because we don't do simplification inside
+        --   POr/PAnd using canBeSat
+        -- a = 5 && (a=4 || a=5)  -> a=5
+        t = [PEq (Lit 5) (Var "a"), POr (PEq (Var "a") (Lit 4)) (PEq (Var "a") (Lit 5))]
+        simplified = Expr.simplifyProps t
+      assertEqual "Must be equal" [] simplified
+  , testCase "simpProp-concrete-and-1" $ do
+      let
+        -- a = 5 && (a=4 && a=3)  -> False
+        t = [PEq (Lit 5) (Var "a"), PAnd (PEq (Var "a") (Lit 4)) (PEq (Var "a") (Lit 3))]
+        simplified = Expr.simplifyProps t
+      assertEqual "Must be equal" [PBool False] simplified
+  , testCase "simpProp-concrete-or-of-or" $ do
+      let
+        -- a = 5 && ((a=4 || a=6) || a=3)  -> False
+        t = [PEq (Lit 5) (Var "a"), POr (POr (PEq (Var "a") (Lit 4)) (PEq (Var "a") (Lit 6))) (PEq (Var "a") (Lit 3))]
+        simplified = Expr.simplifyProps t
+      assertEqual "Must be equal" [PBool False] simplified
+  , testCase "simpProp-inner-expr-simp" $ do
+      let
+        -- 5+1 = 6
+        t = [PEq (Add (Lit 5) (Lit 1)) (Var "a")]
+        simplified = Expr.simplifyProps t
+      assertEqual "Must be equal" [PEq (Lit 6) (Var "a")] simplified
+  , testCase "simpProp-inner-expr-simp-with-canBeSat" $ do
+      let
+        -- 5+1 = 6, 6 != 7
+        t = [PAnd (PEq (Add (Lit 5) (Lit 1)) (Var "a")) (PEq (Var "a") (Lit 7))]
+        simplified = Expr.simplifyProps t
+      assertEqual "Must be equal" [PBool False] simplified
+  , testCase "simpProp-inner-expr-bitwise-and" $ do
+      let
+        -- 1 & 2 != 2
+        t = [PEq (And (Lit 1) (Lit 2)) (Lit 2)]
+        simplified = Expr.simplifyProps t
+      assertEqual "Must be equal" [PBool False] simplified
+  , testCase "simpProp-inner-expr-bitwise-or" $ do
+      let
+        -- 2 | 4 == 6
+        t = [PEq (Or (Lit 2) (Lit 4)) (Lit 6)]
+        simplified = Expr.simplifyProps t
+      assertEqual "Must be equal" [] simplified
+  , testCase "simpProp-constpropagate-1" $ do
+      let
+        -- 5+1 = 6
+        t = [PEq (Add (Lit 5) (Lit 1)) (Var "a"), PEq (Var "b") (Var "a")]
+        simplified = Expr.simplifyProps t
+      assertEqual "Must be equal" [PEq (Lit 6) (Var "a"), PEq (Lit 6) (Var "b")] simplified
+  , testCase "simpProp-constpropagate-2" $ do
+      let
+        -- 5+1 = 6
+        t = [PEq (Add (Lit 5) (Lit 1)) (Var "a"), PEq (Var "b") (Var "a"), PEq (Var "c") (Sub (Var "b") (Lit 1))]
+        simplified = Expr.simplifyProps t
+      assertEqual "Must be equal" [PEq (Lit 6) (Var "a"), PEq (Lit 6) (Var "b"), PEq (Lit 5) (Var "c")] simplified
+  , testCase "simpProp-constpropagate-3" $ do
+      let
+        t = [ PEq (Add (Lit 5) (Lit 1)) (Var "a") -- a = 6
+            , PEq (Var "b") (Var "a")             -- b = 6
+            , PEq (Var "c") (Sub (Var "b") (Lit 1)) -- c = 5
+            , PEq (Var "d") (Sub (Var "b") (Var "c"))] -- d = 1
+        simplified = Expr.simplifyProps t
+      assertEqual "Must  know d == 1" ((PEq (Lit 1) (Var "d")) `elem` simplified) True
   ]
 
 constantPropagationTests :: TestTree
