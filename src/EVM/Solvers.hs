@@ -384,15 +384,18 @@ getModel inst cexvars = runMaybeT $ do
           -- TODO: do I need to check the write idx here?
           (Write _ idx next) -> idx <= 32 && go (Comp next)
 
+
+-- Takes Maybe seconds, returns seconds
 mkTimeout :: Maybe Natural -> Natural
 mkTimeout = fromMaybe 300
 
 -- | Arguments used when spawning a solver instance
-solverArgs :: Solver -> [Text]
-solverArgs solver = case solver of
+solverArgs :: Solver -> Maybe Natural -> [Text]
+solverArgs solver timeout = case solver of
   Bitwuzla ->
     [ "--lang=smt2"
     , "--produce-models"
+    , "--time-limit-per=" <> millisecs
     , "--bv-solver=preprop"
     , "--bv-output-format=16"
     ]
@@ -405,10 +408,12 @@ solverArgs solver = case solver of
     , "--print-success"
     , "--interactive"
     , "--incremental"
+    , "--tlimit-per=" <> millisecs
     , "--arrays-exp"
     ]
   EmptySolver -> []
   Custom _ -> []
+  where millisecs = T.pack $ show $ 1000 * (mkTimeout timeout)
 
 -- | Spawns a solver instance, and sets the various global config options that we use for our queries
 spawnSolver :: Solver -> Maybe (Natural) -> Natural -> IO SolverInstance
@@ -443,7 +448,7 @@ spawnSolver solver timeout maxMemoryMB = do
   (readout, writeout) <- createPipe
   let timeoutSeconds = mkTimeout timeout
       solverCmd = show solver
-      solverArgsStr = fmap T.unpack $ solverArgs solver
+      solverArgsStr = fmap T.unpack $ solverArgs solver timeout
       -- Linux: both CPU and memory limits work
       -- ulimit -v sets RLIMIT_AS (kernel-enforced virtual memory limit in KB)
       shellCmd = "sh"
