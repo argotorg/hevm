@@ -10,7 +10,7 @@ execution of HEVM and check that against evmtool from go-ethereum. Re-using some
 of this code, we also generate a symbolic expression then evaluate it
 concretely through Expr.simplify, then check that against evmtool's output.
 -}
-module EVM.Test.FuzzSymExec where
+module EVM.Test.FuzzSymExec (tests) where
 
 import Control.Monad (when)
 import Control.Monad.IO.Unlift
@@ -148,20 +148,6 @@ instance JSON.ToJSON EVMToolEnv where
                               Lit a -> a
                               _ -> internalError "Timestamp needs to be a Lit"
 
-emptyEvmToolEnv :: EVMToolEnv
-emptyEvmToolEnv = EVMToolEnv { coinbase = 0
-                             , timestamp = Lit 0
-                             , number     = Lit 0
-                             , gasLimit   = 0xffffffffffffffff
-                             , baseFee    = 0
-                             , maxCodeSize= 0xffffffff
-                             , schedule   = feeSchedule
-                             , blockHashes = mempty
-                             , withdrawals = mempty
-                             , currentRandom = 42
-                             , parentBeaconBlockRoot = 5
-                             }
-
 data EVMToolReceipt =
   EVMToolReceipt
     { _type :: String
@@ -223,11 +209,6 @@ instance JSON.ToJSON EVMToolAlloc where
                          , ("nonce", (JSON.toJSON b.nonce))
                          ]
 
-emptyEVMToolAlloc :: EVMToolAlloc
-emptyEVMToolAlloc = EVMToolAlloc { balance = 0
-                                 , code = mempty
-                                 , nonce = 0
-                                 }
 -- Sets up common parts such as TX, origin contract, and environment that can
 -- later be used to create & execute either an evmtool (from go-ethereum) or an
 -- HEVM transaction. Some elements here are hard-coded such as the secret key,
@@ -680,18 +661,6 @@ genContract n = do
 
 randItem :: [a] -> IO a
 randItem = generate . Test.QuickCheck.elements
-
-getOpFromVM :: VM t -> Word8
-getOpFromVM vm =
-  let pcpos  = vm ^. #state % #pc
-      code' = vm ^. #state % #code
-      xs = case code' of
-        UnknownCode _ -> internalError "UnknownCode instead of RuntimeCode"
-        InitCode bs _ -> BS.drop pcpos bs
-        RuntimeCode (ConcreteRuntimeCode xs') -> BS.drop pcpos xs'
-        RuntimeCode (SymbolicRuntimeCode _) -> internalError "RuntimeCode is symbolic"
-  in if xs == BS.empty then 0
-                       else BS.head xs
 
 testEnv :: Env
 testEnv = Env { config = defaultConfig }
