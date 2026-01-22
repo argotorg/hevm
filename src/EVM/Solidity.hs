@@ -77,7 +77,6 @@ import Data.Sequence (Seq)
 import Data.Text (pack, intercalate)
 import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8, decodeUtf8)
-import Data.Text.IO (writeFile)
 import Data.Vector (Vector)
 import Data.Vector qualified as Vector
 import Data.Word (Word8)
@@ -250,6 +249,9 @@ data SrcMapParseState
 data CodeType = Creation | Runtime
   deriving (Show, Eq, Ord)
 
+type ContractName = Text
+type SourceCode = Text
+
 -- Obscure but efficient parser for the Solidity sourcemap format.
 makeSrcMaps :: Text -> Maybe (Seq SrcMap)
 makeSrcMaps = (\case (_, Fe, _) -> Nothing; x -> Just (done x))
@@ -391,31 +393,24 @@ yul' contractName src deployed = do
       bytecode = c ^?! key "evm" ^?! key (if deployed then "deployedBytecode" else "bytecode") ^?! key "object" % _String
   pure $ toCode contractName bytecode
 
-solidity
-  :: (MonadUnliftIO m)
-  => Text -> Text -> m (Maybe ByteString)
-solidity contract src = liftIO $ do
-  json <- solc Solidity src False
-  case readStdJSON json of
-      Right (Contracts sol) -> pure $ Map.lookup ("hevm.sol:" <> contract) sol <&> (.creationCode)
-      Left e -> internalError $ "unable to parse solidity output:\n" <> (T.unpack json) <> "\n" <> show e
+solidity :: MonadIO m => ContractName -> SourceCode -> m (Maybe ByteString)
+solidity contract src = solcCode contract src Creation False
 
-solcRuntime'
-  :: App m
-  => Text -> Text -> Bool -> m (Maybe ByteString)
-solcRuntime' contract src viaIR = do
-  conf <- readConfig
-  liftIO $ do
-    json <- solc Solidity src viaIR
-    when conf.dumpExprs $ liftIO $ Data.Text.IO.writeFile "compiled_code.json" json
-    case readStdJSON json of
-      Right (Contracts sol) -> pure $ Map.lookup ("hevm.sol:" <> contract) sol <&> (.runtimeCode)
-      Left _ -> internalError $ "unable to parse solidity output:\n" <> (T.unpack json)
+solcRuntime' :: MonadIO m => ContractName -> SourceCode -> Bool -> m (Maybe ByteString)
+solcRuntime' contract src viaIR = solcCode contract src Runtime viaIR
 
-solcRuntime
-  :: App m
-  => Text -> Text -> m (Maybe ByteString)
+solcRuntime :: MonadIO m => ContractName -> SourceCode -> m (Maybe ByteString)
 solcRuntime contract src = solcRuntime' contract src False
+
+solcCode :: MonadIO m => ContractName -> SourceCode -> CodeType -> Bool -> m (Maybe ByteString)
+solcCode contract src codeType viaIR = liftIO $ do
+  json <- solc Solidity src viaIR
+  case readStdJSON json of
+    Right (Contracts sol) -> pure $ Map.lookup ("hevm.sol:" <> contract) sol
+      <&> case codeType of
+            Creation -> (.creationCode)
+            Runtime -> (.runtimeCode)
+    Left e -> internalError $ "unable to parse solidity output:\n" <> (T.unpack json) <> "\n" <> show e
 
 functionAbi :: Text -> IO Method
 functionAbi f = do
