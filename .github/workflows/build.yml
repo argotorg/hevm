@@ -13,14 +13,13 @@ jobs:
   nix-build:
     strategy:
       matrix:
-        runtime: [ linux-x64, osx-x64, osx-arm64 ]
         include:
         - runtime: linux-x64
           os: ubuntu-latest
-
+        - runtime: linux-arm64
+          os: ubuntu-24.04-arm
         - runtime: osx-x64
           os: macos-15-intel
-
         - runtime: osx-arm64
           os: macos-15
 

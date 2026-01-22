@@ -18,6 +18,7 @@ import Data.Bits hiding (And, Xor)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Base16 qualified as BS16
+import Data.ByteString.Lazy qualified as BSLazy
 import Data.Binary.Put (runPut)
 import Data.Binary.Get (runGetOrFail)
 import Data.DoubleWord
@@ -50,8 +51,8 @@ import Test.Tasty.Runners hiding (Failure, Success)
 import Test.Tasty.ExpectedFailure
 import Text.RE.TDFA.String
 import Text.RE.Replace
+import Text.ParserCombinators.ReadP (readP_to_S)
 import Witch (unsafeInto, into)
-import Data.Containers.ListUtils (nubOrd)
 
 import Optics.Core hiding (pre, re, elements)
 import Optics.State
@@ -78,6 +79,8 @@ import EVM.Effects
 import EVM.UnitTest (writeTrace, printWarnings)
 import EVM.Expr (maybeLitByteSimp)
 import EVM.Keccak (concreteKeccaks)
+
+import EVM.Expr.ExprTests qualified as ExprTests
 
 testEnv :: Env
 testEnv = Env { config = defaultConfig {
@@ -135,6 +138,7 @@ runSubSet p = defaultMain . applyPattern p $ tests
 tests :: TestTree
 tests = testGroup "hevm"
   [ FuzzSymExec.tests
+  , ExprTests.tests
   , testGroup "simplify-storage"
     [ test "simplify-storage-array-only-static" $ do
        Just c <- solcRuntime "MyContract"
@@ -508,16 +512,7 @@ tests = testGroup "hevm"
        assertEqualM "Expression should simplify to value." simp (Lit 0xacab)
     ]
   , testGroup "StorageTests"
-    [ test "read-from-sstore" $ assertEqualM ""
-        (Lit 0xab)
-        (Expr.readStorage' (Lit 0x0) (SStore (Lit 0x0) (Lit 0xab) (AbstractStore (LitAddr 0x0) Nothing)))
-    , test "read-from-concrete" $ assertEqualM ""
-        (Lit 0xab)
-        (Expr.readStorage' (Lit 0x0) (ConcreteStore $ Map.fromList [(0x0, 0xab)]))
-    , test "read-past-write" $ assertEqualM ""
-        (Lit 0xab)
-        (Expr.readStorage' (Lit 0x0) (SStore (Lit 0x1) (Var "b") (ConcreteStore $ Map.fromList [(0x0, 0xab)])))
-    , test "accessStorage uses fetchedStorage" $ do
+    [ test "accessStorage uses fetchedStorage" $ do
         let dummyContract =
               (initialContract (RuntimeCode (ConcreteRuntimeCode mempty)))
                 { external = True }
@@ -547,16 +542,6 @@ tests = testGroup "hevm"
         let e = ReadByte (Lit 0x0) (WriteWord (Lit 0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffd) (Lit 0x0) (ConcreteBuf "\255\255\255\255"))
         b <- checkEquiv e (Expr.simplify e)
         assertBoolM "Simplifier failed" b
-    , test "copyslice-simps" $ do
-        let e a b =  CopySlice (Lit 0) (Lit 0) (BufLength (AbstractBuf "buff")) (CopySlice (Lit 0) (Lit 0) (BufLength (AbstractBuf "buff")) (AbstractBuf "buff") (ConcreteBuf a)) (ConcreteBuf b)
-            expr1 = e "" ""
-            expr2 = e "" "aasdfasdf"
-            expr3 = e "9832478932" ""
-            expr4 = e "9832478932" "aasdfasdf"
-        assertEqualM "Not full simp" (Expr.simplify expr1) (AbstractBuf "buff")
-        assertEqualM "Not full simp" (Expr.simplify expr2) $ CopySlice (Lit 0x0) (Lit 0x0) (BufLength (AbstractBuf "buff")) (AbstractBuf "buff") (ConcreteBuf "aasdfasdf")
-        assertEqualM "Not full simp" (Expr.simplify expr3) (AbstractBuf "buff")
-        assertEqualM "Not full simp" (Expr.simplify expr4) $ CopySlice (Lit 0x0) (Lit 0x0) (BufLength (AbstractBuf "buff")) (AbstractBuf "buff") (ConcreteBuf "aasdfasdf")
     , test "buffer-length-copy-slice-beyond-source1" $ do
         let e = BufLength (CopySlice (Lit 0x2) (Lit 0x2) (Lit 0x1) (ConcreteBuf "a") (ConcreteBuf ""))
         b <- checkEquiv e (Expr.simplify e)
@@ -565,13 +550,6 @@ tests = testGroup "hevm"
         let e = BufLength (CopySlice (Lit 0x2) (Lit 0x2) (Lit 0x1) (ConcreteBuf "") (ConcreteBuf ""))
         b <- checkEquiv e (Expr.simplify e)
         assertBoolM "Simplifier failed" b
-    , test "simp-readByte1" $ do
-      let srcOffset = (ReadWord (Lit 0x1) (AbstractBuf "stuff1"))
-          size = (ReadWord (Lit 0x1) (AbstractBuf "stuff2"))
-          src = (AbstractBuf "stuff2")
-          e = ReadByte (Lit 0x0) (CopySlice srcOffset (Lit 0x10) size src (AbstractBuf "dst"))
-          simp = Expr.simplify e
-      assertEqualM "readByte simplification" simp (ReadByte (Lit 0x0) (AbstractBuf "dst"))
     , test "simp-readByte2" $ do
       let srcOffset = (ReadWord (Lit 0x1) (AbstractBuf "stuff1"))
           size = (Lit 0x1)
@@ -595,48 +573,6 @@ tests = testGroup "hevm"
           simp = Expr.simplify e
       res <- checkEquiv e simp
       assertEqualM "readWord simplification"  res True
-    , test "simp-max-buflength" $ do
-      let simp = Expr.simplify $ Max (Lit 0) (BufLength (AbstractBuf "txdata"))
-      assertEqualM "max-buflength rules" simp $ BufLength (AbstractBuf "txdata")
-    , test "simp-PLT-max" $ do
-      let simp = Expr.simplifyProp $ PLT (Max (Lit 5) (BufLength (AbstractBuf "txdata"))) (Lit 99)
-      assertEqualM "max-buflength rules" simp $ PLT (BufLength (AbstractBuf "txdata")) (Lit 99)
-    , test "simp-assoc-add1" $ do
-      let simp = Expr.simplify $        Add (Add (Var "c") (Var "a")) (Var "b")
-      assertEqualM "assoc rules" simp $ Add (Var "a") (Add (Var "b") (Var "c"))
-    , test "simp-assoc-add2" $ do
-      let simp = Expr.simplify $        Add (Add (Lit 1) (Var "c")) (Var "b")
-      assertEqualM "assoc rules" simp $ Add (Lit 1) (Add (Var "b") (Var "c"))
-    , test "simp-assoc-add3" $ do
-      let simp = Expr.simplify $        Add (Lit 1) (Add (Lit 2) (Var "c"))
-      assertEqualM "assoc rules" simp $ Add (Lit 3) (Var "c")
-    , test "simp-assoc-add4" $ do
-      let simp = Expr.simplify $        Add (Lit 1) (Add (Var "b") (Lit 2))
-      assertEqualM "assoc rules" simp $ Add (Lit 3) (Var "b")
-    , test "simp-assoc-add5" $ do
-      let simp = Expr.simplify $        Add (Var "a") (Add (Lit 1) (Lit 2))
-      assertEqualM "assoc rules" simp $ Add (Lit 3) (Var "a")
-    , test "simp-assoc-add6" $ do
-      let simp = Expr.simplify $        Add (Lit 7) (Add (Lit 1) (Lit 2))
-      assertEqualM "assoc rules" simp $ Lit 10
-    , test "simp-assoc-add-7" $ do
-      let simp = Expr.simplify $        Add (Var "a") (Add (Var "b") (Lit 2))
-      assertEqualM "assoc rules" simp $ Add (Lit 2) (Add (Var "a") (Var "b"))
-    , test "simp-assoc-add8" $ do
-      let simp = Expr.simplify $        Add (Add (Var "a") (Add (Lit 0x2) (Var "b"))) (Add (Var "c") (Add (Lit 0x2) (Var "d")))
-      assertEqualM "assoc rules" simp $ Add (Lit 4) (Add (Var "a") (Add (Var "b") (Add (Var "c") (Var "d"))))
-    , test "simp-assoc-mul1" $ do
-      let simp = Expr.simplify $        Mul (Mul (Var "b") (Var "a")) (Var "c")
-      assertEqualM "assoc rules" simp $ Mul (Var "a") (Mul (Var "b") (Var "c"))
-    , test "simp-assoc-mul2" $ do
-      let simp = Expr.simplify       $  Mul (Lit 2) (Mul (Var "a") (Lit 3))
-      assertEqualM "assoc rules" simp $ Mul (Lit 6) (Var "a")
-    , test "simp-assoc-xor1" $ do
-      let simp = Expr.simplify       $  Xor (Lit 2) (Xor (Var "a") (Lit 3))
-      assertEqualM "assoc rules" simp $ Xor (Lit 1) (Var "a")
-    , test "simp-assoc-xor2" $ do
-      let simp = Expr.simplify       $  Xor (Lit 2) (Xor (Var "b") (Xor (Var "a") (Lit 3)))
-      assertEqualM "assoc rules" simp $ Xor (Lit 1) (Xor (Var "a") (Var "b"))
     , test "simp-zero-write-extend-buffer-len" $ do
         let
           expr = BufLength $ CopySlice (Lit 0) (Lit 0x10) (Lit 0) (AbstractBuf "buffer") (ConcreteBuf "bimm")
@@ -878,261 +814,6 @@ tests = testGroup "hevm"
         assertEqualM "Must be equal" True equal
   ]
   -}
-  , testGroup "isUnsat-concrete-tests" [
-      test "disjunction-left-false" $ do
-        let
-          t = [PEq (Var "x") (Lit 1), POr (PEq (Var "x") (Lit 0)) (PEq (Var "y") (Lit 1)), PEq (Var "y") (Lit 2)]
-          propagated = Expr.constPropagate t
-        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
-    , test "disjunction-right-false" $ do
-        let
-          t = [PEq (Var "x") (Lit 1), POr (PEq (Var "y") (Lit 1)) (PEq (Var "x") (Lit 0)), PEq (Var "y") (Lit 2)]
-          propagated = Expr.constPropagate t
-        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
-    , test "disjunction-both-false" $ do
-        let
-          t = [PEq (Var "x") (Lit 1), POr (PEq (Var "x") (Lit 2)) (PEq (Var "x") (Lit 0)), PEq (Var "y") (Lit 2)]
-          propagated = Expr.constPropagate t
-        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
-    , ignoreTest $ test "disequality-and-equality" $ do
-        let
-          t = [PNeg (PEq (Lit 1) (Var "arg1")), PEq (Lit 1) (Var "arg1")]
-          propagated = Expr.constPropagate t
-        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
-    , test "equality-and-disequality" $ do
-        let
-          t = [PEq (Lit 1) (Var "arg1"), PNeg (PEq (Lit 1) (Var "arg1"))]
-          propagated = Expr.constPropagate t
-        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
-  ]
-  , testGroup "inequality-propagation-tests" [
-      test "PLT-detects-impossible-constraint" $ do
-        let
-          -- x < 0 is impossible for unsigned integers
-          t = [PLT (Var "x") (Lit 0)]
-          propagated = Expr.constPropagate t
-        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
-    , test "PLT-overflow-check" $ do
-        let
-          -- maxLit < y is impossible
-          t = [PLT (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff) (Var "y")]
-          propagated = Expr.constPropagate t
-        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
-    , test "PGT-detects-impossible-constraint" $ do
-        let
-          -- x > maxLit is impossible
-          t = [PGT (Var "x") (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff)]
-          propagated = Expr.constPropagate t
-        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
-    , test "PGT-overflow-check" $ do
-        let
-          -- 0 > y is impossible
-          t = [PGT (Lit 0) (Var "y")]
-          propagated = Expr.constPropagate t
-        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
-    , test "inequality-conflict-detection-narrow" $ do
-        let
-          -- x < 2 && x > 5 is impossible
-          t = [PLT (Var "x") (Lit 2), PGT (Var "x") (Lit 5)]
-          propagated = Expr.constPropagate t
-        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
-    , test "inequality-conflict-detection-wide" $ do
-        let
-          -- x < 5 && x > 10 is impossible
-          t = [PLT (Var "x") (Lit 5), PGT (Var "x") (Lit 10)]
-          propagated = Expr.constPropagate t
-        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
-    , test "inequality-tight-bounds-satisfied" $ do
-        let
-          -- x >= 5 && x <= 5 and x == 5 should be consistent
-          t = [PGEq (Var "x") (Lit 5), PLEq (Var "x") (Lit 5), PEq (Var "x") (Lit 5)]
-          propagated = Expr.constPropagate t
-        assertEqualM "Must not contain PBool False" False ((PBool False) `elem` propagated)
-    , test "inequality-tight-bounds-violated" $ do
-        let
-          -- x >= 5 && x <= 5 and x != 5 should be inconsistent
-          t = [PGEq (Var "x") (Lit 5), PLEq (Var "x") (Lit 5), PNeg (PEq (Var "x") (Lit 5))]
-          propagated = Expr.constPropagate t
-        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
-    , test "inequality-with-existing-equality-consistent" $ do
-        let
-          -- x == 5 && x < 10 is consistent
-          t = [PEq (Var "x") (Lit 5), PLT (Var "x") (Lit 10)]
-          propagated = Expr.constPropagate t
-        assertEqualM "Must not contain PBool False" False ((PBool False) `elem` propagated)
-    , test "inequality-with-existing-equality-inconsistent" $ do
-        let
-          -- x == 5 && x < 5 is inconsistent
-          t = [PEq (Var "x") (Lit 5), PLT (Var "x") (Lit 5)]
-          propagated = Expr.constPropagate t
-        assertEqualM "Must contain PBool False" True ((PBool False) `elem` propagated)
-  ]
-  , testGroup "simpProp-concrete-tests" [
-      test "simpProp-concrete-trues" $ do
-        let
-          t = [PBool True, PBool True]
-          simplified = Expr.simplifyProps t
-        assertEqualM "Must be equal" [] simplified
-    , test "simpProp-concrete-false1" $ do
-        let
-          t = [PBool True, PBool False]
-          simplified = Expr.simplifyProps t
-        assertEqualM "Must be equal" [PBool False] simplified
-    , test "simpProp-concrete-false2" $ do
-        let
-          t = [PBool False, PBool False]
-          simplified = Expr.simplifyProps t
-        assertEqualM "Must be equal" [PBool False] simplified
-    , test "simpProp-concrete-or-1" $ do
-        let
-          -- a = 5 && (a=4 || a=3)  -> False
-          t = [PEq (Lit 5) (Var "a"), POr (PEq (Var "a") (Lit 4)) (PEq (Var "a") (Lit 3))]
-          simplified = Expr.simplifyProps t
-        assertEqualM "Must be equal" [PBool False] simplified
-    , ignoreTest $ test "simpProp-concrete-or-2" $ do
-        let
-          -- Currently does not work, because we don't do simplification inside
-          --   POr/PAnd using canBeSat
-          -- a = 5 && (a=4 || a=5)  -> a=5
-          t = [PEq (Lit 5) (Var "a"), POr (PEq (Var "a") (Lit 4)) (PEq (Var "a") (Lit 5))]
-          simplified = Expr.simplifyProps t
-        assertEqualM "Must be equal" [] simplified
-    , test "simpProp-concrete-and-1" $ do
-        let
-          -- a = 5 && (a=4 && a=3)  -> False
-          t = [PEq (Lit 5) (Var "a"), PAnd (PEq (Var "a") (Lit 4)) (PEq (Var "a") (Lit 3))]
-          simplified = Expr.simplifyProps t
-        assertEqualM "Must be equal" [PBool False] simplified
-    , test "simpProp-concrete-or-of-or" $ do
-        let
-          -- a = 5 && ((a=4 || a=6) || a=3)  -> False
-          t = [PEq (Lit 5) (Var "a"), POr (POr (PEq (Var "a") (Lit 4)) (PEq (Var "a") (Lit 6))) (PEq (Var "a") (Lit 3))]
-          simplified = Expr.simplifyProps t
-        assertEqualM "Must be equal" [PBool False] simplified
-    , test "simpProp-inner-expr-simp" $ do
-        let
-          -- 5+1 = 6
-          t = [PEq (Add (Lit 5) (Lit 1)) (Var "a")]
-          simplified = Expr.simplifyProps t
-        assertEqualM "Must be equal" [PEq (Lit 6) (Var "a")] simplified
-    , test "simpProp-inner-expr-simp-with-canBeSat" $ do
-        let
-          -- 5+1 = 6, 6 != 7
-          t = [PAnd (PEq (Add (Lit 5) (Lit 1)) (Var "a")) (PEq (Var "a") (Lit 7))]
-          simplified = Expr.simplifyProps t
-        assertEqualM "Must be equal" [PBool False] simplified
-    , test "simpProp-inner-expr-bitwise-and" $ do
-        let
-          -- 1 & 2 != 2
-          t = [PEq (And (Lit 1) (Lit 2)) (Lit 2)]
-          simplified = Expr.simplifyProps t
-        assertEqualM "Must be equal" [PBool False] simplified
-    , test "simpProp-inner-expr-bitwise-or" $ do
-        let
-          -- 2 | 4 == 6
-          t = [PEq (Or (Lit 2) (Lit 4)) (Lit 6)]
-          simplified = Expr.simplifyProps t
-        assertEqualM "Must be equal" [] simplified
-    , test "simpProp-constpropagate-1" $ do
-        let
-          -- 5+1 = 6
-          t = [PEq (Add (Lit 5) (Lit 1)) (Var "a"), PEq (Var "b") (Var "a")]
-          simplified = Expr.simplifyProps t
-        assertEqualM "Must be equal" [PEq (Lit 6) (Var "a"), PEq (Lit 6) (Var "b")] simplified
-    , test "simpProp-constpropagate-2" $ do
-        let
-          -- 5+1 = 6
-          t = [PEq (Add (Lit 5) (Lit 1)) (Var "a"), PEq (Var "b") (Var "a"), PEq (Var "c") (Sub (Var "b") (Lit 1))]
-          simplified = Expr.simplifyProps t
-        assertEqualM "Must be equal" [PEq (Lit 6) (Var "a"), PEq (Lit 6) (Var "b"), PEq (Lit 5) (Var "c")] simplified
-    , test "simpProp-constpropagate-3" $ do
-        let
-          t = [ PEq (Add (Lit 5) (Lit 1)) (Var "a") -- a = 6
-              , PEq (Var "b") (Var "a")             -- b = 6
-              , PEq (Var "c") (Sub (Var "b") (Lit 1)) -- c = 5
-              , PEq (Var "d") (Sub (Var "b") (Var "c"))] -- d = 1
-          simplified = Expr.simplifyProps t
-        assertEqualM "Must  know d == 1" ((PEq (Lit 1) (Var "d")) `elem` simplified) True
-  ]
-  , testGroup "MemoryTests"
-    [ test "read-write-same-byte"  $ assertEqualM ""
-        (LitByte 0x12)
-        (Expr.readByte (Lit 0x20) (WriteByte (Lit 0x20) (LitByte 0x12) mempty))
-    , test "read-write-same-word"  $ assertEqualM ""
-        (Lit 0x12)
-        (Expr.readWord (Lit 0x20) (WriteWord (Lit 0x20) (Lit 0x12) mempty))
-    , test "read-byte-write-word"  $ assertEqualM ""
-        -- reading at byte 31 a word that's been written should return LSB
-        (LitByte 0x12)
-        (Expr.readByte (Lit 0x1f) (WriteWord (Lit 0x0) (Lit 0x12) mempty))
-    , test "read-byte-write-word2"  $ assertEqualM ""
-        -- Same as above, but offset not 0
-        (LitByte 0x12)
-        (Expr.readByte (Lit 0x20) (WriteWord (Lit 0x1) (Lit 0x12) mempty))
-    ,test "read-write-with-offset"  $ assertEqualM ""
-        -- 0x3F = 63 decimal, 0x20 = 32. 0x12 = 18
-        --    We write 128bits (32 Bytes), representing 18 at offset 32.
-        --    Hence, when reading out the 63rd byte, we should read out the LSB 8 bits
-        --           which is 0x12
-        (LitByte 0x12)
-        (Expr.readByte (Lit 0x3F) (WriteWord (Lit 0x20) (Lit 0x12) mempty))
-    ,test "read-write-with-offset2"  $ assertEqualM ""
-        --  0x20 = 32, 0x3D = 61
-        --  we write 128 bits (32 Bytes) representing 0x10012, at offset 32.
-        --  we then read out a byte at offset 61.
-        --  So, at 63 we'd read 0x12, at 62 we'd read 0x00, at 61 we should read 0x1
-        (LitByte 0x1)
-        (Expr.readByte (Lit 0x3D) (WriteWord (Lit 0x20) (Lit 0x10012) mempty))
-    , test "read-write-with-extension-to-zero" $ assertEqualM ""
-        -- write word and read it at the same place (i.e. 0 offset)
-        (Lit 0x12)
-        (Expr.readWord (Lit 0x0) (WriteWord (Lit 0x0) (Lit 0x12) mempty))
-    , test "read-write-with-extension-to-zero-with-offset" $ assertEqualM ""
-        -- write word and read it at the same offset of 4
-        (Lit 0x12)
-        (Expr.readWord (Lit 0x4) (WriteWord (Lit 0x4) (Lit 0x12) mempty))
-    , test "read-write-with-extension-to-zero-with-offset2" $ assertEqualM ""
-        -- write word and read it at the same offset of 16
-        (Lit 0x12)
-        (Expr.readWord (Lit 0x20) (WriteWord (Lit 0x20) (Lit 0x12) mempty))
-    , test "read-word-over-write-byte" $ assertEqualM ""
-        (ReadWord (Lit 0x4) (AbstractBuf "abs"))
-        (Expr.readWord (Lit 0x4) (WriteByte (Lit 0x1) (LitByte 0x12) (AbstractBuf "abs")))
-    , test "read-word-copySlice-overlap" $ assertEqualM ""
-        -- we should not recurse into a copySlice if the read index + 32 overlaps the sliced region
-        (ReadWord (Lit 40) (CopySlice (Lit 0) (Lit 30) (Lit 12) (WriteWord (Lit 10) (Lit 0x64) (AbstractBuf "hi")) (AbstractBuf "hi")))
-        (Expr.readWord (Lit 40) (CopySlice (Lit 0) (Lit 30) (Lit 12) (WriteWord (Lit 10) (Lit 0x64) (AbstractBuf "hi")) (AbstractBuf "hi")))
-    , test "read-word-copySlice-after-slice" $ assertEqualM "Read word simplification missing!"
-        (ReadWord (Lit 100) (AbstractBuf "dst"))
-        (Expr.readWord (Lit 100) (CopySlice (Var "srcOff") (Lit 12) (Lit 60) (AbstractBuf "src") (AbstractBuf "dst")))
-    , test "indexword-MSB" $ assertEqualM ""
-        -- 31st is the LSB byte (of 32)
-        (LitByte 0x78)
-        (Expr.indexWord (Lit 31) (Lit 0x12345678))
-    , test "indexword-LSB" $ assertEqualM ""
-        -- 0th is the MSB byte (of 32), Lit 0xff22bb... is exactly 32 Bytes.
-        (LitByte 0xff)
-        (Expr.indexWord (Lit 0) (Lit 0xff22bb4455667788990011223344556677889900112233445566778899001122))
-    , test "indexword-LSB2" $ assertEqualM ""
-        -- same as above, but with offset 2
-        (LitByte 0xbb)
-        (Expr.indexWord (Lit 2) (Lit 0xff22bb4455667788990011223344556677889900112233445566778899001122))
-    , test "encodeConcreteStore-overwrite" $
-      assertEqualM ""
-        (pure "(store (store ((as const Storage) #x0000000000000000000000000000000000000000000000000000000000000000) (_ bv1 256) (_ bv2 256)) (_ bv3 256) (_ bv4 256))")
-        (EVM.SMT.encodeConcreteStore $ Map.fromList [(W256 1, W256 2), (W256 3, W256 4)])
-    , test "indexword-oob-sym" $ assertEqualM ""
-        -- indexWord should return 0 for oob access
-        (LitByte 0x0)
-        (Expr.indexWord (Lit 100) (JoinBytes
-          (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0)
-          (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0)
-          (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0)
-          (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0) (LitByte 0)))
-    , test "stripbytes-concrete-bug" $ assertEqualM ""
-        (Expr.simplifyReads (ReadByte (Lit 0) (ConcreteBuf "5")))
-        (LitByte 53)
-    ]
   , testGroup "ABI"
     [ testProperty "Put/get inverse" $ \x ->
         case runGetOrFail (getAbi (abiValueType x)) (runPut (putAbi x)) of
@@ -1145,6 +826,60 @@ tests = testGroup "hevm"
         case decodeAbiValues [AbiIntType 24] withSelector of
           [AbiInt 24 val] -> assertEqualM "Incorrectly decoded int24 value" (-42) val
           _ -> internalError "Error in decoding function"
+    , test "ABI-function-roundtrip" $ do
+        -- Test that AbiFunction encodes/decodes correctly
+        let addr = 0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+        let sel = 0x12345678
+        let funcVal = AbiFunction addr sel
+        case runGetOrFail (getAbi AbiFunctionType) (runPut (putAbi funcVal)) of
+          Right ("", _, decoded) -> assertEqualM "Function roundtrip failed" funcVal decoded
+          Left (_, _, err) -> internalError $ "Decoding error: " <> err
+          Right (leftover, _, _) -> internalError $ "Leftover bytes: " <> show leftover
+    , test "ABI-function-encoding" $ do
+        -- Test that AbiFunction encodes to correct 32-byte padded format
+        let addr = 0x1234567890abcdef1234567890abcdef12345678
+        let sel = 0xaabbccdd
+        let funcVal = AbiFunction addr sel
+        let encoded = BSLazy.toStrict $ runPut (putAbi funcVal)
+        -- Should be 32 bytes: 20 addr + 4 selector + 8 padding
+        assertEqualM "Encoded length should be 32" 32 (BS.length encoded)
+        -- First 20 bytes should be address
+        assertEqualM "Address bytes" (hex "1234567890abcdef1234567890abcdef12345678") (BS.take 20 encoded)
+        -- Next 4 bytes should be selector
+        assertEqualM "Selector bytes" (hex "aabbccdd") (BS.take 4 $ BS.drop 20 encoded)
+        -- Last 8 bytes should be zero padding
+        assertEqualM "Padding bytes" (BS.replicate 8 0) (BS.drop 24 encoded)
+    , test "ABI-function-parsing" $ do
+        -- Test parseAbiValue for function type
+        let hexStr = "0x1234567890abcdef1234567890abcdef12345678aabbccdd"
+        case readP_to_S (parseAbiValue AbiFunctionType) hexStr of
+          [(AbiFunction addr sel, "")] -> do
+            assertEqualM "Parsed address" 0x1234567890abcdef1234567890abcdef12345678 addr
+            assertEqualM "Parsed selector" 0xaabbccdd sel
+          [] -> internalError "Failed to parse function value"
+          other -> internalError $ "Unexpected parse result: " <> show other
+    , test "ABI-function-parsing-rejects-wrong-length" $ do
+        -- 23 bytes (too short)
+        let shortHex = "0x1234567890abcdef1234567890abcdef123456aabbcc"
+        case readP_to_S (parseAbiValue AbiFunctionType) shortHex of
+          [] -> pure ()  -- Expected: parsing should fail
+          _ -> internalError "Should reject 23-byte function value"
+        -- 25 bytes (too long)
+        let longHex = "0x1234567890abcdef1234567890abcdef12345678aabbccddee"
+        case readP_to_S (parseAbiValue AbiFunctionType) longHex of
+          [(_, "")] -> internalError "Should reject 25-byte function value"
+          _ -> pure ()  -- Expected: either fails or has leftover
+    , test "ABI-bytes-parsing-validates-length" $ do
+        -- bytes4 should require exactly 4 bytes
+        let fourBytes = "0xaabbccdd"
+        case readP_to_S (parseAbiValue (AbiBytesType 4)) fourBytes of
+          [(AbiBytes 4 bs, "")] -> assertEqualM "bytes4 value" (hex "aabbccdd") bs
+          _ -> internalError "Failed to parse bytes4"
+        -- bytes4 should reject 3 bytes
+        let threeBytes = "0xaabbcc"
+        case readP_to_S (parseAbiValue (AbiBytesType 4)) threeBytes of
+          [] -> pure ()  -- Expected: parsing should fail
+          _ -> internalError "Should reject 3-byte value for bytes4"
     ]
   , testGroup "Solidity-Expressions"
     [ test "Trivial" $
@@ -1995,7 +1730,7 @@ tests = testGroup "hevm"
           let calldata = (WriteWord (Lit 0x0) (Var "u") (ConcreteBuf ""), [])
           initVM <- liftIO $ stToIO $ abstractVM calldata initCode Nothing True
           let iterConf = IterConfig {maxIter=Nothing, askSmtIters=1, loopHeuristic=StackBased }
-          paths <- interpret (Fetch.noRpcFetcher s) iterConf initVM runExpr (pure . pure)
+          paths <- interpret (Fetch.noRpcFetcher s) iterConf initVM runExpr noopPathHandler
           let exprSimp = map Expr.simplify paths
           assertBoolM "unexptected partial execution" (not $ any isPartial exprSimp)
     , test "mixed-concrete-symbolic-args" $ do
@@ -2087,7 +1822,7 @@ tests = testGroup "hevm"
         withDefaultSolver $ \s -> do
           vm <- liftIO $ stToIO $ loadSymVM runtimecode (Lit 0) initCode False
           let iterConf = IterConfig {maxIter=Nothing, askSmtIters=1, loopHeuristic=StackBased }
-          paths <- interpret (Fetch.noRpcFetcher s) iterConf vm runExpr (pure . pure)
+          paths <- interpret (Fetch.noRpcFetcher s) iterConf vm runExpr noopPathHandler
           let exprSimp = map Expr.simplify paths
           assertBoolM "expected partial execution" (any isPartial exprSimp)
     ]
@@ -2124,7 +1859,11 @@ tests = testGroup "hevm"
               , ("test/contracts/fail/symbolicFail.sol",      "prove_symb_fail_allrev_text.*", (False, False))
               , ("test/contracts/fail/symbolicFail.sol",      "prove_symb_fail_somerev_text.*", (False, True))
               , ("test/contracts/fail/symbolicFail.sol",      "prove_symb_fail_allrev_selector.*", (False, False))
-              , ("test/contracts/fail/symbolicFail.sol",      "prove_symb_fail_somerev_selector.*", (False, True))]
+              , ("test/contracts/fail/symbolicFail.sol",      "prove_symb_fail_somerev_selector.*", (False, True))
+              -- vm.etch
+              , ("test/contracts/pass/etch.sol",          "prove_etch.*", (True, True))
+              , ("test/contracts/fail/etchFail.sol",      "prove_etch_fail.*", (False, True))
+              ]
         forM_ cases $ \(testFile, match, expected) -> do
           actual <- runForgeTestCustom testFile match Nothing Nothing False Fetch.noRpc
           putStrLnM $ "Test result for " <> testFile <> " match: " <> T.unpack match <> ": " <> show actual
@@ -4736,38 +4475,9 @@ tests = testGroup "hevm"
   ]
   , testGroup "prop-and-expr-properties"
   [
-    test "nubOrd-Prop-PLT" $ do
-        let a = [ PLT (Lit 0x0) (ReadWord (ReadWord (Lit 0x0) (AbstractBuf "txdata")) (AbstractBuf "txdata"))
-                , PLT (Lit 0x1) (ReadWord (ReadWord (Lit 0x0) (AbstractBuf "txdata")) (AbstractBuf "txdata"))
-                , PLT (Lit 0x2) (ReadWord (ReadWord (Lit 0x0) (AbstractBuf "txdata")) (AbstractBuf "txdata"))
-                , PLT (Lit 0x0) (ReadWord (ReadWord (Lit 0x0) (AbstractBuf "txdata")) (AbstractBuf "txdata"))]
-        let simp = nubOrd a
-            simp2 = List.nub a
-        assertEqualM "Must be 3-length" 3 (length simp)
-        assertEqualM "Must be 3-length" 3 (length simp2)
-    , test "nubOrd-Prop-PEq" $ do
-        let a = [ PEq (Lit 0x0) (ReadWord (Lit 0x0) (AbstractBuf "txdata"))
-                , PEq (Lit 0x0) (ReadWord (Lit 0x1) (AbstractBuf "txdata"))
-                , PEq (Lit 0x0) (ReadWord (Lit 0x2) (AbstractBuf "txdata"))
-                , PEq (Lit 0x0) (ReadWord (Lit 0x0) (AbstractBuf "txdata"))]
-        let simp = nubOrd a
-            simp2 = List.nub a
-        assertEqualM "Must be 3-length" 3 (length simp)
-        assertEqualM "Must be 3-length" 3 (length simp2)
     -- we run these without the simplifier inside `checkSatWithProps`, so
     -- we can test the SMT solver's ability to handle sign extension
-    , test "sign-extend-conc-1" $ do
-      let p = Expr.sex (Lit 0) (Lit 0xff)
-      assertEqualM "stuff" p (Expr.simplify (Sub (Lit 0) (Lit 1)))
-      let p2 = Expr.sex (Lit 30) (Lit 0xff)
-      assertEqualM "stuff" p2 (Lit 0xff)
-      let p3 = Expr.sex (Lit 1) (Lit 0xff)
-      assertEqualM "stuff" p3 (Lit 0xff)
-      let p4 = Expr.sex (Lit 0) (Lit 0x1)
-      assertEqualM "stuff" p4 (Lit 0x1)
-      let p5 = Expr.sex (Lit 0) (Lit 0x0)
-      assertEqualM "stuff" p5 (Lit 0x0)
-    , testNoSimplify "sign-extend-1" $ do
+    testNoSimplify "sign-extend-1" $ do
         let p = (PEq (Lit 1) (SLT (Lit 1774544) (SEx (Lit 2) (Lit 1774567))))
         let simp = Expr.simplifyProps [p]
         assertEqualM "Must simplify to PBool True" simp []
@@ -4814,16 +4524,7 @@ tests = testGroup "hevm"
   ]
   , testGroup "simplification-working"
   [
-    test "PEq-and-PNot-PEq-1" $ do
-      let a = [PEq (Lit 0x539) (Var "arg1"),PNeg (PEq (Lit 0x539) (Var "arg1"))]
-      assertEqualM "Must simplify to PBool False" (Expr.simplifyProps a) ([PBool False])
-    , test "PEq-and-PNot-PEq-2" $ do
-      let a = [PEq (Var "arg1") (Lit 0x539),PNeg (PEq (Lit 0x539) (Var "arg1"))]
-      assertEqualM "Must simplify to PBool False" (Expr.simplifyProps a) ([PBool False])
-    , test "PEq-and-PNot-PEq-3" $ do
-      let a = [PEq (Var "arg1") (Lit 0x539),PNeg (PEq (Var "arg1") (Lit 0x539))]
-      assertEqualM "Must simplify to PBool False" (Expr.simplifyProps a) ([PBool False])
-    , test "prop-simp-bool1" $ do
+    test "prop-simp-bool1" $ do
       let
         a = successGen [PAnd (PBool True) (PBool False)]
         b = Expr.simplify a
@@ -4898,25 +4599,12 @@ tests = testGroup "hevm"
         a = successGen [PImpl (PBool False) (PEq (Var "abc") (Var "bcd"))]
         b = Expr.simplify a
       assertEqualM "Must simplify down" (successGen []) b
-    , test "propSimp-no-duplicate1" $ do
-      let a = [PAnd (PGEq (Max (Lit 0x44) (BufLength (AbstractBuf "txdata"))) (Lit 0x44)) (PLT (Max (Lit 0x44) (BufLength (AbstractBuf "txdata"))) (Lit 0x10000000000000000)), PAnd (PGEq (Var "arg1") (Lit 0x0)) (PLEq (Var "arg1") (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff)),PEq (Lit 0x63) (Var "arg2"),PEq (Lit 0x539) (Var "arg1"),PEq TxValue (Lit 0x0),PEq (IsZero (Eq (Lit 0x63) (Var "arg2"))) (Lit 0x0)]
-      let simp = Expr.simplifyProps a
-      assertEqualM "must not duplicate" simp (nubOrd simp)
-      assertEqualM "We must be able to remove all duplicates" (length $ nubOrd simp) (length $ List.nub simp)
-    , test "propSimp-no-duplicate2" $ do
-      let a = [PNeg (PBool False),PAnd (PGEq (Max (Lit 0x44) (BufLength (AbstractBuf "txdata"))) (Lit 0x44)) (PLT (Max (Lit 0x44) (BufLength (AbstractBuf "txdata"))) (Lit 0x10000000000000000)),PAnd (PGEq (Var "arg2") (Lit 0x0)) (PLEq (Var "arg2") (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff)),PAnd (PGEq (Var "arg1") (Lit 0x0)) (PLEq (Var "arg1") (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff)),PEq (Lit 0x539) (Var "arg1"),PNeg (PEq (Lit 0x539) (Var "arg1")),PEq TxValue (Lit 0x0),PLT (BufLength (AbstractBuf "txdata")) (Lit 0x10000000000000000),PEq (IsZero (Eq (Lit 0x539) (Var "arg1"))) (Lit 0x0),PNeg (PEq (IsZero (Eq (Lit 0x539) (Var "arg1"))) (Lit 0x0)),PNeg (PEq (IsZero TxValue) (Lit 0x0))]
-      let simp = Expr.simplifyProps a
-      assertEqualM "must not duplicate" simp (nubOrd simp)
-      assertEqualM "must not duplicate" (length simp) (length $ List.nub simp)
-    , test "full-order-prop1" $ do
-      let a = [PNeg (PBool False),PAnd (PGEq (Max (Lit 0x44) (BufLength (AbstractBuf "txdata"))) (Lit 0x44)) (PLT (Max (Lit 0x44) (BufLength (AbstractBuf "txdata"))) (Lit 0x10000000000000000)),PAnd (PGEq (Var "arg2") (Lit 0x0)) (PLEq (Var "arg2") (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff)),PAnd (PGEq (Var "arg1") (Lit 0x0)) (PLEq (Var "arg1") (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff)),PEq (Lit 0x539) (Var "arg1"),PNeg (PEq (Lit 0x539) (Var "arg1")),PEq TxValue (Lit 0x0),PLT (BufLength (AbstractBuf "txdata")) (Lit 0x10000000000000000),PEq (IsZero (Eq (Lit 0x539) (Var "arg1"))) (Lit 0x0),PNeg (PEq (IsZero (Eq (Lit 0x539) (Var "arg1"))) (Lit 0x0)),PNeg (PEq (IsZero TxValue) (Lit 0x0))]
-      let simp = Expr.simplifyProps a
-      assertEqualM "We must be able to remove all duplicates" (length $ nubOrd simp) (length $ List.nub simp)
-    , test "full-order-prop2" $ do
-      let a =[PNeg (PBool False),PAnd (PGEq (Max (Lit 0x44) (BufLength (AbstractBuf "txdata"))) (Lit 0x44)) (PLT (Max (Lit 0x44) (BufLength (AbstractBuf "txdata"))) (Lit 0x10000000000000000)),PAnd (PGEq (Var "arg2") (Lit 0x0)) (PLEq (Var "arg2") (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff)),PAnd (PGEq (Var "arg1") (Lit 0x0)) (PLEq (Var "arg1") (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff)),PEq (Lit 0x63) (Var "arg2"),PEq (Lit 0x539) (Var "arg1"),PEq TxValue (Lit 0x0),PLT (BufLength (AbstractBuf "txdata")) (Lit 0x10000000000000000),PEq (IsZero (Eq (Lit 0x63) (Var "arg2"))) (Lit 0x0),PEq (IsZero (Eq (Lit 0x539) (Var "arg1"))) (Lit 0x0),PNeg (PEq (IsZero TxValue) (Lit 0x0))]
-      let simp = Expr.simplifyProps a
-      assertEqualM "must not duplicate" simp (nubOrd simp)
-      assertEqualM "We must be able to remove all duplicates" (length $ nubOrd simp) (length $ List.nub simp)
+  ]
+  , testGroup "SMT-encoding"
+  [ testCase "encodeConcreteStore-overwrite" $
+    assertEqual ""
+      (pure "(store (store ((as const Storage) #x0000000000000000000000000000000000000000000000000000000000000000) (_ bv1 256) (_ bv2 256)) (_ bv3 256) (_ bv4 256))")
+      (EVM.SMT.encodeConcreteStore $ Map.fromList [(W256 1, W256 2), (W256 3, W256 4)])
   ]
   , testGroup "calling-solvers"
   [ test "no-error-on-large-buf" $ do

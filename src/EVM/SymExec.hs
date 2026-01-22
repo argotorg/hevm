@@ -319,6 +319,8 @@ freezeVM vm = do
       ConcreteMemory m -> SymbolicMemory . ConcreteBuf . vectorToByteString <$> VS.freeze m
       m@(SymbolicMemory _) -> pure m
 
+type PathHandler m a = Expr End -> TVar Bool -> m a
+
 data InterpTask m a = InterpTask
   {fetcher :: Fetch.Fetcher Symbolic m
   , iterConf :: IterConfig
@@ -326,21 +328,25 @@ data InterpTask m a = InterpTask
   , taskQ :: Chan (InterpTask m a)
   , numTasks :: TVar Natural
   , stepper :: Stepper Symbolic (Expr End)
-  , handler :: Expr End -> TVar Bool -> m a
+  , handler :: PathHandler m a
   , shouldAbort :: TVar Bool
   }
 
 data Process m a = Process
   { result :: Expr End
-  , handler :: Expr End -> TVar Bool -> m a
+  , handler :: PathHandler m a
   }
+
+-- returns back the input path/branch of the program
+noopPathHandler :: Applicative m => PathHandler m (Expr End)
+noopPathHandler x _ = pure x
 
 interpret :: forall m a . App m
   => Fetch.Fetcher Symbolic m
   -> IterConfig
   -> VM Symbolic
   -> Stepper Symbolic (Expr End)
-  -> (Expr End -> TVar Bool -> m a)
+  -> PathHandler m a
   -> m [a]
 interpret fetcher iterConf vm stepper handler = do
   shouldAbort <- liftIO $ newTVarIO False
@@ -630,7 +636,7 @@ getExprEmptyStore solvers c signature' concreteArgs opts = do
   conf <- readConfig
   calldata <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ loadEmptySymVM (RuntimeCode (ConcreteRuntimeCode c)) (Lit 0) calldata
-  paths <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState runExpr (pure . pure)
+  paths <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState runExpr noopPathHandler
   if conf.simp then (pure $ map Expr.simplify paths) else pure paths
 
 -- Used only in testing
@@ -646,7 +652,7 @@ getExpr solvers c signature' concreteArgs opts = do
   conf <- readConfig
   calldata <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ abstractVM calldata c Nothing False
-  paths <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState runExpr (pure . pure)
+  paths <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState runExpr noopPathHandler
   if conf.simp then (pure $ map Expr.simplify paths) else pure paths
 
 {- | Checks if an assertion violation has been encountered
@@ -731,7 +737,7 @@ exploreContract solvers theCode signature' concreteArgs opts maybepre = do
   calldata <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ abstractVM calldata theCode maybepre False
   let fetcher = Fetch.oracle solvers Nothing opts.rpcInfo
-  executeVM fetcher opts.iterConf preState (pure . pure)
+  executeVM fetcher opts.iterConf preState noopPathHandler
 
 -- | Stepper that parses the result of Stepper.runFully into an Expr End
 runExpr :: Stepper.Stepper Symbolic (Expr End)
@@ -956,7 +962,7 @@ equivalenceCheck solvers sess bytecodeA bytecodeB opts calldata create = do
     getBranches bs = do
       let bytecode = if BS.null bs then BS.pack [0] else bs
       prestate <- liftIO $ stToIO $ abstractVM calldata bytecode Nothing create
-      interpret (Fetch.oracle solvers sess Fetch.noRpc) opts.iterConf prestate runExpr (pure . pure)
+      interpret (Fetch.oracle solvers sess Fetch.noRpc) opts.iterConf prestate runExpr noopPathHandler
     filterQeds (EqIssues res partials) = EqIssues (filter (\(r, _) -> not . isQed $ r) res) partials
 
 rewriteFresh :: Text -> [Expr a] -> [Expr a]

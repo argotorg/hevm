@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Added
 - Support for `--early-abort` flag that aborts symbolic execution as soon as a counterexample is found
+- Support for `vm.etch(address, bytecode)` cheatcode to set the code of a contract at a given address
+
+
+## Changed
+- `AbiFunction` and `AbiBytes` parser is now more strict
 
 ## [0.57.0] - 2026-01-08
 
