@@ -875,7 +875,7 @@ verifyInputsWithHandler solvers opts fetcher preState post cexHandler = do
     putStrLn $ "   Exploration and solving finished, " <> show (length results) <> " branch(es) checked in call " <> call <> " of which partial: "
                 <> show (length smtResults)
     let cexs = filter (\(res, _) -> not . isQed $ res) smtResults
-    putStrLn $ "   Found " <> show (length cexs) <> " counterexample(s) in call " <> call
+    putStrLn $ "   Found " <> show (length cexs) <> " potential counterexample(s) in call " <> call
 
   pure (smtResults, catMaybes partials)
   where
