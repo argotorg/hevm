@@ -1214,6 +1214,9 @@ isQed _ = False
 newtype FunctionSelector = FunctionSelector { unFunctionSelector :: Word32 }
   deriving (Bits, Num, Eq, Ord, Real, Enum, Integral)
 instance Show FunctionSelector where show s = "0x" <> showHex s ""
+instance Read FunctionSelector where
+  readsPrec _ ('0':'x':s) = first FunctionSelector <$> readHex s
+  readsPrec _ s = first FunctionSelector <$> readHex s
 
 
 -- ByteString wrapper ------------------------------------------------------------------------------
