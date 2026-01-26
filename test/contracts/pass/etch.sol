@@ -32,4 +32,19 @@ contract C is Test{
       assert(a.getX() == 20);
       assert(B(address(a)).getY() == 30);
   }
+
+  function prove_etch_fresh_address() external {
+      address fresh = address(0xDEADBEEF);
+      bytes memory bCode = address(b).code;
+      Vm vm = Vm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
+
+      // zero codehash (non-existent account)
+      assert(fresh.codehash == bytes32(0));
+
+      vm.etch(fresh, bCode);
+
+      assert(fresh.code.length == bCode.length);
+      assert(B(fresh).getX() == 20);
+      assert(keccak256(fresh.code) == keccak256(bCode));
+  }
 }
