@@ -805,7 +805,7 @@ getBufs getVal bufs = runMaybeT $ foldM getBuf mempty bufs
     getLength name = do
       maybeVal <- lift $ getVal (name <> "_length ")
       hoistMaybe $ do
-        val <- maybeVal 
+        val <- maybeVal
         Right (ResSpecific (parsed :| [])) <- pure $ parseCommentFreeFileMsg getValueRes (T.toStrict val)
         (TermQualIdentifier (Unqualified (IdSymbol symbol)), TermSpecConstant sc) <- pure parsed
         guard (symbol == T.toStrict (name <> "_length"))
