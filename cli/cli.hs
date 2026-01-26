@@ -119,7 +119,7 @@ commonOptions = CommonOptions
   <*> (optional $ strOption $ long "root"   <> help "Path to  project root directory")
   <*> (option auto $ long "assertion-type"  <> showDefault <> value Forge <> help "Assertions as per Forge or DSTest")
   <*> (option auto $ long "smt-timeout"     <> value 300 <> help "Timeout given to SMT solver in seconds. Not available on Windows")
-  <*> (option auto $ long "smt-memory"      <> value 1024 <> help "Maximum memory limit for SMT solver in MB (default: 1024 MB = 1 GB). Only available on Linux")
+  <*> (option auto $ long "smt-memory"      <> value defMemLimit <> help "Maximum memory limit for SMT solver in MB. Only available on Linux")
   <*> (switch $ long "smt-debug"            <> help "Print smt queries sent to the solver")
   <*> (optional $ strOption $ long "dump-unsolved" <> help "Dump unsolved SMT queries to this (relative) path")
   <*> (optional $ option auto $ long "num-solvers" <> help "Number of solver instances to use (default: number of cpu cores)")

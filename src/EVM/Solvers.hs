@@ -3,7 +3,19 @@
     Description: Solver orchestration
 -}
 {-# LANGUAGE CPP #-}
-module EVM.Solvers where
+module EVM.Solvers
+  ( withSolvers
+  , Solver(..)
+  , SolverGroup(..)
+  , Task
+  , MultiSol(..)
+  , checkSat
+  , checkSatWithProps
+  , checkMulti
+  , defMemLimit
+  ) where
+
+
 
 import Prelude hiding (LT, GT)
 
@@ -41,6 +53,11 @@ import EVM.Keccak qualified as Keccak (concreteKeccaks)
 import EVM.SMT
 import EVM.Types
 
+
+-- In megabytes, i.e. 1GB
+defMemLimit :: Natural
+defMemLimit = 1024
+
 -- | Supported solvers
 data Solver
   = Z3
@@ -59,11 +76,10 @@ instance Show Solver where
 
 -- | A running solver instance
 data SolverInstance = SolverInstance
-  { solvertype :: Solver
-  , stdin      :: Handle
-  , stdout     :: Handle
-  , process    :: ProcessHandle
-  }
+  Solver -- solver type
+  Handle -- stdin
+  Handle -- stdout
+  ProcessHandle
 
 -- | A channel representing a group of solvers
 newtype SolverGroup = SolverGroup (Chan Task)
@@ -81,16 +97,14 @@ newtype CacheEntry = CacheEntry [Prop]
   deriving (Show, Eq)
 
 data MultiData = MultiData
-  { smt2 :: SMT2
-  , multiSol :: MultiSol
-  , resultChan :: Chan (Maybe [W256])
-  }
+  SMT2
+  MultiSol
+  (Chan (Maybe [W256])) -- result channel
 
 data SingleData = SingleData
-  { smt2 :: SMT2
-  , props :: Maybe [Prop]
-  , resultChan :: Chan SMTResult
-  }
+  SMT2
+  (Maybe [Prop])
+  (Chan SMTResult) -- result channel
 
 -- returns True if a is a superset of any of the sets in bs
 supersetAny :: Set Prop -> [Set Prop] -> Bool

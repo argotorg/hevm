@@ -6,7 +6,7 @@ import EVM.Effects
 import EVM.Expr (maybeLitAddrSimp)
 import EVM.FeeSchedule (feeSchedule)
 import EVM.Fetch qualified
-import EVM.Solvers (withSolvers, Solver(..))
+import EVM.Solvers (withSolvers, defMemLimit, Solver(..))
 import EVM.Stepper qualified
 import EVM.Transaction
 import EVM.Types hiding (Block, Case, Env)
@@ -108,7 +108,7 @@ prepareTests = do
 
     runTest :: App m => (String, Case) -> m TestTree
     runTest (name, x) = do
-      let fetcher q = withSolvers Z3 0 (Just 0) 1024 $ \s -> EVM.Fetch.noRpcFetcher s q
+      let fetcher q = withSolvers Z3 0 (Just 0) defMemLimit $ \s -> EVM.Fetch.noRpcFetcher s q
       exec <- toIO $ runVMTest fetcher x
       pure $ testCase' name exec
     testCase' :: String -> Assertion -> TestTree
