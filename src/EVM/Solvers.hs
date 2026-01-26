@@ -432,7 +432,7 @@ solverArgs solver timeout = case solver of
 -- | Spawns a solver instance, and sets the various global config options that we use for our queries
 spawnSolver :: Solver -> Maybe (Natural) -> Natural -> IO SolverInstance
 #if defined(mingw32_HOST_OS)
-spawnSolver solver _ _ = do
+spawnSolver solver timeout _ = do
   (readout, writeout) <- createPipe
   let solverCmd = show solver
       solverArgsStr = fmap T.unpack $ solverArgs solver timeout
