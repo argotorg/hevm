@@ -9,6 +9,9 @@ contract B {
   function getX() external returns (uint) {
       return 20;
   }
+  function getY() external returns (uint) {
+      return 30;
+  }
 }
 contract C is Test{
   A a;
@@ -27,5 +30,6 @@ contract C is Test{
       bytes memory aCode = address(a).code;
       assert(keccak256(aCode) == keccak256(bCode));
       assert(a.getX() == 20);
+      assert(B(address(a)).getY() == 30);
   }
 }
