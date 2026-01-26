@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Changed
 - `AbiFunction` and `AbiBytes` parser is now more strict
+- We now check length of AbiArrayDynamic and don't crash in case it's too large
 
 ## [0.57.0] - 2026-01-08
 
