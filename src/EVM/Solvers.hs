@@ -536,26 +536,28 @@ sendCommand (SolverInstance _ stdin stdout _) (SMTCommand cmd) = do
             Right txt -> pure txt
 
 -- | Returns a string representation of the model for the requested variable
--- Returns "unknown" if the solver process has died (timeout, crash, etc.)
-getValue :: SolverInstance -> Text -> IO Text
+-- Returns Nothing if the solver process has died (timeout, crash, etc.)
+getValue :: SolverInstance -> Text -> IO (Maybe Text)
 getValue (SolverInstance _ stdin stdout _) var = do
   result <- try $ T.hPutStrLn stdin (T.append (T.append "(get-value (" var) "))")
   case result of
-    Left (_ :: IOException) -> pure "unknown"  -- Write failed
+    Left (_ :: IOException) -> pure Nothing
     Right _ -> do
       flushResult <- try $ hFlush stdin
       case flushResult of
-        Left (_ :: IOException) -> pure "unknown"  -- Flush failed
-        Right _ -> fmap (T.unlines . reverse) (readSExpr stdout)
+        Left (_ :: IOException) -> pure Nothing
+        Right _ -> runMaybeT $ do
+          val <- MaybeT $ readSExpr stdout
+          pure $ (T.unlines . reverse) val
 
 -- | Reads lines from h until we have a balanced sexpr
--- Returns ["unknown"] if the solver process has died
-readSExpr :: Handle -> IO [Text]
+-- Returns Nothing if the solver process has died or parsing fails
+readSExpr :: Handle -> IO (Maybe [Text])
 readSExpr h = do
   result <- try $ go 0 0 []
   case result of
-    Left (_ :: IOException) -> pure ["unknown"]  -- Solver died (timeout, crash, etc.)
-    Right txts -> pure txts
+    Left (_ :: IOException) -> pure Nothing
+    Right txts -> pure $ Just txts
   where
     go 0 0 _ = do
       line <- T.hGetLine h

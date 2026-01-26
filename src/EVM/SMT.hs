@@ -771,20 +771,21 @@ parseTxCtx name
   | Just a <- TS.stripPrefix "codehash_" name = CodeHash (parseEAddr a)
   | otherwise = internalError $ "cannot parse " <> (TS.unpack name) <> " into an Expr"
 
-getAddrs :: (TS.Text -> Expr EAddr) -> (Text -> IO Text) -> [TS.Text] -> IO (Maybe (Map (Expr EAddr) Addr))
+getAddrs :: (TS.Text -> Expr EAddr) -> (Text -> IO (Maybe Text)) -> [TS.Text] -> IO (Maybe (Map (Expr EAddr) Addr))
 getAddrs parseName getVal names = runMaybeT $ do
   m <- foldM (getOne parseAddr getVal) mempty names
   pure $ Map.mapKeys parseName m
 
-getVars :: (TS.Text -> Expr EWord) -> (Text -> IO Text) -> [TS.Text] -> IO (Maybe (Map (Expr EWord) W256))
+getVars :: (TS.Text -> Expr EWord) -> (Text -> IO (Maybe Text)) -> [TS.Text] -> IO (Maybe (Map (Expr EWord) W256))
 getVars parseName getVal names = runMaybeT $ do
   m <- foldM (getOne parseW256 getVal) mempty names
   pure $ Map.mapKeys parseName m
 
-getOne :: (SpecConstant -> a) -> (Text -> IO Text) -> Map TS.Text a -> TS.Text -> MaybeT IO (Map TS.Text a)
+getOne :: (SpecConstant -> a) -> (Text -> IO (Maybe Text)) -> Map TS.Text a -> TS.Text -> MaybeT IO (Map TS.Text a)
 getOne parseVal getVal acc name = do
-  raw <- lift $ getVal (T.fromStrict name)
+  maybeRaw <- lift $ getVal (T.fromStrict name)
   val <- hoistMaybe $ do
+    raw <- maybeRaw
     Right (ResSpecific (valParsed :| [])) <- pure $ parseCommentFreeFileMsg getValueRes (T.toStrict raw)
     (TermQualIdentifier (Unqualified (IdSymbol symbol)), TermSpecConstant sc) <- pure valParsed
     guard (symbol == name)
@@ -793,17 +794,18 @@ getOne parseVal getVal acc name = do
 
 -- | Queries the solver for models for each of the expressions representing the
 -- max read index for a given buffer
-queryMaxReads :: (Text -> IO Text) -> Map Text (Expr EWord) -> IO (Maybe (Map Text W256))
+queryMaxReads :: (Text -> IO (Maybe Text)) -> Map Text (Expr EWord) -> IO (Maybe (Map Text W256))
 queryMaxReads getVal maxReads = runMaybeT $ mapM (MaybeT . queryValue getVal) maxReads
 
 -- | Gets the initial model for each buffer, these will often be much too large for our purposes
-getBufs :: (Text -> IO Text) -> [Text] -> IO (Maybe (Map (Expr Buf) BufModel))
+getBufs :: (Text -> IO (Maybe Text)) -> [Text] -> IO (Maybe (Map (Expr Buf) BufModel))
 getBufs getVal bufs = runMaybeT $ foldM getBuf mempty bufs
   where
     getLength :: Text -> MaybeT IO W256
     getLength name = do
-      val <- lift $ getVal (name <> "_length ")
+      maybeVal <- lift $ getVal (name <> "_length ")
       hoistMaybe $ do
+        val <- maybeVal 
         Right (ResSpecific (parsed :| [])) <- pure $ parseCommentFreeFileMsg getValueRes (T.toStrict val)
         (TermQualIdentifier (Unqualified (IdSymbol symbol)), TermSpecConstant sc) <- pure parsed
         guard (symbol == T.toStrict (name <> "_length"))
@@ -812,8 +814,9 @@ getBufs getVal bufs = runMaybeT $ foldM getBuf mempty bufs
     getBuf :: Map (Expr Buf) BufModel -> Text -> MaybeT IO (Map (Expr Buf) BufModel)
     getBuf acc name = do
       len <- getLength name
-      val <- lift $ getVal name
+      maybeVal <- lift $ getVal name
       buf <- hoistMaybe $ do
+        val <- maybeVal
         Right (ResSpecific (valParsed :| [])) <- pure $ parseCommentFreeFileMsg getValueRes (T.toStrict val)
         (TermQualIdentifier (Unqualified (IdSymbol symbol)), term) <- pure valParsed
         guard (T.fromStrict symbol == name)
@@ -859,14 +862,15 @@ getBufs getVal bufs = runMaybeT $ foldM getBuf mempty bufs
 -- well as the concrete part of the storage prestate and returns a fully
 -- concretized storage
 getStore
-  :: (Text -> IO Text)
+  :: (Text -> IO (Maybe Text))
   -> StorageReads
   -> IO (Maybe (Map (Expr EAddr) (Map W256 W256)))
 getStore getVal (StorageReads innerMap) = runMaybeT $ do
   results <- forM (Map.toList innerMap) $ \((addr, idx), slots) -> do
     let name = toLazyText (storeName addr idx)
-    raw <- lift $ getVal name
+    maybeRaw <- lift $ getVal name
     fun <- hoistMaybe $ do
+      raw <- maybeRaw
       Right (ResSpecific (valParsed :| [])) <- pure $ parseCommentFreeFileMsg getValueRes (T.toStrict raw)
       (TermQualIdentifier (Unqualified (IdSymbol symbol)), term) <- pure valParsed
       guard (symbol == T.toStrict name)
@@ -879,17 +883,19 @@ getStore getVal (StorageReads innerMap) = runMaybeT $ do
   pure $ Map.fromList results
 
 -- | Ask the solver to give us the concrete value of an arbitrary abstract word
-queryValue :: (Text -> IO Text) -> Expr EWord -> IO (Maybe W256)
+queryValue :: (Text -> IO (Maybe Text)) -> Expr EWord -> IO (Maybe W256)
 queryValue _ (Lit w) = pure (Just w)
 queryValue getVal w = do
   -- this exprToSMT should never fail, since we have already ran the solver
   let expr = toLazyText $ fromRight' $ exprToSMT w
-  raw <- getVal expr
+  maybeRaw <- getVal expr
   pure $ do
+    raw <- maybeRaw
     valTxt <- extractValue raw
     Right sc <- pure $ parseString specConstant (T.toStrict valTxt)
     pure $ parseW256 sc
   where
+    extractValue :: Text -> Maybe Text
     extractValue getValResponse = (T.stripSuffix "))") $ snd $ T.breakOnEnd " " $ T.stripEnd getValResponse
 
 -- | Interpret an N-dimensional array as a value of type a.
