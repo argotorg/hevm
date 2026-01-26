@@ -1862,6 +1862,7 @@ tests = testGroup "hevm"
               , ("test/contracts/fail/symbolicFail.sol",      "prove_symb_fail_somerev_selector.*", (False, True))
               -- vm.etch
               , ("test/contracts/pass/etch.sol",          "prove_etch.*", (True, True))
+              , ("test/contracts/pass/etch.sol",          "prove_deal.*", (True, True))
               , ("test/contracts/fail/etchFail.sol",      "prove_etch_fail.*", (False, True))
               ]
         forM_ cases $ \(testFile, match, expected) -> do
