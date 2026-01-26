@@ -517,50 +517,37 @@ checkCommand inst cmd = do
 stripCarriageReturn :: Text -> Text
 stripCarriageReturn t = fromMaybe t $ T.stripSuffix "\r" t
 
+-- | Helper function for when we want to try an IO action and get Nothing on exception
+tryIO :: forall a. IO a -> MaybeT IO a
+tryIO action = MaybeT $ either (const Nothing) Just <$> (try action :: IO (Either IOException a))
+
 -- | Sends a string to the solver and appends a newline, returns the first available line from the output buffer
 -- Returns "unknown" if the solver process has died (timeout, crash, etc.)
 sendCommand :: SolverInstance -> SMTEntry -> IO Text
 sendCommand _ (SMTComment _) = internalError "Attempting to send a comment as a command to SMT solver"
 sendCommand (SolverInstance _ stdin stdout _) (SMTCommand cmd) = do
-  result <- try $ T.hPutStrLn stdin $ toLazyText cmd
-  case result of
-    Left (_ :: IOException) -> pure "unknown"  -- Write failed
-    Right _ -> do
-      flushResult <- try $ hFlush stdin
-      case flushResult of
-        Left (_ :: IOException) -> pure "unknown"  -- Flush failed
-        Right _ -> do
-          lineResult <- try $ stripCarriageReturn <$> T.hGetLine stdout
-          case lineResult of
-            Left (_ :: IOException) -> pure "unknown"  -- Process died
-            Right txt -> pure txt
+  result <- runMaybeT $ do
+    tryIO $ T.hPutStrLn stdin $ toLazyText cmd
+    tryIO $ hFlush stdin
+    tryIO $ stripCarriageReturn <$> T.hGetLine stdout
+  pure $ fromMaybe "unknown" result
 
 -- | Returns a string representation of the model for the requested variable
 -- Returns Nothing if the solver process has died (timeout, crash, etc.)
 getValue :: SolverInstance -> Text -> IO (Maybe Text)
-getValue (SolverInstance _ stdin stdout _) var = do
-  result <- try $ T.hPutStrLn stdin (T.append (T.append "(get-value (" var) "))")
-  case result of
-    Left (_ :: IOException) -> pure Nothing
-    Right _ -> do
-      flushResult <- try $ hFlush stdin
-      case flushResult of
-        Left (_ :: IOException) -> pure Nothing
-        Right _ -> runMaybeT $ do
-          val <- MaybeT $ readSExpr stdout
-          pure $ (T.unlines . reverse) val
+getValue (SolverInstance _ stdin stdout _) var = runMaybeT $ do
+  tryIO $ T.hPutStrLn stdin (T.append (T.append "(get-value (" var) "))")
+  tryIO $ hFlush stdin
+  val <- MaybeT $ readSExpr stdout
+  pure $ (T.unlines . reverse) val
 
 -- | Reads lines from h until we have a balanced sexpr
 -- Returns Nothing if the solver process has died or parsing fails
 readSExpr :: Handle -> IO (Maybe [Text])
-readSExpr h = do
-  result <- try $ go 0 0 []
-  case result of
-    Left (_ :: IOException) -> pure Nothing
-    Right txts -> pure $ Just txts
+readSExpr h = runMaybeT $ go 0 0 []
   where
     go 0 0 _ = do
-      line <- T.hGetLine h
+      line <- tryIO $ T.hGetLine h
       let cleanLine = stripCarriageReturn line
           ls = T.length $ T.filter (== '(') cleanLine
           rs = T.length $ T.filter (== ')') cleanLine
@@ -568,7 +555,7 @@ readSExpr h = do
          then pure [cleanLine]
          else go ls rs [cleanLine]
     go ls rs prev = do
-      line <- T.hGetLine h
+      line <- tryIO $ T.hGetLine h
       let cleanLine = stripCarriageReturn line
           ls' = T.length $ T.filter (== '(') cleanLine
           rs' = T.length $ T.filter (== ')') cleanLine
