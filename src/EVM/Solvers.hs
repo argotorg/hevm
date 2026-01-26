@@ -421,7 +421,7 @@ spawnSolver :: Solver -> Maybe (Natural) -> Natural -> IO SolverInstance
 spawnSolver solver _ _ = do
   (readout, writeout) <- createPipe
   let solverCmd = show solver
-      solverArgsStr = fmap T.unpack $ solverArgs solver
+      solverArgsStr = fmap T.unpack $ solverArgs solver timeout
       -- Windows: no ulimit available
       cmd = (proc solverCmd solverArgsStr)
             { std_in = CreatePipe
@@ -433,7 +433,7 @@ spawnSolver solver timeout _ = do
   (readout, writeout) <- createPipe
   let timeoutSeconds = mkTimeout timeout
       solverCmd = show solver
-      solverArgsStr = fmap T.unpack $ solverArgs solver
+      solverArgsStr = fmap T.unpack $ solverArgs solver timeout
       -- macOS: memory limit not possible, but CPU limits work
       -- ulimit -t sets RLIMIT_CPU (kernel-enforced CPU time limit in seconds)
       shellCmd = "sh"
