@@ -2363,9 +2363,12 @@ replaceCodeEtch target newCode =
           put . Just $
             ((now :: Contract)
               { code = newCode
+              , codehash = hashcode newCode
+              , opIxMap = mkOpIxMap newCode
+              , codeOps = mkCodeOps newCode
               })
         UnknownCode _ -> internalError "Can't etch unknown code"
-      Nothing -> internalError "Can't replace code of nonexistent contract"
+      Nothing -> put . Just $ initialContract newCode
 
 replaceCodeOfSelf :: ContractCode -> EVM t ()
 replaceCodeOfSelf newCode = do
