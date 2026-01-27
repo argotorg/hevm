@@ -112,6 +112,7 @@ library
     EVM.SymExec,
     EVM.Traversals,
     EVM.CSE,
+    EVM.CHC,
     EVM.Keccak,
     EVM.Transaction,
     EVM.Types,
