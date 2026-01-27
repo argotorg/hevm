@@ -1,0 +1,505 @@
+{- |
+    Module: EVM.CHC
+    Description: Constrained Horn Clause generation for storage invariant extraction
+
+    This module provides functionality to extract storage invariants using CHC
+    (Constrained Horn Clauses). When unknown code is called and can re-enter
+    the caller contract, we use CHC to compute what storage slots can change
+    and what constraints hold on those changes.
+
+    The key insight is that unknown code can only modify the caller's storage
+    by calling back into the caller's public functions. CHC computes the
+    fixpoint of all possible reentrant call sequences.
+-}
+module EVM.CHC
+  ( -- * Types
+    StorageTransition(..)
+  , StorageWrite(..)
+  , CHCResult(..)
+  , StorageInvariant(..)
+    -- * Extraction
+  , extractStorageTransitions
+  , extractStorageWrites
+    -- * CHC Generation
+  , buildCHC
+  , buildCHCQuery
+    -- * Invariant Computation
+  , computeStorageInvariants
+  , solveForInvariants
+    -- * Utilities
+  , getCallerStorageWrites
+  , transitionToCHCRule
+  ) where
+
+import Prelude hiding (LT, GT)
+
+import Control.Exception (bracket)
+import Data.Foldable (foldl')
+import Data.List (nub)
+import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
+import Data.Text (Text)
+import Data.Text qualified as T
+import Data.Text.Lazy qualified as TL
+import Data.Text.Lazy.IO qualified as TL
+import Data.Text.Lazy.Builder (Builder, fromText, toLazyText)
+import GHC.IO.Handle (hClose)
+import System.Process (createProcess, cleanupProcess, proc, std_in, std_out, std_err, StdStream(..))
+
+import EVM.Types
+
+
+-- * Types
+
+-- | Represents a single write to storage
+data StorageWrite = StorageWrite
+  { swAddr  :: Expr EAddr    -- ^ Address being written to
+  , swKey   :: Expr EWord    -- ^ Storage slot key
+  , swValue :: Expr EWord    -- ^ Value being written
+  , swPrev  :: Expr Storage  -- ^ Previous storage state
+  }
+  deriving (Show, Eq, Ord)
+
+-- | Represents a storage transition from one state to another
+data StorageTransition = StorageTransition
+  { stCallerAddr   :: Expr EAddr         -- ^ The caller contract address
+  , stPreStorage   :: Expr Storage       -- ^ Storage state before transition
+  , stPostStorage  :: Expr Storage       -- ^ Storage state after transition
+  , stPathConds    :: [Prop]             -- ^ Path conditions for this transition
+  , stWrites       :: [StorageWrite]     -- ^ Individual writes in this transition
+  , stFunctionSig  :: Maybe Text         -- ^ Function signature if known
+  }
+  deriving (Show, Eq, Ord)
+
+-- | Result of CHC solving
+data CHCResult
+  = CHCInvariantsFound [StorageInvariant]
+    -- ^ Successfully computed invariants
+  | CHCUnknown Text
+    -- ^ Solver returned unknown
+  | CHCError Text
+    -- ^ Error during solving
+  deriving (Show, Eq)
+
+-- | A storage invariant describes what holds for a storage slot
+data StorageInvariant
+  = SlotUnchanged (Expr EWord)
+    -- ^ This slot cannot change under reentrancy
+  | SlotBounded (Expr EWord) (Expr EWord) (Expr EWord)
+    -- ^ Slot value is bounded: slot, lower, upper
+  | SlotMonotonic (Expr EWord) MonotonicDir
+    -- ^ Slot value only changes in one direction
+  | SlotRelation (Expr EWord) (Expr EWord) Prop
+    -- ^ Two slots maintain a relation
+  | CustomInvariant Prop
+    -- ^ Custom invariant expressed as a Prop
+  deriving (Show, Eq, Ord)
+
+-- | Direction of monotonic change
+data MonotonicDir = Increasing | Decreasing | NonIncreasing | NonDecreasing
+  deriving (Show, Eq, Ord)
+
+
+-- * Extraction
+
+-- | Extract storage transitions from an Expr End (execution result)
+extractStorageTransitions
+  :: Expr EAddr        -- ^ Caller address we care about
+  -> Expr End          -- ^ Execution result
+  -> [StorageTransition]
+extractStorageTransitions caller expr = case expr of
+  Success pathConds _ _ contracts ->
+    -- Extract transitions from final contract states
+    Map.foldrWithKey (extractFromContract caller pathConds) [] contracts
+
+  Failure _ _ _ ->
+    -- Failures don't produce storage transitions (reverted)
+    []
+
+  Partial _ _ _ ->
+    -- Partial executions don't produce complete transitions
+    []
+
+  GVar _ ->
+    -- Global variables don't produce transitions
+    []
+
+-- | Extract transition from a single contract's final state
+extractFromContract
+  :: Expr EAddr
+  -> [Prop]
+  -> Expr EAddr
+  -> Expr EContract
+  -> [StorageTransition]
+  -> [StorageTransition]
+extractFromContract caller pathConds addr (C _ storage _ _ _) acc
+  | addr == caller =
+      let writes = extractStorageWrites caller storage
+          transition = StorageTransition
+            { stCallerAddr = caller
+            , stPreStorage = getBaseStorage storage
+            , stPostStorage = storage
+            , stPathConds = pathConds
+            , stWrites = writes
+            , stFunctionSig = Nothing
+            }
+      in transition : acc
+  | otherwise = acc
+extractFromContract _ _ _ (GVar _) acc = acc
+
+-- | Get the base (initial) storage from a storage expression
+getBaseStorage :: Expr Storage -> Expr Storage
+getBaseStorage (SStore _ _ prev) = getBaseStorage prev
+getBaseStorage s@(AbstractStore _ _) = s
+getBaseStorage s@(ConcreteStore _) = s
+getBaseStorage (GVar _) = ConcreteStore mempty  -- fallback
+
+-- | Extract all writes to a specific address from a storage expression
+extractStorageWrites :: Expr EAddr -> Expr Storage -> [StorageWrite]
+extractStorageWrites targetAddr = go []
+  where
+    go acc (SStore key val prev) =
+      -- For now, we include all writes. In a more sophisticated version,
+      -- we would track which address each write belongs to.
+      let write = StorageWrite
+            { swAddr = targetAddr
+            , swKey = key
+            , swValue = val
+            , swPrev = prev
+            }
+      in go (write : acc) prev
+    go acc (AbstractStore _ _) = acc
+    go acc (ConcreteStore _) = acc
+    go acc (GVar _) = acc
+
+-- | Get only the writes that affect the caller's storage
+getCallerStorageWrites :: Expr EAddr -> Expr Storage -> [StorageWrite]
+getCallerStorageWrites = extractStorageWrites
+
+
+-- * CHC Generation
+
+-- | Build a complete CHC script from storage transitions
+buildCHC :: [StorageTransition] -> Builder
+buildCHC transitions =
+  chcPrelude
+  <> "\n"
+  <> declareRelations transitions
+  <> "\n"
+  <> buildTransitionRules transitions
+  <> "\n"
+  <> buildReachabilityRules transitions
+  <> "\n"
+
+-- | CHC prelude with solver configuration
+chcPrelude :: Builder
+chcPrelude = mconcat
+  [ "; CHC for storage invariant extraction\n"
+  , "(set-logic HORN)\n"
+  , "(set-option :fp.engine spacer)\n"
+  , "\n"
+  , "; Types\n"
+  , "(define-sort Word () (_ BitVec 256))\n"
+  , "(define-sort Storage () (Array Word Word))\n"
+  , "\n"
+  ]
+
+-- | Declare the relations we'll use
+declareRelations :: [StorageTransition] -> Builder
+declareRelations transitions =
+  let -- Collect all unique storage slots that are written
+      allSlots = nub $ concatMap (\t -> map (.swKey) t.stWrites) transitions
+      numSlots = length allSlots
+      -- We use a flattened representation: one Word per slot
+      slotSorts = replicate numSlots "Word"
+      sortList = T.intercalate " " (map T.pack slotSorts)
+  in mconcat
+    [ "; Relations\n"
+    , "; Reachable storage states after reentrancy\n"
+    , "(declare-rel Reachable (" <> fromText sortList <> "))\n"
+    , "\n"
+    , "; Initial storage state\n"
+    , "(declare-rel Initial (" <> fromText sortList <> "))\n"
+    , "\n"
+    , "; Storage transition relations (one per function)\n"
+    ] <> mconcat (zipWith declareTransitionRel [0..] transitions)
+
+-- | Declare a transition relation for a single function
+declareTransitionRel :: Int -> StorageTransition -> Builder
+declareTransitionRel idx transition =
+  let slots = map (.swKey) transition.stWrites
+      numSlots = length slots
+      -- Pre and post state, so double the slots
+      sortList = T.intercalate " " (replicate (numSlots * 2) "Word")
+      funcName = case transition.stFunctionSig of
+        Just sig -> "Transition_" <> sig
+        Nothing  -> "Transition_" <> T.pack (show idx)
+  in "(declare-rel " <> fromText funcName <> " (" <> fromText sortList <> "))\n"
+
+-- | Build transition rules from storage transitions
+buildTransitionRules :: [StorageTransition] -> Builder
+buildTransitionRules transitions =
+  "; Transition rules\n" <> mconcat (zipWith transitionToCHCRule [0..] transitions)
+
+-- | Convert a single storage transition to a CHC rule
+transitionToCHCRule :: Int -> StorageTransition -> Builder
+transitionToCHCRule idx transition =
+  let funcName = case transition.stFunctionSig of
+        Just sig -> "Transition_" <> sig
+        Nothing  -> "Transition_" <> T.pack (show idx)
+
+      writes = transition.stWrites
+      numWrites = length writes
+
+      -- Generate variable names for pre and post states
+      preVars = [fromText $ "pre_s" <> T.pack (show i) | i <- [0..numWrites-1]]
+      postVars = [fromText $ "post_s" <> T.pack (show i) | i <- [0..numWrites-1]]
+
+      -- Build the constraint body
+      -- For each write: post_si = value_i (simplified; real version would encode the Expr)
+      writeConstraints = zipWith3 buildWriteConstraint [0..] writes postVars
+
+      -- Path conditions (simplified encoding)
+      pathConstraints = map propToSimpleCHC transition.stPathConds
+
+      allConstraints = writeConstraints ++ pathConstraints
+      constraintBody = if null allConstraints
+                       then "true"
+                       else foldr1 (\a b -> "(and " <> a <> " " <> b <> ")") allConstraints
+
+      -- Relation application
+      allVars = preVars ++ postVars
+      varList = mconcat [v <> " " | v <- allVars]
+
+  in mconcat
+    [ "(rule (=> "
+    , constraintBody
+    , " ("
+    , fromText funcName
+    , " "
+    , varList
+    , ")))\n"
+    ]
+
+-- | Build a write constraint
+buildWriteConstraint :: Int -> StorageWrite -> Builder -> Builder
+buildWriteConstraint _ write postVar =
+  -- Simplified: just say the post value equals the written value
+  -- In a full implementation, we'd encode the Expr properly
+  case write.swValue of
+    Lit w -> "(= " <> postVar <> " (_ bv" <> fromText (T.pack $ show w) <> " 256))"
+    Var v -> "(= " <> postVar <> " " <> fromText v <> ")"
+    _ -> "true"  -- Fallback for complex expressions
+
+-- | Build reachability rules that model reentrancy
+buildReachabilityRules :: [StorageTransition] -> Builder
+buildReachabilityRules transitions =
+  let numSlots = case transitions of
+                   []    -> 0
+                   (t:_) -> length t.stWrites
+
+      -- Initial state is reachable
+      initVars = [fromText $ "s" <> T.pack (show i) | i <- [0..numSlots-1]]
+      initVarList = mconcat [v <> " " | v <- initVars]
+
+      initRule = mconcat
+        [ "; Initial state is reachable\n"
+        , "(rule (=> (Initial "
+        , initVarList
+        , ") (Reachable "
+        , initVarList
+        , ")))\n"
+        ]
+
+      -- Each transition from a reachable state leads to a reachable state
+      transRules = mconcat $ zipWith buildTransReachRule [0..] transitions
+
+  in initRule <> "\n" <> transRules
+
+-- | Build a reachability rule for a transition
+buildTransReachRule :: Int -> StorageTransition -> Builder
+buildTransReachRule idx transition =
+  let funcName = case transition.stFunctionSig of
+        Just sig -> "Transition_" <> sig
+        Nothing  -> "Transition_" <> T.pack (show idx)
+
+      writes = transition.stWrites
+      numWrites = length writes
+
+      preVars = [fromText $ "s" <> T.pack (show i) | i <- [0..numWrites-1]]
+      postVars = [fromText $ "s" <> T.pack (show i) <> "'" | i <- [0..numWrites-1]]
+
+      preVarList = mconcat [v <> " " | v <- preVars]
+      postVarList = mconcat [v <> " " | v <- postVars]
+      allVarList = mconcat [v <> " " | v <- preVars ++ postVars]
+
+  in mconcat
+    [ "(rule (=> (and (Reachable "
+    , preVarList
+    , ") ("
+    , fromText funcName
+    , " "
+    , allVarList
+    , ")) (Reachable "
+    , postVarList
+    , ")))\n"
+    ]
+
+
+-- * CHC Query Building
+
+-- | Build a CHC query to check if a slot can change
+buildCHCQuery :: [StorageTransition] -> Int -> Builder
+buildCHCQuery transitions slotIdx =
+  let numSlots = case transitions of
+                   []    -> 0
+                   (t:_) -> length t.stWrites
+
+      -- Query: can slot i ever differ from initial value?
+      initVars = [fromText $ "i" <> T.pack (show i) | i <- [0..numSlots-1]]
+      reachVars = [fromText $ "s" <> T.pack (show i) | i <- [0..numSlots-1]]
+
+      initVarList = mconcat [v <> " " | v <- initVars]
+      reachVarList = mconcat [v <> " " | v <- reachVars]
+
+      -- The slot we're checking
+      initSlot = initVars !! slotIdx
+      reachSlot = reachVars !! slotIdx
+
+  in mconcat
+    [ buildCHC transitions
+    , "\n"
+    , "; Query: can slot "
+    , fromText (T.pack $ show slotIdx)
+    , " change?\n"
+    , "(query (and (Initial "
+    , initVarList
+    , ") (Reachable "
+    , reachVarList
+    , ") (not (= "
+    , initSlot
+    , " "
+    , reachSlot
+    , "))))\n"
+    ]
+
+
+-- * Invariant Computation
+
+-- | Compute storage invariants from transitions
+-- This is the main entry point for invariant extraction
+computeStorageInvariants
+  :: Expr EAddr            -- ^ Caller address
+  -> [StorageTransition]   -- ^ All possible transitions
+  -> IO CHCResult
+computeStorageInvariants caller transitions = do
+  -- For now, we do a simple analysis without actually calling a solver
+  -- A full implementation would:
+  -- 1. Build the CHC script
+  -- 2. Send to Z3's Spacer
+  -- 3. Parse the invariants from the result
+
+  let invariants = analyzeTransitionsLocally caller transitions
+  pure $ CHCInvariantsFound invariants
+
+-- | Analyze transitions locally without solver (conservative approximation)
+analyzeTransitionsLocally :: Expr EAddr -> [StorageTransition] -> [StorageInvariant]
+analyzeTransitionsLocally _ transitions =
+  let -- Collect all slots that are written
+      allWrites = concatMap (.stWrites) transitions
+      _writtenSlots = Set.fromList $ map (.swKey) allWrites
+
+      -- Slots that are never written are unchanged
+      -- (This is conservative - a full CHC analysis could find more invariants)
+      unchangedInvariants = []  -- Would need initial slots to compare
+
+      -- For each written slot, try to find bounds or monotonicity
+      writeInvariants = concatMap analyzeSlotWrites (groupWritesBySlot allWrites)
+
+  in unchangedInvariants ++ writeInvariants
+
+-- | Group writes by their target slot
+groupWritesBySlot :: [StorageWrite] -> [(Expr EWord, [StorageWrite])]
+groupWritesBySlot writes =
+  let grouped = foldl' addWrite Map.empty writes
+      addWrite m w = Map.insertWith (++) w.swKey [w] m
+  in Map.toList grouped
+
+-- | Analyze writes to a single slot for patterns
+analyzeSlotWrites :: (Expr EWord, [StorageWrite]) -> [StorageInvariant]
+analyzeSlotWrites (_slot, _writes) =
+  -- Look for patterns in the writes
+  -- For now, just mark any written slot as potentially changed
+  -- A full implementation would analyze the write expressions
+  []
+
+-- | Solve for invariants using a CHC solver
+solveForInvariants
+  :: [StorageTransition]
+  -> IO CHCResult
+solveForInvariants transitions = do
+  -- Build CHC script
+  let chcScript = toLazyText (buildCHC transitions) <> "\n(check-sat)\n"
+
+  -- Invoke z3 with spacer engine
+  result <- runZ3CHC chcScript
+  case result of
+    Left err -> pure $ CHCError err
+    Right "sat" -> pure $ CHCInvariantsFound []  -- SAT means invariants hold
+    Right "unsat" -> pure $ CHCUnknown "CHC query unsatisfiable"
+    Right other -> pure $ CHCUnknown (TL.toStrict other)
+
+-- | Run z3 as a CHC solver
+runZ3CHC :: TL.Text -> IO (Either Text TL.Text)
+runZ3CHC script = do
+  let cmd = (proc "z3" ["-in"])
+            { std_in = CreatePipe
+            , std_out = CreatePipe
+            , std_err = CreatePipe
+            }
+  bracket
+    (createProcess cmd)
+    (\(mstdin, mstdout, mstderr, ph) -> cleanupProcess (mstdin, mstdout, mstderr, ph))
+    (\(mstdin, mstdout, _mstderr, _ph) -> do
+      case (mstdin, mstdout) of
+        (Just stdin, Just stdout) -> do
+          -- Send the CHC script
+          TL.hPutStr stdin script
+          hClose stdin
+          -- Read the result
+          output <- TL.hGetContents stdout
+          let result = TL.strip output
+          pure $ Right result
+        _ -> pure $ Left "Failed to create z3 process pipes"
+    )
+
+
+-- * Utility Functions
+
+-- | Convert a Prop to a simplified CHC constraint
+-- This is a simplified version; full implementation would handle all Prop cases
+propToSimpleCHC :: Prop -> Builder
+propToSimpleCHC prop = case prop of
+  PBool True -> "true"
+  PBool False -> "false"
+  PEq a b -> "(= " <> exprToSimpleCHC a <> " " <> exprToSimpleCHC b <> ")"
+  PLT a b -> "(bvult " <> exprToSimpleCHC a <> " " <> exprToSimpleCHC b <> ")"
+  PGT a b -> "(bvugt " <> exprToSimpleCHC a <> " " <> exprToSimpleCHC b <> ")"
+  PLEq a b -> "(bvule " <> exprToSimpleCHC a <> " " <> exprToSimpleCHC b <> ")"
+  PGEq a b -> "(bvuge " <> exprToSimpleCHC a <> " " <> exprToSimpleCHC b <> ")"
+  PNeg p -> "(not " <> propToSimpleCHC p <> ")"
+  PAnd a b -> "(and " <> propToSimpleCHC a <> " " <> propToSimpleCHC b <> ")"
+  POr a b -> "(or " <> propToSimpleCHC a <> " " <> propToSimpleCHC b <> ")"
+  PImpl a b -> "(=> " <> propToSimpleCHC a <> " " <> propToSimpleCHC b <> ")"
+
+-- | Convert an Expr to a simplified CHC term
+-- This handles only common cases; full implementation would be comprehensive
+exprToSimpleCHC :: Expr a -> Builder
+exprToSimpleCHC expr = case expr of
+  Lit w -> "(_ bv" <> fromText (T.pack $ show w) <> " 256)"
+  Var v -> fromText v
+  Add a b -> "(bvadd " <> exprToSimpleCHC a <> " " <> exprToSimpleCHC b <> ")"
+  Sub a b -> "(bvsub " <> exprToSimpleCHC a <> " " <> exprToSimpleCHC b <> ")"
+  Mul a b -> "(bvmul " <> exprToSimpleCHC a <> " " <> exprToSimpleCHC b <> ")"
+  SLoad key store -> "(select " <> exprToSimpleCHC store <> " " <> exprToSimpleCHC key <> ")"
+  _ -> "unknown"  -- Fallback for unhandled expressions
