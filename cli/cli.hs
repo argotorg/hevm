@@ -88,9 +88,9 @@ data CommonOptions = CommonOptions
   , verb          ::Int
   , root          ::Maybe String
   , assertionType ::AssertionType
-  , solverThreads ::Natural
-  , smttimeout    ::Natural
-  , smtdebug      ::Bool
+  , smtTimeout    ::Natural
+  , smtMemory     ::Natural
+  , smtDebug      ::Bool
   , dumpUnsolved  ::Maybe String
   , numSolvers    ::Maybe Natural
   , maxIterations ::Integer
@@ -118,9 +118,9 @@ commonOptions = CommonOptions
   <*> (option auto $ long "verb"            <> showDefault <> value 1 <> help "Append call trace: {1} failures {2} all")
   <*> (optional $ strOption $ long "root"   <> help "Path to  project root directory")
   <*> (option auto $ long "assertion-type"  <> showDefault <> value Forge <> help "Assertions as per Forge or DSTest")
-  <*> (option auto $ long "solver-threads"  <> showDefault <> value 1 <> help "Number of threads for each solver instance. Only respected for Z3")
-  <*> (option auto $ long "smttimeout"      <> value 300 <> help "Timeout given to SMT solver in seconds")
-  <*> (switch $ long "smtdebug"             <> help "Print smt queries sent to the solver")
+  <*> (option auto $ long "smt-timeout"     <> value 300 <> help "Timeout given to SMT solver in seconds. Not available on Windows")
+  <*> (option auto $ long "smt-memory"      <> value defMemLimit <> help "Maximum memory limit for SMT solver in MB. Only available on Linux")
+  <*> (switch $ long "smt-debug"            <> help "Print smt queries sent to the solver")
   <*> (optional $ strOption $ long "dump-unsolved" <> help "Dump unsolved SMT queries to this (relative) path")
   <*> (optional $ option auto $ long "num-solvers" <> help "Number of solver instances to use (default: number of cpu cores)")
   <*> (option auto $ long "max-iterations"  <> showDefault <> value 5 <> help "Number of times we may revisit a particular branching point. For no bound, set -1")
@@ -332,7 +332,7 @@ main = do
       solver <- getSolver cOpts.solver
       cores <- liftIO $ unsafeInto <$> getNumProcessors
       let solverCount = fromMaybe cores cOpts.numSolvers
-      runEnv env $ withSolvers solver solverCount cOpts.solverThreads (Just cOpts.smttimeout) $ \solvers -> do
+      runEnv env $ withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
         buildOut <- readBuildOutput root testOpts.projectType
         case buildOut of
           Left e -> liftIO $ do
@@ -360,7 +360,7 @@ main = do
         putStrLn "Error: maxBufSize must be at least 0. Negative values do not make sense. A value of zero means at most 1 byte long buffers"
         exitFailure
       pure Env { config = defaultConfig
-        { dumpQueries = cOpts.smtdebug
+        { dumpQueries = cOpts.smtDebug
         , dumpUnsolved = cOpts.dumpUnsolved
         , debug = cOpts.debug
         , dumpEndStates = cOpts.debug
@@ -418,7 +418,7 @@ equivalence eqOpts cOpts = do
   solver <- liftIO $ getSolver cOpts.solver
   cores <- liftIO $ unsafeInto <$> getNumProcessors
   let solverCount = fromMaybe cores cOpts.numSolvers
-  withSolvers solver solverCount cOpts.solverThreads (Just cOpts.smttimeout) $ \s -> do
+  withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \s -> do
     sess <- Fetch.mkSession cOpts.cacheDir Nothing
     eq <- equivalenceCheck s (Just sess) (fromJust bytecodeA) (fromJust bytecodeB) veriOpts calldata eqOpts.create
     let anyIssues =  not (null eq.partials) || any (isUnknown . fst) eq.res  || any (isError . fst) eq.res
@@ -516,7 +516,7 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = do
   cores <- liftIO $ unsafeInto <$> getNumProcessors
   let solverCount = fromMaybe cores cOpts.numSolvers
   solver <- liftIO $ getSolver cOpts.solver
-  withSolvers solver solverCount cOpts.solverThreads (Just cOpts.smttimeout) $ \solvers -> do
+  withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
     let veriOpts = VeriOpts { iterConf = IterConfig {
                               maxIter = parseMaxIters cOpts.maxIterations
                               , askSmtIters = cOpts.askSmtIterations
@@ -584,7 +584,7 @@ launchExec cFileOpts execOpts cExecOpts cOpts = do
     rpcDat :: Fetch.RpcInfo = Fetch.RpcInfo blockUrlInfo
 
   -- TODO: we shouldn't need solvers to execute this code
-  withSolvers Z3 0 1 Nothing $ \solvers -> do
+  withSolvers Z3 0 Nothing cOpts.smtMemory $ \solvers -> do
     let fetcher = Fetch.oracle solvers (Just sess) rpcDat
     vm' <- if execOpts.jsonTrace
            then do
@@ -871,7 +871,7 @@ unitTestOptions testOpts cOpts solvers buildOutput = do
                 in rpcDat { Fetch.blockNumURL = i }
     , maxIter = parseMaxIters cOpts.maxIterations
     , askSmtIters = cOpts.askSmtIterations
-    , smtTimeout = Just cOpts.smttimeout
+    , smtTimeout = Just cOpts.smtTimeout
     , match = T.pack $ fromMaybe ".*" testOpts.match
     , prefix = T.pack testOpts.prefix
     , testParams = params

@@ -31,6 +31,8 @@ module EVM.SMT
 import Prelude hiding (LT, GT, Foldable(..))
 
 import Control.Monad
+import Control.Monad.Trans (lift)
+import Control.Monad.Trans.Maybe (MaybeT(..), runMaybeT, hoistMaybe)
 import Data.Containers.ListUtils (nubOrd, nubInt)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -742,9 +744,6 @@ parseSC (SCHexadecimal a) = readOrError Numeric.readHex a
 parseSC (SCBinary a) = readOrError Numeric.readBin a
 parseSC sc = internalError $ "cannot parse: " <> show sc
 
-parseErr :: (Show a) => a -> b
-parseErr res = internalError $ "cannot parse solver response: " <> show res
-
 parseVar :: TS.Text -> Expr EWord
 parseVar = Var
 
@@ -772,67 +771,60 @@ parseTxCtx name
   | Just a <- TS.stripPrefix "codehash_" name = CodeHash (parseEAddr a)
   | otherwise = internalError $ "cannot parse " <> (TS.unpack name) <> " into an Expr"
 
-getAddrs :: (TS.Text -> Expr EAddr) -> (Text -> IO Text) -> [TS.Text] -> IO (Map (Expr EAddr) Addr)
-getAddrs parseName getVal names = Map.mapKeys parseName <$> foldM (getOne parseAddr getVal) mempty names
+getAddrs :: (TS.Text -> Expr EAddr) -> (Text -> IO (Maybe Text)) -> [TS.Text] -> IO (Maybe (Map (Expr EAddr) Addr))
+getAddrs parseName getVal names = runMaybeT $ do
+  m <- foldM (getOne parseAddr getVal) mempty names
+  pure $ Map.mapKeys parseName m
 
-getVars :: (TS.Text -> Expr EWord) -> (Text -> IO Text) -> [TS.Text] -> IO (Map (Expr EWord) W256)
-getVars parseName getVal names = Map.mapKeys parseName <$> foldM (getOne parseW256 getVal) mempty names
+getVars :: (TS.Text -> Expr EWord) -> (Text -> IO (Maybe Text)) -> [TS.Text] -> IO (Maybe (Map (Expr EWord) W256))
+getVars parseName getVal names = runMaybeT $ do
+  m <- foldM (getOne parseW256 getVal) mempty names
+  pure $ Map.mapKeys parseName m
 
-getOne :: (SpecConstant -> a) -> (Text -> IO Text) -> Map TS.Text a -> TS.Text -> IO (Map TS.Text a)
+getOne :: (SpecConstant -> a) -> (Text -> IO (Maybe Text)) -> Map TS.Text a -> TS.Text -> MaybeT IO (Map TS.Text a)
 getOne parseVal getVal acc name = do
-  raw <- getVal (T.fromStrict name)
-  let
-    parsed = case parseCommentFreeFileMsg getValueRes (T.toStrict raw) of
-      Right (ResSpecific (valParsed :| [])) -> valParsed
-      r -> parseErr r
-    val = case parsed of
-      (TermQualIdentifier (
-        Unqualified (IdSymbol symbol)),
-        TermSpecConstant sc)
-          -> if symbol == name
-             then parseVal sc
-             else internalError "solver did not return model for requested value"
-      r -> parseErr r
+  maybeRaw <- lift $ getVal (T.fromStrict name)
+  val <- hoistMaybe $ do
+    raw <- maybeRaw
+    Right (ResSpecific (valParsed :| [])) <- pure $ parseCommentFreeFileMsg getValueRes (T.toStrict raw)
+    (TermQualIdentifier (Unqualified (IdSymbol symbol)), TermSpecConstant sc) <- pure valParsed
+    guard (symbol == name)
+    pure $ parseVal sc
   pure $ Map.insert name val acc
 
 -- | Queries the solver for models for each of the expressions representing the
 -- max read index for a given buffer
-queryMaxReads :: (Text -> IO Text) -> Map Text (Expr EWord)  -> IO (Map Text W256)
-queryMaxReads getVal maxReads = mapM (queryValue getVal) maxReads
+queryMaxReads :: (Text -> IO (Maybe Text)) -> Map Text (Expr EWord) -> IO (Maybe (Map Text W256))
+queryMaxReads getVal maxReads = runMaybeT $ mapM (MaybeT . queryValue getVal) maxReads
 
 -- | Gets the initial model for each buffer, these will often be much too large for our purposes
-getBufs :: (Text -> IO Text) -> [Text] -> IO (Map (Expr Buf) BufModel)
-getBufs getVal bufs = foldM getBuf mempty bufs
+getBufs :: (Text -> IO (Maybe Text)) -> [Text] -> IO (Maybe (Map (Expr Buf) BufModel))
+getBufs getVal bufs = runMaybeT $ foldM getBuf mempty bufs
   where
-    getLength :: Text -> IO W256
+    getLength :: Text -> MaybeT IO W256
     getLength name = do
-      val <- getVal (name <> "_length ")
-      pure $ case parseCommentFreeFileMsg getValueRes (T.toStrict val) of
-        Right (ResSpecific (parsed :| [])) -> case parsed of
-          (TermQualIdentifier (Unqualified (IdSymbol symbol)), (TermSpecConstant sc))
-            -> if symbol == (T.toStrict $ name <> "_length")
-               then parseW256 sc
-               else internalError "solver did not return model for requested value"
-          res -> parseErr res
-        res -> parseErr res
+      maybeVal <- lift $ getVal (name <> "_length ")
+      hoistMaybe $ do
+        val <- maybeVal
+        Right (ResSpecific (parsed :| [])) <- pure $ parseCommentFreeFileMsg getValueRes (T.toStrict val)
+        (TermQualIdentifier (Unqualified (IdSymbol symbol)), TermSpecConstant sc) <- pure parsed
+        guard (symbol == T.toStrict (name <> "_length"))
+        pure $ parseW256 sc
 
-    getBuf :: Map (Expr Buf) BufModel -> Text -> IO (Map (Expr Buf) BufModel)
+    getBuf :: Map (Expr Buf) BufModel -> Text -> MaybeT IO (Map (Expr Buf) BufModel)
     getBuf acc name = do
       len <- getLength name
-      val <- getVal name
-
-      buf <- case parseCommentFreeFileMsg getValueRes (T.toStrict val) of
-        Right (ResSpecific (valParsed :| [])) -> case valParsed of
-          (TermQualIdentifier (Unqualified (IdSymbol symbol)), term)
-            -> if (T.fromStrict symbol) == name
-               then pure $ parseBuf len term
-               else internalError "solver did not return model for requested value"
-          res -> internalError $ "cannot parse solver response: " <> show res
-        res -> internalError $ "cannot parse solver response: " <> show res
+      maybeVal <- lift $ getVal name
+      buf <- hoistMaybe $ do
+        val <- maybeVal
+        Right (ResSpecific (valParsed :| [])) <- pure $ parseCommentFreeFileMsg getValueRes (T.toStrict val)
+        (TermQualIdentifier (Unqualified (IdSymbol symbol)), term) <- pure valParsed
+        guard (T.fromStrict symbol == name)
+        parseBuf len term
       pure $ Map.insert (AbstractBuf $ T.toStrict name) buf acc
 
-    parseBuf :: W256 -> Term -> BufModel
-    parseBuf len = Comp . go mempty
+    parseBuf :: W256 -> Term -> Maybe BufModel
+    parseBuf len term = Comp <$> go mempty term
       where
         go env = \case
           -- constant arrays
@@ -843,71 +835,67 @@ getBufs getVal bufs = foldM getBuf mempty bufs
                 :| [SortSymbol (IdIndexed "BitVec" (IxNumeral "8" :| []))]
               )
             )) ((TermSpecConstant val :| [])))
-            -> Base (parseW8 val) len
+            -> Just $ Base (parseW8 val) len
 
           -- writing a byte over some array
           (TermApplication
             (Unqualified (IdSymbol "store"))
             (base :| [TermSpecConstant idx, TermSpecConstant val])
-            ) -> let
-              pbase = go env base
-              pidx = parseW256 idx
-              pval = parseW8 val
-            in Write pval pidx pbase
+            ) -> do
+              pbase <- go env base
+              let pidx = parseW256 idx
+                  pval = parseW8 val
+              Just $ Write pval pidx pbase
 
           -- binding a new name
-          (TermLet ((VarBinding name bound) :| []) term) -> let
-              pbound = go env bound
-            in go (Map.insert name pbound env) term
+          (TermLet ((VarBinding name' bound) :| []) term') -> do
+              pbound <- go env bound
+              go (Map.insert name' pbound env) term'
 
           -- looking up a bound name
-          (TermQualIdentifier (Unqualified (IdSymbol name))) -> case Map.lookup name env of
-            Just t -> t
-            Nothing -> internalError $ "could not find "
-                            <> (TS.unpack name)
-                            <> " in environment mapping"
-          p -> parseErr p
+          (TermQualIdentifier (Unqualified (IdSymbol name'))) ->
+            Map.lookup name' env
+
+          _ -> Nothing
 
 -- | Takes a Map containing all reads from a store with an abstract base, as
 -- well as the concrete part of the storage prestate and returns a fully
 -- concretized storage
 getStore
-  :: (Text -> IO Text)
+  :: (Text -> IO (Maybe Text))
   -> StorageReads
-  -> IO (Map (Expr EAddr) (Map W256 W256))
-getStore getVal (StorageReads innerMap) =
-  fmap Map.fromList $ forM (Map.toList innerMap) $ \((addr, idx), slots) -> do
+  -> IO (Maybe (Map (Expr EAddr) (Map W256 W256)))
+getStore getVal (StorageReads innerMap) = runMaybeT $ do
+  results <- forM (Map.toList innerMap) $ \((addr, idx), slots) -> do
     let name = toLazyText (storeName addr idx)
-    raw <- getVal name
-    let parsed = case parseCommentFreeFileMsg getValueRes (T.toStrict raw) of
-                   Right (ResSpecific (valParsed :| [])) -> valParsed
-                   r -> parseErr r
-        -- first interpret SMT term as a function
-        fun = case parsed of
-                (TermQualIdentifier (Unqualified (IdSymbol symbol)), term) ->
-                  if symbol == (T.toStrict name)
-                  then interpret1DArray Map.empty term
-                  else internalError "solver did not return model for requested value"
-                r -> parseErr r
-
-    -- then create a map by adding only the locations that are read by the program
+    maybeRaw <- lift $ getVal name
+    fun <- hoistMaybe $ do
+      raw <- maybeRaw
+      Right (ResSpecific (valParsed :| [])) <- pure $ parseCommentFreeFileMsg getValueRes (T.toStrict raw)
+      (TermQualIdentifier (Unqualified (IdSymbol symbol)), term) <- pure valParsed
+      guard (symbol == T.toStrict name)
+      pure $ interpret1DArray Map.empty term
+    -- create a map by adding only the locations that are read by the program
     store <- foldM (\m slot -> do
-      slot' <- queryValue getVal slot
-      pure $ Map.insert slot' (fun slot') m) Map.empty slots
+      slot' <- MaybeT $ queryValue getVal slot
+      pure $ Map.insert slot' (fun slot') m) Map.empty (Set.toList slots)
     pure (addr, store)
+  pure $ Map.fromList results
 
 -- | Ask the solver to give us the concrete value of an arbitrary abstract word
-queryValue :: (Text -> IO Text) -> Expr EWord -> IO W256
-queryValue _ (Lit w) = pure w
+queryValue :: (Text -> IO (Maybe Text)) -> Expr EWord -> IO (Maybe W256)
+queryValue _ (Lit w) = pure (Just w)
 queryValue getVal w = do
   -- this exprToSMT should never fail, since we have already ran the solver
   let expr = toLazyText $ fromRight' $ exprToSMT w
-  raw <- getVal expr
-  let valTxt = fromMaybe (internalError $ "failed to parse value from get-val response: " <> show raw) $ extractValue raw
-  case parseString specConstant (T.toStrict valTxt) of
-    Right sc -> pure $ parseW256 sc
-    r -> parseErr r
+  maybeRaw <- getVal expr
+  pure $ do
+    raw <- maybeRaw
+    valTxt <- extractValue raw
+    Right sc <- pure $ parseString specConstant (T.toStrict valTxt)
+    pure $ parseW256 sc
   where
+    extractValue :: Text -> Maybe Text
     extractValue getValResponse = (T.stripSuffix "))") $ snd $ T.breakOnEnd " " $ T.stripEnd getValResponse
 
 -- | Interpret an N-dimensional array as a value of type a.

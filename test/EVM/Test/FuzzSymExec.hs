@@ -382,7 +382,7 @@ runCodeWithTrace
   :: App m
   => Fetch.RpcInfo -> EVMToolEnv -> EVMToolAlloc -> EVM.Transaction.Transaction
   -> Expr EAddr -> Expr EAddr -> m (Either (EvmError, [VMTraceStep]) (([Expr 'End], [VMTraceStep], VMTraceStepResult)))
-runCodeWithTrace rpcinfo evmEnv alloc txn fromAddr toAddress = withSolvers Z3 0 1 Nothing $ \solvers -> do
+runCodeWithTrace rpcinfo evmEnv alloc txn fromAddr toAddress = withSolvers Z3 0 Nothing defMemLimit $ \solvers -> do
   let calldata' = ConcreteBuf txn.txdata
       code' = alloc.code
       iterConf = IterConfig { maxIter = Nothing, askSmtIters = 1, loopHeuristic = Naive }
