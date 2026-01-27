@@ -52,6 +52,7 @@ import System.Process (createProcess, cleanupProcess, proc, std_in, std_out, std
 
 import EVM.Types
 import EVM.Effects (Config(..), ReadConfig(..))
+import Witch (into)
 
 
 -- * Types
@@ -312,15 +313,28 @@ declareRelations transitions =
       -- We use a flattened representation: one Word per slot
       slotSorts = replicate numSlots "Word"
       sortList = T.intercalate " " (map T.pack slotSorts)
+
+      -- Declare variables used in rules
+      varDecls = mconcat
+        [ "; Variables\n"
+        -- Variables for transition rules
+        , mconcat [fromText $ "(declare-var pre_s" <> T.pack (show i) <> " Word)\n" | i <- [0..numSlots-1]]
+        , mconcat [fromText $ "(declare-var post_s" <> T.pack (show i) <> " Word)\n" | i <- [0..numSlots-1]]
+        -- Variables for reachability rules
+        , mconcat [fromText $ "(declare-var s" <> T.pack (show i) <> " Word)\n" | i <- [0..numSlots-1]]
+        , mconcat [fromText $ "(declare-var s" <> T.pack (show i) <> "_next Word)\n" | i <- [0..numSlots-1]]
+        , "\n"
+        ]
   in mconcat
-    [ "; Relations\n"
+    [ varDecls
+    , "; Relations\n"
     , "; Reachable storage states after reentrancy\n"
     , "(declare-rel Reachable (" <> fromText sortList <> "))\n"
     , "\n"
     , "; Initial storage state\n"
     , "(declare-rel Initial (" <> fromText sortList <> "))\n"
     , "\n"
-    , "; Storage transition relations (one per function)\n"
+    , "; Storage transition relations (one per transition)\n"
     ] <> mconcat (zipWith declareTransitionRel [0..] transitions)
 
 -- | Declare a transition relation for a single transition
@@ -354,13 +368,14 @@ transitionToCHCRule idx transition =
       -- For each write: post_si = value_i (simplified; real version would encode the Expr)
       writeConstraints = zipWith3 buildWriteConstraint [0..] writes postVars
 
-      -- Path conditions (simplified encoding)
-      pathConstraints = map propToSimpleCHC transition.stPathConds
+      -- Note: We skip path conditions for now as they involve complex symbolic
+      -- expressions (TxValue, BufLength, etc.) that are hard to encode in CHC.
+      -- This is a conservative approximation - it allows more transitions than
+      -- may actually be possible, but that's safe for computing invariants.
 
-      allConstraints = writeConstraints ++ pathConstraints
-      constraintBody = if null allConstraints
+      constraintBody = if null writeConstraints
                        then "true"
-                       else foldr1 (\a b -> "(and " <> a <> " " <> b <> ")") allConstraints
+                       else foldr1 (\a b -> "(and " <> a <> " " <> b <> ")") writeConstraints
 
       -- Relation application
       allVars = preVars ++ postVars
@@ -376,13 +391,17 @@ transitionToCHCRule idx transition =
     , ")))\n"
     ]
 
+-- | Format a W256 as an SMT-LIB bitvector literal
+formatBV256 :: W256 -> Builder
+formatBV256 w = "(_ bv" <> fromText (T.pack $ show (into w :: Integer)) <> " 256)"
+
 -- | Build a write constraint
 buildWriteConstraint :: Int -> StorageWrite -> Builder -> Builder
 buildWriteConstraint _ write postVar =
   -- Simplified: just say the post value equals the written value
   -- In a full implementation, we'd encode the Expr properly
   case write.swValue of
-    Lit w -> "(= " <> postVar <> " (_ bv" <> fromText (T.pack $ show w) <> " 256))"
+    Lit w -> "(= " <> postVar <> " " <> formatBV256 w <> ")"
     Var v -> "(= " <> postVar <> " " <> fromText v <> ")"
     _ -> "true"  -- Fallback for complex expressions
 
@@ -420,7 +439,7 @@ buildTransReachRule idx transition =
       numWrites = length writes
 
       preVars = [fromText $ "s" <> T.pack (show i) | i <- [0..numWrites-1]]
-      postVars = [fromText $ "s" <> T.pack (show i) <> "'" | i <- [0..numWrites-1]]
+      postVars = [fromText $ "s" <> T.pack (show i) <> "_next" | i <- [0..numWrites-1]]
 
       preVarList = mconcat [v <> " " | v <- preVars]
       postVarList = mconcat [v <> " " | v <- postVars]
@@ -655,10 +674,22 @@ propToSimpleCHC prop = case prop of
 -- This handles only common cases; full implementation would be comprehensive
 exprToSimpleCHC :: Expr a -> Builder
 exprToSimpleCHC expr = case expr of
-  Lit w -> "(_ bv" <> fromText (T.pack $ show w) <> " 256)"
+  Lit w -> formatBV256 w
   Var v -> fromText v
   Add a b -> "(bvadd " <> exprToSimpleCHC a <> " " <> exprToSimpleCHC b <> ")"
   Sub a b -> "(bvsub " <> exprToSimpleCHC a <> " " <> exprToSimpleCHC b <> ")"
   Mul a b -> "(bvmul " <> exprToSimpleCHC a <> " " <> exprToSimpleCHC b <> ")"
   SLoad key store -> "(select " <> exprToSimpleCHC store <> " " <> exprToSimpleCHC key <> ")"
-  _ -> "unknown"  -- Fallback for unhandled expressions
+  -- Environment variables - treat as unconstrained symbolic values
+  TxValue -> "chc_txvalue"
+  Origin -> "chc_origin"
+  Coinbase -> "chc_coinbase"
+  Timestamp -> "chc_timestamp"
+  BlockNumber -> "chc_blocknumber"
+  PrevRandao -> "chc_prevrandao"
+  GasLimit -> "chc_gaslimit"
+  ChainId -> "chc_chainid"
+  BaseFee -> "chc_basefee"
+  BufLength b -> "(chc_buflength " <> exprToSimpleCHC b <> ")"
+  AbstractBuf name -> fromText $ "chc_buf_" <> name
+  _ -> "chc_unknown"  -- Fallback for unhandled expressions

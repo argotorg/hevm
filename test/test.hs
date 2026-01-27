@@ -622,6 +622,12 @@ tests = testGroup "hevm"
           |]
         paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "prove_solve()" [])) [] defaultVeriOpts
         let transitions = concatMap CHC.extractAllStorageTransitions paths
+        -- Dump CHC script for debugging when debug is enabled
+        when testEnv.config.debug $ do
+          let chcScript = show $ CHC.buildCHCWithComments transitions
+          let debugFile = "/tmp/chc_debug.smt2"
+          liftIO $ writeFile debugFile chcScript
+          putStrLnM $ "CHC script written to: " ++ debugFile
         -- This test exercises the Z3 integration
         -- It may return an error if Z3 is not installed, which is acceptable
         result <- CHC.solveForInvariants transitions
