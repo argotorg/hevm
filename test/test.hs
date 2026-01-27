@@ -63,7 +63,7 @@ import EVM.Assembler
 import EVM.Exec
 import EVM.Expr qualified as Expr
 import EVM.Fetch qualified as Fetch
-import EVM.Format (hexByteString, hexText, formatExpr)
+import EVM.Format (hexByteString, hexText, formatExpr, formatStorageWrites, formatStorageTransitions)
 import EVM.Precompiled
 import EVM.RLP
 import EVM.SMT hiding (one)
@@ -88,7 +88,7 @@ testEnv = Env { config = defaultConfig {
   dumpQueries = False
   , dumpExprs = False
   , dumpEndStates = False
-  , debug = False
+  , debug = True
   , dumpTrace = False
   , decomposeStorage = True
   , verb = 1
@@ -534,6 +534,7 @@ tests = testGroup "hevm"
         -- Each transition should have writes
         let allWrites = concatMap (.stWrites) transitions
         assertBoolM "Should have at least one storage write" (not $ null allWrites)
+        putStrLnM $ "allWrites:\n" ++ T.unpack (formatStorageWrites allWrites)
     , test "chc-extract-transitions-array" $ do
         -- Test CHC storage transition extraction with an array
         Just c <- solcRuntime "MyContract"
@@ -548,6 +549,7 @@ tests = testGroup "hevm"
         paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "prove_array(uint256)" [AbiUIntType 256])) [] defaultVeriOpts
         let transitions = concatMap CHC.extractAllStorageTransitions paths
         assertBoolM "Should extract at least one transition" (not $ null transitions)
+        putStrLnM $ "transitions:\n" ++ T.unpack (formatStorageTransitions transitions)
     , test "chc-build-script" $ do
         -- Test that CHC script building works
         Just c <- solcRuntime "MyContract"
@@ -627,6 +629,7 @@ tests = testGroup "hevm"
           CHC.CHCInvariantsFound _ -> pure ()  -- Success
           CHC.CHCUnknown _ -> pure ()  -- Also acceptable (unknown result)
           CHC.CHCError _ -> pure ()  -- Also acceptable (Z3 not available or syntax error)
+        putStrLnM $ "CHC invariants found:" <> show result
     ]
   , testGroup "StorageTests"
     [ test "accessStorage uses fetchedStorage" $ do

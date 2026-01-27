@@ -8,6 +8,10 @@ module EVM.Format
   , formatProp
   , formatState
   , formatError
+  , formatStorageWrite
+  , formatStorageWrites
+  , formatStorageTransition
+  , formatStorageTransitions
   , contractNamePart
   , contractPathPart
   , showError
@@ -39,6 +43,7 @@ import Prelude hiding (LT, GT)
 
 import EVM (traceForest, traceForest', traceContext, cheatCode)
 import EVM.ABI (getAbiSeq, parseTypeName, AbiValue(..), AbiType(..), SolError(..), Indexed(..), Event(..))
+import EVM.CHC (StorageWrite(..), StorageTransition(..))
 import EVM.Dapp (DappContext(..), DappInfo(..), findSrc, showTraceLocation)
 import EVM.Expr qualified as Expr
 import EVM.Solidity (SolcContract(..), Method(..), SrcMap (..), WarningData (..), SourceCache(..))
@@ -913,3 +918,52 @@ showVal :: AbiValue -> Text
 showVal (AbiBytes _ bs) = formatBytes bs
 showVal (AbiAddress addr) = T.pack  . show $ addr
 showVal v = T.pack . show $ v
+
+-- | Format a single StorageWrite for display
+formatStorageWrite :: StorageWrite -> Text
+formatStorageWrite w = T.unlines
+  [ "(StorageWrite"
+  , indent 2 $ T.unlines
+    [ "addr: " <> formatExpr w.swAddr
+    , "key: " <> formatExpr w.swKey
+    , "value: " <> formatExpr w.swValue
+    ]
+  , ")"
+  ]
+
+-- | Format a list of StorageWrites
+formatStorageWrites :: [StorageWrite] -> Text
+formatStorageWrites [] = "(no storage writes)"
+formatStorageWrites ws = T.unlines $ zipWith formatOne [0 :: Int ..] ws
+  where
+    formatOne i w = T.unlines
+      [ "Write " <> T.pack (show i) <> ":"
+      , indent 2 $ formatStorageWrite w
+      ]
+
+-- | Format a single StorageTransition for display
+formatStorageTransition :: StorageTransition -> Text
+formatStorageTransition t = T.unlines
+  [ "(StorageTransition"
+  , indent 2 $ T.unlines
+    [ "callerAddr: " <> formatExpr t.stCallerAddr
+    , "functionSig: " <> T.pack (show t.stFunctionSig)
+    , "preStorage: " <> formatExpr t.stPreStorage
+    , "postStorage: " <> formatExpr t.stPostStorage
+    , "pathConds (" <> T.pack (show (length t.stPathConds)) <> "):"
+    , indent 2 $ T.unlines (map formatProp t.stPathConds)
+    , "writes (" <> T.pack (show (length t.stWrites)) <> "):"
+    , indent 2 $ formatStorageWrites t.stWrites
+    ]
+  , ")"
+  ]
+
+-- | Format a list of StorageTransitions
+formatStorageTransitions :: [StorageTransition] -> Text
+formatStorageTransitions [] = "(no storage transitions)"
+formatStorageTransitions ts = T.unlines $ zipWith formatOne [0 :: Int ..] ts
+  where
+    formatOne i t = T.unlines
+      [ "Transition " <> T.pack (show i) <> ":"
+      , indent 2 $ formatStorageTransition t
+      ]
