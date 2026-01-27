@@ -31,6 +31,8 @@ import Data.Set qualified as Set
 import Data.String.Here
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Lazy.Builder (toLazyText)
+import Data.Text.Lazy.IO qualified as TL
 import Data.Time (diffUTCTime, getCurrentTime)
 import Data.Tuple.Extra
 import Data.Tree (flatten)
@@ -624,17 +626,16 @@ tests = testGroup "hevm"
         let transitions = concatMap CHC.extractAllStorageTransitions paths
         -- Dump CHC script for debugging when debug is enabled
         when testEnv.config.debug $ do
-          let chcScript = show $ CHC.buildCHCWithComments transitions
+          let chcScript = toLazyText $ CHC.buildCHCWithComments transitions
           let debugFile = "/tmp/chc_debug.smt2"
-          liftIO $ writeFile debugFile chcScript
+          liftIO $ TL.writeFile debugFile chcScript
           putStrLnM $ "CHC script written to: " ++ debugFile
         -- This test exercises the Z3 integration
-        -- It may return an error if Z3 is not installed, which is acceptable
         result <- CHC.solveForInvariants transitions
         case result of
           CHC.CHCInvariantsFound _ -> pure ()  -- Success
-          CHC.CHCUnknown _ -> pure ()  -- Also acceptable (unknown result)
-          CHC.CHCError _ -> pure ()  -- Also acceptable (Z3 not available or syntax error)
+          CHC.CHCUnknown msg -> liftIO $ assertFailure $ "CHC returned unknown: " <> T.unpack msg
+          CHC.CHCError err -> liftIO $ assertFailure $ "CHC Z3 error: " <> T.unpack err
         putStrLnM $ "CHC invariants found:" <> show result
     ]
   , testGroup "StorageTests"
