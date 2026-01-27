@@ -947,7 +947,6 @@ formatStorageTransition t = T.unlines
   [ "(StorageTransition"
   , indent 2 $ T.unlines
     [ "callerAddr: " <> formatExpr t.stCallerAddr
-    , "functionSig: " <> T.pack (show t.stFunctionSig)
     , "preStorage: " <> formatExpr t.stPreStorage
     , "postStorage: " <> formatExpr t.stPostStorage
     , "pathConds (" <> T.pack (show (length t.stPathConds)) <> "):"

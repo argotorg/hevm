@@ -72,7 +72,6 @@ data StorageTransition = StorageTransition
   , stPostStorage  :: Expr Storage       -- ^ Storage state after transition
   , stPathConds    :: [Prop]             -- ^ Path conditions for this transition
   , stWrites       :: [StorageWrite]     -- ^ Individual writes in this transition
-  , stFunctionSig  :: Maybe Text         -- ^ Function signature if known
   }
   deriving (Show, Eq, Ord)
 
@@ -167,7 +166,6 @@ extractFromAnyContract pathConds addr (C _ storage _ _ _) acc =
         , stPostStorage = storage
         , stPathConds = pathConds
         , stWrites = writes
-        , stFunctionSig = Nothing
         }
   in if null writes then acc else transition : acc
 extractFromAnyContract _ _ (GVar _) acc = acc
@@ -190,7 +188,6 @@ extractFromContract caller pathConds addr (C _ storage _ _ _) acc
             , stPostStorage = storage
             , stPathConds = pathConds
             , stWrites = writes
-            , stFunctionSig = Nothing
             }
       in transition : acc
   | otherwise = acc
@@ -239,7 +236,6 @@ formatTransition t = T.unlines
   , "  writes = ["
   ] <> T.unlines (map formatWrite t.stWrites) <> T.unlines
   [ "  ]"
-  , "  functionSig = " <> T.pack (show t.stFunctionSig)
   , "}"
   ]
 
@@ -266,7 +262,6 @@ formatTransitionsAsComment transitions =
     formatOneTransition idx t =
       fromText ("; --- Transition " <> T.pack (show idx) <> " ---\n")
       <> fromText ("; Caller: " <> T.pack (show t.stCallerAddr) <> "\n")
-      <> fromText ("; Function: " <> T.pack (show t.stFunctionSig) <> "\n")
       <> fromText ("; Pre-storage: " <> T.pack (show t.stPreStorage) <> "\n")
       <> fromText ("; Post-storage: " <> T.pack (show t.stPostStorage) <> "\n")
       <> fromText ("; Path conditions (" <> T.pack (show (length t.stPathConds)) <> "):\n")
@@ -328,16 +323,14 @@ declareRelations transitions =
     , "; Storage transition relations (one per function)\n"
     ] <> mconcat (zipWith declareTransitionRel [0..] transitions)
 
--- | Declare a transition relation for a single function
+-- | Declare a transition relation for a single transition
 declareTransitionRel :: Int -> StorageTransition -> Builder
 declareTransitionRel idx transition =
   let slots = map (.swKey) transition.stWrites
       numSlots = length slots
       -- Pre and post state, so double the slots
       sortList = T.intercalate " " (replicate (numSlots * 2) "Word")
-      funcName = case transition.stFunctionSig of
-        Just sig -> "Transition_" <> sig
-        Nothing  -> "Transition_" <> T.pack (show idx)
+      funcName = "Transition_" <> T.pack (show idx)
   in "(declare-rel " <> fromText funcName <> " (" <> fromText sortList <> "))\n"
 
 -- | Build transition rules from storage transitions
@@ -348,9 +341,7 @@ buildTransitionRules transitions =
 -- | Convert a single storage transition to a CHC rule
 transitionToCHCRule :: Int -> StorageTransition -> Builder
 transitionToCHCRule idx transition =
-  let funcName = case transition.stFunctionSig of
-        Just sig -> "Transition_" <> sig
-        Nothing  -> "Transition_" <> T.pack (show idx)
+  let funcName = "Transition_" <> T.pack (show idx)
 
       writes = transition.stWrites
       numWrites = length writes
@@ -423,9 +414,7 @@ buildReachabilityRules transitions =
 -- | Build a reachability rule for a transition
 buildTransReachRule :: Int -> StorageTransition -> Builder
 buildTransReachRule idx transition =
-  let funcName = case transition.stFunctionSig of
-        Just sig -> "Transition_" <> sig
-        Nothing  -> "Transition_" <> T.pack (show idx)
+  let funcName = "Transition_" <> T.pack (show idx)
 
       writes = transition.stWrites
       numWrites = length writes
