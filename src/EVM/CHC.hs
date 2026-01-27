@@ -19,10 +19,12 @@ module EVM.CHC
   , StorageInvariant(..)
     -- * Extraction
   , extractStorageTransitions
+  , extractAllStorageTransitions
   , extractStorageWrites
     -- * CHC Generation
   , buildCHC
   , buildCHCQuery
+  , buildCHCWithComments
     -- * Invariant Computation
   , computeStorageInvariants
   , solveForInvariants
@@ -34,6 +36,8 @@ module EVM.CHC
 import Prelude hiding (LT, GT)
 
 import Control.Exception (bracket)
+import Control.Monad (when)
+import Control.Monad.IO.Unlift (MonadUnliftIO, liftIO)
 import Data.Foldable (foldl')
 import Data.List (nub)
 import Data.Map.Strict qualified as Map
@@ -47,6 +51,7 @@ import GHC.IO.Handle (hClose)
 import System.Process (createProcess, cleanupProcess, proc, std_in, std_out, std_err, StdStream(..))
 
 import EVM.Types
+import EVM.Effects (Config(..), ReadConfig(..))
 
 
 -- * Types
@@ -103,6 +108,7 @@ data MonotonicDir = Increasing | Decreasing | NonIncreasing | NonDecreasing
 -- * Extraction
 
 -- | Extract storage transitions from an Expr End (execution result)
+-- Only extracts from contracts matching the specified caller address
 extractStorageTransitions
   :: Expr EAddr        -- ^ Caller address we care about
   -> Expr End          -- ^ Execution result
@@ -124,7 +130,50 @@ extractStorageTransitions caller expr = case expr of
     -- Global variables don't produce transitions
     []
 
+-- | Extract storage transitions from ALL contracts in an Expr End
+-- This is useful when you want to analyze all storage changes regardless of address
+extractAllStorageTransitions
+  :: Expr End          -- ^ Execution result
+  -> [StorageTransition]
+extractAllStorageTransitions expr = case expr of
+  Success pathConds _ _ contracts ->
+    -- Extract transitions from ALL final contract states
+    Map.foldrWithKey (extractFromAnyContract pathConds) [] contracts
+
+  Failure _ _ _ ->
+    -- Failures don't produce storage transitions (reverted)
+    []
+
+  Partial _ _ _ ->
+    -- Partial executions don't produce complete transitions
+    []
+
+  GVar _ ->
+    -- Global variables don't produce transitions
+    []
+
+-- | Extract transition from any contract (not filtered by caller)
+extractFromAnyContract
+  :: [Prop]
+  -> Expr EAddr
+  -> Expr EContract
+  -> [StorageTransition]
+  -> [StorageTransition]
+extractFromAnyContract pathConds addr (C _ storage _ _ _) acc =
+  let writes = extractStorageWrites addr storage
+      transition = StorageTransition
+        { stCallerAddr = addr
+        , stPreStorage = getBaseStorage storage
+        , stPostStorage = storage
+        , stPathConds = pathConds
+        , stWrites = writes
+        , stFunctionSig = Nothing
+        }
+  in if null writes then acc else transition : acc
+extractFromAnyContract _ _ (GVar _) acc = acc
+
 -- | Extract transition from a single contract's final state
+-- Only extracts if the contract address matches the caller
 extractFromContract
   :: Expr EAddr
   -> [Prop]
@@ -179,6 +228,55 @@ getCallerStorageWrites = extractStorageWrites
 
 -- * CHC Generation
 
+-- | Format a StorageTransition for debug output
+formatTransition :: StorageTransition -> Text
+formatTransition t = T.unlines
+  [ "StorageTransition {"
+  , "  callerAddr = " <> T.pack (show t.stCallerAddr)
+  , "  preStorage = " <> T.pack (show t.stPreStorage)
+  , "  postStorage = " <> T.pack (show t.stPostStorage)
+  , "  pathConds = " <> T.pack (show t.stPathConds)
+  , "  writes = ["
+  ] <> T.unlines (map formatWrite t.stWrites) <> T.unlines
+  [ "  ]"
+  , "  functionSig = " <> T.pack (show t.stFunctionSig)
+  , "}"
+  ]
+
+-- | Format a StorageWrite for debug output
+formatWrite :: StorageWrite -> Text
+formatWrite w = T.concat
+  [ "    StorageWrite { addr = ", T.pack (show w.swAddr)
+  , ", key = ", T.pack (show w.swKey)
+  , ", value = ", T.pack (show w.swValue)
+  , " }"
+  ]
+
+-- | Format all transitions as a comment block for SMT input
+formatTransitionsAsComment :: [StorageTransition] -> Builder
+formatTransitionsAsComment transitions =
+  fromText "; ============================================================\n"
+  <> fromText "; ORIGINAL INTERNAL IR (StorageTransition data structures)\n"
+  <> fromText "; ============================================================\n"
+  <> mconcat (zipWith formatOneTransition [0..] transitions)
+  <> fromText "; ============================================================\n"
+  <> fromText "\n"
+  where
+    formatOneTransition :: Int -> StorageTransition -> Builder
+    formatOneTransition idx t =
+      fromText ("; --- Transition " <> T.pack (show idx) <> " ---\n")
+      <> fromText ("; Caller: " <> T.pack (show t.stCallerAddr) <> "\n")
+      <> fromText ("; Function: " <> T.pack (show t.stFunctionSig) <> "\n")
+      <> fromText ("; Pre-storage: " <> T.pack (show t.stPreStorage) <> "\n")
+      <> fromText ("; Post-storage: " <> T.pack (show t.stPostStorage) <> "\n")
+      <> fromText ("; Path conditions (" <> T.pack (show (length t.stPathConds)) <> "):\n")
+      <> mconcat [fromText (";   " <> T.pack (show p) <> "\n") | p <- t.stPathConds]
+      <> fromText ("; Writes (" <> T.pack (show (length t.stWrites)) <> "):\n")
+      <> mconcat [fromText (";   [" <> T.pack (show i) <> "] key=" <> T.pack (show w.swKey)
+                           <> " val=" <> T.pack (show w.swValue) <> "\n")
+                 | (i, w) <- zip [0::Int ..] t.stWrites]
+      <> fromText ";\n"
+
 -- | Build a complete CHC script from storage transitions
 buildCHC :: [StorageTransition] -> Builder
 buildCHC transitions =
@@ -190,6 +288,12 @@ buildCHC transitions =
   <> "\n"
   <> buildReachabilityRules transitions
   <> "\n"
+
+-- | Build a complete CHC script with comments showing original IR
+buildCHCWithComments :: [StorageTransition] -> Builder
+buildCHCWithComments transitions =
+  formatTransitionsAsComment transitions
+  <> buildCHC transitions
 
 -- | CHC prelude with solver configuration
 chcPrelude :: Builder
@@ -389,10 +493,23 @@ buildCHCQuery transitions slotIdx =
 -- | Compute storage invariants from transitions
 -- This is the main entry point for invariant extraction
 computeStorageInvariants
-  :: Expr EAddr            -- ^ Caller address
+  :: (MonadUnliftIO m, ReadConfig m)
+  => Expr EAddr            -- ^ Caller address
   -> [StorageTransition]   -- ^ All possible transitions
-  -> IO CHCResult
+  -> m CHCResult
 computeStorageInvariants caller transitions = do
+  conf <- readConfig
+
+  -- Debug: print transitions being analyzed
+  when conf.debug $ liftIO $ do
+    putStrLn $ "CHC: Computing storage invariants for " <> show (length transitions) <> " transitions"
+    putStrLn $ "CHC: Caller address: " <> show caller
+
+  -- Debug: print each transition in detail
+  when (conf.debug && conf.verb >= 2) $ liftIO $ do
+    putStrLn "CHC: Transition details:"
+    mapM_ (TL.putStrLn . TL.fromStrict . formatTransition) transitions
+
   -- For now, we do a simple analysis without actually calling a solver
   -- A full implementation would:
   -- 1. Build the CHC script
@@ -400,6 +517,10 @@ computeStorageInvariants caller transitions = do
   -- 3. Parse the invariants from the result
 
   let invariants = analyzeTransitionsLocally caller transitions
+
+  when conf.debug $ liftIO $ do
+    putStrLn $ "CHC: Found " <> show (length invariants) <> " invariants (local analysis)"
+
   pure $ CHCInvariantsFound invariants
 
 -- | Analyze transitions locally without solver (conservative approximation)
@@ -435,23 +556,50 @@ analyzeSlotWrites (_slot, _writes) =
 
 -- | Solve for invariants using a CHC solver
 solveForInvariants
-  :: [StorageTransition]
-  -> IO CHCResult
+  :: (MonadUnliftIO m, ReadConfig m)
+  => [StorageTransition]
+  -> m CHCResult
 solveForInvariants transitions = do
-  -- Build CHC script
-  let chcScript = toLazyText (buildCHC transitions) <> "\n(check-sat)\n"
+  conf <- readConfig
+
+  -- Build CHC script with comments showing original IR
+  let chcScript = toLazyText (buildCHCWithComments transitions) <> "\n(check-sat)\n"
+
+  -- Debug: print that we're about to call Z3
+  when conf.debug $ liftIO $ do
+    putStrLn $ "CHC: Solving for invariants with " <> show (length transitions) <> " transitions"
+    putStrLn $ "CHC: Invoking Z3 with Spacer engine..."
+
+  -- Dump the CHC expression if requested
+  when conf.dumpExprs $ liftIO $ do
+    putStrLn "============================================================"
+    putStrLn "CHC EXPRESSION (SMT-LIB2 format with HORN logic):"
+    putStrLn "============================================================"
+    TL.putStrLn chcScript
+    putStrLn "============================================================"
 
   -- Invoke z3 with spacer engine
-  result <- runZ3CHC chcScript
+  result <- liftIO $ runZ3CHC conf chcScript
   case result of
-    Left err -> pure $ CHCError err
-    Right "sat" -> pure $ CHCInvariantsFound []  -- SAT means invariants hold
-    Right "unsat" -> pure $ CHCUnknown "CHC query unsatisfiable"
-    Right other -> pure $ CHCUnknown (TL.toStrict other)
+    Left err -> do
+      when conf.debug $ liftIO $ putStrLn $ "CHC: Z3 error: " <> T.unpack err
+      pure $ CHCError err
+    Right "sat" -> do
+      when conf.debug $ liftIO $ putStrLn "CHC: Z3 returned SAT (invariants hold)"
+      pure $ CHCInvariantsFound []  -- SAT means invariants hold
+    Right "unsat" -> do
+      when conf.debug $ liftIO $ putStrLn "CHC: Z3 returned UNSAT (query unsatisfiable)"
+      pure $ CHCUnknown "CHC query unsatisfiable"
+    Right other -> do
+      when conf.debug $ liftIO $ putStrLn $ "CHC: Z3 returned: " <> TL.unpack other
+      pure $ CHCUnknown (TL.toStrict other)
 
 -- | Run z3 as a CHC solver
-runZ3CHC :: TL.Text -> IO (Either Text TL.Text)
-runZ3CHC script = do
+runZ3CHC :: Config -> TL.Text -> IO (Either Text TL.Text)
+runZ3CHC conf script = do
+  when conf.debug $ do
+    putStrLn "CHC: Starting Z3 process..."
+
   let cmd = (proc "z3" ["-in"])
             { std_in = CreatePipe
             , std_out = CreatePipe
@@ -460,13 +608,35 @@ runZ3CHC script = do
   bracket
     (createProcess cmd)
     (\(mstdin, mstdout, mstderr, ph) -> cleanupProcess (mstdin, mstdout, mstderr, ph))
-    (\(mstdin, mstdout, _mstderr, _ph) -> do
-      case (mstdin, mstdout) of
-        (Just stdin, Just stdout) -> do
+    (\(mstdin, mstdout, mstderr, _ph) -> do
+      case (mstdin, mstdout, mstderr) of
+        (Just stdin, Just stdout, Just stderr) -> do
+          -- Debug: show script size
+          when (conf.debug && conf.verb >= 2) $ do
+            putStrLn $ "CHC: Sending " <> show (TL.length script) <> " chars to Z3"
+
           -- Send the CHC script
           TL.hPutStr stdin script
           hClose stdin
+
           -- Read the result
+          output <- TL.hGetContents stdout
+          errOutput <- TL.hGetContents stderr
+
+          -- Debug: show stderr if any
+          when (conf.debug && not (TL.null errOutput)) $ do
+            putStrLn $ "CHC: Z3 stderr: " <> TL.unpack errOutput
+
+          -- Debug: show result
+          let result = TL.strip output
+          when conf.debug $ do
+            putStrLn $ "CHC: Z3 result: " <> TL.unpack result
+
+          pure $ Right result
+        (Just stdin, Just stdout, Nothing) -> do
+          -- No stderr handle, proceed without it
+          TL.hPutStr stdin script
+          hClose stdin
           output <- TL.hGetContents stdout
           let result = TL.strip output
           pure $ Right result
