@@ -320,18 +320,18 @@ getModel inst cexvars = runMaybeT $ do
   then pure initialModel
   else do
     -- get concrete values for each buffers max read index
-    hints <- MaybeT $ queryMaxReads (getValue inst) cexvars.buffers
+    hints <- queryMaxReads (getValue inst) cexvars.buffers
     let cappedHints = capHints hints
-    snd <$> lift (runStateT (shrinkModel cappedHints) initialModel)
+    lift (execStateT (shrinkModel cappedHints) initialModel)
   where
-    getRaw :: MaybeT IO SMTCex
+    getRaw :: MaybeIO SMTCex
     getRaw = do
-      vars <- MaybeT $ getVars parseVar (getValue inst) (fmap T.toStrict cexvars.calldata)
-      addrs <- MaybeT $ getAddrs parseEAddr (getValue inst) (fmap T.toStrict cexvars.addrs)
-      buffers <- MaybeT $ getBufs (getValue inst) (Map.keys cexvars.buffers)
-      storage <- MaybeT $ getStore (getValue inst) cexvars.storeReads
-      blockctx <- MaybeT $ getVars parseBlockCtx (getValue inst) (fmap T.toStrict cexvars.blockContext)
-      txctx <- MaybeT $ getVars parseTxCtx (getValue inst) (fmap T.toStrict cexvars.txContext)
+      vars <- getVars parseVar (getValue inst) (fmap T.toStrict cexvars.calldata)
+      addrs <- getAddrs parseEAddr (getValue inst) (fmap T.toStrict cexvars.addrs)
+      buffers <- getBufs (getValue inst) (Map.keys cexvars.buffers)
+      storage <- getStore (getValue inst) cexvars.storeReads
+      blockctx <- getVars parseBlockCtx (getValue inst) (fmap T.toStrict cexvars.blockContext)
+      txctx <- getVars parseTxCtx (getValue inst) (fmap T.toStrict cexvars.txContext)
       pure $ SMTCex vars addrs buffers storage blockctx txctx
 
     -- sometimes the solver might give us back a model for the max read index
@@ -534,17 +534,17 @@ sendCommand (SolverInstance _ stdin stdout _) (SMTCommand cmd) = do
 
 -- | Returns a string representation of the model for the requested variable
 -- Returns Nothing if the solver process has died (timeout, crash, etc.)
-getValue :: SolverInstance -> Text -> IO (Maybe Text)
-getValue (SolverInstance _ stdin stdout _) var = runMaybeT $ do
+getValue :: SolverInstance -> Text -> MaybeIO Text
+getValue (SolverInstance _ stdin stdout _) var = do
   tryIO $ T.hPutStrLn stdin (T.append (T.append "(get-value (" var) "))")
   tryIO $ hFlush stdin
-  val <- MaybeT $ readSExpr stdout
+  val <- readSExpr stdout
   pure $ (T.unlines . reverse) val
 
 -- | Reads lines from h until we have a balanced sexpr
 -- Returns Nothing if the solver process has died or parsing fails
-readSExpr :: Handle -> IO (Maybe [Text])
-readSExpr h = runMaybeT $ go 0 0 []
+readSExpr :: Handle -> MaybeIO [Text]
+readSExpr h = go 0 0 []
   where
     go 0 0 _ = do
       line <- tryIO $ T.hGetLine h
