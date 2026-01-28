@@ -529,7 +529,7 @@ tests = testGroup "hevm"
           }
           |]
         paths <- withDefaultSolver $ \s -> getExpr s c Nothing [] defaultVeriOpts
-        let addr = SymAddr "entrypoint1"
+        let addr = SymAddr "entrypoint"
         let transitions = concat $ mapMaybe (CHC.extractAllStorageTransitions addr) paths
         assertBoolM "Should extract at least one transition" (not $ null transitions)
         let allWrites = concatMap (.stWrites) transitions
@@ -547,7 +547,7 @@ tests = testGroup "hevm"
           }
           |]
         paths <- withDefaultSolver $ \s -> getExpr s c Nothing [] defaultVeriOpts
-        let addr = SymAddr "entrypoint1"
+        let addr = SymAddr "entrypoint"
         let transitions = concat $ mapMaybe (CHC.extractAllStorageTransitions addr) paths
         assertBoolM "Should extract at least one transition" (not $ null transitions)
         putStrLnM $ "transitions:\n" ++ T.unpack (formatStorageTransitions transitions)
@@ -565,7 +565,7 @@ tests = testGroup "hevm"
           }
           |]
         paths <- withDefaultSolver $ \s -> getExpr s c Nothing [] defaultVeriOpts
-        let addr = SymAddr "entrypoint1"
+        let addr = SymAddr "entrypoint"
         let transitions = concat $ mapMaybe (CHC.extractAllStorageTransitions addr) paths
             -- Build the CHC script
             chcScript = CHC.buildCHCWithComments transitions
@@ -583,7 +583,7 @@ tests = testGroup "hevm"
           |]
         paths <- withDefaultSolver $ \s -> getExpr s c Nothing [] defaultVeriOpts
         -- putStrLnM $ "Paths obtained:\n" <> T.unpack (T.unlines (map formatExpr paths))
-        let addr = SymAddr "entrypoint1"
+        let addr = SymAddr "entrypoint"
         let transitions = concat $ mapMaybe (CHC.extractAllStorageTransitions addr) paths
             caller = case transitions of
               (t:_) -> t.stCallerAddr
@@ -608,7 +608,7 @@ tests = testGroup "hevm"
           |]
         paths <- withDefaultSolver $ \s -> getExpr s c Nothing [] defaultVeriOpts
         -- putStrLnM $ "Paths obtained:\n" <> T.unpack (T.unlines (map formatExpr paths))
-        let addr = SymAddr "entrypoint1"
+        let addr = SymAddr "entrypoint"
         let transitions = concat $ mapMaybe (CHC.extractAllStorageTransitions addr) paths
             caller = case transitions of
               (t:_) -> t.stCallerAddr
@@ -633,7 +633,7 @@ tests = testGroup "hevm"
           |]
         paths <- withDefaultSolver $ \s -> getExpr s c Nothing [] defaultVeriOpts
         putStrLnM $ "Paths obtained:\n" <> T.unpack (T.unlines (map formatExpr paths))
-        let addr = SymAddr "entrypoint1"
+        let addr = SymAddr "entrypoint"
         let transitions = concat $ mapMaybe (CHC.extractAllStorageTransitions addr) paths
         putStrLnM $ "transitions:\n" <> T.unpack (formatStorageTransitions transitions)
         conf <- readConfig
@@ -666,7 +666,7 @@ tests = testGroup "hevm"
           }
           |]
         paths <- withDefaultSolver $ \s -> getExpr s c Nothing [] defaultVeriOpts
-        let addr = SymAddr "entrypoint1"
+        let addr = SymAddr "entrypoint"
         let transitions = concat $ mapMaybe (CHC.extractAllStorageTransitions addr) paths
         conf <- readConfig
         when conf.debug $ do
@@ -701,7 +701,7 @@ tests = testGroup "hevm"
           }
           |]
         paths <- withDefaultSolver $ \s -> getExprEmptyStore s c Nothing [] defaultVeriOpts
-        let addr = SymAddr "entrypoint1"
+        let addr = SymAddr "entrypoint"
         let transitions = concat $ mapMaybe (CHC.extractAllStorageTransitions addr) paths
         conf <- readConfig
         when conf.debug $ do
@@ -743,7 +743,7 @@ tests = testGroup "hevm"
           }
           |]
         paths <- withDefaultSolver $ \s -> getExprEmptyStore s c Nothing [] defaultVeriOpts
-        let addr = SymAddr "entrypoint1"
+        let addr = SymAddr "entrypoint"
         let transitions = concat $ mapMaybe (CHC.extractAllStorageTransitions addr) paths
         conf <- readConfig
         when conf.debug $ do
