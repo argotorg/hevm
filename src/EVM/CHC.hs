@@ -56,7 +56,7 @@ import EVM.SMT (exprToSMT)
 
 
 data CHCResult
-  = CHCInvariantsFound [StorageInvariant] -- ^ Successfully computed invariants
+  = CHCInvariantsFound [StorageInvariant]
   | CHCUnknown Text -- ^ Solver returned unknown
   | CHCError Text -- ^ Error during solving
   deriving (Show, Eq)
@@ -64,15 +64,8 @@ data CHCResult
 -- | A storage invariant describes what holds for a storage slot
 data StorageInvariant
   = SlotUnchanged (Expr EWord)
-    -- ^ This slot cannot change under reentrancy
   | SlotBounded (Expr EWord) (Expr EWord) (Expr EWord)
-    -- ^ Slot value is bounded: slot, lower, upper
   | SlotRelation (Expr EWord) (Expr EWord) Prop
-    -- ^ Two slots maintain a relation
-  deriving (Show, Eq, Ord)
-
--- | Direction of monotonic change
-data MonotonicDir = Increasing | Decreasing | NonIncreasing | NonDecreasing
   deriving (Show, Eq, Ord)
 
 -- | Extract storage transitions from an Expr End (execution result)
@@ -436,8 +429,6 @@ buildCHCQuery transitions slotIdx =
     ]
 
 
--- * Invariant Computation
-
 -- | Compute storage invariants from transitions
 -- This is the main entry point for invariant extraction
 computeStorageInvariants
@@ -458,49 +449,11 @@ computeStorageInvariants caller transitions = do
     putStrLn "CHC: Transition details:"
     mapM_ (TL.putStrLn . TL.fromStrict . formatTransition) transitions
 
-  -- For now, we do a simple analysis without actually calling a solver
-  -- A full implementation would:
-  -- 1. Build the CHC script
-  -- 2. Send to Z3's Spacer
-  -- 3. Parse the invariants from the result
-
-  let invariants = analyzeTransitionsLocally caller transitions
-
+  let invariants =  -- TODO
   when conf.debug $ liftIO $ do
     putStrLn $ "CHC: Found " <> show (length invariants) <> " invariants (local analysis)"
 
   pure $ CHCInvariantsFound invariants
-
--- | Analyze transitions locally without solver (conservative approximation)
-analyzeTransitionsLocally :: Expr EAddr -> [StorageTransition] -> [StorageInvariant]
-analyzeTransitionsLocally _ transitions =
-  let -- Collect all slots that are written
-      allWrites = concatMap (.stWrites) transitions
-      _writtenSlots = Set.fromList $ map (.swKey) allWrites
-
-      -- Slots that are never written are unchanged
-      -- (This is conservative - a full CHC analysis could find more invariants)
-      unchangedInvariants = []  -- Would need initial slots to compare
-
-      -- For each written slot, try to find bounds or monotonicity
-      writeInvariants = concatMap analyzeSlotWrites (groupWritesBySlot allWrites)
-
-  in unchangedInvariants ++ writeInvariants
-
--- | Group writes by their target slot
-groupWritesBySlot :: [StorageWrite] -> [(Expr EWord, [StorageWrite])]
-groupWritesBySlot writes =
-  let grouped = foldl' addWrite Map.empty writes
-      addWrite m w = Map.insertWith (++) w.swKey [w] m
-  in Map.toList grouped
-
--- | Analyze writes to a single slot for patterns
-analyzeSlotWrites :: (Expr EWord, [StorageWrite]) -> [StorageInvariant]
-analyzeSlotWrites (_slot, _writes) =
-  -- Look for patterns in the writes
-  -- For now, just mark any written slot as potentially changed
-  -- A full implementation would analyze the write expressions
-  []
 
 -- | Solve for invariants using a CHC solver
 solveForInvariants
