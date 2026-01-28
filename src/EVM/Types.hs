@@ -1633,6 +1633,30 @@ data StorageTransition = StorageTransition
   }
   deriving (Show, Eq, Ord)
 
+-- | A synthesized invariant from the CHC solver
+-- This represents the actual invariant the solver discovered, not a hand-computed one
+data SynthesizedInvariant = SynthesizedInvariant
+  { siSlotNames :: [T.Text]
+    -- ^ Names of the slot variables (s0, s1, ...)
+  , siRawSMT :: T.Text
+    -- ^ The raw SMT-LIB2 definition from Z3's certificate
+  , siConstraints :: [SlotConstraint]
+    -- ^ Parsed constraints per slot
+  }
+  deriving (Show, Eq)
+
+-- | A constraint on a single storage slot, extracted from the synthesized invariant
+data SlotConstraint
+  = SCExactValues [W256]
+    -- ^ Slot can only have these exact values (disjunction of equalities)
+  | SCBounded W256 W256
+    -- ^ Slot value is in range [min, max]
+  | SCUnbounded
+    -- ^ No constraint on this slot (can be any value)
+  | SCRaw T.Text
+    -- ^ Unparsed constraint (fallback)
+  deriving (Show, Eq)
+
 -- Optics ------------------------------------------------------------------------------------------
 
 

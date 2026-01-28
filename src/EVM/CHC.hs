@@ -21,6 +21,7 @@ module EVM.CHC
   , StorageWrite(..)
   , CHCResult(..)
   , SynthesizedInvariant(..)
+  , SlotConstraint(..)
     -- * Extraction
   , extractAllStorageTransitions
   , extractStorageWrites
@@ -55,6 +56,7 @@ import System.Process (createProcess, cleanupProcess, proc, std_in, std_out, std
 
 import EVM.Types
 import EVM.Effects (Config(..), ReadConfig(..))
+import EVM.Format (formatSynthesizedInvariant)
 import EVM.SMT (exprToSMT)
 
 
@@ -69,29 +71,7 @@ data CHCResult
     -- ^ Error during solving
   deriving (Show, Eq)
 
--- | A synthesized invariant from the CHC solver
--- This represents the actual invariant the solver discovered, not a hand-computed one
-data SynthesizedInvariant = SynthesizedInvariant
-  { siSlotNames :: [Text]
-    -- ^ Names of the slot variables (s0, s1, ...)
-  , siRawSMT :: Text
-    -- ^ The raw SMT-LIB2 definition from Z3's certificate
-  , siConstraints :: [SlotConstraint]
-    -- ^ Parsed constraints per slot
-  }
-  deriving (Show, Eq)
-
--- | A constraint on a single storage slot, extracted from the synthesized invariant
-data SlotConstraint
-  = SCExactValues [W256]
-    -- ^ Slot can only have these exact values (disjunction of equalities)
-  | SCBounded W256 W256
-    -- ^ Slot value is in range [min, max]
-  | SCUnbounded
-    -- ^ No constraint on this slot (can be any value)
-  | SCRaw Text
-    -- ^ Unparsed constraint (fallback)
-  deriving (Show, Eq)
+-- SynthesizedInvariant and SlotConstraint are defined in EVM.Types
 
 -- | Extract storage transitions from ALL contracts in an Expr End
 -- This is useful when you want to analyze all storage changes regardless of address.

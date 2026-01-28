@@ -37,6 +37,8 @@ module EVM.Format
   , hexByteString
   , hexText
   , showVal
+  , formatSynthesizedInvariant
+  , formatSlotConstraint
   ) where
 
 import Prelude hiding (LT, GT)
@@ -918,6 +920,37 @@ showVal :: AbiValue -> Text
 showVal (AbiBytes _ bs) = formatBytes bs
 showVal (AbiAddress addr) = T.pack  . show $ addr
 showVal v = T.pack . show $ v
+
+-- | Format a SlotConstraint for display
+formatSlotConstraint :: SlotConstraint -> Text
+formatSlotConstraint = \case
+  SCExactValues vals -> case vals of
+    [] -> "no valid values"
+    [v] -> "= " <> showWordExact v
+    vs -> "∈ {" <> T.intercalate ", " (map showWordExact vs) <> "}"
+  SCBounded lower upper
+    | lower == upper -> "= " <> showWordExact lower
+    | otherwise -> "∈ [" <> showWordExact lower <> ", " <> showWordExact upper <> "]"
+  SCUnbounded -> "unbounded"
+  SCRaw raw -> "raw: " <> raw
+
+-- | Format a SynthesizedInvariant for display
+formatSynthesizedInvariant :: SynthesizedInvariant -> Text
+formatSynthesizedInvariant inv = T.unlines
+  [ "Synthesized Invariant:"
+  , indent 2 $ T.unlines
+    [ "Slot constraints:"
+    , indent 2 $ case zip inv.siSlotNames inv.siConstraints of
+        [] -> "(none)"
+        pairs -> T.unlines $ map formatSlotPair pairs
+    , ""
+    , "Raw SMT:"
+    , indent 2 inv.siRawSMT
+    ]
+  ]
+  where
+    formatSlotPair (name, constraint) =
+      name <> ": " <> formatSlotConstraint constraint
 
 -- | Format a single StorageWrite for display
 formatStorageWrite :: StorageWrite -> Text

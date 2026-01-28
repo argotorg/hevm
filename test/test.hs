@@ -65,7 +65,7 @@ import EVM.Assembler
 import EVM.Exec
 import EVM.Expr qualified as Expr
 import EVM.Fetch qualified as Fetch
-import EVM.Format (hexByteString, hexText, formatExpr, formatStorageWrites, formatStorageTransitions)
+import EVM.Format (hexByteString, hexText, formatExpr, formatStorageWrites, formatStorageTransitions, formatSynthesizedInvariant)
 import EVM.Precompiled
 import EVM.RLP
 import EVM.SMT hiding (one)
@@ -601,7 +601,7 @@ tests = testGroup "hevm"
         result <- CHC.solveForInvariants transitions
         case result of
           CHC.CHCInvariantSynthesized inv -> do
-            putStrLnM $ "CHC synthesized invariant: " <> show inv
+            putStrLnM $ T.unpack $ formatSynthesizedInvariant inv
             -- The solver should synthesize an invariant with one slot
             assertEqualM "Should have one slot" 1 (length inv.siSlotNames)
           CHC.CHCNoInvariant msg -> liftIO $ assertFailure $ "CHC returned no invariant: " <> T.unpack msg
@@ -633,7 +633,7 @@ tests = testGroup "hevm"
         result <- CHC.solveForInvariants transitions
         case result of
           CHC.CHCInvariantSynthesized inv -> do
-            putStrLnM $ "CHC synthesized invariant: " <> show inv
+            putStrLnM $ T.unpack $ formatSynthesizedInvariant inv
             -- The solver should synthesize an invariant with one slot
             assertEqualM "Should have one slot" 1 (length inv.siSlotNames)
           CHC.CHCNoInvariant msg -> liftIO $ assertFailure $ "CHC returned no invariant: " <> T.unpack msg
@@ -667,7 +667,7 @@ tests = testGroup "hevm"
         result <- CHC.solveForInvariants transitions
         case result of
           CHC.CHCInvariantSynthesized inv -> do
-            putStrLnM $ "CHC synthesized invariant: " <> show inv
+            putStrLnM $ T.unpack $ formatSynthesizedInvariant inv
             -- The solver should synthesize an invariant with one slot
             assertEqualM "Should have one slot" 1 (length inv.siSlotNames)
           CHC.CHCNoInvariant msg -> liftIO $ assertFailure $ "CHC returned no invariant: " <> T.unpack msg
@@ -712,7 +712,7 @@ tests = testGroup "hevm"
         result <- CHC.solveForInvariants transitions
         case result of
           CHC.CHCInvariantSynthesized inv -> do
-            putStrLnM $ "CHC synthesized invariant for unbounded: " <> show inv
+            putStrLnM $ T.unpack $ formatSynthesizedInvariant inv
             -- The solver can handle this case and synthesize an invariant
             assertEqualM "Should have one slot" 1 (length inv.siSlotNames)
           CHC.CHCNoInvariant _ -> pure ()  -- Also acceptable - solver may return SAT
