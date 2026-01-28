@@ -410,7 +410,6 @@ solverArgs solver timeout = case solver of
     [ "--lang=smt2"
     , "--produce-models"
     , "--time-limit-per=" <> millisecs
-    , "--bv-solver=preprop"
     , "--bv-output-format=16"
     ]
   Z3 ->
