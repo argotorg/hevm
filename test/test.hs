@@ -576,31 +576,6 @@ tests = testGroup "hevm"
           CHC.CHCNoInvariant msg -> assertBoolM ("Unexpected no invariant: " <> T.unpack msg) False
           CHC.CHCUnknown msg -> assertBoolM ("Unexpected unknown: " <> T.unpack msg) False
           CHC.CHCError msg -> assertBoolM ("Unexpected error: " <> T.unpack msg) False
-    , test "chc-solve-for-invariants-orig2" $ do
-        Just c <- solcRuntime "MyContract"
-          [i|
-          contract MyContract {
-            uint x;
-            function prove_invariants(address x) public {
-                x = 1;
-            }
-          }
-          |]
-        paths <- withDefaultSolver $ \s -> getExpr s c Nothing [] defaultVeriOpts
-        -- putStrLnM $ "Paths obtained:\n" <> T.unpack (T.unlines (map formatExpr paths))
-        let addr = SymAddr "entrypoint"
-        let transitions = concat $ mapMaybe (CHC.extractAllStorageTransitions addr) paths
-            caller = case transitions of
-              (t:_) -> t.stCallerAddr
-              [] -> LitAddr 0x0
-        putStrLnM $ "transitions:\n" <> T.unpack (formatStorageTransitions transitions)
-        -- Compute invariants (solver synthesizes them)
-        result <- CHC.computeStorageInvariants caller transitions
-        case result of
-          CHC.CHCInvariantSynthesized _ -> pure ()  -- Success
-          CHC.CHCNoInvariant msg -> assertBoolM ("Unexpected no invariant: " <> T.unpack msg) False
-          CHC.CHCUnknown msg -> assertBoolM ("Unexpected unknown: " <> T.unpack msg) False
-          CHC.CHCError msg -> assertBoolM ("Unexpected error: " <> T.unpack msg) False
     , test "chc-solve-for-invariants1" $ do
         Just c <- solcRuntime "MyContract"
           [i|

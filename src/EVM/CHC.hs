@@ -135,6 +135,7 @@ getBaseStorage s@(ConcreteStore _) = s
 getBaseStorage (GVar _) = internalError "getBaseStorage: GVar encountered"
 
 -- | Extract all writes to a specific address from a storage expression
+-- Handles both SStore chains and ConcreteStore (where writes are merged into the map)
 extractStorageWrites :: Expr EAddr -> Expr Storage -> [StorageWrite]
 extractStorageWrites targetAddr = go []
   where
@@ -149,7 +150,20 @@ extractStorageWrites targetAddr = go []
             }
       in go (write : acc) prev
     go acc (AbstractStore _ _) = acc
-    go acc (ConcreteStore _) = acc
+    -- For ConcreteStore, each key-value pair represents a write from the initial 0 state
+    -- We extract these as writes so CHC can analyze them
+    go acc (ConcreteStore m) =
+      let baseStore = ConcreteStore mempty
+          writes = [StorageWrite
+                     { swAddr = targetAddr
+                     , swKey = Lit k
+                     , swValue = Lit v
+                     , swPrev = baseStore
+                     }
+                   | (k, v) <- Map.toList m
+                   , v /= 0  -- Only include non-zero values (0 is the default)
+                   ]
+      in acc ++ writes
     go _ (GVar _) = internalError "extractStorageWrites: GVar encountered"
 
 -- | Get only the writes that affect the caller's storage
@@ -463,32 +477,99 @@ buildTransReachRule idx transition =
 
 -- * CHC Query Building
 
+-- | Extract concrete literal values from an expression
+extractLitValue :: Expr EWord -> Maybe W256
+extractLitValue (Lit w) = Just w
+extractLitValue _ = Nothing
+
+-- | Collect all concrete values that can be written to each slot
+-- Returns a list of (slot index, list of possible values including initial 0)
+collectPossibleValues :: [StorageTransition] -> [[W256]]
+collectPossibleValues transitions =
+  let numSlots = case transitions of
+                   []    -> 0
+                   (t:_) -> length t.stWrites
+      -- For each slot index, collect all concrete values written to it
+      valuesPerSlot = [[0] | _ <- [0..numSlots-1]]  -- Start with initial value 0
+      -- Extract values from each transition
+      addTransitionValues acc transition =
+        zipWith addValue acc (map (.swValue) transition.stWrites)
+      addValue vals expr = case extractLitValue expr of
+        Just v  -> nub (v : vals)
+        Nothing -> vals  -- Keep existing values if not a literal
+  in foldl addTransitionValues valuesPerSlot transitions
+
+-- | Format a W256 as a 256-bit bitvector literal for SMT-LIB2
+-- Uses decimal format: (_ bvN 256) where N is the decimal value
+formatBV256 :: W256 -> Builder
+formatBV256 w = "(_ bv" <> fromText (T.pack (show (toInteger w))) <> " 256)"
+
 -- | Build a synthesis query that asks the solver to find an invariant
 -- When Z3 returns UNSAT, it means no "bad" state is reachable, and the
 -- certificate contains the synthesized invariant for the Reachable relation.
 --
--- We query "Reachable" directly with :print-certificate true to get the
--- inductive invariant that the solver discovered.
+-- The key insight: we create a safety property based on the concrete values
+-- observed in the code. The safety property says "error if we reach a state
+-- that's not the initial value (0) and not any of the written values".
+-- Z3 then computes the strongest invariant that proves this property.
 buildSynthesisQuery :: [StorageTransition] -> Builder
 buildSynthesisQuery transitions =
   let numSlots = case transitions of
                    []    -> 0
                    (t:_) -> length t.stWrites
+      possibleValues = collectPossibleValues transitions
   in if numSlots == 0
      then "; No storage slots written, no query needed\n"
      else mconcat
        [ "; Query for invariant synthesis\n"
-       , "; We define a 'Bad' relation that is always false (no bad states)\n"
-       , "; Z3 will synthesize an invariant for Reachable that proves Bad is unreachable\n"
-       , "(declare-rel Bad ())\n"
+       , "; Safety property: storage can only have values that appear in the code\n"
+       , "; (initial value 0 + all written values)\n"
+       , "(declare-rel Err ())\n"
        , "\n"
-       , "; Bad is unreachable by definition (we want to know what IS reachable)\n"
-       , "; The synthesized invariant for Reachable tells us the possible storage states\n"
-       , "(rule (=> false Bad))\n"
+       , "; Error if we reach a state outside the observed values\n"
+       , buildErrorCondition numSlots possibleValues
        , "\n"
        , "; Request the invariant certificate\n"
-       , "(query Bad :print-certificate true)\n"
+       , "(query Err :print-certificate true)\n"
        ]
+
+-- | Build the error condition based on possible values
+-- Error if Reachable(s0, s1, ...) and none of the slots match their allowed values
+buildErrorCondition :: Int -> [[W256]] -> Builder
+buildErrorCondition numSlots possibleValues =
+  let -- Build condition for each slot: (not (or (= si v1) (= si v2) ...))
+      slotConditions = zipWith buildSlotCondition [0..] possibleValues
+
+      -- Variables for the reachable state
+      vars = [fromText $ "s" <> T.pack (show i) | i <- [0..numSlots-1]]
+      varList = mconcat [v <> " " | v <- vars]
+
+      -- Combine all slot conditions with AND
+      -- Error if ANY slot is outside its allowed values
+      combinedCondition = case slotConditions of
+        []  -> "false"
+        [c] -> c
+        cs  -> "(or " <> mconcat [c <> " " | c <- cs] <> ")"
+
+  in mconcat
+       [ "(rule (=> (and (Reachable "
+       , varList
+       , ") "
+       , combinedCondition
+       , ") Err))\n"
+       ]
+
+-- | Build condition for a single slot being outside its allowed values
+buildSlotCondition :: Int -> [W256] -> Builder
+buildSlotCondition slotIdx values =
+  let varName = fromText $ "s" <> T.pack (show slotIdx)
+      -- (or (= si v1) (= si v2) ...) - slot matches one of the allowed values
+      eqConditions = [(varName, v) | v <- values]
+      orExpr = case eqConditions of
+        []       -> "false"
+        [(v, w)] -> "(= " <> v <> " " <> formatBV256 w <> ")"
+        cs       -> "(or " <> mconcat ["(= " <> v <> " " <> formatBV256 w <> ") " | (v, w) <- cs] <> ")"
+  in "(not " <> orExpr <> ")"
 
 
 
@@ -532,66 +613,79 @@ solveForInvariants transitions = do
 
       slotNames = ["s" <> T.pack (show i) | i <- [0..numSlots-1]]
 
-  -- Build CHC script - the solver will synthesize the invariant
-  let chcScript = toLazyText (buildCHCWithComments transitions)
+  -- Handle the 0-slot case early - no storage is written, so the invariant is trivial
+  when (numSlots == 0) $ do
+    when conf.debug $ liftIO $
+      putStrLn "CHC: No storage slots written, returning trivial invariant"
+    pure ()
 
-  -- Debug: print that we're about to call Z3
-  when conf.debug $ liftIO $ do
-    putStrLn $ "CHC: Requesting invariant synthesis for " <> show (length transitions) <> " transitions"
-    putStrLn $ "CHC: Number of storage slots: " <> show numSlots
-    putStrLn $ "CHC: Invoking Z3 with Spacer engine..."
+  if numSlots == 0
+    then pure $ CHCInvariantSynthesized SynthesizedInvariant
+           { siSlotNames = []
+           , siRawSMT = "; No storage slots written"
+           , siConstraints = []
+           }
+    else do
+      -- Build CHC script - the solver will synthesize the invariant
+      let chcScript = toLazyText (buildCHCWithComments transitions)
 
-  -- Dump the CHC expression if requested
-  when conf.dumpExprs $ liftIO $ do
-    putStrLn "============================================================"
-    putStrLn "CHC EXPRESSION (SMT-LIB2 format with HORN logic):"
-    putStrLn "============================================================"
-    TL.putStrLn chcScript
-    putStrLn "============================================================"
-
-  -- Invoke z3 with spacer engine
-  result <- liftIO $ runZ3CHC conf chcScript
-  case result of
-    Left err -> do
-      when conf.debug $ liftIO $ putStrLn $ "CHC: Z3 error: " <> T.unpack err
-      pure $ CHCError err
-    Right output -> do
-      let outputText = TL.toStrict (TL.strip output)
-          outputLines = T.lines outputText
-
+      -- Debug: print that we're about to call Z3
       when conf.debug $ liftIO $ do
-        putStrLn $ "CHC: Z3 output lines: " <> show (length outputLines)
+        putStrLn $ "CHC: Requesting invariant synthesis for " <> show (length transitions) <> " transitions"
+        putStrLn $ "CHC: Number of storage slots: " <> show numSlots
+        putStrLn $ "CHC: Invoking Z3 with Spacer engine..."
 
-      case outputLines of
-        ("unsat":certLines) -> do
-          -- UNSAT - extract the synthesized invariant from the certificate
-          let certificate = T.unlines certLines
+      -- Dump the CHC expression if requested
+      when conf.dumpExprs $ liftIO $ do
+        putStrLn "============================================================"
+        putStrLn "CHC EXPRESSION (SMT-LIB2 format with HORN logic):"
+        putStrLn "============================================================"
+        TL.putStrLn chcScript
+        putStrLn "============================================================"
+
+      -- Invoke z3 with spacer engine
+      result <- liftIO $ runZ3CHC conf chcScript
+      case result of
+        Left err -> do
+          when conf.debug $ liftIO $ putStrLn $ "CHC: Z3 error: " <> T.unpack err
+          pure $ CHCError err
+        Right output -> do
+          let outputText = TL.toStrict (TL.strip output)
+              outputLines = T.lines outputText
+
           when conf.debug $ liftIO $ do
-            if null certLines
-              then putStrLn "CHC: Z3 returned UNSAT (no certificate)"
-              else do
-                putStrLn "CHC: Z3 returned UNSAT with certificate"
-                putStrLn $ "CHC: Certificate:\n" <> T.unpack certificate
+            putStrLn $ "CHC: Z3 output lines: " <> show (length outputLines)
 
-          -- Parse the certificate to extract the invariant
-          let invariant = parseCertificate slotNames certificate
-          when conf.debug $ liftIO $ do
-            putStrLn $ "CHC: Synthesized invariant: " <> show invariant
+          case outputLines of
+            ("unsat":certLines) -> do
+              -- UNSAT - extract the synthesized invariant from the certificate
+              let certificate = T.unlines certLines
+              when conf.debug $ liftIO $ do
+                if null certLines
+                  then putStrLn "CHC: Z3 returned UNSAT (no certificate)"
+                  else do
+                    putStrLn "CHC: Z3 returned UNSAT with certificate"
+                    putStrLn $ "CHC: Certificate:\n" <> T.unpack certificate
 
-          pure $ CHCInvariantSynthesized invariant
+              -- Parse the certificate to extract the invariant
+              let invariant = parseCertificate slotNames certificate
+              when conf.debug $ liftIO $ do
+                putStrLn $ "CHC: Synthesized invariant: " <> show invariant
 
-        ("sat":cexLines) -> do
-          -- SAT means there's a counterexample
-          let cex = T.unlines cexLines
-          when conf.debug $ liftIO $ do
-            putStrLn "CHC: Z3 returned SAT - bad state is reachable"
-            when (not (null cexLines)) $
-              putStrLn $ "CHC: Counterexample:\n" <> T.unpack cex
-          pure $ CHCNoInvariant (if T.null cex then "Bad state is reachable" else cex)
+              pure $ CHCInvariantSynthesized invariant
 
-        _ -> do
-          when conf.debug $ liftIO $ putStrLn $ "CHC: Z3 returned unexpected: " <> T.unpack outputText
-          pure $ CHCUnknown outputText
+            ("sat":cexLines) -> do
+              -- SAT means there's a counterexample
+              let cex = T.unlines cexLines
+              when conf.debug $ liftIO $ do
+                putStrLn "CHC: Z3 returned SAT - bad state is reachable"
+                when (not (null cexLines)) $
+                  putStrLn $ "CHC: Counterexample:\n" <> T.unpack cex
+              pure $ CHCNoInvariant (if T.null cex then "Bad state is reachable" else cex)
+
+            _ -> do
+              when conf.debug $ liftIO $ putStrLn $ "CHC: Z3 returned unexpected: " <> T.unpack outputText
+              pure $ CHCUnknown outputText
 
 
 -- | Run z3 as a CHC solver
