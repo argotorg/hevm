@@ -115,7 +115,7 @@ extractFromAnyContract pathConds addr (C _ storage _ _ _) acc =
         , stWrites = writes
         }
   in if null writes then acc else transition : acc
-extractFromAnyContract _ _ (GVar _) acc = acc
+extractFromAnyContract _ _ (GVar _) _ = internalError "extractFromAnyContract: GVar encountered"
 
 -- | Extract transition from a single contract's final state
 -- Only extracts if the contract address matches the caller
@@ -145,7 +145,7 @@ getBaseStorage :: Expr Storage -> Expr Storage
 getBaseStorage (SStore _ _ prev) = getBaseStorage prev
 getBaseStorage s@(AbstractStore _ _) = s
 getBaseStorage s@(ConcreteStore _) = s
-getBaseStorage (GVar _) = ConcreteStore mempty  -- fallback
+getBaseStorage (GVar _) = internalError "getBaseStorage: GVar encountered"
 
 -- | Extract all writes to a specific address from a storage expression
 extractStorageWrites :: Expr EAddr -> Expr Storage -> [StorageWrite]
@@ -163,7 +163,7 @@ extractStorageWrites targetAddr = go []
       in go (write : acc) prev
     go acc (AbstractStore _ _) = acc
     go acc (ConcreteStore _) = acc
-    go acc (GVar _) = acc
+    go _ (GVar _) = internalError "extractStorageWrites: GVar encountered"
 
 -- | Get only the writes that affect the caller's storage
 getCallerStorageWrites :: Expr EAddr -> Expr Storage -> [StorageWrite]
