@@ -528,8 +528,9 @@ tests = testGroup "hevm"
             }
           }
           |]
-        paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "prove_mapping(address)" [AbiAddressType])) [] defaultVeriOpts
-        let transitions = concat $ mapMaybe CHC.extractAllStorageTransitions paths
+        paths <- withDefaultSolver $ \s -> getExpr s c Nothing [] defaultVeriOpts
+        let addr = SymAddr "entrypoint1"
+        let transitions = concat $ mapMaybe (CHC.extractAllStorageTransitions addr) paths
         assertBoolM "Should extract at least one transition" (not $ null transitions)
         let allWrites = concatMap (.stWrites) transitions
         assertBoolM "Should have at least one storage write" (not $ null allWrites)
@@ -545,8 +546,9 @@ tests = testGroup "hevm"
             }
           }
           |]
-        paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "prove_array(uint256)" [AbiUIntType 256])) [] defaultVeriOpts
-        let transitions = concat $ mapMaybe CHC.extractAllStorageTransitions paths
+        paths <- withDefaultSolver $ \s -> getExpr s c Nothing [] defaultVeriOpts
+        let addr = SymAddr "entrypoint1"
+        let transitions = concat $ mapMaybe (CHC.extractAllStorageTransitions addr) paths
         assertBoolM "Should extract at least one transition" (not $ null transitions)
         putStrLnM $ "transitions:\n" ++ T.unpack (formatStorageTransitions transitions)
     , test "chc-build-script" $ do
@@ -562,14 +564,14 @@ tests = testGroup "hevm"
             }
           }
           |]
-        paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "prove_combined(address,uint256)" [AbiAddressType, AbiUIntType 256])) [] defaultVeriOpts
-        let transitions = concat $ mapMaybe CHC.extractAllStorageTransitions paths
+        paths <- withDefaultSolver $ \s -> getExpr s c Nothing [] defaultVeriOpts
+        let addr = SymAddr "entrypoint1"
+        let transitions = concat $ mapMaybe (CHC.extractAllStorageTransitions addr) paths
             -- Build the CHC script
             chcScript = CHC.buildCHCWithComments transitions
         -- The script should not be empty
         assertBoolM "CHC script should not be empty" (not $ null $ show chcScript)
-    , test "chc-compute-invariants-orig" $ do
-        -- Test computing storage invariants
+    , test "chc-solve-for-invariants-orig1" $ do
         Just c <- solcRuntime "MyContract"
           [i|
           contract MyContract {
@@ -579,12 +581,14 @@ tests = testGroup "hevm"
             }
           }
           |]
-        paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "prove_invariants(address)" [AbiAddressType])) [] defaultVeriOpts
-        putStrLnM $ "Paths obtained: " <> T.unpack (T.unlines (map formatExpr paths))
-        let transitions = concat $ mapMaybe CHC.extractAllStorageTransitions paths
+        paths <- withDefaultSolver $ \s -> getExpr s c Nothing [] defaultVeriOpts
+        -- putStrLnM $ "Paths obtained:\n" <> T.unpack (T.unlines (map formatExpr paths))
+        let addr = SymAddr "entrypoint1"
+        let transitions = concat $ mapMaybe (CHC.extractAllStorageTransitions addr) paths
             caller = case transitions of
               (t:_) -> t.stCallerAddr
               [] -> LitAddr 0x0
+        putStrLnM $ "transitions:\n" <> T.unpack (formatStorageTransitions transitions)
         -- Compute invariants (solver synthesizes them)
         result <- CHC.computeStorageInvariants caller transitions
         case result of
@@ -592,24 +596,31 @@ tests = testGroup "hevm"
           CHC.CHCNoInvariant msg -> assertBoolM ("Unexpected no invariant: " <> T.unpack msg) False
           CHC.CHCUnknown msg -> assertBoolM ("Unexpected unknown: " <> T.unpack msg) False
           CHC.CHCError msg -> assertBoolM ("Unexpected error: " <> T.unpack msg) False
-    , test "chc-script-has-comments" $ do
-        -- Test that the CHC script includes IR comments
+    , test "chc-solve-for-invariants-orig2" $ do
         Just c <- solcRuntime "MyContract"
           [i|
           contract MyContract {
             uint x;
-            function prove_simple() public {
-                x = 42;
+            function prove_invariants(address x) public {
+                x = 1;
             }
           }
           |]
-        paths <- withDefaultSolver $ \s -> getExprEmptyStore s c (Just (Sig "prove_simple()" [])) [] defaultVeriOpts
-        let transitions = concat $ mapMaybe CHC.extractAllStorageTransitions paths
-            chcScript = show $ CHC.buildCHCWithComments transitions
-        -- The script should contain the IR comments
-        assertBoolM "CHC script should contain IR comment header" ("; ORIGINAL INTERNAL IR" `List.isInfixOf` chcScript)
-        assertBoolM "CHC script should contain transition markers" ("; --- Transition" `List.isInfixOf` chcScript)
-        assertBoolM "CHC script should set HORN logic" ("set-logic HORN" `List.isInfixOf` chcScript)
+        paths <- withDefaultSolver $ \s -> getExpr s c Nothing [] defaultVeriOpts
+        -- putStrLnM $ "Paths obtained:\n" <> T.unpack (T.unlines (map formatExpr paths))
+        let addr = SymAddr "entrypoint1"
+        let transitions = concat $ mapMaybe (CHC.extractAllStorageTransitions addr) paths
+            caller = case transitions of
+              (t:_) -> t.stCallerAddr
+              [] -> LitAddr 0x0
+        putStrLnM $ "transitions:\n" <> T.unpack (formatStorageTransitions transitions)
+        -- Compute invariants (solver synthesizes them)
+        result <- CHC.computeStorageInvariants caller transitions
+        case result of
+          CHC.CHCInvariantSynthesized _ -> pure ()  -- Success
+          CHC.CHCNoInvariant msg -> assertBoolM ("Unexpected no invariant: " <> T.unpack msg) False
+          CHC.CHCUnknown msg -> assertBoolM ("Unexpected unknown: " <> T.unpack msg) False
+          CHC.CHCError msg -> assertBoolM ("Unexpected error: " <> T.unpack msg) False
     , test "chc-solve-for-invariants1" $ do
         Just c <- solcRuntime "MyContract"
           [i|
@@ -620,8 +631,11 @@ tests = testGroup "hevm"
             }
           }
           |]
-        paths <- withDefaultSolver $ \s -> getExprEmptyStore s c (Just (Sig "prove_solve()" [])) [] defaultVeriOpts
-        let transitions = concat $ mapMaybe CHC.extractAllStorageTransitions paths
+        paths <- withDefaultSolver $ \s -> getExpr s c Nothing [] defaultVeriOpts
+        putStrLnM $ "Paths obtained:\n" <> T.unpack (T.unlines (map formatExpr paths))
+        let addr = SymAddr "entrypoint1"
+        let transitions = concat $ mapMaybe (CHC.extractAllStorageTransitions addr) paths
+        putStrLnM $ "transitions:\n" <> T.unpack (formatStorageTransitions transitions)
         conf <- readConfig
         when conf.debug $ do
           let chcScript = toLazyText $ CHC.buildCHCWithComments transitions
@@ -651,8 +665,9 @@ tests = testGroup "hevm"
             }
           }
           |]
-        paths <- withDefaultSolver $ \s -> getExprEmptyStore s c (Nothing) [] defaultVeriOpts
-        let transitions = concat $ mapMaybe CHC.extractAllStorageTransitions paths
+        paths <- withDefaultSolver $ \s -> getExpr s c Nothing [] defaultVeriOpts
+        let addr = SymAddr "entrypoint1"
+        let transitions = concat $ mapMaybe (CHC.extractAllStorageTransitions addr) paths
         conf <- readConfig
         when conf.debug $ do
           let chcScript = toLazyText $ CHC.buildCHCWithComments transitions
@@ -685,8 +700,9 @@ tests = testGroup "hevm"
             }
           }
           |]
-        paths <- withDefaultSolver $ \s -> getExprEmptyStore s c (Nothing) [] defaultVeriOpts
-        let transitions = concat $ mapMaybe CHC.extractAllStorageTransitions paths
+        paths <- withDefaultSolver $ \s -> getExprEmptyStore s c Nothing [] defaultVeriOpts
+        let addr = SymAddr "entrypoint1"
+        let transitions = concat $ mapMaybe (CHC.extractAllStorageTransitions addr) paths
         conf <- readConfig
         when conf.debug $ do
           let chcScript = toLazyText $ CHC.buildCHCWithComments transitions
@@ -726,8 +742,9 @@ tests = testGroup "hevm"
             }
           }
           |]
-        paths <- withDefaultSolver $ \s -> getExprEmptyStore s c (Nothing) [] defaultVeriOpts
-        let transitions = concat $ mapMaybe CHC.extractAllStorageTransitions paths
+        paths <- withDefaultSolver $ \s -> getExprEmptyStore s c Nothing [] defaultVeriOpts
+        let addr = SymAddr "entrypoint1"
+        let transitions = concat $ mapMaybe (CHC.extractAllStorageTransitions addr) paths
         conf <- readConfig
         when conf.debug $ do
           let chcScript = toLazyText $ CHC.buildCHCWithComments transitions

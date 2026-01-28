@@ -22,7 +22,6 @@ module EVM.CHC
   , CHCResult(..)
   , SynthesizedInvariant(..)
     -- * Extraction
-  , extractStorageTransitions
   , extractAllStorageTransitions
   , extractStorageWrites
     -- * CHC Generation
@@ -94,27 +93,17 @@ data SlotConstraint
     -- ^ Unparsed constraint (fallback)
   deriving (Show, Eq)
 
--- | Extract storage transitions from an Expr End (execution result)
--- Only extracts from contracts matching the specified caller address.
--- Returns Nothing if the execution result is Partial (can't guarantee anything).
-extractStorageTransitions
-  :: Expr EAddr        -- ^ Caller address we care about
-  -> Expr End          -- ^ Execution result
-  -> Maybe [StorageTransition]
-extractStorageTransitions caller expr = case expr of
-  Success pathConds _ _ contracts -> Just $ Map.foldrWithKey (extractFromContract caller pathConds) [] contracts
-  Failure _ _ _ -> Just [] -- Failures don't produce storage transitions (reverted)
-  Partial _ _ _ -> Nothing -- Can't determine outcome, return Nothing
-  GVar _ -> internalError "extractStorageTransitions: GVar encountered"
-
 -- | Extract storage transitions from ALL contracts in an Expr End
 -- This is useful when you want to analyze all storage changes regardless of address.
 -- Returns Nothing if the execution result is Partial (can't guarantee anything).
 extractAllStorageTransitions
-  :: Expr End          -- ^ Execution result
+  :: Expr EAddr -- ^ contract
+  -> Expr End   -- ^ Execution result
   -> Maybe [StorageTransition]
-extractAllStorageTransitions expr = case expr of
-  Success pathConds _ _ contracts -> Just $ Map.foldrWithKey (extractFromAnyContract pathConds) [] contracts
+extractAllStorageTransitions addr expr = case expr of
+  Success pathConds _ _ contracts ->
+     let filteredC = Map.filterWithKey (\caddr _ -> caddr == addr) contracts
+     in Just $ Map.foldrWithKey (extractFromAnyContract pathConds) [] filteredC
   Failure _ _ _ -> Just [] -- Failures don't produce storage transitions (reverted)
   Partial _ _ _ -> Nothing -- Can't determine outcome, return Nothing
   GVar _ -> internalError "extractAllStorageTransitions: GVar encountered"
@@ -137,29 +126,6 @@ extractFromAnyContract pathConds addr (C _ storage _ _ _) acc =
         }
   in if null writes then acc else transition : acc
 extractFromAnyContract _ _ (GVar _) _ = internalError "extractFromAnyContract: GVar encountered"
-
--- | Extract transition from a single contract's final state
--- Only extracts if the contract address matches the caller
-extractFromContract
-  :: Expr EAddr
-  -> [Prop]
-  -> Expr EAddr
-  -> Expr EContract
-  -> [StorageTransition]
-  -> [StorageTransition]
-extractFromContract caller pathConds addr (C _ storage _ _ _) acc
-  | addr == caller =
-      let writes = extractStorageWrites caller storage
-          transition = StorageTransition
-            { stCallerAddr = caller
-            , stPreStorage = getBaseStorage storage
-            , stPostStorage = storage
-            , stPathConds = pathConds
-            , stWrites = writes
-            }
-      in transition : acc
-  | otherwise = acc
-extractFromContract _ _ _ (GVar _) acc = acc
 
 -- | Get the base (initial) storage from a storage expression
 getBaseStorage :: Expr Storage -> Expr Storage
