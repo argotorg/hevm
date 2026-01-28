@@ -67,26 +67,28 @@ data StorageInvariant
   deriving (Show, Eq, Ord)
 
 -- | Extract storage transitions from an Expr End (execution result)
--- Only extracts from contracts matching the specified caller address
+-- Only extracts from contracts matching the specified caller address.
+-- Returns Nothing if the execution result is Partial (can't guarantee anything).
 extractStorageTransitions
   :: Expr EAddr        -- ^ Caller address we care about
   -> Expr End          -- ^ Execution result
-  -> [StorageTransition]
+  -> Maybe [StorageTransition]
 extractStorageTransitions caller expr = case expr of
-  Success pathConds _ _ contracts -> Map.foldrWithKey (extractFromContract caller pathConds) [] contracts
-  Failure _ _ _ -> [] -- Failures don't produce storage transitions (reverted)
-  Partial _ _ _ -> [] -- ACTUALLY, this is an issue, because we can't guarantee anything
+  Success pathConds _ _ contracts -> Just $ Map.foldrWithKey (extractFromContract caller pathConds) [] contracts
+  Failure _ _ _ -> Just [] -- Failures don't produce storage transitions (reverted)
+  Partial _ _ _ -> Nothing -- Can't determine outcome, return Nothing
   GVar _ -> internalError "extractStorageTransitions: GVar encountered"
 
 -- | Extract storage transitions from ALL contracts in an Expr End
--- This is useful when you want to analyze all storage changes regardless of address
+-- This is useful when you want to analyze all storage changes regardless of address.
+-- Returns Nothing if the execution result is Partial (can't guarantee anything).
 extractAllStorageTransitions
   :: Expr End          -- ^ Execution result
-  -> [StorageTransition]
+  -> Maybe [StorageTransition]
 extractAllStorageTransitions expr = case expr of
-  Success pathConds _ _ contracts -> Map.foldrWithKey (extractFromAnyContract pathConds) [] contracts
-  Failure _ _ _ -> [] -- Failures don't produce storage transitions (reverted)
-  Partial _ _ _ -> [] -- ACTUALLY, this is an issue, because we can't guarantee anything
+  Success pathConds _ _ contracts -> Just $ Map.foldrWithKey (extractFromAnyContract pathConds) [] contracts
+  Failure _ _ _ -> Just [] -- Failures don't produce storage transitions (reverted)
+  Partial _ _ _ -> Nothing -- Can't determine outcome, return Nothing
   GVar _ -> internalError "extractAllStorageTransitions: GVar encountered"
 
 -- | Extract transition from any contract (not filtered by caller)
