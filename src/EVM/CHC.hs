@@ -38,7 +38,7 @@ import Prelude hiding (LT, GT)
 import Control.Exception (bracket)
 import Control.Monad (when)
 import Control.Monad.IO.Unlift (MonadUnliftIO, liftIO)
-import Data.List (nub)
+import Data.List (nub, elemIndex)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -213,9 +213,9 @@ formatTransitionsAsComment transitions =
                  | (i, w) <- zip [0::Int ..] t.stWrites]
       <> fromText ";\n"
 
--- | Build a complete CHC script from storage transitions
-buildCHC :: [StorageTransition] -> Builder
-buildCHC transitions =
+-- | Build the base CHC script (without the query)
+buildCHCBase :: [StorageTransition] -> Builder
+buildCHCBase transitions =
   chcPrelude
   <> "\n"
   <> declareRelations transitions
@@ -223,15 +223,30 @@ buildCHC transitions =
   <> buildTransitionRules transitions
   <> "\n"
   <> buildReachabilityRules transitions
+
+-- | Build a complete CHC script from storage transitions
+-- Takes the expected slot values to use in the invariant query
+buildCHC :: [StorageTransition] -> [[W256]] -> Builder
+buildCHC transitions slotValues =
+  buildCHCBase transitions
   <> "\n"
-  <> buildInvariantQuery transitions
+  <> buildInvariantQuery transitions slotValues
   <> "\n"
 
 -- | Build a complete CHC script with comments showing original IR
+-- This version computes slot values from concrete writes (no fixpoint)
+-- Useful for debug output
 buildCHCWithComments :: [StorageTransition] -> Builder
 buildCHCWithComments transitions =
   formatTransitionsAsComment transitions
-  <> buildCHC transitions
+  <> buildCHCBase transitions
+  <> "; (Use buildCHCWithComments' for full query with expected values)\n"
+
+-- | Build a complete CHC script with comments and invariant query
+buildCHCWithComments' :: [StorageTransition] -> [[W256]] -> Builder
+buildCHCWithComments' transitions slotValues =
+  formatTransitionsAsComment transitions
+  <> buildCHC transitions slotValues
 
 -- | CHC prelude with solver configuration
 chcPrelude :: Builder
@@ -302,13 +317,16 @@ transitionToCHCRule idx transition =
       writes = transition.stWrites
       numWrites = length writes
 
+      -- Build a list of slot keys for substitution
+      slotKeys = map (.swKey) writes
+
       -- Generate variable names for pre and post states
       preVars = [fromText $ "pre_s" <> T.pack (show i) | i <- [0..numWrites-1]]
       postVars = [fromText $ "post_s" <> T.pack (show i) | i <- [0..numWrites-1]]
 
       -- Build the constraint body
       -- For each write: post_si = value_i (simplified; real version would encode the Expr)
-      writeConstraints = zipWith3 buildWriteConstraint [0..] writes postVars
+      writeConstraints = zipWith3 (buildWriteConstraint slotKeys) [0..] writes postVars
 
       -- Note: We skip path conditions for now as they involve complex symbolic
       -- expressions (TxValue, BufLength, etc.) that are hard to encode in CHC.
@@ -334,12 +352,114 @@ transitionToCHCRule idx transition =
     ]
 
 -- | Build a write constraint using SMT.hs for expression encoding
-buildWriteConstraint :: Int -> StorageWrite -> Builder -> Builder
-buildWriteConstraint _ write postVar =
-  -- Use SMT.hs to encode the value expression
-  case exprToSMT write.swValue of
+-- The slotKeys list maps slot indices to their key expressions
+buildWriteConstraint :: [Expr EWord] -> Int -> StorageWrite -> Builder -> Builder
+buildWriteConstraint slotKeys _ write postVar =
+  -- Substitute SLoad expressions with pre-state variables before encoding
+  let substValue = substSLoadsInExpr slotKeys write.swValue
+  in case exprToSMT substValue of
     Right valEnc -> "(= " <> postVar <> " " <> valEnc <> ")"
     Left _ -> "true"  -- Fallback for expressions SMT can't encode
+
+-- | Substitute SLoad expressions from base storage with pre-state variables
+-- For example, SLoad (Lit 0) baseStorage becomes Var "pre_s0" if slot 0 is at index 0
+substSLoadsInExpr :: [Expr EWord] -> Expr EWord -> Expr EWord
+substSLoadsInExpr slotKeys = go
+  where
+    go :: Expr EWord -> Expr EWord
+    go expr = case expr of
+      -- Handle SLoad from base storage
+      SLoad slot storage | isBaseStorage storage ->
+        case elemIndex slot slotKeys of
+          Just i  -> Var ("pre_s" <> T.pack (show i))
+          Nothing -> expr  -- Slot not in our tracked list, keep as-is
+      -- Recursively transform subexpressions
+      Add a b -> Add (go a) (go b)
+      Sub a b -> Sub (go a) (go b)
+      Mul a b -> Mul (go a) (go b)
+      Div a b -> Div (go a) (go b)
+      SDiv a b -> SDiv (go a) (go b)
+      Mod a b -> Mod (go a) (go b)
+      SMod a b -> SMod (go a) (go b)
+      AddMod a b c -> AddMod (go a) (go b) (go c)
+      MulMod a b c -> MulMod (go a) (go b) (go c)
+      Exp a b -> Exp (go a) (go b)
+      SEx a b -> SEx (go a) (go b)
+      Min a b -> Min (go a) (go b)
+      Max a b -> Max (go a) (go b)
+      LT a b -> LT (go a) (go b)
+      GT a b -> GT (go a) (go b)
+      LEq a b -> LEq (go a) (go b)
+      GEq a b -> GEq (go a) (go b)
+      SLT a b -> SLT (go a) (go b)
+      SGT a b -> SGT (go a) (go b)
+      Eq a b -> Eq (go a) (go b)
+      IsZero a -> IsZero (go a)
+      And a b -> And (go a) (go b)
+      Or a b -> Or (go a) (go b)
+      Xor a b -> Xor (go a) (go b)
+      Not a -> Not (go a)
+      SHL a b -> SHL (go a) (go b)
+      SHR a b -> SHR (go a) (go b)
+      SAR a b -> SAR (go a) (go b)
+      -- Terminal cases - no transformation needed
+      Lit _ -> expr
+      Var _ -> expr
+      -- Other cases - return as-is for now
+      _ -> expr
+
+    isBaseStorage :: Expr Storage -> Bool
+    isBaseStorage (AbstractStore _ _) = True
+    isBaseStorage (ConcreteStore _) = False
+    isBaseStorage (SStore _ _ _) = False
+    isBaseStorage (GVar _) = False
+
+-- | Evaluate an expression with all combinations of known slot values
+-- Returns all possible concrete results
+evalExprWithValues :: [Expr EWord] -> [W256] -> Expr EWord -> [W256]
+evalExprWithValues slotKeys knownVals expr =
+  -- For each known value, substitute it and try to evaluate
+  [result | val <- knownVals
+          , let substituted = substAndEval slotKeys val expr
+          , Just result <- [evalToLit substituted]]
+  where
+    -- Substitute SLoad expressions with a concrete value and evaluate
+    substAndEval :: [Expr EWord] -> W256 -> Expr EWord -> Expr EWord
+    substAndEval keys val = go
+      where
+        go :: Expr EWord -> Expr EWord
+        go e = case e of
+          -- For SLoad from base storage, substitute with the concrete value
+          -- if the slot matches one of our tracked slots
+          SLoad slot storage | isBaseStorage' storage ->
+            case elemIndex slot keys of
+              Just _  -> Lit val  -- Substitute with the known value
+              Nothing -> e        -- Unknown slot, keep as-is
+          -- Recursively process and evaluate subexpressions
+          Add a b -> evalBinOp (+) (go a) (go b)
+          Sub a b -> evalBinOp (-) (go a) (go b)
+          Mul a b -> evalBinOp (*) (go a) (go b)
+          Div a b -> case (go a, go b) of
+                       (Lit x, Lit y) | y /= 0 -> Lit (x `div` y)
+                       (a', b') -> Div a' b'
+          -- Terminal cases
+          Lit _ -> e
+          Var _ -> e
+          -- Other cases - process recursively but don't evaluate
+          _ -> e
+
+        evalBinOp :: (W256 -> W256 -> W256) -> Expr EWord -> Expr EWord -> Expr EWord
+        evalBinOp op (Lit a) (Lit b) = Lit (op a b)
+        evalBinOp _ a b = Add a b  -- Can't evaluate, return placeholder
+
+        isBaseStorage' :: Expr Storage -> Bool
+        isBaseStorage' (AbstractStore _ _) = True
+        isBaseStorage' _ = False
+
+    -- Try to extract a concrete value from an expression
+    evalToLit :: Expr EWord -> Maybe W256
+    evalToLit (Lit v) = Just v
+    evalToLit _ = Nothing
 
 -- | Build reachability rules that model reentrancy
 buildReachabilityRules :: [StorageTransition] -> Builder
@@ -413,21 +533,11 @@ buildTransReachRule idx transition =
 -- 1. Define a "Bad" relation that holds when any slot is outside its expected values
 -- 2. Add a rule: Reachable(s0, ...) AND outside_expected => Bad
 -- 3. Query "Bad"
-buildInvariantQuery :: [StorageTransition] -> Builder
-buildInvariantQuery transitions =
+buildInvariantQuery :: [StorageTransition] -> [[W256]] -> Builder
+buildInvariantQuery transitions slotValues =
   let numSlots = case transitions of
                    []    -> 0
                    (t:_) -> length t.stWrites
-
-      -- Collect all concrete values for each slot (including initial 0)
-      collectSlotValues :: Int -> [W256]
-      collectSlotValues slotIdx =
-        0 : [v | t <- transitions
-               , (i, w) <- zip [0..] t.stWrites
-               , i == slotIdx
-               , Lit v <- [w.swValue]]
-
-      slotValues = [collectSlotValues i | i <- [0..numSlots-1]]
 
       -- Build constraint: slot value is NOT in the expected set
       -- (not (or (= s0 val1) (= s0 val2) ...))
@@ -492,7 +602,7 @@ buildCHCQuery transitions slotIdx =
       reachSlot = reachVars !! slotIdx
 
   in mconcat
-    [ buildCHC transitions
+    [ buildCHCBase transitions
     , "\n"
     , "; Query: can slot "
     , fromText (T.pack $ show slotIdx)
@@ -543,20 +653,65 @@ solveForInvariants
 solveForInvariants transitions = do
   conf <- readConfig
 
-  -- Collect all possible values for each slot
+  -- Collect all possible values for each slot using fixpoint iteration
   let numSlots = case transitions of
                    []    -> 0
                    (t:_) -> length t.stWrites
-      collectSlotValues :: Int -> [W256]
-      collectSlotValues slotIdx =
+
+      -- Get all slot keys in order
+      slotKeys = case transitions of
+                   []    -> []
+                   (t:_) -> map (.swKey) t.stWrites
+
+      -- Collect initial concrete values (0 for initial state + concrete write values)
+      initialSlotValues :: Int -> [W256]
+      initialSlotValues slotIdx =
         0 : [v | t <- transitions
                , (i, w) <- zip [0..] t.stWrites
                , i == slotIdx
                , Lit v <- [w.swValue]]
-      slotValues = [nub $ collectSlotValues i | i <- [0..numSlots-1]]
+
+      -- Get all non-concrete write expressions for a slot
+      getNonConcreteExprs :: Int -> [Expr EWord]
+      getNonConcreteExprs slotIdx =
+        [w.swValue | t <- transitions
+                   , (i, w) <- zip [0..] t.stWrites
+                   , i == slotIdx
+                   , not (isLit w.swValue)]
+
+      isLit :: Expr EWord -> Bool
+      isLit (Lit _) = True
+      isLit _ = False
+
+      -- Compute fixpoint for all slots together
+      -- We iterate until no new values are discovered or max iterations reached
+      -- Note: We limit to 2 iterations for now to avoid exponential growth in cases
+      -- like x *= 2 which can produce unbounded value sequences
+      computeFixpoint :: [[W256]] -> Int -> [[W256]]
+      computeFixpoint currentVals iterations
+        | iterations >= 1 = currentVals  -- Max iterations to prevent exponential growth
+        | otherwise =
+            let -- For each slot, evaluate all non-concrete expressions with current values
+                newVals = [evalNonConcreteExprs slotIdx (currentVals !! slotIdx)
+                          | slotIdx <- [0..numSlots-1]]
+                -- Union with current values
+                mergedVals = zipWith (\cur new -> nub (cur ++ new)) currentVals newVals
+            in if mergedVals == currentVals
+               then currentVals  -- Fixpoint reached
+               else computeFixpoint mergedVals (iterations + 1)
+
+      -- Evaluate non-concrete expressions with all known values for the slot
+      evalNonConcreteExprs :: Int -> [W256] -> [W256]
+      evalNonConcreteExprs slotIdx knownVals =
+        let exprs = getNonConcreteExprs slotIdx
+        in concat [evalExprWithValues slotKeys knownVals expr | expr <- exprs]
+
+      -- Start with initial concrete values, then compute fixpoint
+      initialVals = [nub $ initialSlotValues i | i <- [0..numSlots-1]]
+      slotValues = computeFixpoint initialVals 0
 
   -- Build CHC script with query
-  let chcScript = toLazyText (buildCHCWithComments transitions)
+  let chcScript = toLazyText (buildCHCWithComments' transitions slotValues)
 
   -- Debug: print that we're about to call Z3
   when conf.debug $ liftIO $ do
