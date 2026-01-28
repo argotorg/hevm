@@ -12,7 +12,7 @@
     fixpoint of all possible reentrant call sequences.
 -}
 module EVM.CHC
-  ( -- * Types
+  ( -- * Types (re-exported from EVM.Types)
     StorageTransition(..)
   , StorageWrite(..)
   , CHCResult(..)
@@ -52,29 +52,13 @@ import System.Process (createProcess, cleanupProcess, proc, std_in, std_out, std
 
 import EVM.Types
 import EVM.Effects (Config(..), ReadConfig(..))
-import Witch (into)
+import EVM.SMT (exprToSMT)
 
 
 -- * Types
 
--- | Represents a single write to storage
-data StorageWrite = StorageWrite
-  { swAddr  :: Expr EAddr    -- ^ Address being written to
-  , swKey   :: Expr EWord    -- ^ Storage slot key
-  , swValue :: Expr EWord    -- ^ Value being written
-  , swPrev  :: Expr Storage  -- ^ Previous storage state
-  }
-  deriving (Show, Eq, Ord)
-
--- | Represents a storage transition from one state to another
-data StorageTransition = StorageTransition
-  { stCallerAddr   :: Expr EAddr         -- ^ The caller contract address
-  , stPreStorage   :: Expr Storage       -- ^ Storage state before transition
-  , stPostStorage  :: Expr Storage       -- ^ Storage state after transition
-  , stPathConds    :: [Prop]             -- ^ Path conditions for this transition
-  , stWrites       :: [StorageWrite]     -- ^ Individual writes in this transition
-  }
-  deriving (Show, Eq, Ord)
+-- Note: StorageWrite and StorageTransition are defined in EVM.Types
+-- and re-exported from this module for backward compatibility.
 
 -- | Result of CHC solving
 data CHCResult
@@ -391,19 +375,13 @@ transitionToCHCRule idx transition =
     , ")))\n"
     ]
 
--- | Format a W256 as an SMT-LIB bitvector literal
-formatBV256 :: W256 -> Builder
-formatBV256 w = "(_ bv" <> fromText (T.pack $ show (into w :: Integer)) <> " 256)"
-
--- | Build a write constraint
+-- | Build a write constraint using SMT.hs for expression encoding
 buildWriteConstraint :: Int -> StorageWrite -> Builder -> Builder
 buildWriteConstraint _ write postVar =
-  -- Simplified: just say the post value equals the written value
-  -- In a full implementation, we'd encode the Expr properly
-  case write.swValue of
-    Lit w -> "(= " <> postVar <> " " <> formatBV256 w <> ")"
-    Var v -> "(= " <> postVar <> " " <> fromText v <> ")"
-    _ -> "true"  -- Fallback for complex expressions
+  -- Use SMT.hs to encode the value expression
+  case exprToSMT write.swValue of
+    Right valEnc -> "(= " <> postVar <> " " <> valEnc <> ")"
+    Left _ -> "true"  -- Fallback for expressions SMT can't encode
 
 -- | Build reachability rules that model reentrancy
 buildReachabilityRules :: [StorageTransition] -> Builder
@@ -650,46 +628,3 @@ runZ3CHC conf script = do
           pure $ Right result
         _ -> pure $ Left "Failed to create z3 process pipes"
     )
-
-
--- * Utility Functions
-
--- | Convert a Prop to a simplified CHC constraint
--- This is a simplified version; full implementation would handle all Prop cases
-propToSimpleCHC :: Prop -> Builder
-propToSimpleCHC prop = case prop of
-  PBool True -> "true"
-  PBool False -> "false"
-  PEq a b -> "(= " <> exprToSimpleCHC a <> " " <> exprToSimpleCHC b <> ")"
-  PLT a b -> "(bvult " <> exprToSimpleCHC a <> " " <> exprToSimpleCHC b <> ")"
-  PGT a b -> "(bvugt " <> exprToSimpleCHC a <> " " <> exprToSimpleCHC b <> ")"
-  PLEq a b -> "(bvule " <> exprToSimpleCHC a <> " " <> exprToSimpleCHC b <> ")"
-  PGEq a b -> "(bvuge " <> exprToSimpleCHC a <> " " <> exprToSimpleCHC b <> ")"
-  PNeg p -> "(not " <> propToSimpleCHC p <> ")"
-  PAnd a b -> "(and " <> propToSimpleCHC a <> " " <> propToSimpleCHC b <> ")"
-  POr a b -> "(or " <> propToSimpleCHC a <> " " <> propToSimpleCHC b <> ")"
-  PImpl a b -> "(=> " <> propToSimpleCHC a <> " " <> propToSimpleCHC b <> ")"
-
--- | Convert an Expr to a simplified CHC term
--- This handles only common cases; full implementation would be comprehensive
-exprToSimpleCHC :: Expr a -> Builder
-exprToSimpleCHC expr = case expr of
-  Lit w -> formatBV256 w
-  Var v -> fromText v
-  Add a b -> "(bvadd " <> exprToSimpleCHC a <> " " <> exprToSimpleCHC b <> ")"
-  Sub a b -> "(bvsub " <> exprToSimpleCHC a <> " " <> exprToSimpleCHC b <> ")"
-  Mul a b -> "(bvmul " <> exprToSimpleCHC a <> " " <> exprToSimpleCHC b <> ")"
-  SLoad key store -> "(select " <> exprToSimpleCHC store <> " " <> exprToSimpleCHC key <> ")"
-  -- Environment variables - treat as unconstrained symbolic values
-  TxValue -> "chc_txvalue"
-  Origin -> "chc_origin"
-  Coinbase -> "chc_coinbase"
-  Timestamp -> "chc_timestamp"
-  BlockNumber -> "chc_blocknumber"
-  PrevRandao -> "chc_prevrandao"
-  GasLimit -> "chc_gaslimit"
-  ChainId -> "chc_chainid"
-  BaseFee -> "chc_basefee"
-  BufLength b -> "(chc_buflength " <> exprToSimpleCHC b <> ")"
-  AbstractBuf name -> fromText $ "chc_buf_" <> name
-  _ -> "chc_unknown"  -- Fallback for unhandled expressions

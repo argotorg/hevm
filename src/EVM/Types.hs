@@ -1612,6 +1612,27 @@ forceLit :: Expr EWord -> W256
 forceLit (Lit x) = x
 forceLit x = internalError $ "concrete vm, shouldn't ever happen: " <> show x
 
+-- CHC Types (for storage invariant extraction) ------------------------------------------------
+
+-- | Represents a single write to storage
+data StorageWrite = StorageWrite
+  { swAddr  :: Expr EAddr    -- ^ Address being written to
+  , swKey   :: Expr EWord    -- ^ Storage slot key
+  , swValue :: Expr EWord    -- ^ Value being written
+  , swPrev  :: Expr Storage  -- ^ Previous storage state
+  }
+  deriving (Show, Eq, Ord)
+
+-- | Represents a storage transition from one state to another
+data StorageTransition = StorageTransition
+  { stCallerAddr   :: Expr EAddr         -- ^ The caller contract address
+  , stPreStorage   :: Expr Storage       -- ^ Storage state before transition
+  , stPostStorage  :: Expr Storage       -- ^ Storage state after transition
+  , stPathConds    :: [Prop]             -- ^ Path conditions for this transition
+  , stWrites       :: [StorageWrite]     -- ^ Individual writes in this transition
+  }
+  deriving (Show, Eq, Ord)
+
 -- Optics ------------------------------------------------------------------------------------------
 
 
