@@ -46,6 +46,7 @@ import Data.Text.Lazy qualified as TL
 import Data.Text.Lazy.IO qualified as TL
 import Data.Text.Lazy.Builder (Builder, fromText, toLazyText)
 import GHC.IO.Handle (hClose)
+import Numeric (showHex)
 import System.Process (createProcess, cleanupProcess, proc, std_in, std_out, std_err, StdStream(..))
 
 import EVM.Types
@@ -222,6 +223,8 @@ buildCHC transitions =
   <> buildTransitionRules transitions
   <> "\n"
   <> buildReachabilityRules transitions
+  <> "\n"
+  <> buildInvariantQuery transitions
   <> "\n"
 
 -- | Build a complete CHC script with comments showing original IR
@@ -402,6 +405,74 @@ buildTransReachRule idx transition =
 
 -- * CHC Query Building
 
+-- | Build an invariant query that checks if values outside the expected set are reachable
+-- For each slot, we collect all concrete values that can be written (plus 0 for initial),
+-- then query if any OTHER value is reachable. If UNSAT, the invariant is proven.
+--
+-- Z3's CHC query command expects a relation name, so we:
+-- 1. Define a "Bad" relation that holds when any slot is outside its expected values
+-- 2. Add a rule: Reachable(s0, ...) AND outside_expected => Bad
+-- 3. Query "Bad"
+buildInvariantQuery :: [StorageTransition] -> Builder
+buildInvariantQuery transitions =
+  let numSlots = case transitions of
+                   []    -> 0
+                   (t:_) -> length t.stWrites
+
+      -- Collect all concrete values for each slot (including initial 0)
+      collectSlotValues :: Int -> [W256]
+      collectSlotValues slotIdx =
+        0 : [v | t <- transitions
+               , (i, w) <- zip [0..] t.stWrites
+               , i == slotIdx
+               , Lit v <- [w.swValue]]
+
+      slotValues = [collectSlotValues i | i <- [0..numSlots-1]]
+
+      -- Build constraint: slot value is NOT in the expected set
+      -- (not (or (= s0 val1) (= s0 val2) ...))
+      buildNotInSet :: Int -> [W256] -> Builder
+      buildNotInSet slotIdx vals =
+        let slotVar = fromText $ "s" <> T.pack (show slotIdx)
+            valConstraints = [mconcat ["(= ", slotVar, " ", formatW256 v, ")"] | v <- nub vals]
+        in if null valConstraints
+           then "false"  -- No values, can't be outside empty set
+           else "(not (or " <> mconcat [c <> " " | c <- valConstraints] <> "))"
+
+      -- Build the full constraint: ANY slot is outside its expected set
+      slotConstraints = [buildNotInSet i vs | (i, vs) <- zip [0..] slotValues]
+      badCondition = case slotConstraints of
+                       []  -> "false"
+                       [c] -> c
+                       cs  -> "(or " <> mconcat [c <> " " | c <- cs] <> ")"
+
+      reachVars = [fromText $ "s" <> T.pack (show i) | i <- [0..numSlots-1]]
+      reachVarList = mconcat [v <> " " | v <- reachVars]
+
+  in if numSlots == 0
+     then "; No storage slots written, no query needed\n"
+     else mconcat
+       [ "; Define Bad relation for invariant checking\n"
+       , "(declare-rel Bad ())\n"
+       , "\n"
+       , "; Invariant query: can any slot have a value outside the expected set?\n"
+       , "; Expected values per slot:\n"
+       , mconcat [fromText $ ";   slot" <> T.pack (show i) <> ": " <> T.pack (show vs) <> "\n"
+                 | (i, vs) <- zip [0..] slotValues]
+       , "; Bad states: reachable AND some slot outside expected values\n"
+       , "(rule (=> (and (Reachable "
+       , reachVarList
+       , ") "
+       , badCondition
+       , ") Bad))\n"
+       , "\n"
+       , "(query Bad)\n"
+       ]
+
+-- | Format a W256 value as a hex literal for SMT
+formatW256 :: W256 -> Builder
+formatW256 w = fromText $ "#x" <> T.justifyRight 64 '0' (T.pack $ showHex w "")
+
 -- | Build a CHC query to check if a slot can change
 buildCHCQuery :: [StorageTransition] -> Int -> Builder
 buildCHCQuery transitions slotIdx =
@@ -462,6 +533,9 @@ computeStorageInvariants caller transitions = do
   solveForInvariants transitions
 
 -- | Solve for invariants using a CHC solver
+-- The CHC script includes a query asking if values outside the expected set are reachable.
+-- - If Z3 returns UNSAT, the query is unreachable and the invariant is proven.
+-- - If Z3 returns SAT, there's a counterexample showing the invariant doesn't hold.
 solveForInvariants
   :: (MonadUnliftIO m, ReadConfig m)
   => [StorageTransition]
@@ -469,14 +543,25 @@ solveForInvariants
 solveForInvariants transitions = do
   conf <- readConfig
 
-  -- Build CHC script with comments showing original IR
-  -- We use (check-sat) followed by (get-model) to extract the invariant
+  -- Collect all possible values for each slot
+  let numSlots = case transitions of
+                   []    -> 0
+                   (t:_) -> length t.stWrites
+      collectSlotValues :: Int -> [W256]
+      collectSlotValues slotIdx =
+        0 : [v | t <- transitions
+               , (i, w) <- zip [0..] t.stWrites
+               , i == slotIdx
+               , Lit v <- [w.swValue]]
+      slotValues = [nub $ collectSlotValues i | i <- [0..numSlots-1]]
+
+  -- Build CHC script with query
   let chcScript = toLazyText (buildCHCWithComments transitions)
-                  <> "\n(check-sat)\n(get-model)\n"
 
   -- Debug: print that we're about to call Z3
   when conf.debug $ liftIO $ do
     putStrLn $ "CHC: Solving for invariants with " <> show (length transitions) <> " transitions"
+    putStrLn $ "CHC: Expected values per slot: " <> show slotValues
     putStrLn $ "CHC: Invoking Z3 with Spacer engine..."
 
   -- Dump the CHC expression if requested
@@ -494,33 +579,31 @@ solveForInvariants transitions = do
       when conf.debug $ liftIO $ putStrLn $ "CHC: Z3 error: " <> T.unpack err
       pure $ CHCError err
     Right output -> do
-      let outputLines = TL.lines output
-      case outputLines of
-        ("sat":modelLines) -> do
-          -- Parse the model to extract the Reachable relation's interpretation
-          let modelText = TL.unlines modelLines
-              invariant = parseModelForInvariant modelText
+      let outputStr = TL.strip output
+      case outputStr of
+        "unsat" -> do
+          -- UNSAT means the query is unreachable - the invariant holds!
+          -- Build invariants from the collected values
+          let invariants = zipWith buildSlotInvariant [0..] slotValues
           when conf.debug $ liftIO $ do
-            putStrLn "CHC: Z3 returned SAT (invariants found)"
-            putStrLn $ "CHC: Model:\n" <> TL.unpack modelText
-          pure $ CHCInvariantsFound invariant
-        ("unsat":_) -> do
-          when conf.debug $ liftIO $ putStrLn "CHC: Z3 returned UNSAT (no solution)"
-          pure $ CHCUnknown "CHC query unsatisfiable - no invariant found"
+            putStrLn "CHC: Z3 returned UNSAT - invariant proven!"
+            putStrLn $ "CHC: Proven invariants: " <> show invariants
+          pure $ CHCInvariantsFound invariants
+        "sat" -> do
+          -- SAT means there's a counterexample - the invariant doesn't hold
+          when conf.debug $ liftIO $ putStrLn "CHC: Z3 returned SAT - invariant does NOT hold"
+          pure $ CHCUnknown "Invariant does not hold - values outside expected set are reachable"
         _ -> do
           when conf.debug $ liftIO $ putStrLn $ "CHC: Z3 returned: " <> TL.unpack output
           pure $ CHCUnknown (TL.toStrict output)
+  where
+    -- Build a SlotBounded invariant for a slot with known values
+    buildSlotInvariant :: Int -> [W256] -> StorageInvariant
+    buildSlotInvariant slotIdx vals =
+      let minVal = minimum vals
+          maxVal = maximum vals
+      in SlotBounded (Lit (fromIntegral slotIdx)) (Lit minVal) (Lit maxVal)
 
--- | Parse Z3's model output to extract the Reachable relation invariant
--- The model contains the interpretation of all relations, including Reachable
--- which represents the set of reachable storage states
-parseModelForInvariant :: TL.Text -> [StorageInvariant]
-parseModelForInvariant modelText =
-  -- For now, we just report that an invariant was found
-  -- The full model text contains the Reachable relation interpretation
-  -- which is the actual invariant (e.g., "x = 0 OR x = 1")
-  -- TODO: Parse the S-expression model to extract structured invariants
-  [SlotBounded (Lit 0) (Lit 0) (Lit 1)]  -- Placeholder: slot 0 is bounded [0, 1]
 
 -- | Run z3 as a CHC solver
 runZ3CHC :: Config -> TL.Text -> IO (Either Text TL.Text)
