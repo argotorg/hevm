@@ -608,7 +608,7 @@ tests = testGroup "hevm"
         assertBoolM "CHC script should contain IR comment header" ("; ORIGINAL INTERNAL IR" `List.isInfixOf` chcScript)
         assertBoolM "CHC script should contain transition markers" ("; --- Transition" `List.isInfixOf` chcScript)
         assertBoolM "CHC script should set HORN logic" ("set-logic HORN" `List.isInfixOf` chcScript)
-    , test "chc-solve-for-invariants" $ do
+    , test "chc-solve-for-invariants1" $ do
         Just c <- solcRuntime "MyContract"
           [i|
           contract MyContract {
@@ -631,9 +631,71 @@ tests = testGroup "hevm"
         case result of
           CHC.CHCInvariantsFound invariants -> do
             putStrLnM $ "CHC invariants found: " <> show invariants
-            -- The invariant should indicate x can only be 0 or 1
-            -- (starts at 0, becomes 1 when prove_solve() is called)
-            assertBoolM "Should find at least one invariant" (not $ null invariants)
+            assertEqualM "Should find one invariant" 1 (length invariants)
+            assertEqualM "Invariant should be x == 1" (Just (CHC.SlotBounded (Lit 0x0) (Lit 0x0) (Lit 0x1))) (listToMaybe invariants)
+          CHC.CHCUnknown msg -> liftIO $ assertFailure $ "CHC returned unknown: " <> T.unpack msg
+          CHC.CHCError err -> liftIO $ assertFailure $ "CHC Z3 error: " <> T.unpack err
+    , test "chc-solve-for-invariants2" $ do
+        Just c <- solcRuntime "MyContract"
+          [i|
+          contract MyContract {
+            uint x;
+            function prove_solve() public {
+                x = 1;
+            }
+            function prove_solve2() public {
+                x = 2;
+            }
+          }
+          |]
+        paths <- withDefaultSolver $ \s -> getExpr s c (Nothing) [] defaultVeriOpts
+        let transitions = concat $ mapMaybe CHC.extractAllStorageTransitions paths
+        conf <- readConfig
+        when conf.debug $ do
+          let chcScript = toLazyText $ CHC.buildCHCWithComments transitions
+          let debugFile = "/tmp/chc_debug.smt2"
+          liftIO $ TL.writeFile debugFile chcScript
+          putStrLnM $ "CHC script written to: " ++ debugFile
+        -- This test exercises the Z3 integration and extracts invariants
+        result <- CHC.solveForInvariants transitions
+        case result of
+          CHC.CHCInvariantsFound invariants -> do
+            putStrLnM $ "CHC invariants found: " <> show invariants
+            assertEqualM "Should find one invariant" 1 (length invariants)
+            assertEqualM "Invariant should be x == 1" (Just (CHC.SlotBounded (Lit 0x0) (Lit 0x0) (Lit 0x2))) (listToMaybe invariants)
+          CHC.CHCUnknown msg -> liftIO $ assertFailure $ "CHC returned unknown: " <> T.unpack msg
+          CHC.CHCError err -> liftIO $ assertFailure $ "CHC Z3 error: " <> T.unpack err
+    , test "chc-solve-for-invariants3" $ do
+        Just c <- solcRuntime "MyContract"
+          [i|
+          contract MyContract {
+            uint x;
+            function prove_solve() public {
+                x = 1;
+            }
+            function prove_solve2() public {
+                x = 2;
+            }
+            function prove_solve3() public {
+                x *= 2;
+            }
+          }
+          |]
+        paths <- withDefaultSolver $ \s -> getExpr s c (Nothing) [] defaultVeriOpts
+        let transitions = concat $ mapMaybe CHC.extractAllStorageTransitions paths
+        conf <- readConfig
+        when conf.debug $ do
+          let chcScript = toLazyText $ CHC.buildCHCWithComments transitions
+          let debugFile = "/tmp/chc_debug.smt2"
+          liftIO $ TL.writeFile debugFile chcScript
+          putStrLnM $ "CHC script written to: " ++ debugFile
+        -- This test exercises the Z3 integration and extracts invariants
+        result <- CHC.solveForInvariants transitions
+        case result of
+          CHC.CHCInvariantsFound invariants -> do
+            putStrLnM $ "CHC invariants found: " <> show invariants
+            assertEqualM "Should find one invariant" 1 (length invariants)
+            assertEqualM "Invariant should be x == 1" (Just (CHC.SlotBounded (Lit 0x0) (Lit 0x0) (Lit 0x4))) (listToMaybe invariants)
           CHC.CHCUnknown msg -> liftIO $ assertFailure $ "CHC returned unknown: " <> T.unpack msg
           CHC.CHCError err -> liftIO $ assertFailure $ "CHC Z3 error: " <> T.unpack err
     ]
