@@ -43,9 +43,8 @@ blockchainTests ts = bench "blockchain-tests" $ nfIO $ do
   tests <- ts
   putStrLn "    executing blockchain tests"
   let cases = concat . Map.elems . (fmap Map.toList) $ tests
-      ignored = Map.keys BCTests.problematicTests
   foldM (\acc (n, c) ->
-      if n `elem` ignored
+      if isJust (BCTests.findIgnoreReason n)
       then pure True
       else do
         res <- runApp $ runBCTest c

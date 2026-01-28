@@ -1,4 +1,4 @@
-module EVM.Test.BlockchainTests (prepareTests, problematicTests, Case, vmForCase, checkExpectation, allTestCases) where
+module EVM.Test.BlockchainTests (prepareTests, problematicTests, findIgnoreReason, Case, vmForCase, checkExpectation, allTestCases) where
 
 import EVM (initialContract, makeVm, setEIP4788Storage)
 import EVM.Concrete qualified as EVM
@@ -23,6 +23,7 @@ import Data.Aeson qualified as JSON
 import Data.Aeson.Types qualified as JSON
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as Lazy
+import Data.List (isPrefixOf)
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Maybe (fromJust, fromMaybe, isNothing, isJust)
@@ -113,9 +114,13 @@ prepareTests = do
       pure $ testCase' name exec
     testCase' :: String -> Assertion -> TestTree
     testCase' name assertion =
-      case Map.lookup name problematicTests of
-        Just f -> f (testCase name assertion)
+      case findIgnoreReason name of
+        Just reason -> ignoreTestBecause reason (testCase name assertion)
         Nothing -> testCase name assertion
+
+-- | Find if a test name matches any problematic test prefix
+findIgnoreReason :: String -> Maybe String
+findIgnoreReason name = lookup True [(prefix `isPrefixOf` name, reason) | (prefix, reason) <- problematicTests]
 
 rootDirectory :: IO FilePath
 rootDirectory = getEnv "HEVM_ETHEREUM_TESTS_REPO"
@@ -139,16 +144,38 @@ allTestCases = do
   pure $ Map.fromList cases
 
 -- | Tests that are known to fail or are too slow to run in CI.
+-- Uses prefix matching: any test name starting with a prefix will be ignored.
 -- Test names are from the execution-spec-tests fixtures format.
-problematicTests :: Map String (TestTree -> TestTree)
-problematicTests = Map.fromList
-  -- EIP-4844 point evaluation precompile (0x0A) not implemented
-  [ ("tests/cancun/eip4844_blobs/test_point_evaluation_precompile.py::test_tx_entry_point[fork_Cancun-blockchain_test_from_state_test-correct_proof-exact_gas]", ignoreTestBecause "EIP-4844 point evaluation precompile not implemented")
-  , ("tests/cancun/eip4844_blobs/test_point_evaluation_precompile.py::test_tx_entry_point[fork_Cancun-blockchain_test_from_state_test-correct_proof-extra_gas]", ignoreTestBecause "EIP-4844 point evaluation precompile not implemented")
-  , ("tests/cancun/eip4844_blobs/test_point_evaluation_precompile.py::test_tx_entry_point[fork_Cancun-blockchain_test_from_state_test-correct_proof-insufficient_gas]", ignoreTestBecause "EIP-4844 point evaluation precompile not implemented")
-  , ("tests/cancun/eip4844_blobs/test_point_evaluation_precompile.py::test_tx_entry_point[fork_Cancun-blockchain_test_from_state_test-incorrect_proof-exact_gas]", ignoreTestBecause "EIP-4844 point evaluation precompile not implemented")
-  , ("tests/cancun/eip4844_blobs/test_point_evaluation_precompile.py::test_tx_entry_point[fork_Cancun-blockchain_test_from_state_test-incorrect_proof-extra_gas]", ignoreTestBecause "EIP-4844 point evaluation precompile not implemented")
-  , ("tests/cancun/eip4844_blobs/test_point_evaluation_precompile.py::test_tx_entry_point[fork_Cancun-blockchain_test_from_state_test-incorrect_proof-insufficient_gas]", ignoreTestBecause "EIP-4844 point evaluation precompile not implemented")
+problematicTests :: [(String, String)]
+problematicTests =
+  [ -- EIP-4844 point evaluation precompile (0x0A) not implemented
+    ("tests/cancun/eip4844_blobs/test_point_evaluation_precompile.py::", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/cancun/eip4844_blobs/test_point_evaluation_precompile_gas.py::", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+    -- Other tests that invoke the 0x0A precompile
+  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Cancun-address_0x000000000000000000000000000000000000000a", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stSpecialTest/failed_tx_xcf416c53_ParisFiller.json::", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-11]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-13]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-24]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-28]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-39]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-42]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-53]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-64]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-75]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-86]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-97]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-108]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-119]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-130]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-141]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-152]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-163]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-174]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-185]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-196]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-207]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-218]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
   ]
 
 
