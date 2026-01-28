@@ -107,6 +107,7 @@ sender tx = ecrec v' tx.r  tx.s hash
   where hash = keccak' (signingData tx)
         v    = tx.v
         v'   = if v == 27 || v == 28 then v
+               else if v >= 35 then 28 - (v `mod` 2) -- EIP155
                else 27 + v
 
 sign :: Integer -> Transaction -> Transaction
