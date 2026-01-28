@@ -38,10 +38,8 @@ import Prelude hiding (LT, GT)
 import Control.Exception (bracket)
 import Control.Monad (when)
 import Control.Monad.IO.Unlift (MonadUnliftIO, liftIO)
-import Data.Foldable (foldl')
 import Data.List (nub)
 import Data.Map.Strict qualified as Map
-import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Lazy qualified as TL
@@ -449,11 +447,8 @@ computeStorageInvariants caller transitions = do
     putStrLn "CHC: Transition details:"
     mapM_ (TL.putStrLn . TL.fromStrict . formatTransition) transitions
 
-  let invariants =  -- TODO
-  when conf.debug $ liftIO $ do
-    putStrLn $ "CHC: Found " <> show (length invariants) <> " invariants (local analysis)"
-
-  pure $ CHCInvariantsFound invariants
+  -- Use SMT solver to compute invariants via CHC
+  solveForInvariants transitions
 
 -- | Solve for invariants using a CHC solver
 solveForInvariants
