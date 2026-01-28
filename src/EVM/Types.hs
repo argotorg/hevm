@@ -558,6 +558,7 @@ data EvmError
   | NonceOverflow
   | BadCheatCode String FunctionSelector
   | NonexistentFork Int
+  | AssumeCheatFailed
   deriving (Show, Eq, Ord)
 
 evmErrToString :: EvmError -> String

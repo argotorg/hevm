@@ -79,6 +79,8 @@ tests = testGroup "Concrete execution tests"
   [ testCase "return-updated-input-argument" $ expectValue (AbiUInt 8 3) =<< executeSingleCall simpleUncheckedArithmeticExample "C" "a" [AbiUInt 8 1]
   , testCase "silent-overflow-in-unchecked-arithmetic" $ expectValue (AbiUInt 8 245) =<< executeSingleCall simpleUncheckedArithmeticExample "C" "a" [AbiUInt 8 250]
   , testCase "revert-on-arithmetic-overflow" $ expectRevert =<< executeSingleCall simpleCheckedArithmeticExample "C" "a" [AbiUInt 8 250]
+  , testCase "cheat-assume-satisfied" $ expectValue (AbiUInt 8 42) =<< executeSingleCall assumeCheatCodeExample "C" "a" [AbiUInt 8 42]
+  , testCase "cheat-assume-failing" $ expectError AssumeCheatFailed =<< executeSingleCall assumeCheatCodeExample "C" "a" [AbiUInt 8 5]
   ]
 
 expectValue :: AbiValue -> ExecResult -> IO ()
@@ -101,6 +103,11 @@ expectRevert res = do
   case err of
     Revert _ -> pure ()
     _ -> assertFailure "Revert was expected, but got a different EVM error"
+
+expectError :: EvmError -> ExecResult -> IO ()
+expectError expectedErr res = do
+  err <- assertLeft res
+  assertEqual "Incorrect error obtained from concrete execution" expectedErr err
 
 assertLeft :: Either e a -> IO e
 assertLeft = \case
@@ -126,6 +133,18 @@ simpleCheckedArithmeticExample = [here|
   contract C {
     function a(uint8 x) public returns (uint8 b) {
       b = x*2+1;
+    }
+  }
+|]
+
+assumeCheatCodeExample :: Text
+assumeCheatCodeExample = [here|
+  interface Hevm {function assume(bool) external;}
+  contract C {
+    function a(uint8 x) public returns (uint8 b) {
+      Hevm hevm = Hevm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
+      hevm.assume(x > 10);
+      b = x;
     }
   }
 |]

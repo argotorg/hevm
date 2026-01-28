@@ -16,10 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SMT queries now run in separate processes, which allows us to better manage
   timeouts and memory usage by the SMT solver.
 - We now allow limiting the SMT solver's memory usage via `--smt-memory` (in MB).
-
-## Changed
 - The option `--smttimeout` is now called `--smt-timeout` for consistency with other
   options.
+- We now abort VM run on a failed `assume`.
 
 ## [0.57.0] - 2026-01-08
 

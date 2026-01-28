@@ -1835,8 +1835,10 @@ cheatActions = Map.fromList
   , action "assume(bool)" $
       \sig input -> case decodeStaticArgs 0 1 input of
         [c] -> do
-          modifying #constraints ((:) (PEq (Lit 1) c))
-          doStop
+          whenSymbolicElse (modifying #constraints ((:) (PEq (Lit 1) c)) >> doStop) $ do
+            case c of
+              Lit v -> if (v == 0) then (terminateVMWithError AssumeCheatFailed) else doStop
+              _ -> internalError "Symbolic value encountered in concrete mode"
         _ -> vmError (BadCheatCode "assume(bool) parameter decoding failed." sig)
 
   , action "roll(uint256)" $
@@ -2400,6 +2402,15 @@ data FrameResult
   | FrameReverted (Expr Buf) -- ^ REVERT
   | FrameErrored EvmError -- ^ Any other error
   deriving Show
+
+terminateVMWithError :: VMOps t => EvmError -> EVM t ()
+terminateVMWithError err = do
+  vm <- get
+  case vm.frames of
+    [] -> finishFrame (FrameErrored err)
+    _ -> do
+      finishFrame (FrameErrored err)
+      terminateVMWithError err
 
 finishAllFramesAndStop :: VMOps t => EVM t ()
 finishAllFramesAndStop = do
