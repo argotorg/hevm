@@ -689,7 +689,7 @@ solveForInvariants transitions = do
       -- like x *= 2 which can produce unbounded value sequences
       computeFixpoint :: [[W256]] -> Int -> [[W256]]
       computeFixpoint currentVals iterations
-        | iterations >= 1 = currentVals  -- Max iterations to prevent exponential growth
+        | iterations >= 10 = currentVals  -- Max iterations to prevent exponential growth
         | otherwise =
             let -- For each slot, evaluate all non-concrete expressions with current values
                 newVals = [evalNonConcreteExprs slotIdx (currentVals !! slotIdx)
