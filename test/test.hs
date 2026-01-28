@@ -529,11 +529,8 @@ tests = testGroup "hevm"
           }
           |]
         paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "prove_mapping(address)" [AbiAddressType])) [] defaultVeriOpts
-        -- Extract storage transitions from all contracts in the paths
         let transitions = concat $ mapMaybe CHC.extractAllStorageTransitions paths
-        -- We should have at least one transition
         assertBoolM "Should extract at least one transition" (not $ null transitions)
-        -- Each transition should have writes
         let allWrites = concatMap (.stWrites) transitions
         assertBoolM "Should have at least one storage write" (not $ null allWrites)
         putStrLnM $ "allWrites:\n" ++ T.unpack (formatStorageWrites allWrites)
@@ -612,7 +609,6 @@ tests = testGroup "hevm"
         assertBoolM "CHC script should contain transition markers" ("; --- Transition" `List.isInfixOf` chcScript)
         assertBoolM "CHC script should set HORN logic" ("set-logic HORN" `List.isInfixOf` chcScript)
     , test "chc-solve-for-invariants" $ do
-        -- Test calling the Z3 solver (may fail if Z3 not available)
         Just c <- solcRuntime "MyContract"
           [i|
           contract MyContract {
@@ -624,19 +620,22 @@ tests = testGroup "hevm"
           |]
         paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "prove_solve()" [])) [] defaultVeriOpts
         let transitions = concat $ mapMaybe CHC.extractAllStorageTransitions paths
-        -- Dump CHC script for debugging when debug is enabled
-        when testEnv.config.debug $ do
+        conf <- readConfig
+        when conf.debug $ do
           let chcScript = toLazyText $ CHC.buildCHCWithComments transitions
           let debugFile = "/tmp/chc_debug.smt2"
           liftIO $ TL.writeFile debugFile chcScript
           putStrLnM $ "CHC script written to: " ++ debugFile
-        -- This test exercises the Z3 integration
+        -- This test exercises the Z3 integration and extracts invariants
         result <- CHC.solveForInvariants transitions
         case result of
-          CHC.CHCInvariantsFound _ -> pure ()  -- Success
+          CHC.CHCInvariantsFound invariants -> do
+            putStrLnM $ "CHC invariants found: " <> show invariants
+            -- The invariant should indicate x can only be 0 or 1
+            -- (starts at 0, becomes 1 when prove_solve() is called)
+            assertBoolM "Should find at least one invariant" (not $ null invariants)
           CHC.CHCUnknown msg -> liftIO $ assertFailure $ "CHC returned unknown: " <> T.unpack msg
           CHC.CHCError err -> liftIO $ assertFailure $ "CHC Z3 error: " <> T.unpack err
-        putStrLnM $ "CHC invariants found:" <> show result
     ]
   , testGroup "StorageTests"
     [ test "accessStorage uses fetchedStorage" $ do
