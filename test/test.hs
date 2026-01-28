@@ -5368,7 +5368,7 @@ checkEquivBase mkprop l r expect = do
   config <- readConfig
   let noSimplifyEnv = Env {config = config {simp = False}}
   liftIO $ runEnv noSimplifyEnv $ do
-    withSolvers CVC5 1 (Just 1) defMemLimit $ \solvers -> do
+    withSolvers Bitwuzla 1 (Just 1) defMemLimit $ \solvers -> do
       res <- checkSatWithProps solvers [mkprop l r]
       let ret = case res of
             Qed -> Just True
