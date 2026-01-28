@@ -568,7 +568,7 @@ tests = testGroup "hevm"
             chcScript = CHC.buildCHCWithComments transitions
         -- The script should not be empty
         assertBoolM "CHC script should not be empty" (not $ null $ show chcScript)
-    , test "chc-compute-invariants" $ do
+    , test "chc-compute-invariants-orig" $ do
         -- Test computing storage invariants
         Just c <- solcRuntime "MyContract"
           [i|
@@ -580,6 +580,7 @@ tests = testGroup "hevm"
           }
           |]
         paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "prove_invariants(address)" [AbiAddressType])) [] defaultVeriOpts
+        putStrLnM $ "Paths obtained: " <> T.unpack (T.unlines (map formatExpr paths))
         let transitions = concat $ mapMaybe CHC.extractAllStorageTransitions paths
             caller = case transitions of
               (t:_) -> t.stCallerAddr
@@ -602,7 +603,7 @@ tests = testGroup "hevm"
             }
           }
           |]
-        paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "prove_simple()" [])) [] defaultVeriOpts
+        paths <- withDefaultSolver $ \s -> getExprEmptyStore s c (Just (Sig "prove_simple()" [])) [] defaultVeriOpts
         let transitions = concat $ mapMaybe CHC.extractAllStorageTransitions paths
             chcScript = show $ CHC.buildCHCWithComments transitions
         -- The script should contain the IR comments
@@ -619,7 +620,7 @@ tests = testGroup "hevm"
             }
           }
           |]
-        paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "prove_solve()" [])) [] defaultVeriOpts
+        paths <- withDefaultSolver $ \s -> getExprEmptyStore s c (Just (Sig "prove_solve()" [])) [] defaultVeriOpts
         let transitions = concat $ mapMaybe CHC.extractAllStorageTransitions paths
         conf <- readConfig
         when conf.debug $ do
@@ -650,7 +651,7 @@ tests = testGroup "hevm"
             }
           }
           |]
-        paths <- withDefaultSolver $ \s -> getExpr s c (Nothing) [] defaultVeriOpts
+        paths <- withDefaultSolver $ \s -> getExprEmptyStore s c (Nothing) [] defaultVeriOpts
         let transitions = concat $ mapMaybe CHC.extractAllStorageTransitions paths
         conf <- readConfig
         when conf.debug $ do
@@ -684,7 +685,7 @@ tests = testGroup "hevm"
             }
           }
           |]
-        paths <- withDefaultSolver $ \s -> getExpr s c (Nothing) [] defaultVeriOpts
+        paths <- withDefaultSolver $ \s -> getExprEmptyStore s c (Nothing) [] defaultVeriOpts
         let transitions = concat $ mapMaybe CHC.extractAllStorageTransitions paths
         conf <- readConfig
         when conf.debug $ do
@@ -725,7 +726,7 @@ tests = testGroup "hevm"
             }
           }
           |]
-        paths <- withDefaultSolver $ \s -> getExpr s c (Nothing) [] defaultVeriOpts
+        paths <- withDefaultSolver $ \s -> getExprEmptyStore s c (Nothing) [] defaultVeriOpts
         let transitions = concat $ mapMaybe CHC.extractAllStorageTransitions paths
         conf <- readConfig
         when conf.debug $ do
