@@ -662,10 +662,43 @@ tests = testGroup "hevm"
           CHC.CHCInvariantsFound invariants -> do
             putStrLnM $ "CHC invariants found: " <> show invariants
             assertEqualM "Should find one invariant" 1 (length invariants)
-            assertEqualM "Invariant should be x == 1" (Just (CHC.SlotBounded (Lit 0x0) (Lit 0x0) (Lit 0x2))) (listToMaybe invariants)
+            assertEqualM "Invariant should be 0 <= x <= 2" (Just (CHC.SlotBounded (Lit 0x0) (Lit 0x0) (Lit 0x2))) (listToMaybe invariants)
           CHC.CHCUnknown msg -> liftIO $ assertFailure $ "CHC returned unknown: " <> T.unpack msg
           CHC.CHCError err -> liftIO $ assertFailure $ "CHC Z3 error: " <> T.unpack err
     , test "chc-solve-for-invariants3" $ do
+        Just c <- solcRuntime "MyContract"
+          [i|
+          contract MyContract {
+            uint x;
+            function prove_solve() public {
+                x = 1;
+            }
+            function prove_solve2() public {
+                x = 2;
+            }
+            function prove_solve3() public {
+                if (x < 10) x *= 2;
+            }
+          }
+          |]
+        paths <- withDefaultSolver $ \s -> getExpr s c (Nothing) [] defaultVeriOpts
+        let transitions = concat $ mapMaybe CHC.extractAllStorageTransitions paths
+        conf <- readConfig
+        when conf.debug $ do
+          let chcScript = toLazyText $ CHC.buildCHCWithComments transitions
+          let debugFile = "/tmp/chc_debug.smt2"
+          liftIO $ TL.writeFile debugFile chcScript
+          putStrLnM $ "CHC script written to: " ++ debugFile
+        result <- CHC.solveForInvariants transitions
+        case result of
+          CHC.CHCInvariantsFound invariants -> do
+            putStrLnM $ "CHC invariants found: " <> show invariants
+            assertEqualM "Should find one invariant" 1 (length invariants)
+            assertEqualM "Invariant should be  0<= x <= 20" (Just (CHC.SlotBounded (Lit 0x0) (Lit 0) (Lit 20))) (listToMaybe invariants)
+          CHC.CHCUnknown msg -> liftIO $ assertFailure $ "CHC returned unknown: " <> T.unpack msg
+          CHC.CHCError err -> liftIO $ assertFailure $ "CHC Z3 error: " <> T.unpack err
+        pure ()
+    , test "chc-solve-for-invariants-unbounded" $ do
         -- This test verifies that CHC handles symbolic expressions (like x *= 2)
         -- that depend on pre-state values. The SLoad expressions should be
         -- correctly substituted with pre-state variables in the SMT encoding.
@@ -697,18 +730,8 @@ tests = testGroup "hevm"
           liftIO $ TL.writeFile debugFile chcScript
           putStrLnM $ "CHC script written to: " ++ debugFile
         -- This test exercises the Z3 integration with symbolic expressions
-        result <- CHC.solveForInvariants transitions
-        case result of
-          CHC.CHCInvariantsFound invariants -> do
-            -- If invariants are found, verify they're reasonable
-            putStrLnM $ "CHC invariants found: " <> show invariants
-            assertEqualM "Should find one invariant" 1 (length invariants)
-          CHC.CHCUnknown msg -> do
-            -- For unbounded transitions, CHCUnknown is expected because
-            -- our finite approximation can't match the full CHC fixpoint
-            putStrLnM $ "CHC returned unknown (expected for unbounded x *= 2): " <> T.unpack msg
-            pure ()  -- This is acceptable for this test
-          CHC.CHCError err -> liftIO $ assertFailure $ "CHC Z3 error: " <> T.unpack err
+        CHC.CHCUnknown _ <- CHC.solveForInvariants transitions
+        pure ()
     ]
   , testGroup "StorageTests"
     [ test "accessStorage uses fetchedStorage" $ do
