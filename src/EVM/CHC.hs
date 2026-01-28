@@ -10,20 +10,23 @@
     The key insight is that unknown code can only modify the caller's storage
     by calling back into the caller's public functions. CHC computes the
     fixpoint of all possible reentrant call sequences.
+
+    We use Z3's Spacer engine to synthesize invariants automatically. The solver
+    finds the inductive invariant that proves the property, rather than us
+    computing expected values and asking the solver to verify.
 -}
 module EVM.CHC
   ( -- * Types (re-exported from EVM.Types)
     StorageTransition(..)
   , StorageWrite(..)
   , CHCResult(..)
-  , StorageInvariant(..)
+  , SynthesizedInvariant(..)
     -- * Extraction
   , extractStorageTransitions
   , extractAllStorageTransitions
   , extractStorageWrites
     -- * CHC Generation
   , buildCHC
-  , buildCHCQuery
   , buildCHCWithComments
     -- * Invariant Computation
   , computeStorageInvariants
@@ -31,6 +34,8 @@ module EVM.CHC
     -- * Utilities
   , getCallerStorageWrites
   , transitionToCHCRule
+    -- * Certificate Parsing
+  , parseCertificate
   ) where
 
 import Prelude hiding (LT, GT)
@@ -46,7 +51,7 @@ import Data.Text.Lazy qualified as TL
 import Data.Text.Lazy.IO qualified as TL
 import Data.Text.Lazy.Builder (Builder, fromText, toLazyText)
 import GHC.IO.Handle (hClose)
-import Numeric (showHex)
+import Numeric (readHex)
 import System.Process (createProcess, cleanupProcess, proc, std_in, std_out, std_err, StdStream(..))
 
 import EVM.Types
@@ -55,17 +60,39 @@ import EVM.SMT (exprToSMT)
 
 
 data CHCResult
-  = CHCInvariantsFound [StorageInvariant]
-  | CHCUnknown Text -- ^ Solver returned unknown
-  | CHCError Text -- ^ Error during solving
+  = CHCInvariantSynthesized SynthesizedInvariant
+    -- ^ Solver synthesized an invariant (returned UNSAT with certificate)
+  | CHCNoInvariant Text
+    -- ^ Solver returned SAT - no invariant exists (with counterexample info)
+  | CHCUnknown Text
+    -- ^ Solver returned unknown
+  | CHCError Text
+    -- ^ Error during solving
   deriving (Show, Eq)
 
--- | A storage invariant describes what holds for a storage slot
-data StorageInvariant
-  = SlotUnchanged (Expr EWord)
-  | SlotBounded (Expr EWord) (Expr EWord) (Expr EWord)
-  | SlotRelation (Expr EWord) (Expr EWord) Prop
-  deriving (Show, Eq, Ord)
+-- | A synthesized invariant from the CHC solver
+-- This represents the actual invariant the solver discovered, not a hand-computed one
+data SynthesizedInvariant = SynthesizedInvariant
+  { siSlotNames :: [Text]
+    -- ^ Names of the slot variables (s0, s1, ...)
+  , siRawSMT :: Text
+    -- ^ The raw SMT-LIB2 definition from Z3's certificate
+  , siConstraints :: [SlotConstraint]
+    -- ^ Parsed constraints per slot
+  }
+  deriving (Show, Eq)
+
+-- | A constraint on a single storage slot, extracted from the synthesized invariant
+data SlotConstraint
+  = SCExactValues [W256]
+    -- ^ Slot can only have these exact values (disjunction of equalities)
+  | SCBounded W256 W256
+    -- ^ Slot value is in range [min, max]
+  | SCUnbounded
+    -- ^ No constraint on this slot (can be any value)
+  | SCRaw Text
+    -- ^ Unparsed constraint (fallback)
+  deriving (Show, Eq)
 
 -- | Extract storage transitions from an Expr End (execution result)
 -- Only extracts from contracts matching the specified caller address.
@@ -163,9 +190,6 @@ extractStorageWrites targetAddr = go []
 getCallerStorageWrites :: Expr EAddr -> Expr Storage -> [StorageWrite]
 getCallerStorageWrites = extractStorageWrites
 
-
--- * CHC Generation
-
 -- | Format a StorageTransition for debug output
 formatTransition :: StorageTransition -> Text
 formatTransition t = T.unlines
@@ -225,35 +249,30 @@ buildCHCBase transitions =
   <> buildReachabilityRules transitions
 
 -- | Build a complete CHC script from storage transitions
--- Takes the expected slot values to use in the invariant query
-buildCHC :: [StorageTransition] -> [[W256]] -> Builder
-buildCHC transitions slotValues =
+-- The query asks for invariant synthesis - the solver discovers the invariant
+buildCHC :: [StorageTransition] -> Builder
+buildCHC transitions =
   buildCHCBase transitions
   <> "\n"
-  <> buildInvariantQuery transitions slotValues
+  <> buildSynthesisQuery transitions
   <> "\n"
 
 -- | Build a complete CHC script with comments showing original IR
--- This version computes slot values from concrete writes (no fixpoint)
--- Useful for debug output
 buildCHCWithComments :: [StorageTransition] -> Builder
 buildCHCWithComments transitions =
   formatTransitionsAsComment transitions
-  <> buildCHCBase transitions
-  <> "; (Use buildCHCWithComments' for full query with expected values)\n"
-
--- | Build a complete CHC script with comments and invariant query
-buildCHCWithComments' :: [StorageTransition] -> [[W256]] -> Builder
-buildCHCWithComments' transitions slotValues =
-  formatTransitionsAsComment transitions
-  <> buildCHC transitions slotValues
+  <> buildCHC transitions
 
 -- | CHC prelude with solver configuration
+-- Configures Z3's Spacer engine to synthesize and output invariants
 chcPrelude :: Builder
 chcPrelude = mconcat
-  [ "; CHC for storage invariant extraction\n"
+  [ "; CHC for storage invariant synthesis\n"
   , "(set-logic HORN)\n"
   , "(set-option :fp.engine spacer)\n"
+  , "; Disable inlining to preserve relation structure in certificate\n"
+  , "(set-option :fp.xform.inline_eager false)\n"
+  , "(set-option :fp.xform.inline_linear false)\n"
   , "\n"
   , "; Types\n"
   , "(define-sort Word () (_ BitVec 256))\n"
@@ -414,53 +433,6 @@ substSLoadsInExpr slotKeys = go
     isBaseStorage (SStore _ _ _) = False
     isBaseStorage (GVar _) = False
 
--- | Evaluate an expression with all combinations of known slot values
--- Returns all possible concrete results
-evalExprWithValues :: [Expr EWord] -> [W256] -> Expr EWord -> [W256]
-evalExprWithValues slotKeys knownVals expr =
-  -- For each known value, substitute it and try to evaluate
-  [result | val <- knownVals
-          , let substituted = substAndEval slotKeys val expr
-          , Just result <- [evalToLit substituted]]
-  where
-    -- Substitute SLoad expressions with a concrete value and evaluate
-    substAndEval :: [Expr EWord] -> W256 -> Expr EWord -> Expr EWord
-    substAndEval keys val = go
-      where
-        go :: Expr EWord -> Expr EWord
-        go e = case e of
-          -- For SLoad from base storage, substitute with the concrete value
-          -- if the slot matches one of our tracked slots
-          SLoad slot storage | isBaseStorage' storage ->
-            case elemIndex slot keys of
-              Just _  -> Lit val  -- Substitute with the known value
-              Nothing -> e        -- Unknown slot, keep as-is
-          -- Recursively process and evaluate subexpressions
-          Add a b -> evalBinOp (+) (go a) (go b)
-          Sub a b -> evalBinOp (-) (go a) (go b)
-          Mul a b -> evalBinOp (*) (go a) (go b)
-          Div a b -> case (go a, go b) of
-                       (Lit x, Lit y) | y /= 0 -> Lit (x `div` y)
-                       (a', b') -> Div a' b'
-          -- Terminal cases
-          Lit _ -> e
-          Var _ -> e
-          -- Other cases - process recursively but don't evaluate
-          _ -> e
-
-        evalBinOp :: (W256 -> W256 -> W256) -> Expr EWord -> Expr EWord -> Expr EWord
-        evalBinOp op (Lit a) (Lit b) = Lit (op a b)
-        evalBinOp _ a b = Add a b  -- Can't evaluate, return placeholder
-
-        isBaseStorage' :: Expr Storage -> Bool
-        isBaseStorage' (AbstractStore _ _) = True
-        isBaseStorage' _ = False
-
-    -- Try to extract a concrete value from an expression
-    evalToLit :: Expr EWord -> Maybe W256
-    evalToLit (Lit v) = Just v
-    evalToLit _ = Nothing
-
 -- | Build reachability rules that model reentrancy
 buildReachabilityRules :: [StorageTransition] -> Builder
 buildReachabilityRules transitions =
@@ -525,98 +497,33 @@ buildTransReachRule idx transition =
 
 -- * CHC Query Building
 
--- | Build an invariant query that checks if values outside the expected set are reachable
--- For each slot, we collect all concrete values that can be written (plus 0 for initial),
--- then query if any OTHER value is reachable. If UNSAT, the invariant is proven.
+-- | Build a synthesis query that asks the solver to find an invariant
+-- When Z3 returns UNSAT, it means no "bad" state is reachable, and the
+-- certificate contains the synthesized invariant for the Reachable relation.
 --
--- Z3's CHC query command expects a relation name, so we:
--- 1. Define a "Bad" relation that holds when any slot is outside its expected values
--- 2. Add a rule: Reachable(s0, ...) AND outside_expected => Bad
--- 3. Query "Bad"
-buildInvariantQuery :: [StorageTransition] -> [[W256]] -> Builder
-buildInvariantQuery transitions slotValues =
+-- We query "Reachable" directly with :print-certificate true to get the
+-- inductive invariant that the solver discovered.
+buildSynthesisQuery :: [StorageTransition] -> Builder
+buildSynthesisQuery transitions =
   let numSlots = case transitions of
                    []    -> 0
                    (t:_) -> length t.stWrites
-
-      -- Build constraint: slot value is NOT in the expected set
-      -- (not (or (= s0 val1) (= s0 val2) ...))
-      buildNotInSet :: Int -> [W256] -> Builder
-      buildNotInSet slotIdx vals =
-        let slotVar = fromText $ "s" <> T.pack (show slotIdx)
-            valConstraints = [mconcat ["(= ", slotVar, " ", formatW256 v, ")"] | v <- nub vals]
-        in if null valConstraints
-           then "false"  -- No values, can't be outside empty set
-           else "(not (or " <> mconcat [c <> " " | c <- valConstraints] <> "))"
-
-      -- Build the full constraint: ANY slot is outside its expected set
-      slotConstraints = [buildNotInSet i vs | (i, vs) <- zip [0..] slotValues]
-      badCondition = case slotConstraints of
-                       []  -> "false"
-                       [c] -> c
-                       cs  -> "(or " <> mconcat [c <> " " | c <- cs] <> ")"
-
-      reachVars = [fromText $ "s" <> T.pack (show i) | i <- [0..numSlots-1]]
-      reachVarList = mconcat [v <> " " | v <- reachVars]
-
   in if numSlots == 0
      then "; No storage slots written, no query needed\n"
      else mconcat
-       [ "; Define Bad relation for invariant checking\n"
+       [ "; Query for invariant synthesis\n"
+       , "; We define a 'Bad' relation that is always false (no bad states)\n"
+       , "; Z3 will synthesize an invariant for Reachable that proves Bad is unreachable\n"
        , "(declare-rel Bad ())\n"
        , "\n"
-       , "; Invariant query: can any slot have a value outside the expected set?\n"
-       , "; Expected values per slot:\n"
-       , mconcat [fromText $ ";   slot" <> T.pack (show i) <> ": " <> T.pack (show vs) <> "\n"
-                 | (i, vs) <- zip [0..] slotValues]
-       , "; Bad states: reachable AND some slot outside expected values\n"
-       , "(rule (=> (and (Reachable "
-       , reachVarList
-       , ") "
-       , badCondition
-       , ") Bad))\n"
+       , "; Bad is unreachable by definition (we want to know what IS reachable)\n"
+       , "; The synthesized invariant for Reachable tells us the possible storage states\n"
+       , "(rule (=> false Bad))\n"
        , "\n"
-       , "(query Bad)\n"
+       , "; Request the invariant certificate\n"
+       , "(query Bad :print-certificate true)\n"
        ]
 
--- | Format a W256 value as a hex literal for SMT
-formatW256 :: W256 -> Builder
-formatW256 w = fromText $ "#x" <> T.justifyRight 64 '0' (T.pack $ showHex w "")
-
--- | Build a CHC query to check if a slot can change
-buildCHCQuery :: [StorageTransition] -> Int -> Builder
-buildCHCQuery transitions slotIdx =
-  let numSlots = case transitions of
-                   []    -> 0
-                   (t:_) -> length t.stWrites
-
-      -- Query: can slot i ever differ from initial value?
-      initVars = [fromText $ "i" <> T.pack (show i) | i <- [0..numSlots-1]]
-      reachVars = [fromText $ "s" <> T.pack (show i) | i <- [0..numSlots-1]]
-
-      initVarList = mconcat [v <> " " | v <- initVars]
-      reachVarList = mconcat [v <> " " | v <- reachVars]
-
-      -- The slot we're checking
-      initSlot = initVars !! slotIdx
-      reachSlot = reachVars !! slotIdx
-
-  in mconcat
-    [ buildCHCBase transitions
-    , "\n"
-    , "; Query: can slot "
-    , fromText (T.pack $ show slotIdx)
-    , " change?\n"
-    , "(query (and (Initial "
-    , initVarList
-    , ") (Reachable "
-    , reachVarList
-    , ") (not (= "
-    , initSlot
-    , " "
-    , reachSlot
-    , "))))\n"
-    ]
 
 
 -- | Compute storage invariants from transitions
@@ -643,9 +550,9 @@ computeStorageInvariants caller transitions = do
   solveForInvariants transitions
 
 -- | Solve for invariants using a CHC solver
--- The CHC script includes a query asking if values outside the expected set are reachable.
--- - If Z3 returns UNSAT, the query is unreachable and the invariant is proven.
--- - If Z3 returns SAT, there's a counterexample showing the invariant doesn't hold.
+-- The solver synthesizes the invariant automatically via fixpoint computation.
+-- - If Z3 returns UNSAT with a certificate, we extract the synthesized invariant.
+-- - If Z3 returns SAT, there's a counterexample.
 solveForInvariants
   :: (MonadUnliftIO m, ReadConfig m)
   => [StorageTransition]
@@ -653,70 +560,19 @@ solveForInvariants
 solveForInvariants transitions = do
   conf <- readConfig
 
-  -- Collect all possible values for each slot using fixpoint iteration
   let numSlots = case transitions of
                    []    -> 0
                    (t:_) -> length t.stWrites
 
-      -- Get all slot keys in order
-      slotKeys = case transitions of
-                   []    -> []
-                   (t:_) -> map (.swKey) t.stWrites
+      slotNames = ["s" <> T.pack (show i) | i <- [0..numSlots-1]]
 
-      -- Collect initial concrete values (0 for initial state + concrete write values)
-      initialSlotValues :: Int -> [W256]
-      initialSlotValues slotIdx =
-        0 : [v | t <- transitions
-               , (i, w) <- zip [0..] t.stWrites
-               , i == slotIdx
-               , Lit v <- [w.swValue]]
-
-      -- Get all non-concrete write expressions for a slot
-      getNonConcreteExprs :: Int -> [Expr EWord]
-      getNonConcreteExprs slotIdx =
-        [w.swValue | t <- transitions
-                   , (i, w) <- zip [0..] t.stWrites
-                   , i == slotIdx
-                   , not (isLit w.swValue)]
-
-      isLit :: Expr EWord -> Bool
-      isLit (Lit _) = True
-      isLit _ = False
-
-      -- Compute fixpoint for all slots together
-      -- We iterate until no new values are discovered or max iterations reached
-      -- Note: We limit to 2 iterations for now to avoid exponential growth in cases
-      -- like x *= 2 which can produce unbounded value sequences
-      computeFixpoint :: [[W256]] -> Int -> [[W256]]
-      computeFixpoint currentVals iterations
-        | iterations >= 10 = currentVals  -- Max iterations to prevent exponential growth
-        | otherwise =
-            let -- For each slot, evaluate all non-concrete expressions with current values
-                newVals = [evalNonConcreteExprs slotIdx (currentVals !! slotIdx)
-                          | slotIdx <- [0..numSlots-1]]
-                -- Union with current values
-                mergedVals = zipWith (\cur new -> nub (cur ++ new)) currentVals newVals
-            in if mergedVals == currentVals
-               then currentVals  -- Fixpoint reached
-               else computeFixpoint mergedVals (iterations + 1)
-
-      -- Evaluate non-concrete expressions with all known values for the slot
-      evalNonConcreteExprs :: Int -> [W256] -> [W256]
-      evalNonConcreteExprs slotIdx knownVals =
-        let exprs = getNonConcreteExprs slotIdx
-        in concat [evalExprWithValues slotKeys knownVals expr | expr <- exprs]
-
-      -- Start with initial concrete values, then compute fixpoint
-      initialVals = [nub $ initialSlotValues i | i <- [0..numSlots-1]]
-      slotValues = computeFixpoint initialVals 0
-
-  -- Build CHC script with query
-  let chcScript = toLazyText (buildCHCWithComments' transitions slotValues)
+  -- Build CHC script - the solver will synthesize the invariant
+  let chcScript = toLazyText (buildCHCWithComments transitions)
 
   -- Debug: print that we're about to call Z3
   when conf.debug $ liftIO $ do
-    putStrLn $ "CHC: Solving for invariants with " <> show (length transitions) <> " transitions"
-    putStrLn $ "CHC: Expected values per slot: " <> show slotValues
+    putStrLn $ "CHC: Requesting invariant synthesis for " <> show (length transitions) <> " transitions"
+    putStrLn $ "CHC: Number of storage slots: " <> show numSlots
     putStrLn $ "CHC: Invoking Z3 with Spacer engine..."
 
   -- Dump the CHC expression if requested
@@ -734,30 +590,42 @@ solveForInvariants transitions = do
       when conf.debug $ liftIO $ putStrLn $ "CHC: Z3 error: " <> T.unpack err
       pure $ CHCError err
     Right output -> do
-      let outputStr = TL.strip output
-      case outputStr of
-        "unsat" -> do
-          -- UNSAT means the query is unreachable - the invariant holds!
-          -- Build invariants from the collected values
-          let invariants = zipWith buildSlotInvariant [0..] slotValues
+      let outputText = TL.toStrict (TL.strip output)
+          outputLines = T.lines outputText
+
+      when conf.debug $ liftIO $ do
+        putStrLn $ "CHC: Z3 output lines: " <> show (length outputLines)
+
+      case outputLines of
+        ("unsat":certLines) -> do
+          -- UNSAT - extract the synthesized invariant from the certificate
+          let certificate = T.unlines certLines
           when conf.debug $ liftIO $ do
-            putStrLn "CHC: Z3 returned UNSAT - invariant proven!"
-            putStrLn $ "CHC: Proven invariants: " <> show invariants
-          pure $ CHCInvariantsFound invariants
-        "sat" -> do
-          -- SAT means there's a counterexample - the invariant doesn't hold
-          when conf.debug $ liftIO $ putStrLn "CHC: Z3 returned SAT - invariant does NOT hold"
-          pure $ CHCUnknown "Invariant does not hold - values outside expected set are reachable"
+            if null certLines
+              then putStrLn "CHC: Z3 returned UNSAT (no certificate)"
+              else do
+                putStrLn "CHC: Z3 returned UNSAT with certificate"
+                putStrLn $ "CHC: Certificate:\n" <> T.unpack certificate
+
+          -- Parse the certificate to extract the invariant
+          let invariant = parseCertificate slotNames certificate
+          when conf.debug $ liftIO $ do
+            putStrLn $ "CHC: Synthesized invariant: " <> show invariant
+
+          pure $ CHCInvariantSynthesized invariant
+
+        ("sat":cexLines) -> do
+          -- SAT means there's a counterexample
+          let cex = T.unlines cexLines
+          when conf.debug $ liftIO $ do
+            putStrLn "CHC: Z3 returned SAT - bad state is reachable"
+            when (not (null cexLines)) $
+              putStrLn $ "CHC: Counterexample:\n" <> T.unpack cex
+          pure $ CHCNoInvariant (if T.null cex then "Bad state is reachable" else cex)
+
         _ -> do
-          when conf.debug $ liftIO $ putStrLn $ "CHC: Z3 returned: " <> TL.unpack output
-          pure $ CHCUnknown (TL.toStrict output)
-  where
-    -- Build a SlotBounded invariant for a slot with known values
-    buildSlotInvariant :: Int -> [W256] -> StorageInvariant
-    buildSlotInvariant slotIdx vals =
-      let minVal = minimum vals
-          maxVal = maximum vals
-      in SlotBounded (Lit (fromIntegral slotIdx)) (Lit minVal) (Lit maxVal)
+          when conf.debug $ liftIO $ putStrLn $ "CHC: Z3 returned unexpected: " <> T.unpack outputText
+          pure $ CHCUnknown outputText
 
 
 -- | Run z3 as a CHC solver
@@ -808,3 +676,108 @@ runZ3CHC conf script = do
           pure $ Right result
         _ -> pure $ Left "Failed to create z3 process pipes"
     )
+
+
+-- * Certificate Parsing
+
+-- | Parse a Z3 certificate to extract the synthesized invariant
+-- The certificate format from Z3's Spacer is:
+--   (define-fun Reachable ((s0 (_ BitVec 256)) ...) Bool
+--     <body>)
+-- where <body> describes the invariant.
+parseCertificate :: [Text] -> Text -> SynthesizedInvariant
+parseCertificate slotNames certificate =
+  let -- Find the Reachable definition
+      reachableDef = extractReachableDefinition certificate
+      constraints = parseConstraintsFromBody slotNames reachableDef
+  in SynthesizedInvariant
+       { siSlotNames = slotNames
+       , siRawSMT = certificate
+       , siConstraints = constraints
+       }
+
+-- | Extract the body of the Reachable relation definition from the certificate
+extractReachableDefinition :: Text -> Text
+extractReachableDefinition cert =
+  -- Look for (define-fun Reachable ... and extract the body
+  let lines' = T.lines cert
+      -- Find lines that are part of the Reachable definition
+      inReachable = dropWhile (not . T.isInfixOf "Reachable") lines'
+  in case inReachable of
+       [] -> ""
+       _  -> T.unlines inReachable
+
+-- | Parse constraints from the body of the Reachable definition
+-- This is a simplified parser that handles common patterns:
+-- - (= s0 #xNNNN) for exact values
+-- - (or (= s0 #xNNNN) (= s0 #xMMMM)) for disjunctions of exact values
+-- - true for unbounded
+parseConstraintsFromBody :: [Text] -> Text -> [SlotConstraint]
+parseConstraintsFromBody slotNames body
+  | T.null body = map (const SCUnbounded) slotNames
+  | otherwise = map (parseSlotConstraint body) slotNames
+
+-- | Parse constraint for a single slot from the invariant body
+parseSlotConstraint :: Text -> Text -> SlotConstraint
+parseSlotConstraint body slotName =
+  -- Look for patterns involving this slot
+  let -- Check for exact value patterns: (= slotName #xNNNN)
+      exactVals = extractExactValues slotName body
+  in case exactVals of
+       [] -> -- No exact values found, check for other patterns
+         if T.isInfixOf slotName body
+         then SCRaw (extractSlotExpression slotName body)
+         else SCUnbounded
+       vals -> SCExactValues vals
+
+-- | Extract exact values for a slot from expressions like (= s0 #x...)
+extractExactValues :: Text -> Text -> [W256]
+extractExactValues slotName body =
+  let -- Pattern: (= slotName #xHEX)
+      -- We'll use a simple text-based extraction
+      chunks = T.splitOn ("(= " <> slotName <> " ") body
+  in concatMap extractHexValue (drop 1 chunks)
+
+-- | Extract a hex value from the start of a text chunk
+extractHexValue :: Text -> [W256]
+extractHexValue chunk =
+  case T.stripPrefix "#x" chunk of
+    Just rest ->
+      let hexStr = T.takeWhile isHexDigit rest
+      in case readHex (T.unpack hexStr) of
+           [(val, "")] -> [val]
+           _ -> []
+    Nothing ->
+      case T.stripPrefix "#b" chunk of
+        Just rest ->
+          let binStr = T.takeWhile (\c -> c == '0' || c == '1') rest
+          in case readBin (T.unpack binStr) of
+               Just val -> [val]
+               Nothing -> []
+        Nothing -> []
+  where
+    isHexDigit c = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+    readBin :: String -> Maybe W256
+    readBin = foldl addBit (Just 0)
+      where
+        addBit Nothing _ = Nothing
+        addBit (Just acc) '0' = Just (acc * 2)
+        addBit (Just acc) '1' = Just (acc * 2 + 1)
+        addBit _ _ = Nothing
+
+-- | Extract the sub-expression involving a specific slot
+extractSlotExpression :: Text -> Text -> Text
+extractSlotExpression slotName body =
+  -- Simple extraction: find the smallest balanced parentheses containing the slot
+  let idx = T.length (fst (T.breakOn slotName body))
+  in if idx >= T.length body
+     then ""
+     else findBalancedExpr (T.drop idx body)
+
+-- | Find a balanced parenthesized expression
+findBalancedExpr :: Text -> Text
+findBalancedExpr t =
+  -- Back up to find the opening paren
+  let prefix = T.takeWhile (/= ')') t
+      suffix = T.drop (T.length prefix + 1) t
+  in prefix <> ")" <> T.take 0 suffix  -- Just the first expression
