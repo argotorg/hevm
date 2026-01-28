@@ -721,15 +721,16 @@ runZ3CHC conf script = do
 -- * Certificate Parsing
 
 -- | Parse a Z3 certificate to extract the synthesized invariant
--- The certificate format from Z3's Spacer is:
---   (define-fun Reachable ((s0 (_ BitVec 256)) ...) Bool
---     <body>)
--- where <body> describes the invariant.
+-- The certificate format from Z3's Spacer is typically:
+--   (forall ((A (_ BitVec 256)) ...) (= (Reachable A ...) <body>))
+-- where <body> describes the invariant and A, B, etc. are the slot variables.
 parseCertificate :: [Text] -> Text -> SynthesizedInvariant
 parseCertificate slotNames certificate =
   let -- Find the Reachable definition
       reachableDef = extractReachableDefinition certificate
-      constraints = parseConstraintsFromBody slotNames reachableDef
+      -- Extract the variable names from the forall or define-fun
+      varNames = extractReachableVarNames certificate (length slotNames)
+      constraints = parseConstraintsFromBody varNames reachableDef
   in SynthesizedInvariant
        { siSlotNames = slotNames
        , siRawSMT = certificate
@@ -746,6 +747,68 @@ extractReachableDefinition cert =
   in case inReachable of
        [] -> ""
        _  -> T.unlines inReachable
+
+-- | Extract the variable names used in the Reachable relation from the certificate
+-- Looks for patterns like:
+--   (forall ((A (_ BitVec 256)) (B (_ BitVec 256))) (= (Reachable A B) ...))
+-- or:
+--   (define-fun Reachable ((A (_ BitVec 256)) (B (_ BitVec 256))) Bool ...)
+-- Returns the variable names in order (e.g., ["A", "B"])
+extractReachableVarNames :: Text -> Int -> [Text]
+extractReachableVarNames cert numSlots =
+  let -- Try to find forall pattern first
+      forallVars = extractForallVars cert
+      -- If that fails, try define-fun pattern
+      defineFunVars = extractDefineFunVars cert
+      foundVars = if null forallVars then defineFunVars else forallVars
+  in if length foundVars >= numSlots
+     then take numSlots foundVars
+     else foundVars ++ [T.pack ("s" ++ show i) | i <- [length foundVars..numSlots-1]]
+
+-- | Extract variable names from forall pattern
+-- Pattern: (forall ((A (_ BitVec 256)) (B (_ BitVec 256))) (= (Reachable A B) ...))
+extractForallVars :: Text -> [Text]
+extractForallVars cert =
+  -- Find "(forall ((" and extract the variable bindings
+  case T.breakOn "(forall ((" cert of
+    (_, "") -> []
+    (_, rest) ->
+      let afterForall = T.drop (T.length "(forall ((") rest
+      in extractVarBindings afterForall
+
+-- | Extract variable names from define-fun pattern
+-- Pattern: (define-fun Reachable ((A (_ BitVec 256)) ...) Bool ...)
+extractDefineFunVars :: Text -> [Text]
+extractDefineFunVars cert =
+  case T.breakOn "(define-fun Reachable ((" cert of
+    (_, "") -> []
+    (_, rest) ->
+      let afterDefine = T.drop (T.length "(define-fun Reachable ((") rest
+      in extractVarBindings afterDefine
+
+-- | Extract variable names from a sequence of bindings like "A (_ BitVec 256)) (B (_ BitVec 256))"
+extractVarBindings :: Text -> [Text]
+extractVarBindings t = go t []
+  where
+    go txt acc =
+      -- Each binding starts with a variable name followed by space
+      let varName = T.takeWhile (\c -> c /= ' ' && c /= ')') txt
+      in if T.null varName || T.head txt == ')'
+         then reverse acc
+         else
+           -- Skip to after ")) (" or "))" for the next binding
+           case T.breakOn "))" txt of
+             (_, "") -> reverse (varName : acc)
+             (_, rest) ->
+               let afterClose = T.drop 2 rest
+               in if T.null afterClose || T.head afterClose /= ' '
+                  then reverse (varName : acc)  -- End of bindings
+                  else
+                    -- Check if next char after space is '('
+                    let afterSpace = T.dropWhile (== ' ') afterClose
+                    in if T.null afterSpace || T.head afterSpace /= '('
+                       then reverse (varName : acc)
+                       else go (T.drop 1 afterSpace) (varName : acc)  -- Skip '('
 
 -- | Parse constraints from the body of the Reachable definition
 -- This is a simplified parser that handles common patterns:
@@ -771,24 +834,29 @@ parseSlotConstraint body slotName =
        vals -> SCExactValues vals
 
 -- | Extract exact values for a slot from expressions like (= s0 #x...)
+-- Handles multi-line patterns where whitespace/newlines separate the variable and value
 extractExactValues :: Text -> Text -> [W256]
 extractExactValues slotName body =
-  let -- Pattern: (= slotName #xHEX)
+  let -- Pattern: (= slotName #xHEX) - may have whitespace/newlines between variable and value
       -- We'll use a simple text-based extraction
-      chunks = T.splitOn ("(= " <> slotName <> " ") body
-  in concatMap extractHexValue (drop 1 chunks)
+      -- Try both single-space and newline patterns
+      chunks = T.splitOn ("(= " <> slotName) body
+  -- Deduplicate extracted values
+  in nub $ concatMap extractHexValue (drop 1 chunks)
 
--- | Extract a hex value from the start of a text chunk
+-- | Extract a hex value from a text chunk (after variable name, with possible whitespace)
 extractHexValue :: Text -> [W256]
 extractHexValue chunk =
-  case T.stripPrefix "#x" chunk of
+  -- Strip leading whitespace (including newlines) before looking for #x or #b
+  let stripped = T.dropWhile isSpace chunk
+  in case T.stripPrefix "#x" stripped of
     Just rest ->
       let hexStr = T.takeWhile isHexDigit rest
       in case readHex (T.unpack hexStr) of
            [(val, "")] -> [val]
            _ -> []
     Nothing ->
-      case T.stripPrefix "#b" chunk of
+      case T.stripPrefix "#b" stripped of
         Just rest ->
           let binStr = T.takeWhile (\c -> c == '0' || c == '1') rest
           in case readBin (T.unpack binStr) of
@@ -796,6 +864,7 @@ extractHexValue chunk =
                Nothing -> []
         Nothing -> []
   where
+    isSpace c = c == ' ' || c == '\n' || c == '\r' || c == '\t'
     isHexDigit c = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
     readBin :: String -> Maybe W256
     readBin = foldl addBit (Just 0)
