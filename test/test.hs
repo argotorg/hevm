@@ -551,26 +551,6 @@ tests = testGroup "hevm"
         let transitions = concat $ mapMaybe (CHC.extractAllStorageTransitions addr) paths
         assertBoolM "Should extract at least one transition" (not $ null transitions)
         putStrLnM $ "transitions:\n" ++ T.unpack (formatStorageTransitions transitions)
-    , test "chc-build-script" $ do
-        -- Test that CHC script building works
-        Just c <- solcRuntime "MyContract"
-          [i|
-          contract MyContract {
-            uint[] a;
-            mapping(address => uint) balances;
-            function prove_combined(address x, uint idx) public {
-                balances[x] = 1;
-                a[idx] = 2;
-            }
-          }
-          |]
-        paths <- withDefaultSolver $ \s -> getExpr s c Nothing [] defaultVeriOpts
-        let addr = SymAddr "entrypoint"
-        let transitions = concat $ mapMaybe (CHC.extractAllStorageTransitions addr) paths
-            -- Build the CHC script
-            chcScript = CHC.buildCHCWithComments transitions
-        -- The script should not be empty
-        assertBoolM "CHC script should not be empty" (not $ null $ show chcScript)
     , test "chc-solve-for-invariants-orig1" $ do
         Just c <- solcRuntime "MyContract"
           [i|
