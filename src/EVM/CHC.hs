@@ -650,7 +650,7 @@ solveForInvariants transitions = do
               -- Parse the certificate to extract the invariant
               let invariant = parseCertificate slotNames certificate
               when conf.debug $ liftIO $ do
-                putStrLn $ "CHC: Synthesized invariant: " <> show invariant
+                TL.putStrLn $ TL.fromStrict $ "CHC: " <> formatSynthesizedInvariant invariant
 
               pure $ CHCInvariantSynthesized invariant
 
