@@ -220,7 +220,7 @@ instance FromJSON Transaction where
     toAddr   <- addrFieldMaybe val "to"
     v        <- wordField val "v"
     value    <- wordField val "value"
-    txType   <- fmap (read :: String -> Int) <$> (val JSON..:? "type")
+    txType   <- fmap (read :: String -> Int) <$> val JSON..:? "type"
     case txType of
       Just 0x00 -> pure $ Transaction tdata gasLimit gasPrice nonce r s toAddr v value LegacyTransaction [] Nothing Nothing 1
       Just 0x01 -> do

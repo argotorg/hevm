@@ -30,7 +30,7 @@ import Data.Word (Word64)
 import GHC.Generics (Generic)
 import System.Environment (getEnv)
 import System.FilePath.Find qualified as Find
-import System.FilePath.Posix (makeRelative, (</>))
+import System.FilePath.Posix (makeRelative)
 import Witch (into, unsafeInto)
 import Witherable (Filterable, catMaybes)
 
@@ -118,10 +118,8 @@ prepareTests = do
         Nothing -> testCase name assertion
 
 rootDirectory :: IO FilePath
-rootDirectory = do
-  repo <- getEnv "HEVM_ETHEREUM_TESTS_REPO"
-  let testsDir = "BlockchainTests/GeneralStateTests"
-  pure $ repo </> testsDir
+rootDirectory = getEnv "HEVM_ETHEREUM_TESTS_REPO"
+  -- Env var now points directly to the blockchain_tests directory
 
 collectJsonFiles :: FilePath -> IO [FilePath]
 collectJsonFiles rootDir = Find.find Find.always (Find.extension Find.==? ".json") rootDir
@@ -140,42 +138,17 @@ allTestCases = do
     )
   pure $ Map.fromList cases
 
+-- | Tests that are known to fail or are too slow to run in CI.
+-- Test names are from the execution-spec-tests fixtures format.
 problematicTests :: Map String (TestTree -> TestTree)
 problematicTests = Map.fromList
-  [ ("loopMul_d0g0v0_Cancun", ignoreTestBecause "hevm is too slow")
-  , ("loopMul_d1g0v0_Cancun", ignoreTestBecause "hevm is too slow")
-  , ("loopMul_d2g0v0_Cancun", ignoreTestBecause "hevm is too slow")
-  , ("CALLBlake2f_MaxRounds_d0g0v0_Cancun", ignoreTestBecause "very slow, bypasses timeout due time spent in FFI")
-
-  , ("15_tstoreCannotBeDosd_d0g0v0_Cancun", ignoreTestBecause "slow test")
-  , ("21_tstoreCannotBeDosdOOO_d0g0v0_Cancun", ignoreTestBecause "slow test")
-
-  -- TODO: implement point evaluation, 0xa precompile, EIP-4844, Cancun
-  , ("idPrecomps_d9g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d117g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d12g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d135g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d153g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d171g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d189g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d207g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d225g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d243g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d261g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d279g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d27g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d297g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d315g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d333g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d351g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d369g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d387g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d45g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d63g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d81g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d99g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("makeMoney_d0g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("failed_tx_xcf416c53_d0g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
+  -- EIP-4844 point evaluation precompile (0x0A) not implemented
+  [ ("tests/cancun/eip4844_blobs/test_point_evaluation_precompile.py::test_tx_entry_point[fork_Cancun-blockchain_test_from_state_test-correct_proof-exact_gas]", ignoreTestBecause "EIP-4844 point evaluation precompile not implemented")
+  , ("tests/cancun/eip4844_blobs/test_point_evaluation_precompile.py::test_tx_entry_point[fork_Cancun-blockchain_test_from_state_test-correct_proof-extra_gas]", ignoreTestBecause "EIP-4844 point evaluation precompile not implemented")
+  , ("tests/cancun/eip4844_blobs/test_point_evaluation_precompile.py::test_tx_entry_point[fork_Cancun-blockchain_test_from_state_test-correct_proof-insufficient_gas]", ignoreTestBecause "EIP-4844 point evaluation precompile not implemented")
+  , ("tests/cancun/eip4844_blobs/test_point_evaluation_precompile.py::test_tx_entry_point[fork_Cancun-blockchain_test_from_state_test-incorrect_proof-exact_gas]", ignoreTestBecause "EIP-4844 point evaluation precompile not implemented")
+  , ("tests/cancun/eip4844_blobs/test_point_evaluation_precompile.py::test_tx_entry_point[fork_Cancun-blockchain_test_from_state_test-incorrect_proof-extra_gas]", ignoreTestBecause "EIP-4844 point evaluation precompile not implemented")
+  , ("tests/cancun/eip4844_blobs/test_point_evaluation_precompile.py::test_tx_entry_point[fork_Cancun-blockchain_test_from_state_test-incorrect_proof-insufficient_gas]", ignoreTestBecause "EIP-4844 point evaluation precompile not implemented")
   ]
 
 
