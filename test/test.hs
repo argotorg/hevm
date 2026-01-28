@@ -730,6 +730,11 @@ tests = testGroup "hevm"
           liftIO $ TL.writeFile debugFile chcScript
           putStrLnM $ "CHC script written to: " ++ debugFile
         -- This test exercises the Z3 integration with symbolic expressions
+        result <- CHC.solveForInvariants transitions
+        case result of
+          CHC.CHCInvariantsFound _ -> liftIO $ assertFailure "This is unbounded, so no invariants hold"
+          CHC.CHCUnknown _ -> pure()
+          CHC.CHCError err -> liftIO $ assertFailure $ "CHC Z3 error: " <> T.unpack err
         CHC.CHCUnknown _ <- CHC.solveForInvariants transitions
         pure ()
     ]
