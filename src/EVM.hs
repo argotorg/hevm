@@ -658,7 +658,7 @@ exec1 conf = do
 
         OpMcopy -> {-# SCC "OpMcopy" #-}
           case stk of
-            dstOff:srcOff:sz:xs ->  do
+            dstOff:srcOff:sz:xs ->
               case sz of
                 Lit sz' -> do
                   let words_copied = (sz' + 31) `div` 32
@@ -666,14 +666,16 @@ exec1 conf = do
                   burn (g_verylow + (unsafeInto g_mcopy)) $
                     accessMemoryRange srcOff sz $ accessMemoryRange dstOff sz $ do
                       next
+                      assign' (#state % #stack) xs
                       mcopy sz srcOff dstOff
                 _ -> do
                   -- symbolic, ignore gas
                   next
+                  assign' (#state % #stack) xs
                   mcopy sz srcOff dstOff
-              assign' (#state % #stack) xs
             _ -> underrun
             where
+            mcopy (Lit 0) _ _ = pure ()
             mcopy sz srcOff dstOff = do
                   m <- gets (.state.memory)
                   case m of
