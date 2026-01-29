@@ -135,10 +135,12 @@ allTestCases = do
   jsons <- collectJsonFiles root
   cases <- forM jsons (\fname -> do
       fContents <- BS.readFile fname
-      let parsed = case (parseBCSuite (Lazy.fromStrict fContents)) of
-                    Left "No cases to check." -> mempty
-                    Left _err -> mempty -- TODO: This should be an error
-                    Right allTests -> allTests
+      parsed <- case (parseBCSuite (Lazy.fromStrict fContents)) of
+                    Left "No cases to check." -> pure mempty
+                    Left err -> do
+                      putStrLn $ "Warning: Failed to parse " ++ fname ++ ": " ++ err
+                      pure mempty
+                    Right allTests -> pure allTests
       pure (fname, parsed)
     )
   pure $ Map.fromList cases
@@ -305,7 +307,7 @@ parseContracts w v = v .: which >>= parseJSON
           Pre  -> "pre"
           Post -> "postState"
 
-parseBCSuite :: Lazy.ByteString-> Either String (Map String Case)
+parseBCSuite :: Lazy.ByteString -> Either String (Map String Case)
 parseBCSuite x = case (JSON.eitherDecode' x) :: Either String (Map String BlockchainCase) of
   Left e        -> Left e
   Right bcCases -> let allCases = fromBlockchainCase <$> bcCases
@@ -332,8 +334,7 @@ data BlockchainError
   deriving Show
 
 errorFatal :: BlockchainError -> Bool
-errorFatal TooManyBlocks = True
-errorFatal TooManyTxs = True
+errorFatal FailedCreate = True
 errorFatal SignatureUnverified = True
 errorFatal InvalidTx = True
 errorFatal _ = False
