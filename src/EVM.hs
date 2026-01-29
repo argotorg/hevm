@@ -2347,6 +2347,7 @@ replaceCode target newCode =
               { balance = now.balance
               , nonce = now.nonce
               , storage = now.storage
+              , tStorage = now.tStorage
               }
         RuntimeCode _ ->
           internalError $ "Can't replace code of deployed contract " <> show target
