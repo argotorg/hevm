@@ -3237,9 +3237,10 @@ instance VMOps Concrete where
     gasRemaining <- use (#state % #gas)
 
     let
-      sumRefunds   = sum (snd <$> tx.subState.refunds)
-      gasUsed      = tx.gaslimit - gasRemaining
-      cappedRefund = min (quot gasUsed 5) sumRefunds
+      gasUsedBeforeRefund = tx.gaslimit - gasRemaining
+      sumRefunds          = sum (snd <$> tx.subState.refunds)
+      cappedRefund        = min (quot gasUsedBeforeRefund 5) sumRefunds
+      gasUsed             = gasUsedBeforeRefund - cappedRefund
       originPay    = (into $ gasRemaining + cappedRefund) * tx.gasprice
       minerPay     = tx.priorityFee * (into gasUsed)
 
