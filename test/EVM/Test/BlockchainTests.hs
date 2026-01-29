@@ -26,7 +26,7 @@ import Data.ByteString.Lazy qualified as Lazy
 import Data.List (isPrefixOf)
 import Data.Map (Map)
 import Data.Map qualified as Map
-import Data.Maybe (fromJust, fromMaybe, isNothing, isJust)
+import Data.Maybe (fromJust, fromMaybe, isNothing)
 import Data.Word (Word64)
 import GHC.Generics (Generic)
 import System.Environment (getEnv)
@@ -429,22 +429,11 @@ maxBaseFee tx =
 
 checkTx :: Transaction -> Block -> BlockchainContracts -> Maybe (BlockchainContracts)
 checkTx tx block prestate = do
-  origin <- sender tx
   validateTx tx block prestate
-  if (isJust tx.toAddr) then pure prestate
-  else
-    let senderNonce = (.nonce) <$> Map.lookup origin prestate
-        addr  = case EVM.createAddress origin (fromJust senderNonce) of
-                  (LitAddr a) -> a
-                  _ -> internalError "Cannot happen"
-        freshContract = BlockchainContract (ByteStringS "") 0 0 mempty
-        (BlockchainContract (ByteStringS b) prevNonce _ _) = (fromMaybe freshContract $ Map.lookup addr prestate)
-        nonEmptyAccount = not (BS.null b)
-        badNonce = prevNonce /= 0
-        initCodeSizeExceeded = BS.length tx.txdata > (unsafeInto maxCodeSize * 2)
-    in
-    if (badNonce || nonEmptyAccount || initCodeSizeExceeded) then mzero
-    else pure prestate
+  let initCodeSizeExceeded = isNothing tx.toAddr
+        && BS.length tx.txdata > (unsafeInto maxCodeSize * 2)
+  if initCodeSizeExceeded then mzero
+  else pure prestate
 
 validateTx :: Transaction -> Block -> BlockchainContracts -> Maybe ()
 validateTx tx block cs = do
