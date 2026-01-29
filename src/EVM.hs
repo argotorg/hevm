@@ -1525,8 +1525,20 @@ finalize = do
       -- deposit the code from a creation tx
       creation <- use (#tx % #isCreate)
       createe  <- use (#state % #contract)
-      createeExists <- (Map.member createe) <$> use (#env % #contracts)
-      when (creation && createeExists) $
+      createeContract <- preuse (#env % #contracts % ix createe)
+      -- Check if this is a collision case (target has RuntimeCode instead of InitCode)
+      let isCollision = creation && case createeContract of
+            Just c -> case c.code of
+              InitCode _ _ -> False
+              RuntimeCode _ -> True   -- collision: existing contract has RuntimeCode
+              UnknownCode _ -> internalError "cannot determine collision with unknown code"
+            Nothing -> internalError "create transaction but no code found"
+      -- For collision: burn all gas (failed CREATE consumes all gas)
+      when isCollision $ assign (#state % #gas) initialGas
+      -- Only replace code if this is a creation tx, the contract exists,
+      -- and it has InitCode (not RuntimeCode from a collision)
+      let shouldReplaceCode = creation && not isCollision
+      when shouldReplaceCode $
         case output of
           ConcreteBuf bs -> replaceCode createe (RuntimeCode (ConcreteRuntimeCode bs))
           _ ->

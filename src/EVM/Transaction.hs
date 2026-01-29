@@ -1,6 +1,6 @@
 module EVM.Transaction where
 
-import EVM (initialContract, ceilDiv)
+import EVM (initialContract, ceilDiv, collision)
 import EVM.Expr qualified as Expr
 import EVM.FeeSchedule
 import EVM.Format (hexText)
@@ -12,6 +12,7 @@ import Optics.Core hiding (cons)
 
 import Data.Aeson (FromJSON (..))
 import Data.Aeson qualified as JSON
+import Data.Function (applyWhen)
 import Data.Aeson.Types qualified as JSON
 import Data.ByteString (ByteString, cons)
 import Data.ByteString qualified as BS
@@ -306,13 +307,20 @@ initTx vm =
     preState = setupTx origin coinbase gasPrice gasLimit vm.env.contracts
     oldBalance = view (accountAt toAddr % #balance) preState
     creation = vm.tx.isCreate
-    initState =
-        ((Map.adjust (over #balance (`Expr.sub` value))) origin)
-      . (Map.adjust (over #balance (Expr.add value))) toAddr
-      . (if creation
-         then Map.insert toAddr (toContract & (set #balance oldBalance))
-         else touchAccount toAddr)
-      $ preState
+    -- Check for collision at target address for CREATE transactions
+    hasCollision = creation && collision (Map.lookup toAddr preState)
+    -- For collision: don't transfer value, don't create contract
+    initState = if hasCollision
+      then touchAccount toAddr preState
+      else ((Map.adjust (over #balance (`Expr.sub` value))) origin)
+         . (Map.adjust (over #balance (Expr.add value))) toAddr
+         . (if creation
+            then Map.insert toAddr (toContract & (set #balance oldBalance))
+            else touchAccount toAddr)
+         $ preState
   in
     vm & #env % #contracts .~ initState
        & #tx % #txReversion .~ preState
+       -- For collision: set code to empty so exec1 immediately stops and calls finalize
+       -- (don't set #result directly, as that bypasses finalize which handles gas payment)
+       & applyWhen hasCollision (#state % #code .~ RuntimeCode (ConcreteRuntimeCode ""))
