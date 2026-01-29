@@ -146,7 +146,28 @@ basicSimplificationTests = testGroup "Basic simplification tests"
           src = (AbstractBuf "stuff2")
           e = ReadByte (Lit 0x0) (CopySlice srcOffset (Lit 0x10) size src (AbstractBuf "dst"))
           simp = Expr.simplify e
-      assertEqual "readByte simplification" simp (ReadByte (Lit 0x0) (AbstractBuf "dst"))
+      assertEqual "" simp (ReadByte (Lit 0x0) (AbstractBuf "dst"))
+  , testCase "simp-readByte2" $ do
+      let srcOffset = (ReadWord (Lit 0x1) (AbstractBuf "stuff1"))
+          size = (Lit 0x1)
+          src = (AbstractBuf "stuff2")
+          e = ReadByte (Lit 0x0) (CopySlice srcOffset (Lit 0x10) size src (AbstractBuf "dst"))
+          simp = Expr.simplify e
+      assertEqual "" (ReadByte (Lit 0x0) (AbstractBuf "dst")) simp
+  , testCase "simp-readWord1" $ do
+      let srcOffset = (ReadWord (Lit 0x1) (AbstractBuf "stuff1"))
+          size = (ReadWord (Lit 0x1) (AbstractBuf "stuff2"))
+          src = (AbstractBuf "stuff2")
+          e = ReadWord (Lit 0x1) (CopySlice srcOffset (Lit 0x40) size src (AbstractBuf "dst"))
+          simp = Expr.simplify e
+      assertEqual "" simp (ReadWord (Lit 0x1) (AbstractBuf "dst"))
+  , testCase "simp-readWord2" $ do
+    let srcOffset = (ReadWord (Lit 0x12) (AbstractBuf "stuff1"))
+        size = (Lit 0x1)
+        src = (AbstractBuf "stuff2")
+        e = ReadWord (Lit 0x12) (CopySlice srcOffset (Lit 0x50) size src (AbstractBuf "dst"))
+        simp = Expr.simplify e
+    assertEqual "readWord simplification" (ReadWord (Lit 0x12) (AbstractBuf "dst")) simp
   , testCase "simp-max-buflength" $ do
       let simp = Expr.simplify $ Max (Lit 0) (BufLength (AbstractBuf "txdata"))
       assertEqual "max-buflength rules" simp $ BufLength (AbstractBuf "txdata")
@@ -191,15 +212,30 @@ basicSimplificationTests = testGroup "Basic simplification tests"
       assertEqual "assoc rules" simp $ Xor (Lit 1) (Xor (Var "a") (Var "b"))
   , testCase "sign-extend-conc-1" $ do
       let p = Expr.sex (Lit 0) (Lit 0xff)
-      assertEqual "stuff" p (Lit Expr.maxLit)
+      assertEqual "" p (Lit Expr.maxLit)
       let p2 = Expr.sex (Lit 30) (Lit 0xff)
-      assertEqual "stuff" p2 (Lit 0xff)
+      assertEqual "" p2 (Lit 0xff)
       let p3 = Expr.sex (Lit 1) (Lit 0xff)
-      assertEqual "stuff" p3 (Lit 0xff)
+      assertEqual "" p3 (Lit 0xff)
       let p4 = Expr.sex (Lit 0) (Lit 0x1)
-      assertEqual "stuff" p4 (Lit 0x1)
+      assertEqual "" p4 (Lit 0x1)
       let p5 = Expr.sex (Lit 0) (Lit 0x0)
-      assertEqual "stuff" p5 (Lit 0x0)
+      assertEqual "" p5 (Lit 0x0)
+  , testCase "writeWord-overflow" $ do
+      let simp = Expr.simplify $ ReadByte (Lit 0x0) (WriteWord (Lit 0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffd) (Lit 0x0) (ConcreteBuf "\255\255\255\255"))
+      assertEqual "writeWord overflow incorrect" (LitByte 0) simp
+  , testCase "buffer-length-copy-slice-beyond-source1" $ do
+      let simp = Expr.simplify $ BufLength (CopySlice (Lit 0x2) (Lit 0x2) (Lit 0x1) (ConcreteBuf "a") (ConcreteBuf ""))
+      assertEqual "" (Lit 3) simp
+  , testCase "copy-slice of size 0 is noop" $ do
+        let simp = Expr.simplify $ BufLength $ CopySlice (Lit 0) (Lit 0x10) (Lit 0) (AbstractBuf "buffer") (ConcreteBuf "bimm")
+        assertEqual "" (Lit 0x4) simp
+  , testCase "length of concrete buffer is concrete" $ do
+      let simp = Expr.simplify $ BufLength (ConcreteBuf "ab")
+      assertEqual "" (Lit 2) simp
+  , testCase "simplify read over write byte" $ do
+      let simp = Expr.simplify $ ReadByte (Lit 0xf0000000000000000000000000000000000000000000000000000000000000) (WriteByte (And (SHA256 (ConcreteBuf "")) (Lit 0x1)) (LitByte 0) (ConcreteBuf ""))
+      assertEqual "" (LitByte 0) simp
   ]
 
 propSimplificationTests :: TestTree
@@ -292,24 +328,33 @@ propSimplificationTests = testGroup "prop-simplifications"
   , testCase "PEq-and-PNot-PEq-1" $ do
       let a = [PEq (Lit 0x539) (Var "arg1"),PNeg (PEq (Lit 0x539) (Var "arg1"))]
       assertEqual "Must simplify to PBool False" (Expr.simplifyProps a) ([PBool False])
-    , testCase "PEq-and-PNot-PEq-2" $ do
+  , testCase "PEq-and-PNot-PEq-2" $ do
       let a = [PEq (Var "arg1") (Lit 0x539),PNeg (PEq (Lit 0x539) (Var "arg1"))]
       assertEqual "Must simplify to PBool False" (Expr.simplifyProps a) ([PBool False])
-    , testCase "PEq-and-PNot-PEq-3" $ do
+  , testCase "PEq-and-PNot-PEq-3" $ do
       let a = [PEq (Var "arg1") (Lit 0x539),PNeg (PEq (Var "arg1") (Lit 0x539))]
       assertEqual "Must simplify to PBool False" (Expr.simplifyProps a) ([PBool False])
-    , testCase "propSimp-no-duplicate1" $ do
+  , testCase "propSimp-no-duplicate1" $ do
       let a = [PAnd (PGEq (Max (Lit 0x44) (BufLength (AbstractBuf "txdata"))) (Lit 0x44)) (PLT (Max (Lit 0x44) (BufLength (AbstractBuf "txdata"))) (Lit 0x10000000000000000)), PAnd (PGEq (Var "arg1") (Lit 0x0)) (PLEq (Var "arg1") (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff)),PEq (Lit 0x63) (Var "arg2"),PEq (Lit 0x539) (Var "arg1"),PEq TxValue (Lit 0x0),PEq (IsZero (Eq (Lit 0x63) (Var "arg2"))) (Lit 0x0)]
       let simp = Expr.simplifyProps a
       assertEqual "must not duplicate" simp (nubOrd simp)
-    , testCase "propSimp-no-duplicate2" $ do
+  , testCase "propSimp-no-duplicate2" $ do
       let a = [PNeg (PBool False),PAnd (PGEq (Max (Lit 0x44) (BufLength (AbstractBuf "txdata"))) (Lit 0x44)) (PLT (Max (Lit 0x44) (BufLength (AbstractBuf "txdata"))) (Lit 0x10000000000000000)),PAnd (PGEq (Var "arg2") (Lit 0x0)) (PLEq (Var "arg2") (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff)),PAnd (PGEq (Var "arg1") (Lit 0x0)) (PLEq (Var "arg1") (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff)),PEq (Lit 0x539) (Var "arg1"),PNeg (PEq (Lit 0x539) (Var "arg1")),PEq TxValue (Lit 0x0),PLT (BufLength (AbstractBuf "txdata")) (Lit 0x10000000000000000),PEq (IsZero (Eq (Lit 0x539) (Var "arg1"))) (Lit 0x0),PNeg (PEq (IsZero (Eq (Lit 0x539) (Var "arg1"))) (Lit 0x0)),PNeg (PEq (IsZero TxValue) (Lit 0x0))]
       let simp = Expr.simplifyProps a
       assertEqual "must not duplicate" simp (nubOrd simp)
-    , testCase "full-order-prop1" $ do
+  , testCase "full-order-prop1" $ do
       let a =[PNeg (PBool False),PAnd (PGEq (Max (Lit 0x44) (BufLength (AbstractBuf "txdata"))) (Lit 0x44)) (PLT (Max (Lit 0x44) (BufLength (AbstractBuf "txdata"))) (Lit 0x10000000000000000)),PAnd (PGEq (Var "arg2") (Lit 0x0)) (PLEq (Var "arg2") (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff)),PAnd (PGEq (Var "arg1") (Lit 0x0)) (PLEq (Var "arg1") (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff)),PEq (Lit 0x63) (Var "arg2"),PEq (Lit 0x539) (Var "arg1"),PEq TxValue (Lit 0x0),PLT (BufLength (AbstractBuf "txdata")) (Lit 0x10000000000000000),PEq (IsZero (Eq (Lit 0x63) (Var "arg2"))) (Lit 0x0),PEq (IsZero (Eq (Lit 0x539) (Var "arg1"))) (Lit 0x0),PNeg (PEq (IsZero TxValue) (Lit 0x0))]
       let simp = Expr.simplifyProps a
       assertEqual "must not duplicate" simp (nubOrd simp)
+  , testCase "dont simplify abstract buffer of size 0" $ do
+      let
+        p = Expr.peq (BufLength (AbstractBuf "b")) (Lit 0x0)
+        simp = Expr.simplifyProp p
+      assertEqual "peq does not normalize arguments" (PEq (Lit (0x0)) (BufLength (AbstractBuf "b"))) p
+      assertBool "" (p == simp)
+  , testCase "simplify comparison GEq" $ do
+      let simp = Expr.simplifyProp $ PEq (Lit 0x1) (GEq (Var "v") (Lit 0x2))
+      assertEqual "" (PLEq (Lit 0x2) (Var "v")) simp
   ]
 
 constantPropagationTests :: TestTree

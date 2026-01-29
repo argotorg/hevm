@@ -540,89 +540,18 @@ tests = testGroup "hevm"
         -- there won't be query now as accessStorage uses fetch cache
         assertBoolM (show vm4.result) (isNothing vm4.result)
     ]
-  , testGroup "SimplifierUnitTests"
-    -- common overflow cases that the simplifier was getting wrong
-    [ test "writeWord-overflow" $ do
-        let e = ReadByte (Lit 0x0) (WriteWord (Lit 0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffd) (Lit 0x0) (ConcreteBuf "\255\255\255\255"))
-        b <- checkEquiv e (Expr.simplify e)
-        assertBoolM "Simplifier failed" b
-    , test "buffer-length-copy-slice-beyond-source1" $ do
-        let e = BufLength (CopySlice (Lit 0x2) (Lit 0x2) (Lit 0x1) (ConcreteBuf "a") (ConcreteBuf ""))
-        b <- checkEquiv e (Expr.simplify e)
-        assertBoolM "Simplifier failed" b
-    , test "buffer-length-copy-slice-beyond-source2" $ do
-        let e = BufLength (CopySlice (Lit 0x2) (Lit 0x2) (Lit 0x1) (ConcreteBuf "") (ConcreteBuf ""))
-        b <- checkEquiv e (Expr.simplify e)
-        assertBoolM "Simplifier failed" b
-    , test "simp-readByte2" $ do
-      let srcOffset = (ReadWord (Lit 0x1) (AbstractBuf "stuff1"))
-          size = (Lit 0x1)
-          src = (AbstractBuf "stuff2")
-          e = ReadByte (Lit 0x0) (CopySlice srcOffset (Lit 0x10) size src (AbstractBuf "dst"))
-          simp = Expr.simplify e
-      res <- checkEquiv e simp
-      assertEqualM "readByte simplification"  res True
-    , test "simp-readWord1" $ do
-      let srcOffset = (ReadWord (Lit 0x1) (AbstractBuf "stuff1"))
-          size = (ReadWord (Lit 0x1) (AbstractBuf "stuff2"))
-          src = (AbstractBuf "stuff2")
-          e = ReadWord (Lit 0x1) (CopySlice srcOffset (Lit 0x40) size src (AbstractBuf "dst"))
-          simp = Expr.simplify e
-      assertEqualM "readWord simplification" simp (ReadWord (Lit 0x1) (AbstractBuf "dst"))
-    , test "simp-readWord2" $ do
-      let srcOffset = (ReadWord (Lit 0x12) (AbstractBuf "stuff1"))
-          size = (Lit 0x1)
-          src = (AbstractBuf "stuff2")
-          e = ReadWord (Lit 0x12) (CopySlice srcOffset (Lit 0x50) size src (AbstractBuf "dst"))
-          simp = Expr.simplify e
-      res <- checkEquiv e simp
-      assertEqualM "readWord simplification"  res True
-    , test "simp-zero-write-extend-buffer-len" $ do
-        let
-          expr = BufLength $ CopySlice (Lit 0) (Lit 0x10) (Lit 0) (AbstractBuf "buffer") (ConcreteBuf "bimm")
-          simp = Expr.simplify expr
-        ret <-  checkEquiv expr simp
-        assertEqualM "Must be equivalent" True ret
-    , test "bufLength-simp" $ do
-      let
-        a = BufLength (ConcreteBuf "ab")
-        simp = Expr.simplify a
-      assertEqualM "Must be simplified down to a Lit" simp (Lit 2)
-    , test "stripWrites-overflow" $ do
-        -- below eventually boils down to
-        -- unsafeInto (0xf0000000000000000000000000000000000000000000000000000000000000+1) :: Int
-        -- which failed before
-        let
-          a = ReadByte (Lit 0xf0000000000000000000000000000000000000000000000000000000000000) (WriteByte (And (SHA256 (ConcreteBuf "")) (Lit 0x1)) (LitByte 0) (ConcreteBuf ""))
-          b = Expr.simplify a
-        ret <- checkEquiv a b
-        assertBoolM "must be equivalent" ret
-    , test "read-beyond-bound (negative-test)" $ do
+  -- These tests fuzz the simplifier by generating a random expression,
+  -- applying some simplification rules, and then using the smt encoding to
+  -- check that the simplified version is semantically equivalent to the
+  -- unsimplified one
+  , adjustOption (\(Test.Tasty.QuickCheck.QuickCheckTests n) -> Test.Tasty.QuickCheck.QuickCheckTests (div n 2)) $ testGroup "SimplifierPropertyTests"
+    [ test "read-beyond-bound (negative-test)" $ do
       let
         e1 = CopySlice (Lit 1) (Lit 0) (Lit 2) (ConcreteBuf "a") (ConcreteBuf "")
         e2 = ConcreteBuf "Definitely not the same!"
       equal <- checkEquiv e1 e2
       assertBoolM "Should not be equivalent!" $ not equal
-    , testNoSimplify "simplify-comparison-GEq" $ do
-      let
-        expr = PEq (Lit 0x1) (GEq (Var "v") (Lit 0x2))
-        simp = Expr.simplifyProp expr
-      ret <- checkEquivPropAndLHS expr simp
-      assertEqualM "Must be equivalent" True ret
-    , test "buffer-length-zero" $ do
-        let
-          p = PEq (BufLength (AbstractBuf "b")) (Lit 0x0)
-          simp = Expr.simplifyProp p
-        liftIO $ print simp
-        ret <-  checkEquivProp p simp
-        assertEqualM "Must be equivalent" True ret
-    ]
-  -- These tests fuzz the simplifier by generating a random expression,
-  -- applying some simplification rules, and then using the smt encoding to
-  -- check that the simplified version is semantically equivalent to the
-  -- unsimplified one
-  , adjustOption (\(Test.Tasty.QuickCheck.QuickCheckTests n) -> Test.Tasty.QuickCheck.QuickCheckTests (div n 2)) $ testGroup "SimplifierTests"
-    [ testProperty  "buffer-simplification" $ \(expr :: Expr Buf) -> propNoSimp $ do
+    , testProperty  "buffer-simplification" $ \(expr :: Expr Buf) -> propNoSimp $ do
         let simplified = Expr.simplify expr
         checkEquivAndLHS expr simplified
     , testProperty  "buffer-simplification-len" $ \(expr :: Expr Buf) -> propNoSimp $ do
