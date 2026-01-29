@@ -41,6 +41,12 @@ import Test.Tasty.HUnit
 
 data Which = Pre | Post
 
+-- EIP-4895: Withdrawal from beacon chain
+data Withdrawal = Withdrawal
+  { wAddress :: Addr
+  , wAmount  :: W256  -- amount in Gwei
+  } deriving (Show, Eq)
+
 data Block = Block
   { coinbase    :: Addr
   , difficulty  :: W256
@@ -51,6 +57,7 @@ data Block = Block
   , timestamp   :: W256
   , txs         :: [Transaction]
   , beaconRoot  :: W256
+  , withdrawals :: [Withdrawal]
   } deriving Show
 
 data BlockchainContract = BlockchainContract
@@ -83,9 +90,10 @@ makeContract (BlockchainContract (ByteStringS code) nonce balance storage) =
 type BlockchainContracts = Map Addr BlockchainContract
 
 data Case = Case
-  { vmOpts      :: VMOpts Concrete
+  { vmOpts          :: VMOpts Concrete
   , checkContracts  :: BlockchainContracts
   , testExpectation :: BlockchainContracts
+  , caseWithdrawals :: [Withdrawal]
   } deriving Show
 
 data BlockchainCase = BlockchainCase
@@ -187,8 +195,32 @@ runVMTest fetcher x = do
   vm0 <- liftIO $ vmForCase x
   result <- EVM.Stepper.interpret fetcher vm0 EVM.Stepper.runFully
   writeTrace result
-  let maybeReason = checkExpectation x result
+  -- Apply EIP-4895 withdrawals after transaction execution
+  let resultWithWithdrawals = applyWithdrawals x.caseWithdrawals result
+  let maybeReason = checkExpectation x resultWithWithdrawals
   liftIO $ forM_ maybeReason (liftIO >=> assertFailure)
+
+-- | Apply EIP-4895 withdrawals to VM state
+-- Withdrawals credit balance to addresses (amount is in Gwei, multiply by 10^9 for Wei)
+applyWithdrawals :: [Withdrawal] -> VM Concrete -> VM Concrete
+applyWithdrawals ws vm = foldl applyWithdrawal vm ws
+  where
+    applyWithdrawal :: VM Concrete -> Withdrawal -> VM Concrete
+    applyWithdrawal vm' (Withdrawal addr amount) =
+      let weiAmount = Lit (amount * 1000000000)  -- Gwei to Wei
+          addrExpr = LitAddr addr
+          contracts' = Map.alter (creditBalance weiAmount) addrExpr vm'.env.contracts
+      in vm' { env = vm'.env { contracts = contracts' } }
+
+    creditBalance :: Expr EWord -> Maybe Contract -> Maybe Contract
+    creditBalance weiAmount Nothing =
+      -- Create new account with just the withdrawal balance
+      Just $ (EVM.initialContract (RuntimeCode (ConcreteRuntimeCode "")))
+        { balance = weiAmount }
+    creditBalance (Lit weiAmount) (Just c) =
+      -- Add to existing balance
+      Just $ c { balance = Lit (forceLit c.balance + weiAmount) }
+    creditBalance _ (Just c) = Just c  -- shouldn't happen in concrete execution
 
 checkExpectation :: Case -> VM Concrete -> Maybe (IO String)
 checkExpectation x vm = let (okState, okBal, okNonce, okStor, okCode) = checkExpectedContracts vm x.testExpectation in
@@ -282,6 +314,14 @@ instance FromJSON BlockchainCase where
   parseJSON invalid =
     JSON.typeMismatch "GeneralState test case" invalid
 
+instance FromJSON Withdrawal where
+  parseJSON (JSON.Object v) = do
+    addr   <- addrField v "address"
+    amount <- wordField v "amount"
+    pure $ Withdrawal addr amount
+  parseJSON invalid =
+    JSON.typeMismatch "Withdrawal" invalid
+
 instance FromJSON Block where
   parseJSON (JSON.Object v) = do
     v'         <- v .: "blockHeader"
@@ -294,9 +334,11 @@ instance FromJSON Block where
     timestamp  <- wordField v' "timestamp"
     mixHash    <- wordField v' "mixHash"
     beaconRoot <- fmap read <$> v' .:? "parentBeaconBlockRoot"
+    ws         <- v .:? "withdrawals"
     pure $ Block { coinbase, difficulty, mixHash, gasLimit
                  , baseFee = fromMaybe 0 baseFee, number, timestamp
                  , txs, beaconRoot = fromMaybe 0 beaconRoot
+                 , withdrawals = fromMaybe [] ws
                  }
   parseJSON invalid =
     JSON.typeMismatch "Block" invalid
@@ -392,6 +434,7 @@ fromBlockchainCase' block tx preState postState =
        })
       checkState
       postState
+      block.withdrawals
         where
           toAddr = maybe (EVM.createAddress origin (fromJust senderNonce)) LitAddr (tx.toAddr)
           senderNonce = (.nonce) <$> Map.lookup origin preState
