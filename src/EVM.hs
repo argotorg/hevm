@@ -320,7 +320,7 @@ exec1 conf = do
     doStop = finishFrame (FrameReturned mempty)
     litSelf = maybeLitAddrSimp self
 
-  if isJust litSelf && (fromJust litSelf) > 0x0 && (fromJust litSelf) <= 0xa then do
+  if isJust litSelf && isPrecompileAddr' (fromJust litSelf) then do
     -- call to precompile
     let ?op = 0x00 -- dummy value
     let calldatasize = bufLength vm.state.calldata
@@ -3063,9 +3063,13 @@ freshSymAddr = do
   n <- use (#env % #freshAddresses)
   pure $ SymAddr ("freshSymAddr" <> (pack $ show n))
 
+isPrecompileAddr' :: Addr -> Bool
+isPrecompileAddr' 0x100 = True
+isPrecompileAddr' x = 0x0 < x && x <= 0x11
+
 isPrecompileAddr :: Expr EAddr -> Bool
 isPrecompileAddr = \case
-  LitAddr a -> 0x0 < a && a <= 0x09
+  LitAddr a -> isPrecompileAddr' a
   SymAddr _ -> False
   GVar _ -> internalError "Unexpected GVar"
 
