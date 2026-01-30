@@ -143,10 +143,12 @@ exploreNestedBranch conf exec1Step nestedJumpTarget targetPC cond stackAfterPop 
                    && checkNoSideEffects vm0 vmTrue
                   then do
                     -- Merge stacks using ITE with the branch condition
+                    -- Simplify merged expressions to prevent unbounded growth
+                    -- (e.g. Mul (Lit 0) (ITE ...) must reduce to Lit 0)
                     let condSimp = Expr.simplify cond
                         mergeExpr t f
                           | t == f    = t
-                          | otherwise = ITE condSimp t f
+                          | otherwise = Expr.simplify (ITE condSimp t f)
                         mergedStack = zipWith mergeExpr trueStack falseStack
                     -- Use vm0 as base and update PC and stack
                     put vm0
@@ -211,10 +213,12 @@ tryMergeForwardJump conf exec1Step currentPC jumpTarget cond stackAfterPop = do
               if length trueStack == length falseStack && soundnessOK
                 then do
                   -- Merge stacks using ITE expressions
+                  -- Simplify merged expressions to prevent unbounded growth
+                  -- (e.g. Mul (Lit 0) (ITE ...) must reduce to Lit 0)
                   let condSimp = Expr.simplify cond
                       mergeExpr t f
                         | t == f    = t
-                        | otherwise = ITE condSimp t f
+                        | otherwise = Expr.simplify (ITE condSimp t f)
                       mergedStack = zipWith mergeExpr trueStack falseStack
                   -- Use vm0 as base and update only PC and stack
                   when conf.debug $ traceM $ "Merged forward jump at PC " ++ show jumpTarget
