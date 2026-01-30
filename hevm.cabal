@@ -121,6 +121,7 @@ library
     EVM.Effects,
   other-modules:
     EVM.CheatsTH,
+    EVM.SMT.DivEncoding,
     EVM.SMT.Types,
     EVM.SMT.SMTLIB,
     Paths_hevm

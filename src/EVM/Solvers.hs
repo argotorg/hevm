@@ -51,6 +51,7 @@ import EVM.Expr (simplifyProps)
 
 import EVM.Keccak qualified as Keccak (concreteKeccaks)
 import EVM.SMT
+import EVM.SMT.DivEncoding
 import EVM.Types
 
 
@@ -128,9 +129,29 @@ checkSatWithProps sg props = do
   if psSimp == [PBool False] then pure Qed
   else do
     let concreteKeccaks = fmap (\(buf,val) -> PEq (Lit val) (Keccak buf)) (toList $ Keccak.concreteKeccaks props)
-    let smt2 = assertProps conf (if conf.simp then psSimp <> concreteKeccaks else psSimp)
-    if isLeft smt2 then pure $ Error $ getError smt2
-    else liftIO $ checkSat sg (Just props) smt2
+    let allProps = if conf.simp then psSimp <> concreteKeccaks else psSimp
+    if not conf.abstractArith then do
+      -- Original path: direct encoding with concrete division semantics
+      let smt2 = assertProps conf allProps
+      if isLeft smt2 then pure $ Error $ getError smt2
+      else liftIO $ checkSat sg (Just props) smt2
+    else do
+      -- Two-phase solving with abstract division
+      -- Phase 1: Use uninterpreted functions (overapproximation)
+      let smt2Abstract = assertPropsAbstract conf allProps
+      if isLeft smt2Abstract then pure $ Error $ getError smt2Abstract
+      else do
+        phase1 <- liftIO $ checkSat sg (Just props) smt2Abstract
+        case phase1 of
+          Qed -> pure Qed            -- UNSAT with abstractions => truly UNSAT (sound)
+          Error e -> pure (Error e)
+          Unknown u -> pure (Unknown u)
+          Cex _ -> do
+            -- Phase 2: Refine with exact definitions to validate counterexample
+            when conf.debug $ liftIO $ putStrLn "Abstract div/mod: potential cex found, refining..."
+            let smt2Refined = assertPropsRefined conf allProps
+            if isLeft smt2Refined then pure $ Error $ getError smt2Refined
+            else liftIO $ checkSat sg (Just props) smt2Refined
 
 -- When props is Nothing, the cache will not be filled or used
 checkSat :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> IO SMTResult
