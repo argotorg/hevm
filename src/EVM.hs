@@ -15,6 +15,7 @@ import EVM.Expr (readStorage, concStoreContains, writeStorage, readByte, readWor
   writeByte, bufLength, indexWord, readBytes, copySlice, wordToAddr, maybeLitByteSimp, maybeLitWordSimp, maybeLitAddrSimp)
 import EVM.Expr qualified as Expr
 import EVM.FeeSchedule (FeeSchedule (..))
+import EVM.Merge qualified as Merge
 import EVM.Op
 import EVM.Precompiled qualified
 import EVM.Solidity
@@ -166,6 +167,7 @@ makeVm o = do
     , exploreDepth = 0
     , keccakPreImgs = fromList []
     , pathsVisited = mempty
+    , mergeState = defaultMergeState
     }
     where
     env = Env
@@ -815,14 +817,50 @@ exec1 conf = do
 
         OpJumpi -> {-# SCC "OpJumpi" #-}
           case stk of
-            x:y:xs -> forceConcreteLimitSz x 2 "JUMPI: symbolic jumpdest" $ \x' ->
-              burn g_high $
+            x:y:xs -> forceConcreteLimitSz x 2 "JUMPI: symbolic jumpdest" $ \x' -> burn g_high $
+                -- Note: We must NOT check tryInto x' unconditionally!
+                -- Per EVM semantics, if condition is 0, we just fall through
+                -- without validating the destination. Only validate when jumping.
                 let jump :: Bool -> EVM t ()
                     jump False = assign' (#state % #stack) xs >> next
                     jump _    = case tryInto x' of
                       Left _ -> vmError BadJumpDestination
                       Right i -> checkJump i xs
-                in branch conf.maxDepth y jump
+                    -- For Symbolic execution, try forward-jump merge first
+                    symbolicMerge :: EVM Symbolic ()
+                    symbolicMerge = case tryInto x' of
+                      Left _ ->
+                        -- Invalid destination - but we only error if we try to jump
+                        -- Use branch to decide based on condition
+                        branch conf.maxDepth y $ \case
+                          False -> assign' (#state % #stack) xs >> next
+                          True -> vmError BadJumpDestination
+                      Right jumpTarget -> do
+                        -- Check if we're already in merge mode (speculative execution)
+                        ms <- use #mergeState
+                        let alreadyMerging = ms.msActive
+                        if alreadyMerging
+                          then do
+                            -- Inside speculation: try both paths using budget-based exploration
+                            result <- Merge.exploreNestedBranch conf (exec1 conf) jumpTarget ms.msTargetPC y xs
+                            case result of
+                              Just vmFinal -> put vmFinal
+                              Nothing -> do
+                                -- Neither path converged - exhaust budget to stop speculation
+                                modifying #mergeState $ \s -> s { msRemainingBudget = 0 }
+                          else do
+                            merged <- if conf.mergeMaxBudget > 0
+                              then Merge.tryMergeForwardJump conf (exec1 conf) vm.state.pc jumpTarget y xs
+                              else pure False
+                            unless merged $ do
+                              -- Define Symbolic-specific jump for fallback
+                              let jumpSym :: Bool -> EVM Symbolic ()
+                                  jumpSym False = assign' (#state % #stack) xs >> next
+                                  jumpSym _    = checkJump jumpTarget xs
+                              branch conf.maxDepth y jumpSym
+                in case eqT @t @Symbolic of
+                     Just Refl -> symbolicMerge
+                     Nothing -> branch conf.maxDepth y jump
             _ -> underrun
 
         OpPc -> {-# SCC "OpPc" #-}
@@ -3096,6 +3134,11 @@ instance VMOps Symbolic where
   whenSymbolicElse a _ = a
 
   partial e = assign #result $ Just (Unfinished e)
+  -- NOTE: We use the original forking behavior here instead of speculative merge.
+  -- Speculative merge in `branch` can cause unsoundness because the merged
+  -- ITE expressions may allow the solver to find false counterexamples.
+  -- State merging is still done in JUMPI via `tryMergeForwardJump` which has
+  -- proper soundness checks (no side effects, same stack depth, etc.)
   branch depthLimit cond continue = do
     loc <- codeloc
     pathconds <- use #constraints

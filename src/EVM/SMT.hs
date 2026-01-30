@@ -476,6 +476,11 @@ exprToSMT = \case
   IsZero a -> do
     cond <- op2 "=" a (Lit 0)
     pure $ "(ite " <> cond `sp` one `sp` zero <> ")"
+  ITE c t f -> do
+    condEnc <- exprToSMT c
+    thenEnc <- exprToSMT t
+    elseEnc <- exprToSMT f
+    pure $ "(ite (distinct " <> condEnc `sp` zero <> ") " <> thenEnc `sp` elseEnc <> ")"
   And a b -> op2 "bvand" a b
   Or a b -> op2 "bvor" a b
   Xor a b -> op2 "bvxor" a b
