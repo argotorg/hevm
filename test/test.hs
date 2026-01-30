@@ -4097,6 +4097,47 @@ tests = testGroup "hevm"
         let sig = Just (Sig "f(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])
         (_, []) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
         putStrLnM "Nested branches handled correctly without false positives"
+    , test "merge-simplify-zero-mul-in-loop" $ do
+        -- Regression test: merging inside a loop where one branch multiplies by zero.
+        -- Without simplification of merged ITE expressions, Mul (Lit 0) (ITE ...)
+        -- accumulates unsimplified across loop iterations, causing unbounded memory growth.
+        -- This is the pattern from ABDKMath64x64.pow(0, x).
+        Just c <- solcRuntime "C"
+          [i|
+          contract C {
+            function f(uint256 x) public pure {
+              uint256 base = 0;
+              uint256 result = 0x100000000;
+              unchecked {
+                // Unrolled loop: 8 sequential conditional multiplications by zero.
+                // Each creates an ITE where true-branch is Mul(result, 0) and false
+                // leaves result unchanged. Without simplifying Mul(Lit 0, ITE(...))
+                // to Lit 0 at merge time, the expression tree grows unboundedly.
+                if (x & 0x1 != 0) result = result * base;
+                base = base * base;
+                if (x & 0x2 != 0) result = result * base;
+                base = base * base;
+                if (x & 0x4 != 0) result = result * base;
+                base = base * base;
+                if (x & 0x8 != 0) result = result * base;
+                base = base * base;
+                if (x & 0x10 != 0) result = result * base;
+                base = base * base;
+                if (x & 0x20 != 0) result = result * base;
+                base = base * base;
+                if (x & 0x40 != 0) result = result * base;
+                base = base * base;
+                if (x & 0x80 != 0) result = result * base;
+              }
+              // If any bit is set, result becomes 0; if x&0xff==0, result stays 0x100000000
+              // Either way result <= 0x100000000
+              assert(result <= 0x100000000);
+            }
+          }
+          |]
+        let sig = Just (Sig "f(uint256)" [AbiUIntType 256])
+        (_, []) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        putStrLnM "Zero-mul loop merging works without expression blowup"
     , test "no-merge-with-memory-write" $ do
         -- Branches with memory writes should not cause issues
         Just c <- solcRuntime "C"
