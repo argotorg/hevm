@@ -20,23 +20,6 @@
         "type": "github"
       }
     },
-    "ethereum-tests": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1698656397,
-        "narHash": "sha256-1zhBaJ3X5kQ94qv9Yz12/3d83w3jNP6OtzjH+ykK8sg=",
-        "owner": "ethereum",
-        "repo": "tests",
-        "rev": "428f218d7d6f4a52544e12684afbfe6e2882ffbf",
-        "type": "github"
-      },
-      "original": {
-        "owner": "ethereum",
-        "ref": "v13",
-        "repo": "tests",
-        "type": "github"
-      }
-    },
     "flake-utils": {
       "inputs": {
         "systems": "systems"
@@ -193,7 +176,6 @@
     "root": {
       "inputs": {
         "empty-smt-solver": "empty-smt-solver",
-        "ethereum-tests": "ethereum-tests",
         "flake-utils": "flake-utils_2",
         "forge-std": "forge-std",
         "foundry": "foundry",
