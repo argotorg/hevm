@@ -279,7 +279,7 @@ getEVMToolRet evmDir contr txData gaslimitExec = do
   JSON.encodeFile (evmDir </> "alloc.json") alloc
   JSON.encodeFile (evmDir </> "env.json") evmEnv
   let cmd = (proc "evm" [ "transition"
-                        , "--state.fork", "Cancun"
+                        , "--state.fork", "Osaka"
                         , "--input.alloc", "alloc.json"
                         , "--input.env", "env.json"
                         , "--input.txs", "txs.json"

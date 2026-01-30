@@ -27,8 +27,8 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         execution-spec-tests-fixtures = builtins.fetchTarball {
-          url = "https://github.com/ethereum/execution-spec-tests/releases/download/v5.4.0/fixtures_stable.tar.gz";
-          sha256 = "0a0i20f611aghvh1vghvzcxilbh80bd4174n7ih7iarn5x71aq1p";
+          url = "https://github.com/ethereum/execution-spec-tests/releases/download/v5.4.0/fixtures_develop.tar.gz";
+          sha256 = "0dsg7lcj591i0p7s93xv0vin2dwricgq29v8xakqnx1kfj3fcyvq";
         };
         pkgs = (import nixpkgs {
           inherit system;

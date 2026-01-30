@@ -386,7 +386,7 @@ errorFatal _ = False
 fromBlockchainCase :: BlockchainCase -> Either BlockchainError Case
 fromBlockchainCase (BlockchainCase blocks preState postState network) =
   case (blocks, network) of
-    ([block], "Cancun") -> case block.txs of
+    ([block], "Osaka") -> case block.txs of
       [tx] | tx.txtype == EIP4844Transaction || tx.txtype == EIP7702Transaction -> Left UnsupportedTxType -- TODO EIP4844 / EIP7702
       [tx] -> fromBlockchainCase' block tx preState postState
       []        -> Left NoTxs
