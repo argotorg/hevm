@@ -15,7 +15,7 @@
 
 module EVM.Merge
   ( execUntilPCSymbolic
-  , speculateLoop
+  , runSpeculation
   , exploreNestedBranch
   , tryMergeForwardJump
   , checkNoSideEffects
@@ -48,18 +48,18 @@ execUntilPCSymbolic conf exec1Step targetPC = do
       , msRemainingBudget = budget
       , msNestingDepth = 0
       }
-    result <- speculateLoop conf exec1Step targetPC
+    result <- runSpeculation conf exec1Step targetPC
     -- Reset merge state
     modifying #mergeState $ \ms -> ms { msActive = False }
     return result
 
--- | Inner loop for speculative execution with budget tracking
-speculateLoop
+-- | Run speculative execution with budget tracking until target PC is reached
+runSpeculation
   :: Config
   -> EVM Symbolic ()  -- ^ Single-step executor
   -> Int              -- ^ Target PC
   -> EVM Symbolic (Maybe (VM Symbolic))
-speculateLoop conf exec1Step targetPC = do
+runSpeculation conf exec1Step targetPC = do
     ms <- use #mergeState
     if ms.msRemainingBudget <= 0
       then return Nothing  -- Budget exhausted
@@ -74,7 +74,7 @@ speculateLoop conf exec1Step targetPC = do
                 -- Decrement budget and execute one instruction
                 modifying #mergeState $ \s -> s { msRemainingBudget = s.msRemainingBudget - 1 }
                 exec1Step
-                speculateLoop conf exec1Step targetPC
+                runSpeculation conf exec1Step targetPC
 
 -- | When hitting nested JUMPI during speculation, try both paths
 -- Returns Just vmState if BOTH paths converge to targetPC, Nothing otherwise
@@ -117,7 +117,7 @@ exploreNestedBranch conf exec1Step nestedJumpTarget targetPC cond stackAfterPop 
               , msRemainingBudget = halfBudget
               }
 
-            resultFallThrough <- speculateLoop conf exec1Step targetPC
+            resultFallThrough <- runSpeculation conf exec1Step targetPC
 
             -- Restore state for jump path
             put vm0
@@ -129,7 +129,7 @@ exploreNestedBranch conf exec1Step nestedJumpTarget targetPC cond stackAfterPop 
               }
 
             -- Try jump path (cond != 0)
-            resultJump <- speculateLoop conf exec1Step targetPC
+            resultJump <- runSpeculation conf exec1Step targetPC
 
             -- SOUNDNESS: Both paths MUST converge for merge to be valid
             case (resultFallThrough, resultJump) of

@@ -235,8 +235,6 @@ common test-base
   autogen-modules:
     Paths_hevm
   build-depends:
-    QuickCheck,
-    quickcheck-instances,
     aeson,
     base,
     containers,
@@ -249,11 +247,9 @@ common test-base
     process,
     tasty,
     tasty-hunit,
-    tasty-quickcheck,
     tasty-expected-failure,
     temporary,
     text,
-    vector,
     witherable,
     optics-core,
     witch,
@@ -265,7 +261,6 @@ library test-utils
   default-language: GHC2021
   exposed-modules:
     EVM.Test.Utils
-    EVM.Test.FuzzSymExec
     EVM.Test.BlockchainTests
 
 common test-common
@@ -274,10 +269,10 @@ common test-common
   if flag(devel)
     ghc-options: -threaded -with-rtsopts=-N
   build-depends:
-    test-utils
+    test-utils,
+    vector,
   other-modules:
     EVM.Test.Utils
-    EVM.Test.FuzzSymExec
     EVM.Test.BlockchainTests
 
 --- Test Suites ---
@@ -291,6 +286,7 @@ test-suite test
     test.hs
   other-modules:
     EVM.Expr.ExprTests
+    EVM.Test.FuzzSymExec
   build-depends:
     base16,
     binary,
@@ -299,7 +295,10 @@ test-suite test
     here,
     time,
     optics-extra,
-    regex
+    QuickCheck,
+    quickcheck-instances,
+    regex,
+    tasty-quickcheck,
 
 -- these tests require network access so we split them into a separate test
 -- suite to make it easy to skip them when running nix-build

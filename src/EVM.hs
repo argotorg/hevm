@@ -815,9 +815,7 @@ exec1 conf = do
 
         OpJumpi -> {-# SCC "OpJumpi" #-}
           case stk of
-            x:y:xs ->
-              forceConcreteLimitSz x 2 "JUMPI: symbolic jumpdest" $ \x' ->
-              burn g_high $
+            x:y:xs -> forceConcreteLimitSz x 2 "JUMPI: symbolic jumpdest" $ \x' -> burn g_high $
                 -- Note: We must NOT check tryInto x' unconditionally!
                 -- Per EVM semantics, if condition is 0, we just fall through
                 -- without validating the destination. Only validate when jumping.
@@ -846,11 +844,12 @@ exec1 conf = do
                             case result of
                               Just vmFinal -> put vmFinal
                               Nothing -> do
-                                -- Neither path converged - signal failure by setting a result
-                                -- This will cause speculateLoop to return Nothing
-                                assign #result $ Just $ VMFailure BadJumpDestination
+                                -- Neither path converged - exhaust budget to stop speculation
+                                modifying #mergeState $ \s -> s { msRemainingBudget = 0 }
                           else do
-                            merged <- Merge.tryMergeForwardJump conf (exec1 conf) vm.state.pc jumpTarget y xs
+                            merged <- if conf.mergeMaxBudget > 0
+                              then Merge.tryMergeForwardJump conf (exec1 conf) vm.state.pc jumpTarget y xs
+                              else pure False
                             unless merged $ do
                               -- Define Symbolic-specific jump for fallback
                               let jumpSym :: Bool -> EVM Symbolic ()
@@ -2402,9 +2401,12 @@ replaceCodeEtch target newCode =
           put . Just $
             ((now :: Contract)
               { code = newCode
+              , codehash = hashcode newCode
+              , opIxMap = mkOpIxMap newCode
+              , codeOps = mkCodeOps newCode
               })
         UnknownCode _ -> internalError "Can't etch unknown code"
-      Nothing -> internalError "Can't replace code of nonexistent contract"
+      Nothing -> put . Just $ initialContract newCode
 
 replaceCodeOfSelf :: ContractCode -> EVM t ()
 replaceCodeOfSelf newCode = do

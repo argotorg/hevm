@@ -1,12 +1,15 @@
 module EVM.SMT.Types where
 
-import Data.Text.Lazy (Text)
-import Data.Text.Lazy.Builder
+import Control.Monad.Trans.Maybe (MaybeT)
 import Data.Map (Map)
 import Data.Map qualified as Map (unionWith)
 import Data.Set (Set)
+import Data.Text.Lazy (Text)
+import Data.Text.Lazy.Builder
 
 import EVM.Types
+
+type MaybeIO = MaybeT IO
 
 data SMTEntry = SMTCommand Builder | SMTComment Builder
   deriving (Eq)

@@ -1059,7 +1059,6 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
     go (ITE _ t f) | t == f = t                     -- branches identical: eliminate ITE
     go (ITE c (ITE c' a _) d) | c == c' = ITE c a d -- nested same condition in then
     go (ITE c a (ITE c' _ d)) | c == c' = ITE c a d -- nested same condition in else
-    go (ITE c t f) = ITE c t f                      -- no simplification possible
 
     -- syntactic Eq reduction
     go (Eq (Lit a) (Lit b))
