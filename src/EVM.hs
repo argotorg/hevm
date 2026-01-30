@@ -2947,7 +2947,7 @@ concreteModexpGasFee input =
      (lene < into (maxBound :: Word32) || (lenb == 0 && lenm == 0)) &&
      lenm < into (maxBound :: Word64)
   then
-    max 200 ((multiplicationComplexity * iterCount) `div` 3)
+    max 500 (multiplicationComplexity * iterCount)
   else
     maxBound -- TODO: this is not 100% correct, return Nothing on overflow
   where
@@ -2957,12 +2957,13 @@ concreteModexpGasFee input =
       lazySlice (96 + lenb) (min 32 lene) input
     nwords :: Word64
     nwords = ceilDiv (unsafeInto $ max lenb lenm) 8
-    multiplicationComplexity = nwords * nwords
+    maxLength = max lenb lenm
+    multiplicationComplexity = if maxLength <= 32 then 16 else 2 * nwords * nwords
     iterCount' :: Word64
     iterCount' | lene <= 32 && ez = 0
                | lene <= 32 = unsafeInto (log2 e')
-               | e' == 0 = 8 * (unsafeInto lene - 32)
-               | otherwise = unsafeInto (log2 e') + 8 * (unsafeInto lene - 32)
+               | e' == 0 = 16 * (unsafeInto lene - 32)
+               | otherwise = unsafeInto (log2 e') + 16 * (unsafeInto lene - 32)
     iterCount = max iterCount' 1
 
 -- Gas cost of precompiles
