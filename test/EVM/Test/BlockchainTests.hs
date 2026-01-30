@@ -1,6 +1,6 @@
 module EVM.Test.BlockchainTests (prepareTests, problematicTests, findIgnoreReason, Case, vmForCase, checkExpectation, allTestCases) where
 
-import EVM (initialContract, makeVm, setEIP4788Storage)
+import EVM (initialContract, makeVm, setEIP4788Storage, setEIP2935Storage)
 import EVM.Concrete qualified as EVM
 import EVM.Effects
 import EVM.Expr (maybeLitAddrSimp)
@@ -57,6 +57,7 @@ data Block = Block
   , timestamp   :: W256
   , txs         :: [Transaction]
   , beaconRoot  :: W256
+  , parentHash  :: W256
   , withdrawals :: [Withdrawal]
   } deriving Show
 
@@ -334,11 +335,12 @@ instance FromJSON Block where
     timestamp  <- wordField v' "timestamp"
     mixHash    <- wordField v' "mixHash"
     beaconRoot <- fmap read <$> v' .:? "parentBeaconBlockRoot"
+    parentHash <- wordField v' "parentHash"
     ws         <- v .:? "withdrawals"
     pure $ Block { coinbase, difficulty, mixHash, gasLimit
                  , baseFee = fromMaybe 0 baseFee, number, timestamp
                  , txs, beaconRoot = fromMaybe 0 beaconRoot
-                 , withdrawals = fromMaybe [] ws
+                 , parentHash, withdrawals = fromMaybe [] ws
                  }
   parseJSON invalid =
     JSON.typeMismatch "Block" invalid
@@ -431,6 +433,7 @@ fromBlockchainCase' block tx preState postState =
        , allowFFI       = False
        , freshAddresses = 0
        , beaconRoot     = block.beaconRoot
+       , parentHash     = block.parentHash
        })
       checkState
       postState
@@ -497,6 +500,7 @@ vmForCase x = do
     -- TODO: we need to call this again because we override contracts in the
     -- previous line
     <&> setEIP4788Storage x.vmOpts
+    <&> setEIP2935Storage x.vmOpts
   pure $ initTx vm
 
 forceConcreteAddrs :: Map (Expr EAddr) Contract -> Map Addr Contract

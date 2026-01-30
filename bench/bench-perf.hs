@@ -65,7 +65,8 @@ vm0Opts c =
       allowFFI = False,
       otherContracts = [],
       freshAddresses = 0,
-      beaconRoot = 0
+      beaconRoot = 0,
+      parentHash = 0
     }
 
 vmOptsToTestVMParams :: VMOpts Concrete -> TestVMParams

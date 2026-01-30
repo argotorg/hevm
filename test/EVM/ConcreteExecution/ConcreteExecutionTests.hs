@@ -69,6 +69,7 @@ executeSingleCall sourceCode contractName functionName abiArgs = do
     , allowFFI       = False
     , freshAddresses = 0
     , beaconRoot     = 0
+    , parentHash     = 0
     }
   let withInitializedTransactionVM = EVM.Transaction.initTx initialVM
   let fetcher = Fetch.zero 0 Nothing defMemLimit

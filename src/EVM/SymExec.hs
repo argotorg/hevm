@@ -261,6 +261,7 @@ loadEmptySymVM x callvalue cd =
     , allowFFI = False
     , freshAddresses = 0
     , beaconRoot = 0
+    , parentHash = 0
     })
 
 -- Creates a symbolic VM that has symbolic storage, unlike loadEmptySymVM
@@ -298,6 +299,7 @@ loadSymVM x callvalue cd create =
     , allowFFI = False
     , freshAddresses = 0
     , beaconRoot = 0
+    , parentHash = 0
     })
 
 -- freezes any mutable refs, making it safe to share between threads

@@ -993,6 +993,7 @@ data VMOpts (t :: VMType) = VMOpts
   , allowFFI :: Bool
   , freshAddresses :: Int
   , beaconRoot :: W256
+  , parentHash :: W256      -- EIP-2935 parent block hash
   }
 
 deriving instance Show (VMOpts Symbolic)

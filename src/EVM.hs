@@ -116,7 +116,7 @@ makeVm o = do
       initialAccessedStorageKeys = fromList $ foldMap (uncurry (map . (,))) (Map.toList txaccessList)
       touched = if o.create then [txorigin] else [txorigin, txtoAddr]
   memory <- ConcreteMemory <$> VS.Mutable.new 0
-  pure $ setEIP4788Storage o $ VM
+  pure $ setEIP2935Storage o $ setEIP4788Storage o $ VM
     { result = Nothing
     , frames = mempty
     , tx = TxState
@@ -209,6 +209,25 @@ setEIP4788Storage o vm = do
         env = vm.env {
           contracts = Map.insert beaconRootsAddress
                                  (beaconRootsContract { storage } :: Contract)
+                                 vm.env.contracts
+        }
+      }
+    Nothing -> vm
+
+-- https://eips.ethereum.org/EIPS/eip-2935
+setEIP2935Storage :: VMOpts t -> VM t -> VM t
+setEIP2935Storage o vm = do
+  let historyStorageAddress = LitAddr 0x0000F90827F1C53a10cb7A02335B175320002935
+  case Map.lookup historyStorageAddress vm.env.contracts of
+    Just historyContract -> do
+      let
+        historyBufferLength = 8191
+        slotIdx = Expr.mod (Expr.sub o.number (Lit 1)) (Lit historyBufferLength)
+        storage = Expr.writeStorage slotIdx (Lit o.parentHash) historyContract.storage
+      vm {
+        env = vm.env {
+          contracts = Map.insert historyStorageAddress
+                                 (historyContract { storage } :: Contract)
                                  vm.env.contracts
         }
       }
