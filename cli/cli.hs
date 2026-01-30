@@ -102,6 +102,7 @@ data CommonOptions = CommonOptions
   , cacheDir      ::Maybe String
   , earlyAbort    ::Bool
   , mergeMaxBudget :: Int
+  , abstractArith ::Bool
   }
 
 commonOptions :: Parser CommonOptions
@@ -133,6 +134,7 @@ commonOptions = CommonOptions
   <*> (optional $ strOption $ long "cache-dir" <> help "Directory to save and load RPC cache")
   <*> (switch $  long "early-abort" <> help "Stop exploration immediately upon finding the first counterexample")
   <*> (option auto $ long "merge-max-budget" <> showDefault <> value 100 <> help "Max instructions for speculative merge exploration during path merging")
+  <*> (switch $  long "abstract-arith" <> help "Use uninterpreted functions for div/mod in SMT queries (Halmos-style two-phase solving)")
 
 data CommonExecOptions = CommonExecOptions
   { address       ::Maybe Addr
@@ -377,6 +379,7 @@ main = do
         , onlyDeployed = cOpts.onlyDeployed
         , earlyAbort = cOpts.earlyAbort
         , mergeMaxBudget = cOpts.mergeMaxBudget
+        , abstractArith = cOpts.abstractArith
         } }
 
 

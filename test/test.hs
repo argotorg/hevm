@@ -1,7 +1,6 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE ImplicitParams #-}
-{-# LANGUAGE TypeAbstractions #-}
 
 module Main where
 
@@ -104,6 +103,10 @@ test a b = testCase a $ runEnv testEnv b
 testNoSimplify :: TestName -> ReaderT Env IO () -> TestTree
 testNoSimplify a b = let testEnvNoSimp = Env { config = testEnv.config { simp = False } }
   in testCase a $ runEnv testEnvNoSimp b
+
+testAbstractArith :: TestName -> ReaderT Env IO () -> TestTree
+testAbstractArith a b = let testEnvAbstract = Env { config = testEnv.config { abstractArith = True } }
+  in testCase a $ runEnv testEnvAbstract b
 
 prop :: Testable prop => ReaderT Env IO prop -> Property
 prop a = ioProperty $ runEnv testEnv a
@@ -1213,6 +1216,13 @@ tests = testGroup "hevm"
               , ("test/contracts/pass/etch.sol",          "prove_etch.*", (True, True))
               , ("test/contracts/pass/etch.sol",          "prove_deal.*", (True, True))
               , ("test/contracts/fail/etchFail.sol",      "prove_etch_fail.*", (False, True))
+              -- halmos-adapted arith tests
+              , ("test/contracts/pass/arith.sol",           "prove_Mod", (True, True))
+              , ("test/contracts/pass/arith.sol",           "prove_Exp", (True, True))
+              , ("test/contracts/pass/arith.sol",           "prove_Div_pass", (True, True))
+              , ("test/contracts/fail/arith.sol",           "prove_Div_fail", (False, True))
+              , ("test/contracts/pass/math.sol",            "prove_Avg", (True, True))
+              , ("test/contracts/fail/math.sol",            "prove_mint", (False, True))
               ]
         forM_ cases $ \(testFile, match, expected) -> do
           actual <- runForgeTestCustom testFile match Nothing Nothing False Fetch.noRpc
@@ -1271,6 +1281,24 @@ tests = testGroup "hevm"
     , test "Keccak" $ do
         let testFile = "test/contracts/pass/keccak.sol"
         runForgeTest testFile "prove_access" >>= assertEqualM "test result" (True, True)
+    ]
+  , testGroup "Abstract-Arith"
+    -- Tests adapted from halmos (tests/regression/test/Arith.t.sol, tests/solver/test/SignedDiv.t.sol, tests/solver/test/Math.t.sol)
+    -- Run with abstractArith = True to exercise two-phase solving
+    [ testAbstractArith "Arith-Pass" $ do
+        let testFile = "test/contracts/pass/arith.sol"
+        runForgeTest testFile "prove_Mod" >>= assertEqualM "prove_Mod" (True, True)
+        runForgeTest testFile "prove_Exp" >>= assertEqualM "prove_Exp" (True, True)
+        runForgeTest testFile "prove_Div_pass" >>= assertEqualM "prove_Div_pass" (True, True)
+    , testAbstractArith "Arith-Fail" $ do
+        let testFile = "test/contracts/fail/arith.sol"
+        runForgeTest testFile "prove_Div_fail" >>= assertEqualM "prove_Div_fail" (False, True)
+    , testAbstractArith "Math-Pass" $ do
+        let testFile = "test/contracts/pass/math.sol"
+        runForgeTest testFile "prove_Avg" >>= assertEqualM "prove_Avg" (True, True)
+    , testAbstractArith "Math-Fail" $ do
+        let testFile = "test/contracts/fail/math.sol"
+        runForgeTest testFile "prove_mint" >>= assertEqualM "prove_mint" (False, True)
     ]
   , testGroup "max-iterations"
     [ test "concrete-loops-reached" $ do
