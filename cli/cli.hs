@@ -102,6 +102,7 @@ data CommonOptions = CommonOptions
   , onlyDeployed  ::Bool
   , cacheDir      ::Maybe String
   , earlyAbort    ::Bool
+  , abstractArith ::Bool
   }
 
 commonOptions :: Parser CommonOptions
@@ -132,6 +133,7 @@ commonOptions = CommonOptions
   <*> (switch $ long "only-deployed" <> help "When trying to resolve unknown addresses, only use addresses of deployed contracts")
   <*> (optional $ strOption $ long "cache-dir" <> help "Directory to save and load RPC cache")
   <*> (switch $  long "early-abort" <> help "Stop exploration immediately upon finding the first counterexample")
+  <*> (switch $  long "abstract-arith" <> help "Use uninterpreted functions for div/mod in SMT queries (Halmos-style two-phase solving)")
 
 data CommonExecOptions = CommonExecOptions
   { address       ::Maybe Addr
@@ -375,6 +377,7 @@ main = do
         , simp = Prelude.not cOpts.noSimplify
         , onlyDeployed = cOpts.onlyDeployed
         , earlyAbort = cOpts.earlyAbort
+        , abstractArith = cOpts.abstractArith
         } }
 
 

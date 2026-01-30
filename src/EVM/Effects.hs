@@ -47,6 +47,7 @@ data Config = Config
   , simp             :: Bool
   , onlyDeployed     :: Bool
   , earlyAbort       :: Bool
+  , abstractArith    :: Bool
   }
   deriving (Show, Eq)
 
@@ -67,6 +68,7 @@ defaultConfig = Config
   , simp = True
   , onlyDeployed = False
   , earlyAbort = False
+  , abstractArith = False
   }
 
 -- Write to the console
