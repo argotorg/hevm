@@ -285,6 +285,7 @@ test-suite test
     test.hs
   other-modules:
     EVM.Expr.ExprTests
+    EVM.Expr.Generator
     EVM.ConcreteExecution.ConcreteExecutionTests
     EVM.Test.FuzzSymExec
   build-depends:
