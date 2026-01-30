@@ -48,7 +48,7 @@ sign hash sk = (v, r, s)
     r = unsafeInto $ sign_r sig
     s = unsafeInto lowS
 
-    -- this is a little bit sad, but cryptonite doesn't give us back a v value
+    -- this is a little bit sad, but crypton doesn't give us back a v value
     -- so we compute it by guessing one, and then seeing if that gives us the right answer from ecrecover
     v = if ecrec 28 r s hash == deriveAddr sk
         then 28

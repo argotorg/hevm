@@ -81,6 +81,7 @@ import EVM.Expr (maybeLitByteSimp)
 import EVM.Keccak (concreteKeccaks)
 
 import EVM.Expr.ExprTests qualified as ExprTests
+import EVM.ConcreteExecution.ConcreteExecutionTests qualified as ConcreteExecutionTests
 
 testEnv :: Env
 testEnv = Env { config = defaultConfig {
@@ -141,6 +142,7 @@ tests :: TestTree
 tests = testGroup "hevm"
   [ FuzzSymExec.tests
   , ExprTests.tests
+  , ConcreteExecutionTests.tests
   , testGroup "simplify-storage"
     [ test "simplify-storage-array-only-static" $ do
        Just c <- solcRuntime "MyContract"
@@ -5520,7 +5522,7 @@ checkEquivBase mkprop l r expect = do
   config <- readConfig
   let noSimplifyEnv = Env {config = config {simp = False}}
   liftIO $ runEnv noSimplifyEnv $ do
-    withSolvers CVC5 1 (Just 1) defMemLimit $ \solvers -> do
+    withSolvers Bitwuzla 1 (Just 1) defMemLimit $ \solvers -> do
       res <- checkSatWithProps solvers [mkprop l r]
       let ret = case res of
             Qed -> Just True
