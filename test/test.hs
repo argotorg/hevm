@@ -132,6 +132,9 @@ withCVC5Solver = withSolvers CVC5 3 Nothing defMemLimit
 withBitwuzlaSolver :: App m => (SolverGroup -> m a) -> m a
 withBitwuzlaSolver = withSolvers Bitwuzla 3 Nothing defMemLimit
 
+withShortBitwuzlaSolver :: App m => (SolverGroup -> m a) -> m a
+withShortBitwuzlaSolver = withSolvers Bitwuzla 3 (Just 5) defMemLimit
+
 
 main :: IO ()
 main = defaultMain tests
@@ -5287,6 +5290,261 @@ tests = testGroup "hevm"
                 putStrLnM $ "Not OK: " <> show f <> " Got: " <> show res
                 internalError "Was NOT equivalent"
            )
+    ]
+  , testGroup "Arithmetic Soundness"
+    [ testAbstractArith "sdiv-by-one" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_sdiv_by_one(int256 a) external pure {
+              int256 result;
+              assembly { result := sdiv(a, 1) }
+              assert(result == a);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" res []
+    , testAbstractArith "sdiv-by-neg-one" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_sdiv_by_neg_one(int256 a) external pure {
+              int256 result;
+              assembly { result := sdiv(a, sub(0, 1)) }
+              if (a == -170141183460469231731687303715884105728 * 2**128) { // type(int256).min
+                  assert(result == a);
+              } else {
+                  assert(result == -a);
+              }
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" res []
+    , testAbstractArith "sdiv-intmin-by-two" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_sdiv_intmin_by_two() external pure {
+              int256 result;
+              assembly {
+                let intmin := 0x8000000000000000000000000000000000000000000000000000000000000000
+                result := sdiv(intmin, 2)
+              }
+              // -2**254 is 0xc000...0000
+              assert(result == -0x4000000000000000000000000000000000000000000000000000000000000000);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "smod-by-zero" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_smod_by_zero(int256 a) external pure {
+              int256 result;
+              assembly { result := smod(a, 0) }
+              assert(result == 0);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" res []
+    , testAbstractArith "smod-intmin-by-three" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_smod_intmin_by_three() external pure {
+              int256 result;
+              assembly { result := smod(0x8000000000000000000000000000000000000000000000000000000000000000, 3) }
+              assert(result == -2);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" res []
+    , expectFail $ testAbstractArith "div-mod-identity" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_div_mod_identity(int256 a, int256 b) external pure {
+              if (b == 0) return;
+              int256 q;
+              int256 r;
+              assembly {
+                  q := sdiv(a, b)
+                  r := smod(a, b)
+              }
+              int256 reconstructed;
+              // using unchecked because SDiv(min, -1) * -1 + 0 = min in EVM (wraps)
+              unchecked {
+                  reconstructed = q * b + r;
+              }
+              assert(reconstructed == a);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "udiv-by-one" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_udiv_by_one(uint256 a) external pure {
+              uint256 result;
+              assembly { result := div(a, 1) }
+              assert(result == a);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "umod-by-zero" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_umod_by_zero(uint256 a) external pure {
+              uint256 result;
+              assembly { result := mod(a, 0) }
+              assert(result == 0);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "sdiv-by-zero" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_sdiv_by_zero(int256 a) external pure {
+              int256 result;
+              assembly { result := sdiv(a, 0) }
+              assert(result == 0);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "sdiv-zero-dividend" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_sdiv_zero_dividend(int256 b) external pure {
+              int256 result;
+              assembly { result := sdiv(0, b) }
+              assert(result == 0);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "sdiv-truncation" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_sdiv_truncation() external pure {
+              int256 result;
+              assembly { result := sdiv(sub(0, 7), 2) }
+              assert(result == -3);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "sdiv-sign-symmetry" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_sdiv_sign_symmetry(int256 a, int256 b) external pure {
+              if (a == -57896044618658097711785492504343953926634992332820282019728792003956564819968) return;
+              if (b == -57896044618658097711785492504343953926634992332820282019728792003956564819968) return;
+              if (b == 0) return;
+              int256 r1;
+              int256 r2;
+              assembly {
+                r1 := sdiv(a, b)
+                r2 := sdiv(sub(0, a), sub(0, b))
+              }
+              assert(r1 == r2);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "sdiv-sign-antisymmetry" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_sdiv_sign_antisymmetry(int256 a, int256 b) external pure {
+              if (a == -57896044618658097711785492504343953926634992332820282019728792003956564819968) return;
+              if (b == 0) return;
+              int256 r1;
+              int256 r2;
+              assembly {
+                r1 := sdiv(a, b)
+                r2 := sdiv(sub(0, a), b)
+              }
+              assert(r1 == -r2);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "smod-by-one" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_smod_by_one(int256 a) external pure {
+              int256 r1;
+              int256 r2;
+              assembly {
+                r1 := smod(a, 1)
+                r2 := smod(a, sub(0, 1))
+              }
+              assert(r1 == 0);
+              assert(r2 == 0);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "smod-zero-dividend" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_smod_zero_dividend(int256 b) external pure {
+              int256 result;
+              assembly { result := smod(0, b) }
+              assert(result == 0);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "smod-sign-matches-dividend" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_smod_sign_matches_dividend(int256 a, int256 b) external pure {
+              if (b == 0 || a == 0) return;
+              int256 result;
+              assembly { result := smod(a, b) }
+              if (result != 0) {
+                assert((a > 0 && result > 0) || (a < 0 && result < 0));
+              }
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "smod-intmin" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_smod_intmin() external pure {
+              int256 result;
+              assembly { result := smod(0x8000000000000000000000000000000000000000000000000000000000000000, 2) }
+              assert(result == 0);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "unsigned-div-by-zero" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_unsigned_div_by_zero(uint256 a) external pure {
+              uint256 result;
+              assembly { result := div(a, 0) }
+              assert(result == 0);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , expectFail $ testAbstractArith "unsigned-div-mod-identity" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_unsigned_div_mod_identity(uint256 a, uint256 b) external pure {
+              if (b == 0) return;
+              uint256 q;
+              uint256 r;
+              assembly {
+                q := div(a, b)
+                r := mod(a, b)
+              }
+              assert(q * b + r == a);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
     ]
   ]
   where

@@ -698,9 +698,6 @@ propToSMTWith enc = \case
 -- ** Helpers ** ---------------------------------------------------------------------------------
 
 
--- | Stores a region of src into dst
-copySlice :: Expr EWord -> Expr EWord -> Expr EWord -> Builder -> Builder -> Err Builder
-copySlice = copySliceWith ConcreteDivision
 
 copySliceWith :: DivEncoding -> Expr EWord -> Expr EWord -> Expr EWord -> Builder -> Builder -> Err Builder
 copySliceWith divEnc srcOffset dstOffset (Lit size) src dst = do
@@ -719,9 +716,6 @@ copySliceWith divEnc srcOffset dstOffset (Lit size) src dst = do
     offset o e = exprToSMTWith divEnc $ Expr.add (Lit o) e
 copySliceWith _ _ _ _ _ _ = Left "CopySlice with a symbolically sized region not currently implemented, cannot execute SMT solver on this query"
 
--- | Unrolls an exponentiation into a series of multiplications
-expandExp :: Expr EWord -> W256 -> Err Builder
-expandExp = expandExpWith ConcreteDivision
 
 expandExpWith :: DivEncoding -> Expr EWord -> W256 -> Err Builder
 expandExpWith divEnc base expnt
@@ -733,9 +727,6 @@ expandExpWith divEnc base expnt
     n <- expandExpWith divEnc base (expnt - 1)
     pure $ "(bvmul " <> b `sp` n <> ")"
 
--- | Concatenates a list of bytes into a larger bitvector
-concatBytes :: [Expr Byte] -> Err Builder
-concatBytes = concatBytesWith ConcreteDivision
 
 concatBytesWith :: DivEncoding -> [Expr Byte] -> Err Builder
 concatBytesWith divEnc bytes = do
@@ -750,9 +741,6 @@ concatBytesWith divEnc bytes = do
       byteSMT <- exprToSMTWith divEnc byte
       pure $ "(concat " <> byteSMT `sp` inner <> ")"
 
--- | Concatenates a list of bytes into a larger bitvector
-writeBytes :: ByteString -> Expr Buf -> Err Builder
-writeBytes = writeBytesWith ConcreteDivision
 
 writeBytesWith :: DivEncoding -> ByteString -> Expr Buf -> Err Builder
 writeBytesWith divEnc bytes buf =  do
