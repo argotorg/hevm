@@ -89,9 +89,9 @@ assertPropsRefined conf ps = do
 type DivOp = (Int, Expr EWord, Expr EWord)
 
 -- | Canonical key for grouping operations that share the same bvudiv/bvurem core.
--- For unsigned: (show a, show b, False)
--- For signed:   (show a, canonicalAbs b, True) where canonicalAbs normalizes negations
-type AbsKey = (String, String, Bool)
+-- For unsigned: (show a, show b, False, isMod)
+-- For signed:   (canonicalAbs a, canonicalAbs b, True, isMod) where canonicalAbs normalizes negations
+type AbsKey = (String, String, Bool, Bool)
 
 -- | Normalize an expression for absolute value canonicalization.
 -- |Sub(Lit 0, x)| = |x|, so we strip the negation wrapper.
@@ -101,8 +101,8 @@ canonicalAbs x = show x
 
 absKey :: DivOp -> AbsKey
 absKey (kind, a, b)
-  | kind == 0 || kind == 2 = (show a, show b, False)  -- unsigned: exact operands
-  | otherwise              = (canonicalAbs a, canonicalAbs b, True)  -- signed: normalize abs
+  | kind == 0 || kind == 2 = (show a, show b, False, kind >= 2)  -- unsigned: exact operands
+  | otherwise              = (canonicalAbs a, canonicalAbs b, True, kind >= 2)  -- signed: normalize abs
 
 -- | Generate ground-instance axioms with CSE'd bvudiv/bvurem intermediates.
 -- For each group of div/mod ops sharing the same (|a|, |b|), generates:
@@ -317,8 +317,8 @@ divModShiftBoundAxioms props = do
                     , SMTCommand $ "(assert (=" `sp` absBName `sp` absBEnc <> "))"
                     ]
         -- Generate shift bounds or fall back to bvudiv
-        let shiftBounds = case extractShift canonA of
-              Just k ->
+        let shiftBounds = case (isDiv, extractShift canonA) of
+              (True, Just k) ->
                 let kLit = fromString $ show k
                     threshold = "(bvshl (_ bv1 256) (_ bv" <> kLit <> " 256))"
                     shifted = "(bvlshr" `sp` absAName `sp` "(_ bv" <> kLit <> " 256))"
@@ -331,8 +331,8 @@ divModShiftBoundAxioms props = do
                    , -- if |b| < 2^k then q >= |a| >> k
                      SMTCommand $ "(assert (=> (bvult" `sp` absBName `sp` threshold <> ") (bvuge" `sp` coreName `sp` shifted <> ")))"
                    ]
-              Nothing ->
-                -- No shift structure: use full bvudiv definition
+              _ ->
+                -- No shift structure or it's a modulo op: use full bvudiv/bvurem definition
                 let coreEnc = if isDiv
                               then "(ite (=" `sp` absBName `sp` zero <> ")" `sp` zero
                                 `sp` "(bvudiv" `sp` absAName `sp` absBName <> "))"
