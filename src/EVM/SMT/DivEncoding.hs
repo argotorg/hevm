@@ -4,12 +4,15 @@
 -}
 module EVM.SMT.DivEncoding
   ( divModAbstractDecls
-  , divModRefinedDefs
   , divModBounds
   , assertPropsAbstract
   , assertPropsRefined
+  , assertPropsShiftBounds
   ) where
 
+import Data.Bits ((.&.), countTrailingZeros)
+import Data.List (nubBy, groupBy, sortBy)
+import Data.Ord (comparing)
 import Data.Text.Lazy.Builder
 
 import EVM.Effects
@@ -26,18 +29,6 @@ divModAbstractDecls =
   , SMTCommand "(declare-fun evm_bvsdiv ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
   , SMTCommand "(declare-fun evm_bvurem ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
   , SMTCommand "(declare-fun evm_bvsrem ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
-  ]
-
--- | Exact function definitions for div/mod with EVM semantics (Phase 2 refinement).
--- These define-fun replace the declare-fun from Phase 1, giving concrete semantics:
--- division by zero returns zero (matching EVM behavior).
-divModRefinedDefs :: [SMTEntry]
-divModRefinedDefs =
-  [ SMTComment "refined division/modulo (exact EVM semantics)"
-  , SMTCommand "(define-fun evm_bvudiv ((x (_ BitVec 256)) (y (_ BitVec 256))) (_ BitVec 256) (ite (= y (_ bv0 256)) (_ bv0 256) (bvudiv x y)))"
-  , SMTCommand "(define-fun evm_bvsdiv ((x (_ BitVec 256)) (y (_ BitVec 256))) (_ BitVec 256) (ite (= y (_ bv0 256)) (_ bv0 256) (bvsdiv x y)))"
-  , SMTCommand "(define-fun evm_bvurem ((x (_ BitVec 256)) (y (_ BitVec 256))) (_ BitVec 256) (ite (= y (_ bv0 256)) (_ bv0 256) (bvurem x y)))"
-  , SMTCommand "(define-fun evm_bvsrem ((x (_ BitVec 256)) (y (_ BitVec 256))) (_ BitVec 256) (ite (= y (_ bv0 256)) (_ bv0 256) (bvsrem x y)))"
   ]
 
 -- | Generate bounds constraints for abstract div/mod operations.
@@ -70,19 +61,318 @@ divModBounds props = do
 -- | Encode props using uninterpreted functions for div/mod (Phase 1 of two-phase solving)
 assertPropsAbstract :: Config -> [Prop] -> Err SMT2
 assertPropsAbstract conf ps = do
-  base <- if not conf.simp then assertPropsHelperWith AbstractDivision False ps
-          else assertPropsHelperWith AbstractDivision True (decompose conf ps)
+  let mkBase s = assertPropsHelperWith AbstractDivision s divModAbstractDecls
+  base <- if not conf.simp then mkBase False ps
+          else mkBase True (decompose conf ps)
   bounds <- divModBounds ps
-  pure $ SMT2 (SMTScript divModAbstractDecls) mempty mempty
-      <> base
+  pure $ base
       <> SMT2 (SMTScript bounds) mempty mempty
 
--- | Encode props using exact div/mod definitions (Phase 2 refinement)
+-- | Encode props using exact div/mod definitions (Phase 2 refinement).
+-- Keeps declare-fun (uninterpreted) for sharing, but adds ground-instance
+-- axioms with CSE'd bvudiv/bvurem intermediates. Signed division operations
+-- that differ only in divisor sign share the same bvudiv result since
+-- |x| = |-x|.
 assertPropsRefined :: Config -> [Prop] -> Err SMT2
 assertPropsRefined conf ps = do
-  base <- if not conf.simp then assertPropsHelperWith AbstractDivision False ps
-          else assertPropsHelperWith AbstractDivision True (decompose conf ps)
+  let mkBase s = assertPropsHelperWith AbstractDivision s divModAbstractDecls
+  base <- if not conf.simp then mkBase False ps
+          else mkBase True (decompose conf ps)
   bounds <- divModBounds ps
-  pure $ SMT2 (SMTScript divModRefinedDefs) mempty mempty
-      <> base
+  axioms <- divModGroundAxioms ps
+  pure $ base
       <> SMT2 (SMTScript bounds) mempty mempty
+      <> SMT2 (SMTScript axioms) mempty mempty
+
+-- DivOp kind: 0=Div, 1=SDiv, 2=Mod, 3=SMod
+-- We track (kind, dividend, divisor)
+type DivOp = (Int, Expr EWord, Expr EWord)
+
+-- | Canonical key for grouping operations that share the same bvudiv/bvurem core.
+-- For unsigned: (show a, show b, False)
+-- For signed:   (show a, canonicalAbs b, True) where canonicalAbs normalizes negations
+type AbsKey = (String, String, Bool)
+
+-- | Normalize an expression for absolute value canonicalization.
+-- |Sub(Lit 0, x)| = |x|, so we strip the negation wrapper.
+canonicalAbs :: Expr EWord -> String
+canonicalAbs (Sub (Lit 0) x) = show x
+canonicalAbs x = show x
+
+absKey :: DivOp -> AbsKey
+absKey (kind, a, b)
+  | kind == 0 || kind == 2 = (show a, show b, False)  -- unsigned: exact operands
+  | otherwise              = (canonicalAbs a, canonicalAbs b, True)  -- signed: normalize abs
+
+-- | Generate ground-instance axioms with CSE'd bvudiv/bvurem intermediates.
+-- For each group of div/mod ops sharing the same (|a|, |b|), generates:
+--   - declare-const for abs_a, abs_b, and the bvudiv/bvurem result
+--   - axioms expressing each evm_bvXdiv call in terms of the shared result
+divModGroundAxioms :: [Prop] -> Err [SMTEntry]
+divModGroundAxioms props = do
+  let allDivs = nubBy eqDivOp $ concatMap (foldProp collectDivOps []) props
+  if null allDivs then pure []
+  else do
+    let groups = groupBy (\a b -> absKey a == absKey b)
+               $ sortBy (comparing absKey) allDivs
+        indexedGroups = zip [0..] groups
+    entries <- concat <$> mapM (uncurry mkGroupAxioms) indexedGroups
+    let links = mkCongruenceLinks indexedGroups
+    pure $ (SMTComment "division/modulo ground-instance axioms (CSE'd)") : entries <> links
+  where
+    collectDivOps :: forall a . Expr a -> [DivOp]
+    collectDivOps = \case
+      Div a b  -> [(0, a, b)]
+      SDiv a b -> [(1, a, b)]
+      Mod a b  -> [(2, a, b)]
+      SMod a b -> [(3, a, b)]
+      _        -> []
+
+    eqDivOp :: DivOp -> DivOp -> Bool
+    eqDivOp (k1, a1, b1) (k2, a2, b2) =
+      k1 == k2 && show a1 == show a2 && show b1 == show b2
+
+    -- | Generate axioms for a group of ops sharing the same bvudiv/bvurem core.
+    mkGroupAxioms :: Int -> [DivOp] -> Err [SMTEntry]
+    mkGroupAxioms groupIdx ops = do
+      -- The first op determines the dividend/divisor encoding
+      let (firstKind, firstA, firstB) = head ops
+          isDiv = firstKind == 0 || firstKind == 1  -- div vs mod
+          isSigned = firstKind == 1 || firstKind == 3
+          prefix = if isDiv then "udiv" else "urem"
+          coreName = fromString $ prefix <> "_" <> show groupIdx
+
+      if not isSigned then do
+        -- Unsigned: simple axioms, one bvudiv/bvurem per op (no abs-value needed)
+        mapM (mkUnsignedAxiom coreName) ops
+      else do
+        -- Signed: create shared intermediates for abs values and bvudiv/bvurem result
+        let absAName = fromString $ "abs_a_" <> show groupIdx
+            absBName = fromString $ "abs_b_" <> show groupIdx
+        -- Use the canonical (non-negated) form for abs value encoding
+        let canonA = stripNeg firstA
+            canonB = stripNeg firstB
+        canonAenc <- exprToSMTWith AbstractDivision canonA
+        canonBenc <- exprToSMTWith AbstractDivision canonB
+        let absAEnc = "(ite (bvsge" `sp` canonAenc `sp` zero <> ")"
+                   `sp` canonAenc `sp` "(bvsub" `sp` zero `sp` canonAenc <> "))"
+            absBEnc = "(ite (bvsge" `sp` canonBenc `sp` zero <> ")"
+                   `sp` canonBenc `sp` "(bvsub" `sp` zero `sp` canonBenc <> "))"
+            coreEnc = if isDiv
+                      then "(ite (=" `sp` absBName `sp` zero <> ")" `sp` zero
+                        `sp` "(bvudiv" `sp` absAName `sp` absBName <> "))"
+                      else "(ite (=" `sp` absBName `sp` zero <> ")" `sp` zero
+                        `sp` "(bvurem" `sp` absAName `sp` absBName <> "))"
+        let decls = [ SMTCommand $ "(declare-const" `sp` absAName `sp` "(_ BitVec 256))"
+                    , SMTCommand $ "(declare-const" `sp` absBName `sp` "(_ BitVec 256))"
+                    , SMTCommand $ "(declare-const" `sp` coreName `sp` "(_ BitVec 256))"
+                    , SMTCommand $ "(assert (=" `sp` absAName `sp` absAEnc <> "))"
+                    , SMTCommand $ "(assert (=" `sp` absBName `sp` absBEnc <> "))"
+                    , SMTCommand $ "(assert (=" `sp` coreName `sp` coreEnc <> "))"
+                    ]
+        axioms <- mapM (mkSignedAxiom coreName) ops
+        pure $ decls <> axioms
+
+    stripNeg :: Expr EWord -> Expr EWord
+    stripNeg (Sub (Lit 0) x) = x
+    stripNeg x = x
+
+    mkUnsignedAxiom :: Builder -> DivOp -> Err SMTEntry
+    mkUnsignedAxiom _coreName (kind, a, b) = do
+      aenc <- exprToSMTWith AbstractDivision a
+      benc <- exprToSMTWith AbstractDivision b
+      let fname = if kind == 0 then "evm_bvudiv" else "evm_bvurem"
+          abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
+          op = if kind == 0 then "bvudiv" else "bvurem"
+          concrete = "(ite (=" `sp` benc `sp` zero <> ")" `sp` zero
+                  `sp` "(" <> op `sp` aenc `sp` benc <> "))"
+      pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
+
+    mkSignedAxiom :: Builder -> DivOp -> Err SMTEntry
+    mkSignedAxiom coreName (kind, a, b) = do
+      aenc <- exprToSMTWith AbstractDivision a
+      benc <- exprToSMTWith AbstractDivision b
+      let fname = if kind == 1 then "evm_bvsdiv" else "evm_bvsrem"
+          abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
+      if kind == 1 then do
+        -- SDiv: result sign depends on whether operand signs match
+        let sameSign = "(=" `sp` "(bvslt" `sp` aenc `sp` zero <> ")"
+                    `sp` "(bvslt" `sp` benc `sp` zero <> "))"
+            concrete = "(ite (=" `sp` benc `sp` zero <> ")" `sp` zero
+                     `sp` "(ite" `sp` sameSign `sp` coreName
+                     `sp` "(bvsub" `sp` zero `sp` coreName <> ")))"
+        pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
+      else do
+        -- SMod: result sign matches dividend
+        let concrete = "(ite (=" `sp` benc `sp` zero <> ")" `sp` zero
+                     `sp` "(ite (bvsge" `sp` aenc `sp` zero <> ")"
+                     `sp` coreName
+                     `sp` "(bvsub" `sp` zero `sp` coreName <> ")))"
+        pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
+
+-- | For each pair of signed groups with the same operation type (udiv/urem),
+-- emit a congruence lemma: if abs inputs are equal, results are equal.
+-- This is a sound tautology (function congruence for bvudiv/bvurem) that
+-- helps bitwuzla avoid independent reasoning about multiple bvudiv terms.
+mkCongruenceLinks :: [(Int, [DivOp])] -> [SMTEntry]
+mkCongruenceLinks indexedGroups =
+  let signedDivGroups = [(i, ops) | (i, ops) <- indexedGroups
+                        , let k = fst3 (head ops), k == 1]  -- SDiv groups
+      signedModGroups = [(i, ops) | (i, ops) <- indexedGroups
+                        , let k = fst3 (head ops), k == 3]  -- SMod groups
+  in concatMap (mkPairLinks "udiv") (allPairs signedDivGroups)
+     <> concatMap (mkPairLinks "urem") (allPairs signedModGroups)
+  where
+    fst3 (a, _, _) = a
+    allPairs xs = [(a, b) | a <- xs, b <- xs, fst a < fst b]
+    mkPairLinks prefix' ((i, _), (j, _)) =
+      let absAI = fromString $ "abs_a_" <> show i
+          absBi = fromString $ "abs_b_" <> show i
+          absAJ = fromString $ "abs_a_" <> show j
+          absBJ = fromString $ "abs_b_" <> show j
+          coreI = fromString $ prefix' <> "_" <> show i
+          coreJ = fromString $ prefix' <> "_" <> show j
+      in [ SMTCommand $ "(assert (=> (and (=" `sp` absAI `sp` absAJ <> ") (="
+              `sp` absBi `sp` absBJ <> ")) (=" `sp` coreI `sp` coreJ <> ")))" ]
+
+-- | Phase 3: Encode props with shift-based quotient bounds instead of bvudiv.
+-- When the dividend of a signed division has the form SHL(k, x), we know that
+-- bvudiv(|SHL(k,x)|, |y|) has a tight relationship with bvlshr(|SHL(k,x)|, k):
+--   if |y| >= 2^k then q <= bvlshr(|a|, k)
+--   if |y| <  2^k then q >= bvlshr(|a|, k)
+-- This avoids bvudiv entirely, which bitwuzla struggles with at 256 bits.
+assertPropsShiftBounds :: Config -> [Prop] -> Err SMT2
+assertPropsShiftBounds conf ps = do
+  let mkBase s = assertPropsHelperWith AbstractDivision s divModAbstractDecls
+  base <- if not conf.simp then mkBase False ps
+          else mkBase True (decompose conf ps)
+  bounds <- divModBounds ps
+  axioms <- divModShiftBoundAxioms ps
+  pure $ base
+      <> SMT2 (SMTScript bounds) mempty mempty
+      <> SMT2 (SMTScript axioms) mempty mempty
+
+-- | Generate shift-based bound axioms (no bvudiv/bvurem).
+-- For each group of signed div/mod ops, if the dividend has a SHL(k, _) structure,
+-- generates bounds using bvlshr instead of bvudiv.
+divModShiftBoundAxioms :: [Prop] -> Err [SMTEntry]
+divModShiftBoundAxioms props = do
+  let allDivs = nubBy eqDivOp $ concatMap (foldProp collectDivOps []) props
+  if null allDivs then pure []
+  else do
+    let groups = groupBy (\a b -> absKey a == absKey b)
+               $ sortBy (comparing absKey) allDivs
+        indexedGroups = zip [0..] groups
+    entries <- concat <$> mapM (uncurry mkGroupShiftAxioms) indexedGroups
+    let links = mkCongruenceLinks indexedGroups
+    pure $ (SMTComment "division/modulo shift-bound axioms (no bvudiv)") : entries <> links
+  where
+    collectDivOps :: forall a . Expr a -> [DivOp]
+    collectDivOps = \case
+      Div a b  -> [(0, a, b)]
+      SDiv a b -> [(1, a, b)]
+      Mod a b  -> [(2, a, b)]
+      SMod a b -> [(3, a, b)]
+      _        -> []
+
+    eqDivOp :: DivOp -> DivOp -> Bool
+    eqDivOp (k1, a1, b1) (k2, a2, b2) =
+      k1 == k2 && show a1 == show a2 && show b1 == show b2
+
+    -- | Extract shift amount from a dividend expression.
+    -- Returns Just k if the canonical (abs-stripped) dividend is SHL(Lit k, _),
+    -- or if it is a literal that is an exact power of 2 (Lit 2^k).
+    extractShift :: Expr EWord -> Maybe Int
+    extractShift (SHL (Lit k) _) = Just (fromIntegral k)
+    extractShift (Sub (Lit 0) x) = extractShift x
+    extractShift (Lit n) | n > 0, n .&. (n - 1) == 0 = Just (countTrailingZeros n)
+    extractShift _ = Nothing
+
+    mkGroupShiftAxioms :: Int -> [DivOp] -> Err [SMTEntry]
+    mkGroupShiftAxioms groupIdx ops = do
+      let (firstKind, firstA, firstB) = head ops
+          isDiv = firstKind == 0 || firstKind == 1
+          isSigned = firstKind == 1 || firstKind == 3
+          prefix = if isDiv then "udiv" else "urem"
+          coreName = fromString $ prefix <> "_" <> show groupIdx
+
+      if not isSigned then do
+        -- Unsigned: fall back to full bvudiv axiom (these are usually fast)
+        mapM (mkUnsignedAxiom coreName) ops
+      else do
+        let absAName = fromString $ "abs_a_" <> show groupIdx
+            absBName = fromString $ "abs_b_" <> show groupIdx
+            canonA = stripNeg firstA
+            canonB = stripNeg firstB
+        canonAenc <- exprToSMTWith AbstractDivision canonA
+        canonBenc <- exprToSMTWith AbstractDivision canonB
+        let absAEnc = "(ite (bvsge" `sp` canonAenc `sp` zero <> ")"
+                   `sp` canonAenc `sp` "(bvsub" `sp` zero `sp` canonAenc <> "))"
+            absBEnc = "(ite (bvsge" `sp` canonBenc `sp` zero <> ")"
+                   `sp` canonBenc `sp` "(bvsub" `sp` zero `sp` canonBenc <> "))"
+        let decls = [ SMTCommand $ "(declare-const" `sp` absAName `sp` "(_ BitVec 256))"
+                    , SMTCommand $ "(declare-const" `sp` absBName `sp` "(_ BitVec 256))"
+                    , SMTCommand $ "(declare-const" `sp` coreName `sp` "(_ BitVec 256))"
+                    , SMTCommand $ "(assert (=" `sp` absAName `sp` absAEnc <> "))"
+                    , SMTCommand $ "(assert (=" `sp` absBName `sp` absBEnc <> "))"
+                    ]
+        -- Generate shift bounds or fall back to bvudiv
+        let shiftBounds = case extractShift canonA of
+              Just k ->
+                let kLit = fromString $ show k
+                    threshold = "(bvshl (_ bv1 256) (_ bv" <> kLit <> " 256))"
+                    shifted = "(bvlshr" `sp` absAName `sp` "(_ bv" <> kLit <> " 256))"
+                in [ -- q = 0 when b = 0
+                     SMTCommand $ "(assert (=> (=" `sp` absBName `sp` zero <> ") (=" `sp` coreName `sp` zero <> ")))"
+                   , -- q <= abs_a (always true)
+                     SMTCommand $ "(assert (bvule" `sp` coreName `sp` absAName <> "))"
+                   , -- if |b| >= 2^k then q <= |a| >> k
+                     SMTCommand $ "(assert (=> (bvuge" `sp` absBName `sp` threshold <> ") (bvule" `sp` coreName `sp` shifted <> ")))"
+                   , -- if |b| < 2^k then q >= |a| >> k
+                     SMTCommand $ "(assert (=> (bvult" `sp` absBName `sp` threshold <> ") (bvuge" `sp` coreName `sp` shifted <> ")))"
+                   ]
+              Nothing ->
+                -- No shift structure: use full bvudiv definition
+                let coreEnc = if isDiv
+                              then "(ite (=" `sp` absBName `sp` zero <> ")" `sp` zero
+                                `sp` "(bvudiv" `sp` absAName `sp` absBName <> "))"
+                              else "(ite (=" `sp` absBName `sp` zero <> ")" `sp` zero
+                                `sp` "(bvurem" `sp` absAName `sp` absBName <> "))"
+                in [ SMTCommand $ "(assert (=" `sp` coreName `sp` coreEnc <> "))" ]
+        axioms <- mapM (mkSignedAxiom coreName) ops
+        pure $ decls <> shiftBounds <> axioms
+
+    stripNeg :: Expr EWord -> Expr EWord
+    stripNeg (Sub (Lit 0) x) = x
+    stripNeg x = x
+
+    mkUnsignedAxiom :: Builder -> DivOp -> Err SMTEntry
+    mkUnsignedAxiom _coreName (kind, a, b) = do
+      aenc <- exprToSMTWith AbstractDivision a
+      benc <- exprToSMTWith AbstractDivision b
+      let fname = if kind == 0 then "evm_bvudiv" else "evm_bvurem"
+          abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
+          op = if kind == 0 then "bvudiv" else "bvurem"
+          concrete = "(ite (=" `sp` benc `sp` zero <> ")" `sp` zero
+                  `sp` "(" <> op `sp` aenc `sp` benc <> "))"
+      pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
+
+    mkSignedAxiom :: Builder -> DivOp -> Err SMTEntry
+    mkSignedAxiom coreName (kind, a, b) = do
+      aenc <- exprToSMTWith AbstractDivision a
+      benc <- exprToSMTWith AbstractDivision b
+      let fname = if kind == 1 then "evm_bvsdiv" else "evm_bvsrem"
+          abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
+      if kind == 1 then do
+        let sameSign = "(=" `sp` "(bvslt" `sp` aenc `sp` zero <> ")"
+                    `sp` "(bvslt" `sp` benc `sp` zero <> "))"
+            concrete = "(ite (=" `sp` benc `sp` zero <> ")" `sp` zero
+                     `sp` "(ite" `sp` sameSign `sp` coreName
+                     `sp` "(bvsub" `sp` zero `sp` coreName <> ")))"
+        pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
+      else do
+        let concrete = "(ite (=" `sp` benc `sp` zero <> ")" `sp` zero
+                     `sp` "(ite (bvsge" `sp` aenc `sp` zero <> ")"
+                     `sp` coreName
+                     `sp` "(bvsub" `sp` zero `sp` coreName <> ")))"
+        pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
