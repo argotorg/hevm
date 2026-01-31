@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0
 pragma solidity >=0.8.0 <0.9.0;
 
+import {Test} from "forge-std/Test.sol";
+
 /// Adapted from halmos tests/regression/test/Arith.t.sol
 /// Division failure case: y == 0 is a valid counterexample
-contract ArithFailTest {
+contract ArithFailTest is Test {
     function unchecked_div(uint x, uint y) public pure returns (uint ret) {
         assembly {
             ret := div(x, y)
