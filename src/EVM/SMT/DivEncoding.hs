@@ -332,13 +332,12 @@ divModShiftBoundAxioms props = do
                      SMTCommand $ "(assert (=> (bvult" `sp` absBName `sp` threshold <> ") (bvuge" `sp` coreName `sp` shifted <> ")))"
                    ]
               _ ->
-                -- No shift structure or it's a modulo op: use full bvudiv/bvurem definition
-                let coreEnc = if isDiv
-                              then "(ite (=" `sp` absBName `sp` zero <> ")" `sp` zero
-                                `sp` "(bvudiv" `sp` absAName `sp` absBName <> "))"
-                              else "(ite (=" `sp` absBName `sp` zero <> ")" `sp` zero
-                                `sp` "(bvurem" `sp` absAName `sp` absBName <> "))"
-                in [ SMTCommand $ "(assert (=" `sp` coreName `sp` coreEnc <> "))" ]
+                -- No shift structure or it's a modulo op: use abstract bounds only.
+                -- This avoids bvudiv entirely, making the encoding an overapproximation.
+                -- Only UNSAT results are sound (checked by caller).
+                [ SMTCommand $ "(assert (=> (=" `sp` absAName `sp` zero <> ") (=" `sp` coreName `sp` zero <> ")))"
+                , SMTCommand $ "(assert (bvule" `sp` coreName `sp` absAName <> "))"
+                ]
         axioms <- mapM (mkSignedAxiom coreName) ops
         pure $ decls <> shiftBounds <> axioms
 
