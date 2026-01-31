@@ -11,6 +11,12 @@ import EVM.Types
 
 type MaybeIO = MaybeT IO
 
+-- | Controls how division/modulo operations are encoded into SMT.
+-- 'ConcreteDivision' uses inline ite-check-zero with real SMT ops (existing behavior).
+-- 'AbstractDivision' uses uninterpreted functions (evm_bvudiv, etc.) for performance.
+data DivEncoding = ConcreteDivision | AbstractDivision
+  deriving (Show, Eq)
+
 data SMTEntry = SMTCommand Builder | SMTComment Builder
   deriving (Eq)
 
