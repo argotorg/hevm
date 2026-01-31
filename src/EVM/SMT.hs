@@ -140,10 +140,10 @@ decompose conf props = if conf.decomposeStorage && safeExprs && safeProps
 -- because we make use of it to verify the correctness of our simplification
 -- passes through property-based testing.
 assertPropsHelper :: Bool -> [Prop]  -> Err SMT2
-assertPropsHelper = assertPropsHelperWith ConcreteDivision
+assertPropsHelper simp = assertPropsHelperWith ConcreteDivision simp []
 
-assertPropsHelperWith :: DivEncoding -> Bool -> [Prop]  -> Err SMT2
-assertPropsHelperWith divEnc simp psPreConc = do
+assertPropsHelperWith :: DivEncoding -> Bool -> [SMTEntry] -> [Prop]  -> Err SMT2
+assertPropsHelperWith divEnc simp extraDecls psPreConc = do
  encs <- mapM (propToSMTWith divEnc) psElim
  intermediates <- declareIntermediatesWith divEnc bufs stores
  readAssumes' <- readAssumes
@@ -151,6 +151,7 @@ assertPropsHelperWith divEnc simp psPreConc = do
  frameCtxs <- (declareFrameContext . nubOrd $ foldl' (<>) [] frameCtx)
  blockCtxs <- (declareBlockContext . nubOrd $ foldl' (<>) [] blockCtx)
  pure $ prelude
+  <> SMT2 (SMTScript extraDecls) mempty mempty
   <> SMT2 (SMTScript (declareAbstractStores abstractStores)) mempty mempty
   <> declareConstrainAddrs addresses
   <> (declareBufs toDeclarePsElim bufs stores)
@@ -507,9 +508,9 @@ exprToSMTWith enc = \case
   CLZ a -> op1 "clz256" a
   SEx a b -> op2 "signext" a b
   Div a b -> divOp "bvudiv" "evm_bvudiv" a b
-  SDiv a b -> divOp "bvsdiv" "evm_bvsdiv" a b
+  SDiv a b -> sdivOp "evm_bvsdiv" a b
   Mod a b -> divOp "bvurem" "evm_bvurem" a b
-  SMod a b -> divOp "bvsrem" "evm_bvsrem" a b
+  SMod a b -> smodOp "evm_bvsrem" a b
   -- NOTE: this needs to do the MUL at a higher precision, then MOD, then downcast
   MulMod a b c -> do
     aExp <- exprToSMTWith enc a
@@ -623,6 +624,34 @@ exprToSMTWith enc = \case
     divOp concreteOp abstractOp a b = case enc of
       ConcreteDivision -> op2CheckZero concreteOp a b
       AbstractDivision -> op2 abstractOp a b
+    -- | Encode SDiv using bvudiv with abs-value decomposition.
+    -- bitwuzla cannot solve UNSAT queries with bvsdiv at 256-bit,
+    -- but handles bvudiv efficiently.
+    sdivOp :: Builder -> Expr x -> Expr y -> Err Builder
+    sdivOp abstractOp a b = case enc of
+      AbstractDivision -> op2 abstractOp a b
+      ConcreteDivision -> do
+        aenc <- exprToSMTWith enc a
+        benc <- exprToSMTWith enc b
+        let absa = "(ite (bvsge " <> aenc `sp` zero <> ")" `sp` aenc `sp` "(bvsub" `sp` zero `sp` aenc <> "))"
+            absb = "(ite (bvsge " <> benc `sp` zero <> ")" `sp` benc `sp` "(bvsub" `sp` zero `sp` benc <> "))"
+            udiv = "(bvudiv" `sp` absa `sp` absb <> ")"
+            sameSign = "(=" `sp` "(bvslt" `sp` aenc `sp` zero <> ")" `sp` "(bvslt" `sp` benc `sp` zero <> "))"
+        pure $ "(ite (=" `sp` benc `sp` zero <> ")" `sp` zero `sp`
+                "(ite" `sp` sameSign `sp` udiv `sp` "(bvsub" `sp` zero `sp` udiv <> ")))"
+    -- | Encode SMod using bvurem with abs-value decomposition.
+    -- EVM SMOD: result has the sign of the dividend (a).
+    smodOp :: Builder -> Expr x -> Expr y -> Err Builder
+    smodOp abstractOp a b = case enc of
+      AbstractDivision -> op2 abstractOp a b
+      ConcreteDivision -> do
+        aenc <- exprToSMTWith enc a
+        benc <- exprToSMTWith enc b
+        let absa = "(ite (bvsge " <> aenc `sp` zero <> ")" `sp` aenc `sp` "(bvsub" `sp` zero `sp` aenc <> "))"
+            absb = "(ite (bvsge " <> benc `sp` zero <> ")" `sp` benc `sp` "(bvsub" `sp` zero `sp` benc <> "))"
+            urem = "(bvurem" `sp` absa `sp` absb <> ")"
+        pure $ "(ite (=" `sp` benc `sp` zero <> ")" `sp` zero `sp`
+                "(ite (bvsge" `sp` aenc `sp` zero <> ")" `sp` urem `sp` "(bvsub" `sp` zero `sp` urem <> ")))"
 
 sp :: Builder -> Builder -> Builder
 a `sp` b = a <> (fromText " ") <> b
