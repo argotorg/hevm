@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0
 pragma solidity >=0.8.0 <0.9.0;
 
+import {Test} from "forge-std/Test.sol";
+
 /// Adapted from halmos tests/solver/test/Math.t.sol
 /// Deposit/mint ratio test - counterexamples exist for mint case
-contract MathFailTest {
+contract MathFailTest is Test {
     function prove_mint(uint s, uint A1, uint S1) public pure {
         uint a = (s * A1) / S1;
 

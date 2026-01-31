@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0
 pragma solidity >=0.8.0 <0.9.0;
 
+import {Test} from "forge-std/Test.sol";
+
 /// Adapted from halmos tests/regression/test/Arith.t.sol
 /// Tests division/modulo/exponentiation properties
-contract ArithTest {
+contract ArithTest is Test {
     function unchecked_div(uint x, uint y) public pure returns (uint ret) {
         assembly {
             ret := div(x, y)
