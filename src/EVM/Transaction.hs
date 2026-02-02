@@ -41,8 +41,8 @@ data TxType
 
 instance JSON.ToJSON TxType where
   toJSON t = case t of
-               EIP7702Transaction    -> "0x4" -- EIP7702
-               EIP4844Transaction    -> "0x3" -- EIP4844
+               EIP7702Transaction    -> "0x4" -- permanently sets the code for an EOA
+               EIP4844Transaction    -> "0x3" -- Proto-Danksharding
                EIP1559Transaction    -> "0x2" -- EIP1559
                LegacyTransaction     -> "0x1" -- EIP2718
                AccessListTransaction -> "0x1" -- EIP2930
