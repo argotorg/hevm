@@ -65,8 +65,7 @@ assertPropsAbstract conf ps = do
   base <- if not conf.simp then mkBase False ps
           else mkBase True (decompose conf ps)
   bounds <- divModBounds ps
-  pure $ base
-      <> SMT2 (SMTScript bounds) mempty mempty
+  pure $ base <> SMT2 (SMTScript bounds) mempty mempty
 
 -- | Encode props using exact div/mod definitions (Phase 2 refinement).
 -- Keeps declare-fun (uninterpreted) for sharing, but adds ground-instance
