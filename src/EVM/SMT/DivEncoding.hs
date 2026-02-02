@@ -83,25 +83,38 @@ assertPropsRefined conf ps = do
       <> SMT2 (SMTScript bounds) mempty mempty
       <> SMT2 (SMTScript axioms) mempty mempty
 
--- DivOp kind: 0=Div, 1=SDiv, 2=Mod, 3=SMod
+-- | Kind of division/modulo operation
+data DivOpKind = UDiv | USDiv | UMod | USMod
+  deriving (Eq, Ord)
+
 -- We track (kind, dividend, divisor)
-type DivOp = (Int, Expr EWord, Expr EWord)
+type DivOp = (DivOpKind, Expr EWord, Expr EWord)
 
 -- | Canonical key for grouping operations that share the same bvudiv/bvurem core.
--- For unsigned: (show a, show b, False, isMod)
+-- For unsigned: (a, b, False, isMod)
 -- For signed:   (canonicalAbs a, canonicalAbs b, True, isMod) where canonicalAbs normalizes negations
-type AbsKey = (String, String, Bool, Bool)
+type AbsKey = (Expr EWord, Expr EWord, Bool, Bool)
 
 -- | Normalize an expression for absolute value canonicalization.
 -- |Sub(Lit 0, x)| = |x|, so we strip the negation wrapper.
-canonicalAbs :: Expr EWord -> String
-canonicalAbs (Sub (Lit 0) x) = show x
-canonicalAbs x = show x
+canonicalAbs :: Expr EWord -> Expr EWord
+canonicalAbs (Sub (Lit 0) x) = x
+canonicalAbs x = x
+
+isSigned :: DivOpKind -> Bool
+isSigned USDiv = True
+isSigned USMod = True
+isSigned _     = False
+
+isMod :: DivOpKind -> Bool
+isMod UMod  = True
+isMod USMod = True
+isMod _     = False
 
 absKey :: DivOp -> AbsKey
 absKey (kind, a, b)
-  | kind == 0 || kind == 2 = (show a, show b, False, kind >= 2)  -- unsigned: exact operands
-  | otherwise              = (canonicalAbs a, canonicalAbs b, True, kind >= 2)  -- signed: normalize abs
+  | not (isSigned kind) = (a, b, False, isMod kind)         -- unsigned: exact operands
+  | otherwise           = (canonicalAbs a, canonicalAbs b, True, isMod kind)  -- signed: normalize abs
 
 -- | Generate ground-instance axioms with CSE'd bvudiv/bvurem intermediates.
 -- For each group of div/mod ops sharing the same (|a|, |b|), generates:
@@ -121,27 +134,25 @@ divModGroundAxioms props = do
   where
     collectDivOps :: forall a . Expr a -> [DivOp]
     collectDivOps = \case
-      Div a b  -> [(0, a, b)]
-      SDiv a b -> [(1, a, b)]
-      Mod a b  -> [(2, a, b)]
-      SMod a b -> [(3, a, b)]
+      Div a b  -> [(UDiv, a, b)]
+      SDiv a b -> [(USDiv, a, b)]
+      Mod a b  -> [(UMod, a, b)]
+      SMod a b -> [(USMod, a, b)]
       _        -> []
 
     eqDivOp :: DivOp -> DivOp -> Bool
     eqDivOp (k1, a1, b1) (k2, a2, b2) =
-      k1 == k2 && show a1 == show a2 && show b1 == show b2
+      k1 == k2 && a1 == a2 && b1 == b2
 
     -- | Generate axioms for a group of ops sharing the same bvudiv/bvurem core.
     mkGroupAxioms :: Int -> [DivOp] -> Err [SMTEntry]
-    mkGroupAxioms groupIdx ops = do
-      -- The first op determines the dividend/divisor encoding
-      let (firstKind, firstA, firstB) = head ops
-          isDiv = firstKind == 0 || firstKind == 1  -- div vs mod
-          isSigned = firstKind == 1 || firstKind == 3
-          prefix = if isDiv then "udiv" else "urem"
+    mkGroupAxioms _ [] = pure []
+    mkGroupAxioms groupIdx ops@((firstKind, firstA, firstB) : _) = do
+      let isDiv' = not (isMod firstKind)
+          prefix = if isDiv' then "udiv" else "urem"
           coreName = fromString $ prefix <> "_" <> show groupIdx
 
-      if not isSigned then do
+      if not (isSigned firstKind) then do
         -- Unsigned: simple axioms, one bvudiv/bvurem per op (no abs-value needed)
         mapM (mkUnsignedAxiom coreName) ops
       else do
@@ -157,7 +168,7 @@ divModGroundAxioms props = do
                    `sp` canonAenc `sp` "(bvsub" `sp` zero `sp` canonAenc <> "))"
             absBEnc = "(ite (bvsge" `sp` canonBenc `sp` zero <> ")"
                    `sp` canonBenc `sp` "(bvsub" `sp` zero `sp` canonBenc <> "))"
-            coreEnc = if isDiv
+            coreEnc = if isDiv'
                       then "(ite (=" `sp` absBName `sp` zero <> ")" `sp` zero
                         `sp` "(bvudiv" `sp` absAName `sp` absBName <> "))"
                       else "(ite (=" `sp` absBName `sp` zero <> ")" `sp` zero
@@ -180,9 +191,9 @@ divModGroundAxioms props = do
     mkUnsignedAxiom _coreName (kind, a, b) = do
       aenc <- exprToSMTWith AbstractDivision a
       benc <- exprToSMTWith AbstractDivision b
-      let fname = if kind == 0 then "evm_bvudiv" else "evm_bvurem"
+      let fname = if kind == UDiv then "evm_bvudiv" else "evm_bvurem"
           abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
-          op = if kind == 0 then "bvudiv" else "bvurem"
+          op = if kind == UDiv then "bvudiv" else "bvurem"
           concrete = "(ite (=" `sp` benc `sp` zero <> ")" `sp` zero
                   `sp` "(" <> op `sp` aenc `sp` benc <> "))"
       pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
@@ -191,9 +202,9 @@ divModGroundAxioms props = do
     mkSignedAxiom coreName (kind, a, b) = do
       aenc <- exprToSMTWith AbstractDivision a
       benc <- exprToSMTWith AbstractDivision b
-      let fname = if kind == 1 then "evm_bvsdiv" else "evm_bvsrem"
+      let fname = if kind == USDiv then "evm_bvsdiv" else "evm_bvsrem"
           abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
-      if kind == 1 then do
+      if kind == USDiv then do
         -- SDiv: result sign depends on whether operand signs match
         let sameSign = "(=" `sp` "(bvslt" `sp` aenc `sp` zero <> ")"
                     `sp` "(bvslt" `sp` benc `sp` zero <> "))"
@@ -215,14 +226,13 @@ divModGroundAxioms props = do
 -- helps bitwuzla avoid independent reasoning about multiple bvudiv terms.
 mkCongruenceLinks :: [(Int, [DivOp])] -> [SMTEntry]
 mkCongruenceLinks indexedGroups =
-  let signedDivGroups = [(i, ops) | (i, ops) <- indexedGroups
-                        , let k = fst3 (head ops), k == 1]  -- SDiv groups
-      signedModGroups = [(i, ops) | (i, ops) <- indexedGroups
-                        , let k = fst3 (head ops), k == 3]  -- SMod groups
+  let signedDivGroups = [(i, ops) | (i, ops@((k,_,_):_)) <- indexedGroups
+                        , k == USDiv]  -- SDiv groups
+      signedModGroups = [(i, ops) | (i, ops@((k,_,_):_)) <- indexedGroups
+                        , k == USMod]  -- SMod groups
   in concatMap (mkPairLinks "udiv") (allPairs signedDivGroups)
      <> concatMap (mkPairLinks "urem") (allPairs signedModGroups)
   where
-    fst3 (a, _, _) = a
     allPairs xs = [(a, b) | a <- xs, b <- xs, fst a < fst b]
     mkPairLinks prefix' ((i, _), (j, _)) =
       let absAI = fromString $ "abs_a_" <> show i
@@ -268,15 +278,15 @@ divModShiftBoundAxioms props = do
   where
     collectDivOps :: forall a . Expr a -> [DivOp]
     collectDivOps = \case
-      Div a b  -> [(0, a, b)]
-      SDiv a b -> [(1, a, b)]
-      Mod a b  -> [(2, a, b)]
-      SMod a b -> [(3, a, b)]
+      Div a b  -> [(UDiv, a, b)]
+      SDiv a b -> [(USDiv, a, b)]
+      Mod a b  -> [(UMod, a, b)]
+      SMod a b -> [(USMod, a, b)]
       _        -> []
 
     eqDivOp :: DivOp -> DivOp -> Bool
     eqDivOp (k1, a1, b1) (k2, a2, b2) =
-      k1 == k2 && show a1 == show a2 && show b1 == show b2
+      k1 == k2 && a1 == a2 && b1 == b2
 
     -- | Extract shift amount from a dividend expression.
     -- Returns Just k if the canonical (abs-stripped) dividend is SHL(Lit k, _),
@@ -288,14 +298,13 @@ divModShiftBoundAxioms props = do
     extractShift _ = Nothing
 
     mkGroupShiftAxioms :: Int -> [DivOp] -> Err [SMTEntry]
-    mkGroupShiftAxioms groupIdx ops = do
-      let (firstKind, firstA, firstB) = head ops
-          isDiv = firstKind == 0 || firstKind == 1
-          isSigned = firstKind == 1 || firstKind == 3
-          prefix = if isDiv then "udiv" else "urem"
+    mkGroupShiftAxioms _ [] = pure []
+    mkGroupShiftAxioms groupIdx ops@((firstKind, firstA, firstB) : _) = do
+      let isDiv' = not (isMod firstKind)
+          prefix = if isDiv' then "udiv" else "urem"
           coreName = fromString $ prefix <> "_" <> show groupIdx
 
-      if not isSigned then do
+      if not (isSigned firstKind) then do
         -- Unsigned: fall back to full bvudiv axiom (these are usually fast)
         mapM (mkUnsignedAxiom coreName) ops
       else do
@@ -316,7 +325,7 @@ divModShiftBoundAxioms props = do
                     , SMTCommand $ "(assert (=" `sp` absBName `sp` absBEnc <> "))"
                     ]
         -- Generate shift bounds or fall back to bvudiv
-        let shiftBounds = case (isDiv, extractShift canonA) of
+        let shiftBounds = case (isDiv', extractShift canonA) of
               (True, Just k) ->
                 let kLit = fromString $ show k
                     threshold = "(bvshl (_ bv1 256) (_ bv" <> kLit <> " 256))"
@@ -348,9 +357,9 @@ divModShiftBoundAxioms props = do
     mkUnsignedAxiom _coreName (kind, a, b) = do
       aenc <- exprToSMTWith AbstractDivision a
       benc <- exprToSMTWith AbstractDivision b
-      let fname = if kind == 0 then "evm_bvudiv" else "evm_bvurem"
+      let fname = if kind == UDiv then "evm_bvudiv" else "evm_bvurem"
           abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
-          op = if kind == 0 then "bvudiv" else "bvurem"
+          op = if kind == UDiv then "bvudiv" else "bvurem"
           concrete = "(ite (=" `sp` benc `sp` zero <> ")" `sp` zero
                   `sp` "(" <> op `sp` aenc `sp` benc <> "))"
       pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
@@ -359,9 +368,9 @@ divModShiftBoundAxioms props = do
     mkSignedAxiom coreName (kind, a, b) = do
       aenc <- exprToSMTWith AbstractDivision a
       benc <- exprToSMTWith AbstractDivision b
-      let fname = if kind == 1 then "evm_bvsdiv" else "evm_bvsrem"
+      let fname = if kind == USDiv then "evm_bvsdiv" else "evm_bvsrem"
           abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
-      if kind == 1 then do
+      if kind == USDiv then do
         let sameSign = "(=" `sp` "(bvslt" `sp` aenc `sp` zero <> ")"
                     `sp` "(bvslt" `sp` benc `sp` zero <> "))"
             concrete = "(ite (=" `sp` benc `sp` zero <> ")" `sp` zero

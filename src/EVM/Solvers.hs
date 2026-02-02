@@ -144,8 +144,8 @@ checkSatWithProps sg props = do
         phase1 <- liftIO $ checkSat sg (Just props) smt2Abstract
         case phase1 of
           Qed -> pure Qed            -- UNSAT with abstractions => truly UNSAT (sound)
-          Error e -> pure (Error e)
-          Unknown u -> pure (Unknown u)
+          e@(Error _) -> pure e
+          u@(Unknown _) -> pure u
           Cex _ -> do
             -- Phase 2: Refine with exact definitions to validate counterexample
             when conf.debug $ liftIO $ putStrLn "Abstract div/mod: potential cex found, refining..."
