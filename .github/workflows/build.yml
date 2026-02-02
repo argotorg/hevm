@@ -226,7 +226,8 @@ jobs:
 
       - name: Download execution-spec-tests fixtures
         run: |
-          curl --retry 5 -fsSL https://github.com/ethereum/execution-spec-tests/releases/download/v5.4.0/fixtures_stable.tar.gz | tar xz
+          ARTIFACT_URL="$(grep ethereum/execution-spec-tests flake.nix | cut -f2 -d'"')"
+          curl --retry 5 -fsSL "$ARTIFACT_URL" | tar xz
 
       - uses: actions/checkout@v4
         with:
