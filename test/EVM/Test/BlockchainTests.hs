@@ -109,6 +109,9 @@ prepareTests = do
   rootDir <- liftIO rootDirectory
   liftIO $ putStrLn $ "Loading and parsing json files from ethereum-tests from " <> show rootDir
   cases <- liftIO allTestCases
+  let testCount = sum . fmap Map.size $ cases
+  let expectedTestCount = 16989
+  when (testCount < expectedTestCount) $ internalError $ "Lower than expected number of tests!\nExpected: " <> (show expectedTestCount) <> "\nGot: " <> (show testCount)
   groups <- forM (Map.toList cases) (\(f, subtests) -> testGroup (makeRelative rootDir f) <$> (process subtests))
   liftIO $ putStrLn "Loaded."
   pure $ testGroup "ethereum-tests" groups
