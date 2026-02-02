@@ -451,23 +451,23 @@ exprToSMTWith enc = \case
   Mul a b -> op2 "bvmul" a b
   Exp a b -> case a of
     Lit 0 -> do
-      benc <- exprToSMTWith enc b
+      benc <- toSMT b
       pure $ "(ite (= " <> benc `sp` zero <> " ) " <> one `sp` zero <> ")"
     Lit 1 -> pure one
     Lit 2 -> do
-        benc <- exprToSMTWith enc b
+        benc <- toSMT b
         pure $ "(bvshl " <> one `sp` benc <> ")"
     _ -> case b of
       -- b is limited below, otherwise SMT query will be huge, and eventually Haskell stack overflows
       Lit b' | b' < 1000 -> expandExpWith enc a b'
       _ -> Left $ "Cannot encode symbolic exponent into SMT. Offending symbolic value: " <> show b
   Min a b -> do
-    aenc <- exprToSMTWith enc a
-    benc <- exprToSMTWith enc b
+    aenc <- toSMT a
+    benc <- toSMT b
     pure $ "(ite (bvule " <> aenc `sp` benc <> ") " <> aenc `sp` benc <> ")"
   Max a b -> do
-    aenc <- exprToSMTWith enc a
-    benc <- exprToSMTWith enc b
+    aenc <- toSMT a
+    benc <- toSMT b
     pure $ "(max " <> aenc `sp` benc <> ")"
   LT a b -> do
     cond <- op2 "bvult" a b
@@ -513,17 +513,17 @@ exprToSMTWith enc = \case
   SMod a b -> smodOp "evm_bvsrem" a b
   -- NOTE: this needs to do the MUL at a higher precision, then MOD, then downcast
   MulMod a b c -> do
-    aExp <- exprToSMTWith enc a
-    bExp <- exprToSMTWith enc b
-    cExp <- exprToSMTWith enc c
+    aExp <- toSMT a
+    bExp <- toSMT b
+    cExp <- toSMT c
     let aLift = "((_ zero_extend 256) " <> aExp <> ")"
         bLift = "((_ zero_extend 256) " <> bExp <> ")"
         cLift = "((_ zero_extend 256) " <> cExp <> ")"
     pure $ "(ite (= " <> cExp <> " (_ bv0 256)) (_ bv0 256) ((_ extract 255 0) (bvurem (bvmul " <> aLift `sp` bLift <> ")" <> cLift <> ")))"
   AddMod a b c -> do
-    aExp <- exprToSMTWith enc a
-    bExp <- exprToSMTWith enc b
-    cExp <- exprToSMTWith enc c
+    aExp <- toSMT a
+    bExp <- toSMT b
+    cExp <- toSMT c
     let aLift = "((_ zero_extend 1) " <> aExp <> ")"
         bLift = "((_ zero_extend 1) " <> bExp <> ")"
         cLift = "((_ zero_extend 1) " <> cExp <> ")"
@@ -532,8 +532,8 @@ exprToSMTWith enc = \case
     cond <- op2 "=" a b
     pure $ "(ite " <> cond `sp` one `sp` zero <> ")"
   Keccak a -> do
-    e <- exprToSMTWith enc a
-    sz  <- exprToSMTWith enc $ Expr.bufLength a
+    e <- toSMT a
+    sz  <- toSMT $ Expr.bufLength a
     pure $ "(keccak " <> e <> " " <> sz <> ")"
 
   TxValue -> pure $ fromString "txvalue"
@@ -541,10 +541,10 @@ exprToSMTWith enc = \case
 
   Origin ->  pure "origin"
   BlockHash a -> do
-    e <- exprToSMTWith enc a
+    e <- toSMT a
     pure $ "(blockhash " <> e <> ")"
   CodeSize a -> do
-    e <- exprToSMTWith enc a
+    e <- toSMT a
     pure $ "(codesize " <> e <> ")"
   Coinbase -> pure "coinbase"
   Timestamp -> pure "timestamp"
@@ -556,16 +556,16 @@ exprToSMTWith enc = \case
 
   a@(SymAddr _) -> pure $ formatEAddr a
   WAddr(a@(SymAddr _)) -> do
-    wa <- exprToSMTWith enc a
+    wa <- toSMT a
     pure $ "((_ zero_extend 96)" `sp` wa `sp` ")"
 
   LitByte b -> pure $ byteAsBV b
   IndexWord idx w -> case idx of
     Lit n -> if n >= 0 && n < 32
              then do
-               e <- exprToSMTWith enc w
+               e <- toSMT w
                pure $ fromLazyText ("(indexWord" <> T.pack (show (into n :: Integer))) `sp` e <> ")"
-             else exprToSMTWith enc (LitByte 0)
+             else toSMT (LitByte 0)
     _ -> op2 "indexWord" idx w
   ReadByte idx src -> op2 "select" src idx
 
@@ -575,29 +575,29 @@ exprToSMTWith enc = \case
   ReadWord idx prev -> op2 "readWord" idx prev
   BufLength (AbstractBuf b) -> pure $ fromText b <> "_length"
   BufLength (GVar (BufVar n)) -> pure $ fromLazyText $ "buf" <> (T.pack . show $ n) <> "_length"
-  BufLength b -> exprToSMTWith enc (bufLength b)
+  BufLength b -> toSMT (bufLength b)
   WriteByte idx val prev -> do
-    encIdx  <- exprToSMTWith enc idx
-    encVal  <- exprToSMTWith enc val
-    encPrev <- exprToSMTWith enc prev
+    encIdx  <- toSMT idx
+    encVal  <- toSMT val
+    encPrev <- toSMT prev
     pure $ "(store " <> encPrev `sp` encIdx `sp` encVal <> ")"
   WriteWord idx val prev -> do
-    encIdx  <- exprToSMTWith enc idx
-    encVal  <- exprToSMTWith enc val
-    encPrev <- exprToSMTWith enc prev
+    encIdx  <- toSMT idx
+    encVal  <- toSMT val
+    encPrev <- toSMT prev
     pure $ "(writeWord " <> encIdx `sp` encVal `sp` encPrev <> ")"
   CopySlice srcIdx dstIdx size src dst -> do
-    srcSMT <- exprToSMTWith enc src
-    dstSMT <- exprToSMTWith enc dst
+    srcSMT <- toSMT src
+    dstSMT <- toSMT dst
     copySliceWith enc srcIdx dstIdx size srcSMT dstSMT
 
   -- we need to do a bit of processing here.
   ConcreteStore s -> encodeConcreteStore s
   AbstractStore a idx -> pure $ storeName a idx
   SStore idx val prev -> do
-    encIdx  <- exprToSMTWith enc idx
-    encVal  <- exprToSMTWith enc val
-    encPrev <- exprToSMTWith enc prev
+    encIdx  <- toSMT idx
+    encVal  <- toSMT val
+    encPrev <- toSMT prev
     pure $ "(store" `sp` encPrev `sp` encIdx `sp` encVal <> ")"
   SLoad idx store -> op2 "select" store idx
   LitAddr n -> pure $ fromLazyText $ "(_ bv" <> T.pack (show (into n :: Integer)) <> " 160)"
@@ -606,19 +606,22 @@ exprToSMTWith enc = \case
 
   a -> internalError $ "TODO: implement: " <> show a
   where
+    -- Local alias to avoid repeating 'enc' at every recursive call
+    toSMT :: Expr x -> Err Builder
+    toSMT = exprToSMTWith enc
     op1 :: Builder -> Expr x -> Err Builder
     op1 op a = do
-      e <- exprToSMTWith enc a
+      e <- toSMT a
       pure $ "(" <> op `sp` e <> ")"
     op2 :: Builder -> Expr x -> Expr y -> Err Builder
     op2 op a b = do
-       aenc <- exprToSMTWith enc a
-       benc <- exprToSMTWith enc b
+       aenc <- toSMT a
+       benc <- toSMT b
        pure $ "(" <> op `sp` aenc `sp` benc <> ")"
     op2CheckZero :: Builder -> Expr x -> Expr y -> Err Builder
     op2CheckZero op a b = do
-      aenc <- exprToSMTWith enc a
-      benc <- exprToSMTWith enc b
+      aenc <- toSMT a
+      benc <- toSMT b
       pure $ "(ite (= " <> benc <> " (_ bv0 256)) (_ bv0 256) " <>  "(" <> op `sp` aenc `sp` benc <> "))"
     divOp :: Builder -> Builder -> Expr x -> Expr y -> Err Builder
     divOp concreteOp abstractOp a b = case enc of
@@ -631,8 +634,8 @@ exprToSMTWith enc = \case
     sdivOp abstractOp a b = case enc of
       AbstractDivision -> op2 abstractOp a b
       ConcreteDivision -> do
-        aenc <- exprToSMTWith enc a
-        benc <- exprToSMTWith enc b
+        aenc <- toSMT a
+        benc <- toSMT b
         let absa = "(ite (bvsge " <> aenc `sp` zero <> ")" `sp` aenc `sp` "(bvsub" `sp` zero `sp` aenc <> "))"
             absb = "(ite (bvsge " <> benc `sp` zero <> ")" `sp` benc `sp` "(bvsub" `sp` zero `sp` benc <> "))"
             udiv = "(bvudiv" `sp` absa `sp` absb <> ")"
@@ -645,8 +648,8 @@ exprToSMTWith enc = \case
     smodOp abstractOp a b = case enc of
       AbstractDivision -> op2 abstractOp a b
       ConcreteDivision -> do
-        aenc <- exprToSMTWith enc a
-        benc <- exprToSMTWith enc b
+        aenc <- toSMT a
+        benc <- toSMT b
         let absa = "(ite (bvsge " <> aenc `sp` zero <> ")" `sp` aenc `sp` "(bvsub" `sp` zero `sp` aenc <> "))"
             absb = "(ite (bvsge " <> benc `sp` zero <> ")" `sp` benc `sp` "(bvsub" `sp` zero `sp` benc <> "))"
             urem = "(bvurem" `sp` absa `sp` absb <> ")"
