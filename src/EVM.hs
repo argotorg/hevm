@@ -1525,8 +1525,20 @@ finalize = do
       -- deposit the code from a creation tx
       creation <- use (#tx % #isCreate)
       createe  <- use (#state % #contract)
-      createeExists <- (Map.member createe) <$> use (#env % #contracts)
-      when (creation && createeExists) $
+      createeContract <- preuse (#env % #contracts % ix createe)
+      -- Check if this is a collision case (target has RuntimeCode instead of InitCode)
+      let isCollision = creation && case createeContract of
+            Just c -> case c.code of
+              InitCode _ _ -> False
+              RuntimeCode _ -> True   -- collision: existing contract has RuntimeCode
+              UnknownCode _ -> internalError "cannot determine collision with unknown code"
+            Nothing -> internalError "create transaction but no code found"
+      -- For collision: burn all gas (failed CREATE consumes all gas)
+      when isCollision $ assign (#state % #gas) initialGas
+      -- Only replace code if this is a creation tx, the contract exists,
+      -- and it has InitCode (not RuntimeCode from a collision)
+      let shouldReplaceCode = creation && not isCollision
+      when shouldReplaceCode $
         case output of
           ConcreteBuf bs -> replaceCode createe (RuntimeCode (ConcreteRuntimeCode bs))
           _ ->
@@ -2207,14 +2219,21 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
 
 -- -- * Contract creation
 
--- EIP 684
+-- EIP-684 and EIP-7610: collision if nonce != 0, code is non-empty, or storage is non-empty
 collision :: Maybe Contract -> Bool
 collision c' = case c' of
-  Just c -> c.nonce /= Just 0 || case c.code of
+  Just c -> c.nonce /= Just 0 || not (isStorageEmpty c.storage) || case c.code of
     RuntimeCode (ConcreteRuntimeCode "") -> False
     RuntimeCode (SymbolicRuntimeCode b) -> not $ null b
     _ -> True
   Nothing -> False
+  where
+    isStorageEmpty :: Expr Storage -> Bool
+    isStorageEmpty = \case
+      ConcreteStore m -> Map.null m
+      AbstractStore _ _ -> True -- empty symbolic store
+      SStore _ _ _ -> False     -- has writes, so non-empty
+      GVar _ -> internalError "unexpected global variable"
 
 create :: forall t. (?op :: Word8, ?conf::Config, VMOps t)
   => Expr EAddr -> Contract

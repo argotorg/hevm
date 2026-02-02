@@ -1,4 +1,4 @@
-module EVM.Test.BlockchainTests (prepareTests, problematicTests, Case, vmForCase, checkExpectation, allTestCases) where
+module EVM.Test.BlockchainTests (prepareTests, problematicTests, findIgnoreReason, Case, vmForCase, checkExpectation, allTestCases) where
 
 import EVM (initialContract, makeVm, setEIP4788Storage)
 import EVM.Concrete qualified as EVM
@@ -23,14 +23,15 @@ import Data.Aeson qualified as JSON
 import Data.Aeson.Types qualified as JSON
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as Lazy
+import Data.List (isPrefixOf)
 import Data.Map (Map)
 import Data.Map qualified as Map
-import Data.Maybe (fromJust, fromMaybe, isNothing, isJust)
+import Data.Maybe (fromJust, fromMaybe, isNothing)
 import Data.Word (Word64)
 import GHC.Generics (Generic)
 import System.Environment (getEnv)
 import System.FilePath.Find qualified as Find
-import System.FilePath.Posix (makeRelative, (</>))
+import System.FilePath.Posix (makeRelative)
 import Witch (into, unsafeInto)
 import Witherable (Filterable, catMaybes)
 
@@ -39,6 +40,12 @@ import Test.Tasty.ExpectedFailure
 import Test.Tasty.HUnit
 
 data Which = Pre | Post
+
+-- EIP-4895: Withdrawal from beacon chain
+data Withdrawal = Withdrawal
+  { wAddress :: Addr
+  , wAmount  :: W256  -- amount in Gwei
+  } deriving (Show, Eq)
 
 data Block = Block
   { coinbase    :: Addr
@@ -50,6 +57,7 @@ data Block = Block
   , timestamp   :: W256
   , txs         :: [Transaction]
   , beaconRoot  :: W256
+  , withdrawals :: [Withdrawal]
   } deriving Show
 
 data BlockchainContract = BlockchainContract
@@ -82,9 +90,10 @@ makeContract (BlockchainContract (ByteStringS code) nonce balance storage) =
 type BlockchainContracts = Map Addr BlockchainContract
 
 data Case = Case
-  { vmOpts      :: VMOpts Concrete
+  { vmOpts          :: VMOpts Concrete
   , checkContracts  :: BlockchainContracts
   , testExpectation :: BlockchainContracts
+  , caseWithdrawals :: [Withdrawal]
   } deriving Show
 
 data BlockchainCase = BlockchainCase
@@ -113,15 +122,17 @@ prepareTests = do
       pure $ testCase' name exec
     testCase' :: String -> Assertion -> TestTree
     testCase' name assertion =
-      case Map.lookup name problematicTests of
-        Just f -> f (testCase name assertion)
+      case findIgnoreReason name of
+        Just reason -> ignoreTestBecause reason (testCase name assertion)
         Nothing -> testCase name assertion
 
+-- | Find if a test name matches any problematic test prefix
+findIgnoreReason :: String -> Maybe String
+findIgnoreReason name = lookup True [(prefix `isPrefixOf` name, reason) | (prefix, reason) <- problematicTests]
+
 rootDirectory :: IO FilePath
-rootDirectory = do
-  repo <- getEnv "HEVM_ETHEREUM_TESTS_REPO"
-  let testsDir = "BlockchainTests/GeneralStateTests"
-  pure $ repo </> testsDir
+rootDirectory = getEnv "HEVM_ETHEREUM_TESTS_REPO"
+  -- Env var now points directly to the blockchain_tests directory
 
 collectJsonFiles :: FilePath -> IO [FilePath]
 collectJsonFiles rootDir = Find.find Find.always (Find.extension Find.==? ".json") rootDir
@@ -132,50 +143,49 @@ allTestCases = do
   jsons <- collectJsonFiles root
   cases <- forM jsons (\fname -> do
       fContents <- BS.readFile fname
-      let parsed = case (parseBCSuite (Lazy.fromStrict fContents)) of
-                    Left "No cases to check." -> mempty
-                    Left _err -> mempty -- TODO: This should be an error
-                    Right allTests -> allTests
+      parsed <- case (parseBCSuite (Lazy.fromStrict fContents)) of
+                    Left "No cases to check." -> pure mempty
+                    Left err -> do
+                      putStrLn $ "Warning: Failed to parse " ++ fname ++ ": " ++ err
+                      pure mempty
+                    Right allTests -> pure allTests
       pure (fname, parsed)
     )
   pure $ Map.fromList cases
 
-problematicTests :: Map String (TestTree -> TestTree)
-problematicTests = Map.fromList
-  [ ("loopMul_d0g0v0_Cancun", ignoreTestBecause "hevm is too slow")
-  , ("loopMul_d1g0v0_Cancun", ignoreTestBecause "hevm is too slow")
-  , ("loopMul_d2g0v0_Cancun", ignoreTestBecause "hevm is too slow")
-  , ("CALLBlake2f_MaxRounds_d0g0v0_Cancun", ignoreTestBecause "very slow, bypasses timeout due time spent in FFI")
-
-  , ("15_tstoreCannotBeDosd_d0g0v0_Cancun", ignoreTestBecause "slow test")
-  , ("21_tstoreCannotBeDosdOOO_d0g0v0_Cancun", ignoreTestBecause "slow test")
-
-  -- TODO: implement point evaluation, 0xa precompile, EIP-4844, Cancun
-  , ("idPrecomps_d9g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d117g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d12g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d135g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d153g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d171g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d189g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d207g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d225g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d243g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d261g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d279g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d27g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d297g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d315g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d333g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d351g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d369g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d387g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d45g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d63g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d81g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d99g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("makeMoney_d0g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("failed_tx_xcf416c53_d0g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
+-- | Tests that are known to fail or are too slow to run in CI.
+-- Uses prefix matching: any test name starting with a prefix will be ignored.
+-- Test names are from the execution-spec-tests fixtures format.
+problematicTests :: [(String, String)]
+problematicTests =
+  [ -- EIP-4844 point evaluation precompile (0x0A) not implemented
+    ("tests/cancun/eip4844_blobs/test_point_evaluation_precompile.py::", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/cancun/eip4844_blobs/test_point_evaluation_precompile_gas.py::", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+    -- Other tests that invoke the 0x0A precompile
+  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Cancun-address_0x000000000000000000000000000000000000000a", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stSpecialTest/failed_tx_xcf416c53_ParisFiller.json::", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-11]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-13]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-24]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-28]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-39]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-42]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-53]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-64]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-75]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-86]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-97]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-108]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-119]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-130]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-141]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-152]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-163]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-174]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-185]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-196]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-207]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::precompsEIP2929Cancun[fork_Cancun-blockchain_test_from_state_test-yes-218]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
   ]
 
 
@@ -185,8 +195,32 @@ runVMTest fetcher x = do
   vm0 <- liftIO $ vmForCase x
   result <- EVM.Stepper.interpret fetcher vm0 EVM.Stepper.runFully
   writeTrace result
-  let maybeReason = checkExpectation x result
+  -- Apply EIP-4895 withdrawals after transaction execution
+  let resultWithWithdrawals = applyWithdrawals x.caseWithdrawals result
+  let maybeReason = checkExpectation x resultWithWithdrawals
   liftIO $ forM_ maybeReason (liftIO >=> assertFailure)
+
+-- | Apply EIP-4895 withdrawals to VM state
+-- Withdrawals credit balance to addresses (amount is in Gwei, multiply by 10^9 for Wei)
+applyWithdrawals :: [Withdrawal] -> VM Concrete -> VM Concrete
+applyWithdrawals ws vm = foldl applyWithdrawal vm ws
+  where
+    applyWithdrawal :: VM Concrete -> Withdrawal -> VM Concrete
+    applyWithdrawal vm' (Withdrawal addr amount) =
+      let weiAmount = Lit (amount * 1000000000)  -- Gwei to Wei
+          addrExpr = LitAddr addr
+          contracts' = Map.alter (creditBalance weiAmount) addrExpr vm'.env.contracts
+      in vm' { env = vm'.env { contracts = contracts' } }
+
+    creditBalance :: Expr EWord -> Maybe Contract -> Maybe Contract
+    creditBalance weiAmount Nothing =
+      -- Create new account with just the withdrawal balance
+      Just $ (EVM.initialContract (RuntimeCode (ConcreteRuntimeCode "")))
+        { balance = weiAmount }
+    creditBalance (Lit weiAmount) (Just c) =
+      -- Add to existing balance
+      Just $ c { balance = Lit (forceLit c.balance + weiAmount) }
+    creditBalance _ (Just c) = Just c  -- shouldn't happen in concrete execution
 
 checkExpectation :: Case -> VM Concrete -> Maybe (IO String)
 checkExpectation x vm = let (okState, okBal, okNonce, okStor, okCode) = checkExpectedContracts vm x.testExpectation in
@@ -280,6 +314,14 @@ instance FromJSON BlockchainCase where
   parseJSON invalid =
     JSON.typeMismatch "GeneralState test case" invalid
 
+instance FromJSON Withdrawal where
+  parseJSON (JSON.Object v) = do
+    addr   <- addrField v "address"
+    amount <- wordField v "amount"
+    pure $ Withdrawal addr amount
+  parseJSON invalid =
+    JSON.typeMismatch "Withdrawal" invalid
+
 instance FromJSON Block where
   parseJSON (JSON.Object v) = do
     v'         <- v .: "blockHeader"
@@ -292,9 +334,11 @@ instance FromJSON Block where
     timestamp  <- wordField v' "timestamp"
     mixHash    <- wordField v' "mixHash"
     beaconRoot <- fmap read <$> v' .:? "parentBeaconBlockRoot"
+    ws         <- v .:? "withdrawals"
     pure $ Block { coinbase, difficulty, mixHash, gasLimit
                  , baseFee = fromMaybe 0 baseFee, number, timestamp
                  , txs, beaconRoot = fromMaybe 0 beaconRoot
+                 , withdrawals = fromMaybe [] ws
                  }
   parseJSON invalid =
     JSON.typeMismatch "Block" invalid
@@ -305,7 +349,7 @@ parseContracts w v = v .: which >>= parseJSON
           Pre  -> "pre"
           Post -> "postState"
 
-parseBCSuite :: Lazy.ByteString-> Either String (Map String Case)
+parseBCSuite :: Lazy.ByteString -> Either String (Map String Case)
 parseBCSuite x = case (JSON.eitherDecode' x) :: Either String (Map String BlockchainCase) of
   Left e        -> Left e
   Right bcCases -> let allCases = fromBlockchainCase <$> bcCases
@@ -328,11 +372,11 @@ data BlockchainError
   | InvalidTx
   | OldNetwork
   | FailedCreate
+  | UnsupportedTxType
   deriving Show
 
 errorFatal :: BlockchainError -> Bool
-errorFatal TooManyBlocks = True
-errorFatal TooManyTxs = True
+errorFatal FailedCreate = True
 errorFatal SignatureUnverified = True
 errorFatal InvalidTx = True
 errorFatal _ = False
@@ -341,6 +385,7 @@ fromBlockchainCase :: BlockchainCase -> Either BlockchainError Case
 fromBlockchainCase (BlockchainCase blocks preState postState network) =
   case (blocks, network) of
     ([block], "Cancun") -> case block.txs of
+      [tx] | tx.txtype == EIP4844Transaction || tx.txtype == EIP7702Transaction -> Left UnsupportedTxType -- TODO EIP4844 / EIP7702
       [tx] -> fromBlockchainCase' block tx preState postState
       []        -> Left NoTxs
       _         -> Left TooManyTxs
@@ -389,6 +434,7 @@ fromBlockchainCase' block tx preState postState =
        })
       checkState
       postState
+      block.withdrawals
         where
           toAddr = maybe (EVM.createAddress origin (fromJust senderNonce)) LitAddr (tx.toAddr)
           senderNonce = (.nonce) <$> Map.lookup origin preState
@@ -426,22 +472,11 @@ maxBaseFee tx =
 
 checkTx :: Transaction -> Block -> BlockchainContracts -> Maybe (BlockchainContracts)
 checkTx tx block prestate = do
-  origin <- sender tx
   validateTx tx block prestate
-  if (isJust tx.toAddr) then pure prestate
-  else
-    let senderNonce = (.nonce) <$> Map.lookup origin prestate
-        addr  = case EVM.createAddress origin (fromJust senderNonce) of
-                  (LitAddr a) -> a
-                  _ -> internalError "Cannot happen"
-        freshContract = BlockchainContract (ByteStringS "") 0 0 mempty
-        (BlockchainContract (ByteStringS b) prevNonce _ _) = (fromMaybe freshContract $ Map.lookup addr prestate)
-        nonEmptyAccount = not (BS.null b)
-        badNonce = prevNonce /= 0
-        initCodeSizeExceeded = BS.length tx.txdata > (unsafeInto maxCodeSize * 2)
-    in
-    if (badNonce || nonEmptyAccount || initCodeSizeExceeded) then mzero
-    else pure prestate
+  let initCodeSizeExceeded = isNothing tx.toAddr
+        && BS.length tx.txdata > (unsafeInto maxCodeSize * 2)
+  if initCodeSizeExceeded then mzero
+  else pure prestate
 
 validateTx :: Transaction -> Block -> BlockchainContracts -> Maybe ()
 validateTx tx block cs = do
