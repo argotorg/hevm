@@ -15,6 +15,7 @@ import EVM.Expr (readStorage, concStoreContains, writeStorage, readByte, readWor
   writeByte, bufLength, indexWord, readBytes, copySlice, wordToAddr, maybeLitByteSimp, maybeLitWordSimp, maybeLitAddrSimp)
 import EVM.Expr qualified as Expr
 import EVM.FeeSchedule (FeeSchedule (..))
+import EVM.FeeSchedule qualified as Fees (feeSchedule)
 import EVM.Op
 import EVM.Precompiled qualified
 import EVM.Solidity
@@ -65,6 +66,37 @@ import Witch (into, tryFrom, unsafeInto, tryInto)
 import Crypto.Hash (Digest, SHA256, RIPEMD160)
 import Crypto.Hash qualified as Crypto
 import Crypto.Number.ModArithmetic (expFast)
+
+defaultVMOpts :: VMOps t => VMOpts t
+defaultVMOpts = VMOpts
+  { contract       = emptyContract
+  , otherContracts = []
+  , calldata       = mempty
+  , value          = Lit 0
+  , address        = LitAddr 0xacab
+  , caller         = LitAddr 0
+  , origin         = LitAddr 0
+  , gas            = toGas maxBound
+  , gaslimit       = maxBound
+  , baseFee        = 0
+  , priorityFee    = 0
+  , coinbase       = LitAddr 0
+  , number         = Lit 0
+  , timestamp      = Lit 0
+  , blockGaslimit  = maxBound
+  , gasprice       = 0
+  , maxCodeSize    = 0xffffffff
+  , prevRandao     = 0
+  , schedule       = Fees.feeSchedule
+  , chainId        = 1
+  , create         = False
+  , baseState      = EmptyBase
+  , txAccessList   = mempty
+  , allowFFI       = False
+  , freshAddresses = 0
+  , beaconRoot     = 0
+  , parentHash     = 0
+  }
 
 blankState :: VMOps t => ST RealWorld (FrameState t)
 blankState = do

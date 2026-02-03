@@ -10,7 +10,7 @@ import Data.Map qualified as Map
 import Data.Text (Text)
 import Data.Vector qualified as V
 
-import EVM (makeVm, symbolify)
+import EVM (makeVm, symbolify, defaultVMOpts)
 import EVM.ABI
 import EVM.Fetch
 import EVM.SMT
@@ -138,34 +138,20 @@ vmFromRpc sess blockNum calldata callvalue caller address = do
     Nothing -> internalError "could not fetch block"
     Just b -> pure b
 
-  liftIO $ stToIO (makeVm $ VMOpts
+  liftIO $ stToIO (makeVm $ defaultVMOpts
     { contract       = makeContractFromRPC ctrct
-    , otherContracts = []
     , calldata       = calldata
     , value          = callvalue
     , address        = LitAddr address
     , caller         = caller
-    , origin         = LitAddr 0xacab
-    , gas            = 0xffffffffffffffff
-    , gaslimit       = 0xffffffffffffffff
     , baseFee        = blk.baseFee
-    , priorityFee    = 0
     , coinbase       = blk.coinbase
     , number         = blk.number
     , timestamp      = blk.timestamp
     , blockGaslimit  = blk.gaslimit
-    , gasprice       = 0
     , maxCodeSize    = blk.maxCodeSize
     , prevRandao     = blk.prevRandao
     , schedule       = blk.schedule
-    , chainId        = 1
-    , create         = False
-    , baseState      = EmptyBase
-    , txAccessList   = mempty
-    , allowFFI       = False
-    , freshAddresses = 0
-    , beaconRoot     = 0
-    , parentHash     = 0
     })
 
 testRpc :: Text

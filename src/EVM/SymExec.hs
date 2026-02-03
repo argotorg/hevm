@@ -48,13 +48,12 @@ import Options.Generic (ParseField, ParseFields, ParseRecord)
 import Text.Printf (printf)
 import Witch (into, unsafeInto)
 
-import EVM (makeVm, abstractContract, initialContract, getCodeLocation, isValidJumpDest)
+import EVM (makeVm, abstractContract, initialContract, getCodeLocation, isValidJumpDest, defaultVMOpts)
 import EVM.Exec (exec)
 import EVM.Fetch qualified as Fetch
 import EVM.ABI
 import EVM.Effects
 import EVM.Expr qualified as Expr
-import EVM.FeeSchedule (feeSchedule)
 import EVM.Format (formatExpr, formatPartial, formatPartialDetailed, showVal, indent, formatBinary, formatProp, formatState, formatError)
 import EVM.SMT qualified as SMT
 import EVM.Solvers (SolverGroup, checkSatWithProps)
@@ -234,34 +233,16 @@ loadEmptySymVM
   -> (Expr Buf, [Prop])
   -> ST RealWorld (VM Symbolic)
 loadEmptySymVM x callvalue cd =
-  (makeVm $ VMOpts
+  (makeVm $ defaultVMOpts
     { contract = initialContract x
-    , otherContracts = []
     , calldata = cd
     , value = callvalue
-    , baseState = EmptyBase
     , address = SymAddr "entrypoint"
     , caller = SymAddr "caller"
     , origin = SymAddr "origin"
     , coinbase = SymAddr "coinbase"
-    , number = Lit 0
-    , timestamp = Lit 0
     , blockGaslimit = 0
-    , gasprice = 0
     , prevRandao = 42069
-    , gas = ()
-    , gaslimit = 0xffffffffffffffff
-    , baseFee = 0
-    , priorityFee = 0
-    , maxCodeSize = 0xffffffff
-    , schedule = feeSchedule
-    , chainId = 1
-    , create = False
-    , txAccessList = mempty
-    , allowFFI = False
-    , freshAddresses = 0
-    , beaconRoot = 0
-    , parentHash = 0
     })
 
 -- Creates a symbolic VM that has symbolic storage, unlike loadEmptySymVM
@@ -272,9 +253,8 @@ loadSymVM
   -> Bool
   -> ST RealWorld (VM Symbolic)
 loadSymVM x callvalue cd create =
-  (makeVm $ VMOpts
+  (makeVm $ defaultVMOpts
     { contract = if create then initialContract x else abstractContract x (SymAddr "entrypoint")
-    , otherContracts = []
     , calldata = cd
     , value = callvalue
     , baseState = AbstractBase
@@ -282,24 +262,9 @@ loadSymVM x callvalue cd create =
     , caller = SymAddr "caller"
     , origin = SymAddr "origin"
     , coinbase = SymAddr "coinbase"
-    , number = Lit 0
-    , timestamp = Lit 0
     , blockGaslimit = 0
-    , gasprice = 0
     , prevRandao = 42069
-    , gas = ()
-    , gaslimit = 0xffffffffffffffff
-    , baseFee = 0
-    , priorityFee = 0
-    , maxCodeSize = 0xffffffff
-    , schedule = feeSchedule
-    , chainId = 1
     , create = create
-    , txAccessList = mempty
-    , allowFFI = False
-    , freshAddresses = 0
-    , beaconRoot = 0
-    , parentHash = 0
     })
 
 -- freezes any mutable refs, making it safe to share between threads

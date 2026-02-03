@@ -39,12 +39,11 @@ import Data.List.Split (splitOn)
 import Text.Read (readMaybe)
 import JSONL (jsonlBuilder, jsonLine)
 
-import EVM (initialContract, abstractContract, makeVm)
+import EVM (initialContract, abstractContract, makeVm, defaultVMOpts)
 import EVM.ABI (Sig(..))
 import EVM.Dapp (dappInfo, DappInfo, emptyDapp)
 import EVM.Expr qualified as Expr
 import EVM.Concrete qualified as Concrete
-import EVM.FeeSchedule (feeSchedule)
 import EVM.Fetch qualified as Fetch
 import EVM.Format (hexByteString, strip0x, formatExpr, indent)
 import EVM.Solidity
@@ -708,9 +707,8 @@ vmFromCommand cOpts cExecOpts cFileOpts execOpts sess = do
                   then addr (.address) (Concrete.createAddress (fromJust $ maybeLitAddrSimp origin) (W64 $ word64 (.nonce) 0))
                   else addr (.address) (LitAddr 0xacab)
 
-        vm0 baseFee miner ts blockNum prevRan c = makeVm $ VMOpts
+        vm0 baseFee miner ts blockNum prevRan c = makeVm $ (defaultVMOpts @Concrete)
           { contract       = c
-          , otherContracts = []
           , calldata       = (calldata, [])
           , value          = Lit val
           , address        = address
@@ -727,15 +725,8 @@ vmFromCommand cOpts cExecOpts cFileOpts execOpts sess = do
           , gasprice       = word (.gasprice) 0
           , maxCodeSize    = word (.maxcodesize) 0xffffffff
           , prevRandao     = word (.prevRandao) prevRan
-          , schedule       = feeSchedule
           , chainId        = word (.chainid) 1
           , create         = (.create) execOpts
-          , baseState      = EmptyBase
-          , txAccessList   = mempty -- TODO: support me soon
-          , allowFFI       = False
-          , freshAddresses = 0
-          , beaconRoot     = 0
-          , parentHash     = 0
           }
         word f def = fromMaybe def (f cExecOpts)
         word64 f def = fromMaybe def (f cExecOpts)
@@ -815,7 +806,7 @@ symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
     address = eaddr (.address) (SymAddr "entrypoint")
     originAddr = eaddr (.origin) (SymAddr "origin")
     originContr = abstractContract (RuntimeCode (SymbolicRuntimeCode mempty)) originAddr
-    vm0 baseFee miner ts blockNum prevRan cd callvalue caller c baseState = makeVm $ VMOpts
+    vm0 baseFee miner ts blockNum prevRan cd callvalue caller c baseState = makeVm $ defaultVMOpts
       { contract       = c
       , otherContracts = [(originAddr, originContr)]
       , calldata       = cd
@@ -823,7 +814,6 @@ symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
       , address        = address
       , caller         = caller
       , origin         = origin
-      , gas            = ()
       , gaslimit       = word64 (.gaslimit) 0xffffffffffffffff
       , baseFee        = baseFee
       , priorityFee    = word (.priorityFee) 0
@@ -834,15 +824,9 @@ symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
       , gasprice       = word (.gasprice) 0
       , maxCodeSize    = word (.maxcodesize) 0xffffffff
       , prevRandao     = word (.prevRandao) prevRan
-      , schedule       = feeSchedule
       , chainId        = word (.chainid) 1
       , create         = (.create) sOpts
       , baseState      = baseState
-      , txAccessList   = mempty
-      , allowFFI       = False
-      , freshAddresses = 0
-      , beaconRoot     = 0
-      , parentHash     = 0
       }
     word f def = fromMaybe def (f cExecOpts)
     word64 f def = fromMaybe def (f cExecOpts)

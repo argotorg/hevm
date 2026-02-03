@@ -44,7 +44,7 @@ import Test.Tasty.HUnit (assertEqual, testCase, assertBool)
 import Test.Tasty.QuickCheck hiding (Failure, Success)
 import Witch (into, unsafeInto)
 
-import EVM (makeVm, initialContract, symbolify)
+import EVM (makeVm, initialContract, symbolify, defaultVMOpts)
 import EVM.Assembler (assemble)
 import EVM.Expr qualified as Expr
 import EVM.Exec (ethrunAddress)
@@ -401,12 +401,10 @@ vmForRuntimeCode :: ByteString -> Expr Buf -> EVMToolEnv -> EVMToolAlloc -> EVM.
 vmForRuntimeCode runtimecode calldata' evmToolEnv alloc txn fromAddr toAddress =
   let contract = initialContract (RuntimeCode (ConcreteRuntimeCode runtimecode))
                  & set #balance (Lit alloc.balance)
-  in (makeVm $ VMOpts
+  in (makeVm $ (defaultVMOpts @Concrete)
     { contract = contract
-    , otherContracts = []
     , calldata = (calldata', [])
     , value = Lit txn.value
-    , baseState = EmptyBase
     , address =  toAddress
     , caller = fromAddr
     , origin = fromAddr
@@ -423,12 +421,6 @@ vmForRuntimeCode runtimecode calldata' evmToolEnv alloc txn fromAddr toAddress =
     , maxCodeSize = evmToolEnv.maxCodeSize
     , schedule = evmToolEnv.schedule
     , chainId = txn.chainId
-    , create = False
-    , txAccessList = mempty
-    , allowFFI = False
-    , freshAddresses = 0
-    , beaconRoot = 0
-    , parentHash = 0
     }) <&> set (#env % #contracts % at (LitAddr ethrunAddress))
              (Just (initialContract (RuntimeCode (ConcreteRuntimeCode BS.empty))))
        <&> set (#state % #calldata) calldata'

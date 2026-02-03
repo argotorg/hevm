@@ -11,7 +11,6 @@ import EVM.Dapp
 import EVM.Effects
 import EVM.Exec
 import EVM.Expr qualified as Expr
-import EVM.FeeSchedule (feeSchedule)
 import EVM.Fetch qualified as Fetch
 import EVM.Format
 import EVM.Solidity
@@ -524,13 +523,10 @@ makeTxCall params (cd, cdProps) = do
   vm <- get
   put $ initTx vm
 
-initialUnitTestVm :: VMOps t => UnitTestOptions -> SolcContract -> ST RealWorld (VM t)
+initialUnitTestVm :: forall t. VMOps t => UnitTestOptions -> SolcContract -> ST RealWorld (VM t)
 initialUnitTestVm (UnitTestOptions {..}) theContract = do
-  vm <- makeVm $ VMOpts
+  vm <- makeVm $ (defaultVMOpts @t)
            { contract = initialContract (InitCode theContract.creationCode mempty)
-           , otherContracts = []
-           , calldata = mempty
-           , value = Lit 0
            , address = testParams.address
            , caller = testParams.caller
            , origin = testParams.origin
@@ -545,15 +541,9 @@ initialUnitTestVm (UnitTestOptions {..}) theContract = do
            , priorityFee = testParams.priorityFee
            , maxCodeSize = testParams.maxCodeSize
            , prevRandao = testParams.prevrandao
-           , schedule = feeSchedule
            , chainId = testParams.chainId
            , create = True
-           , baseState = EmptyBase
-           , txAccessList = mempty -- TODO: support unit test access lists???
            , allowFFI = ffiAllowed
-           , freshAddresses = 0
-           , beaconRoot = 0
-           , parentHash = 0
            }
   let creator =
         initialContract (RuntimeCode (ConcreteRuntimeCode ""))

@@ -14,14 +14,13 @@ import Data.Vector qualified as V
 
 import EVM.ABI
 import EVM.Effects qualified as Effects
-import EVM.FeeSchedule
 import EVM.Fetch qualified as Fetch
 import EVM.Solidity (solcRuntime)
 import EVM.Solvers (defMemLimit)
 import EVM.Stepper qualified
 import EVM.Transaction (initTx)
 import EVM.Types
-import EVM (initialContract, makeVm)
+import EVM (initialContract, makeVm, defaultVMOpts)
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -42,34 +41,9 @@ executeSingleCall sourceCode contractName functionName abiArgs = do
   let functionSignature = functionName <> "(" <> T.intercalate "," (map (abiTypeSolidity . abiValueType) abiArgs) <> ")"
   let callData = abiMethod functionSignature (AbiTuple $ V.fromList abiArgs)
   let contractWithCode = initialContract (RuntimeCode $ ConcreteRuntimeCode runtimeCode)
-  initialVM <- stToIO $ makeVm $ VMOpts
-    { contract     = contractWithCode
-    , otherContracts = []
-    , calldata       = (ConcreteBuf callData, [])
-    , value          = Lit 0
-    , address        = (LitAddr 0xacab)
-    , caller         = (LitAddr 0)
-    , origin         = (LitAddr 0)
-    , gas            = maxBound
-    , baseFee        = 0
-    , priorityFee    = 0
-    , gaslimit       = maxBound
-    , coinbase       = (LitAddr 0)
-    , number         = Lit 0
-    , timestamp      = Lit 0
-    , blockGaslimit  = maxBound
-    , gasprice       = 0
-    , maxCodeSize    = maxBound
-    , prevRandao     = 0
-    , schedule       = feeSchedule
-    , chainId        = 1
-    , create         = False
-    , baseState      = EmptyBase
-    , txAccessList   = mempty
-    , allowFFI       = False
-    , freshAddresses = 0
-    , beaconRoot     = 0
-    , parentHash     = 0
+  initialVM <- stToIO $ makeVm $ defaultVMOpts
+    { contract = contractWithCode
+    , calldata = (ConcreteBuf callData, [])
     }
   let withInitializedTransactionVM = EVM.Transaction.initTx initialVM
   let fetcher = Fetch.zero 0 Nothing defMemLimit
