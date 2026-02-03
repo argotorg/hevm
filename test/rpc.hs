@@ -169,7 +169,7 @@ vmFromRpc sess blockNum calldata callvalue caller address = do
     })
 
 testRpc :: Text
-testRpc = "https://eth-mainnet.alchemyapi.io/v2/vpeKFsEF6PHifHzdtcwXSDbhV3ym5Ro4"
+testRpc = "https://eth-mainnet.g.alchemy.com/v2/vpeKFsEF6PHifHzdtcwXSDbhV3ym5Ro4"
 
 testBlockNumber :: BlockNumber
 testBlockNumber = BlockNumber 16198552
