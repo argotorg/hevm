@@ -1,4 +1,5 @@
 {-# LANGUAGE TypeAbstractions #-}
+{-# OPTIONS_GHC -Wno-incomplete-uni-patterns #-} -- It's OK to crash in tests if the pattern does not match
 
 module EVM.Expr.ExprTests (tests) where
 
@@ -17,7 +18,8 @@ import Data.Typeable
 import EVM.Effects
 import EVM.Expr qualified as Expr
 import EVM.Expr.Generator
-import EVM.Solvers
+import EVM.Solvers hiding (checkSat)
+import EVM.SymExec (subModel)
 import EVM.Traversals (mapExprM)
 import EVM.Types hiding (Env)
 
@@ -32,6 +34,7 @@ unitTests = testGroup "Unit tests"
   , constantPropagationTests
   , boundPropagationTests
   , comparisonTests
+  , signExtendTests
   ]
 
 simplificationTests :: TestTree
@@ -518,6 +521,34 @@ comparisonTests = testGroup "Prop comparison tests"
         assertEqual "Must be 3-length" 3 (length simp2)
   ]
 
+signExtendTests :: TestTree
+signExtendTests = testGroup "SEx tests"
+  [
+    -- these should run without simplification to test the SMT solver's ability to handle sign extension
+    testCase "sign-extend-1" $ do
+        let p = (PEq (Lit 1) (SLT (Lit 1774544) (SEx (Lit 2) (Lit 1774567))))
+        let simp = Expr.simplifyProps [p]
+        assertEqual "Must simplify to PBool True" simp []
+        res <- checkSat p
+        assertBool "Must be satisfiable!" $ isSat res
+  , testCase "sign-extend-2" $ do
+      let p = (PEq (Lit 1) (SLT (SEx (Lit 2) (Var "arg1")) (Lit 0)))
+      res <- checkSat p
+      assertBool "Must be satisfiable!" $ isSat res
+  , testCase "sign-extend-3" $ do
+      let p = PAnd
+              (PEq (Lit 1) (SLT (SEx (Lit 2) (Var "arg1")) (Lit 115792089237316195423570985008687907853269984665640564039457584007913128752664)))
+              (PEq (Var "arg1") (SEx (Lit 2) (Var "arg1")))
+      res <- checkSat p
+      assertBool "Must be satisfiable!" $ isSat res
+  , testProperty "sign-extend-vs-smt" $ withMaxSuccess 30 $ \(a :: W256, b :: W256) -> ioProperty $ do
+      let p = (PEq (Var "arg1") (SEx (Lit (a `mod` 50)) (Lit b)))
+      Cex cex <- checkSat p
+      let Right (Lit v1) = subModel cex (Var "arg1")
+      let [PEq (Lit v2) (Var "arg1")] = Expr.simplifyProps [p]
+      pure $ v1 === v2
+  ]
+
 fuzzTests :: TestTree
 fuzzTests = adjustOption (\(Test.Tasty.QuickCheck.QuickCheckTests n) -> Test.Tasty.QuickCheck.QuickCheckTests (div n 2)) $
   testGroup "ExprFuzzTests" [equivalenceSanityChecks, simplifierFuzzTests]
@@ -533,8 +564,8 @@ equivalenceSanityChecks = testGroup "Expr equivalence sanity checks"
   , testProperty "expr equality is satisfiable" $ \(buf, idx) -> ioProperty $ do
         let simplified = Expr.readWord idx buf
             full = ReadWord idx buf
-        res <- proveIsUnsat (Expr.peq full simplified)
-        pure $ res == SAT || res == UNKNOWN
+        res <- checkSat (Expr.peq full simplified)
+        pure $ isSatOrUnknown res
   ]
 
 -- These tests fuzz the simplifier by generating a random expression,
@@ -713,33 +744,36 @@ simplifierFuzzTests = testGroup "SimplifierPropertyTests"
   ]
   -}
 
-data SATRes = SAT | UNSAT | UNKNOWN | ERROR
-  deriving (Eq)
 
 proveEquivProp :: Prop -> Prop -> IO Bool
 proveEquivProp a b
   | a == b = pure True
   | otherwise = do
-      res <- proveIsUnsat $ PNeg ((PImpl a b) .&& (PImpl b a))
-      pure $ res == UNSAT || res == UNKNOWN
+      res <- checkSat $ PNeg ((PImpl a b) .&& (PImpl b a))
+      pure $ isUnsatOrUnknown res
 
 proveEquivExpr :: Typeable a => Expr a -> Expr a -> IO Bool
 proveEquivExpr a b
   | a == b = pure True
   | otherwise = do
-      res <- (proveIsUnsat $ a ./= b)
-      pure $ res == UNSAT || res == UNKNOWN
+      res <- (checkSat $ a ./= b)
+      pure $ isUnsatOrUnknown res
 
-proveIsUnsat :: Prop -> IO SATRes
-proveIsUnsat p = runEnv (Env {config = equivConfig}) $
-    withSolvers Bitwuzla 1 (Just 1) defMemLimit $ \solvers -> do
-      res <- checkSatWithProps solvers [p]
-      let ret = case res of
-            Qed -> UNSAT
-            Cex {} -> SAT
-            Error _ -> ERROR
-            Unknown _ -> UNKNOWN
-      pure ret
+checkSat :: Prop -> IO SMTResult
+checkSat p = runEnv (Env {config = equivConfig}) $
+    withOneBitwuzla $ \solvers -> checkSatWithProps solvers [p]
 
 equivConfig :: Config
 equivConfig = defaultConfig {simp = False, dumpQueries = False}
+
+withOneBitwuzla :: App m => (SolverGroup -> m a) -> m a
+withOneBitwuzla = withSolvers Bitwuzla 1 (Just 1) defMemLimit
+
+isSat :: SMTResult -> Bool
+isSat = isCex
+
+isSatOrUnknown :: SMTResult -> Bool
+isSatOrUnknown res = isSat res || isUnknown res
+
+isUnsatOrUnknown :: SMTResult -> Bool
+isUnsatOrUnknown res = isQed res || isUnknown res

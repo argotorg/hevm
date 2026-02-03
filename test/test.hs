@@ -4114,55 +4114,6 @@ tests = testGroup "hevm"
       (_, [Cex (_, ctr1)]) <- withCVC5Solver $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
       putStrLnM  $ "expected counterexamples found: " <> show ctr1
   ]
-  , testGroup "prop-and-expr-properties"
-  [
-    -- we run these without the simplifier inside `checkSatWithProps`, so
-    -- we can test the SMT solver's ability to handle sign extension
-    testNoSimplify "sign-extend-1" $ do
-        let p = (PEq (Lit 1) (SLT (Lit 1774544) (SEx (Lit 2) (Lit 1774567))))
-        let simp = Expr.simplifyProps [p]
-        assertEqualM "Must simplify to PBool True" simp []
-        withDefaultSolver $ \s -> do
-          res <- checkSatWithProps s [p]
-          _ <- case res of
-            Cex c -> pure c
-            _ -> liftIO $ assertFailure "Must be satisfiable!"
-          pure ()
-    , testNoSimplify "sign-extend-2" $ do
-      let p = (PEq (Lit 1) (SLT (SEx (Lit 2) (Var "arg1")) (Lit 0)))
-      withDefaultSolver $ \s -> do
-        res <- checkSatWithProps s [p]
-        _ <- case res of
-          Cex c -> pure c
-          _ -> liftIO $ assertFailure "Must be satisfiable!"
-        pure()
-    , testNoSimplify "sign-extend-3" $ do
-      let p = PAnd
-                (PEq (Lit 1) (SLT (SEx (Lit 2) (Var "arg1")) (Lit 115792089237316195423570985008687907853269984665640564039457584007913128752664)))
-                (PEq (Var "arg1") (SEx (Lit 2) (Var "arg1")))
-      withDefaultSolver $ \s -> do
-        res <- checkSatWithProps s [p]
-        _ <- case res of
-          Cex c -> pure c
-          _ -> liftIO $ assertFailure "Must be satisfiable!"
-        pure()
-    , testProperty "sign-extend-vs-smt" $ \(a :: W256, b :: W256) -> propNoSimp $ do
-        let p = (PEq (Var "arg1") (SEx (Lit (a `mod` 50)) (Lit b)))
-        withDefaultSolver $ \s -> do
-          res <- checkSatWithProps s [p]
-          cex <- case res of
-            Cex c -> pure c
-            _ -> liftIO $ assertFailure "Must be satisfiable!"
-          let res1 = fromRight (internalError "cannot be") $ subModel cex (Var "arg1")
-          res1W <- case res1 of
-            Lit x -> pure x
-            _ -> internalError "Expected Lit"
-          let res2 = Expr.simplifyProps [p]
-          res2W <- case res2 of
-            [PEq (Lit x) (Var "arg1")] -> pure x
-            _ -> internalError "Expected PEq"
-          assertEqualM "Must be equivalent concrete values" res1W res2W
-  ]
   , testGroup "simplification-working"
   [
     test "prop-simp-bool1" $ do
