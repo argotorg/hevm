@@ -176,9 +176,6 @@ problematicTests =
   , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_map_fp2_to_g2.py::", "EIP-2537 precompiles not implemented")
   , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_pairing.py::", "EIP-2537 precompiles not implemented")
   , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_variable_length_input_contracts.py::", "EIP-2537 precompiles not implemented")
-    -- EIP-7951
-  , ("tests/osaka/eip7951_p256verify_precompiles/test_eip_mainnet.py::", "EIP-7951 precompiles not implemented")
-  , ("tests/osaka/eip7951_p256verify_precompiles/test_p256verify.py::", "EIP-7951 precompiles not implemented")
     -- Other tests that invoke the 0x0A precompile
   , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x000000000000000000000000000000000000000a", "EIP-4844 point evaluation precompile (0x0A) not implemented")
   , ("tests/static/state_tests/stSpecialTest/failed_tx_xcf416c53_ParisFiller.json::", "EIP-4844 point evaluation precompile (0x0A) not implemented")
@@ -222,16 +219,10 @@ problematicTests =
   , ("tests/prague/eip7002_el_triggerable_withdrawals/test_modified_withdrawal_contract.py::", "Requires withdrawal system contract")
   , ("tests/prague/eip7251_consolidations/test_modified_consolidation_contract.py::", "Requires consolidation system contract")
   , ("tests/prague/eip7685_general_purpose_el_requests/test_multi_type_requests.py::", "Requires EL request system contracts")
-    -- EIP-7702 Set Code transactions - requires new tx type support
-  , ("tests/prague/eip7702_set_code_tx/test_calls.py::", "EIP-7702 tx type not implemented")
-  , ("tests/prague/eip7702_set_code_tx/test_gas.py::", "EIP-7702 tx type not implemented")
-  , ("tests/prague/eip7702_set_code_tx/test_set_code_txs_2.py::", "EIP-7702 tx type not implemented")
     -- CREATE2 collision with SELFDESTRUCT tests - EIP-6780 changed SELFDESTRUCT behavior
   , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructedFiller.json::", "SELFDESTRUCT behavior changed in Cancun (EIP-6780)")
   , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructed2Filler.json::", "SELFDESTRUCT behavior changed in Cancun (EIP-6780)")
   , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructedRevertFiller.json::", "SELFDESTRUCT behavior changed in Cancun (EIP-6780)")
-    -- EIP-7823: Large calldata test still has gas calculation issue
-  , ("tests/osaka/eip7823_modexp_upper_bounds/test_modexp_upper_bounds.py::test_modexp_upper_bounds[fork_Osaka-blockchain_test_from_state_test-near_uint64_max_base]", "Large calldata gas calculation")
     -- EIP-2929 precompile tests that use unimplemented precompiles (0x0A-0x11)
   , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::", "Tests use unimplemented precompiles 0x0A-0x11")
   ]
@@ -434,7 +425,7 @@ fromBlockchainCase :: BlockchainCase -> Either BlockchainError Case
 fromBlockchainCase (BlockchainCase blocks preState postState network) =
   case (blocks, network) of
     ([block], "Osaka") -> case block.txs of
-      [tx] | tx.txtype == EIP4844Transaction || tx.txtype == EIP7702Transaction -> Left UnsupportedTxType -- TODO EIP4844 / EIP7702
+      [tx] | tx.txtype == EIP4844Transaction -> Left UnsupportedTxType -- TODO EIP4844
       [tx] -> fromBlockchainCase' block tx preState postState
       []        -> Left NoTxs
       _         -> Left TooManyTxs
@@ -482,6 +473,7 @@ fromBlockchainCase' block tx preState postState =
        , beaconRoot     = block.beaconRoot
        , parentHash     = block.parentHash
        , txdataFloorGas = txdataFloorGas tx
+       , authorizationList = tx.authorizationList
        })
       checkState
       postState
@@ -510,6 +502,14 @@ priorityFee tx baseFee = let
                  let maxPrio = fromJust tx.maxPriorityFeeGas
                      maxFee = fromJust tx.maxFeePerGas
                  in (maxPrio, maxFee)
+               EIP4844Transaction ->
+                 let maxPrio = fromJust tx.maxPriorityFeeGas
+                     maxFee = fromJust tx.maxFeePerGas
+                 in (maxPrio, maxFee)
+               EIP7702Transaction ->
+                 let maxPrio = fromJust tx.maxPriorityFeeGas
+                     maxFee = fromJust tx.maxFeePerGas
+                 in (maxPrio, maxFee)
                _ ->
                  let gasPrice = fromJust tx.gasPrice
                  in (gasPrice, gasPrice)
@@ -519,6 +519,8 @@ maxBaseFee :: Transaction -> W256
 maxBaseFee tx =
   case tx.txtype of
      EIP1559Transaction -> fromJust tx.maxFeePerGas
+     EIP4844Transaction -> fromJust tx.maxFeePerGas
+     EIP7702Transaction -> fromJust tx.maxFeePerGas
      _ -> fromJust tx.gasPrice
 
 checkTx :: Transaction -> Block -> BlockchainContracts -> Maybe (BlockchainContracts)

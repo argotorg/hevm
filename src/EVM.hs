@@ -22,6 +22,7 @@ import EVM.Solidity
 import EVM.Types
 import EVM.Types qualified as Expr (Expr(Gas))
 import EVM.Sign qualified
+import EVM.RLP (RLP(..), rlpencode)
 import EVM.Concrete qualified as Concrete
 import EVM.CheatsTH
 import EVM.Effects (Config (..))
@@ -29,7 +30,7 @@ import EVM.Effects (Config (..))
 import Control.Monad (unless, when)
 import Control.Monad.ST (ST, RealWorld)
 import Control.Monad.State.Strict (MonadState, State, get, gets, lift, modify', put)
-import Data.Bits (FiniteBits, countLeadingZeros, finiteBitSize)
+import Data.Bits (FiniteBits, countLeadingZeros, finiteBitSize, shiftR)
 import Data.ByteArray qualified as BA
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -65,7 +66,9 @@ import Witch (into, tryFrom, unsafeInto, tryInto)
 
 import Crypto.Hash (Digest, SHA256, RIPEMD160)
 import Crypto.Hash qualified as Crypto
-import Crypto.Number.ModArithmetic (expFast)
+import Crypto.Number.ModArithmetic (expFast, inverse)
+import Crypto.PubKey.ECC.Prim (pointAddTwoMuls, isPointAtInfinity, isPointValid)
+import Crypto.PubKey.ECC.Types (getCurveByName, CurveName(..), Point(..), Curve(..), CurveCommon(..), CurvePrime(..))
 
 defaultVMOpts :: VMOps t => VMOpts t
 defaultVMOpts = VMOpts
@@ -97,6 +100,7 @@ defaultVMOpts = VMOpts
   , beaconRoot     = 0
   , parentHash     = 0
   , txdataFloorGas = 0
+  , authorizationList = []
   }
 
 blankState :: VMOps t => ST RealWorld (FrameState t)
@@ -202,9 +206,12 @@ makeVm o = do
     , pathsVisited = mempty
     }
     where
+    -- Process EIP-7702 authorization list to set delegation codes
+    baseContracts = Map.fromList ((o.address,o.contract):o.otherContracts)
+    contractsWithDelegations = processAuthorizations o.chainId o.authorizationList baseContracts
     env = Env
       { chainId = o.chainId
-      , contracts = Map.fromList ((o.address,o.contract):o.otherContracts)
+      , contracts = contractsWithDelegations
       , freshAddresses = o.freshAddresses
       , freshGasVals = 0
       }
@@ -1383,12 +1390,86 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
               Nothing -> precompileFail
             _ -> precompileFail
 
+      -- P256VERIFY (EIP-7212)
+      0x100 ->
+        forceConcreteBuf input "P256VERIFY" $ \input' -> do
+          -- Input: hash (32) || r (32) || s (32) || x (32) || y (32) = 160 bytes
+          -- Per EIP-7212: "If the input is less than 160 bytes, the remaining bytes
+          -- are considered to be zero"
+          let paddedInput = truncpadlit 160 input'
+              result = p256Verify paddedInput
+          if result
+          then do
+            -- Success: return 1 (32 bytes, big-endian)
+            let output = ConcreteBuf $ BS.replicate 31 0 <> BS.singleton 1
+            assign' (#state % #stack) (Lit 1 : xs)
+            assign (#state % #returndata) output
+            copyBytesToMemory output outSize (Lit 0) outOffset
+            next
+          else do
+            -- Verification failed or invalid input: return empty but CALL succeeds
+            assign' (#state % #stack) (Lit 1 : xs)
+            assign (#state % #returndata) mempty
+            next
+
       _ -> notImplemented
 
 truncpadlit :: Int -> ByteString -> ByteString
 truncpadlit n xs = if m > n then BS.take n xs
                    else BS.append xs (BS.replicate (n - m) 0)
   where m = BS.length xs
+
+-- | P-256 (secp256r1) signature verification for EIP-7212
+-- Input format: hash (32) || r (32) || s (32) || x (32) || y (32)
+-- Returns True if signature is valid, False otherwise
+-- Note: EIP-7212 provides a PRE-HASHED message, so we implement ECDSA
+-- verification manually to avoid double-hashing.
+p256Verify :: ByteString -> Bool
+p256Verify input =
+  let -- Parse input
+      hashBytes = BS.take 32 input
+      e = into @Integer $ word hashBytes  -- message hash as integer
+      r = into @Integer $ word $ BS.take 32 $ BS.drop 32 input
+      s = into @Integer $ word $ BS.take 32 $ BS.drop 64 input
+      x = into @Integer $ word $ BS.take 32 $ BS.drop 96 input
+      y = into @Integer $ word $ BS.take 32 $ BS.drop 128 input
+
+      -- P-256 curve order
+      curve = getCurveByName SEC_p256r1
+      n = case curve of
+            CurveFP (CurvePrime _ cc) -> ecc_n cc
+            _ -> 0  -- Should never happen for P-256
+
+      -- Public key point
+      pubPoint = Point x y
+
+      -- ECDSA verification algorithm for pre-hashed message:
+      -- 1. Verify r and s are in [1, n-1]
+      -- 2. Verify public key is valid point on curve
+      -- 3. Calculate w = s^(-1) mod n
+      -- 4. Calculate u1 = (e * w) mod n
+      -- 5. Calculate u2 = (r * w) mod n
+      -- 6. Calculate R = u1*G + u2*Q
+      -- 7. If R is at infinity, fail
+      -- 8. Verify r == R.x mod n
+
+  in if r < 1 || r >= n || s < 1 || s >= n
+     then False
+     else if not (isPointValid curve pubPoint)
+     then False
+     else case inverse s n of
+       Nothing -> False  -- s has no inverse (shouldn't happen if s in [1, n-1])
+       Just w ->
+         let u1 = (e * w) `mod` n
+             u2 = (r * w) `mod` n
+             -- R = u1*G + u2*Q
+             rPoint = pointAddTwoMuls curve u1 (ecc_g $ common_curve curve) u2 pubPoint
+         in case rPoint of
+              PointO -> False  -- Point at infinity
+              Point rx _ -> (rx `mod` n) == r
+  where
+    common_curve (CurveFP (CurvePrime _ cc)) = cc
+    common_curve _ = error "p256Verify: unexpected curve type"
 
 lazySlice :: W256 -> W256 -> ByteString -> LS.ByteString
 lazySlice offset size bs =
@@ -1414,6 +1495,26 @@ asInteger :: LS.ByteString -> Integer
 asInteger xs = if xs == mempty then 0
   else 256 * asInteger (LS.init xs)
       + into (LS.last xs)
+
+-- | BLS12-381 MSM discount table from EIP-2537
+-- Maps k (number of pairs) to discount in parts per 1000
+blsMsmDiscount :: Word64 -> Word64
+blsMsmDiscount k = case k of
+  1 -> 1000; 2 -> 1000; 3 -> 923; 4 -> 884; 5 -> 855; 6 -> 832; 7 -> 812; 8 -> 796; 9 -> 782; 10 -> 770
+  11 -> 759; 12 -> 749; 13 -> 740; 14 -> 732; 15 -> 724; 16 -> 717; 17 -> 711; 18 -> 704; 19 -> 699; 20 -> 693
+  21 -> 688; 22 -> 683; 23 -> 679; 24 -> 674; 25 -> 670; 26 -> 666; 27 -> 663; 28 -> 659; 29 -> 655; 30 -> 652
+  31 -> 649; 32 -> 646; 33 -> 643; 34 -> 640; 35 -> 637; 36 -> 634; 37 -> 632; 38 -> 629; 39 -> 627; 40 -> 624
+  41 -> 622; 42 -> 620; 43 -> 618; 44 -> 615; 45 -> 613; 46 -> 611; 47 -> 609; 48 -> 607; 49 -> 606; 50 -> 604
+  51 -> 602; 52 -> 600; 53 -> 598; 54 -> 597; 55 -> 595; 56 -> 593; 57 -> 592; 58 -> 590; 59 -> 589; 60 -> 587
+  61 -> 586; 62 -> 584; 63 -> 583; 64 -> 582; 65 -> 580; 66 -> 579; 67 -> 578; 68 -> 576; 69 -> 575; 70 -> 574
+  71 -> 573; 72 -> 571; 73 -> 570; 74 -> 569; 75 -> 568; 76 -> 567; 77 -> 566; 78 -> 565; 79 -> 563; 80 -> 562
+  81 -> 561; 82 -> 560; 83 -> 559; 84 -> 558; 85 -> 557; 86 -> 556; 87 -> 555; 88 -> 554; 89 -> 553; 90 -> 552
+  91 -> 552; 92 -> 551; 93 -> 550; 94 -> 549; 95 -> 548; 96 -> 547; 97 -> 546; 98 -> 545; 99 -> 545; 100 -> 544
+  101 -> 543; 102 -> 542; 103 -> 541; 104 -> 541; 105 -> 540; 106 -> 539; 107 -> 538; 108 -> 538; 109 -> 537; 110 -> 536
+  111 -> 536; 112 -> 535; 113 -> 534; 114 -> 534; 115 -> 533; 116 -> 532; 117 -> 532; 118 -> 531; 119 -> 530; 120 -> 530
+  121 -> 529; 122 -> 528; 123 -> 528; 124 -> 527; 125 -> 527; 126 -> 526; 127 -> 525; 128 -> 525
+  -- For k > 128, use the formula: 174 / floor(log2(k)) + 476
+  _ -> 174 `div` (unsafeInto (log2 k)) + 476
 
 -- * Opcode helper actions
 
@@ -2238,6 +2339,8 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
         burn' xGas $ do
           calldata <- readMemory xInOffset xInSize
           abi <- maybeLitWordSimp . readBytes 4 (Lit 0) <$> readMemory xInOffset (Lit 4)
+          -- EIP-7702: Resolve delegation if target has delegation code
+          let (resolvedCode, codeAddr) = resolveDelegatedCode target addr vm0.env.contracts
           let newContext = CallContext
                             { target    = addr
                             , context   = xContext
@@ -2265,8 +2368,9 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
           zoom #state $ do
             assign #gas xGas
             assign #pc 0
-            assign #code (clearInitCode target.code)
-            assign #codeContract addr
+            -- EIP-7702: Use resolved code (possibly from delegated address)
+            assign #code (clearInitCode resolvedCode)
+            assign #codeContract codeAddr
             assign #stack mempty
             assign #memory newMemory
             assign #memorySize 0
@@ -2983,28 +3087,43 @@ mkCodeOps contractCode =
 
 concreteModexpGasFee :: ByteString -> Word64
 concreteModexpGasFee input =
-  if lenb < into (maxBound :: Word32) &&
-     (lene < into (maxBound :: Word32) || (lenb == 0 && lenm == 0)) &&
-     lenm < into (maxBound :: Word64)
-  then
-    max 500 (multiplicationComplexity * iterCount)
-  else
-    maxBound -- TODO: this is not 100% correct, return Nothing on overflow
-  where
-    (lenb, lene, lenm) = parseModexpLength input
-    ez = isZero (96 + lenb) lene input
-    e' = word $ LS.toStrict $
-      lazySlice (96 + lenb) (min 32 lene) input
-    nwords :: Word64
-    nwords = ceilDiv (unsafeInto $ max lenb lenm) 8
-    maxLength = max lenb lenm
-    multiplicationComplexity = if maxLength <= 32 then 16 else 2 * nwords * nwords
-    iterCount' :: Word64
-    iterCount' | lene <= 32 && ez = 0
-               | lene <= 32 = unsafeInto (log2 e')
-               | e' == 0 = 16 * (unsafeInto lene - 32)
-               | otherwise = unsafeInto (log2 e') + 16 * (unsafeInto lene - 32)
-    iterCount = max iterCount' 1
+  let (lenb, lene, lenm) = parseModexpLength input
+      -- Maximum safe value for W256 -> Word64 conversion
+      maxSafeW256 :: W256
+      maxSafeW256 = into (maxBound :: Word64)
+  in if lenb > maxSafeW256 || lene > maxSafeW256 || lenm > maxSafeW256
+     then maxBound  -- Overflow: charge maximum gas
+     else
+       let ez = isZero (96 + lenb) lene input
+           e' = word $ LS.toStrict $ lazySlice (96 + lenb) (min 32 lene) input
+           maxLength :: Word64
+           maxLength = unsafeInto $ max lenb lenm
+           nwords :: Word64
+           nwords = ceilDiv maxLength 8
+           -- Check for overflow in nwords * nwords calculation
+           multiplicationComplexity :: Word64
+           multiplicationComplexity
+             | maxLength <= 32 = 16
+             | nwords > 0xFFFFFFFF = maxBound  -- nwords^2 would overflow
+             | otherwise = let nw2 = nwords * nwords
+                           in if nw2 > maxBound `div` 2
+                              then maxBound
+                              else 2 * nw2
+           lene64 :: Word64
+           lene64 = unsafeInto lene
+           iterCount' :: Word64
+           iterCount' | lene <= 32 && ez = 0
+                      | lene <= 32 = unsafeInto (log2 e')
+                      | e' == 0 = 16 * (lene64 - 32)
+                      | otherwise = unsafeInto (log2 e') + 16 * (lene64 - 32)
+           iterCount = max iterCount' 1
+           -- Check for overflow in final multiplication
+           result = if multiplicationComplexity == maxBound
+                    then maxBound
+                    else if iterCount > maxBound `div` multiplicationComplexity
+                         then maxBound
+                         else multiplicationComplexity * iterCount
+       in max 500 result
 
 -- Gas cost of precompiles
 costOfPrecompile :: FeeSchedule Word64 -> Addr -> Expr Buf -> Word64
@@ -3039,6 +3158,32 @@ costOfPrecompile (FeeSchedule {..}) precompileAddr input =
     0x9 -> case input of
              ConcreteBuf i -> g_fround * (unsafeInto $ asInteger $ lazySlice 0 4 i)
              _ -> internalError "Unsupported symbolic blake2 gas calc"
+    -- BLS12-381 precompiles (EIP-2537)
+    -- G1ADD
+    0x0B -> 375
+    -- G1MUL
+    0x0C -> 12000
+    -- G1MSM
+    0x0D -> let k = inputLen `div` 160  -- 128 bytes point + 32 bytes scalar
+            in if k == 0 then 0
+               else 12000 * k * blsMsmDiscount k `div` 1000
+    -- G2ADD
+    0x0E -> 600
+    -- G2MUL
+    0x0F -> 45000
+    -- G2MSM
+    0x10 -> let k = inputLen `div` 288  -- 256 bytes point + 32 bytes scalar
+            in if k == 0 then 0
+               else 45000 * k * blsMsmDiscount k `div` 1000
+    -- PAIRING
+    0x11 -> let k = inputLen `div` 384  -- 128 bytes G1 + 256 bytes G2
+            in 43000 * k + 65000
+    -- MAP_FP_TO_G1
+    0x12 -> 5500
+    -- MAP_FP2_TO_G2
+    0x13 -> 75000
+    -- P256VERIFY (EIP-7951)
+    0x100 -> 6900
     _ -> internalError $ "unimplemented precompiled contract " ++ show precompileAddr
 
 -- Gas cost of memory expansion
@@ -3105,13 +3250,115 @@ freshSymAddr = do
 
 isPrecompileAddr' :: Addr -> Bool
 isPrecompileAddr' 0x100 = True
-isPrecompileAddr' x = 0x0 < x && x <= 0x11
+isPrecompileAddr' x = 0x0 < x && x <= 0x13  -- Extended for BLS12-381 MAP precompiles
 
 isPrecompileAddr :: Expr EAddr -> Bool
 isPrecompileAddr = \case
   LitAddr a -> isPrecompileAddr' a
   SymAddr _ -> False
   GVar _ -> internalError "Unexpected GVar"
+
+
+-- EIP-7702 Delegation Handling --------------------------------------------------------------------
+
+
+-- | EIP-7702 delegation code prefix: 0xef0100
+-- A delegated account has code starting with this prefix followed by 20-byte target address
+delegationPrefix :: ByteString
+delegationPrefix = BS.pack [0xef, 0x01, 0x00]
+
+-- | Check if a contract has delegation code and return the target address
+-- Returns Just targetAddr if code is exactly 23 bytes starting with 0xef0100
+getDelegationTarget :: ContractCode -> Maybe Addr
+getDelegationTarget = \case
+  RuntimeCode (ConcreteRuntimeCode code) ->
+    if BS.length code == 23 && BS.take 3 code == delegationPrefix
+    then Just $ unsafeInto $ word $ BS.drop 3 code
+    else Nothing
+  _ -> Nothing
+
+-- | Resolve the code to execute for a contract, following EIP-7702 delegation
+-- Returns (code to execute, codeContract address)
+-- If the target has delegation code, returns the delegated-to contract's code
+resolveDelegatedCode
+  :: Contract           -- ^ The target contract being called
+  -> Expr EAddr         -- ^ The address of the target
+  -> Map (Expr EAddr) Contract  -- ^ All contracts
+  -> (ContractCode, Expr EAddr)  -- ^ (resolved code, code source address)
+resolveDelegatedCode target targetAddr contracts =
+  case getDelegationTarget target.code of
+    Nothing -> (target.code, targetAddr)
+    Just delegatedTo ->
+      let delegatedAddr = LitAddr delegatedTo
+      in case Map.lookup delegatedAddr contracts of
+           Just delegatedContract -> (delegatedContract.code, delegatedAddr)
+           -- If delegated-to doesn't exist, treat as empty code
+           Nothing -> (RuntimeCode (ConcreteRuntimeCode ""), delegatedAddr)
+
+-- | Create a delegation designator code for EIP-7702
+-- The code is 0xef0100 || target_address (23 bytes total)
+makeDelegationCode :: Addr -> ByteString
+makeDelegationCode target = delegationPrefix <> word160Bytes target
+
+-- | Recover the authorizing address from an EIP-7702 authorization entry
+-- Returns the address that signed the authorization, or Nothing if invalid
+recoverAuthority :: W256 -> AuthorizationEntry -> Maybe Addr
+recoverAuthority chainId auth =
+  let -- EIP-7702 signing message: keccak(0x05 || rlp([chain_id, address, nonce]))
+      rlpPayload = rlpList
+        [ rlpWord256 auth.authChainId
+        , BS $ word160Bytes auth.authAddress
+        , rlpWord256 auth.authNonce
+        ]
+      signingMessage = BS.cons 0x05 rlpPayload
+      msgHash = keccak' signingMessage
+      -- v is yParity + 27 for ecrecover
+      v = into auth.authYParity + 27
+  in -- Check chain_id: must be 0 (any chain) or match current chain
+     if auth.authChainId /= 0 && auth.authChainId /= chainId
+     then Nothing
+     else EVM.Sign.ecrec v auth.authR auth.authS msgHash
+  where
+    rlpList items = rlpencode $ List items
+    rlpWord256 0 = BS mempty
+    rlpWord256 n = BS $ octets n
+    octets x = BS.pack $ dropWhile (== 0) [fromIntegral (shiftR x (8 * i)) | i <- reverse [0..31 :: Int]]
+
+-- | Process all EIP-7702 authorization entries and return the updated contracts map
+-- For each valid authorization:
+-- 1. Verify the signature and recover the authority address
+-- 2. Check the authority's nonce matches (or authority has no account yet)
+-- 3. Set the authority's code to the delegation designator
+-- 4. Increment the authority's nonce
+processAuthorizations
+  :: W256                           -- ^ Chain ID
+  -> [AuthorizationEntry]           -- ^ Authorization list from transaction
+  -> Map (Expr EAddr) Contract      -- ^ Current contracts state
+  -> Map (Expr EAddr) Contract      -- ^ Updated contracts state with delegations
+processAuthorizations chainId auths contracts = foldl processOne contracts auths
+  where
+    processOne :: Map (Expr EAddr) Contract -> AuthorizationEntry -> Map (Expr EAddr) Contract
+    processOne cs auth = case recoverAuthority chainId auth of
+      Nothing -> cs  -- Invalid signature, skip
+      Just authority ->
+        let authorityAddr = LitAddr authority
+            existingAccount = Map.lookup authorityAddr cs
+            currentNonce = case existingAccount of
+              Just c -> fromMaybe 0 c.nonce
+              Nothing -> 0
+        in -- Check nonce matches
+           if into currentNonce /= auth.authNonce
+           then cs  -- Nonce mismatch, skip
+           else
+             let delegationCode = makeDelegationCode auth.authAddress
+                 delegationContractCode = RuntimeCode (ConcreteRuntimeCode delegationCode)
+                 -- Create or update the authority's contract with delegation code
+                 newContract = case existingAccount of
+                   Just c -> set #code delegationContractCode $
+                             set #nonce (Just (currentNonce + 1)) c
+                   Nothing -> set #nonce (Just 1) $ initialContract delegationContractCode
+             in Map.insert authorityAddr newContract cs
+
 
 -- * Arithmetic
 
