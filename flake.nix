@@ -4,11 +4,7 @@
   inputs = {
     flake-utils.url = "github:numtide/flake-utils";
     nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
-    foundry = {
-      url = "github:shazow/foundry.nix/stable";
-      inputs.nixpkgs.follows = "nixpkgs";
-      inputs.flake-utils.follows = "flake-utils";
-    };
+    foundry.url = "github:shazow/foundry.nix/stable";
     solidity = {
       url = "github:argotorg/solidity/8a97fa7a1db1ec509221ead6fea6802c684ee887";
       flake = false;
@@ -24,7 +20,6 @@
     solc-pkgs = {
       url = "github:hellwolf/solc.nix";
       inputs.nixpkgs.follows = "nixpkgs";
-      inputs.flake-utils.follows = "flake-utils";
     };
   };
 
