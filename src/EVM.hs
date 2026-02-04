@@ -146,12 +146,15 @@ makeVm o = do
   let txaccessList = o.txAccessList
       txorigin = o.origin
       txtoAddr = o.address
+      -- EIP-7702: Authority addresses are warmed after chain_id validation
+      authWarmAddrs = getAuthoritiesToWarm o.chainId o.authorizationList
       initialAccessedAddrs = fromList $
            [txorigin, txtoAddr, o.coinbase]
         ++ (fmap LitAddr [1..9])          -- Legacy precompiles (ECRECOVER, SHA256, etc.)
         ++ (fmap LitAddr [0x0A..0x13])    -- EIP-4844 Point Evaluation + BLS12-381 precompiles
         ++ [LitAddr 0x100]                -- EIP-7951 P256VERIFY
         ++ (Map.keys txaccessList)
+        ++ authWarmAddrs                  -- EIP-7702: Warmed authority addresses
       initialAccessedStorageKeys = fromList $ foldMap (uncurry (map . (,))) (Map.toList txaccessList)
       touched = if o.create then [txorigin] else [txorigin, txtoAddr]
   memory <- ConcreteMemory <$> VS.Mutable.new 0
@@ -3305,9 +3308,11 @@ makeDelegationCode :: Addr -> ByteString
 makeDelegationCode target = delegationPrefix <> word160Bytes target
 
 -- | Recover the authorizing address from an EIP-7702 authorization entry
--- Returns the address that signed the authorization, or Nothing if invalid
-recoverAuthority :: W256 -> AuthorizationEntry -> Maybe Addr
-recoverAuthority chainId auth =
+-- Returns the address that signed the authorization, or Nothing if invalid signature
+-- Note: This does NOT check chain_id - per EIP-7702 spec, ecrecover happens first,
+-- then the address is warmed, and only then is chain_id validated
+recoverAuthorityAddress :: AuthorizationEntry -> Maybe Addr
+recoverAuthorityAddress auth =
   let -- EIP-7702 signing message: keccak(0x05 || rlp([chain_id, address, nonce]))
       rlpPayload = rlpList
         [ rlpWord256 auth.authChainId
@@ -3318,22 +3323,32 @@ recoverAuthority chainId auth =
       msgHash = keccak' signingMessage
       -- v is yParity + 27 for ecrecover
       v = into auth.authYParity + 27
-  in -- Check chain_id: must be 0 (any chain) or match current chain
-     if auth.authChainId /= 0 && auth.authChainId /= chainId
-     then Nothing
-     else EVM.Sign.ecrec v auth.authR auth.authS msgHash
+  in EVM.Sign.ecrec v auth.authR auth.authS msgHash
   where
     rlpList items = rlpencode $ List items
     rlpWord256 0 = BS mempty
     rlpWord256 n = BS $ octets n
     octets x = BS.pack $ dropWhile (== 0) [fromIntegral (shiftR x (8 * i)) | i <- reverse [0..31 :: Int]]
 
+-- | Get all authority addresses that should be warmed from authorization list
+-- Per EIP-7702 spec: addresses are warmed AFTER chain_id validation
+-- Chain ID check happens first (must be 0 or match current chain), then ecrecover
+getAuthoritiesToWarm :: W256 -> [AuthorizationEntry] -> [Expr EAddr]
+getAuthoritiesToWarm chainId auths = map LitAddr $ mapMaybe (recoverIfValidChainId chainId) auths
+  where
+    recoverIfValidChainId :: W256 -> AuthorizationEntry -> Maybe Addr
+    recoverIfValidChainId cid auth
+      -- Chain ID must be 0 (any chain) or match current chain
+      | auth.authChainId /= 0 && auth.authChainId /= cid = Nothing
+      | otherwise = recoverAuthorityAddress auth
+
 -- | Process all EIP-7702 authorization entries and return the updated contracts map
--- For each valid authorization:
--- 1. Verify the signature and recover the authority address
--- 2. Check the authority's nonce matches (or authority has no account yet)
--- 3. Set the authority's code to the delegation designator
--- 4. Increment the authority's nonce
+-- Per EIP-7702 spec, for each authorization:
+-- 1. ecrecover to get authority address (addresses warmed separately via getAuthoritiesToWarm)
+-- 2. Check chain_id: must be 0 or match current chain
+-- 3. Check authority's code is empty or already delegated
+-- 4. Check nonce matches
+-- 5. Set delegation code and increment nonce
 processAuthorizations
   :: W256                           -- ^ Chain ID
   -> [AuthorizationEntry]           -- ^ Authorization list from transaction
@@ -3342,26 +3357,44 @@ processAuthorizations
 processAuthorizations chainId auths contracts = foldl processOne contracts auths
   where
     processOne :: Map (Expr EAddr) Contract -> AuthorizationEntry -> Map (Expr EAddr) Contract
-    processOne cs auth = case recoverAuthority chainId auth of
+    processOne cs auth = case recoverAuthorityAddress auth of
       Nothing -> cs  -- Invalid signature, skip
       Just authority ->
-        let authorityAddr = LitAddr authority
-            existingAccount = Map.lookup authorityAddr cs
-            currentNonce = case existingAccount of
-              Just c -> fromMaybe 0 c.nonce
-              Nothing -> 0
-        in -- Check nonce matches
-           if into currentNonce /= auth.authNonce
-           then cs  -- Nonce mismatch, skip
-           else
-             let delegationCode = makeDelegationCode auth.authAddress
-                 delegationContractCode = RuntimeCode (ConcreteRuntimeCode delegationCode)
-                 -- Create or update the authority's contract with delegation code
-                 newContract = case existingAccount of
-                   Just c -> set #code delegationContractCode $
-                             set #nonce (Just (currentNonce + 1)) c
-                   Nothing -> set #nonce (Just 1) $ initialContract delegationContractCode
-             in Map.insert authorityAddr newContract cs
+        -- Check chain_id: must be 0 (any chain) or match current chain
+        if auth.authChainId /= 0 && auth.authChainId /= chainId
+        then cs  -- Chain ID mismatch, skip (but address was already warmed)
+        else
+          let authorityAddr = LitAddr authority
+              existingAccount = Map.lookup authorityAddr cs
+              currentNonce = case existingAccount of
+                Just c -> fromMaybe 0 c.nonce
+                Nothing -> 0
+              -- Check if code is empty or already delegated
+              codeIsOk = case existingAccount of
+                Nothing -> True  -- No account = empty code
+                Just c -> case c.code of
+                  RuntimeCode (ConcreteRuntimeCode code) ->
+                    BS.null code || isDelegationCode code
+                  _ -> True  -- Symbolic code, allow for now
+          in -- Check code constraint (EIP-7702 step 4)
+             if not codeIsOk
+             then cs  -- Account has non-delegation code, skip
+             -- Check nonce matches
+             else if into currentNonce /= auth.authNonce
+             then cs  -- Nonce mismatch, skip
+             else
+               let delegationCode = makeDelegationCode auth.authAddress
+                   delegationContractCode = RuntimeCode (ConcreteRuntimeCode delegationCode)
+                   -- Create or update the authority's contract with delegation code
+                   newContract = case existingAccount of
+                     Just c -> set #code delegationContractCode $
+                               set #nonce (Just (currentNonce + 1)) c
+                     Nothing -> set #nonce (Just 1) $ initialContract delegationContractCode
+               in Map.insert authorityAddr newContract cs
+
+-- | Check if bytecode is a delegation code (0xef0100 prefix)
+isDelegationCode :: ByteString -> Bool
+isDelegationCode code = BS.length code == 23 && BS.isPrefixOf delegationPrefix code
 
 
 -- * Arithmetic

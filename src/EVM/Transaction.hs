@@ -235,11 +235,16 @@ txGasCost fs tx =
       nonZeroBytes = BS.length calldata - zeroBytes
       baseCost     = fs.g_transaction
         + (if isNothing tx.toAddr then fs.g_txcreate + initcodeCost else 0)
-        + (accessListPrice fs tx.accessList )
+        + (accessListPrice fs tx.accessList)
+        + (authListPrice fs tx.authorizationList)  -- EIP-7702
       zeroCost     = fs.g_txdatazero
       nonZeroCost  = fs.g_txdatanonzero
       initcodeCost = fs.g_initcodeword * unsafeInto (ceilDiv (BS.length calldata) 32)
   in baseCost + zeroCost * (unsafeInto zeroBytes) + nonZeroCost * (unsafeInto nonZeroBytes)
+
+-- | EIP-7702: Calculate intrinsic gas cost for authorization list
+authListPrice :: FeeSchedule Word64 -> [AuthorizationEntry] -> Word64
+authListPrice fs al = fs.g_auth_base * unsafeInto (length al)
 
 -- | EIP-7623: Calculate floor gas cost based on calldata tokens
 -- tokens = zero_bytes + (nonzero_bytes * 4)
