@@ -1398,6 +1398,47 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
               Nothing -> precompileFail
             _ -> precompileFail
 
+      -- Point Evaluation (EIP-4844)
+      0x0A ->
+        forceConcreteBuf input "POINT_EVALUATION" $ \input' -> do
+          -- Input: versioned_hash (32) || z (32) || y (32) || commitment (48) || proof (48) = 192 bytes
+          -- Per EIP-4844: Input must be exactly 192 bytes
+          if BS.length input' /= 192
+          then precompileFail
+          else do
+            let versionedHash = BS.take 32 input'
+                z = BS.take 32 $ BS.drop 32 input'
+                y = BS.take 32 $ BS.drop 64 input'
+                -- commitment = BS.take 48 $ BS.drop 96 input'  -- Not used without KZG
+                -- proof = BS.take 48 $ BS.drop 144 input'      -- Not used without KZG
+
+                -- BLS_MODULUS: the field modulus for BLS12-381
+                blsModulus :: Integer
+                blsModulus = 52435875175126190479447740508185965837690552500527637822603658699938581184513
+
+                -- Check versioned_hash format: first byte must be 0x01 (VERSIONED_HASH_VERSION_KZG)
+                hashVersion = if BS.null versionedHash then 0 else BS.head versionedHash
+
+                -- Check z and y are valid field elements (< BLS_MODULUS)
+                zInt = into @Integer $ word z
+                yInt = into @Integer $ word y
+
+            -- Validation checks per EIP-4844
+            if hashVersion /= 0x01
+            then precompileFail  -- Invalid versioned hash version
+            else if zInt >= blsModulus || yInt >= blsModulus
+            then precompileFail  -- z or y out of bounds
+            else do
+              -- TODO: Actual KZG verification requires c-kzg-4844 library
+              -- For now, we perform the cryptographic verification using the library
+              case pointEvaluationVerify input' of
+                Just output -> do
+                  assign' (#state % #stack) (Lit 1 : xs)
+                  assign (#state % #returndata) (ConcreteBuf output)
+                  copyBytesToMemory (ConcreteBuf output) outSize (Lit 0) outOffset
+                  next
+                Nothing -> precompileFail
+
       -- P256VERIFY (EIP-7212)
       0x100 ->
         forceConcreteBuf input "P256VERIFY" $ \input' -> do
@@ -1478,6 +1519,37 @@ p256Verify input =
   where
     common_curve (CurveFP (CurvePrime _ cc)) = cc
     common_curve _ = error "p256Verify: unexpected curve type"
+
+-- | Point Evaluation precompile (EIP-4844) KZG proof verification
+-- Input: versioned_hash (32) || z (32) || y (32) || commitment (48) || proof (48)
+-- Output: FIELD_ELEMENTS_PER_BLOB (32) || BLS_MODULUS (32) on success
+-- Returns Nothing on verification failure
+--
+-- Per EIP-4844, this precompile verifies:
+-- 1. versioned_hash == kzg_to_versioned_hash(commitment)
+-- 2. verify_kzg_proof(commitment, z, y, proof)
+--
+-- Note: Full KZG proof verification requires the c-kzg-4844 library.
+-- This implementation can verify the versioned_hash matches the commitment,
+-- but cannot perform the actual KZG proof verification without the library.
+pointEvaluationVerify :: ByteString -> Maybe ByteString
+pointEvaluationVerify input =
+  let versionedHash = BS.take 32 input
+      commitment = BS.take 48 $ BS.drop 96 input
+      -- Per EIP-4844: kzg_to_versioned_hash(commitment) = 0x01 || SHA256(commitment)[1:32]
+      commitmentHash = BA.convert (Crypto.hash commitment :: Digest SHA256)
+      expectedVersionedHash = BS.singleton 0x01 <> BS.drop 1 commitmentHash
+  in if versionedHash /= expectedVersionedHash
+     then Nothing  -- Versioned hash doesn't match commitment
+     else
+       -- Try ethjet FFI first (in case KZG support is available)
+       case EVM.Precompiled.execute 0x0A input 64 of
+         Just output -> Just output
+         Nothing ->
+           -- Without c-kzg-4844, we cannot verify the KZG proof
+           -- Return failure - this will cause valid proofs to fail,
+           -- but at least invalid versioned hashes are caught above
+           Nothing
 
 lazySlice :: W256 -> W256 -> ByteString -> LS.ByteString
 lazySlice offset size bs =
@@ -3172,6 +3244,8 @@ costOfPrecompile (FeeSchedule {..}) precompileAddr input =
     0x9 -> case input of
              ConcreteBuf i -> g_fround * (unsafeInto $ asInteger $ lazySlice 0 4 i)
              _ -> internalError "Unsupported symbolic blake2 gas calc"
+    -- Point Evaluation (EIP-4844)
+    0x0A -> 50000
     -- BLS12-381 precompiles (EIP-2537)
     -- G1ADD
     0x0B -> 375

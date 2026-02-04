@@ -21,9 +21,13 @@
       url = "github:hellwolf/solc.nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    c-kzg-4844 = {
+      url = "github:ethereum/c-kzg-4844/v2.1.5";
+      flake = false;
+    };
   };
 
-  outputs = { nixpkgs, flake-utils, solidity, empty-smt-solver, forge-std, foundry, solc-pkgs, ... }:
+  outputs = { nixpkgs, flake-utils, solidity, empty-smt-solver, forge-std, foundry, solc-pkgs, c-kzg-4844, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = (import nixpkgs {
@@ -45,6 +49,58 @@
           pkgs.git
           pkgs.bitwuzla
         ];
+
+        # c-kzg-4844 library for EIP-4844 Point Evaluation precompile
+        c-kzg = pkgs.stdenv.mkDerivation {
+          pname = "c-kzg-4844";
+          version = "2.1.5";
+          src = c-kzg-4844;
+
+          nativeBuildInputs = [ pkgs.clang ];
+          buildInputs = [ pkgs.blst ];
+
+          buildPhase = ''
+            cd src
+            CFLAGS="-O2 -fPIC -Wno-implicit-function-declaration -Wno-gnu-folding-constant -I${pkgs.blst}/include -I. -Icommon -Ieip4844 -Ieip7594 -Isetup"
+
+            # Compile common files
+            ${pkgs.clang}/bin/clang $CFLAGS -c common/alloc.c -o alloc.o
+            ${pkgs.clang}/bin/clang $CFLAGS -c common/bytes.c -o bytes.o
+            ${pkgs.clang}/bin/clang $CFLAGS -c common/ec.c -o ec.o
+            ${pkgs.clang}/bin/clang $CFLAGS -c common/fr.c -o fr.o
+            ${pkgs.clang}/bin/clang $CFLAGS -c common/lincomb.c -o lincomb.o
+            ${pkgs.clang}/bin/clang $CFLAGS -c common/utils.c -o utils.o
+
+            # Compile setup files
+            ${pkgs.clang}/bin/clang $CFLAGS -c setup/setup.c -o setup.o
+
+            # Compile eip4844 files
+            ${pkgs.clang}/bin/clang $CFLAGS -c eip4844/eip4844.c -o eip4844.o
+            ${pkgs.clang}/bin/clang $CFLAGS -c eip4844/blob.c -o blob.o
+
+            # Compile eip7594 files
+            ${pkgs.clang}/bin/clang $CFLAGS -c eip7594/eip7594.c -o eip7594.o
+            ${pkgs.clang}/bin/clang $CFLAGS -c eip7594/cell.c -o cell.o
+            ${pkgs.clang}/bin/clang $CFLAGS -c eip7594/fft.c -o fft.o
+            ${pkgs.clang}/bin/clang $CFLAGS -c eip7594/fk20.c -o fk20.o
+            ${pkgs.clang}/bin/clang $CFLAGS -c eip7594/poly.c -o poly.o
+            ${pkgs.clang}/bin/clang $CFLAGS -c eip7594/recovery.c -o recovery.o
+
+            # Create static library
+            ar rcs libckzg.a alloc.o bytes.o ec.o fr.o lincomb.o utils.o setup.o eip4844.o blob.o eip7594.o cell.o fft.o fk20.o poly.o recovery.o
+          '';
+
+          installPhase = ''
+            mkdir -p $out/lib $out/include $out/share
+            cp libckzg.a $out/lib/
+            cp ckzg.h $out/include/
+            cp -r common $out/include/
+            cp -r eip4844 $out/include/
+            cp -r eip7594 $out/include/
+            cp -r setup $out/include/
+            cp trusted_setup.txt $out/share/
+          '';
+        };
 
         secp256k1-static = stripDylib (pkgs.secp256k1.overrideAttrs (attrs: {
           configureFlags = attrs.configureFlags ++ [ "--enable-static" ];
@@ -69,6 +125,8 @@
           ps.lib.pipe
             (((hspkgs ps).callCabal2nix "hevm" ./. {
               secp256k1 = ps.secp256k1;
+              ckzg = c-kzg;
+              blst = ps.blst;
             }).overrideAttrs(final: prev: {
               HEVM_SOLIDITY_REPO = solidity;
               HEVM_ETHEREUM_TESTS_REPO = "${execution-spec-tests-fixtures}/blockchain_tests";
@@ -189,7 +247,7 @@
         # --- shell ---
 
         devShells.default = let
-          libraryPath = "${pkgs.lib.makeLibraryPath [ pkgs.libff pkgs.secp256k1 pkgs.gmp ]}";
+          libraryPath = "${pkgs.lib.makeLibraryPath [ pkgs.libff pkgs.secp256k1 pkgs.gmp c-kzg pkgs.blst ]}";
         in (hspkgs pkgs).shellFor {
           packages = _: [ (hevmBase pkgs) ];
           buildInputs = [
@@ -209,6 +267,7 @@
           DAPP_SOLC = "${solc}/bin/solc";
           HEVM_ETHEREUM_TESTS_REPO = "${execution-spec-tests-fixtures}/blockchain_tests";
           HEVM_FORGE_STD_REPO = forge-std;
+          HEVM_KZG_TRUSTED_SETUP = "${c-kzg}/share/trusted_setup.txt";
 
           # point cabal repl to system deps
           LD_LIBRARY_PATH = libraryPath;
