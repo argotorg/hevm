@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- New opcode: CLZ
 - Support for `--early-abort` flag that aborts symbolic execution as soon as a counterexample is found
 - Support for `vm.etch(address, bytecode)` cheatcode to set the code of a contract at a given address
 

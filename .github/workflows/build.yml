@@ -250,7 +250,7 @@ jobs:
           echo CVC5_PATH="$PWD/cvc5-Win64-x86_64-static/bin" >> "$GITHUB_ENV"
           # solc
           mkdir solc
-          curl --retry 5 -fsSL https://github.com/ethereum/solidity/releases/download/v0.8.26/solc-windows.exe -o solc/solc.exe
+          curl --retry 5 -fsSL https://github.com/argotorg/solidity/releases/download/v0.8.33/solc-windows.exe -o solc/solc.exe
           echo DAPP_SOLC="$PWD/solc/solc.exe" >> "$GITHUB_ENV"
           echo DAPP_SOLC_PATH="$PWD/solc/" >> "$GITHUB_ENV"
           # repos

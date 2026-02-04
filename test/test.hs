@@ -1604,6 +1604,9 @@ tests = testGroup "hevm"
     , test "ConstantinopleMin" $ do
         let testFile = "test/contracts/pass/constantinople_min.sol"
         runForgeTest testFile ".*" >>= assertEqualM "test result" (True, True)
+    , test "Fusaka" $ do
+        let testFile = "test/contracts/pass/fusaka.sol"
+        runForgeTest testFile ".*" >>= assertEqualM "test result" (True, True)
     , test "Prove-Tests-Pass" $ do
         let testFile = "test/contracts/pass/dsProvePass.sol"
         runForgeTest testFile ".*" >>= assertEqualM "test result" (True, True)
@@ -3030,6 +3033,74 @@ tests = testGroup "hevm"
         (_, []) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c (Just (Sig "fun(uint256,uint8)" [AbiUIntType 256, AbiUIntType 8])) [] defaultVeriOpts
         putStrLnM "signextend works as expected"
      ,
+     test "opcode-clz" $ do
+        Just c <- solcRuntime "MyContract"
+            [i|
+            contract MyContract {
+              function clz_test(uint256 x) internal pure returns (uint256 result) {
+                  assembly {
+                      result := clz(x)
+                  }
+              }
+
+              function fun() external pure {
+                assert(clz_test(0) == 256);
+                assert(clz_test(1) == 255);
+                assert(clz_test(2) == 254);
+                assert(clz_test(2) == 254);
+                // 61853446846231190821175268292818646713405929256851257084424727564423478318049
+                // is larger than 2**255, so CLZ should be 0
+                assert(clz_test(61853446846231190821175268292818646713405929256851257084424727564423478318049) == 0);
+                // 1402344919110095602128912437416037586276662158775737295210557361797392888602
+                // is larger than 2**249 but smaller than 2**250, so CLZ should be 6
+                assert(clz_test(1402344919110095602128912437416037586276662158775737295210557361797392888602) == 6);
+              }
+             }
+            |]
+        (_, r) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c (Just (Sig "fun()" [])) [] defaultVeriOpts
+        assertEqualM "CLZ. expected QED"  [] r
+     ,
+     test "opcode-clz-negative-test" $ do
+        Just c <- solcRuntime "MyContract"
+            [i|
+            contract MyContract {
+              function clz_test(uint256 x) internal pure returns (uint256 result) {
+                  assembly {
+                      result := clz(x)
+                  }
+              }
+
+              function fun() external pure {
+                assert(clz_test(0) == 255); // wrong, should be 256
+              }
+             }
+            |]
+        (_, r) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c (Just (Sig "fun()" [])) [] defaultVeriOpts
+        case r of
+          [Cex _] -> assertEqualM "CLZ. expected CEX" () ()
+          _ -> liftIO $ assertFailure "CLZ. Expected exactly one Cex"
+     ,
+     test "opcode-clz-negative-test2" $ do
+        Just c <- solcRuntime "MyContract"
+            [i|
+            contract MyContract {
+              function clz_test(uint256 x) internal pure returns (uint256 result) {
+                  assembly {
+                      result := clz(x)
+                  }
+              }
+
+              function fun() external pure {
+                // 22 = 10110 -- i.e. 5 bits
+                assert(clz_test(22) == 250); // should be 251: 256 - 5 = 251
+              }
+             }
+            |]
+        (_, r) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c (Just (Sig "fun()" [])) [] defaultVeriOpts
+        case r of
+          [Cex _] -> assertEqualM "CLZ. expected CEX" () ()
+          _ -> liftIO $ assertFailure "CLZ. Expected exactly one Cex"
+     ,
      test "opcode-shl" $ do
         Just c <- solcRuntime "MyContract"
             [i|
@@ -3046,7 +3117,7 @@ tests = testGroup "hevm"
              }
             |]
         (_, []) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c (Just (Sig "fun(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
-        putStrLnM "SAR works as expected"
+        putStrLnM "SHL works as expected"
      ,
      test "opcode-xor-cancel" $ do
         Just c <- solcRuntime "MyContract"

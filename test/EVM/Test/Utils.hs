@@ -87,11 +87,13 @@ callProcessCwd cmd args cwd = do
 
 compileWithForge :: App m => FilePath -> FilePath -> m (Either String BuildOutput)
 compileWithForge root src = do
-  liftIO $ createDirectory (root </> "src")
-  liftIO $ writeFile (root </> "src" </> "unit-tests.t.sol") =<< readFile =<< Paths.getDataFileName src
-  liftIO $ initLib (root </> "lib" </> "tokens") ("test" </> "contracts" </> "lib" </> "erc20.sol") "erc20.sol"
-  liftIO $ initStdForgeDir (root </> "lib" </> "forge-std")
-  (res,out,err) <- liftIO $ readProcessWithExitCode "forge" ["build", "--ast", "--root", root] ""
+  (res, out, err) <- liftIO $ do
+    createDirectory (root </> "src")
+    writeFile (root </> "foundry.toml") "[profile.default]\nevm_version = \"Osaka\"\nast = true\n"
+    writeFile (root </> "src" </> "unit-tests.t.sol") =<< readFile =<< Paths.getDataFileName src
+    initLib (root </> "lib" </> "tokens") ("test" </> "contracts" </> "lib" </> "erc20.sol") "erc20.sol"
+    initStdForgeDir (root </> "lib" </> "forge-std")
+    readProcessWithExitCode "forge" ["build", "--root", root] ""
   case res of
     ExitFailure _ -> pure . Left $ "compilation failed: " <> "exit code: " <> show res <> "\n\nstdout:\n" <> out <> "\n\nstderr:\n" <> err
     ExitSuccess -> readFilteredBuildOutput root (\path -> "unit-tests.t.sol" `Data.List.isInfixOf` path) Foundry

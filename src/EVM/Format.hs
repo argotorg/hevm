@@ -663,6 +663,7 @@ formatExpr = go
       SHL a b -> fmt "SHL" [a, b]
       SHR a b -> fmt "SHR" [a, b]
       SAR a b -> fmt "SAR" [a, b]
+      CLZ a -> fmt "CLZ" [a]
 
       e@Origin -> T.pack (show e)
       e@Coinbase -> T.pack (show e)
