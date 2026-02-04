@@ -3090,11 +3090,13 @@ mkCodeOps contractCode =
 concreteModexpGasFee :: ByteString -> Word64
 concreteModexpGasFee input =
   let (lenb, lene, lenm) = parseModexpLength input
-      -- Maximum safe value for W256 -> Word64 conversion
-      maxSafeW256 :: W256
-      maxSafeW256 = into (maxBound :: Word64)
-  in if lenb > maxSafeW256 || lene > maxSafeW256 || lenm > maxSafeW256
-     then maxBound  -- Overflow: charge maximum gas
+      -- EIP-7823: Cap input lengths at 1024 bytes (8192 bits)
+      -- If any length exceeds this, the precompile will fail
+      -- and consume all provided gas
+      eip7823Limit :: W256
+      eip7823Limit = 1024
+  in if lenb > eip7823Limit || lene > eip7823Limit || lenm > eip7823Limit
+     then 0  -- EIP-7823: limits exceeded, gas cost is 0 (precompileFail will consume all gas)
      else
        let ez = isZero (96 + lenb) lene input
            e' = word $ LS.toStrict $ lazySlice (96 + lenb) (min 32 lene) input

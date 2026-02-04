@@ -224,6 +224,8 @@ problematicTests =
   , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructedRevertFiller.json::", "SELFDESTRUCT behavior changed in Cancun (EIP-6780)")
     -- EIP-2929 precompile tests that use unimplemented precompiles (0x0A-0x11)
   , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::", "Tests use unimplemented precompiles 0x0A-0x11")
+    -- EIP-7823 ModExp edge case with near-uint64_max base length has gas calculation issues
+  , ("tests/osaka/eip7823_modexp_upper_bounds/test_modexp_upper_bounds.py::test_modexp_upper_bounds[fork_Osaka-blockchain_test_from_state_test-near_uint64_max_base]", "EIP-7823: near uint64 max gas calculation edge case")
   ]
 
 
