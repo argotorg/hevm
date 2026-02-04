@@ -575,12 +575,12 @@ vmForCase x = do
       let chainId = opts.chainId
           authList = opts.authorizationList
           origin = opts.origin
-          (contractsWithDelegations, authRefunds) = processAuthorizations chainId origin authList vm.env.contracts
+          (contractsWithDelegations, authRefunds, delegationTargets) = processAuthorizations chainId origin authList vm.env.contracts
           -- Get addresses to warm (after chain_id validation)
           authWarmAddrs = getAuthoritiesToWarm chainId authList
-          -- Update accessed addresses with auth warm addresses
+          -- Update accessed addresses with auth warm addresses AND delegation targets
           currentAccessed = vm.tx.subState.accessedAddresses
-          newAccessed = Set.union currentAccessed (Set.fromList authWarmAddrs)
+          newAccessed = Set.union currentAccessed (Set.fromList (authWarmAddrs ++ delegationTargets))
           -- Replace subState refunds with the ones from the correct pre-state
           -- (makeVm's refunds are based on incorrect contract state)
           newRefunds = authRefunds
@@ -591,7 +591,8 @@ vmForCase x = do
             Nothing -> (vm.state.code, vm.state.codeContract)
       in vm { env = vm.env { contracts = contractsWithDelegations }
             , tx = vm.tx { subState = vm.tx.subState { accessedAddresses = newAccessed
-                                                     , refunds = newRefunds } }
+                                                     , refunds = newRefunds }
+                         , authorizationRefunds = newRefunds }  -- EIP-7702: preserve for revert
             , state = vm.state { code = resolvedCode, codeContract = resolvedCodeAddr }
             }
 

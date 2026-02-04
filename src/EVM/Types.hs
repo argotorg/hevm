@@ -812,6 +812,7 @@ data TxState = TxState
   , isCreate    :: Bool
   , txReversion :: Map (Expr EAddr) Contract
   , txdataFloorGas :: Word64  -- EIP-7623: floor gas cost based on calldata tokens
+  , authorizationRefunds :: [(Expr EAddr, Word64)]  -- EIP-7702: refunds from authorization processing (preserved on revert)
   }
   deriving (Show)
 

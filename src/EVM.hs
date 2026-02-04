@@ -148,6 +148,7 @@ makeVm o = do
       txtoAddr = o.address
       -- EIP-7702: Authority addresses are warmed after chain_id validation
       authWarmAddrs = getAuthoritiesToWarm o.chainId o.authorizationList
+      -- EIP-7702: Delegation targets are warmed for valid authorizations (included in authDelegationTargets)
       initialAccessedAddrs = fromList $
            [txorigin, txtoAddr, o.coinbase]
         ++ (fmap LitAddr [1..9])          -- Legacy precompiles (ECRECOVER, SHA256, etc.)
@@ -155,6 +156,7 @@ makeVm o = do
         ++ [LitAddr 0x100]                -- EIP-7951 P256VERIFY
         ++ (Map.keys txaccessList)
         ++ authWarmAddrs                  -- EIP-7702: Warmed authority addresses
+        ++ authDelegationTargets          -- EIP-7702: Warmed delegation targets (for valid authorizations)
       initialAccessedStorageKeys = fromList $ foldMap (uncurry (map . (,))) (Map.toList txaccessList)
       touched = if o.create then [txorigin] else [txorigin, txtoAddr]
   memory <- ConcreteMemory <$> VS.Mutable.new 0
@@ -172,6 +174,7 @@ makeVm o = do
       , isCreate = o.create
       , txReversion = Map.fromList ((o.address,o.contract):o.otherContracts)
       , txdataFloorGas = o.txdataFloorGas
+      , authorizationRefunds = authRefunds  -- EIP-7702: preserved on revert
       }
     , logs = []
     , traces = Zipper.fromForest []
@@ -211,9 +214,9 @@ makeVm o = do
     , pathsVisited = mempty
     }
     where
-    -- Process EIP-7702 authorization list to set delegation codes and collect refunds
+    -- Process EIP-7702 authorization list to set delegation codes, collect refunds, and get addresses to warm
     baseContracts = Map.fromList ((o.address,o.contract):o.otherContracts)
-    (contractsWithDelegations, authRefunds) = processAuthorizations o.chainId o.origin o.authorizationList baseContracts
+    (contractsWithDelegations, authRefunds, authDelegationTargets) = processAuthorizations o.chainId o.origin o.authorizationList baseContracts
     env = Env
       { chainId = o.chainId
       , contracts = contractsWithDelegations
@@ -1673,7 +1676,11 @@ finalize :: VMOps t => EVM t ()
 finalize = do
   let
     revertContracts  = use (#tx % #txReversion) >>= assign (#env % #contracts)
-    revertSubstate   = assign (#tx % #subState) (SubState mempty mempty mempty mempty mempty mempty)
+    -- EIP-7702: On revert, clear execution state but preserve authorization refunds
+    -- Authorization refunds are computed before execution and should apply regardless of tx success
+    revertSubstate   = do
+      authRefunds <- use (#tx % #authorizationRefunds)
+      assign (#tx % #subState) (SubState mempty mempty mempty mempty authRefunds mempty)
 
   addAliasConstraints
   use #result >>= \case
@@ -3348,7 +3355,7 @@ getAuthoritiesToWarm chainId auths = map LitAddr $ mapMaybe (recoverIfValidChain
       | auth.authChainId /= 0 && auth.authChainId /= cid = Nothing
       | otherwise = recoverAuthorityAddress auth
 
--- | Process all EIP-7702 authorization entries and return the updated contracts map and refunds
+-- | Process all EIP-7702 authorization entries and return the updated contracts map, refunds, and addresses to warm
 -- Per EIP-7702 spec, for each authorization:
 -- 1. ecrecover to get authority address (addresses warmed separately via getAuthoritiesToWarm)
 -- 2. Check chain_id: must be 0 or match current chain
@@ -3356,26 +3363,27 @@ getAuthoritiesToWarm chainId auths = map LitAddr $ mapMaybe (recoverIfValidChain
 -- 4. Check nonce matches (for self-sponsored: nonce == account_nonce + 1)
 -- 5. Add refund if authority exists (PER_EMPTY_ACCOUNT_COST - PER_AUTH_BASE_COST = 12500)
 -- 6. Set delegation code and increment nonce
+-- 7. Add delegation target address to accessed addresses (only for valid authorizations)
 processAuthorizations
   :: W256                                -- ^ Chain ID
   -> Expr EAddr                          -- ^ Transaction origin address
   -> [AuthorizationEntry]                -- ^ Authorization list from transaction
   -> Map (Expr EAddr) Contract           -- ^ Current contracts state
-  -> (Map (Expr EAddr) Contract, [(Expr EAddr, Word64)])  -- ^ (Updated contracts, Refunds)
-processAuthorizations chainId origin auths contracts = foldl processOne (contracts, []) auths
+  -> (Map (Expr EAddr) Contract, [(Expr EAddr, Word64)], [Expr EAddr])  -- ^ (Updated contracts, Refunds, Delegation targets to warm)
+processAuthorizations chainId origin auths contracts = foldl processOne (contracts, [], []) auths
   where
     -- EIP-7702 refund: PER_EMPTY_ACCOUNT_COST (25000) - PER_AUTH_BASE_COST (12500) = 12500
     authRefundAmount :: Word64
     authRefundAmount = 12500
 
-    processOne :: (Map (Expr EAddr) Contract, [(Expr EAddr, Word64)]) -> AuthorizationEntry
-               -> (Map (Expr EAddr) Contract, [(Expr EAddr, Word64)])
-    processOne (cs, refs) auth = case recoverAuthorityAddress auth of
-      Nothing -> (cs, refs)  -- Invalid signature, skip
+    processOne :: (Map (Expr EAddr) Contract, [(Expr EAddr, Word64)], [Expr EAddr]) -> AuthorizationEntry
+               -> (Map (Expr EAddr) Contract, [(Expr EAddr, Word64)], [Expr EAddr])
+    processOne (cs, refs, warmAddrs) auth = case recoverAuthorityAddress auth of
+      Nothing -> (cs, refs, warmAddrs)  -- Invalid signature, skip
       Just authority ->
         -- Check chain_id: must be 0 (any chain) or match current chain
         if auth.authChainId /= 0 && auth.authChainId /= chainId
-        then (cs, refs)  -- Chain ID mismatch, skip (but address was already warmed)
+        then (cs, refs, warmAddrs)  -- Chain ID mismatch, skip (but address was already warmed)
         else
           let authorityAddr = LitAddr authority
               existingAccount = Map.lookup authorityAddr cs
@@ -3398,10 +3406,10 @@ processAuthorizations chainId origin auths contracts = foldl processOne (contrac
                               else currentNonce
           in -- Check code constraint (EIP-7702 step 4)
              if not codeIsOk
-             then (cs, refs)  -- Account has non-delegation code, skip
+             then (cs, refs, warmAddrs)  -- Account has non-delegation code, skip
              -- Check nonce matches (step 5)
              else if into expectedNonce /= auth.authNonce
-             then (cs, refs)  -- Nonce mismatch, skip
+             then (cs, refs, warmAddrs)  -- Nonce mismatch, skip
              else
                -- EIP-7702: If target address is 0x0, set code to empty (clears delegation)
                -- Otherwise, set delegation code (0xef0100 || address)
@@ -3431,7 +3439,11 @@ processAuthorizations chainId origin auths contracts = foldl processOne (contrac
                    newRefs = if accountReallyExists
                              then (authorityAddr, authRefundAmount) : refs
                              else refs
-               in (Map.insert authorityAddr newContract cs, newRefs)
+                   -- EIP-7702 step 7: Add delegation target to accessed addresses (if non-zero)
+                   newWarmAddrs = if auth.authAddress /= 0
+                                  then LitAddr auth.authAddress : warmAddrs
+                                  else warmAddrs
+               in (Map.insert authorityAddr newContract cs, newRefs, newWarmAddrs)
 
 -- | Check if bytecode is a delegation code (0xef0100 prefix)
 isDelegationCode :: ByteString -> Bool
