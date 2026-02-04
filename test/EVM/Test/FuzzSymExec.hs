@@ -777,7 +777,7 @@ newtype GasLimitInt = GasLimitInt (Int)
 
 instance Arbitrary GasLimitInt where
   arbitrary = do
-    let mkLimit = chooseInt (50000, 0xfffff)
+    let mkLimit = chooseInt (60000, 0xfffff)
     fmap GasLimitInt mkLimit
 
 -- GenTxDataRaw
