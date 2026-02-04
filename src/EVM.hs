@@ -890,25 +890,23 @@ exec1 conf = do
                       Right jumpTarget -> do
                         -- Check if we're already in merge mode (speculative execution)
                         ms <- use #mergeState
-                        let alreadyMerging = ms.msActive
-                        if alreadyMerging
-                          then do
-                            -- Inside speculation: try both paths using budget-based exploration
-                            result <- Merge.exploreNestedBranch conf (exec1 conf) jumpTarget ms.msTargetPC y xs
-                            case result of
-                              Just vmFinal -> put vmFinal
-                              Nothing -> do
-                                -- Neither path converged - signal failure by setting a result
-                                -- This will cause speculateLoop to return Nothing
-                                assign #result $ Just $ VMFailure BadJumpDestination
-                          else do
-                            merged <- Merge.tryMergeForwardJump conf (exec1 conf) vm.state.pc jumpTarget y xs
-                            unless merged $ do
-                              -- Define Symbolic-specific jump for fallback
-                              let jumpSym :: Bool -> EVM Symbolic ()
-                                  jumpSym False = assign' (#state % #stack) xs >> next
-                                  jumpSym _    = checkJump jumpTarget xs
-                              branch conf.maxDepth y jumpSym
+                        if ms.msActive then do
+                          -- Inside speculation: try both paths using budget-based exploration
+                          result <- Merge.exploreNestedBranch conf (exec1 conf) jumpTarget ms.msTargetPC y xs
+                          case result of
+                            Just vmFinal -> put vmFinal
+                            Nothing -> do
+                              -- Neither path converged - signal failure by setting a result
+                              -- This will cause speculateLoop to return Nothing
+                              assign #result $ Just $ VMFailure BadJumpDestination
+                        else do
+                          merged <- Merge.tryMergeForwardJump conf (exec1 conf) vm.state.pc jumpTarget y xs
+                          unless merged $ do
+                            -- Define Symbolic-specific jump for fallback
+                            let jumpSym :: Bool -> EVM Symbolic ()
+                                jumpSym False = assign' (#state % #stack) xs >> next
+                                jumpSym _    = checkJump jumpTarget xs
+                            branch conf.maxDepth y jumpSym
                 in case eqT @t @Symbolic of
                      Just Refl -> symbolicMerge
                      Nothing -> branch conf.maxDepth y jump
