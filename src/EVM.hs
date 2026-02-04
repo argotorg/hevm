@@ -96,6 +96,7 @@ defaultVMOpts = VMOpts
   , freshAddresses = 0
   , beaconRoot     = 0
   , parentHash     = 0
+  , txdataFloorGas = 0
   }
 
 blankState :: VMOps t => ST RealWorld (FrameState t)
@@ -161,6 +162,7 @@ makeVm o = do
       , subState = SubState mempty touched initialAccessedAddrs initialAccessedStorageKeys mempty mempty
       , isCreate = o.create
       , txReversion = Map.fromList ((o.address,o.contract):o.otherContracts)
+      , txdataFloorGas = o.txdataFloorGas
       }
     , logs = []
     , traces = Zipper.fromForest []
@@ -1306,21 +1308,26 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
         forceConcreteBuf input "MODEXP" $ \input' -> do
           let
             (lenb, lene, lenm) = parseModexpLength input'
-
-            output = ConcreteBuf $
-              if isZero (96 + lenb + lene) lenm input'
-              then truncpadlit (unsafeInto lenm) (asBE (0 :: Int))
-              else
-                let
-                  b = asInteger $ lazySlice 96 lenb input'
-                  e = asInteger $ lazySlice (96 + lenb) lene input'
-                  m = asInteger $ lazySlice (96 + lenb + lene) lenm input'
-                in
-                  padLeft (unsafeInto lenm) (asBE (expFast b e m))
-          assign' (#state % #stack) (Lit 1 : xs)
-          assign (#state % #returndata) output
-          copyBytesToMemory output outSize (Lit 0) outOffset
-          next
+            -- EIP-7823: ModExp upper bounds - each input limited to 1024 bytes (8192 bits)
+            modexpLimit = 1024 :: W256
+          if lenb > modexpLimit || lene > modexpLimit || lenm > modexpLimit
+          then precompileFail  -- EIP-7823: fail and consume all gas if limits exceeded
+          else do
+            let
+              output = ConcreteBuf $
+                if isZero (96 + lenb + lene) lenm input'
+                then truncpadlit (unsafeInto lenm) (asBE (0 :: Int))
+                else
+                  let
+                    b = asInteger $ lazySlice 96 lenb input'
+                    e = asInteger $ lazySlice (96 + lenb) lene input'
+                    m = asInteger $ lazySlice (96 + lenb + lene) lenm input'
+                  in
+                    padLeft (unsafeInto lenm) (asBE (expFast b e m))
+            assign' (#state % #stack) (Lit 1 : xs)
+            assign (#state % #returndata) output
+            copyBytesToMemory output outSize (Lit 0) outOffset
+            next
 
       -- ECADD
       0x6 ->
@@ -3330,8 +3337,15 @@ instance VMOps Concrete where
       gasUsedBeforeRefund = tx.gaslimit - gasRemaining
       sumRefunds          = sum (snd <$> tx.subState.refunds)
       cappedRefund        = min (quot gasUsedBeforeRefund 5) sumRefunds
-      gasUsed             = gasUsedBeforeRefund - cappedRefund
-      originPay    = (into $ gasRemaining + cappedRefund) * tx.gasprice
+      gasUsedAfterRefund  = gasUsedBeforeRefund - cappedRefund
+      -- EIP-7623: Apply floor cost based on calldata tokens
+      -- gasUsed = max(gasUsedAfterRefund, txdataFloorGas)
+      gasUsed             = max gasUsedAfterRefund tx.txdataFloorGas
+      -- Adjust refund if floor kicks in
+      actualRefund        = if gasUsed > gasUsedAfterRefund
+                            then cappedRefund - (gasUsed - gasUsedAfterRefund)
+                            else cappedRefund
+      originPay    = (into $ gasRemaining + actualRefund) * tx.gasprice
       minerPay     = tx.priorityFee * (into gasUsed)
 
     modifying (#env % #contracts)

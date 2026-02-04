@@ -230,6 +230,20 @@ txGasCost fs tx =
       initcodeCost = fs.g_initcodeword * unsafeInto (ceilDiv (BS.length calldata) 32)
   in baseCost + zeroCost * (unsafeInto zeroBytes) + nonZeroCost * (unsafeInto nonZeroBytes)
 
+-- | EIP-7623: Calculate floor gas cost based on calldata tokens
+-- tokens = zero_bytes + (nonzero_bytes * 4)
+-- floor_gas = 10 * tokens
+txdataFloorGas :: Transaction -> Word64
+txdataFloorGas tx =
+  let calldata     = tx.txdata
+      zeroBytes    = BS.count 0 calldata
+      nonZeroBytes = BS.length calldata - zeroBytes
+      -- tokens_in_calldata = zero_bytes + (nonzero_bytes * 4)
+      tokens       = unsafeInto zeroBytes + (unsafeInto nonZeroBytes * 4)
+      -- TOTAL_COST_FLOOR_PER_TOKEN = 10
+      floorPerToken = 10 :: Word64
+  in floorPerToken * tokens
+
 instance FromJSON AccessListEntry where
   parseJSON (JSON.Object val) = do
     accessAddress_ <- addrField val "address"
