@@ -214,7 +214,6 @@ problematicTests =
   , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x0000000000000000000000000000000000000011", "0x11 precompile not implemented")
   , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x0000000000000000000000000000000000000100", "0x100 precompile not implemented")
   , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::", "TODO")
-  , ("tests/osaka/eip7939_count_leading_zeros/test_eip_mainnet.py::", "CLZ not implemented")
     -- Other tests (TODO: fix or re-sort them)
   , ("tests/frontier/precompiles/test_ripemd.py::", "TODO")
   , ("tests/osaka/eip7823_modexp_upper_bounds/test_eip_mainnet.py::", "TODO")
