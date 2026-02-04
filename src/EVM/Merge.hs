@@ -51,7 +51,7 @@ execUntilPCSymbolic conf exec1Step targetPC = do
     result <- speculateLoop conf exec1Step targetPC
     -- Reset merge state
     modifying #mergeState $ \ms -> ms { msActive = False }
-    return result
+    pure result
 
 -- | Inner loop for speculative execution with budget tracking
 speculateLoop
@@ -62,12 +62,12 @@ speculateLoop
 speculateLoop conf exec1Step targetPC = do
     ms <- use #mergeState
     if ms.msRemainingBudget <= 0
-      then return Nothing  -- Budget exhausted
+      then pure Nothing  -- Budget exhausted
       else do
         pc <- use (#state % #pc)
         result <- use #result
         case result of
-          Just _ -> return Nothing  -- Hit error/return
+          Just _ -> pure Nothing  -- Hit error/return
           Nothing
             | pc == targetPC -> Just <$> get  -- Reached target
             | otherwise -> do
@@ -94,14 +94,14 @@ exploreNestedBranch conf exec1Step nestedJumpTarget targetPC cond stackAfterPop 
 
     -- Check limits
     if ms.msRemainingBudget <= 0 || ms.msNestingDepth >= maxDepth
-      then return Nothing
+      then pure Nothing
       else do
         vm0 <- get
 
         -- CRITICAL: Skip if memory is mutable (ConcreteMemory)
         -- Mutable memory is not properly restored by `put vm0`
         case vm0.state.memory of
-          ConcreteMemory _ -> return Nothing  -- Can't safely explore with mutable memory
+          ConcreteMemory _ -> pure Nothing  -- Can't safely explore with mutable memory
           SymbolicMemory _ -> do
             -- Save original merge state for proper backtracking
             let originalDepth = ms.msNestingDepth
@@ -163,11 +163,11 @@ exploreNestedBranch conf exec1Step nestedJumpTarget targetPC cond stackAfterPop 
                   else do
                     -- Side effects or stack mismatch - can't merge
                     put vm0
-                    return Nothing
+                    pure Nothing
               _ -> do
                 -- One or both paths didn't converge - can't merge
                 put vm0
-                return Nothing
+                pure Nothing
 
 -- | Try to merge a forward jump (skip block pattern) for Symbolic execution
 -- Returns True if merge succeeded, False if we should fall back to forking
@@ -184,13 +184,13 @@ tryMergeForwardJump
 tryMergeForwardJump conf exec1Step currentPC jumpTarget cond stackAfterPop = do
   -- Only handle forward jumps (skip block pattern)
   if jumpTarget <= currentPC
-    then return False  -- Not a forward jump
+    then pure False  -- Not a forward jump
     else do
       vm0 <- get
 
       -- CRITICAL: Skip merge if memory is mutable (ConcreteMemory)
       case vm0.state.memory of
-        ConcreteMemory _ -> return False
+        ConcreteMemory _ -> pure False
         SymbolicMemory _ -> do
           -- True branch (jump taken): Just sets PC to target, no execution needed
           let trueStack = stackAfterPop  -- Stack after popping JUMPI args
@@ -202,9 +202,9 @@ tryMergeForwardJump conf exec1Step currentPC jumpTarget cond stackAfterPop = do
 
           case maybeVmFalse of
             Nothing -> do
-              -- Couldn't converge - restore and return False
+              -- Couldn't converge - restore and pure False
               put vm0
-              return False
+              pure False
             Just vmFalse -> do
               let falseStack = vmFalse.state.stack
                   soundnessOK = checkNoSideEffects vm0 vmFalse
@@ -227,11 +227,11 @@ tryMergeForwardJump conf exec1Step currentPC jumpTarget cond stackAfterPop = do
                   assign (#state % #stack) mergedStack
                   assign #result Nothing
                   assign (#mergeState % #msActive) False
-                  return True
+                  pure True
                 else do
                   -- Can't merge: stack depth or state differs
                   put vm0
-                  return False
+                  pure False
 
 -- | Check that execution had no side effects (storage, memory, logs, etc.)
 checkNoSideEffects :: VM Symbolic -> VM Symbolic -> Bool
