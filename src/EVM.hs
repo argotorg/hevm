@@ -868,19 +868,19 @@ exec1 conf = do
 
         OpJumpi -> {-# SCC "OpJumpi" #-}
           case stk of
-            x:y:xs -> forceConcreteLimitSz x 2 "JUMPI: symbolic jumpdest" $ \x' ->
+            x:y:xs -> forceConcreteLimitSz x 2 "JUMPI: symbolic jumpdest" $ \jdest ->
               burn g_high $
                 -- Note: We must NOT check tryInto x' unconditionally!
                 -- Per EVM semantics, if condition is 0, we just fall through
                 -- without validating the destination. Only validate when jumping.
                 let jump :: Bool -> EVM t ()
                     jump False = assign' (#state % #stack) xs >> next
-                    jump _    = case tryInto x' of
+                    jump _    = case tryInto jdest of
                       Left _ -> vmError BadJumpDestination
                       Right i -> checkJump i xs
                     -- For Symbolic execution, try forward-jump merge first
                     symbolicMerge :: EVM Symbolic ()
-                    symbolicMerge = case tryInto x' of
+                    symbolicMerge = case tryInto jdest of
                       Left _ ->
                         -- Invalid destination - but we only error if we try to jump
                         -- Use branch to decide based on condition
