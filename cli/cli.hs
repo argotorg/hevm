@@ -39,12 +39,11 @@ import Data.List.Split (splitOn)
 import Text.Read (readMaybe)
 import JSONL (jsonlBuilder, jsonLine)
 
-import EVM (initialContract, abstractContract, makeVm)
+import EVM (initialContract, abstractContract, makeVm, defaultVMOpts)
 import EVM.ABI (Sig(..))
 import EVM.Dapp (dappInfo, DappInfo, emptyDapp)
 import EVM.Expr qualified as Expr
 import EVM.Concrete qualified as Concrete
-import EVM.FeeSchedule (feeSchedule)
 import EVM.Fetch qualified as Fetch
 import EVM.Format (hexByteString, strip0x, formatExpr, indent)
 import EVM.Solidity
@@ -88,9 +87,9 @@ data CommonOptions = CommonOptions
   , verb          ::Int
   , root          ::Maybe String
   , assertionType ::AssertionType
-  , solverThreads ::Natural
-  , smttimeout    ::Natural
-  , smtdebug      ::Bool
+  , smtTimeout    ::Natural
+  , smtMemory     ::Natural
+  , smtDebug      ::Bool
   , dumpUnsolved  ::Maybe String
   , numSolvers    ::Maybe Natural
   , maxIterations ::Integer
@@ -101,6 +100,7 @@ data CommonOptions = CommonOptions
   , noSimplify    ::Bool
   , onlyDeployed  ::Bool
   , cacheDir      ::Maybe String
+  , earlyAbort    ::Bool
   }
 
 commonOptions :: Parser CommonOptions
@@ -117,9 +117,9 @@ commonOptions = CommonOptions
   <*> (option auto $ long "verb"            <> showDefault <> value 1 <> help "Append call trace: {1} failures {2} all")
   <*> (optional $ strOption $ long "root"   <> help "Path to  project root directory")
   <*> (option auto $ long "assertion-type"  <> showDefault <> value Forge <> help "Assertions as per Forge or DSTest")
-  <*> (option auto $ long "solver-threads"  <> showDefault <> value 1 <> help "Number of threads for each solver instance. Only respected for Z3")
-  <*> (option auto $ long "smttimeout"      <> value 300 <> help "Timeout given to SMT solver in seconds")
-  <*> (switch $ long "smtdebug"             <> help "Print smt queries sent to the solver")
+  <*> (option auto $ long "smt-timeout"     <> value 300 <> help "Timeout given to SMT solver in seconds. Not available on Windows")
+  <*> (option auto $ long "smt-memory"      <> value defMemLimit <> help "Maximum memory limit for SMT solver in MB. Only available on Linux")
+  <*> (switch $ long "smt-debug"            <> help "Print smt queries sent to the solver")
   <*> (optional $ strOption $ long "dump-unsolved" <> help "Dump unsolved SMT queries to this (relative) path")
   <*> (optional $ option auto $ long "num-solvers" <> help "Number of solver instances to use (default: number of cpu cores)")
   <*> (option auto $ long "max-iterations"  <> showDefault <> value 5 <> help "Number of times we may revisit a particular branching point. For no bound, set -1")
@@ -130,6 +130,7 @@ commonOptions = CommonOptions
   <*> (switch $ long "no-simplify" <> help "Don't perform simplification of expressions")
   <*> (switch $ long "only-deployed" <> help "When trying to resolve unknown addresses, only use addresses of deployed contracts")
   <*> (optional $ strOption $ long "cache-dir" <> help "Directory to save and load RPC cache")
+  <*> (switch $  long "early-abort" <> help "Stop exploration immediately upon finding the first counterexample")
 
 data CommonExecOptions = CommonExecOptions
   { address       ::Maybe Addr
@@ -330,7 +331,7 @@ main = do
       solver <- getSolver cOpts.solver
       cores <- liftIO $ unsafeInto <$> getNumProcessors
       let solverCount = fromMaybe cores cOpts.numSolvers
-      runEnv env $ withSolvers solver solverCount cOpts.solverThreads (Just cOpts.smttimeout) $ \solvers -> do
+      runEnv env $ withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
         buildOut <- readBuildOutput root testOpts.projectType
         case buildOut of
           Left e -> liftIO $ do
@@ -358,7 +359,7 @@ main = do
         putStrLn "Error: maxBufSize must be at least 0. Negative values do not make sense. A value of zero means at most 1 byte long buffers"
         exitFailure
       pure Env { config = defaultConfig
-        { dumpQueries = cOpts.smtdebug
+        { dumpQueries = cOpts.smtDebug
         , dumpUnsolved = cOpts.dumpUnsolved
         , debug = cOpts.debug
         , dumpEndStates = cOpts.debug
@@ -372,6 +373,7 @@ main = do
         , verb = cOpts.verb
         , simp = Prelude.not cOpts.noSimplify
         , onlyDeployed = cOpts.onlyDeployed
+        , earlyAbort = cOpts.earlyAbort
         } }
 
 
@@ -415,7 +417,7 @@ equivalence eqOpts cOpts = do
   solver <- liftIO $ getSolver cOpts.solver
   cores <- liftIO $ unsafeInto <$> getNumProcessors
   let solverCount = fromMaybe cores cOpts.numSolvers
-  withSolvers solver solverCount cOpts.solverThreads (Just cOpts.smttimeout) $ \s -> do
+  withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \s -> do
     sess <- Fetch.mkSession cOpts.cacheDir Nothing
     eq <- equivalenceCheck s (Just sess) (fromJust bytecodeA) (fromJust bytecodeB) veriOpts calldata eqOpts.create
     let anyIssues =  not (null eq.partials) || any (isUnknown . fst) eq.res  || any (isError . fst) eq.res
@@ -513,7 +515,7 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = do
   cores <- liftIO $ unsafeInto <$> getNumProcessors
   let solverCount = fromMaybe cores cOpts.numSolvers
   solver <- liftIO $ getSolver cOpts.solver
-  withSolvers solver solverCount cOpts.solverThreads (Just cOpts.smttimeout) $ \solvers -> do
+  withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
     let veriOpts = VeriOpts { iterConf = IterConfig {
                               maxIter = parseMaxIters cOpts.maxIterations
                               , askSmtIters = cOpts.askSmtIterations
@@ -581,7 +583,7 @@ launchExec cFileOpts execOpts cExecOpts cOpts = do
     rpcDat :: Fetch.RpcInfo = Fetch.RpcInfo blockUrlInfo
 
   -- TODO: we shouldn't need solvers to execute this code
-  withSolvers Z3 0 1 Nothing $ \solvers -> do
+  withSolvers Z3 0 Nothing cOpts.smtMemory $ \solvers -> do
     let fetcher = Fetch.oracle solvers (Just sess) rpcDat
     vm' <- if execOpts.jsonTrace
            then do
@@ -705,9 +707,8 @@ vmFromCommand cOpts cExecOpts cFileOpts execOpts sess = do
                   then addr (.address) (Concrete.createAddress (fromJust $ maybeLitAddrSimp origin) (W64 $ word64 (.nonce) 0))
                   else addr (.address) (LitAddr 0xacab)
 
-        vm0 baseFee miner ts blockNum prevRan c = makeVm $ VMOpts
+        vm0 baseFee miner ts blockNum prevRan c = makeVm $ (defaultVMOpts @Concrete)
           { contract       = c
-          , otherContracts = []
           , calldata       = (calldata, [])
           , value          = Lit val
           , address        = address
@@ -724,14 +725,8 @@ vmFromCommand cOpts cExecOpts cFileOpts execOpts sess = do
           , gasprice       = word (.gasprice) 0
           , maxCodeSize    = word (.maxcodesize) 0xffffffff
           , prevRandao     = word (.prevRandao) prevRan
-          , schedule       = feeSchedule
           , chainId        = word (.chainid) 1
           , create         = (.create) execOpts
-          , baseState      = EmptyBase
-          , txAccessList   = mempty -- TODO: support me soon
-          , allowFFI       = False
-          , freshAddresses = 0
-          , beaconRoot     = 0
           }
         word f def = fromMaybe def (f cExecOpts)
         word64 f def = fromMaybe def (f cExecOpts)
@@ -811,7 +806,7 @@ symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
     address = eaddr (.address) (SymAddr "entrypoint")
     originAddr = eaddr (.origin) (SymAddr "origin")
     originContr = abstractContract (RuntimeCode (SymbolicRuntimeCode mempty)) originAddr
-    vm0 baseFee miner ts blockNum prevRan cd callvalue caller c baseState = makeVm $ VMOpts
+    vm0 baseFee miner ts blockNum prevRan cd callvalue caller c baseState = makeVm $ defaultVMOpts
       { contract       = c
       , otherContracts = [(originAddr, originContr)]
       , calldata       = cd
@@ -819,7 +814,6 @@ symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
       , address        = address
       , caller         = caller
       , origin         = origin
-      , gas            = ()
       , gaslimit       = word64 (.gaslimit) 0xffffffffffffffff
       , baseFee        = baseFee
       , priorityFee    = word (.priorityFee) 0
@@ -830,14 +824,9 @@ symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
       , gasprice       = word (.gasprice) 0
       , maxCodeSize    = word (.maxcodesize) 0xffffffff
       , prevRandao     = word (.prevRandao) prevRan
-      , schedule       = feeSchedule
       , chainId        = word (.chainid) 1
       , create         = (.create) sOpts
       , baseState      = baseState
-      , txAccessList   = mempty
-      , allowFFI       = False
-      , freshAddresses = 0
-      , beaconRoot     = 0
       }
     word f def = fromMaybe def (f cExecOpts)
     word64 f def = fromMaybe def (f cExecOpts)
@@ -868,7 +857,7 @@ unitTestOptions testOpts cOpts solvers buildOutput = do
                 in rpcDat { Fetch.blockNumURL = i }
     , maxIter = parseMaxIters cOpts.maxIterations
     , askSmtIters = cOpts.askSmtIterations
-    , smtTimeout = Just cOpts.smttimeout
+    , smtTimeout = Just cOpts.smtTimeout
     , match = T.pack $ fromMaybe ".*" testOpts.match
     , prefix = T.pack testOpts.prefix
     , testParams = params

@@ -43,9 +43,8 @@ blockchainTests ts = bench "blockchain-tests" $ nfIO $ do
   tests <- ts
   putStrLn "    executing blockchain tests"
   let cases = concat . Map.elems . (fmap Map.toList) $ tests
-      ignored = Map.keys BCTests.problematicTests
   foldM (\acc (n, c) ->
-      if n `elem` ignored
+      if isJust (BCTests.findIgnoreReason n)
       then pure True
       else do
         res <- runApp $ runBCTest c
@@ -57,7 +56,7 @@ runBCTest :: App m => BCTests.Case -> m Bool
 runBCTest x =
  do
   vm0 <- liftIO $ BCTests.vmForCase x
-  result <- Stepper.interpret (Fetch.zero 0 Nothing) vm0 Stepper.runFully
+  result <- Stepper.interpret (Fetch.zero 0 Nothing 1024) vm0 Stepper.runFully
   writeTrace vm0
   pure $ isNothing $ BCTests.checkExpectation x result
 
@@ -67,7 +66,7 @@ runBCTest x =
 
 findPanics :: App m => Solver -> Natural -> Integer -> ByteString -> m ()
 findPanics solver count iters c = do
-  _ <- withSolvers solver count 1 Nothing $ \s -> do
+  _ <- withSolvers solver count Nothing 1024 $ \s -> do
     let opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf {maxIter = Just iters, askSmtIters = iters + 1 }}
     checkAssert s allPanicCodes c Nothing [] opts
   liftIO $ putStrLn "done"

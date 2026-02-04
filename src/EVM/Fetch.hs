@@ -495,10 +495,10 @@ mkSessionWithoutCache :: App m => m Session
 mkSessionWithoutCache = mkSession Nothing Nothing
 
 -- Only used for testing (test.hs, BlockchainTests.hs)
-zero :: Natural -> Maybe Natural -> Fetcher t m
-zero smtjobs smttimeout q = do
+zero :: Natural -> Maybe Natural -> Natural -> Fetcher t m
+zero smtjobs smttimeout maxMemoryMB q = do
   sess <- mkSessionWithoutCache
-  withSolvers Z3 smtjobs 1 smttimeout $ \s ->
+  withSolvers Z3 smtjobs smttimeout maxMemoryMB $ \s ->
     oracle s (Just sess) noRpc q
 
 noRpcFetcher :: forall t m . App m => SolverGroup -> Fetcher t m

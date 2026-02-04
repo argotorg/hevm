@@ -440,6 +440,7 @@ prettyError = \case
   NonceOverflow -> "Nonce overflow"
   BadCheatCode reason a -> "Bad cheat code: " <>  reason <> " sig: " <> show a
   NonexistentFork a -> "Fork ID does not exist: " <> show a
+  AssumeCheatFailed -> "Assume failed"
 
 prettyvmresult :: Expr End -> String
 prettyvmresult (Failure _ _ (Revert (ConcreteBuf ""))) = "Revert"

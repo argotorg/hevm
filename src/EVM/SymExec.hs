@@ -11,9 +11,9 @@ import Control.Concurrent.Async ( mapConcurrently)
 import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
 import Control.Concurrent.Spawn (parMapIO, pool)
 import Control.Concurrent.STM (writeTChan, newTChan, TChan, readTChan, atomically, isEmptyTChan, STM)
-import Control.Concurrent.STM.TVar (TVar, newTVarIO, modifyTVar, readTVar, writeTVar)
+import Control.Concurrent.STM.TVar (TVar, newTVarIO, modifyTVar, readTVar, readTVarIO, writeTVar)
 import Control.Concurrent.STM.TMVar (TMVar, putTMVar, takeTMVar, newEmptyTMVarIO)
-import Control.Monad (when, forM_, forM, forever)
+import Control.Monad (when, unless, forM_, forM, forever, void)
 import Control.Monad.Loops (whileM)
 import Control.Monad.IO.Unlift (MonadUnliftIO, toIO, withRunInIO)
 import Control.Monad.Operational qualified as Operational
@@ -48,13 +48,12 @@ import Options.Generic (ParseField, ParseFields, ParseRecord)
 import Text.Printf (printf)
 import Witch (into, unsafeInto)
 
-import EVM (makeVm, abstractContract, initialContract, getCodeLocation, isValidJumpDest)
+import EVM (makeVm, abstractContract, initialContract, getCodeLocation, isValidJumpDest, defaultVMOpts)
 import EVM.Exec (exec)
 import EVM.Fetch qualified as Fetch
 import EVM.ABI
 import EVM.Effects
 import EVM.Expr qualified as Expr
-import EVM.FeeSchedule (feeSchedule)
 import EVM.Format (formatExpr, formatPartial, formatPartialDetailed, showVal, indent, formatBinary, formatProp, formatState, formatError)
 import EVM.SMT qualified as SMT
 import EVM.Solvers (SolverGroup, checkSatWithProps)
@@ -234,33 +233,16 @@ loadEmptySymVM
   -> (Expr Buf, [Prop])
   -> ST RealWorld (VM Symbolic)
 loadEmptySymVM x callvalue cd =
-  (makeVm $ VMOpts
+  (makeVm $ defaultVMOpts
     { contract = initialContract x
-    , otherContracts = []
     , calldata = cd
     , value = callvalue
-    , baseState = EmptyBase
     , address = SymAddr "entrypoint"
     , caller = SymAddr "caller"
     , origin = SymAddr "origin"
     , coinbase = SymAddr "coinbase"
-    , number = Lit 0
-    , timestamp = Lit 0
     , blockGaslimit = 0
-    , gasprice = 0
     , prevRandao = 42069
-    , gas = ()
-    , gaslimit = 0xffffffffffffffff
-    , baseFee = 0
-    , priorityFee = 0
-    , maxCodeSize = 0xffffffff
-    , schedule = feeSchedule
-    , chainId = 1
-    , create = False
-    , txAccessList = mempty
-    , allowFFI = False
-    , freshAddresses = 0
-    , beaconRoot = 0
     })
 
 -- Creates a symbolic VM that has symbolic storage, unlike loadEmptySymVM
@@ -271,9 +253,8 @@ loadSymVM
   -> Bool
   -> ST RealWorld (VM Symbolic)
 loadSymVM x callvalue cd create =
-  (makeVm $ VMOpts
+  (makeVm $ defaultVMOpts
     { contract = if create then initialContract x else abstractContract x (SymAddr "entrypoint")
-    , otherContracts = []
     , calldata = cd
     , value = callvalue
     , baseState = AbstractBase
@@ -281,23 +262,9 @@ loadSymVM x callvalue cd create =
     , caller = SymAddr "caller"
     , origin = SymAddr "origin"
     , coinbase = SymAddr "coinbase"
-    , number = Lit 0
-    , timestamp = Lit 0
     , blockGaslimit = 0
-    , gasprice = 0
     , prevRandao = 42069
-    , gas = ()
-    , gaslimit = 0xffffffffffffffff
-    , baseFee = 0
-    , priorityFee = 0
-    , maxCodeSize = 0xffffffff
-    , schedule = feeSchedule
-    , chainId = 1
     , create = create
-    , txAccessList = mempty
-    , allowFFI = False
-    , freshAddresses = 0
-    , beaconRoot = 0
     })
 
 -- freezes any mutable refs, making it safe to share between threads
@@ -319,6 +286,8 @@ freezeVM vm = do
       ConcreteMemory m -> SymbolicMemory . ConcreteBuf . vectorToByteString <$> VS.freeze m
       m@(SymbolicMemory _) -> pure m
 
+type PathHandler m a = Expr End -> TVar Bool -> m a
+
 data InterpTask m a = InterpTask
   {fetcher :: Fetch.Fetcher Symbolic m
   , iterConf :: IterConfig
@@ -326,22 +295,28 @@ data InterpTask m a = InterpTask
   , taskQ :: Chan (InterpTask m a)
   , numTasks :: TVar Natural
   , stepper :: Stepper Symbolic (Expr End)
-  , handler :: Expr End -> m a
+  , handler :: PathHandler m a
+  , shouldAbort :: TVar Bool
   }
 
 data Process m a = Process
   { result :: Expr End
-  , handler :: Expr End -> m a
+  , handler :: PathHandler m a
   }
+
+-- returns back the input path/branch of the program
+noopPathHandler :: Applicative m => PathHandler m (Expr End)
+noopPathHandler x _ = pure x
 
 interpret :: forall m a . App m
   => Fetch.Fetcher Symbolic m
   -> IterConfig
   -> VM Symbolic
   -> Stepper Symbolic (Expr End)
-  -> (Expr End -> m a)
+  -> PathHandler m a
   -> m [a]
 interpret fetcher iterConf vm stepper handler = do
+  shouldAbort <- liftIO $ newTVarIO False
   conf <- readConfig
   taskQ <- liftIO newChan
   processQ <- liftIO newChan
@@ -363,11 +338,11 @@ interpret fetcher iterConf vm stepper handler = do
   allProcessDone <- liftIO newEmptyTMVarIO
 
   -- spawn task orchestration thread
-  taskOrchestrate' <- toIO $ taskOrchestrate taskQ availableInstances processQ numTasks numProcs
+  taskOrchestrate' <- toIO $ taskOrchestrate taskQ shouldAbort availableInstances processQ numTasks numProcs
   taskOrchestrateId <- liftIO $ forkIO taskOrchestrate'
 
   -- spawn processing orchestration thread
-  processOrchestrate' <- toIO $ processOrchestrate processQ availableProcs resChan numProcs numTasks allProcessDone
+  processOrchestrate' <- toIO $ processOrchestrate processQ shouldAbort availableProcs resChan numProcs numTasks allProcessDone
   processOrchestrateId <- liftIO $ forkIO processOrchestrate'
 
   -- Add in the first task, further tasks will be added by the interpreters themselves
@@ -379,6 +354,7 @@ interpret fetcher iterConf vm stepper handler = do
         , numTasks = numTasks
         , stepper = stepper
         , handler = handler
+        , shouldAbort = shouldAbort
         }
   liftIO $ writeChan taskQ interpTask
 
@@ -394,30 +370,41 @@ interpret fetcher iterConf vm stepper handler = do
     -- orchestrator loop
     taskOrchestrate :: App m
       => Chan (InterpTask m a)
+      -> TVar Bool
       -> Chan () -> Chan (Process m a)
-      -> TVar Natural -> TVar Natural -> m b
-    taskOrchestrate taskQ avail processQ numTasks numProcs = forever $ do
+      -> TVar Natural -> TVar Natural -> m ()
+    taskOrchestrate taskQ shouldAbort avail processQ numTasks numProcs = forever $ do
       _ <- liftIO $ readChan avail
       task <- liftIO $ readChan taskQ
-      runTask' <- toIO $ getOneExpr task avail processQ numTasks numProcs
-      liftIO $ forkIO runTask'
+      abortFlag <- liftIO $ readTVarIO shouldAbort
+      if abortFlag
+        then liftIO $ writeChan avail ()
+        else do
+          runTask' <- toIO $ getOneExpr task avail processQ numTasks numProcs
+          void $ liftIO $ forkIO runTask'
 
     -- processing orchestrator loop
-    processOrchestrate :: App m => Chan (Process m a) -> Chan () -> TChan a -> TVar Natural -> TVar Natural -> TMVar () -> m b
-    processOrchestrate processQ availProcessors resChan numProcs numTasks allProcessDone = forever $ do
-      _ <- liftIO $ readChan availProcessors
+    processOrchestrate :: App m
+      => Chan (Process m a) -> TVar Bool -> Chan () -> TChan a
+      -> TVar Natural -> TVar Natural -> TMVar () -> m ()
+    processOrchestrate processQ shouldAbort avail resChan numProcs numTasks allProcessDone = forever $ do
+      _ <- liftIO $ readChan avail
       proc <- liftIO $ readChan processQ
-      runProcess' <- toIO $ processOne proc availProcessors resChan numProcs numTasks allProcessDone
-      liftIO $ forkIO runProcess'
+      abortFlag <- liftIO $ readTVarIO shouldAbort
+      if abortFlag
+        then liftIO $ writeChan avail ()
+        else do
+          runProcess' <- toIO $ processOne proc shouldAbort avail resChan numProcs numTasks allProcessDone
+          void $ liftIO $ forkIO runProcess'
 
     -- process one task
-    processOne :: App m => Process m a -> Chan () -> TChan a -> TVar Natural -> TVar Natural -> TMVar () -> m ()
-    processOne task availProcs resChan numProcs numTasks allProcessDone = do
-      processed <- task.handler task.result
+    processOne :: App m => Process m a -> TVar Bool -> Chan () -> TChan a -> TVar Natural -> TVar Natural -> TMVar () -> m ()
+    processOne task shouldAbort avail resChan numProcs numTasks allProcessDone = do
+      processed <- task.handler task.result shouldAbort
       liftIO . atomically $ writeTChan resChan processed
 
       -- Return instance to pool immediately after processing
-      liftIO $ writeChan availProcs ()
+      liftIO $ writeChan avail ()
 
       -- Decrement and check if all done
       liftIO $ atomically $ do
@@ -483,9 +470,12 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
           runOne frozen newDepth (v:rest) = do
             conf <- readConfig
             (ra, vma) <- liftIO $ stToIO $ runStateT (continue v) frozen { result = Nothing, exploreDepth = newDepth }
-            liftIO $ atomically $ modifyTVar numTasks (+1)
-            when (conf.debug && conf.verb >=2) $ liftIO $ putStrLn $ "Queuing new task for ForkMany at depth " <> show newDepth
-            liftIO $ writeChan taskQ t { vm = vma, stepper = (k ra) }
+            -- Check abort flag before queuing new task
+            abortFlag <- liftIO $ readTVarIO shouldAbort
+            unless abortFlag $ do
+              liftIO $ atomically $ modifyTVar numTasks (+1)
+              when (conf.debug && conf.verb >=2) $ liftIO $ putStrLn $ "Queuing new task for ForkMany at depth " <> show newDepth
+              liftIO $ writeChan taskQ t { vm = vma, stepper = (k ra) }
             runOne frozen newDepth rest
           runOne _ _ [] = internalError "unreachable"
       Stepper.Fork (PleaseRunBoth continue) -> do
@@ -493,9 +483,12 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
         frozen <- liftIO $ stToIO $ freezeVM vm
         let newDepth = vm.exploreDepth+1
         (ra, vma) <- liftIO $ stToIO $ runStateT (continue True) frozen { result = Nothing, exploreDepth = newDepth }
-        liftIO $ atomically $ modifyTVar numTasks (+1)
-        liftIO $ writeChan taskQ $ t { vm = vma, stepper = (k ra) }
-        when (conf.debug && conf.verb >= 2) $ liftIO $ putStrLn $ "Queued new task for Fork at depth " <> show newDepth
+        -- Check abort flag before queuing new task
+        abortFlag <- liftIO $ readTVarIO shouldAbort
+        unless abortFlag $ do
+          liftIO $ atomically $ modifyTVar numTasks (+1)
+          liftIO $ writeChan taskQ $ t { vm = vma, stepper = (k ra) }
+          when (conf.debug && conf.verb >= 2) $ liftIO $ putStrLn $ "Queued new task for Fork at depth " <> show newDepth
 
         (rb, vmb) <- liftIO $ stToIO $ runStateT (continue False) frozen { result = Nothing, exploreDepth = newDepth }
         when (conf.debug && conf.verb >=2) $ liftIO $ putStrLn $ "Continuing task for Fork at depth " <> show newDepth
@@ -610,7 +603,7 @@ getExprEmptyStore solvers c signature' concreteArgs opts = do
   conf <- readConfig
   calldata <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ loadEmptySymVM (RuntimeCode (ConcreteRuntimeCode c)) (Lit 0) calldata
-  paths <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState runExpr pure
+  paths <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState runExpr noopPathHandler
   if conf.simp then (pure $ map Expr.simplify paths) else pure paths
 
 -- Used only in testing
@@ -626,7 +619,7 @@ getExpr solvers c signature' concreteArgs opts = do
   conf <- readConfig
   calldata <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ abstractVM calldata c Nothing False
-  paths <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState runExpr pure
+  paths <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState runExpr noopPathHandler
   if conf.simp then (pure $ map Expr.simplify paths) else pure paths
 
 {- | Checks if an assertion violation has been encountered
@@ -711,7 +704,7 @@ exploreContract solvers theCode signature' concreteArgs opts maybepre = do
   calldata <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ abstractVM calldata theCode maybepre False
   let fetcher = Fetch.oracle solvers Nothing opts.rpcInfo
-  executeVM fetcher opts.iterConf preState pure
+  executeVM fetcher opts.iterConf preState noopPathHandler
 
 -- | Stepper that parses the result of Stepper.runFully into an Expr End
 runExpr :: Stepper.Stepper Symbolic (Expr End)
@@ -776,7 +769,7 @@ getPartials = mapMaybe go
 
 
 -- | Symbolically execute the VM and return the representention of the execution
-executeVM :: forall m a . App m => Fetch.Fetcher Symbolic m -> IterConfig -> VM Symbolic -> (Expr End -> m a) -> m [a]
+executeVM :: forall m a . App m => Fetch.Fetcher Symbolic m -> IterConfig -> VM Symbolic -> (Expr End -> TVar Bool -> m a) -> m [a]
 executeVM fetcher iterConfig preState handlePath = interpret fetcher iterConfig preState runExpr handlePath
 
 -- | Symbolically execute the VM and check all endstates against the
@@ -821,7 +814,7 @@ verifyInputsWithHandler solvers opts fetcher preState post cexHandler = do
     putStrLn $ "   Keccak preimages in state: " <> (show $ length preState.keccakPreImgs)
     putStrLn $ "   Exploring call " <> call
 
-  results <- executeVM fetcher opts.iterConf preState $ \leaf -> do
+  results <- executeVM fetcher opts.iterConf preState $ \leaf shouldAbort -> do
     -- Extract partial if applicable
     let mPartial = case leaf of
           Partial _ _ p -> Just (p, leaf)
@@ -835,7 +828,10 @@ verifyInputsWithHandler solvers opts fetcher preState post cexHandler = do
         when (conf.debug && conf.verb >=2) $ liftIO $ putStrLn $ "   Checking leaf with props: " <> show props <> " SMT result: " <> show res
         -- Call custom handler if provided (for immediate Cex processing/validation/printing)
         case (cexHandler, res) of
-          (Just handler, cex@(Cex _)) -> handler preState cex leaf
+          (Just handler, cex@(Cex _)) -> do
+            handler preState cex leaf
+            when conf.earlyAbort $ liftIO $ atomically $ writeTVar shouldAbort True
+          (_, (Cex _)) -> when conf.earlyAbort $ liftIO $ atomically $ writeTVar shouldAbort True
           _ -> pure ()
         pure (res, leaf)
       else pure (Qed, leaf)
@@ -846,7 +842,7 @@ verifyInputsWithHandler solvers opts fetcher preState post cexHandler = do
     putStrLn $ "   Exploration and solving finished, " <> show (length results) <> " branch(es) checked in call " <> call <> " of which partial: "
                 <> show (length smtResults)
     let cexs = filter (\(res, _) -> not . isQed $ res) smtResults
-    putStrLn $ "   Found " <> show (length cexs) <> " counterexample(s) in call " <> call
+    putStrLn $ "   Found " <> show (length cexs) <> " potential counterexample(s) in call " <> call
 
   pure (smtResults, catMaybes partials)
   where
@@ -933,7 +929,7 @@ equivalenceCheck solvers sess bytecodeA bytecodeB opts calldata create = do
     getBranches bs = do
       let bytecode = if BS.null bs then BS.pack [0] else bs
       prestate <- liftIO $ stToIO $ abstractVM calldata bytecode Nothing create
-      interpret (Fetch.oracle solvers sess Fetch.noRpc) opts.iterConf prestate runExpr pure
+      interpret (Fetch.oracle solvers sess Fetch.noRpc) opts.iterConf prestate runExpr noopPathHandler
     filterQeds (EqIssues res partials) = EqIssues (filter (\(r, _) -> not . isQed $ r) res) partials
 
 rewriteFresh :: Text -> [Expr a] -> [Expr a]

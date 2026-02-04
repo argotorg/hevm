@@ -20,23 +20,6 @@
         "type": "github"
       }
     },
-    "ethereum-tests": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1698656397,
-        "narHash": "sha256-1zhBaJ3X5kQ94qv9Yz12/3d83w3jNP6OtzjH+ykK8sg=",
-        "owner": "ethereum",
-        "repo": "tests",
-        "rev": "428f218d7d6f4a52544e12684afbfe6e2882ffbf",
-        "type": "github"
-      },
-      "original": {
-        "owner": "ethereum",
-        "ref": "v13",
-        "repo": "tests",
-        "type": "github"
-      }
-    },
     "flake-utils": {
       "inputs": {
         "systems": "systems"
@@ -148,7 +131,6 @@
     "root": {
       "inputs": {
         "empty-smt-solver": "empty-smt-solver",
-        "ethereum-tests": "ethereum-tests",
         "flake-utils": "flake-utils_2",
         "forge-std": "forge-std",
         "foundry": "foundry",
@@ -160,13 +142,13 @@
     "solc-macos-amd64-list-json": {
       "flake": false,
       "locked": {
-        "narHash": "sha256-oJrt1d/kxej9rUrdXQIhb19Yp/n76xqlUwkkZujzNUo=",
+        "narHash": "sha256-P+ZslplK4cQ/wnV/wykVKb+yTCviI0eylA3sk9uHmRo=",
         "type": "file",
-        "url": "https://github.com/argotorg/solc-bin/raw/0c6f116/macosx-amd64/list.json"
+        "url": "https://github.com/argotorg/solc-bin/raw/a11f1ad/macosx-amd64/list.json"
       },
       "original": {
         "type": "file",
-        "url": "https://github.com/argotorg/solc-bin/raw/0c6f116/macosx-amd64/list.json"
+        "url": "https://github.com/argotorg/solc-bin/raw/a11f1ad/macosx-amd64/list.json"
       }
     },
     "solc-pkgs": {
@@ -180,11 +162,11 @@
         "solc-macos-amd64-list-json": "solc-macos-amd64-list-json"
       },
       "locked": {
-        "lastModified": 1764792431,
-        "narHash": "sha256-gqHLugmqY5CzTlJBNuwC5FOaPl3X6Z/UlI8/fPt/jyY=",
+        "lastModified": 1768831671,
+        "narHash": "sha256-0mmlYRtZK+eomevkQCCH7PL8QlSuALZQsjLroCWGE08=",
         "owner": "hellwolf",
         "repo": "solc.nix",
-        "rev": "740364bdc3df632cce49e37e8bec858a91991dc4",
+        "rev": "80ad871b93d15c7bccf71617f78f73c2d291a9c7",
         "type": "github"
       },
       "original": {

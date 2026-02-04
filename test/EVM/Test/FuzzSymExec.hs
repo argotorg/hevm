@@ -10,7 +10,7 @@ execution of HEVM and check that against evmtool from go-ethereum. Re-using some
 of this code, we also generate a symbolic expression then evaluate it
 concretely through Expr.simplify, then check that against evmtool's output.
 -}
-module EVM.Test.FuzzSymExec where
+module EVM.Test.FuzzSymExec (tests) where
 
 import Control.Monad (when)
 import Control.Monad.IO.Unlift
@@ -44,7 +44,7 @@ import Test.Tasty.HUnit (assertEqual, testCase, assertBool)
 import Test.Tasty.QuickCheck hiding (Failure, Success)
 import Witch (into, unsafeInto)
 
-import EVM (makeVm, initialContract, symbolify)
+import EVM (makeVm, initialContract, symbolify, defaultVMOpts)
 import EVM.Assembler (assemble)
 import EVM.Expr qualified as Expr
 import EVM.Exec (ethrunAddress)
@@ -148,20 +148,6 @@ instance JSON.ToJSON EVMToolEnv where
                               Lit a -> a
                               _ -> internalError "Timestamp needs to be a Lit"
 
-emptyEvmToolEnv :: EVMToolEnv
-emptyEvmToolEnv = EVMToolEnv { coinbase = 0
-                             , timestamp = Lit 0
-                             , number     = Lit 0
-                             , gasLimit   = 0xffffffffffffffff
-                             , baseFee    = 0
-                             , maxCodeSize= 0xffffffff
-                             , schedule   = feeSchedule
-                             , blockHashes = mempty
-                             , withdrawals = mempty
-                             , currentRandom = 42
-                             , parentBeaconBlockRoot = 5
-                             }
-
 data EVMToolReceipt =
   EVMToolReceipt
     { _type :: String
@@ -223,11 +209,6 @@ instance JSON.ToJSON EVMToolAlloc where
                          , ("nonce", (JSON.toJSON b.nonce))
                          ]
 
-emptyEVMToolAlloc :: EVMToolAlloc
-emptyEVMToolAlloc = EVMToolAlloc { balance = 0
-                                 , code = mempty
-                                 , nonce = 0
-                                 }
 -- Sets up common parts such as TX, origin contract, and environment that can
 -- later be used to create & execute either an evmtool (from go-ethereum) or an
 -- HEVM transaction. Some elements here are hard-coded such as the secret key,
@@ -298,7 +279,7 @@ getEVMToolRet evmDir contr txData gaslimitExec = do
   JSON.encodeFile (evmDir </> "alloc.json") alloc
   JSON.encodeFile (evmDir </> "env.json") evmEnv
   let cmd = (proc "evm" [ "transition"
-                        , "--state.fork", "Cancun"
+                        , "--state.fork", "Osaka"
                         , "--input.alloc", "alloc.json"
                         , "--input.env", "env.json"
                         , "--input.txs", "txs.json"
@@ -401,12 +382,12 @@ runCodeWithTrace
   :: App m
   => Fetch.RpcInfo -> EVMToolEnv -> EVMToolAlloc -> EVM.Transaction.Transaction
   -> Expr EAddr -> Expr EAddr -> m (Either (EvmError, [VMTraceStep]) (([Expr 'End], [VMTraceStep], VMTraceStepResult)))
-runCodeWithTrace rpcinfo evmEnv alloc txn fromAddr toAddress = withSolvers Z3 0 1 Nothing $ \solvers -> do
+runCodeWithTrace rpcinfo evmEnv alloc txn fromAddr toAddress = withSolvers Z3 0 Nothing defMemLimit $ \solvers -> do
   let calldata' = ConcreteBuf txn.txdata
       code' = alloc.code
       iterConf = IterConfig { maxIter = Nothing, askSmtIters = 1, loopHeuristic = Naive }
       fetcherSym = Fetch.oracle solvers Nothing rpcinfo
-      buildExpr vm = interpret fetcherSym iterConf vm runExpr pure
+      buildExpr vm = interpret fetcherSym iterConf vm runExpr noopPathHandler
   origVM <- liftIO $ stToIO $ vmForRuntimeCode code' calldata' evmEnv alloc txn fromAddr toAddress
   expr <- buildExpr $ symbolify origVM
 
@@ -420,12 +401,10 @@ vmForRuntimeCode :: ByteString -> Expr Buf -> EVMToolEnv -> EVMToolAlloc -> EVM.
 vmForRuntimeCode runtimecode calldata' evmToolEnv alloc txn fromAddr toAddress =
   let contract = initialContract (RuntimeCode (ConcreteRuntimeCode runtimecode))
                  & set #balance (Lit alloc.balance)
-  in (makeVm $ VMOpts
+  in (makeVm $ (defaultVMOpts @Concrete)
     { contract = contract
-    , otherContracts = []
     , calldata = (calldata', [])
     , value = Lit txn.value
-    , baseState = EmptyBase
     , address =  toAddress
     , caller = fromAddr
     , origin = fromAddr
@@ -442,11 +421,6 @@ vmForRuntimeCode runtimecode calldata' evmToolEnv alloc txn fromAddr toAddress =
     , maxCodeSize = evmToolEnv.maxCodeSize
     , schedule = evmToolEnv.schedule
     , chainId = txn.chainId
-    , create = False
-    , txAccessList = mempty
-    , allowFFI = False
-    , freshAddresses = 0
-    , beaconRoot = 0
     }) <&> set (#env % #contracts % at (LitAddr ethrunAddress))
              (Just (initialContract (RuntimeCode (ConcreteRuntimeCode BS.empty))))
        <&> set (#state % #calldata) calldata'
@@ -680,18 +654,6 @@ genContract n = do
 
 randItem :: [a] -> IO a
 randItem = generate . Test.QuickCheck.elements
-
-getOpFromVM :: VM t -> Word8
-getOpFromVM vm =
-  let pcpos  = vm ^. #state % #pc
-      code' = vm ^. #state % #code
-      xs = case code' of
-        UnknownCode _ -> internalError "UnknownCode instead of RuntimeCode"
-        InitCode bs _ -> BS.drop pcpos bs
-        RuntimeCode (ConcreteRuntimeCode xs') -> BS.drop pcpos xs'
-        RuntimeCode (SymbolicRuntimeCode _) -> internalError "RuntimeCode is symbolic"
-  in if xs == BS.empty then 0
-                       else BS.head xs
 
 testEnv :: Env
 testEnv = Env { config = defaultConfig }

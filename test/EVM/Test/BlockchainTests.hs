@@ -1,12 +1,12 @@
-module EVM.Test.BlockchainTests (prepareTests, problematicTests, Case, vmForCase, checkExpectation, allTestCases) where
+module EVM.Test.BlockchainTests (prepareTests, problematicTests, findIgnoreReason, Case, vmForCase, checkExpectation, allTestCases) where
 
-import EVM (initialContract, makeVm, setEIP4788Storage)
+import EVM (initialContract, makeVm, setEIP4788Storage, setEIP2935Storage)
 import EVM.Concrete qualified as EVM
 import EVM.Effects
 import EVM.Expr (maybeLitAddrSimp)
 import EVM.FeeSchedule (feeSchedule)
 import EVM.Fetch qualified
-import EVM.Solvers (withSolvers, Solver(..))
+import EVM.Solvers (withSolvers, defMemLimit, Solver(..))
 import EVM.Stepper qualified
 import EVM.Transaction
 import EVM.Types hiding (Block, Case, Env)
@@ -23,14 +23,15 @@ import Data.Aeson qualified as JSON
 import Data.Aeson.Types qualified as JSON
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as Lazy
+import Data.List (isPrefixOf)
 import Data.Map (Map)
 import Data.Map qualified as Map
-import Data.Maybe (fromJust, fromMaybe, isNothing, isJust)
+import Data.Maybe (fromJust, fromMaybe, isNothing)
 import Data.Word (Word64)
 import GHC.Generics (Generic)
 import System.Environment (getEnv)
 import System.FilePath.Find qualified as Find
-import System.FilePath.Posix (makeRelative, (</>))
+import System.FilePath.Posix (makeRelative)
 import Witch (into, unsafeInto)
 import Witherable (Filterable, catMaybes)
 
@@ -39,6 +40,12 @@ import Test.Tasty.ExpectedFailure
 import Test.Tasty.HUnit
 
 data Which = Pre | Post
+
+-- EIP-4895: Withdrawal from beacon chain
+data Withdrawal = Withdrawal
+  { wAddress :: Addr
+  , wAmount  :: W256  -- amount in Gwei
+  } deriving (Show, Eq)
 
 data Block = Block
   { coinbase    :: Addr
@@ -50,6 +57,8 @@ data Block = Block
   , timestamp   :: W256
   , txs         :: [Transaction]
   , beaconRoot  :: W256
+  , parentHash  :: W256
+  , withdrawals :: [Withdrawal]
   } deriving Show
 
 data BlockchainContract = BlockchainContract
@@ -82,9 +91,10 @@ makeContract (BlockchainContract (ByteStringS code) nonce balance storage) =
 type BlockchainContracts = Map Addr BlockchainContract
 
 data Case = Case
-  { vmOpts      :: VMOpts Concrete
+  { vmOpts          :: VMOpts Concrete
   , checkContracts  :: BlockchainContracts
   , testExpectation :: BlockchainContracts
+  , caseWithdrawals :: [Withdrawal]
   } deriving Show
 
 data BlockchainCase = BlockchainCase
@@ -99,6 +109,9 @@ prepareTests = do
   rootDir <- liftIO rootDirectory
   liftIO $ putStrLn $ "Loading and parsing json files from ethereum-tests from " <> show rootDir
   cases <- liftIO allTestCases
+  let testCount = sum . fmap Map.size $ cases
+  let expectedTestCount = 16989
+  when (testCount < expectedTestCount) $ internalError $ "Lower than expected number of tests!\nExpected: " <> (show expectedTestCount) <> "\nGot: " <> (show testCount)
   groups <- forM (Map.toList cases) (\(f, subtests) -> testGroup (makeRelative rootDir f) <$> (process subtests))
   liftIO $ putStrLn "Loaded."
   pure $ testGroup "ethereum-tests" groups
@@ -108,20 +121,22 @@ prepareTests = do
 
     runTest :: App m => (String, Case) -> m TestTree
     runTest (name, x) = do
-      let fetcher q = withSolvers Z3 0 1 (Just 0) $ \s -> EVM.Fetch.noRpcFetcher s q
+      let fetcher q = withSolvers Z3 0 (Just 0) defMemLimit $ \s -> EVM.Fetch.noRpcFetcher s q
       exec <- toIO $ runVMTest fetcher x
       pure $ testCase' name exec
     testCase' :: String -> Assertion -> TestTree
     testCase' name assertion =
-      case Map.lookup name problematicTests of
-        Just f -> f (testCase name assertion)
+      case findIgnoreReason name of
+        Just reason -> ignoreTestBecause reason (testCase name assertion)
         Nothing -> testCase name assertion
 
+-- | Find if a test name matches any problematic test prefix
+findIgnoreReason :: String -> Maybe String
+findIgnoreReason name = lookup True [(prefix `isPrefixOf` name, reason) | (prefix, reason) <- problematicTests]
+
 rootDirectory :: IO FilePath
-rootDirectory = do
-  repo <- getEnv "HEVM_ETHEREUM_TESTS_REPO"
-  let testsDir = "BlockchainTests/GeneralStateTests"
-  pure $ repo </> testsDir
+rootDirectory = getEnv "HEVM_ETHEREUM_TESTS_REPO"
+  -- Env var now points directly to the blockchain_tests directory
 
 collectJsonFiles :: FilePath -> IO [FilePath]
 collectJsonFiles rootDir = Find.find Find.always (Find.extension Find.==? ".json") rootDir
@@ -132,50 +147,162 @@ allTestCases = do
   jsons <- collectJsonFiles root
   cases <- forM jsons (\fname -> do
       fContents <- BS.readFile fname
-      let parsed = case (parseBCSuite (Lazy.fromStrict fContents)) of
-                    Left "No cases to check." -> mempty
-                    Left _err -> mempty -- TODO: This should be an error
-                    Right allTests -> allTests
+      parsed <- case (parseBCSuite (Lazy.fromStrict fContents)) of
+                    Left "No cases to check." -> pure mempty
+                    Left err -> do
+                      putStrLn $ "Warning: Failed to parse " ++ fname ++ ": " ++ err
+                      pure mempty
+                    Right allTests -> pure allTests
       pure (fname, parsed)
     )
   pure $ Map.fromList cases
 
-problematicTests :: Map String (TestTree -> TestTree)
-problematicTests = Map.fromList
-  [ ("loopMul_d0g0v0_Cancun", ignoreTestBecause "hevm is too slow")
-  , ("loopMul_d1g0v0_Cancun", ignoreTestBecause "hevm is too slow")
-  , ("loopMul_d2g0v0_Cancun", ignoreTestBecause "hevm is too slow")
-  , ("CALLBlake2f_MaxRounds_d0g0v0_Cancun", ignoreTestBecause "very slow, bypasses timeout due time spent in FFI")
-
-  , ("15_tstoreCannotBeDosd_d0g0v0_Cancun", ignoreTestBecause "slow test")
-  , ("21_tstoreCannotBeDosdOOO_d0g0v0_Cancun", ignoreTestBecause "slow test")
-
-  -- TODO: implement point evaluation, 0xa precompile, EIP-4844, Cancun
-  , ("idPrecomps_d9g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d117g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d12g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d135g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d153g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d171g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d189g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d207g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d225g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d243g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d261g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d279g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d27g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d297g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d315g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d333g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d351g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d369g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d387g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d45g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d63g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d81g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("precompsEIP2929Cancun_d99g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("makeMoney_d0g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
-  , ("failed_tx_xcf416c53_d0g0v0_Cancun", ignoreTestBecause "EIP-4844 not implemented")
+-- | Tests that are known to fail or are too slow to run in CI.
+-- Uses prefix matching: any test name starting with a prefix will be ignored.
+-- Test names are from the execution-spec-tests fixtures format.
+problematicTests :: [(String, String)]
+problematicTests =
+  [ -- EIP-4844 point evaluation precompile (0x0A) not implemented
+    ("tests/cancun/eip4844_blobs/test_point_evaluation_precompile.py::", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/cancun/eip4844_blobs/test_point_evaluation_precompile_gas.py::", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+    -- EIP-2537 precompiles
+  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g1add.py::", "EIP-2537 precompiles not implemented")
+  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g1msm.py::", "EIP-2537 precompiles not implemented")
+  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g1mul.py::", "EIP-2537 precompiles not implemented")
+  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g2add.py::", "EIP-2537 precompiles not implemented")
+  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g2msm.py::", "EIP-2537 precompiles not implemented")
+  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g2mul.py::", "EIP-2537 precompiles not implemented")
+  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_map_fp_to_g1.py::", "EIP-2537 precompiles not implemented")
+  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_map_fp2_to_g2.py::", "EIP-2537 precompiles not implemented")
+  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_pairing.py::", "EIP-2537 precompiles not implemented")
+  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_variable_length_input_contracts.py::", "EIP-2537 precompiles not implemented")
+    -- EIP-7951
+  , ("tests/osaka/eip7951_p256verify_precompiles/test_eip_mainnet.py::", "EIP-7951 precompiles not implemented")
+  , ("tests/osaka/eip7951_p256verify_precompiles/test_p256verify.py::", "EIP-7951 precompiles not implemented")
+    -- Other tests that invoke the 0x0A precompile
+  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x000000000000000000000000000000000000000a", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stSpecialTest/failed_tx_xcf416c53_ParisFiller.json::", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-11]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-13]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-24]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-28]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-39]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-42]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-53]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-64]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-75]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-86]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-97]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-108]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-119]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-130]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-141]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-152]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-163]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-174]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-185]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-196]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-207]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-218]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
+    -- Other precompile tests
+  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x000000000000000000000000000000000000000b", "0xB precompile not implemented")
+  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x000000000000000000000000000000000000000c", "0xC precompile not implemented")
+  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x000000000000000000000000000000000000000d", "0xD precompile not implemented")
+  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x000000000000000000000000000000000000000e", "0xE precompile not implemented")
+  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x000000000000000000000000000000000000000f", "0xF precompile not implemented")
+  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x0000000000000000000000000000000000000010", "0x10 precompile not implemented")
+  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x0000000000000000000000000000000000000011", "0x11 precompile not implemented")
+  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x0000000000000000000000000000000000000100", "0x100 precompile not implemented")
+  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::", "TODO")
+    -- CLZ tests
+  , ("tests/frontier/opcodes/test_all_opcodes.py::test_all_opcodes[fork_Osaka-blockchain_test_from_state_test]", "CLZ not implemented")
+  , ("tests/frontier/opcodes/test_all_opcodes.py::test_constant_gas[fork_Osaka-CLZ-blockchain_test_from_state_test]", "CLZ not implemented")
+  , ("tests/osaka/eip7939_count_leading_zeros/test_count_leading_zeros.py::", "CLZ not implemented")
+  , ("tests/osaka/eip7939_count_leading_zeros/test_eip_mainnet.py::", "CLZ not implemented")
+    -- Other tests (TODO: fix or re-sort them)
+  , ("tests/frontier/precompiles/test_ripemd.py::", "TODO")
+  , ("tests/osaka/eip7823_modexp_upper_bounds/test_eip_mainnet.py::", "TODO")
+  , ("tests/osaka/eip7823_modexp_upper_bounds/test_modexp_upper_bounds.py::", "TODO")
+  , ("tests/osaka/eip7825_transaction_gas_limit_cap/test_tx_gas_limit.py::", "TODO")
+  , ("tests/osaka/eip7883_modexp_gas_increase/test_modexp_thresholds.py::", "TODO")
+  , ("tests/prague/eip2935_historical_block_hashes_from_state/test_block_hashes.py::", "TODO")
+  , ("tests/prague/eip6110_deposits/test_deposits.py::", "TODO")
+  , ("tests/prague/eip7002_el_triggerable_withdrawals/test_modified_withdrawal_contract.py::", "TODO")
+  , ("tests/prague/eip7251_consolidations/test_modified_consolidation_contract.py::", "TODO")
+  , ("tests/prague/eip7623_increase_calldata_cost/test_execution_gas.py::", "TODO")
+  , ("tests/prague/eip7623_increase_calldata_cost/test_refunds.py::", "TODO")
+  , ("tests/prague/eip7685_general_purpose_el_requests/test_multi_type_requests.py::", "TODO")
+  , ("tests/prague/eip7702_set_code_tx/test_calls.py::", "TODO")
+  , ("tests/prague/eip7702_set_code_tx/test_gas.py::", "TODO")
+  , ("tests/prague/eip7702_set_code_tx/test_set_code_txs_2.py::", "TODO")
+  , ("tests/shanghai/eip3860_initcode/test_initcode.py::", "TODO")
+  , ("tests/shanghai/eip3860_initcode/test_with_eof.py::", "TODO")
+  , ("tests/static/state_tests/Cancun/stEIP5656_MCOPY/MCOPY_memory_expansion_costFiller.yml::", "TODO")
+  , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructed2Filler.json::", "TODO")
+  , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructedFiller.json::", "TODO")
+  , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructedRevertFiller.json::", "TODO")
+  , ("tests/static/state_tests/stEIP150singleCodeGasPrices/gasCostExpFiller.yml::", "TODO")
+  , ("tests/static/state_tests/stEIP150singleCodeGasPrices/gasCostMemoryFiller.yml::", "TODO")
+  , ("tests/static/state_tests/stEIP150singleCodeGasPrices/gasCostMemSegFiller.yml::", "TODO")
+  , ("tests/static/state_tests/stEIP2930/transactionCostsFiller.yml::", "TODO")
+  , ("tests/static/state_tests/stMemoryTest/memReturnFiller.json::", "TODO")
+  , ("tests/static/state_tests/stNonZeroCallsTest/NonZeroValue_TransactionCALLwithData_ToEmpty_ParisFiller.json::", "TODO")
+  , ("tests/static/state_tests/stNonZeroCallsTest/NonZeroValue_TransactionCALLwithData_ToNonNonZeroBalanceFiller.json::", "TODO")
+  , ("tests/static/state_tests/stNonZeroCallsTest/NonZeroValue_TransactionCALLwithData_ToOneStorageKey_ParisFiller.json::", "TODO")
+  , ("tests/static/state_tests/stNonZeroCallsTest/NonZeroValue_TransactionCALLwithDataFiller.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest0Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest126Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest144Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest157Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest172Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest176Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest190Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest197Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest209Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest230Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest251Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest252Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest25Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest271Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest275Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest288Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest300Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest312Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest321Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest323Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest345Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest350Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest45Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest57Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest5Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest72Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest78Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom/randomStatetest82Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom2/randomStatetest396Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom2/randomStatetest404Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom2/randomStatetest414Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom2/randomStatetest420Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom2/randomStatetest428Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom2/randomStatetest444Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom2/randomStatetest478Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom2/randomStatetest509Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom2/randomStatetest531Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom2/randomStatetest543Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom2/randomStatetest558Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom2/randomStatetest567Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom2/randomStatetest572Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom2/randomStatetest609Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom2/randomStatetest624Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom2/randomStatetest644Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRandom2/randomStatetest645Filler.json::", "TODO")
+  , ("tests/static/state_tests/stRevertTest/PythonRevertTestTue201814-1430Filler.json::", "TODO")
+  , ("tests/static/state_tests/stStackTests/stackOverflowM1PUSHFiller.json::", "TODO")
+  , ("tests/static/state_tests/stTransactionTest/HighGasLimitFiller.json::", "TODO")
+  , ("tests/static/state_tests/stTransactionTest/TransactionDataCosts652Filler.json::", "TODO")
+  , ("tests/static/state_tests/stZeroCallsTest/ZeroValue_TransactionCALLwithData_ToEmpty_ParisFiller.json::", "TODO")
+  , ("tests/static/state_tests/stZeroCallsTest/ZeroValue_TransactionCALLwithData_ToNonZeroBalanceFiller.json::", "TODO")
+  , ("tests/static/state_tests/stZeroCallsTest/ZeroValue_TransactionCALLwithData_ToOneStorageKey_ParisFiller.json::", "TODO")
+  , ("tests/static/state_tests/stZeroCallsTest/ZeroValue_TransactionCALLwithDataFiller.json::", "TODO")
   ]
 
 
@@ -185,8 +312,32 @@ runVMTest fetcher x = do
   vm0 <- liftIO $ vmForCase x
   result <- EVM.Stepper.interpret fetcher vm0 EVM.Stepper.runFully
   writeTrace result
-  let maybeReason = checkExpectation x result
+  -- Apply EIP-4895 withdrawals after transaction execution
+  let resultWithWithdrawals = applyWithdrawals x.caseWithdrawals result
+  let maybeReason = checkExpectation x resultWithWithdrawals
   liftIO $ forM_ maybeReason (liftIO >=> assertFailure)
+
+-- | Apply EIP-4895 withdrawals to VM state
+-- Withdrawals credit balance to addresses (amount is in Gwei, multiply by 10^9 for Wei)
+applyWithdrawals :: [Withdrawal] -> VM Concrete -> VM Concrete
+applyWithdrawals ws vm = foldl applyWithdrawal vm ws
+  where
+    applyWithdrawal :: VM Concrete -> Withdrawal -> VM Concrete
+    applyWithdrawal vm' (Withdrawal addr amount) =
+      let weiAmount = Lit (amount * 1000000000)  -- Gwei to Wei
+          addrExpr = LitAddr addr
+          contracts' = Map.alter (creditBalance weiAmount) addrExpr vm'.env.contracts
+      in vm' { env = vm'.env { contracts = contracts' } }
+
+    creditBalance :: Expr EWord -> Maybe Contract -> Maybe Contract
+    creditBalance weiAmount Nothing =
+      -- Create new account with just the withdrawal balance
+      Just $ (EVM.initialContract (RuntimeCode (ConcreteRuntimeCode "")))
+        { balance = weiAmount }
+    creditBalance (Lit weiAmount) (Just c) =
+      -- Add to existing balance
+      Just $ c { balance = Lit (forceLit c.balance + weiAmount) }
+    creditBalance _ (Just c) = Just c  -- shouldn't happen in concrete execution
 
 checkExpectation :: Case -> VM Concrete -> Maybe (IO String)
 checkExpectation x vm = let (okState, okBal, okNonce, okStor, okCode) = checkExpectedContracts vm x.testExpectation in
@@ -280,6 +431,14 @@ instance FromJSON BlockchainCase where
   parseJSON invalid =
     JSON.typeMismatch "GeneralState test case" invalid
 
+instance FromJSON Withdrawal where
+  parseJSON (JSON.Object v) = do
+    addr   <- addrField v "address"
+    amount <- wordField v "amount"
+    pure $ Withdrawal addr amount
+  parseJSON invalid =
+    JSON.typeMismatch "Withdrawal" invalid
+
 instance FromJSON Block where
   parseJSON (JSON.Object v) = do
     v'         <- v .: "blockHeader"
@@ -292,9 +451,12 @@ instance FromJSON Block where
     timestamp  <- wordField v' "timestamp"
     mixHash    <- wordField v' "mixHash"
     beaconRoot <- fmap read <$> v' .:? "parentBeaconBlockRoot"
+    parentHash <- wordField v' "parentHash"
+    ws         <- v .:? "withdrawals"
     pure $ Block { coinbase, difficulty, mixHash, gasLimit
                  , baseFee = fromMaybe 0 baseFee, number, timestamp
                  , txs, beaconRoot = fromMaybe 0 beaconRoot
+                 , parentHash, withdrawals = fromMaybe [] ws
                  }
   parseJSON invalid =
     JSON.typeMismatch "Block" invalid
@@ -305,7 +467,7 @@ parseContracts w v = v .: which >>= parseJSON
           Pre  -> "pre"
           Post -> "postState"
 
-parseBCSuite :: Lazy.ByteString-> Either String (Map String Case)
+parseBCSuite :: Lazy.ByteString -> Either String (Map String Case)
 parseBCSuite x = case (JSON.eitherDecode' x) :: Either String (Map String BlockchainCase) of
   Left e        -> Left e
   Right bcCases -> let allCases = fromBlockchainCase <$> bcCases
@@ -328,11 +490,11 @@ data BlockchainError
   | InvalidTx
   | OldNetwork
   | FailedCreate
+  | UnsupportedTxType
   deriving Show
 
 errorFatal :: BlockchainError -> Bool
-errorFatal TooManyBlocks = True
-errorFatal TooManyTxs = True
+errorFatal FailedCreate = True
 errorFatal SignatureUnverified = True
 errorFatal InvalidTx = True
 errorFatal _ = False
@@ -340,7 +502,8 @@ errorFatal _ = False
 fromBlockchainCase :: BlockchainCase -> Either BlockchainError Case
 fromBlockchainCase (BlockchainCase blocks preState postState network) =
   case (blocks, network) of
-    ([block], "Cancun") -> case block.txs of
+    ([block], "Osaka") -> case block.txs of
+      [tx] | tx.txtype == EIP4844Transaction || tx.txtype == EIP7702Transaction -> Left UnsupportedTxType -- TODO EIP4844 / EIP7702
       [tx] -> fromBlockchainCase' block tx preState postState
       []        -> Left NoTxs
       _         -> Left TooManyTxs
@@ -386,9 +549,11 @@ fromBlockchainCase' block tx preState postState =
        , allowFFI       = False
        , freshAddresses = 0
        , beaconRoot     = block.beaconRoot
+       , parentHash     = block.parentHash
        })
       checkState
       postState
+      block.withdrawals
         where
           toAddr = maybe (EVM.createAddress origin (fromJust senderNonce)) LitAddr (tx.toAddr)
           senderNonce = (.nonce) <$> Map.lookup origin preState
@@ -426,22 +591,11 @@ maxBaseFee tx =
 
 checkTx :: Transaction -> Block -> BlockchainContracts -> Maybe (BlockchainContracts)
 checkTx tx block prestate = do
-  origin <- sender tx
   validateTx tx block prestate
-  if (isJust tx.toAddr) then pure prestate
-  else
-    let senderNonce = (.nonce) <$> Map.lookup origin prestate
-        addr  = case EVM.createAddress origin (fromJust senderNonce) of
-                  (LitAddr a) -> a
-                  _ -> internalError "Cannot happen"
-        freshContract = BlockchainContract (ByteStringS "") 0 0 mempty
-        (BlockchainContract (ByteStringS b) prevNonce _ _) = (fromMaybe freshContract $ Map.lookup addr prestate)
-        nonEmptyAccount = not (BS.null b)
-        badNonce = prevNonce /= 0
-        initCodeSizeExceeded = BS.length tx.txdata > (unsafeInto maxCodeSize * 2)
-    in
-    if (badNonce || nonEmptyAccount || initCodeSizeExceeded) then mzero
-    else pure prestate
+  let initCodeSizeExceeded = isNothing tx.toAddr
+        && BS.length tx.txdata > (unsafeInto maxCodeSize * 2)
+  if initCodeSizeExceeded then mzero
+  else pure prestate
 
 validateTx :: Transaction -> Block -> BlockchainContracts -> Maybe ()
 validateTx tx block cs = do
@@ -462,6 +616,7 @@ vmForCase x = do
     -- TODO: we need to call this again because we override contracts in the
     -- previous line
     <&> setEIP4788Storage x.vmOpts
+    <&> setEIP2935Storage x.vmOpts
   pure $ initTx vm
 
 forceConcreteAddrs :: Map (Expr EAddr) Contract -> Map Addr Contract

@@ -10,7 +10,7 @@ import Data.Map qualified as Map
 import Data.Text (Text)
 import Data.Vector qualified as V
 
-import EVM (makeVm, symbolify)
+import EVM (makeVm, symbolify, defaultVMOpts)
 import EVM.ABI
 import EVM.Fetch
 import EVM.SMT
@@ -86,7 +86,7 @@ tests = testGroup "rpc"
           calldata' = ConcreteBuf $ abiMethod "transfer(address,uint256)" (AbiTuple (V.fromList [AbiAddress (Addr 0xdead), AbiUInt 256 wad]))
         sess <- mkSessionWithoutCache
         vm <- weth9VM sess testBlockNumber (calldata', [])
-        postVm <- withSolvers Z3 1 1 Nothing $ \solvers ->
+        postVm <- withSolvers Z3 1 Nothing defMemLimit $ \solvers ->
           Stepper.interpret (oracle solvers (Just sess) testRpcInfo) vm Stepper.runFully
         let
           wethStore = (fromJust $ Map.lookup (LitAddr 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2) postVm.env.contracts).storage
@@ -110,7 +110,7 @@ tests = testGroup "rpc"
           postc _ _ = PBool True
         sess <- mkSession Nothing Nothing
         vm <- weth9VM sess testBlockNumber calldata'
-        (_, [Cex (_, model)]) <- withSolvers Z3 1 1 Nothing $ \s ->
+        (_, [Cex (_, model)]) <- withSolvers Z3 1 Nothing defMemLimit $ \s ->
           verify s (oracle s (Just sess) testRpcInfo) (defaultVeriOpts {rpcInfo = testRpcInfo}) (symbolify vm) postc Nothing
         liftIO $ assertBool "model should exceed caller balance" (getVar model "arg2" >= 695836005599316055372648)
     ]
@@ -138,37 +138,24 @@ vmFromRpc sess blockNum calldata callvalue caller address = do
     Nothing -> internalError "could not fetch block"
     Just b -> pure b
 
-  liftIO $ stToIO (makeVm $ VMOpts
+  liftIO $ stToIO (makeVm $ defaultVMOpts
     { contract       = makeContractFromRPC ctrct
-    , otherContracts = []
     , calldata       = calldata
     , value          = callvalue
     , address        = LitAddr address
     , caller         = caller
-    , origin         = LitAddr 0xacab
-    , gas            = 0xffffffffffffffff
-    , gaslimit       = 0xffffffffffffffff
     , baseFee        = blk.baseFee
-    , priorityFee    = 0
     , coinbase       = blk.coinbase
     , number         = blk.number
     , timestamp      = blk.timestamp
     , blockGaslimit  = blk.gaslimit
-    , gasprice       = 0
     , maxCodeSize    = blk.maxCodeSize
     , prevRandao     = blk.prevRandao
     , schedule       = blk.schedule
-    , chainId        = 1
-    , create         = False
-    , baseState      = EmptyBase
-    , txAccessList   = mempty
-    , allowFFI       = False
-    , freshAddresses = 0
-    , beaconRoot     = 0
     })
 
 testRpc :: Text
-testRpc = "https://eth-mainnet.alchemyapi.io/v2/vpeKFsEF6PHifHzdtcwXSDbhV3ym5Ro4"
+testRpc = "https://eth-mainnet.g.alchemy.com/v2/vpeKFsEF6PHifHzdtcwXSDbhV3ym5Ro4"
 
 testBlockNumber :: BlockNumber
 testBlockNumber = BlockNumber 16198552

@@ -38,7 +38,7 @@ runForgeTestCustom testFile match timeout maxIter ffiAllowed rpcinfo = do
         internalError $ "Error compiling test file " <> show testFile <> " in directory "
           <> show root
       Right buildOut -> do
-        withSolvers Bitwuzla 3 1 timeout $ \solvers -> do
+        withSolvers Bitwuzla 3 timeout defMemLimit $ \solvers -> do
           opts <- testOpts solvers root (Just buildOut) match maxIter ffiAllowed rpcinfo
           unitTest opts buildOut
 

@@ -559,6 +559,7 @@ data EvmError
   | NonceOverflow
   | BadCheatCode String FunctionSelector
   | NonexistentFork Int
+  | AssumeCheatFailed
   deriving (Show, Eq, Ord)
 
 evmErrToString :: EvmError -> String
@@ -993,6 +994,7 @@ data VMOpts (t :: VMType) = VMOpts
   , allowFFI :: Bool
   , freshAddresses :: Int
   , beaconRoot :: W256
+  , parentHash :: W256      -- EIP-2935 parent block hash
   }
 
 deriving instance Show (VMOpts Symbolic)
@@ -1216,6 +1218,9 @@ isQed _ = False
 newtype FunctionSelector = FunctionSelector { unFunctionSelector :: Word32 }
   deriving (Bits, Num, Eq, Ord, Real, Enum, Integral)
 instance Show FunctionSelector where show s = "0x" <> showHex s ""
+instance Read FunctionSelector where
+  readsPrec _ ('0':'x':s) = first FunctionSelector <$> readHex s
+  readsPrec _ s = first FunctionSelector <$> readHex s
 
 
 -- ByteString wrapper ------------------------------------------------------------------------------

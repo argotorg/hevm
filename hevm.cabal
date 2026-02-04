@@ -161,7 +161,7 @@ library
     mtl                               >= 2.2 && < 2.4,
     filepath                          >= 1.4.2 && < 1.6,
     cereal                            >= 0.5.8 && < 0.6,
-    cryptonite                        >= 0.30 && < 0.31,
+    crypton                           >= 0.32 && < 1.1,
     memory                            >= 0.16.0 && < 0.20,
     data-dword                        >= 0.3.1 && < 0.4,
     process                           >= 1.6.5 && < 1.7,
@@ -234,8 +234,6 @@ common test-base
   autogen-modules:
     Paths_hevm
   build-depends:
-    QuickCheck,
-    quickcheck-instances,
     aeson,
     base,
     containers,
@@ -248,11 +246,9 @@ common test-base
     process,
     tasty,
     tasty-hunit,
-    tasty-quickcheck,
     tasty-expected-failure,
     temporary,
     text,
-    vector,
     witherable,
     optics-core,
     witch,
@@ -264,7 +260,6 @@ library test-utils
   default-language: GHC2021
   exposed-modules:
     EVM.Test.Utils
-    EVM.Test.FuzzSymExec
     EVM.Test.BlockchainTests
 
 common test-common
@@ -273,10 +268,10 @@ common test-common
   if flag(devel)
     ghc-options: -threaded -with-rtsopts=-N
   build-depends:
-    test-utils
+    test-utils,
+    vector,
   other-modules:
     EVM.Test.Utils
-    EVM.Test.FuzzSymExec
     EVM.Test.BlockchainTests
 
 --- Test Suites ---
@@ -288,6 +283,11 @@ test-suite test
     exitcode-stdio-1.0
   main-is:
     test.hs
+  other-modules:
+    EVM.Expr.ExprTests
+    EVM.Expr.Generator
+    EVM.ConcreteExecution.ConcreteExecutionTests
+    EVM.Test.FuzzSymExec
   build-depends:
     base16,
     binary,
@@ -296,7 +296,10 @@ test-suite test
     here,
     time,
     optics-extra,
-    regex
+    QuickCheck,
+    quickcheck-instances,
+    regex,
+    tasty-quickcheck,
 
 -- these tests require network access so we split them into a separate test
 -- suite to make it easy to skip them when running nix-build
