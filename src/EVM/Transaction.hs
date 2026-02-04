@@ -243,8 +243,9 @@ txGasCost fs tx =
   in baseCost + zeroCost * (unsafeInto zeroBytes) + nonZeroCost * (unsafeInto nonZeroBytes)
 
 -- | EIP-7702: Calculate intrinsic gas cost for authorization list
+-- Per EIP-7702, intrinsic gas charges PER_EMPTY_ACCOUNT_COST (g_newaccount = 25000) per auth
 authListPrice :: FeeSchedule Word64 -> [AuthorizationEntry] -> Word64
-authListPrice fs al = fs.g_auth_base * unsafeInto (length al)
+authListPrice fs al = fs.g_newaccount * unsafeInto (length al)
 
 -- | EIP-7623: Calculate floor gas cost based on calldata tokens
 -- tokens = zero_bytes + (nonzero_bytes * 4)

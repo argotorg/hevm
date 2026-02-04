@@ -3313,17 +3313,23 @@ makeDelegationCode target = delegationPrefix <> word160Bytes target
 -- then the address is warmed, and only then is chain_id validated
 recoverAuthorityAddress :: AuthorizationEntry -> Maybe Addr
 recoverAuthorityAddress auth =
-  let -- EIP-7702 signing message: keccak(0x05 || rlp([chain_id, address, nonce]))
-      rlpPayload = rlpList
-        [ rlpWord256 auth.authChainId
-        , BS $ word160Bytes auth.authAddress
-        , rlpWord256 auth.authNonce
-        ]
-      signingMessage = BS.cons 0x05 rlpPayload
-      msgHash = keccak' signingMessage
-      -- v is yParity + 27 for ecrecover
-      v = into auth.authYParity + 27
-  in EVM.Sign.ecrec v auth.authR auth.authS msgHash
+  -- EIP-2: Reject high-s signatures to prevent transaction malleability
+  -- s must be in the lower half of the curve order
+  let secp256k1nHalf = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0 :: W256
+  in if auth.authS > secp256k1nHalf
+     then Nothing  -- Invalid signature: s value too high (EIP-2)
+     else
+       let -- EIP-7702 signing message: keccak(0x05 || rlp([chain_id, address, nonce]))
+           rlpPayload = rlpList
+             [ rlpWord256 auth.authChainId
+             , BS $ word160Bytes auth.authAddress
+             , rlpWord256 auth.authNonce
+             ]
+           signingMessage = BS.cons 0x05 rlpPayload
+           msgHash = keccak' signingMessage
+           -- v is yParity + 27 for ecrecover
+           v = into auth.authYParity + 27
+       in EVM.Sign.ecrec v auth.authR auth.authS msgHash
   where
     rlpList items = rlpencode $ List items
     rlpWord256 0 = BS mempty
@@ -3348,7 +3354,7 @@ getAuthoritiesToWarm chainId auths = map LitAddr $ mapMaybe (recoverIfValidChain
 -- 2. Check chain_id: must be 0 or match current chain
 -- 3. Check authority's code is empty or already delegated
 -- 4. Check nonce matches
--- 5. Add refund if authority exists (PER_EMPTY_ACCOUNT_COST - PER_AUTH_BASE_COST = 22500)
+-- 5. Add refund if authority exists (PER_EMPTY_ACCOUNT_COST - PER_AUTH_BASE_COST = 12500)
 -- 6. Set delegation code and increment nonce
 processAuthorizations
   :: W256                                -- ^ Chain ID
@@ -3357,9 +3363,9 @@ processAuthorizations
   -> (Map (Expr EAddr) Contract, [(Expr EAddr, Word64)])  -- ^ (Updated contracts, Refunds)
 processAuthorizations chainId auths contracts = foldl processOne (contracts, []) auths
   where
-    -- EIP-7702 refund: PER_EMPTY_ACCOUNT_COST (25000) - PER_AUTH_BASE_COST (2500) = 22500
+    -- EIP-7702 refund: PER_EMPTY_ACCOUNT_COST (25000) - PER_AUTH_BASE_COST (12500) = 12500
     authRefundAmount :: Word64
-    authRefundAmount = 22500
+    authRefundAmount = 12500
 
     processOne :: (Map (Expr EAddr) Contract, [(Expr EAddr, Word64)]) -> AuthorizationEntry
                -> (Map (Expr EAddr) Contract, [(Expr EAddr, Word64)])
@@ -3389,13 +3395,16 @@ processAuthorizations chainId auths contracts = foldl processOne (contracts, [])
              else if into currentNonce /= auth.authNonce
              then (cs, refs)  -- Nonce mismatch, skip
              else
-               let delegationCode = makeDelegationCode auth.authAddress
-                   delegationContractCode = RuntimeCode (ConcreteRuntimeCode delegationCode)
-                   -- Create or update the authority's contract with delegation code
+               -- EIP-7702: If target address is 0x0, set code to empty (clears delegation)
+               -- Otherwise, set delegation code (0xef0100 || address)
+               let newCode = if auth.authAddress == 0
+                             then RuntimeCode (ConcreteRuntimeCode mempty)
+                             else RuntimeCode (ConcreteRuntimeCode (makeDelegationCode auth.authAddress))
+                   -- Create or update the authority's contract
                    newContract = case existingAccount of
-                     Just c -> set #code delegationContractCode $
+                     Just c -> set #code newCode $
                                set #nonce (Just (currentNonce + 1)) c
-                     Nothing -> set #nonce (Just 1) $ initialContract delegationContractCode
+                     Nothing -> set #nonce (Just 1) $ initialContract newCode
                    -- Add refund if authority exists in trie (EIP-7702 step 6)
                    -- An account "exists" if it has non-zero balance, nonce, or code
                    accountReallyExists = case existingAccount of

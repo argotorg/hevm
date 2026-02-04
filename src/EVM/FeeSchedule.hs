@@ -106,5 +106,5 @@ feeSchedule = FeeSchedule
   , g_warm_storage_read = 100
   , g_access_list_address = 2400
   , g_access_list_storage_key = 1900
-  , g_auth_base = 2500            -- EIP-7702: PER_AUTH_BASE_COST
+  , g_auth_base = 12500           -- EIP-7702: PER_AUTH_BASE_COST
   }
