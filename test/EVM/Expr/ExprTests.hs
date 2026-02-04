@@ -263,6 +263,22 @@ basicSimplificationTests = testGroup "Basic simplification tests"
       let simplified = Expr.simplify x
       let expected = (SLoad (Keccak (AbstractBuf "es")) (ConcreteStore (Map.empty))) -- TODO: This should be simplified to (Lit 0)
       assertEqual "Must be equal, given keccak distance axiom" expected simplified
+  , testCase "expr-simp-and-commut-assoc" $ do
+      let
+        a = And (Lit 4) (And (Lit 5) (Var "a"))
+        b = Expr.simplify a
+      assertEqual "Must reorder and perform And" (And (Lit 4) (Var "a")) b
+  , testCase "expr-simp-order-eqbyte" $ do
+      let
+        a = EqByte (ReadByte (Lit 1) (AbstractBuf "b")) (ReadByte (Lit 1) (AbstractBuf "a"))
+        b = Expr.simplify a
+      assertEqual "Must order eqbyte params" b (EqByte (ReadByte (Lit 1) (AbstractBuf "a")) (ReadByte (Lit 1) (AbstractBuf "b")))
+  , testCase "prop-simp-expr" $ do
+      let
+        successPath props = Success props mempty (ConcreteBuf "") mempty
+        a = successPath [PEq (Add (Lit 1) (Lit 2)) (Sub (Lit 4) (Lit 1))]
+        b = Expr.simplify a
+      assertEqual "Must simplify down" (successPath []) b
   ]
 
 propSimplificationTests :: TestTree
@@ -382,6 +398,61 @@ propSimplificationTests = testGroup "prop-simplifications"
   , testCase "simplify comparison GEq" $ do
       let simp = Expr.simplifyProp $ PEq (Lit 0x1) (GEq (Var "v") (Lit 0x2))
       assertEqual "" (PLEq (Lit 0x2) (Var "v")) simp
+  , testCase "prop-simp-bool1" $ do
+      let
+        a = [PAnd (PBool True) (PBool False)]
+        b = Expr.simplifyProps a
+      assertEqual "Must simplify down" [PBool False] b
+  , testCase "prop-simp-bool2" $ do
+      let
+        a = [POr (PBool True) (PBool False)]
+        b = Expr.simplifyProps a
+      assertEqual "Must simplify down" [] b
+  , testCase "prop-simp-LT" $ do
+      let
+        a = [PLT (Lit 1) (Lit 2)]
+        b = Expr.simplifyProps a
+      assertEqual "Must simplify down" [] b
+  , testCase "prop-simp-GEq" $ do
+      let
+        a = [PGEq (Lit 1) (Lit 2)]
+        b = Expr.simplifyProps a
+      assertEqual "Must simplify down" [PBool False] b
+  , testCase "prop-simp-liteq-false" $ do
+      let
+        a = [PEq (LitByte 10) (LitByte 12)]
+        b = Expr.simplifyProps a
+      assertEqual "Must simplify down" [PBool False] b
+  , testCase "prop-simp-concbuf-false" $ do
+      let
+        a = [PEq (ConcreteBuf "a") (ConcreteBuf "ab")]
+        b = Expr.simplifyProps a
+      assertEqual "Must simplify down" [PBool False] b
+  , testCase "prop-simp-sort-eq-arguments" $ do
+      let
+        a = [PEq (Var "a") (Var "b"), PEq (Var "b") (Var "a")]
+        b = Expr.simplifyProps a
+      assertEqual "Must reorder and nubOrd" (length b) 1
+  , testCase "prop-simp-demorgan-pneg-pand" $ do
+      let
+        a = [PNeg (PAnd (PEq (Lit 4) (Var "a")) (PEq (Lit 5) (Var "b")))]
+        b = Expr.simplifyProps a
+      assertEqual "Must apply demorgan" b [POr (PNeg (PEq (Lit 4) (Var "a"))) (PNeg (PEq (Lit 5) (Var "b")))]
+  , testCase "prop-simp-demorgan-pneg-por" $ do
+    let
+      a = [PNeg (POr (PEq (Lit 4) (Var "a")) (PEq (Lit 5) (Var "b")))]
+      b = Expr.simplifyProps a
+    assertEqual "Must apply demorgan" [PNeg (PEq (Lit 4) (Var "a")), PNeg (PEq (Lit 5) (Var "b"))] b
+  , testCase "prop-simp-lit0-or-both-0" $ do
+    let
+      a = [PEq (Lit 0) (Or (Var "a") (Var "b"))]
+      b = Expr.simplifyProps a
+    assertEqual "Must apply demorgan" [PEq (Lit 0) (Var "a"), PEq (Lit 0) (Var "b")] b
+  , testCase "prop-simp-impl" $ do
+      let
+        a = [PImpl (PBool False) (PEq (Var "abc") (Var "bcd"))]
+        b = Expr.simplifyProps a
+      assertEqual "Must simplify down" [] b
   ]
 
 constantPropagationTests :: TestTree

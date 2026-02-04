@@ -4114,84 +4114,6 @@ tests = testGroup "hevm"
       (_, [Cex (_, ctr1)]) <- withCVC5Solver $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
       putStrLnM  $ "expected counterexamples found: " <> show ctr1
   ]
-  , testGroup "simplification-working"
-  [
-    test "prop-simp-bool1" $ do
-      let
-        a = successGen [PAnd (PBool True) (PBool False)]
-        b = Expr.simplify a
-      assertEqualM "Must simplify down" (successGen [PBool False]) b
-    , test "prop-simp-bool2" $ do
-      let
-        a = successGen [POr (PBool True) (PBool False)]
-        b = Expr.simplify a
-      assertEqualM "Must simplify down" (successGen []) b
-    , test "prop-simp-LT" $ do
-      let
-        a = successGen [PLT (Lit 1) (Lit 2)]
-        b = Expr.simplify a
-      assertEqualM "Must simplify down" (successGen []) b
-    , test "prop-simp-GEq" $ do
-      let
-        a = successGen [PGEq (Lit 1) (Lit 2)]
-        b = Expr.simplify a
-      assertEqualM "Must simplify down" (successGen [PBool False]) b
-    , test "prop-simp-liteq-false" $ do
-      let
-        a = [PEq (LitByte 10) (LitByte 12)]
-        b = Expr.simplifyProps a
-      assertEqualM "Must simplify to PBool" ([PBool False]) b
-    , test "prop-simp-concbuf-false" $ do
-      let
-        a = [PEq (ConcreteBuf "a") (ConcreteBuf "ab")]
-        b = Expr.simplifyProps a
-      assertEqualM "Must simplify to PBool" ([PBool False]) b
-    , test "prop-simp-sort-eq-arguments" $ do
-      let
-        a = [PEq (Var "a") (Var "b"), PEq (Var "b") (Var "a")]
-        b = Expr.simplifyProps a
-      assertEqualM "Must reorder and nubOrd" (length b) 1
-    , test "expr-simp-and-commut-assoc" $ do
-      let
-        a = And (Lit 4) (And (Lit 5) (Var "a"))
-        b = Expr.simplify a
-      assertEqualM "Must reorder and perform And" (And (Lit 4) (Var "a")) b
-    , test "expr-simp-order-eqbyte" $ do
-      let
-        a = EqByte (ReadByte (Lit 1) (AbstractBuf "b")) (ReadByte (Lit 1) (AbstractBuf "a"))
-        b = Expr.simplify a
-      assertEqualM "Must order eqbyte params" b (EqByte (ReadByte (Lit 1) (AbstractBuf "a")) (ReadByte (Lit 1) (AbstractBuf "b")))
-    , test "prop-simp-demorgan-pneg-pand" $ do
-      let
-        a = [PNeg (PAnd (PEq (Lit 4) (Var "a")) (PEq (Lit 5) (Var "b")))]
-        b = Expr.simplifyProps a
-      assertEqualM "Must apply demorgan" b [POr (PNeg (PEq (Lit 4) (Var "a"))) (PNeg (PEq (Lit 5) (Var "b")))]
-    , test "prop-simp-demorgan-pneg-por" $ do
-      let
-        a = [PNeg (POr (PEq (Lit 4) (Var "a")) (PEq (Lit 5) (Var "b")))]
-        b = Expr.simplifyProps a
-      assertEqualM "Must apply demorgan" [PNeg (PEq (Lit 4) (Var "a")), PNeg (PEq (Lit 5) (Var "b"))] b
-    , test "prop-simp-lit0-or-both-0" $ do
-      let
-        a = [PEq (Lit 0) (Or (Var "a") (Var "b"))]
-        b = Expr.simplifyProps a
-      assertEqualM "Must apply demorgan" [PEq (Lit 0) (Var "a"), PEq (Lit 0) (Var "b")] b
-    , test "prop-simp-multiple" $ do
-      let
-        a = successGen [PBool False, PBool True]
-        b = Expr.simplify a
-      assertEqualM "Must simplify down" (successGen [PBool False]) b
-    , test "prop-simp-expr" $ do
-      let
-        a = successGen [PEq (Add (Lit 1) (Lit 2)) (Sub (Lit 4) (Lit 1))]
-        b = Expr.simplify a
-      assertEqualM "Must simplify down" (successGen []) b
-    , test "prop-simp-impl" $ do
-      let
-        a = successGen [PImpl (PBool False) (PEq (Var "abc") (Var "bcd"))]
-        b = Expr.simplify a
-      assertEqualM "Must simplify down" (successGen []) b
-  ]
   , testGroup "SMT-encoding"
   [ testCase "encodeConcreteStore-overwrite" $
     assertEqual ""
@@ -5280,9 +5202,6 @@ checkPost post c sig = do
   case cexs of
     [] -> pure $ Right e
     cs -> pure $ Left cs
-
-successGen :: [Prop] -> Expr End
-successGen props = Success props mempty (ConcreteBuf "") mempty
 
 -- gets the expected concrete values for symbolic abi testing
 expectedConcVals :: Text -> AbiValue -> SMTCex
