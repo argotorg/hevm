@@ -810,6 +810,7 @@ data TxState = TxState
   , subState    :: SubState
   , isCreate    :: Bool
   , txReversion :: Map (Expr EAddr) Contract
+  , txdataFloorGas :: Word64  -- EIP-7623: floor gas cost based on calldata tokens
   }
   deriving (Show)
 
@@ -994,6 +995,7 @@ data VMOpts (t :: VMType) = VMOpts
   , freshAddresses :: Int
   , beaconRoot :: W256
   , parentHash :: W256      -- EIP-2935 parent block hash
+  , txdataFloorGas :: Word64   -- EIP-7623: floor gas cost based on calldata tokens
   }
 
 deriving instance Show (VMOpts Symbolic)

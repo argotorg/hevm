@@ -220,23 +220,37 @@ problematicTests =
   , ("tests/osaka/eip7939_count_leading_zeros/test_count_leading_zeros.py::", "CLZ not implemented")
   , ("tests/osaka/eip7939_count_leading_zeros/test_eip_mainnet.py::", "CLZ not implemented")
     -- Other tests (TODO: fix or re-sort them)
-  , ("tests/frontier/precompiles/test_ripemd.py::", "TODO")
-  , ("tests/osaka/eip7823_modexp_upper_bounds/test_eip_mainnet.py::", "TODO")
-  , ("tests/osaka/eip7823_modexp_upper_bounds/test_modexp_upper_bounds.py::", "TODO")
-  , ("tests/osaka/eip7825_transaction_gas_limit_cap/test_tx_gas_limit.py::", "TODO")
-  , ("tests/osaka/eip7883_modexp_gas_increase/test_modexp_thresholds.py::", "TODO")
+  , ("tests/frontier/precompiles/test_ripemd.py::", "Gas calculation affected by EIP-7623")
+    -- EIP-7823: 2 tests failing due to EIP-7623 calldata cost changes
+  , ("tests/osaka/eip7823_modexp_upper_bounds/test_modexp_upper_bounds.py::test_modexp_upper_bounds[fork_Osaka-blockchain_test_from_state_test-near_uint64_max_base]", "Requires EIP-7623 calldata cost")
+  , ("tests/osaka/eip7823_modexp_upper_bounds/test_modexp_upper_bounds.py::test_modexp_upper_bounds[fork_Osaka-blockchain_test_from_state_test-zero_exp_mod_exceed]", "Requires EIP-7623 calldata cost")
+    -- EIP-7825: 2 tests failing due to EIP-7623 calldata cost changes
+  , ("tests/osaka/eip7825_transaction_gas_limit_cap/test_tx_gas_limit.py::test_tx_gas_limit_cap_contract_creation[fork_Osaka-blockchain_test_from_state_test-exceed_tx_gas_limit_False]", "Requires EIP-7623 calldata cost")
+  , ("tests/osaka/eip7825_transaction_gas_limit_cap/test_tx_gas_limit.py::test_tx_gas_limit_cap_contract_creation[fork_Osaka-blockchain_test_from_state_test-exceed_tx_gas_limit_True]", "Requires EIP-7623 calldata cost")
+    -- EIP-7883: 4 tests failing due to EIP-7623 calldata cost changes
+  , ("tests/osaka/eip7883_modexp_gas_increase/test_modexp_thresholds.py::test_modexp_used_in_transaction_entry_points", "Requires EIP-7623 calldata cost")
+    -- EIP-7623: 5 tests failing with exact_gas/below_floor scenarios
+  , ("tests/prague/eip7623_increase_calldata_cost/test_execution_gas.py::TestGasConsumptionBelowDataFloor::", "EIP-7623 floor calculation edge case")
+  , ("tests/prague/eip7623_increase_calldata_cost/test_refunds.py::test_gas_refunds_from_data_floor[fork_Osaka-blockchain_test_from_state_test-refund_type_RefundType.STORAGE_CLEAR-refund_test_type_RefundTestType.EXECUTION_GAS_MINUS_REFUND_LESS_THAN_DATA_FLOOR]", "EIP-7623 floor calculation edge case")
+    -- EIP-3860 tests failing with large initcode due to EIP-7623 floor gas
+  , ("tests/shanghai/eip3860_initcode/test_initcode.py::TestCreateInitcode::test_create_opcode_initcode[fork_Osaka-blockchain_test_from_state_test-create-49120_bytes]", "EIP-7623 floor gas")
+  , ("tests/shanghai/eip3860_initcode/test_initcode.py::TestCreateInitcode::test_create_opcode_initcode[fork_Osaka-blockchain_test_from_state_test-create-49121_bytes]", "EIP-7623 floor gas")
+  , ("tests/shanghai/eip3860_initcode/test_initcode.py::TestCreateInitcode::test_create_opcode_initcode[fork_Osaka-blockchain_test_from_state_test-create-max_size_ones]", "EIP-7623 floor gas")
+  , ("tests/shanghai/eip3860_initcode/test_initcode.py::TestCreateInitcode::test_create_opcode_initcode[fork_Osaka-blockchain_test_from_state_test-create-max_size_zeros]", "EIP-7623 floor gas")
+  , ("tests/shanghai/eip3860_initcode/test_initcode.py::TestCreateInitcode::test_create_opcode_initcode[fork_Osaka-blockchain_test_from_state_test-create2-49120_bytes]", "EIP-7623 floor gas")
+  , ("tests/shanghai/eip3860_initcode/test_initcode.py::TestCreateInitcode::test_create_opcode_initcode[fork_Osaka-blockchain_test_from_state_test-create2-49121_bytes]", "EIP-7623 floor gas")
+  , ("tests/shanghai/eip3860_initcode/test_initcode.py::TestCreateInitcode::test_create_opcode_initcode[fork_Osaka-blockchain_test_from_state_test-create2-max_size_ones]", "EIP-7623 floor gas")
+  , ("tests/shanghai/eip3860_initcode/test_initcode.py::TestCreateInitcode::test_create_opcode_initcode[fork_Osaka-blockchain_test_from_state_test-create2-max_size_zeros]", "EIP-7623 floor gas")
+    -- test_with_eof.py tests are failing - EOF not implemented
+  , ("tests/shanghai/eip3860_initcode/test_with_eof.py::", "EOF not implemented")
   , ("tests/prague/eip2935_historical_block_hashes_from_state/test_block_hashes.py::", "TODO")
   , ("tests/prague/eip6110_deposits/test_deposits.py::", "TODO")
   , ("tests/prague/eip7002_el_triggerable_withdrawals/test_modified_withdrawal_contract.py::", "TODO")
   , ("tests/prague/eip7251_consolidations/test_modified_consolidation_contract.py::", "TODO")
-  , ("tests/prague/eip7623_increase_calldata_cost/test_execution_gas.py::", "TODO")
-  , ("tests/prague/eip7623_increase_calldata_cost/test_refunds.py::", "TODO")
   , ("tests/prague/eip7685_general_purpose_el_requests/test_multi_type_requests.py::", "TODO")
   , ("tests/prague/eip7702_set_code_tx/test_calls.py::", "TODO")
   , ("tests/prague/eip7702_set_code_tx/test_gas.py::", "TODO")
   , ("tests/prague/eip7702_set_code_tx/test_set_code_txs_2.py::", "TODO")
-  , ("tests/shanghai/eip3860_initcode/test_initcode.py::", "TODO")
-  , ("tests/shanghai/eip3860_initcode/test_with_eof.py::", "TODO")
   , ("tests/static/state_tests/Cancun/stEIP5656_MCOPY/MCOPY_memory_expansion_costFiller.yml::", "TODO")
   , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructed2Filler.json::", "TODO")
   , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructedFiller.json::", "TODO")
@@ -550,6 +564,7 @@ fromBlockchainCase' block tx preState postState =
        , freshAddresses = 0
        , beaconRoot     = block.beaconRoot
        , parentHash     = block.parentHash
+       , txdataFloorGas = txdataFloorGas tx
        })
       checkState
       postState
@@ -597,13 +612,19 @@ checkTx tx block prestate = do
   if initCodeSizeExceeded then mzero
   else pure prestate
 
+-- EIP-7825: Maximum transaction gas limit is 2^24 (16,777,216)
+maxTxGasLimit :: Word64
+maxTxGasLimit = 16777216
+
 validateTx :: Transaction -> Block -> BlockchainContracts -> Maybe ()
 validateTx tx block cs = do
   origin <- sender tx
   originBalance <- (.balance) <$> Map.lookup origin cs
   originNonce <- (.nonce) <$> Map.lookup origin cs
   let gasDeposit = (effectiveprice tx block.baseFee) * (into tx.gasLimit)
-  if gasDeposit + tx.value <= originBalance
+  -- EIP-7825: Reject transactions exceeding max gas limit
+  if tx.gasLimit > maxTxGasLimit then Nothing
+  else if gasDeposit + tx.value <= originBalance
     && ((unsafeInto tx.nonce) == originNonce) && block.baseFee <= maxBaseFee tx
   then Just ()
   else Nothing
