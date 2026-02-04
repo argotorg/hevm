@@ -868,23 +868,23 @@ exec1 conf = do
 
         OpJumpi -> {-# SCC "OpJumpi" #-}
           case stk of
-            x:y:xs -> forceConcreteLimitSz x 2 "JUMPI: symbolic jumpdest" $ \jdest ->
+            x:cond:xs -> forceConcreteLimitSz x 2 "JUMPI: symbolic jumpdest" $ \maybeTarget ->
               burn g_high $
                 -- Note: We must NOT check tryInto x' unconditionally!
                 -- Per EVM semantics, if condition is 0, we just fall through
                 -- without validating the destination. Only validate when jumping.
                 let jump :: Bool -> EVM t ()
                     jump False = assign' (#state % #stack) xs >> next
-                    jump _    = case tryInto jdest of
+                    jump _    = case tryInto maybeTarget of
                       Left _ -> vmError BadJumpDestination
-                      Right i -> checkJump i xs
+                      Right jumpTarget -> checkJump jumpTarget xs
                     -- For Symbolic execution, try forward-jump merge first
                     symbolicMerge :: EVM Symbolic ()
-                    symbolicMerge = case tryInto jdest of
+                    symbolicMerge = case tryInto maybeTarget of
                       Left _ ->
                         -- Invalid destination - but we only error if we try to jump
                         -- Use branch to decide based on condition
-                        branch conf.maxDepth y $ \case
+                        branch conf.maxDepth cond $ \case
                           False -> assign' (#state % #stack) xs >> next
                           True -> vmError BadJumpDestination
                       Right jumpTarget -> do
@@ -892,7 +892,7 @@ exec1 conf = do
                         ms <- use #mergeState
                         if ms.msActive then do
                           -- Inside speculation: try both paths using budget-based exploration
-                          result <- Merge.exploreNestedBranch conf (exec1 conf) jumpTarget ms.msTargetPC y xs
+                          result <- Merge.exploreNestedBranch conf (exec1 conf) jumpTarget ms.msTargetPC cond xs
                           case result of
                             Just vmFinal -> put vmFinal
                             Nothing -> do
@@ -900,16 +900,15 @@ exec1 conf = do
                               -- This will cause speculateLoop to return Nothing
                               assign #result $ Just $ VMFailure BadJumpDestination
                         else do
-                          merged <- Merge.tryMergeForwardJump conf (exec1 conf) vm.state.pc jumpTarget y xs
+                          merged <- Merge.tryMergeForwardJump conf (exec1 conf) vm.state.pc jumpTarget cond xs
                           unless merged $ do
-                            -- Define Symbolic-specific jump for fallback
                             let jumpSym :: Bool -> EVM Symbolic ()
                                 jumpSym False = assign' (#state % #stack) xs >> next
                                 jumpSym _    = checkJump jumpTarget xs
-                            branch conf.maxDepth y jumpSym
+                            branch conf.maxDepth cond jumpSym
                 in case eqT @t @Symbolic of
                      Just Refl -> symbolicMerge
-                     Nothing -> branch conf.maxDepth y jump
+                     Nothing -> branch conf.maxDepth cond jump
             _ -> underrun
 
         OpPc -> {-# SCC "OpPc" #-}
