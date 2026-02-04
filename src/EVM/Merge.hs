@@ -48,10 +48,10 @@ execUntilPCSymbolic conf exec1Step targetPC = do
       , msRemainingBudget = budget
       , msNestingDepth = 0
       }
-    result <- speculateLoop conf exec1Step targetPC
+    res <- speculateLoop conf exec1Step targetPC
     -- Reset merge state
     modifying #mergeState $ \ms -> ms { msActive = False }
-    pure result
+    pure res
 
 -- | Inner loop for speculative execution with budget tracking
 speculateLoop
