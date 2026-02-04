@@ -574,7 +574,8 @@ vmForCase x = do
     applyEIP7702Authorizations opts vm =
       let chainId = opts.chainId
           authList = opts.authorizationList
-          (contractsWithDelegations, authRefunds) = processAuthorizations chainId authList vm.env.contracts
+          origin = opts.origin
+          (contractsWithDelegations, authRefunds) = processAuthorizations chainId origin authList vm.env.contracts
           -- Get addresses to warm (after chain_id validation)
           authWarmAddrs = getAuthoritiesToWarm chainId authList
           -- Update accessed addresses with auth warm addresses

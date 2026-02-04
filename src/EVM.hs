@@ -213,7 +213,7 @@ makeVm o = do
     where
     -- Process EIP-7702 authorization list to set delegation codes and collect refunds
     baseContracts = Map.fromList ((o.address,o.contract):o.otherContracts)
-    (contractsWithDelegations, authRefunds) = processAuthorizations o.chainId o.authorizationList baseContracts
+    (contractsWithDelegations, authRefunds) = processAuthorizations o.chainId o.origin o.authorizationList baseContracts
     env = Env
       { chainId = o.chainId
       , contracts = contractsWithDelegations
@@ -3353,15 +3353,16 @@ getAuthoritiesToWarm chainId auths = map LitAddr $ mapMaybe (recoverIfValidChain
 -- 1. ecrecover to get authority address (addresses warmed separately via getAuthoritiesToWarm)
 -- 2. Check chain_id: must be 0 or match current chain
 -- 3. Check authority's code is empty or already delegated
--- 4. Check nonce matches
+-- 4. Check nonce matches (for self-sponsored: nonce == account_nonce + 1)
 -- 5. Add refund if authority exists (PER_EMPTY_ACCOUNT_COST - PER_AUTH_BASE_COST = 12500)
 -- 6. Set delegation code and increment nonce
 processAuthorizations
   :: W256                                -- ^ Chain ID
+  -> Expr EAddr                          -- ^ Transaction origin address
   -> [AuthorizationEntry]                -- ^ Authorization list from transaction
   -> Map (Expr EAddr) Contract           -- ^ Current contracts state
   -> (Map (Expr EAddr) Contract, [(Expr EAddr, Word64)])  -- ^ (Updated contracts, Refunds)
-processAuthorizations chainId auths contracts = foldl processOne (contracts, []) auths
+processAuthorizations chainId origin auths contracts = foldl processOne (contracts, []) auths
   where
     -- EIP-7702 refund: PER_EMPTY_ACCOUNT_COST (25000) - PER_AUTH_BASE_COST (12500) = 12500
     authRefundAmount :: Word64
@@ -3388,11 +3389,18 @@ processAuthorizations chainId auths contracts = foldl processOne (contracts, [])
                   RuntimeCode (ConcreteRuntimeCode code) ->
                     BS.null code || isDelegationCode code
                   _ -> True  -- Symbolic code, allow for now
+              -- EIP-7702 step 5: nonce validation
+              -- For self-sponsored (authority == origin), nonce must be account_nonce + 1
+              -- Otherwise, nonce must equal account_nonce
+              isSelfSponsored = authorityAddr == origin
+              expectedNonce = if isSelfSponsored
+                              then currentNonce + 1
+                              else currentNonce
           in -- Check code constraint (EIP-7702 step 4)
              if not codeIsOk
              then (cs, refs)  -- Account has non-delegation code, skip
-             -- Check nonce matches
-             else if into currentNonce /= auth.authNonce
+             -- Check nonce matches (step 5)
+             else if into expectedNonce /= auth.authNonce
              then (cs, refs)  -- Nonce mismatch, skip
              else
                -- EIP-7702: If target address is 0x0, set code to empty (clears delegation)
