@@ -868,8 +868,7 @@ exec1 conf = do
 
         OpJumpi -> {-# SCC "OpJumpi" #-}
           case stk of
-            x:y:xs ->
-              forceConcreteLimitSz x 2 "JUMPI: symbolic jumpdest" $ \x' ->
+            x:y:xs -> forceConcreteLimitSz x 2 "JUMPI: symbolic jumpdest" $ \x' ->
               burn g_high $
                 -- Note: We must NOT check tryInto x' unconditionally!
                 -- Per EVM semantics, if condition is 0, we just fall through
