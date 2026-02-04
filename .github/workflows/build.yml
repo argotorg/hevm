@@ -224,12 +224,10 @@ jobs:
           path: ethereum-solidity
           persist-credentials: false
 
-      - uses: actions/checkout@v4
-        with:
-          repository: ethereum/tests
-          ref: v13
-          path: ethereum-tests
-          persist-credentials: false
+      - name: Download execution-spec-tests fixtures
+        run: |
+          ARTIFACT_URL="$(grep ethereum/execution-spec-tests flake.nix | cut -f2 -d'"')"
+          curl --retry 5 -fsSL "$ARTIFACT_URL" | tar xz
 
       - uses: actions/checkout@v4
         with:
@@ -257,7 +255,7 @@ jobs:
           echo DAPP_SOLC_PATH="$PWD/solc/" >> "$GITHUB_ENV"
           # repos
           echo HEVM_SOLIDITY_REPO="$PWD/ethereum-solidity" >> "$GITHUB_ENV"
-          echo HEVM_ETHEREUM_TESTS_REPO="$PWD/ethereum-tests" >> "$GITHUB_ENV"
+          echo HEVM_ETHEREUM_TESTS_REPO="$PWD/fixtures/blockchain_tests" >> "$GITHUB_ENV"
           echo HEVM_FORGE_STD_REPO="$PWD/forge-std" >> "$GITHUB_ENV"
 
       - name: run tests

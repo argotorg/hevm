@@ -9,10 +9,6 @@
       url = "github:argotorg/solidity/8a97fa7a1db1ec509221ead6fea6802c684ee887";
       flake = false;
     };
-    ethereum-tests = {
-      url = "github:ethereum/tests/v13";
-      flake = false;
-    };
     forge-std = {
       url = "github:foundry-rs/forge-std";
       flake = false;
@@ -27,9 +23,13 @@
     };
   };
 
-  outputs = { nixpkgs, flake-utils, solidity, empty-smt-solver, forge-std, ethereum-tests, foundry, solc-pkgs, ... }:
+  outputs = { nixpkgs, flake-utils, solidity, empty-smt-solver, forge-std, foundry, solc-pkgs, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
+        execution-spec-tests-fixtures = builtins.fetchTarball {
+          url = "https://github.com/ethereum/execution-spec-tests/releases/download/v5.4.0/fixtures_develop.tar.gz";
+          sha256 = "0dsg7lcj591i0p7s93xv0vin2dwricgq29v8xakqnx1kfj3fcyvq";
+        };
         pkgs = (import nixpkgs {
           inherit system;
           overlays = [solc-pkgs.overlay];
@@ -71,7 +71,7 @@
               secp256k1 = ps.secp256k1;
             }).overrideAttrs(final: prev: {
               HEVM_SOLIDITY_REPO = solidity;
-              HEVM_ETHEREUM_TESTS_REPO = ethereum-tests;
+              HEVM_ETHEREUM_TESTS_REPO = "${execution-spec-tests-fixtures}/blockchain_tests";
               HEVM_FORGE_STD_REPO = forge-std;
               DAPP_SOLC = "${solc}/bin/solc";
             }))
@@ -207,7 +207,7 @@
           # hevm tests expect these to be set
           HEVM_SOLIDITY_REPO = solidity;
           DAPP_SOLC = "${solc}/bin/solc";
-          HEVM_ETHEREUM_TESTS_REPO = ethereum-tests;
+          HEVM_ETHEREUM_TESTS_REPO = "${execution-spec-tests-fixtures}/blockchain_tests";
           HEVM_FORGE_STD_REPO = forge-std;
 
           # point cabal repl to system deps

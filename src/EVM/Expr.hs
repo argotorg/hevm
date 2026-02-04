@@ -246,6 +246,8 @@ readByte i@(Lit x) (WriteByte (Lit idx) val src)
   = if x == idx
     then val
     else readByte i src
+readByte i@(Lit x) (WriteByte (And (Lit idx) _) _ src)
+  | x > idx = readByte i src
 readByte i@(Lit x) (WriteWord (Lit idx) val src)
   = if x - idx < 32
     then case val of

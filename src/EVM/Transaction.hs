@@ -1,6 +1,6 @@
 module EVM.Transaction where
 
-import EVM (initialContract, ceilDiv)
+import EVM (initialContract, ceilDiv, collision)
 import EVM.Expr qualified as Expr
 import EVM.FeeSchedule
 import EVM.Format (hexText)
@@ -12,6 +12,7 @@ import Optics.Core hiding (cons)
 
 import Data.Aeson (FromJSON (..))
 import Data.Aeson qualified as JSON
+import Data.Function (applyWhen)
 import Data.Aeson.Types qualified as JSON
 import Data.ByteString (ByteString, cons)
 import Data.ByteString qualified as BS
@@ -34,10 +35,14 @@ data TxType
   = LegacyTransaction
   | AccessListTransaction
   | EIP1559Transaction
+  | EIP4844Transaction
+  | EIP7702Transaction
   deriving (Show, Eq, Generic)
 
 instance JSON.ToJSON TxType where
   toJSON t = case t of
+               EIP7702Transaction    -> "0x4" -- permanently sets the code for an EOA
+               EIP4844Transaction    -> "0x3" -- Proto-Danksharding
                EIP1559Transaction    -> "0x2" -- EIP1559
                LegacyTransaction     -> "0x1" -- EIP2718
                AccessListTransaction -> "0x1" -- EIP2930
@@ -107,6 +112,7 @@ sender tx = ecrec v' tx.r  tx.s hash
   where hash = keccak' (signingData tx)
         v    = tx.v
         v'   = if v == 27 || v == 28 then v
+               else if v >= 35 then 28 - (v `mod` 2) -- EIP155
                else 27 + v
 
 sign :: Integer -> Transaction -> Transaction
@@ -123,6 +129,8 @@ signingData tx =
       else normalData
     AccessListTransaction -> eip2930Data
     EIP1559Transaction -> eip1559Data
+    EIP4844Transaction -> eip4844Data
+    EIP7702Transaction -> eip7702Data
   where v          = tx.v
         to'        = case tx.toAddr of
           Just a  -> BS $ word160Bytes a
@@ -165,7 +173,6 @@ signingData tx =
           , BS tx.txdata
           , rlpAccessList
           ]
-
         eip2930Data = cons 0x01 $ rlpList
           [ rlpWord256 tx.chainId
           , rlpWord256 tx.nonce
@@ -175,6 +182,31 @@ signingData tx =
           , rlpWord256 tx.value
           , BS tx.txdata
           , rlpAccessList
+          ]
+        eip4844Data = cons 0x03 $ rlpList
+          [ rlpWord256 tx.chainId
+          , rlpWord256 tx.nonce
+          , rlpWord256 maxPrio
+          , rlpWord256 maxFee
+          , rlpWord256 (into tx.gasLimit)
+          , to'
+          , rlpWord256 tx.value
+          , BS tx.txdata
+          , rlpAccessList
+          , rlpWord256 $ undefined -- TODO EIP4844 max_fee_per_blob_gas
+          , undefined -- TODO EIP4844 blob_versioned_hashes
+          ]
+        eip7702Data = cons 0x04 $ rlpList
+          [ rlpWord256 tx.chainId
+          , rlpWord256 tx.nonce
+          , rlpWord256 maxPrio
+          , rlpWord256 maxFee
+          , rlpWord256 (into tx.gasLimit)
+          , to'
+          , rlpWord256 tx.value
+          , BS tx.txdata
+          , rlpAccessList
+          , undefined -- TODO EIP4844 authorization_list
           ]
 
 accessListPrice :: FeeSchedule Word64 -> [AccessListEntry] -> Word64
@@ -219,7 +251,7 @@ instance FromJSON Transaction where
     toAddr   <- addrFieldMaybe val "to"
     v        <- wordField val "v"
     value    <- wordField val "value"
-    txType   <- fmap (read :: String -> Int) <$> (val JSON..:? "type")
+    txType   <- fmap (read :: String -> Int) <$> val JSON..:? "type"
     case txType of
       Just 0x00 -> pure $ Transaction tdata gasLimit gasPrice nonce r s toAddr v value LegacyTransaction [] Nothing Nothing 1
       Just 0x01 -> do
@@ -228,6 +260,14 @@ instance FromJSON Transaction where
       Just 0x02 -> do
         accessListEntries <- (val JSON..: "accessList") >>= parseJSONList
         pure $ Transaction tdata gasLimit gasPrice nonce r s toAddr v value EIP1559Transaction accessListEntries maxPrio maxFee 1
+      Just 0x03 -> do
+        accessListEntries <- (val JSON..: "accessList") >>= parseJSONList
+        -- TODO: capture max_fee_per_blob_gas and blob_versioned_hashes EIP4844
+        pure $ Transaction tdata gasLimit gasPrice nonce r s toAddr v value EIP4844Transaction accessListEntries maxPrio maxFee 1
+      Just 0x04 -> do
+        accessListEntries <- (val JSON..: "accessList") >>= parseJSONList
+        -- TODO: capture authorization_list EIP7702
+        pure $ Transaction tdata gasLimit gasPrice nonce r s toAddr v value EIP7702Transaction accessListEntries maxPrio maxFee 1
       Just _ -> fail "unrecognized custom transaction type"
       Nothing -> pure $ Transaction tdata gasLimit gasPrice nonce r s toAddr v value LegacyTransaction [] Nothing Nothing 1
   parseJSON invalid =
@@ -267,13 +307,20 @@ initTx vm =
     preState = setupTx origin coinbase gasPrice gasLimit vm.env.contracts
     oldBalance = view (accountAt toAddr % #balance) preState
     creation = vm.tx.isCreate
-    initState =
-        ((Map.adjust (over #balance (`Expr.sub` value))) origin)
-      . (Map.adjust (over #balance (Expr.add value))) toAddr
-      . (if creation
-         then Map.insert toAddr (toContract & (set #balance oldBalance))
-         else touchAccount toAddr)
-      $ preState
+    -- Check for collision at target address for CREATE transactions
+    hasCollision = creation && collision (Map.lookup toAddr preState)
+    -- For collision: don't transfer value, don't create contract
+    initState = if hasCollision
+      then touchAccount toAddr preState
+      else ((Map.adjust (over #balance (`Expr.sub` value))) origin)
+         . (Map.adjust (over #balance (Expr.add value))) toAddr
+         . (if creation
+            then Map.insert toAddr (toContract & (set #balance oldBalance))
+            else touchAccount toAddr)
+         $ preState
   in
     vm & #env % #contracts .~ initState
        & #tx % #txReversion .~ preState
+       -- For collision: set code to empty so exec1 immediately stops and calls finalize
+       -- (don't set #result directly, as that bypasses finalize which handles gas payment)
+       & applyWhen hasCollision (#state % #code .~ RuntimeCode (ConcreteRuntimeCode ""))

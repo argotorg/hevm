@@ -558,6 +558,7 @@ data EvmError
   | NonceOverflow
   | BadCheatCode String FunctionSelector
   | NonexistentFork Int
+  | AssumeCheatFailed
   deriving (Show, Eq, Ord)
 
 evmErrToString :: EvmError -> String
@@ -992,6 +993,7 @@ data VMOpts (t :: VMType) = VMOpts
   , allowFFI :: Bool
   , freshAddresses :: Int
   , beaconRoot :: W256
+  , parentHash :: W256      -- EIP-2935 parent block hash
   }
 
 deriving instance Show (VMOpts Symbolic)

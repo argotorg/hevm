@@ -15,6 +15,7 @@ import EVM.Expr (readStorage, concStoreContains, writeStorage, readByte, readWor
   writeByte, bufLength, indexWord, readBytes, copySlice, wordToAddr, maybeLitByteSimp, maybeLitWordSimp, maybeLitAddrSimp)
 import EVM.Expr qualified as Expr
 import EVM.FeeSchedule (FeeSchedule (..))
+import EVM.FeeSchedule qualified as Fees (feeSchedule)
 import EVM.Op
 import EVM.Precompiled qualified
 import EVM.Solidity
@@ -66,6 +67,37 @@ import Crypto.Hash (Digest, SHA256, RIPEMD160)
 import Crypto.Hash qualified as Crypto
 import Crypto.Number.ModArithmetic (expFast)
 
+defaultVMOpts :: VMOps t => VMOpts t
+defaultVMOpts = VMOpts
+  { contract       = emptyContract
+  , otherContracts = []
+  , calldata       = mempty
+  , value          = Lit 0
+  , address        = LitAddr 0xacab
+  , caller         = LitAddr 0
+  , origin         = LitAddr 0
+  , gas            = toGas maxBound
+  , gaslimit       = maxBound
+  , baseFee        = 0
+  , priorityFee    = 0
+  , coinbase       = LitAddr 0
+  , number         = Lit 0
+  , timestamp      = Lit 0
+  , blockGaslimit  = maxBound
+  , gasprice       = 0
+  , maxCodeSize    = 0xffffffff
+  , prevRandao     = 0
+  , schedule       = Fees.feeSchedule
+  , chainId        = 1
+  , create         = False
+  , baseState      = EmptyBase
+  , txAccessList   = mempty
+  , allowFFI       = False
+  , freshAddresses = 0
+  , beaconRoot     = 0
+  , parentHash     = 0
+  }
+
 blankState :: VMOps t => ST RealWorld (FrameState t)
 blankState = do
   memory <- ConcreteMemory <$> VS.Mutable.new 0
@@ -116,7 +148,7 @@ makeVm o = do
       initialAccessedStorageKeys = fromList $ foldMap (uncurry (map . (,))) (Map.toList txaccessList)
       touched = if o.create then [txorigin] else [txorigin, txtoAddr]
   memory <- ConcreteMemory <$> VS.Mutable.new 0
-  pure $ setEIP4788Storage o $ VM
+  pure $ setEIP2935Storage o $ setEIP4788Storage o $ VM
     { result = Nothing
     , frames = mempty
     , tx = TxState
@@ -214,6 +246,25 @@ setEIP4788Storage o vm = do
       }
     Nothing -> vm
 
+-- https://eips.ethereum.org/EIPS/eip-2935
+setEIP2935Storage :: VMOpts t -> VM t -> VM t
+setEIP2935Storage o vm = do
+  let historyStorageAddress = LitAddr 0x0000F90827F1C53a10cb7A02335B175320002935
+  case Map.lookup historyStorageAddress vm.env.contracts of
+    Just historyContract -> do
+      let
+        historyBufferLength = 8191
+        slotIdx = Expr.mod (Expr.sub o.number (Lit 1)) (Lit historyBufferLength)
+        storage = Expr.writeStorage slotIdx (Lit o.parentHash) historyContract.storage
+      vm {
+        env = vm.env {
+          contracts = Map.insert historyStorageAddress
+                                 (historyContract { storage } :: Contract)
+                                 vm.env.contracts
+        }
+      }
+    Nothing -> vm
+
 -- | Initialize an abstract contract with unknown code
 unknownContract :: Expr EAddr -> Contract
 unknownContract addr = Contract
@@ -301,7 +352,7 @@ exec1 conf = do
     doStop = finishFrame (FrameReturned mempty)
     litSelf = maybeLitAddrSimp self
 
-  if isJust litSelf && (fromJust litSelf) > 0x0 && (fromJust litSelf) <= 0xa then do
+  if isJust litSelf && isPrecompileAddr' (fromJust litSelf) then do
     -- call to precompile
     let ?op = 0x00 -- dummy value
     let calldatasize = bufLength vm.state.calldata
@@ -658,7 +709,7 @@ exec1 conf = do
 
         OpMcopy -> {-# SCC "OpMcopy" #-}
           case stk of
-            dstOff:srcOff:sz:xs ->  do
+            dstOff:srcOff:sz:xs ->
               case sz of
                 Lit sz' -> do
                   let words_copied = (sz' + 31) `div` 32
@@ -666,14 +717,16 @@ exec1 conf = do
                   burn (g_verylow + (unsafeInto g_mcopy)) $
                     accessMemoryRange srcOff sz $ accessMemoryRange dstOff sz $ do
                       next
+                      assign' (#state % #stack) xs
                       mcopy sz srcOff dstOff
                 _ -> do
                   -- symbolic, ignore gas
                   next
+                  assign' (#state % #stack) xs
                   mcopy sz srcOff dstOff
-              assign' (#state % #stack) xs
             _ -> underrun
             where
+            mcopy (Lit 0) _ _ = pure ()
             mcopy sz srcOff dstOff = do
                   m <- gets (.state.memory)
                   case m of
@@ -1523,8 +1576,20 @@ finalize = do
       -- deposit the code from a creation tx
       creation <- use (#tx % #isCreate)
       createe  <- use (#state % #contract)
-      createeExists <- (Map.member createe) <$> use (#env % #contracts)
-      when (creation && createeExists) $
+      createeContract <- preuse (#env % #contracts % ix createe)
+      -- Check if this is a collision case (target has RuntimeCode instead of InitCode)
+      let isCollision = creation && case createeContract of
+            Just c -> case c.code of
+              InitCode _ _ -> False
+              RuntimeCode _ -> True   -- collision: existing contract has RuntimeCode
+              UnknownCode _ -> internalError "cannot determine collision with unknown code"
+            Nothing -> internalError "create transaction but no code found"
+      -- For collision: burn all gas (failed CREATE consumes all gas)
+      when isCollision $ assign (#state % #gas) initialGas
+      -- Only replace code if this is a creation tx, the contract exists,
+      -- and it has InitCode (not RuntimeCode from a collision)
+      let shouldReplaceCode = creation && not isCollision
+      when shouldReplaceCode $
         case output of
           ConcreteBuf bs -> replaceCode createe (RuntimeCode (ConcreteRuntimeCode bs))
           _ ->
@@ -1833,8 +1898,10 @@ cheatActions = Map.fromList
   , action "assume(bool)" $
       \sig input -> case decodeStaticArgs 0 1 input of
         [c] -> do
-          modifying #constraints ((:) (PEq (Lit 1) c))
-          doStop
+          whenSymbolicElse (modifying #constraints ((:) (PEq (Lit 1) c)) >> doStop) $ do
+            case c of
+              Lit v -> if (v == 0) then (terminateVMWithError AssumeCheatFailed) else doStop
+              _ -> internalError "Symbolic value encountered in concrete mode"
         _ -> vmError (BadCheatCode "assume(bool) parameter decoding failed." sig)
 
   , action "roll(uint256)" $
@@ -2203,14 +2270,21 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
 
 -- -- * Contract creation
 
--- EIP 684
+-- EIP-684 and EIP-7610: collision if nonce != 0, code is non-empty, or storage is non-empty
 collision :: Maybe Contract -> Bool
 collision c' = case c' of
-  Just c -> c.nonce /= Just 0 || case c.code of
+  Just c -> c.nonce /= Just 0 || not (isStorageEmpty c.storage) || case c.code of
     RuntimeCode (ConcreteRuntimeCode "") -> False
     RuntimeCode (SymbolicRuntimeCode b) -> not $ null b
     _ -> True
   Nothing -> False
+  where
+    isStorageEmpty :: Expr Storage -> Bool
+    isStorageEmpty = \case
+      ConcreteStore m -> Map.null m
+      AbstractStore _ _ -> True -- empty symbolic store
+      SStore _ _ _ -> False     -- has writes, so non-empty
+      GVar _ -> internalError "unexpected global variable"
 
 create :: forall t. (?op :: Word8, ?conf::Config, VMOps t)
   => Expr EAddr -> Contract
@@ -2345,6 +2419,7 @@ replaceCode target newCode =
               { balance = now.balance
               , nonce = now.nonce
               , storage = now.storage
+              , tStorage = now.tStorage
               }
         RuntimeCode _ ->
           internalError $ "Can't replace code of deployed contract " <> show target
@@ -2363,9 +2438,12 @@ replaceCodeEtch target newCode =
           put . Just $
             ((now :: Contract)
               { code = newCode
+              , codehash = hashcode newCode
+              , opIxMap = mkOpIxMap newCode
+              , codeOps = mkCodeOps newCode
               })
         UnknownCode _ -> internalError "Can't etch unknown code"
-      Nothing -> internalError "Can't replace code of nonexistent contract"
+      Nothing -> put . Just $ initialContract newCode
 
 replaceCodeOfSelf :: ContractCode -> EVM t ()
 replaceCodeOfSelf newCode = do
@@ -2394,6 +2472,15 @@ data FrameResult
   | FrameReverted (Expr Buf) -- ^ REVERT
   | FrameErrored EvmError -- ^ Any other error
   deriving Show
+
+terminateVMWithError :: VMOps t => EvmError -> EVM t ()
+terminateVMWithError err = do
+  vm <- get
+  case vm.frames of
+    [] -> finishFrame (FrameErrored err)
+    _ -> do
+      finishFrame (FrameErrored err)
+      terminateVMWithError err
 
 finishAllFramesAndStop :: VMOps t => EVM t ()
 finishAllFramesAndStop = do
@@ -2892,7 +2979,7 @@ concreteModexpGasFee input =
      (lene < into (maxBound :: Word32) || (lenb == 0 && lenm == 0)) &&
      lenm < into (maxBound :: Word64)
   then
-    max 200 ((multiplicationComplexity * iterCount) `div` 3)
+    max 500 (multiplicationComplexity * iterCount)
   else
     maxBound -- TODO: this is not 100% correct, return Nothing on overflow
   where
@@ -2902,12 +2989,13 @@ concreteModexpGasFee input =
       lazySlice (96 + lenb) (min 32 lene) input
     nwords :: Word64
     nwords = ceilDiv (unsafeInto $ max lenb lenm) 8
-    multiplicationComplexity = nwords * nwords
+    maxLength = max lenb lenm
+    multiplicationComplexity = if maxLength <= 32 then 16 else 2 * nwords * nwords
     iterCount' :: Word64
     iterCount' | lene <= 32 && ez = 0
                | lene <= 32 = unsafeInto (log2 e')
-               | e' == 0 = 8 * (unsafeInto lene - 32)
-               | otherwise = unsafeInto (log2 e') + 8 * (unsafeInto lene - 32)
+               | e' == 0 = 16 * (unsafeInto lene - 32)
+               | otherwise = unsafeInto (log2 e') + 16 * (unsafeInto lene - 32)
     iterCount = max iterCount' 1
 
 -- Gas cost of precompiles
@@ -3007,9 +3095,13 @@ freshSymAddr = do
   n <- use (#env % #freshAddresses)
   pure $ SymAddr ("freshSymAddr" <> (pack $ show n))
 
+isPrecompileAddr' :: Addr -> Bool
+isPrecompileAddr' 0x100 = True
+isPrecompileAddr' x = 0x0 < x && x <= 0x11
+
 isPrecompileAddr :: Expr EAddr -> Bool
 isPrecompileAddr = \case
-  LitAddr a -> 0x0 < a && a <= 0x09
+  LitAddr a -> isPrecompileAddr' a
   SymAddr _ -> False
   GVar _ -> internalError "Unexpected GVar"
 
@@ -3234,9 +3326,10 @@ instance VMOps Concrete where
     gasRemaining <- use (#state % #gas)
 
     let
-      sumRefunds   = sum (snd <$> tx.subState.refunds)
-      gasUsed      = tx.gaslimit - gasRemaining
-      cappedRefund = min (quot gasUsed 5) sumRefunds
+      gasUsedBeforeRefund = tx.gaslimit - gasRemaining
+      sumRefunds          = sum (snd <$> tx.subState.refunds)
+      cappedRefund        = min (quot gasUsedBeforeRefund 5) sumRefunds
+      gasUsed             = gasUsedBeforeRefund - cappedRefund
       originPay    = (into $ gasRemaining + cappedRefund) * tx.gasprice
       minerPay     = tx.priorityFee * (into gasUsed)
 
