@@ -3396,10 +3396,24 @@ processAuthorizations chainId auths contracts = foldl processOne (contracts, [])
                      Just c -> set #code delegationContractCode $
                                set #nonce (Just (currentNonce + 1)) c
                      Nothing -> set #nonce (Just 1) $ initialContract delegationContractCode
-                   -- Add refund if authority exists (EIP-7702 step 6)
-                   newRefs = case existingAccount of
-                     Just _ -> (authorityAddr, authRefundAmount) : refs
-                     Nothing -> refs
+                   -- Add refund if authority exists in trie (EIP-7702 step 6)
+                   -- An account "exists" if it has non-zero balance, nonce, or code
+                   accountReallyExists = case existingAccount of
+                     Nothing -> False
+                     Just c ->
+                       let hasBalance = case c.balance of
+                             Lit b -> b /= 0
+                             _ -> True  -- Symbolic, assume exists
+                           hasNonce = case c.nonce of
+                             Just n -> n /= 0
+                             Nothing -> False
+                           hasCode = case c.code of
+                             RuntimeCode (ConcreteRuntimeCode code) -> not (BS.null code)
+                             _ -> True  -- Symbolic or InitCode, assume exists
+                       in hasBalance || hasNonce || hasCode
+                   newRefs = if accountReallyExists
+                             then (authorityAddr, authRefundAmount) : refs
+                             else refs
                in (Map.insert authorityAddr newContract cs, newRefs)
 
 -- | Check if bytecode is a delegation code (0xef0100 prefix)

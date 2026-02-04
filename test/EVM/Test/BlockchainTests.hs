@@ -1,6 +1,6 @@
 module EVM.Test.BlockchainTests (prepareTests, problematicTests, findIgnoreReason, Case, vmForCase, checkExpectation, allTestCases) where
 
-import EVM (initialContract, makeVm, setEIP4788Storage, setEIP2935Storage)
+import EVM (initialContract, makeVm, setEIP4788Storage, setEIP2935Storage, processAuthorizations, getAuthoritiesToWarm, resolveDelegatedCode)
 import EVM.Concrete qualified as EVM
 import EVM.Effects
 import EVM.Expr (maybeLitAddrSimp)
@@ -26,6 +26,7 @@ import Data.ByteString.Lazy qualified as Lazy
 import Data.List (isPrefixOf)
 import Data.Map (Map)
 import Data.Map qualified as Map
+import Data.Set qualified as Set
 import Data.Maybe (fromJust, fromMaybe, isNothing)
 import Data.Word (Word64)
 import GHC.Generics (Generic)
@@ -447,7 +448,7 @@ fromBlockchainCase' block tx preState postState =
     (Just origin, Just checkState) -> Right $ Case
       (VMOpts
        { contract       = EVM.initialContract theCode
-       , otherContracts = []
+       , otherContracts = otherContractsFromPreState
        , calldata       = (cd, [])
        , value          = Lit tx.value
        , address        = toAddr
@@ -492,6 +493,12 @@ fromBlockchainCase' block tx preState postState =
           cd = if isCreate
                then mempty
                else ConcreteBuf tx.txdata
+          -- Include all pre-state contracts except the target address (which is in 'contract')
+          otherContractsFromPreState =
+            [ (LitAddr addr, makeContract bc)
+            | (addr, bc) <- Map.toList preState
+            , LitAddr addr /= toAddr
+            ]
 
 effectiveprice :: Transaction -> W256 -> W256
 effectiveprice tx baseFee = priorityFee tx baseFee + baseFee
@@ -551,14 +558,41 @@ validateTx tx block cs = do
 
 vmForCase :: Case -> IO (VM Concrete)
 vmForCase x = do
+  let preStateContracts = Map.mapKeys LitAddr $ Map.map makeContract x.checkContracts
   vm <- stToIO $ makeVm x.vmOpts
-    -- TODO: why do we override contracts here instead of using VMOpts otherContracts?
-    <&> set (#env % #contracts) (Map.mapKeys LitAddr $ Map.map makeContract x.checkContracts)
-    -- TODO: we need to call this again because we override contracts in the
-    -- previous line
+    -- Override contracts with pre-state
+    <&> set (#env % #contracts) preStateContracts
+    -- Process EIP-7702 authorizations on the pre-state contracts
+    <&> applyEIP7702Authorizations x.vmOpts
+    -- Set up beacon root and history storage
     <&> setEIP4788Storage x.vmOpts
     <&> setEIP2935Storage x.vmOpts
   pure $ initTx vm
+  where
+    -- Process EIP-7702 authorization list on the current contracts
+    applyEIP7702Authorizations :: VMOpts Concrete -> VM Concrete -> VM Concrete
+    applyEIP7702Authorizations opts vm =
+      let chainId = opts.chainId
+          authList = opts.authorizationList
+          (contractsWithDelegations, authRefunds) = processAuthorizations chainId authList vm.env.contracts
+          -- Get addresses to warm (after chain_id validation)
+          authWarmAddrs = getAuthoritiesToWarm chainId authList
+          -- Update accessed addresses with auth warm addresses
+          currentAccessed = vm.tx.subState.accessedAddresses
+          newAccessed = Set.union currentAccessed (Set.fromList authWarmAddrs)
+          -- Replace subState refunds with the ones from the correct pre-state
+          -- (makeVm's refunds are based on incorrect contract state)
+          newRefunds = authRefunds
+          -- Check if the initial contract has delegation code and resolve it
+          initialContractAddr = vm.state.contract
+          (resolvedCode, resolvedCodeAddr) = case Map.lookup initialContractAddr contractsWithDelegations of
+            Just target -> resolveDelegatedCode target initialContractAddr contractsWithDelegations
+            Nothing -> (vm.state.code, vm.state.codeContract)
+      in vm { env = vm.env { contracts = contractsWithDelegations }
+            , tx = vm.tx { subState = vm.tx.subState { accessedAddresses = newAccessed
+                                                     , refunds = newRefunds } }
+            , state = vm.state { code = resolvedCode, codeContract = resolvedCodeAddr }
+            }
 
 forceConcreteAddrs :: Map (Expr EAddr) Contract -> Map Addr Contract
 forceConcreteAddrs cs = Map.mapKeys
