@@ -148,7 +148,9 @@ makeVm o = do
       txtoAddr = o.address
       initialAccessedAddrs = fromList $
            [txorigin, txtoAddr, o.coinbase]
-        ++ (fmap LitAddr [1..9])
+        ++ (fmap LitAddr [1..9])          -- Legacy precompiles (ECRECOVER, SHA256, etc.)
+        ++ (fmap LitAddr [0x0A..0x13])    -- EIP-4844 Point Evaluation + BLS12-381 precompiles
+        ++ [LitAddr 0x100]                -- EIP-7951 P256VERIFY
         ++ (Map.keys txaccessList)
       initialAccessedStorageKeys = fromList $ foldMap (uncurry (map . (,))) (Map.toList txaccessList)
       touched = if o.create then [txorigin] else [txorigin, txtoAddr]
