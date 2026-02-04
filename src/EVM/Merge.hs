@@ -123,10 +123,8 @@ exploreNestedBranch conf exec1Step nestedJumpTarget targetPC cond stackAfterPop 
             put vm0
             assign (#state % #pc) nestedJumpTarget
             assign' (#state % #stack) stackAfterPop
-            modifying #mergeState $ \_ -> ms
-              { msNestingDepth = originalDepth + 1
-              , msRemainingBudget = halfBudget
-              }
+            modifying #mergeState $ const ms
+              { msNestingDepth = originalDepth + 1 , msRemainingBudget = halfBudget }
 
             -- Try jump path (cond != 0)
             resultJump <- speculateLoop conf exec1Step targetPC
@@ -155,10 +153,8 @@ exploreNestedBranch conf exec1Step nestedJumpTarget targetPC cond stackAfterPop 
                     assign (#state % #pc) targetPC
                     assign (#state % #stack) mergedStack
                     assign #result Nothing
-                    modifying #mergeState $ \_ -> ms
-                      { msNestingDepth = originalDepth
-                      , msRemainingBudget = originalBudget - (originalBudget - halfBudget) * 2
-                      }
+                    modifying #mergeState $ const ms
+                      { msNestingDepth = originalDepth, msRemainingBudget = originalBudget - (originalBudget - halfBudget) * 2}
                     Just <$> get
                   else do
                     -- Side effects or stack mismatch - can't merge
