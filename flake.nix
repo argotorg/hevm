@@ -26,15 +26,15 @@
   outputs = { nixpkgs, flake-utils, solidity, empty-smt-solver, forge-std, foundry, solc-pkgs, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        execution-spec-tests-fixtures = builtins.fetchTarball {
-          url = "https://github.com/ethereum/execution-spec-tests/releases/download/v5.4.0/fixtures_develop.tar.gz";
-          sha256 = "0dsg7lcj591i0p7s93xv0vin2dwricgq29v8xakqnx1kfj3fcyvq";
-        };
         pkgs = (import nixpkgs {
           inherit system;
           overlays = [solc-pkgs.overlay];
           config = { allowBroken = true; };
         });
+        execution-spec-tests-fixtures = pkgs.fetchzip {
+          url = "https://github.com/ethereum/execution-spec-tests/releases/download/v5.4.0/fixtures_develop.tar.gz";
+          hash = "sha256-eHvmhnQzdIun6mgngR+LmTdh4wa7j6TPBTGkIhk9Tzc=";
+        };
         solc = (solc-pkgs.mkDefault pkgs pkgs.solc_0_8_31);
         testDeps = [
           solc
