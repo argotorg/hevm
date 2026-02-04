@@ -232,7 +232,9 @@ txGasCost fs tx =
 
 -- | EIP-7623: Calculate floor gas cost based on calldata tokens
 -- tokens = zero_bytes + (nonzero_bytes * 4)
--- floor_gas = 10 * tokens
+-- floor_gas = 21000 + 10 * tokens
+-- This is the minimum total gas that must be charged for a transaction.
+-- Per EIP-7623: gas_used = 21000 + max(4*tokens + execution + creation, 10*tokens)
 txdataFloorGas :: Transaction -> Word64
 txdataFloorGas tx =
   let calldata     = tx.txdata
@@ -242,7 +244,9 @@ txdataFloorGas tx =
       tokens       = unsafeInto zeroBytes + (unsafeInto nonZeroBytes * 4)
       -- TOTAL_COST_FLOOR_PER_TOKEN = 10
       floorPerToken = 10 :: Word64
-  in floorPerToken * tokens
+      -- Base transaction cost is always charged
+      baseCost     = 21000 :: Word64
+  in baseCost + floorPerToken * tokens
 
 instance FromJSON AccessListEntry where
   parseJSON (JSON.Object val) = do

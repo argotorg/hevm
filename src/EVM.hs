@@ -3338,7 +3338,8 @@ instance VMOps Concrete where
       cappedRefund        = min (quot gasUsedBeforeRefund 5) sumRefunds
       gasUsedAfterRefund  = gasUsedBeforeRefund - cappedRefund
       -- EIP-7623: Apply floor cost based on calldata tokens
-      -- gasUsed = max(gasUsedAfterRefund, txdataFloorGas)
+      -- gas_used = 21000 + max(4*tokens + execution + creation, 10*tokens)
+      -- Since txdataFloorGas = 21000 + 10*tokens, we just compare totals
       gasUsed             = max gasUsedAfterRefund tx.txdataFloorGas
       -- Adjust refund if floor kicks in
       actualRefund        = if gasUsed > gasUsedAfterRefund
