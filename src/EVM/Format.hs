@@ -69,8 +69,8 @@ import Data.Vector (Vector)
 import Hexdump (prettyHex)
 import Numeric (showHex)
 import Witch (into, unsafeInto, tryFrom)
-import Data.Sequence qualified as Seq
 import Data.Vector.Storable qualified as VS
+import Data.Sequence qualified as Seq
 
 data Signedness = Signed | Unsigned
   deriving (Show)
