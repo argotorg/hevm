@@ -3588,6 +3588,29 @@ getAuthoritiesToWarm chainId auths = map LitAddr $ mapMaybe (recoverIfValid chai
       -- Step 3: ecrecover must succeed
       | otherwise = recoverAuthorityAddress auth
 
+-- | Check if an account's code allows EIP-7702 delegation (empty or already delegated)
+accountCodeAllowsDelegation :: Maybe Contract -> Bool
+accountCodeAllowsDelegation Nothing = True  -- No account = empty code
+accountCodeAllowsDelegation (Just c) = case c.code of
+  RuntimeCode (ConcreteRuntimeCode code) -> BS.null code || isDelegationCode code
+  _ -> True  -- Symbolic code, allow for now
+
+-- | Check if an account "really exists" in the trie (non-zero balance, nonce, or code)
+-- Used for EIP-7702 refund calculation
+accountReallyExists :: Maybe Contract -> Bool
+accountReallyExists Nothing = False
+accountReallyExists (Just c) = hasBalance || hasNonce || hasCode
+  where
+    hasBalance = case c.balance of
+      Lit b -> b /= 0
+      _ -> True  -- Symbolic, assume exists
+    hasNonce = case c.nonce of
+      Just n -> n /= 0
+      Nothing -> False
+    hasCode = case c.code of
+      RuntimeCode (ConcreteRuntimeCode code) -> not (BS.null code)
+      _ -> True  -- Symbolic or InitCode, assume exists
+
 -- | Process all EIP-7702 authorization entries and return the updated contracts map, refunds, and addresses to warm
 -- Per EIP-7702 spec, for each authorization:
 -- 1. ecrecover to get authority address (addresses warmed separately via getAuthoritiesToWarm)
@@ -3609,80 +3632,32 @@ processAuthorizations chainId origin auths contracts = foldl processOne (contrac
     authRefund :: Word64
     authRefund = perEmptyAccountCost - perAuthBaseCost
 
-    processOne :: (Map (Expr EAddr) Contract, [(Expr EAddr, Word64)], [Expr EAddr]) -> AuthorizationEntry
-               -> (Map (Expr EAddr) Contract, [(Expr EAddr, Word64)], [Expr EAddr])
-    processOne (cs, refs, warmAddrs) auth = case recoverAuthorityAddress auth of
-      Nothing -> (cs, refs, warmAddrs)  -- Invalid signature, skip
-      Just authority ->
-        -- Check chain_id: must be 0 (any chain) or match current chain
-        if auth.authChainId /= 0 && auth.authChainId /= chainId
-        then (cs, refs, warmAddrs)  -- Chain ID mismatch, skip
-        -- EIP-7702 step 2: Verify nonce < 2^64-1
-        else if auth.authNonce >= maxAuthNonce
-        then (cs, refs, warmAddrs)  -- Auth nonce too high, skip
-        else
-          let authorityAddr = LitAddr authority
-              existingAccount = Map.lookup authorityAddr cs
-              currentNonce = case existingAccount of
-                Just c -> fromMaybe 0 c.nonce
-                Nothing -> 0
-              -- Check if code is empty or already delegated
-              codeIsOk = case existingAccount of
-                Nothing -> True  -- No account = empty code
-                Just c -> case c.code of
-                  RuntimeCode (ConcreteRuntimeCode code) ->
-                    BS.null code || isDelegationCode code
-                  _ -> True  -- Symbolic code, allow for now
-              -- EIP-7702 step 5: nonce validation
-              -- For self-sponsored (authority == origin), nonce must be account_nonce + 1
-              -- Otherwise, nonce must equal account_nonce
-              isSelfSponsored = authorityAddr == origin
-              expectedNonce = if isSelfSponsored
-                              then currentNonce + 1
-                              else currentNonce
-          in -- Check code constraint (EIP-7702 step 4)
-             if not codeIsOk
-             then (cs, refs, warmAddrs)  -- Account has non-delegation code, skip
-             -- EIP-7702: If the account's nonce is 2^64-1, skip to prevent overflow
-             else if currentNonce == maxBound
-             then (cs, refs, warmAddrs)  -- Would overflow, skip
-             -- Check nonce matches (step 5)
-             else if into expectedNonce /= auth.authNonce
-             then (cs, refs, warmAddrs)  -- Nonce mismatch, skip
-             else
-               -- EIP-7702: If target address is 0x0, set code to empty (clears delegation)
-               -- Otherwise, set delegation code (0xef0100 || address)
-               let newCode = if auth.authAddress == 0
-                             then RuntimeCode (ConcreteRuntimeCode mempty)
-                             else RuntimeCode (ConcreteRuntimeCode (makeDelegationCode auth.authAddress))
-                   -- Create or update the authority's contract
-                   newContract = case existingAccount of
-                     Just c -> set #code newCode $
-                               set #nonce (Just (currentNonce + 1)) c
-                     Nothing -> set #nonce (Just 1) $ initialContract newCode
-                   -- Add refund if authority exists in trie (EIP-7702 step 6)
-                   -- An account "exists" if it has non-zero balance, nonce, or code
-                   accountReallyExists = case existingAccount of
-                     Nothing -> False
-                     Just c ->
-                       let hasBalance = case c.balance of
-                             Lit b -> b /= 0
-                             _ -> True  -- Symbolic, assume exists
-                           hasNonce = case c.nonce of
-                             Just n -> n /= 0
-                             Nothing -> False
-                           hasCode = case c.code of
-                             RuntimeCode (ConcreteRuntimeCode code) -> not (BS.null code)
-                             _ -> True  -- Symbolic or InitCode, assume exists
-                       in hasBalance || hasNonce || hasCode
-                   newRefs = if accountReallyExists
-                             then (authorityAddr, authRefund) : refs
-                             else refs
-                   -- Note: EIP-7702 step 7 says to add the AUTHORITY account to accessed_addresses,
-                   -- which is handled separately in getAuthoritiesToWarm. The delegation TARGET
-                   -- should only be warmed if it's the transaction's destination's delegation target,
-                   -- not for every authorization. So we don't add delegation targets here.
-               in (Map.insert authorityAddr newContract cs, newRefs, warmAddrs)
+    -- Validate and apply a single authorization
+    processOne acc@(cs, refs, warmAddrs) auth = case recoverAuthorityAddress auth of
+      Nothing -> acc  -- Invalid signature
+      Just authority
+        | auth.authChainId /= 0 && auth.authChainId /= chainId -> acc  -- Chain ID mismatch
+        | auth.authNonce >= maxAuthNonce -> acc  -- Auth nonce too high
+        | not (accountCodeAllowsDelegation existingAccount) -> acc  -- Non-delegation code
+        | currentNonce == maxBound -> acc  -- Would overflow
+        | into expectedNonce /= auth.authNonce -> acc  -- Nonce mismatch
+        | otherwise ->
+            let newCode = if auth.authAddress == 0
+                          then RuntimeCode (ConcreteRuntimeCode mempty)
+                          else RuntimeCode (ConcreteRuntimeCode (makeDelegationCode auth.authAddress))
+                newContract = case existingAccount of
+                  Just c -> set #code newCode $ set #nonce (Just (currentNonce + 1)) c
+                  Nothing -> set #nonce (Just 1) $ initialContract newCode
+                newRefs = if accountReallyExists existingAccount
+                          then (authorityAddr, authRefund) : refs
+                          else refs
+            in (Map.insert authorityAddr newContract cs, newRefs, warmAddrs)
+        where
+          authorityAddr = LitAddr authority
+          existingAccount = Map.lookup authorityAddr cs
+          currentNonce = maybe 0 (fromMaybe 0 . (.nonce)) existingAccount
+          isSelfSponsored = authorityAddr == origin
+          expectedNonce = if isSelfSponsored then currentNonce + 1 else currentNonce
 
 -- | Check if bytecode is a delegation code (0xef0100 prefix)
 isDelegationCode :: ByteString -> Bool
