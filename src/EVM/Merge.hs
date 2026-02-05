@@ -47,7 +47,7 @@ execUntilPCSymbolic conf exec1Step targetPC = do
       }
     res <- speculateLoop conf exec1Step targetPC
     -- Reset merge state
-    modifying #mergeState $ \ms -> ms { msActive = False }
+    assign #mergeState defaultMergeState
     pure res
 
 -- | Inner loop for speculative execution with budget tracking
@@ -64,7 +64,7 @@ speculateLoop conf exec1Step targetPC = do
         pc <- use (#state % #pc)
         result <- use #result
         case result of
-          Just _ -> pure Nothing  -- Hit error/return
+          Just _ -> pure Nothing  -- Hit RPC call/revert/SMT query/etc.
           Nothing
             | pc == targetPC -> Just <$> get  -- Reached target
             | otherwise -> do
