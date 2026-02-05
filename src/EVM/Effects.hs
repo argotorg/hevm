@@ -47,7 +47,6 @@ data Config = Config
   , simp             :: Bool
   , onlyDeployed     :: Bool
   , earlyAbort       :: Bool
-  -- State merging parameters
   , mergeMaxBudget   :: Int        -- ^ Max instructions for speculative merge exploration
   }
   deriving (Show, Eq)
