@@ -163,42 +163,7 @@ allTestCases = do
 -- Test names are from the execution-spec-tests fixtures format.
 problematicTests :: [(String, String)]
 problematicTests =
-  [ -- EIP-2537 precompiles
-    ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g1add.py::", "EIP-2537 precompiles not implemented")
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g1msm.py::", "EIP-2537 precompiles not implemented")
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g1mul.py::", "EIP-2537 precompiles not implemented")
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g2add.py::", "EIP-2537 precompiles not implemented")
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g2msm.py::", "EIP-2537 precompiles not implemented")
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g2mul.py::", "EIP-2537 precompiles not implemented")
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_map_fp_to_g1.py::", "EIP-2537 precompiles not implemented")
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_map_fp2_to_g2.py::", "EIP-2537 precompiles not implemented")
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_pairing.py::", "EIP-2537 precompiles not implemented")
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_variable_length_input_contracts.py::", "EIP-2537 precompiles not implemented")
-    -- Other precompile tests
-  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x000000000000000000000000000000000000000b", "0xB precompile not implemented")
-  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x000000000000000000000000000000000000000c", "0xC precompile not implemented")
-  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x000000000000000000000000000000000000000d", "0xD precompile not implemented")
-  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x000000000000000000000000000000000000000e", "0xE precompile not implemented")
-  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x000000000000000000000000000000000000000f", "0xF precompile not implemented")
-  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x0000000000000000000000000000000000000010", "0x10 precompile not implemented")
-  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x0000000000000000000000000000000000000011", "0x11 precompile not implemented")
-    -- test_with_eof.py tests are failing - EOF not implemented
-  , ("tests/shanghai/eip3860_initcode/test_with_eof.py::", "EOF not implemented")
-    -- EIP-2935: 2 tests fail with block hash history
-  , ("tests/prague/eip2935_historical_block_hashes_from_state/test_block_hashes.py::test_block_hashes_history", "Multi-block test not supported")
-    -- Prague beacon chain/consensus layer EIPs - require system contract interactions
-  , ("tests/prague/eip6110_deposits/test_deposits.py::", "Requires deposit system contract")
-  , ("tests/prague/eip7002_el_triggerable_withdrawals/test_modified_withdrawal_contract.py::", "Requires withdrawal system contract")
-  , ("tests/prague/eip7251_consolidations/test_modified_consolidation_contract.py::", "Requires consolidation system contract")
-  , ("tests/prague/eip7685_general_purpose_el_requests/test_multi_type_requests.py::", "Requires EL request system contracts")
-    -- CREATE2 collision with SELFDESTRUCT tests - EIP-6780 changed SELFDESTRUCT behavior
-  , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructedFiller.json::", "SELFDESTRUCT behavior changed in Cancun (EIP-6780)")
-  , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructed2Filler.json::", "SELFDESTRUCT behavior changed in Cancun (EIP-6780)")
-  , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructedRevertFiller.json::", "SELFDESTRUCT behavior changed in Cancun (EIP-6780)")
-    -- EIP-2929 precompile tests that use unimplemented precompiles (0x0B-0x11)
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::", "Tests use unimplemented precompiles 0x0B-0x11")
-    -- EIP-7823 ModExp edge case with near-uint64_max base length has gas calculation issues
-  , ("tests/osaka/eip7823_modexp_upper_bounds/test_modexp_upper_bounds.py::test_modexp_upper_bounds[fork_Osaka-blockchain_test_from_state_test-near_uint64_max_base]", "EIP-7823: near uint64 max gas calculation edge case")
+  [
   ]
 
 

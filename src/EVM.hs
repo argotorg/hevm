@@ -152,7 +152,7 @@ makeVm o = do
       initialAccessedAddrs = fromList $
            [txorigin, txtoAddr, o.coinbase]
         ++ (fmap LitAddr [1..9])          -- Legacy precompiles (ECRECOVER, SHA256, etc.)
-        ++ (fmap LitAddr [0x0A..0x13])    -- EIP-4844 Point Evaluation + BLS12-381 precompiles
+        ++ (fmap LitAddr [0x0A..0x11])    -- EIP-4844 Point Evaluation + BLS12-381 precompiles
         ++ [LitAddr 0x100]                -- EIP-7951 P256VERIFY
         ++ (Map.keys txaccessList)
         ++ authWarmAddrs                  -- EIP-7702: Warmed authority addresses
@@ -1438,6 +1438,107 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
                   copyBytesToMemory (ConcreteBuf output) outSize (Lit 0) outOffset
                   next
                 Nothing -> precompileFail
+
+      -- BLS12-381 G1ADD (EIP-2537) - 0x0B
+      0x0B ->
+        forceConcreteBuf input "BLS_G1ADD" $ \input' ->
+          if BS.length input' /= 256
+          then precompileFail
+          else case EVM.Precompiled.execute 0x0B input' 128 of
+            Nothing -> precompileFail
+            Just output -> do
+              let truncpaddedOutput = ConcreteBuf $ truncpadlit 128 output
+              assign' (#state % #stack) (Lit 1 : xs)
+              assign (#state % #returndata) truncpaddedOutput
+              copyBytesToMemory truncpaddedOutput outSize (Lit 0) outOffset
+              next
+
+      -- BLS12-381 G1MSM (EIP-2537) - 0x0C
+      0x0C ->
+        forceConcreteBuf input "BLS_G1MSM" $ \input' -> do
+          let len = BS.length input'
+          if len == 0 || len `mod` 160 /= 0
+          then precompileFail
+          else case EVM.Precompiled.execute 0x0C input' 128 of
+            Nothing -> precompileFail
+            Just output -> do
+              let truncpaddedOutput = ConcreteBuf $ truncpadlit 128 output
+              assign' (#state % #stack) (Lit 1 : xs)
+              assign (#state % #returndata) truncpaddedOutput
+              copyBytesToMemory truncpaddedOutput outSize (Lit 0) outOffset
+              next
+
+      -- BLS12-381 G2ADD (EIP-2537) - 0x0D
+      0x0D ->
+        forceConcreteBuf input "BLS_G2ADD" $ \input' ->
+          if BS.length input' /= 512
+          then precompileFail
+          else case EVM.Precompiled.execute 0x0D input' 256 of
+            Nothing -> precompileFail
+            Just output -> do
+              let truncpaddedOutput = ConcreteBuf $ truncpadlit 256 output
+              assign' (#state % #stack) (Lit 1 : xs)
+              assign (#state % #returndata) truncpaddedOutput
+              copyBytesToMemory truncpaddedOutput outSize (Lit 0) outOffset
+              next
+
+      -- BLS12-381 G2MSM (EIP-2537) - 0x0E
+      0x0E ->
+        forceConcreteBuf input "BLS_G2MSM" $ \input' -> do
+          let len = BS.length input'
+          if len == 0 || len `mod` 288 /= 0
+          then precompileFail
+          else case EVM.Precompiled.execute 0x0E input' 256 of
+            Nothing -> precompileFail
+            Just output -> do
+              let truncpaddedOutput = ConcreteBuf $ truncpadlit 256 output
+              assign' (#state % #stack) (Lit 1 : xs)
+              assign (#state % #returndata) truncpaddedOutput
+              copyBytesToMemory truncpaddedOutput outSize (Lit 0) outOffset
+              next
+
+      -- BLS12-381 PAIRING (EIP-2537) - 0x0F
+      0x0F ->
+        forceConcreteBuf input "BLS_PAIRING" $ \input' -> do
+          let len = BS.length input'
+          if len `mod` 384 /= 0
+          then precompileFail
+          else case EVM.Precompiled.execute 0x0F input' 32 of
+            Nothing -> precompileFail
+            Just output -> do
+              let truncpaddedOutput = ConcreteBuf $ truncpadlit 32 output
+              assign' (#state % #stack) (Lit 1 : xs)
+              assign (#state % #returndata) truncpaddedOutput
+              copyBytesToMemory truncpaddedOutput outSize (Lit 0) outOffset
+              next
+
+      -- BLS12-381 MAP_FP_TO_G1 (EIP-2537) - 0x10
+      0x10 ->
+        forceConcreteBuf input "BLS_MAP_FP_TO_G1" $ \input' ->
+          if BS.length input' /= 64
+          then precompileFail
+          else case EVM.Precompiled.execute 0x10 input' 128 of
+            Nothing -> precompileFail
+            Just output -> do
+              let truncpaddedOutput = ConcreteBuf $ truncpadlit 128 output
+              assign' (#state % #stack) (Lit 1 : xs)
+              assign (#state % #returndata) truncpaddedOutput
+              copyBytesToMemory truncpaddedOutput outSize (Lit 0) outOffset
+              next
+
+      -- BLS12-381 MAP_FP2_TO_G2 (EIP-2537) - 0x11
+      0x11 ->
+        forceConcreteBuf input "BLS_MAP_FP2_TO_G2" $ \input' ->
+          if BS.length input' /= 128
+          then precompileFail
+          else case EVM.Precompiled.execute 0x11 input' 256 of
+            Nothing -> precompileFail
+            Just output -> do
+              let truncpaddedOutput = ConcreteBuf $ truncpadlit 256 output
+              assign' (#state % #stack) (Lit 1 : xs)
+              assign (#state % #returndata) truncpaddedOutput
+              copyBytesToMemory truncpaddedOutput outSize (Lit 0) outOffset
+              next
 
       -- P256VERIFY (EIP-7212)
       0x100 ->
@@ -3247,29 +3348,25 @@ costOfPrecompile (FeeSchedule {..}) precompileAddr input =
     -- Point Evaluation (EIP-4844)
     0x0A -> 50000
     -- BLS12-381 precompiles (EIP-2537)
-    -- G1ADD
+    -- G1ADD (0x0B)
     0x0B -> 375
-    -- G1MUL
-    0x0C -> 12000
-    -- G1MSM
-    0x0D -> let k = inputLen `div` 160  -- 128 bytes point + 32 bytes scalar
+    -- G1MSM (0x0C)
+    0x0C -> let k = inputLen `div` 160  -- 128 bytes point + 32 bytes scalar
             in if k == 0 then 0
                else 12000 * k * blsMsmDiscount k `div` 1000
-    -- G2ADD
-    0x0E -> 600
-    -- G2MUL
-    0x0F -> 45000
-    -- G2MSM
-    0x10 -> let k = inputLen `div` 288  -- 256 bytes point + 32 bytes scalar
+    -- G2ADD (0x0D)
+    0x0D -> 600
+    -- G2MSM (0x0E)
+    0x0E -> let k = inputLen `div` 288  -- 256 bytes point + 32 bytes scalar
             in if k == 0 then 0
                else 45000 * k * blsMsmDiscount k `div` 1000
-    -- PAIRING
-    0x11 -> let k = inputLen `div` 384  -- 128 bytes G1 + 256 bytes G2
+    -- PAIRING (0x0F)
+    0x0F -> let k = inputLen `div` 384  -- 128 bytes G1 + 256 bytes G2
             in 43000 * k + 65000
-    -- MAP_FP_TO_G1
-    0x12 -> 5500
-    -- MAP_FP2_TO_G2
-    0x13 -> 75000
+    -- MAP_FP_TO_G1 (0x10)
+    0x10 -> 5500
+    -- MAP_FP2_TO_G2 (0x11)
+    0x11 -> 75000
     -- P256VERIFY (EIP-7951)
     0x100 -> 6900
     _ -> internalError $ "unimplemented precompiled contract " ++ show precompileAddr
@@ -3338,7 +3435,7 @@ freshSymAddr = do
 
 isPrecompileAddr' :: Addr -> Bool
 isPrecompileAddr' 0x100 = True
-isPrecompileAddr' x = 0x0 < x && x <= 0x13  -- Extended for BLS12-381 MAP precompiles
+isPrecompileAddr' x = 0x0 < x && x <= 0x11  -- Extended for BLS12-381 precompiles (EIP-2537)
 
 isPrecompileAddr :: Expr EAddr -> Bool
 isPrecompileAddr = \case
