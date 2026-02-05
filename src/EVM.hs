@@ -60,14 +60,14 @@ import Data.Vector qualified as V
 import Data.Vector.Storable qualified as VS
 import Data.Vector.Storable.Mutable qualified as VS.Mutable
 import Data.Vector.Storable.ByteString (vectorToByteString, byteStringToVector)
-import Data.Word (Word8, Word32, Word64)
+import Data.Word (Word8, Word64)
 import Text.Read (readMaybe)
 import Witch (into, tryFrom, unsafeInto, tryInto)
 
 import Crypto.Hash (Digest, SHA256, RIPEMD160)
 import Crypto.Hash qualified as Crypto
 import Crypto.Number.ModArithmetic (expFast, inverse)
-import Crypto.PubKey.ECC.Prim (pointAddTwoMuls, isPointAtInfinity, isPointValid)
+import Crypto.PubKey.ECC.Prim (pointAddTwoMuls, isPointValid)
 import Crypto.PubKey.ECC.Types (getCurveByName, CurveName(..), Point(..), Curve(..), CurveCommon(..), CurvePrime(..))
 
 defaultVMOpts :: VMOps t => VMOpts t
@@ -2548,9 +2548,12 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
           abi <- maybeLitWordSimp . readBytes 4 (Lit 0) <$> readMemory xInOffset (Lit 4)
           -- EIP-7702: Resolve delegation if target has delegation code
           let (resolvedCode, codeAddr) = resolveDelegatedCode target addr vm0.env.contracts
-          -- EIP-7702: If delegation resolved to a different address, charge access cost
+              -- Check if target had delegation code (even if self-delegating)
+              hasDelegation = isJust $ getDelegationTarget target.code
+          -- EIP-7702: If delegation was resolved, charge access cost for the delegation target
           -- "If a code executing instruction accesses a cold account during the
           -- resolution of delegated code, add an additional COLD_ACCOUNT_READ_COST"
+          -- Note: For self-delegation, codeAddr == addr but we still charge (warm access = 100)
           let finishCall = do
                 let newContext = CallContext
                               { target    = addr
@@ -2590,8 +2593,9 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
                   assign #overrideCaller Nothing
                   assign #resetCaller False
                 continue addr
-          -- Charge access cost for delegation target if different from call target
-          if codeAddr /= addr
+          -- Charge access cost for delegation target when delegation exists
+          -- (even for self-delegation where codeAddr == addr)
+          if hasDelegation
             then accessAndBurn codeAddr finishCall
             else finishCall
 

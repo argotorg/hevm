@@ -1,6 +1,6 @@
 module EVM.Test.BlockchainTests (prepareTests, problematicTests, findIgnoreReason, Case, vmForCase, checkExpectation, allTestCases) where
 
-import EVM (initialContract, makeVm, setEIP4788Storage, setEIP2935Storage, processAuthorizations, getAuthoritiesToWarm, resolveDelegatedCode, getDelegationTarget, isPrecompileAddr')
+import EVM (initialContract, makeVm, setEIP4788Storage, setEIP2935Storage, processAuthorizations, getAuthoritiesToWarm, resolveDelegatedCode, getDelegationTarget)
 import EVM.Concrete qualified as EVM
 import EVM.Effects
 import EVM.Expr (maybeLitAddrSimp)
