@@ -47,11 +47,15 @@ ar rcs libckzg.a alloc.o bytes.o ec.o fr.o lincomb.o utils.o \
     setup.o eip4844.o blob.o eip7594.o cell.o fft.o fk20.o poly.o recovery.o
 
 # Install library and headers
-mkdir -p "$PREFIX/lib" "$PREFIX/include" "$PREFIX/share"
+mkdir -p "$PREFIX/lib" "$PREFIX/include"
 cp libckzg.a "$PREFIX/lib/"
 cp ckzg.h "$PREFIX/include/"
 cp -r common "$PREFIX/include/"
 cp -r eip4844 "$PREFIX/include/"
 cp -r eip7594 "$PREFIX/include/"
 cp -r setup "$PREFIX/include/"
-cp trusted_setup.txt "$PREFIX/share/"
+
+# Generate embedded trusted setup header
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+python3 "$SCRIPT_DIR/../../scripts/generate-kzg-trusted-setup.py" \
+    trusted_setup.txt "$PREFIX/include/kzg-trusted-setup-data.h"

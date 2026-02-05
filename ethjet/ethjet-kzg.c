@@ -1,5 +1,6 @@
 #include "ethjet-kzg.h"
 #include "tinykeccak.h"
+#include "kzg-trusted-setup-data.h"
 
 #include <ckzg.h>
 #include <eip4844/eip4844.h>
@@ -7,7 +8,6 @@
 #include <common/bytes.h>
 #include <string.h>
 #include <stdlib.h>
-#include <stdio.h>
 
 static KZGSettings *kzg_settings = NULL;
 static int kzg_initialized = 0;
@@ -29,8 +29,6 @@ static const uint8_t OUTPUT_FIELD_ELEMENTS_PER_BLOB[32] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00
 };
 
-/* Embedded trusted setup - minimal for testing.
- * For production, load from file or embed full setup. */
 int ethjet_kzg_init(void) {
     if (kzg_initialized) {
         return 1;
@@ -41,45 +39,22 @@ int ethjet_kzg_init(void) {
         return 0;
     }
 
-    /* Try to load trusted setup from standard locations */
-    const char *paths[] = {
-        "./trusted_setup.txt",
-        "/etc/ethereum/trusted_setup.txt",
-        NULL
-    };
+    C_KZG_RET ret = load_trusted_setup(
+        kzg_settings,
+        kzg_g1_monomial_bytes, KZG_G1_MONOMIAL_BYTES_LEN,
+        kzg_g1_lagrange_bytes, KZG_G1_LAGRANGE_BYTES_LEN,
+        kzg_g2_monomial_bytes, KZG_G2_MONOMIAL_BYTES_LEN,
+        0
+    );
 
-    /* Check HEVM_KZG_TRUSTED_SETUP environment variable first */
-    const char *env_path = getenv("HEVM_KZG_TRUSTED_SETUP");
-    if (env_path) {
-        FILE *f = fopen(env_path, "r");
-        if (f) {
-            C_KZG_RET ret = load_trusted_setup_file(kzg_settings, f, 0);
-            fclose(f);
-            if (ret == C_KZG_OK) {
-                kzg_initialized = 1;
-                return 1;
-            }
-        }
+    if (ret != C_KZG_OK) {
+        free(kzg_settings);
+        kzg_settings = NULL;
+        return 0;
     }
 
-    for (int i = 0; paths[i] != NULL; i++) {
-        FILE *f = fopen(paths[i], "r");
-        if (f) {
-            C_KZG_RET ret = load_trusted_setup_file(kzg_settings, f, 0);
-            fclose(f);
-            if (ret == C_KZG_OK) {
-                kzg_initialized = 1;
-                return 1;
-            }
-        }
-    }
-
-    /* If no trusted setup found, we can still validate input format
-     * but won't be able to verify proofs */
-    kzg_initialized = 0;
-    free(kzg_settings);
-    kzg_settings = NULL;
-    return 0;
+    kzg_initialized = 1;
+    return 1;
 }
 
 void ethjet_kzg_free(void) {

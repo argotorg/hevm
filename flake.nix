@@ -56,7 +56,7 @@
           version = "2.1.5";
           src = c-kzg-4844;
 
-          nativeBuildInputs = [ pkgs.clang ];
+          nativeBuildInputs = [ pkgs.clang pkgs.python3 ];
           buildInputs = [ pkgs.blst ];
 
           buildPhase = ''
@@ -91,14 +91,14 @@
           '';
 
           installPhase = ''
-            mkdir -p $out/lib $out/include $out/share
+            mkdir -p $out/lib $out/include
             cp libckzg.a $out/lib/
             cp ckzg.h $out/include/
             cp -r common $out/include/
             cp -r eip4844 $out/include/
             cp -r eip7594 $out/include/
             cp -r setup $out/include/
-            cp trusted_setup.txt $out/share/
+            python3 ${./scripts/generate-kzg-trusted-setup.py} trusted_setup.txt $out/include/kzg-trusted-setup-data.h
           '';
         };
 
@@ -267,7 +267,6 @@
           DAPP_SOLC = "${solc}/bin/solc";
           HEVM_ETHEREUM_TESTS_REPO = "${execution-spec-tests-fixtures}/blockchain_tests";
           HEVM_FORGE_STD_REPO = forge-std;
-          HEVM_KZG_TRUSTED_SETUP = "${c-kzg}/share/trusted_setup.txt";
 
           # point cabal repl to system deps
           LD_LIBRARY_PATH = libraryPath;

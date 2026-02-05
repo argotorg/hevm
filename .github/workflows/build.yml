@@ -263,8 +263,6 @@ jobs:
           echo HEVM_SOLIDITY_REPO="$PWD/ethereum-solidity" >> "$GITHUB_ENV"
           echo HEVM_ETHEREUM_TESTS_REPO="$PWD/fixtures/blockchain_tests" >> "$GITHUB_ENV"
           echo HEVM_FORGE_STD_REPO="$PWD/forge-std" >> "$GITHUB_ENV"
-          # kzg trusted setup
-          echo HEVM_KZG_TRUSTED_SETUP="$HOME/.local/share/trusted_setup.txt" >> "$GITHUB_ENV"
 
       - name: run tests
         run: |
