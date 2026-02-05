@@ -1586,6 +1586,10 @@ truncpadlit n xs = if m > n then BS.take n xs
                    else BS.append xs (BS.replicate (n - m) 0)
   where m = BS.length xs
 
+-- | Read a 32-byte big-endian word from a ByteString at a given offset
+readWord256At :: Int -> ByteString -> Integer
+readWord256At offset bs = into @Integer $ word $ BS.take 32 $ BS.drop offset bs
+
 -- | P-256 (secp256r1) signature verification for EIP-7212
 -- Input format: hash (32) || r (32) || s (32) || x (32) || y (32)
 -- Returns True if signature is valid, False otherwise
@@ -1593,13 +1597,12 @@ truncpadlit n xs = if m > n then BS.take n xs
 -- verification manually to avoid double-hashing.
 p256Verify :: ByteString -> Bool
 p256Verify input =
-  let -- Parse input
-      hashBytes = BS.take 32 input
-      e = into @Integer $ word hashBytes  -- message hash as integer
-      r = into @Integer $ word $ BS.take 32 $ BS.drop 32 input
-      s = into @Integer $ word $ BS.take 32 $ BS.drop 64 input
-      x = into @Integer $ word $ BS.take 32 $ BS.drop 96 input
-      y = into @Integer $ word $ BS.take 32 $ BS.drop 128 input
+  let -- Parse input (all 32-byte big-endian words)
+      e = readWord256At 0 input    -- message hash
+      r = readWord256At 32 input   -- signature r
+      s = readWord256At 64 input   -- signature s
+      x = readWord256At 96 input   -- public key x
+      y = readWord256At 128 input  -- public key y
 
       -- P-256 curve order
       curve = getCurveByName SEC_p256r1
