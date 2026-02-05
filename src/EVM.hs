@@ -3564,15 +3564,20 @@ recoverAuthorityAddress auth =
     octets x = BS.pack $ dropWhile (== 0) [fromIntegral (shiftR x (8 * i)) | i <- reverse [0..31 :: Int]]
 
 -- | Get all authority addresses that should be warmed from authorization list
--- Per EIP-7702 spec: addresses are warmed AFTER chain_id validation
--- Chain ID check happens first (must be 0 or match current chain), then ecrecover
+-- Per EIP-7702 spec, warming happens at step 4, but ONLY if steps 1-3 pass:
+--   1. Chain ID must be 0 or match current chain
+--   2. Auth nonce must be < 2^64-1
+--   3. ecrecover must succeed
 getAuthoritiesToWarm :: W256 -> [AuthorizationEntry] -> [Expr EAddr]
-getAuthoritiesToWarm chainId auths = map LitAddr $ mapMaybe (recoverIfValidChainId chainId) auths
+getAuthoritiesToWarm chainId auths = map LitAddr $ mapMaybe (recoverIfValid chainId) auths
   where
-    recoverIfValidChainId :: W256 -> AuthorizationEntry -> Maybe Addr
-    recoverIfValidChainId cid auth
-      -- Chain ID must be 0 (any chain) or match current chain
+    recoverIfValid :: W256 -> AuthorizationEntry -> Maybe Addr
+    recoverIfValid cid auth
+      -- Step 1: Chain ID must be 0 (any chain) or match current chain
       | auth.authChainId /= 0 && auth.authChainId /= cid = Nothing
+      -- Step 2: Auth nonce must be < 2^64-1 (per EIP-7702 step 2)
+      | auth.authNonce >= (0xFFFFFFFFFFFFFFFF :: W256) = Nothing
+      -- Step 3: ecrecover must succeed
       | otherwise = recoverAuthorityAddress auth
 
 -- | Process all EIP-7702 authorization entries and return the updated contracts map, refunds, and addresses to warm
@@ -3603,7 +3608,10 @@ processAuthorizations chainId origin auths contracts = foldl processOne (contrac
       Just authority ->
         -- Check chain_id: must be 0 (any chain) or match current chain
         if auth.authChainId /= 0 && auth.authChainId /= chainId
-        then (cs, refs, warmAddrs)  -- Chain ID mismatch, skip (but address was already warmed)
+        then (cs, refs, warmAddrs)  -- Chain ID mismatch, skip
+        -- EIP-7702 step 2: Verify nonce < 2^64-1
+        else if auth.authNonce >= (0xFFFFFFFFFFFFFFFF :: W256)
+        then (cs, refs, warmAddrs)  -- Auth nonce too high, skip
         else
           let authorityAddr = LitAddr authority
               existingAccount = Map.lookup authorityAddr cs
