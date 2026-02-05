@@ -706,8 +706,7 @@ data VM (t :: VMType) = VM
   --   during symbolic execution. See e.g. OpStaticcall
   , exploreDepth   :: Int
   , keccakPreImgs  :: Set (ByteString, W256)
-  , mergeState :: MergeState
-  -- ^ State for speculative merge execution (try-both-paths approach)
+  , mergeState     :: MergeState
   }
   deriving (Generic)
 
