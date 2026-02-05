@@ -85,50 +85,50 @@ tryMergeForwardJump
 tryMergeForwardJump conf exec1Step currentPC jumpTarget cond stackAfterPop = do
   -- Only handle forward jumps (skip block pattern)
   if jumpTarget <= currentPC
-    then pure False  -- Not a forward jump
-    else do
-      vm0 <- get
+  then pure False  -- Not a forward jump
+  else do
+    vm0 <- get
 
-      -- CRITICAL: Skip merge if memory is mutable (ConcreteMemory)
-      case vm0.state.memory of
-        ConcreteMemory _ -> pure False
-        SymbolicMemory _ -> do
-          -- True branch (jump taken): Just sets PC to target, no execution needed
-          let trueStack = stackAfterPop  -- Stack after popping JUMPI args
+    -- Skip merge if memory is mutable (ConcreteMemory)
+    case vm0.state.memory of
+      ConcreteMemory _ -> pure False
+      SymbolicMemory _ -> do
+        -- True branch (jump taken): Just sets PC to target, no execution needed
+        let trueStack = stackAfterPop  -- Stack after popping JUMPI args
 
-          -- False branch (fall through): Execute until we reach jump target
-          assign' (#state % #stack) stackAfterPop
-          modifying' (#state % #pc) (+ 1)  -- Move past JUMPI
-          maybeVmFalse <- speculateLoopOuter conf exec1Step jumpTarget
+        -- False branch (fall through): Execute until we reach jump target
+        assign' (#state % #stack) stackAfterPop
+        modifying' (#state % #pc) (+ 1)  -- Move past JUMPI
+        maybeVmFalse <- speculateLoopOuter conf exec1Step jumpTarget
 
-          case maybeVmFalse of
-            Nothing -> put vm0 >> pure False -- restore, can't merge
-            Just vmFalse -> do
-              let falseStack = vmFalse.state.stack
-                  soundnessOK = checkNoSideEffects vm0 vmFalse
+        case maybeVmFalse of
+          Nothing -> put vm0 >> pure False -- restore, can't merge
+          Just vmFalse -> do
+            let falseStack = vmFalse.state.stack
+                soundnessOK = checkNoSideEffects vm0 vmFalse
 
-              -- Check merge conditions: same stack depth AND no side effects
-              if length trueStack == length falseStack && soundnessOK
-                then do
-                  -- Merge stacks using ITE expressions, simplifying to prevent growth
-                  let condSimp = Expr.simplify cond
-                      mergeExpr t f
-                        | t == f    = t
-                        | otherwise = Expr.simplify (ITE condSimp t f)
-                      mergedStack = zipWith mergeExpr trueStack falseStack
-                  -- Use vm0 as base and update only PC and stack
-                  when conf.debug $ traceM $ "Merged forward jump"
-                    ++ runSrcLookup vm0.config.srcLookup vm0.env.contracts vm0.state.contract jumpTarget
-                  put vm0
-                  assign (#state % #pc) jumpTarget
-                  assign (#state % #stack) mergedStack
-                  assign #result Nothing
-                  assign (#mergeState % #msActive) False
-                  pure True
-                else do
-                  -- Can't merge: stack depth or state differs
-                  put vm0
-                  pure False
+            -- Check merge conditions: same stack depth AND no side effects
+            if length trueStack == length falseStack && soundnessOK
+              then do
+                -- Merge stacks using ITE expressions, simplifying to prevent growth
+                let condSimp = Expr.simplify cond
+                    mergeExpr t f
+                      | t == f    = t
+                      | otherwise = Expr.simplify (ITE condSimp t f)
+                    mergedStack = zipWith mergeExpr trueStack falseStack
+                -- Use vm0 as base and update only PC and stack
+                when conf.debug $ traceM $ "Merged forward jump"
+                  ++ runSrcLookup vm0.config.srcLookup vm0.env.contracts vm0.state.contract jumpTarget
+                put vm0
+                assign (#state % #pc) jumpTarget
+                assign (#state % #stack) mergedStack
+                assign #result Nothing
+                assign (#mergeState % #msActive) False
+                pure True
+              else do
+                -- Can't merge: stack depth or state differs
+                put vm0
+                pure False
 
 -- | Check that execution had no side effects (storage, memory, logs, etc.)
 checkNoSideEffects :: VM Symbolic -> VM Symbolic -> Bool
