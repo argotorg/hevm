@@ -730,25 +730,10 @@ data BaseState
   | AbstractBase
   deriving (Show)
 
--- | A callback for looking up source location info given the contracts map,
--- an address, and a PC. Used for debug output (e.g. showing the Solidity
--- source line at a given PC).
-newtype SrcLookup = SrcLookup (Map (Expr EAddr) Contract -> Expr EAddr -> Int -> String)
-
-instance Show SrcLookup where
-  show _ = "<SrcLookup>"
-
--- | Run a SrcLookup to get source location info, with a fallback for when
--- no SrcLookup is available.
-runSrcLookup :: Maybe SrcLookup -> Map (Expr EAddr) Contract -> Expr EAddr -> Int -> String
-runSrcLookup Nothing _ addr pc = " at addr: " <> show addr <> " at pc: " <> show pc
-runSrcLookup (Just (SrcLookup f)) contracts addr pc = f contracts addr pc
-
 -- | Configuration options that need to be consulted at runtime
 data RuntimeConfig = RuntimeConfig
   { allowFFI :: Bool
   , baseState :: BaseState
-  , srcLookup :: Maybe SrcLookup
   }
   deriving (Show)
 
