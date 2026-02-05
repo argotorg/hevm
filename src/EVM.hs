@@ -1170,14 +1170,32 @@ callChecks
   -> EVM t ()
 callChecks this xGas xContext xTo xValue xInOffset xInSize xOutOffset xOutSize xs continue = do
   vm <- get
-  let fees = vm.block.schedule
+  let fees@FeeSchedule {..} = vm.block.schedule
   accessMemoryRange xInOffset xInSize $
     accessMemoryRange xOutOffset xOutSize $ do
-      availableGas <- use (#state % #gas)
       let recipientExists = accountExists xContext vm
       let from = fromMaybe vm.state.contract vm.state.overrideCaller
       fromBal <- preuse $ #env % #contracts % ix from % #balance
-      costOfCall fees recipientExists xValue availableGas xGas xTo $ \cost gas' -> do
+      -- EIP-7702: Check if target has delegation and calculate access cost
+      -- This cost must be included in c_extra BEFORE the 63/64 rule
+      -- We pre-burn it to reduce available gas, ensuring correct gas cap calculation
+      let doDelegationAccess = case xTo of
+            LitAddr _ -> case Map.lookup xTo vm.env.contracts of
+              Just targetContract -> case getDelegationTarget targetContract.code of
+                Just delegateTo -> do
+                  -- Check if delegation target is warm/cold and mark it accessed
+                  let delegateAddr = LitAddr delegateTo
+                  isWarm <- accessAccountForGas delegateAddr
+                  -- Pre-burn the delegation access cost so it's included before 63/64 rule
+                  let delegationGasCost = if isWarm then g_warm_storage_read else g_cold_account_access
+                  burn delegationGasCost $ pure ()
+                Nothing -> pure ()  -- No delegation
+              Nothing -> pure ()  -- Target doesn't exist
+            _ -> pure ()  -- Symbolic address
+      doDelegationAccess
+      -- Now get the updated available gas (after delegation cost is burned)
+      availableGas' <- use (#state % #gas)
+      costOfCall fees recipientExists xValue availableGas' xGas xTo $ \cost gas' -> do
         let checkCallDepth =
               if length vm.frames >= 1024
               then do
@@ -1188,6 +1206,7 @@ callChecks this xGas xContext xTo xValue xInOffset xInSize xOutOffset xOutSize x
               else continue (toGas gas')
         case (fromBal, xValue) of
           -- we're not transferring any value, and can skip the balance check
+          -- EIP-7702: Delegation cost was pre-burned, so just use cost here
           (_, Lit 0) -> burn (cost - gas') checkCallDepth
 
           -- from is in the state, we check if they have enough balance
@@ -2548,12 +2567,6 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
           abi <- maybeLitWordSimp . readBytes 4 (Lit 0) <$> readMemory xInOffset (Lit 4)
           -- EIP-7702: Resolve delegation if target has delegation code
           let (resolvedCode, codeAddr) = resolveDelegatedCode target addr vm0.env.contracts
-              -- Check if target had delegation code (even if self-delegating)
-              hasDelegation = isJust $ getDelegationTarget target.code
-          -- EIP-7702: If delegation was resolved, charge access cost for the delegation target
-          -- "If a code executing instruction accesses a cold account during the
-          -- resolution of delegated code, add an additional COLD_ACCOUNT_READ_COST"
-          -- Note: For self-delegation, codeAddr == addr but we still charge (warm access = 100)
           let finishCall = do
                 let newContext = CallContext
                               { target    = addr
@@ -2593,11 +2606,9 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
                   assign #overrideCaller Nothing
                   assign #resetCaller False
                 continue addr
-          -- Charge access cost for delegation target when delegation exists
-          -- (even for self-delegation where codeAddr == addr)
-          if hasDelegation
-            then accessAndBurn codeAddr finishCall
-            else finishCall
+          -- EIP-7702: Delegation access cost is now charged in callChecks (before 63/64 rule)
+          -- The delegation target was already marked as accessed in callChecks
+          finishCall
 
 -- -- * Contract creation
 

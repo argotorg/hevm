@@ -178,8 +178,7 @@ problematicTests =
     -- call patterns have gas discrepancies that need deeper investigation.
   , ("tests/prague/eip7702_set_code_tx/test_set_code_txs.py::test_call_into_chain_delegating_set_code",
      "EIP-7702 delegation chain access cost calculation issue")
-  , ("tests/prague/eip7702_set_code_tx/test_set_code_txs.py::test_call_into_self_delegating_set_code",
-     "EIP-7702 self-delegation access cost issue (call variants)")
+  -- FIXED: test_call_into_self_delegating_set_code now passes (delegation cost included before 63/64 rule)
   , ("tests/prague/eip7702_set_code_tx/test_set_code_txs_2.py::test_double_auth",
      "EIP-7702 double authorization gas calculation")
   , ("tests/prague/eip7702_set_code_tx/test_set_code_txs_2.py::test_pointer_contract_pointer_loop",
