@@ -673,7 +673,7 @@ data MergeState = MergeState
   } deriving (Show, Eq, Generic)
 
 defaultMergeState :: MergeState
-defaultMergeState = MergeState False 0 0
+defaultMergeState = MergeState False 0
 
 data VMType = Symbolic | Concrete
 
