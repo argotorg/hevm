@@ -1266,6 +1266,46 @@ precompiledContract this xGas precompileAddr recipient xValue inOffset inSize ou
           _ -> underrun
         _ -> pure ()
 
+-- BLS12-381 Field Modulus (used by Point Evaluation precompile)
+blsModulus :: Integer
+blsModulus = 52435875175126190479447740508185965837690552500527637822603658699938581184513
+
+-- BLS12-381 Precompile Input/Output Sizes (EIP-2537)
+g1PointSize, g2PointSize :: Int
+g1PointSize = 128
+g2PointSize = 256
+
+-- Two points for ADD operations
+g1AddInputSize, g2AddInputSize :: Int
+g1AddInputSize = 256
+g2AddInputSize = 512
+
+-- MSM pair sizes: point + 32-byte scalar
+g1MsmPairSize, g2MsmPairSize, blsPairingPairSize :: Int
+g1MsmPairSize = 160
+g2MsmPairSize = 288
+blsPairingPairSize = 384
+
+-- Map operations input sizes
+mapFpInputSize, mapFp2InputSize :: Int
+mapFpInputSize = 64
+mapFp2InputSize = 128
+
+-- Pairing output size
+blsPairingOutputSize :: Int
+blsPairingOutputSize = 32
+
+-- EIP-7702 Constants
+perEmptyAccountCost, perAuthBaseCost :: Word64
+perEmptyAccountCost = 25000
+perAuthBaseCost = 12500
+
+delegationCodeLength :: Int
+delegationCodeLength = 23  -- 3-byte prefix + 20-byte address
+
+maxAuthNonce :: W256
+maxAuthNonce = 0xFFFFFFFFFFFFFFFF
+
 executePrecompile
   :: (?op :: Word8, VMOps t)
   => Addr
@@ -1431,10 +1471,6 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
                 -- commitment = BS.take 48 $ BS.drop 96 input'  -- Not used without KZG
                 -- proof = BS.take 48 $ BS.drop 144 input'      -- Not used without KZG
 
-                -- BLS_MODULUS: the field modulus for BLS12-381
-                blsModulus :: Integer
-                blsModulus = 52435875175126190479447740508185965837690552500527637822603658699938581184513
-
                 -- Check versioned_hash format: first byte must be 0x01 (VERSIONED_HASH_VERSION_KZG)
                 hashVersion = if BS.null versionedHash then 0 else BS.head versionedHash
 
@@ -1461,12 +1497,12 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
       -- BLS12-381 G1ADD (EIP-2537) - 0x0B
       0x0B ->
         forceConcreteBuf input "BLS_G1ADD" $ \input' ->
-          if BS.length input' /= 256
+          if BS.length input' /= g1AddInputSize
           then precompileFail
-          else case EVM.Precompiled.execute 0x0B input' 128 of
+          else case EVM.Precompiled.execute 0x0B input' g1PointSize of
             Nothing -> precompileFail
             Just output -> do
-              let truncpaddedOutput = ConcreteBuf $ truncpadlit 128 output
+              let truncpaddedOutput = ConcreteBuf $ truncpadlit g1PointSize output
               assign' (#state % #stack) (Lit 1 : xs)
               assign (#state % #returndata) truncpaddedOutput
               copyBytesToMemory truncpaddedOutput outSize (Lit 0) outOffset
@@ -1476,12 +1512,12 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
       0x0C ->
         forceConcreteBuf input "BLS_G1MSM" $ \input' -> do
           let len = BS.length input'
-          if len == 0 || len `mod` 160 /= 0
+          if len == 0 || len `mod` g1MsmPairSize /= 0
           then precompileFail
-          else case EVM.Precompiled.execute 0x0C input' 128 of
+          else case EVM.Precompiled.execute 0x0C input' g1PointSize of
             Nothing -> precompileFail
             Just output -> do
-              let truncpaddedOutput = ConcreteBuf $ truncpadlit 128 output
+              let truncpaddedOutput = ConcreteBuf $ truncpadlit g1PointSize output
               assign' (#state % #stack) (Lit 1 : xs)
               assign (#state % #returndata) truncpaddedOutput
               copyBytesToMemory truncpaddedOutput outSize (Lit 0) outOffset
@@ -1490,12 +1526,12 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
       -- BLS12-381 G2ADD (EIP-2537) - 0x0D
       0x0D ->
         forceConcreteBuf input "BLS_G2ADD" $ \input' ->
-          if BS.length input' /= 512
+          if BS.length input' /= g2AddInputSize
           then precompileFail
-          else case EVM.Precompiled.execute 0x0D input' 256 of
+          else case EVM.Precompiled.execute 0x0D input' g2PointSize of
             Nothing -> precompileFail
             Just output -> do
-              let truncpaddedOutput = ConcreteBuf $ truncpadlit 256 output
+              let truncpaddedOutput = ConcreteBuf $ truncpadlit g2PointSize output
               assign' (#state % #stack) (Lit 1 : xs)
               assign (#state % #returndata) truncpaddedOutput
               copyBytesToMemory truncpaddedOutput outSize (Lit 0) outOffset
@@ -1505,12 +1541,12 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
       0x0E ->
         forceConcreteBuf input "BLS_G2MSM" $ \input' -> do
           let len = BS.length input'
-          if len == 0 || len `mod` 288 /= 0
+          if len == 0 || len `mod` g2MsmPairSize /= 0
           then precompileFail
-          else case EVM.Precompiled.execute 0x0E input' 256 of
+          else case EVM.Precompiled.execute 0x0E input' g2PointSize of
             Nothing -> precompileFail
             Just output -> do
-              let truncpaddedOutput = ConcreteBuf $ truncpadlit 256 output
+              let truncpaddedOutput = ConcreteBuf $ truncpadlit g2PointSize output
               assign' (#state % #stack) (Lit 1 : xs)
               assign (#state % #returndata) truncpaddedOutput
               copyBytesToMemory truncpaddedOutput outSize (Lit 0) outOffset
@@ -1520,12 +1556,12 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
       0x0F ->
         forceConcreteBuf input "BLS_PAIRING" $ \input' -> do
           let len = BS.length input'
-          if len `mod` 384 /= 0
+          if len `mod` blsPairingPairSize /= 0
           then precompileFail
-          else case EVM.Precompiled.execute 0x0F input' 32 of
+          else case EVM.Precompiled.execute 0x0F input' blsPairingOutputSize of
             Nothing -> precompileFail
             Just output -> do
-              let truncpaddedOutput = ConcreteBuf $ truncpadlit 32 output
+              let truncpaddedOutput = ConcreteBuf $ truncpadlit blsPairingOutputSize output
               assign' (#state % #stack) (Lit 1 : xs)
               assign (#state % #returndata) truncpaddedOutput
               copyBytesToMemory truncpaddedOutput outSize (Lit 0) outOffset
@@ -1534,12 +1570,12 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
       -- BLS12-381 MAP_FP_TO_G1 (EIP-2537) - 0x10
       0x10 ->
         forceConcreteBuf input "BLS_MAP_FP_TO_G1" $ \input' ->
-          if BS.length input' /= 64
+          if BS.length input' /= mapFpInputSize
           then precompileFail
-          else case EVM.Precompiled.execute 0x10 input' 128 of
+          else case EVM.Precompiled.execute 0x10 input' g1PointSize of
             Nothing -> precompileFail
             Just output -> do
-              let truncpaddedOutput = ConcreteBuf $ truncpadlit 128 output
+              let truncpaddedOutput = ConcreteBuf $ truncpadlit g1PointSize output
               assign' (#state % #stack) (Lit 1 : xs)
               assign (#state % #returndata) truncpaddedOutput
               copyBytesToMemory truncpaddedOutput outSize (Lit 0) outOffset
@@ -1548,12 +1584,12 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
       -- BLS12-381 MAP_FP2_TO_G2 (EIP-2537) - 0x11
       0x11 ->
         forceConcreteBuf input "BLS_MAP_FP2_TO_G2" $ \input' ->
-          if BS.length input' /= 128
+          if BS.length input' /= mapFp2InputSize
           then precompileFail
-          else case EVM.Precompiled.execute 0x11 input' 256 of
+          else case EVM.Precompiled.execute 0x11 input' g2PointSize of
             Nothing -> precompileFail
             Just output -> do
-              let truncpaddedOutput = ConcreteBuf $ truncpadlit 256 output
+              let truncpaddedOutput = ConcreteBuf $ truncpadlit g2PointSize output
               assign' (#state % #stack) (Lit 1 : xs)
               assign (#state % #returndata) truncpaddedOutput
               copyBytesToMemory truncpaddedOutput outSize (Lit 0) outOffset
@@ -3391,29 +3427,29 @@ costOfPrecompile (FeeSchedule {..}) precompileAddr input =
              ConcreteBuf i -> g_fround * (unsafeInto $ asInteger $ lazySlice 0 4 i)
              _ -> internalError "Unsupported symbolic blake2 gas calc"
     -- Point Evaluation (EIP-4844)
-    0x0A -> 50000
+    0x0A -> g_point_evaluation
     -- BLS12-381 precompiles (EIP-2537)
     -- G1ADD (0x0B)
-    0x0B -> 375
+    0x0B -> g_bls_g1add
     -- G1MSM (0x0C)
-    0x0C -> let k = inputLen `div` 160  -- 128 bytes point + 32 bytes scalar
+    0x0C -> let k = inputLen `div` unsafeInto g1MsmPairSize
             in if k == 0 then 0
-               else 12000 * k * blsG1MsmDiscount k `div` 1000
+               else g_bls_g1msm_base * k * blsG1MsmDiscount k `div` 1000
     -- G2ADD (0x0D)
-    0x0D -> 600
+    0x0D -> g_bls_g2add
     -- G2MSM (0x0E)
-    0x0E -> let k = inputLen `div` 288  -- 256 bytes point + 32 bytes scalar
+    0x0E -> let k = inputLen `div` unsafeInto g2MsmPairSize
             in if k == 0 then 0
-               else 22500 * k * blsG2MsmDiscount k `div` 1000
+               else g_bls_g2msm_base * k * blsG2MsmDiscount k `div` 1000
     -- PAIRING (0x0F)
-    0x0F -> let k = inputLen `div` 384  -- 128 bytes G1 + 256 bytes G2
-            in 32600 * k + 37700
+    0x0F -> let k = inputLen `div` unsafeInto blsPairingPairSize
+            in g_bls_pairing_point * k + g_bls_pairing_base
     -- MAP_FP_TO_G1 (0x10)
-    0x10 -> 5500
+    0x10 -> g_bls_map_fp_to_g1
     -- MAP_FP2_TO_G2 (0x11)
-    0x11 -> 23800
-    -- P256VERIFY (EIP-7951)
-    0x100 -> 6900
+    0x11 -> g_bls_map_fp2_to_g2
+    -- P256VERIFY (EIP-7212)
+    0x100 -> g_p256_verify
     _ -> internalError $ "unimplemented precompiled contract " ++ show precompileAddr
 
 -- Gas cost of memory expansion
@@ -3498,11 +3534,11 @@ delegationPrefix :: ByteString
 delegationPrefix = BS.pack [0xef, 0x01, 0x00]
 
 -- | Check if a contract has delegation code and return the target address
--- Returns Just targetAddr if code is exactly 23 bytes starting with 0xef0100
+-- Returns Just targetAddr if code is exactly delegationCodeLength bytes starting with 0xef0100
 getDelegationTarget :: ContractCode -> Maybe Addr
 getDelegationTarget = \case
   RuntimeCode (ConcreteRuntimeCode code) ->
-    if BS.length code == 23 && BS.take 3 code == delegationPrefix
+    if BS.length code == delegationCodeLength && BS.take 3 code == delegationPrefix
     then Just $ unsafeInto $ word $ BS.drop 3 code
     else Nothing
   _ -> Nothing
@@ -3597,9 +3633,9 @@ processAuthorizations
   -> (Map (Expr EAddr) Contract, [(Expr EAddr, Word64)], [Expr EAddr])  -- ^ (Updated contracts, Refunds, Delegation targets to warm)
 processAuthorizations chainId origin auths contracts = foldl processOne (contracts, [], []) auths
   where
-    -- EIP-7702 refund: PER_EMPTY_ACCOUNT_COST (25000) - PER_AUTH_BASE_COST (12500) = 12500
-    authRefundAmount :: Word64
-    authRefundAmount = 12500
+    -- EIP-7702 refund: PER_EMPTY_ACCOUNT_COST - PER_AUTH_BASE_COST
+    authRefund :: Word64
+    authRefund = perEmptyAccountCost - perAuthBaseCost
 
     processOne :: (Map (Expr EAddr) Contract, [(Expr EAddr, Word64)], [Expr EAddr]) -> AuthorizationEntry
                -> (Map (Expr EAddr) Contract, [(Expr EAddr, Word64)], [Expr EAddr])
@@ -3610,7 +3646,7 @@ processAuthorizations chainId origin auths contracts = foldl processOne (contrac
         if auth.authChainId /= 0 && auth.authChainId /= chainId
         then (cs, refs, warmAddrs)  -- Chain ID mismatch, skip
         -- EIP-7702 step 2: Verify nonce < 2^64-1
-        else if auth.authNonce >= (0xFFFFFFFFFFFFFFFF :: W256)
+        else if auth.authNonce >= maxAuthNonce
         then (cs, refs, warmAddrs)  -- Auth nonce too high, skip
         else
           let authorityAddr = LitAddr authority
@@ -3668,7 +3704,7 @@ processAuthorizations chainId origin auths contracts = foldl processOne (contrac
                              _ -> True  -- Symbolic or InitCode, assume exists
                        in hasBalance || hasNonce || hasCode
                    newRefs = if accountReallyExists
-                             then (authorityAddr, authRefundAmount) : refs
+                             then (authorityAddr, authRefund) : refs
                              else refs
                    -- Note: EIP-7702 step 7 says to add the AUTHORITY account to accessed_addresses,
                    -- which is handled separately in getAuthoritiesToWarm. The delegation TARGET
@@ -3678,7 +3714,7 @@ processAuthorizations chainId origin auths contracts = foldl processOne (contrac
 
 -- | Check if bytecode is a delegation code (0xef0100 prefix)
 isDelegationCode :: ByteString -> Bool
-isDelegationCode code = BS.length code == 23 && BS.isPrefixOf delegationPrefix code
+isDelegationCode code = BS.length code == delegationCodeLength && BS.isPrefixOf delegationPrefix code
 
 
 -- * Arithmetic
