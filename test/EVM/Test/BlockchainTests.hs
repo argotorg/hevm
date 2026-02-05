@@ -163,7 +163,13 @@ allTestCases = do
 -- Test names are from the execution-spec-tests fixtures format.
 problematicTests :: [(String, String)]
 problematicTests =
-  [
+  [ -- EIP-7685: General Purpose EL Requests - not implemented
+    ("tests/prague/eip7685_general_purpose_el_requests/test_multi_type_requests.py::test_valid_multi_type_request_from_same_tx",
+     "EIP-7685 system contract requests not implemented")
+
+    -- EIP-2935: Historical block hashes - requires multi-block context
+  , ("tests/prague/eip2935_historical_block_hashes_from_state/test_block_hashes.py::test_block_hashes_history",
+     "EIP-2935 multi-block history tests require block context we don't support")
   ]
 
 
