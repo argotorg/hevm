@@ -28,15 +28,14 @@ import EVM.Effects (Config(..))
 import EVM.Expr qualified as Expr
 import EVM.Types
 
--- | Execute instructions speculatively until target PC is reached or we hit a branch/error
--- Uses budget-based exploration that tries both paths for nested JUMPIs
--- Parameters mergeMaxBudget and mergeMaxDepth are configured via Config
-execUntilPCSymbolic
+-- | Execute instructions speculatively until target PC is reached or
+-- we hit budget limit/SMT query/RPC call/revert/error.
+speculateLoopOuter
   :: Config
   -> EVM Symbolic ()  -- ^ Single-step executor
   -> Int              -- ^ Target PC
   -> EVM Symbolic (Maybe (VM Symbolic))
-execUntilPCSymbolic conf exec1Step targetPC = do
+speculateLoopOuter conf exec1Step targetPC = do
     -- Initialize merge state for this speculation
     let budget = conf.mergeMaxBudget
     modifying #mergeState $ \ms -> ms
@@ -189,7 +188,7 @@ tryMergeForwardJump conf exec1Step currentPC jumpTarget cond stackAfterPop = do
           -- False branch (fall through): Execute until we reach jump target
           assign' (#state % #stack) stackAfterPop
           modifying' (#state % #pc) (+ 1)  -- Move past JUMPI
-          maybeVmFalse <- execUntilPCSymbolic conf exec1Step jumpTarget
+          maybeVmFalse <- speculateLoopOuter conf exec1Step jumpTarget
 
           case maybeVmFalse of
             Nothing -> do
