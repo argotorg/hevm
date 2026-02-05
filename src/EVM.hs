@@ -3612,6 +3612,9 @@ processAuthorizations chainId origin auths contracts = foldl processOne (contrac
           in -- Check code constraint (EIP-7702 step 4)
              if not codeIsOk
              then (cs, refs, warmAddrs)  -- Account has non-delegation code, skip
+             -- EIP-7702: If the account's nonce is 2^64-1, skip to prevent overflow
+             else if currentNonce == maxBound
+             then (cs, refs, warmAddrs)  -- Would overflow, skip
              -- Check nonce matches (step 5)
              else if into expectedNonce /= auth.authNonce
              then (cs, refs, warmAddrs)  -- Nonce mismatch, skip
