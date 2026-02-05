@@ -236,7 +236,8 @@ int ethjet_bls_g1mul(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size)
     return 1;
 }
 
-/* G1MSM: Multi-scalar multiplication on G1 */
+/* G1MSM: Multi-scalar multiplication on G1
+ * Points at infinity are filtered out (they contribute 0 to the sum) */
 int ethjet_bls_g1msm(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size) {
     if (out_size < 128) {
         return 0;
@@ -247,10 +248,9 @@ int ethjet_bls_g1msm(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size)
 
     size_t k = in_size / 160;
 
-    /* Handle empty input - return point at infinity */
+    /* Empty input: EIP-2537 requires error for empty input */
     if (k == 0) {
-        memset(out, 0, 128);
-        return 1;
+        return 0;
     }
 
     /* Allocate arrays for points and scalars */
@@ -267,24 +267,43 @@ int ethjet_bls_g1msm(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size)
         return 0;
     }
 
-    /* Decode all points (with subgroup check for MSM) and convert scalars */
+    /* Decode all points (with subgroup check for MSM) and convert scalars
+     * Filter out infinity points - they contribute 0 to the sum */
+    size_t valid_pairs = 0;
     for (size_t i = 0; i < k; i++) {
-        if (!decode_g1_point(&points[i], in + i * 160, 1)) {
+        if (!decode_g1_point(&points[valid_pairs], in + i * 160, 1)) {
             free(points);
             free(point_ptrs);
             free(scalars_le);
             free(scalar_ptrs);
             return 0;
         }
-        point_ptrs[i] = &points[i];
+
+        /* Skip infinity points - they contribute 0 to the MSM sum */
+        if (blst_p1_affine_is_inf(&points[valid_pairs])) {
+            continue;
+        }
+
+        point_ptrs[valid_pairs] = &points[valid_pairs];
         /* Convert scalar from big-endian to little-endian */
-        reverse_scalar_32(scalars_le + i * 32, in + i * 160 + 128);
-        scalar_ptrs[i] = scalars_le + i * 32;
+        reverse_scalar_32(scalars_le + valid_pairs * 32, in + i * 160 + 128);
+        scalar_ptrs[valid_pairs] = scalars_le + valid_pairs * 32;
+        valid_pairs++;
+    }
+
+    /* If all points are infinity, return infinity */
+    if (valid_pairs == 0) {
+        memset(out, 0, 128);
+        free(points);
+        free(point_ptrs);
+        free(scalars_le);
+        free(scalar_ptrs);
+        return 1;
     }
 
     /* Perform MSM using Pippenger algorithm */
     blst_p1 result;
-    size_t scratch_size = blst_p1s_mult_pippenger_scratch_sizeof(k);
+    size_t scratch_size = blst_p1s_mult_pippenger_scratch_sizeof(valid_pairs);
     limb_t *scratch = malloc(scratch_size);
 
     if (!scratch) {
@@ -295,7 +314,7 @@ int ethjet_bls_g1msm(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size)
         return 0;
     }
 
-    blst_p1s_mult_pippenger(&result, point_ptrs, k, scalar_ptrs, 256, scratch);
+    blst_p1s_mult_pippenger(&result, point_ptrs, valid_pairs, scalar_ptrs, 256, scratch);
 
     /* Encode result */
     encode_g1_point(out, &result);
@@ -376,17 +395,17 @@ int ethjet_bls_g2mul(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size)
     return 1;
 }
 
-/* G2MSM: Multi-scalar multiplication on G2 */
+/* G2MSM: Multi-scalar multiplication on G2
+ * Points at infinity are filtered out (they contribute 0 to the sum) */
 int ethjet_bls_g2msm(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size) {
     if (out_size < 256) return 0;
     if (in_size == 0 || in_size % 288 != 0) return 0;
 
     size_t k = in_size / 288;
 
-    /* Handle empty input - return point at infinity */
+    /* Empty input: EIP-2537 requires error for empty input */
     if (k == 0) {
-        memset(out, 0, 256);
-        return 1;
+        return 0;
     }
 
     /* Allocate arrays for points and scalars */
@@ -403,24 +422,43 @@ int ethjet_bls_g2msm(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size)
         return 0;
     }
 
-    /* Decode all points (with subgroup check for MSM) and convert scalars */
+    /* Decode all points (with subgroup check for MSM) and convert scalars
+     * Filter out infinity points - they contribute 0 to the sum */
+    size_t valid_pairs = 0;
     for (size_t i = 0; i < k; i++) {
-        if (!decode_g2_point(&points[i], in + i * 288, 1)) {
+        if (!decode_g2_point(&points[valid_pairs], in + i * 288, 1)) {
             free(points);
             free(point_ptrs);
             free(scalars_le);
             free(scalar_ptrs);
             return 0;
         }
-        point_ptrs[i] = &points[i];
+
+        /* Skip infinity points - they contribute 0 to the MSM sum */
+        if (blst_p2_affine_is_inf(&points[valid_pairs])) {
+            continue;
+        }
+
+        point_ptrs[valid_pairs] = &points[valid_pairs];
         /* Convert scalar from big-endian to little-endian */
-        reverse_scalar_32(scalars_le + i * 32, in + i * 288 + 256);
-        scalar_ptrs[i] = scalars_le + i * 32;
+        reverse_scalar_32(scalars_le + valid_pairs * 32, in + i * 288 + 256);
+        scalar_ptrs[valid_pairs] = scalars_le + valid_pairs * 32;
+        valid_pairs++;
+    }
+
+    /* If all points are infinity, return infinity */
+    if (valid_pairs == 0) {
+        memset(out, 0, 256);
+        free(points);
+        free(point_ptrs);
+        free(scalars_le);
+        free(scalar_ptrs);
+        return 1;
     }
 
     /* Perform MSM using Pippenger algorithm */
     blst_p2 result;
-    size_t scratch_size = blst_p2s_mult_pippenger_scratch_sizeof(k);
+    size_t scratch_size = blst_p2s_mult_pippenger_scratch_sizeof(valid_pairs);
     limb_t *scratch = malloc(scratch_size);
 
     if (!scratch) {
@@ -431,7 +469,7 @@ int ethjet_bls_g2msm(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size)
         return 0;
     }
 
-    blst_p2s_mult_pippenger(&result, point_ptrs, k, scalar_ptrs, 256, scratch);
+    blst_p2s_mult_pippenger(&result, point_ptrs, valid_pairs, scalar_ptrs, 256, scratch);
 
     /* Encode result */
     encode_g2_point(out, &result);
@@ -446,18 +484,17 @@ int ethjet_bls_g2msm(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size)
 }
 
 /* PAIRING: BLS12-381 pairing check
- * Computes e(P1, Q1) * e(P2, Q2) * ... * e(Pk, Qk) and checks if result equals 1 */
+ * Computes e(P1, Q1) * e(P2, Q2) * ... * e(Pk, Qk) and checks if result equals 1
+ * Pairs where either point is infinity are skipped (e(P,0) = e(0,Q) = 1) */
 int ethjet_bls_pairing(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size) {
     if (out_size < 32) return 0;
     if (in_size % 384 != 0) return 0;
 
     size_t k = in_size / 384;
 
-    /* Empty input: pairing of nothing is 1 */
+    /* Empty input: EIP-2537 requires error for empty input */
     if (k == 0) {
-        memset(out, 0, 31);
-        out[31] = 1;
-        return 1;
+        return 0;
     }
 
     /* Allocate arrays for points */
@@ -475,9 +512,10 @@ int ethjet_bls_pairing(uint8_t *in, size_t in_size, uint8_t *out, size_t out_siz
     }
 
     /* Decode all pairs (with subgroup check for PAIRING) */
+    size_t valid_pairs = 0;
     for (size_t i = 0; i < k; i++) {
         /* G1 point: 128 bytes */
-        if (!decode_g1_point(&g1_points[i], in + i * 384, 1)) {
+        if (!decode_g1_point(&g1_points[valid_pairs], in + i * 384, 1)) {
             free(g1_points);
             free(g2_points);
             free(g1_ptrs);
@@ -485,20 +523,39 @@ int ethjet_bls_pairing(uint8_t *in, size_t in_size, uint8_t *out, size_t out_siz
             return 0;
         }
         /* G2 point: 256 bytes */
-        if (!decode_g2_point(&g2_points[i], in + i * 384 + 128, 1)) {
+        if (!decode_g2_point(&g2_points[valid_pairs], in + i * 384 + 128, 1)) {
             free(g1_points);
             free(g2_points);
             free(g1_ptrs);
             free(g2_ptrs);
             return 0;
         }
-        g1_ptrs[i] = &g1_points[i];
-        g2_ptrs[i] = &g2_points[i];
+
+        /* Skip pairs where either point is infinity - e(P,0) = e(0,Q) = 1 */
+        if (blst_p1_affine_is_inf(&g1_points[valid_pairs]) ||
+            blst_p2_affine_is_inf(&g2_points[valid_pairs])) {
+            continue;
+        }
+
+        g1_ptrs[valid_pairs] = &g1_points[valid_pairs];
+        g2_ptrs[valid_pairs] = &g2_points[valid_pairs];
+        valid_pairs++;
+    }
+
+    /* If all pairs had infinity points, result is 1 */
+    if (valid_pairs == 0) {
+        memset(out, 0, 31);
+        out[31] = 1;
+        free(g1_points);
+        free(g2_points);
+        free(g1_ptrs);
+        free(g2_ptrs);
+        return 1;
     }
 
     /* Compute multi-pairing using Miller loop */
     blst_fp12 result;
-    blst_miller_loop_n(&result, g2_ptrs, g1_ptrs, k);
+    blst_miller_loop_n(&result, g2_ptrs, g1_ptrs, valid_pairs);
     blst_final_exp(&result, &result);
 
     /* Check if result is one */
