@@ -902,7 +902,7 @@ equivalenceCheck solvers sess bytecodeA bytecodeB opts calldata create = do
   conf <- readConfig
   case bytecodeA == bytecodeB of
     True -> liftIO $ do
-      putStrLn "bytecodeA and bytecodeB are identical"
+      when conf.debug $ putStrLn "bytecodeA and bytecodeB are identical"
       pure mempty
     False -> do
       when conf.debug $ liftIO $ do
@@ -950,7 +950,7 @@ equivalenceCheck' solvers sess branchesA branchesB create = do
         liftIO $ printPartialIssues branchesB "codeB"
 
       let allPairs = [(a,b) | a <- branchesA, b <- branchesB]
-      liftIO $ putStrLn $ "Found " <> show (length allPairs) <> " total pairs of endstates"
+      when conf.debug $ liftIO $ putStrLn $ "Found " <> show (length allPairs) <> " total pairs of endstates"
 
       when conf.dumpEndStates $ liftIO $
         putStrLn $ "endstates in bytecodeA: " <> show (length branchesA)
@@ -959,7 +959,7 @@ equivalenceCheck' solvers sess branchesA branchesB create = do
       ps <- forM allPairs $ uncurry distinct
       let differingEndStates = sortBySize $ mapMaybe (view _1) ps
       let knownIssues = foldr ((<>) . (view _2)) mempty ps
-      liftIO $ putStrLn $ "Asking the SMT solver for " <> (show $ length differingEndStates) <> " pairs"
+      when conf.debug $ liftIO $ putStrLn $ "Asking the SMT solver for " <> (show $ length differingEndStates) <> " pairs"
       when conf.dumpEndStates $ forM_ (zip differingEndStates [(1::Integer)..]) (\(x, i) ->
         liftIO $ T.writeFile ("prop-checked-" <> show i <> ".prop") (T.pack $ show x))
 
