@@ -15,7 +15,6 @@
 
 module EVM.Merge
   ( execUntilPCSymbolic
-  , speculateLoop
   , exploreNestedBranch
   , tryMergeForwardJump
   , checkNoSideEffects
