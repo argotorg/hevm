@@ -671,10 +671,11 @@ data MergeState = MergeState
   { msActive          :: Bool   -- ^ Inside speculative execution
   , msTargetPC        :: Int    -- ^ PC we're trying to reach
   , msRemainingBudget :: Int    -- ^ Instructions remaining in budget
+  , msNestingDepth    :: Int    -- ^ Current nested branch depth
   } deriving (Show, Eq, Generic)
 
 defaultMergeState :: MergeState
-defaultMergeState = MergeState False 0 0
+defaultMergeState = MergeState False 0 0 0
 
 data VMType = Symbolic | Concrete
 

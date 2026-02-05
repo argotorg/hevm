@@ -891,10 +891,15 @@ exec1 conf = do
                       Right jumpTarget -> do
                         -- Check if we're already in merge mode (speculative execution)
                         ms <- use #mergeState
-                        if ms.msActive then
-                          -- Inside speculation: nested branch, bail out
-                          -- This will cause speculateLoop to return Nothing
-                          assign #result $ Just $ VMFailure BadJumpDestination
+                        if ms.msActive then do
+                          -- Inside speculation: try both paths using budget-based exploration
+                          result <- Merge.exploreNestedBranch conf (exec1 conf) jumpTarget ms.msTargetPC cond xs
+                          case result of
+                            Just vmFinal -> put vmFinal
+                            Nothing -> do
+                              -- Neither path converged - signal failure by setting a result
+                              -- This will cause speculateLoop to return Nothing
+                              assign #result $ Just $ VMFailure BadJumpDestination
                         else do
                           merged <- Merge.tryMergeForwardJump conf (exec1 conf) vm.state.pc jumpTarget cond xs
                           unless merged $ do
