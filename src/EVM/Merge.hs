@@ -14,8 +14,7 @@
 -- This reduces path explosion from 2^N to linear in many common patterns.
 
 module EVM.Merge
-  ( exploreNestedBranch
-  , tryMergeForwardJump
+  ( tryMergeForwardJump
   ) where
 
 import Control.Monad (when)
@@ -42,7 +41,6 @@ speculateLoopOuter conf exec1Step targetPC = do
       { msActive = True
       , msTargetPC = targetPC
       , msRemainingBudget = budget
-      , msNestingDepth = 0
       }
     res <- speculateLoop conf exec1Step targetPC
     -- Reset merge state
@@ -71,91 +69,6 @@ speculateLoop conf exec1Step targetPC = do
                 modifying #mergeState $ \s -> s { msRemainingBudget = s.msRemainingBudget - 1 }
                 exec1Step
                 speculateLoop conf exec1Step targetPC
-
--- | When hitting nested JUMPI during speculation, try both paths
--- Returns Just vmState if BOTH paths converge to targetPC, Nothing otherwise
-exploreNestedBranch
-  :: Config
-  -> EVM Symbolic ()  -- ^ Single-step executor
-  -> Int              -- ^ Nested jump target
-  -> Int              -- ^ Target PC we're trying to reach
-  -> Expr EWord       -- ^ Branch condition
-  -> [Expr EWord]     -- ^ Stack after popping JUMPI args
-  -> EVM Symbolic (Maybe (VM Symbolic))
-exploreNestedBranch conf exec1Step nestedJumpTarget targetPC cond stackAfterPop = do
-    ms <- use #mergeState
-    let maxDepth = conf.mergeMaxDepth
-
-    -- Check limits
-    if ms.msRemainingBudget <= 0 || ms.msNestingDepth >= maxDepth
-      then pure Nothing
-      else do
-        vm0 <- get
-
-        -- CRITICAL: Skip if memory is mutable (ConcreteMemory)
-        -- Mutable memory is not properly restored by `put vm0`
-        case vm0.state.memory of
-          ConcreteMemory _ -> pure Nothing  -- Can't safely explore with mutable memory
-          SymbolicMemory _ -> do
-            -- Save original merge state for proper backtracking
-            let originalDepth = ms.msNestingDepth
-                originalBudget = ms.msRemainingBudget
-                halfBudget = max 10 (originalBudget `div` 2)
-
-            -- Try fall-through path (cond == 0)
-            put vm0
-            assign' (#state % #stack) stackAfterPop
-            modifying' (#state % #pc) (+ 1)  -- Move past JUMPI
-            modifying #mergeState $ \s -> s
-              { msNestingDepth = s.msNestingDepth + 1, msRemainingBudget = halfBudget }
-
-            resultFallThrough <- speculateLoop conf exec1Step targetPC
-
-            -- Restore state for jump path
-            put vm0
-            assign (#state % #pc) nestedJumpTarget
-            assign' (#state % #stack) stackAfterPop
-            modifying #mergeState $ const ms
-              { msNestingDepth = originalDepth + 1, msRemainingBudget = halfBudget }
-
-            -- Try jump path (cond != 0)
-            resultJump <- speculateLoop conf exec1Step targetPC
-
-            -- SOUNDNESS: Both paths MUST converge for merge to be valid
-            case (resultFallThrough, resultJump) of
-              (Just vmFalse, Just vmTrue) -> do
-                -- Both paths converged - merge them using ITE
-                let falseStack = vmFalse.state.stack
-                    trueStack = vmTrue.state.stack
-                -- Check that stacks have same depth and no side effects
-                if length falseStack == length trueStack
-                   && checkNoSideEffects vm0 vmFalse
-                   && checkNoSideEffects vm0 vmTrue
-                  then do
-                    -- Merge stacks using ITE with the branch condition
-                    -- Simplify merged expressions to prevent unbounded growth
-                    -- (e.g. Mul (Lit 0) (ITE ...) must reduce to Lit 0)
-                    let condSimp = Expr.simplify cond
-                        mergeExpr t f
-                          | t == f    = t
-                          | otherwise = Expr.simplify (ITE condSimp t f)
-                        mergedStack = zipWith mergeExpr trueStack falseStack
-                    -- Use vm0 as base and update PC and stack
-                    put vm0
-                    assign (#state % #pc) targetPC
-                    assign (#state % #stack) mergedStack
-                    assign #result Nothing
-                    modifying #mergeState $ const ms
-                      { msNestingDepth = originalDepth, msRemainingBudget = originalBudget - (originalBudget - halfBudget) * 2}
-                    Just <$> get
-                  else do
-                    -- Side effects or stack mismatch - can't merge
-                    put vm0
-                    pure Nothing
-              _ -> do
-                -- One or both paths didn't converge - can't merge
-                put vm0
-                pure Nothing
 
 -- | Try to merge a forward jump (skip block pattern) for Symbolic execution
 -- Returns True if merge succeeded, False if we should fall back to forking

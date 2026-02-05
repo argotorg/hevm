@@ -49,7 +49,6 @@ data Config = Config
   , earlyAbort       :: Bool
   -- State merging parameters
   , mergeMaxBudget   :: Int        -- ^ Max instructions for speculative merge exploration
-  , mergeMaxDepth    :: Int        -- ^ Max nested branch depth during merge speculation
   }
   deriving (Show, Eq)
 
@@ -71,7 +70,6 @@ defaultConfig = Config
   , onlyDeployed = False
   , earlyAbort = False
   , mergeMaxBudget = 1000   -- Default: allow up to 1000 instructions during merge speculation
-  , mergeMaxDepth = 5       -- Default: allow up to 5 levels of nested branches
   }
 
 -- Write to the console
