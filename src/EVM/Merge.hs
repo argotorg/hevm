@@ -117,7 +117,8 @@ tryMergeForwardJump conf exec1Step currentPC jumpTarget cond stackAfterPop = do
                         | otherwise = Expr.simplify (ITE condSimp t f)
                       mergedStack = zipWith mergeExpr trueStack falseStack
                   -- Use vm0 as base and update only PC and stack
-                  when conf.debug $ traceM $ "Merged forward jump at PC " ++ show jumpTarget
+                  when conf.debug $ traceM $ "Merged forward jump"
+                    ++ runSrcLookup vm0.config.srcLookup vm0.env.contracts vm0.state.contract jumpTarget
                   put vm0
                   assign (#state % #pc) jumpTarget
                   assign (#state % #stack) mergedStack

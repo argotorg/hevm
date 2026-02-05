@@ -190,6 +190,7 @@ makeVm o = do
     , config = RuntimeConfig
       { allowFFI = o.allowFFI
       , baseState = o.baseState
+      , srcLookup = Nothing
       }
     , forks = Seq.singleton (ForkState env block mempty "")
     , currentFork = 0
