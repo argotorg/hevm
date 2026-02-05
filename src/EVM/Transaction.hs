@@ -363,7 +363,8 @@ initTx vm =
     oldBalance = view (accountAt toAddr % #balance) preState
     creation = vm.tx.isCreate
     -- Check for collision at target address for CREATE transactions
-    hasCollision = creation && collision (Map.lookup toAddr preState)
+    preStateContract = Map.lookup toAddr preState
+    hasCollision = creation && collision preStateContract
     -- For collision: don't transfer value, don't create contract
     initState = if hasCollision
       then touchAccount toAddr preState

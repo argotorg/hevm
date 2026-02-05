@@ -537,9 +537,14 @@ vmForCase x = do
           -- (makeVm's refunds are based on incorrect contract state)
           newRefunds = authRefunds
           -- Check if the initial contract has delegation code and resolve it
-          (resolvedCode, resolvedCodeAddr) = case Map.lookup initialContractAddr contractsWithDelegations of
-            Just target -> resolveDelegatedCode target initialContractAddr contractsWithDelegations
-            Nothing -> (vm.state.code, vm.state.codeContract)
+          -- BUT: For CREATE transactions, don't resolve - we want to run the InitCode,
+          -- not the code at the pre-existing address
+          (resolvedCode, resolvedCodeAddr) =
+            if opts.create
+            then (vm.state.code, vm.state.codeContract)  -- Keep InitCode for CREATE
+            else case Map.lookup initialContractAddr contractsWithDelegations of
+              Just target -> resolveDelegatedCode target initialContractAddr contractsWithDelegations
+              Nothing -> (vm.state.code, vm.state.codeContract)
       in vm { env = vm.env { contracts = contractsWithDelegations }
             , tx = vm.tx { subState = vm.tx.subState { accessedAddresses = newAccessed
                                                      , refunds = newRefunds }
