@@ -115,6 +115,7 @@ jobs:
             git
             unzip
             bash
+            python
           pacboy: >-
             cmake:p
             ninja:p

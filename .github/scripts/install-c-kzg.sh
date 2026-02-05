@@ -5,6 +5,9 @@ set -eux -o pipefail
 
 INSTALL_VERSION=2.1.5
 
+# Capture repo root before changing directories
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
 if [[ "$(uname -s)" =~ ^MSYS_NT.* ]]; then
     echo "This script is only meant to run on Windows under MSYS2"
     exit 1
@@ -55,7 +58,6 @@ cp -r eip4844 "$PREFIX/include/"
 cp -r eip7594 "$PREFIX/include/"
 cp -r setup "$PREFIX/include/"
 
-# Generate embedded trusted setup header
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-python3 "$SCRIPT_DIR/../../scripts/generate-kzg-trusted-setup.py" \
+# Generate embedded trusted setup header (MSYS2 uses 'python' not 'python3')
+python "$REPO_ROOT/scripts/generate-kzg-trusted-setup.py" \
     trusted_setup.txt "$PREFIX/include/kzg-trusted-setup-data.h"
