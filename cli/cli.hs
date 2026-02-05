@@ -132,7 +132,7 @@ commonOptions = CommonOptions
   <*> (switch $ long "only-deployed" <> help "When trying to resolve unknown addresses, only use addresses of deployed contracts")
   <*> (optional $ strOption $ long "cache-dir" <> help "Directory to save and load RPC cache")
   <*> (switch $  long "early-abort" <> help "Stop exploration immediately upon finding the first counterexample")
-  <*> (option auto $ long "merge-max-budget" <> showDefault <> value 10000 <> help "Max instructions for speculative merge exploration during path merging")
+  <*> (option auto $ long "merge-max-budget" <> showDefault <> value 100 <> help "Max instructions for speculative merge exploration during path merging")
 
 data CommonExecOptions = CommonExecOptions
   { address       ::Maybe Addr

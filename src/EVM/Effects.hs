@@ -68,7 +68,7 @@ defaultConfig = Config
   , simp = True
   , onlyDeployed = False
   , earlyAbort = False
-  , mergeMaxBudget = 1000
+  , mergeMaxBudget = 100
   }
 
 -- Write to the console

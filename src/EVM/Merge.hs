@@ -108,9 +108,7 @@ tryMergeForwardJump conf exec1Step currentPC jumpTarget cond stackAfterPop = do
               then do
                 -- Merge stacks using ITE expressions, simplifying to prevent growth
                 let condSimp = Expr.simplify cond
-                    mergeExpr t f
-                      | t == f    = t
-                      | otherwise = Expr.simplify (ITE condSimp t f)
+                    mergeExpr t f = Expr.simplify $ ITE condSimp t f
                     mergedStack = zipWith mergeExpr trueStack falseStack
                 -- Use vm0 as base and update only PC and stack
                 when conf.debug $ traceM $ "Merged forward jump"
