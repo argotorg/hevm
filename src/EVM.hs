@@ -1660,8 +1660,8 @@ lazySlice offset size bs =
 parseModexpLength :: ByteString -> (W256, W256, W256)
 parseModexpLength input =
   let lenb = word $ LS.toStrict $ lazySlice  0 32 input
-      lene = word $ LS.toStrict $ lazySlice 32 64 input
-      lenm = word $ LS.toStrict $ lazySlice 64 96 input
+      lene = word $ LS.toStrict $ lazySlice 32 32 input
+      lenm = word $ LS.toStrict $ lazySlice 64 32 input
   in (lenb, lene, lenm)
 
 --- checks if a range of ByteString bs starting at offset and length size is all zeros.
@@ -3835,9 +3835,12 @@ instance VMOps Concrete where
     else continue
 
   gasTryFrom (forceLit -> w256) =
-    case tryFrom w256 of
-      Left _ -> Left ()
-      Right a -> Right a
+    -- EVM spec: gas values larger than Word64 max should be treated as "max gas"
+    -- The 63/64 rule will cap it appropriately later
+    -- Note: We can't use tryFrom here because TryFrom W256 Word64 always succeeds (truncates)
+    if w256 > into (maxBound :: Word64)
+    then Right maxBound  -- Cap at Word64 max for overflow
+    else Right (unsafeInto w256)
 
   -- Gas cost of create, including hash cost if needed
   costOfCreate (FeeSchedule {..}) availableGas size hashNeeded = (createCost, initGas)
