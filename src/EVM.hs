@@ -1306,6 +1306,33 @@ delegationCodeLength = 23  -- 3-byte prefix + 20-byte address
 maxAuthNonce :: W256
 maxAuthNonce = 0xFFFFFFFFFFFFFFFF
 
+-- | Execute a BLS precompile with standard input validation and output handling
+executeBLSPrecompile
+  :: VMOps t
+  => Int                    -- ^ Precompile address (as Int for EVM.Precompiled.execute)
+  -> String                 -- ^ Debug name for forceConcreteBuf
+  -> (Int -> Bool)          -- ^ Input length validator
+  -> Int                    -- ^ Expected output size
+  -> Expr Buf               -- ^ Input buffer
+  -> Expr EWord             -- ^ Output offset
+  -> Expr EWord             -- ^ Output size
+  -> [Expr EWord]           -- ^ Stack tail
+  -> EVM t ()               -- ^ Action on failure
+  -> EVM t ()               -- ^ Action to execute next
+  -> EVM t ()
+executeBLSPrecompile addr name validateLen outLen input outOffset outSize xs onFail onNext =
+  forceConcreteBuf input name $ \input' ->
+    if not (validateLen (BS.length input'))
+    then onFail
+    else case EVM.Precompiled.execute addr input' outLen of
+      Nothing -> onFail
+      Just output -> do
+        let result = ConcreteBuf $ truncpadlit outLen output
+        assign' (#state % #stack) (Lit 1 : xs)
+        assign (#state % #returndata) result
+        copyBytesToMemory result outSize (Lit 0) outOffset
+        onNext
+
 executePrecompile
   :: (?op :: Word8, VMOps t)
   => Addr
@@ -1495,105 +1522,39 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
                 Nothing -> precompileFail
 
       -- BLS12-381 G1ADD (EIP-2537) - 0x0B
-      0x0B ->
-        forceConcreteBuf input "BLS_G1ADD" $ \input' ->
-          if BS.length input' /= g1AddInputSize
-          then precompileFail
-          else case EVM.Precompiled.execute 0x0B input' g1PointSize of
-            Nothing -> precompileFail
-            Just output -> do
-              let truncpaddedOutput = ConcreteBuf $ truncpadlit g1PointSize output
-              assign' (#state % #stack) (Lit 1 : xs)
-              assign (#state % #returndata) truncpaddedOutput
-              copyBytesToMemory truncpaddedOutput outSize (Lit 0) outOffset
-              next
+      0x0B -> executeBLSPrecompile 0x0B "BLS_G1ADD"
+                (== g1AddInputSize) g1PointSize
+                input outOffset outSize xs precompileFail next
 
       -- BLS12-381 G1MSM (EIP-2537) - 0x0C
-      0x0C ->
-        forceConcreteBuf input "BLS_G1MSM" $ \input' -> do
-          let len = BS.length input'
-          if len == 0 || len `mod` g1MsmPairSize /= 0
-          then precompileFail
-          else case EVM.Precompiled.execute 0x0C input' g1PointSize of
-            Nothing -> precompileFail
-            Just output -> do
-              let truncpaddedOutput = ConcreteBuf $ truncpadlit g1PointSize output
-              assign' (#state % #stack) (Lit 1 : xs)
-              assign (#state % #returndata) truncpaddedOutput
-              copyBytesToMemory truncpaddedOutput outSize (Lit 0) outOffset
-              next
+      0x0C -> executeBLSPrecompile 0x0C "BLS_G1MSM"
+                (\len -> len > 0 && len `mod` g1MsmPairSize == 0) g1PointSize
+                input outOffset outSize xs precompileFail next
 
       -- BLS12-381 G2ADD (EIP-2537) - 0x0D
-      0x0D ->
-        forceConcreteBuf input "BLS_G2ADD" $ \input' ->
-          if BS.length input' /= g2AddInputSize
-          then precompileFail
-          else case EVM.Precompiled.execute 0x0D input' g2PointSize of
-            Nothing -> precompileFail
-            Just output -> do
-              let truncpaddedOutput = ConcreteBuf $ truncpadlit g2PointSize output
-              assign' (#state % #stack) (Lit 1 : xs)
-              assign (#state % #returndata) truncpaddedOutput
-              copyBytesToMemory truncpaddedOutput outSize (Lit 0) outOffset
-              next
+      0x0D -> executeBLSPrecompile 0x0D "BLS_G2ADD"
+                (== g2AddInputSize) g2PointSize
+                input outOffset outSize xs precompileFail next
 
       -- BLS12-381 G2MSM (EIP-2537) - 0x0E
-      0x0E ->
-        forceConcreteBuf input "BLS_G2MSM" $ \input' -> do
-          let len = BS.length input'
-          if len == 0 || len `mod` g2MsmPairSize /= 0
-          then precompileFail
-          else case EVM.Precompiled.execute 0x0E input' g2PointSize of
-            Nothing -> precompileFail
-            Just output -> do
-              let truncpaddedOutput = ConcreteBuf $ truncpadlit g2PointSize output
-              assign' (#state % #stack) (Lit 1 : xs)
-              assign (#state % #returndata) truncpaddedOutput
-              copyBytesToMemory truncpaddedOutput outSize (Lit 0) outOffset
-              next
+      0x0E -> executeBLSPrecompile 0x0E "BLS_G2MSM"
+                (\len -> len > 0 && len `mod` g2MsmPairSize == 0) g2PointSize
+                input outOffset outSize xs precompileFail next
 
       -- BLS12-381 PAIRING (EIP-2537) - 0x0F
-      0x0F ->
-        forceConcreteBuf input "BLS_PAIRING" $ \input' -> do
-          let len = BS.length input'
-          if len `mod` blsPairingPairSize /= 0
-          then precompileFail
-          else case EVM.Precompiled.execute 0x0F input' blsPairingOutputSize of
-            Nothing -> precompileFail
-            Just output -> do
-              let truncpaddedOutput = ConcreteBuf $ truncpadlit blsPairingOutputSize output
-              assign' (#state % #stack) (Lit 1 : xs)
-              assign (#state % #returndata) truncpaddedOutput
-              copyBytesToMemory truncpaddedOutput outSize (Lit 0) outOffset
-              next
+      0x0F -> executeBLSPrecompile 0x0F "BLS_PAIRING"
+                (\len -> len `mod` blsPairingPairSize == 0) blsPairingOutputSize
+                input outOffset outSize xs precompileFail next
 
       -- BLS12-381 MAP_FP_TO_G1 (EIP-2537) - 0x10
-      0x10 ->
-        forceConcreteBuf input "BLS_MAP_FP_TO_G1" $ \input' ->
-          if BS.length input' /= mapFpInputSize
-          then precompileFail
-          else case EVM.Precompiled.execute 0x10 input' g1PointSize of
-            Nothing -> precompileFail
-            Just output -> do
-              let truncpaddedOutput = ConcreteBuf $ truncpadlit g1PointSize output
-              assign' (#state % #stack) (Lit 1 : xs)
-              assign (#state % #returndata) truncpaddedOutput
-              copyBytesToMemory truncpaddedOutput outSize (Lit 0) outOffset
-              next
+      0x10 -> executeBLSPrecompile 0x10 "BLS_MAP_FP_TO_G1"
+                (== mapFpInputSize) g1PointSize
+                input outOffset outSize xs precompileFail next
 
       -- BLS12-381 MAP_FP2_TO_G2 (EIP-2537) - 0x11
-      0x11 ->
-        forceConcreteBuf input "BLS_MAP_FP2_TO_G2" $ \input' ->
-          if BS.length input' /= mapFp2InputSize
-          then precompileFail
-          else case EVM.Precompiled.execute 0x11 input' g2PointSize of
-            Nothing -> precompileFail
-            Just output -> do
-              let truncpaddedOutput = ConcreteBuf $ truncpadlit g2PointSize output
-              assign' (#state % #stack) (Lit 1 : xs)
-              assign (#state % #returndata) truncpaddedOutput
-              copyBytesToMemory truncpaddedOutput outSize (Lit 0) outOffset
-              next
+      0x11 -> executeBLSPrecompile 0x11 "BLS_MAP_FP2_TO_G2"
+                (== mapFp2InputSize) g2PointSize
+                input outOffset outSize xs precompileFail next
 
       -- P256VERIFY (EIP-7212)
       0x100 ->
