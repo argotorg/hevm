@@ -231,7 +231,7 @@ runUnitTestContract
           tick $ indentLines 3 failOut
           pure [(True, False)]
         Just (VMSuccess _) -> do
-          forM testSigs $ \s -> symRun opts vm1 s solcContr buildOut.sources
+          forM testSigs $ \s -> symRun opts vm1 s buildOut.sources
         _ -> internalError "setUp() did not end with a result"
 
 dsTestFailedSym :: Map (Expr 'EAddr) (Expr EContract) -> VM t -> Prop
@@ -248,8 +248,8 @@ dsTestFailedConc store = case Map.lookup cheatCode store of
 
 -- Define the thread spawner for symbolic tests
 -- Returns tuple of (No Cex, No warnings)
-symRun :: forall m . App m => UnitTestOptions -> VM Concrete -> Sig -> SolcContract -> SourceCache -> m (Bool, Bool)
-symRun opts@UnitTestOptions{..} vm sig@(Sig testName types) solcContr sourceCache = do
+symRun :: forall m . App m => UnitTestOptions -> VM Concrete -> Sig -> SourceCache -> m (Bool, Bool)
+symRun opts@UnitTestOptions{..} vm sig@(Sig testName types) sourceCache = do
     let cs = callSig sig
     liftIO $ putStrLn $ "\x1b[96m[RUNNING]\x1b[0m " <> Text.unpack cs
     cd <- symCalldata cs types [] (AbstractBuf "txdata")
