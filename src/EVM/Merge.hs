@@ -74,8 +74,6 @@ speculateLoop conf exec1Step targetPC = do
 
 -- | When hitting nested JUMPI during speculation, try both paths
 -- Returns Just vmState if BOTH paths converge to targetPC, Nothing otherwise
--- SOUNDNESS: We MUST require both paths to converge and merge them with ITE.
--- Picking one path arbitrarily would lose path constraint information.
 exploreNestedBranch
   :: Config
   -> EVM Symbolic ()  -- ^ Single-step executor
@@ -199,9 +197,7 @@ tryMergeForwardJump conf exec1Step currentPC jumpTarget cond stackAfterPop = do
               -- Check merge conditions: same stack depth AND no side effects
               if length trueStack == length falseStack && soundnessOK
                 then do
-                  -- Merge stacks using ITE expressions
-                  -- Simplify merged expressions to prevent unbounded growth
-                  -- (e.g. Mul (Lit 0) (ITE ...) must reduce to Lit 0)
+                  -- Merge stacks using ITE expressions, simplifying to prevent growth
                   let condSimp = Expr.simplify cond
                       mergeExpr t f
                         | t == f    = t
