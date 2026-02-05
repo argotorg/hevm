@@ -669,7 +669,6 @@ deriving instance Show (VMResult t)
 -- | State tracking for speculative merge execution
 data MergeState = MergeState
   { msActive          :: Bool   -- ^ Inside speculative execution
-  , msTargetPC        :: Int    -- ^ PC we're trying to reach
   , msRemainingBudget :: Int    -- ^ Instructions remaining in budget
   } deriving (Show, Eq, Generic)
 

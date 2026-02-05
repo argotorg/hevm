@@ -39,7 +39,6 @@ speculateLoopOuter conf exec1Step targetPC = do
     let budget = conf.mergeMaxBudget
     modifying #mergeState $ \ms -> ms
       { msActive = True
-      , msTargetPC = targetPC
       , msRemainingBudget = budget
       }
     res <- speculateLoop conf exec1Step targetPC
