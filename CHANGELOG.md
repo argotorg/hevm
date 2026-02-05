@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Added
 - Support for `--early-abort` flag that aborts symbolic execution as soon as a counterexample is found
 - Support for `vm.etch(address, bytecode)` cheatcode to set the code of a contract at a given address
+- State merging via speculative execution of both branches of a JUMPI, joining the
+  resulting states whenever possible. Amount of speculative execution is
+  controlled via `merge-max-budget`
 
 ## Changed
 - `AbiFunction` and `AbiBytes` parser is now more strict
