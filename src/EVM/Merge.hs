@@ -191,10 +191,7 @@ tryMergeForwardJump conf exec1Step currentPC jumpTarget cond stackAfterPop = do
           maybeVmFalse <- speculateLoopOuter conf exec1Step jumpTarget
 
           case maybeVmFalse of
-            Nothing -> do
-              -- Couldn't converge - restore and pure False
-              put vm0
-              pure False
+            Nothing -> put vm0 >> pure False -- restore, can't merge
             Just vmFalse -> do
               let falseStack = vmFalse.state.stack
                   soundnessOK = checkNoSideEffects vm0 vmFalse
