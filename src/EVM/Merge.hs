@@ -98,7 +98,7 @@ tryMergeForwardJump conf exec1Step currentPC jumpTarget cond stackAfterPop = do
         maybeVmFalse <- speculateLoopOuter conf exec1Step jumpTarget
 
         case maybeVmFalse of
-          Nothing -> put vm0 >> pure False -- restore, can't merge
+          Nothing -> put vm0 >> pure False -- can't merge: EVM error, SMT/RPC query, over-budget
           Just vmFalse -> do
             let falseStack = vmFalse.state.stack
                 soundnessOK = checkNoSideEffects vm0 vmFalse
@@ -121,10 +121,7 @@ tryMergeForwardJump conf exec1Step currentPC jumpTarget cond stackAfterPop = do
                 assign #result Nothing
                 assign (#mergeState % #msActive) False
                 pure True
-              else do
-                -- Can't merge: stack depth or state differs
-                put vm0
-                pure False
+              else put vm0 >> pure False -- can't merge: stack depth or state differs
 
 -- | Check that execution had no side effects (storage, memory, logs, etc.)
 checkNoSideEffects :: VM Symbolic -> VM Symbolic -> Bool
