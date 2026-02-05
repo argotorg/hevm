@@ -37,10 +37,7 @@ speculateLoopOuter
 speculateLoopOuter conf exec1Step targetPC = do
     -- Initialize merge state for this speculation
     let budget = conf.mergeMaxBudget
-    modifying #mergeState $ \ms -> ms
-      { msActive = True
-      , msRemainingBudget = budget
-      }
+    modifying #mergeState $ \ms -> ms { msActive = True , msRemainingBudget = budget }
     res <- speculateLoop conf exec1Step targetPC
     -- Reset merge state
     assign #mergeState defaultMergeState
@@ -65,7 +62,7 @@ speculateLoop conf exec1Step targetPC = do
             | pc == targetPC -> Just <$> get  -- Reached target
             | otherwise -> do
                 -- Decrement budget and execute one instruction
-                modifying #mergeState $ \s -> s { msRemainingBudget = s.msRemainingBudget - 1 }
+                modifying #mergeState $ \s -> s { msRemainingBudget = subtract 1 s.msRemainingBudget }
                 exec1Step
                 speculateLoop conf exec1Step targetPC
 
