@@ -113,9 +113,7 @@ exploreNestedBranch conf exec1Step nestedJumpTarget targetPC cond stackAfterPop 
             assign' (#state % #stack) stackAfterPop
             modifying' (#state % #pc) (+ 1)  -- Move past JUMPI
             modifying #mergeState $ \s -> s
-              { msNestingDepth = s.msNestingDepth + 1
-              , msRemainingBudget = halfBudget
-              }
+              { msNestingDepth = s.msNestingDepth + 1, msRemainingBudget = halfBudget }
 
             resultFallThrough <- speculateLoop conf exec1Step targetPC
 
@@ -124,7 +122,7 @@ exploreNestedBranch conf exec1Step nestedJumpTarget targetPC cond stackAfterPop 
             assign (#state % #pc) nestedJumpTarget
             assign' (#state % #stack) stackAfterPop
             modifying #mergeState $ const ms
-              { msNestingDepth = originalDepth + 1 , msRemainingBudget = halfBudget }
+              { msNestingDepth = originalDepth + 1, msRemainingBudget = halfBudget }
 
             -- Try jump path (cond != 0)
             resultJump <- speculateLoop conf exec1Step targetPC
