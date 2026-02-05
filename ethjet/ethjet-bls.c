@@ -65,7 +65,10 @@ static int is_valid_fp2(const uint8_t *fp2_128) {
  * If subgroup_check is true, also verifies the point is in G1 subgroup */
 static int decode_g1_point(blst_p1_affine *out, const uint8_t *in128, int subgroup_check) {
     /* Validate field elements */
-    if (!is_valid_fp(in128) || !is_valid_fp(in128 + 64)) {
+    if (!is_valid_fp(in128)) {
+        return 0;
+    }
+    if (!is_valid_fp(in128 + 64)) {
         return 0;
     }
 
@@ -235,8 +238,12 @@ int ethjet_bls_g1mul(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size)
 
 /* G1MSM: Multi-scalar multiplication on G1 */
 int ethjet_bls_g1msm(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size) {
-    if (out_size < 128) return 0;
-    if (in_size == 0 || in_size % 160 != 0) return 0;
+    if (out_size < 128) {
+        return 0;
+    }
+    if (in_size == 0 || in_size % 160 != 0) {
+        return 0;
+    }
 
     size_t k = in_size / 160;
 
