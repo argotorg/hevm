@@ -22,6 +22,7 @@ import Data.Maybe (fromMaybe, isNothing, fromJust)
 import Data.Word (Word8, Word64)
 import GHC.Generics (Generic)
 import Numeric (showHex)
+import Text.Read (readMaybe)
 import Witch (into, unsafeInto)
 
 data AccessListEntry = AccessListEntry
@@ -247,6 +248,16 @@ txGasCost fs tx =
 authListPrice :: FeeSchedule Word64 -> [AuthorizationEntry] -> Word64
 authListPrice fs al = fs.g_newaccount * unsafeInto (length al)
 
+-- EIP-7623 calldata floor gas constants
+calldataFloorBase :: Word64
+calldataFloorBase = 21000
+
+calldataFloorPerToken :: Word64
+calldataFloorPerToken = 10
+
+nonZeroTokenMultiplier :: Int
+nonZeroTokenMultiplier = 4
+
 -- | EIP-7623: Calculate floor gas cost based on calldata tokens
 -- tokens = zero_bytes + (nonzero_bytes * 4)
 -- floor_gas = 21000 + 10 * tokens
@@ -257,13 +268,9 @@ txdataFloorGas tx =
   let calldata     = tx.txdata
       zeroBytes    = BS.count 0 calldata
       nonZeroBytes = BS.length calldata - zeroBytes
-      -- tokens_in_calldata = zero_bytes + (nonzero_bytes * 4)
-      tokens       = unsafeInto zeroBytes + (unsafeInto nonZeroBytes * 4)
-      -- TOTAL_COST_FLOOR_PER_TOKEN = 10
-      floorPerToken = 10 :: Word64
-      -- Base transaction cost is always charged
-      baseCost     = 21000 :: Word64
-  in baseCost + floorPerToken * tokens
+      -- tokens_in_calldata = zero_bytes + (nonzero_bytes * nonZeroTokenMultiplier)
+      tokens       = unsafeInto zeroBytes + (unsafeInto nonZeroBytes * unsafeInto nonZeroTokenMultiplier)
+  in calldataFloorBase + calldataFloorPerToken * tokens
 
 
 instance FromJSON AccessListEntry where
@@ -279,14 +286,12 @@ instance FromJSON AuthorizationEntry where
     chainId_ <- wordField val "chainId"
     address_ <- addrField val "address"
     nonce_   <- wordField val "nonce"
-    yParity_ <- fmap (read :: String -> Word8) <$> val JSON..:? "yParity"
+    yParity_ <- fmap (fromMaybe 0 . readMaybe) <$> val JSON..:? "yParity"
     r_       <- wordField val "r"
     s_       <- wordField val "s"
     -- yParity may be in the 'v' field instead for some test fixtures
-    v_       <- fmap (read :: String -> Word8) <$> val JSON..:? "v"
-    let yParityVal = case yParity_ of
-                       Just y -> y
-                       Nothing -> fromMaybe 0 v_
+    v_       <- fmap (fromMaybe 0 . readMaybe) <$> val JSON..:? "v"
+    let yParityVal = fromMaybe (fromMaybe 0 v_) yParity_
     pure $ AuthorizationEntry chainId_ address_ nonce_ yParityVal r_ s_
   parseJSON invalid =
     JSON.typeMismatch "AuthorizationEntry" invalid
@@ -305,26 +310,32 @@ instance FromJSON Transaction where
     v        <- wordField val "v"
     value    <- wordField val "value"
     txType   <- fmap (read :: String -> Int) <$> val JSON..:? "type"
+
+    -- Helper to construct Transaction with common fields
+    let mkTx txtype accessList maxPrio' maxFee' authList =
+          Transaction tdata gasLimit gasPrice nonce r s toAddr v value
+                      txtype accessList maxPrio' maxFee' 1 authList
+
     case txType of
-      Just 0x00 -> pure $ Transaction tdata gasLimit gasPrice nonce r s toAddr v value LegacyTransaction [] Nothing Nothing 1 []
+      Just 0x00 -> pure $ mkTx LegacyTransaction [] Nothing Nothing []
       Just 0x01 -> do
         accessListEntries <- (val JSON..: "accessList") >>= parseJSONList
-        pure $ Transaction tdata gasLimit gasPrice nonce r s toAddr v value AccessListTransaction accessListEntries Nothing Nothing 1 []
+        pure $ mkTx AccessListTransaction accessListEntries Nothing Nothing []
       Just 0x02 -> do
         accessListEntries <- (val JSON..: "accessList") >>= parseJSONList
-        pure $ Transaction tdata gasLimit gasPrice nonce r s toAddr v value EIP1559Transaction accessListEntries maxPrio maxFee 1 []
+        pure $ mkTx EIP1559Transaction accessListEntries maxPrio maxFee []
       Just 0x03 -> do
         accessListEntries <- (val JSON..: "accessList") >>= parseJSONList
         -- TODO: capture max_fee_per_blob_gas and blob_versioned_hashes EIP4844
-        pure $ Transaction tdata gasLimit gasPrice nonce r s toAddr v value EIP4844Transaction accessListEntries maxPrio maxFee 1 []
+        pure $ mkTx EIP4844Transaction accessListEntries maxPrio maxFee []
       Just 0x04 -> do
         accessListEntries <- (val JSON..: "accessList") >>= parseJSONList
         authListEntries <- (val JSON..:? "authorizationList") >>= \case
           Just list -> parseJSONList list
           Nothing -> pure []
-        pure $ Transaction tdata gasLimit gasPrice nonce r s toAddr v value EIP7702Transaction accessListEntries maxPrio maxFee 1 authListEntries
+        pure $ mkTx EIP7702Transaction accessListEntries maxPrio maxFee authListEntries
       Just _ -> fail "unrecognized custom transaction type"
-      Nothing -> pure $ Transaction tdata gasLimit gasPrice nonce r s toAddr v value LegacyTransaction [] Nothing Nothing 1 []
+      Nothing -> pure $ mkTx LegacyTransaction [] Nothing Nothing []
   parseJSON invalid =
     JSON.typeMismatch "Transaction" invalid
 
