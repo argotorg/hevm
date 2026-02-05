@@ -1,6 +1,6 @@
 module EVM.Test.BlockchainTests (prepareTests, problematicTests, findIgnoreReason, Case, vmForCase, checkExpectation, allTestCases) where
 
-import EVM (initialContract, makeVm, setEIP4788Storage, setEIP2935Storage, processAuthorizations, getAuthoritiesToWarm, resolveDelegatedCode)
+import EVM (initialContract, makeVm, setEIP4788Storage, setEIP2935Storage, processAuthorizations, getAuthoritiesToWarm, resolveDelegatedCode, getDelegationTarget, isPrecompileAddr')
 import EVM.Concrete qualified as EVM
 import EVM.Effects
 import EVM.Expr (maybeLitAddrSimp)
@@ -512,17 +512,25 @@ vmForCase x = do
       let chainId = opts.chainId
           authList = opts.authorizationList
           origin = opts.origin
-          (contractsWithDelegations, authRefunds, delegationTargets) = processAuthorizations chainId origin authList vm.env.contracts
-          -- Get addresses to warm (after chain_id validation)
+          (contractsWithDelegations, authRefunds, _) = processAuthorizations chainId origin authList vm.env.contracts
+          -- Get addresses to warm (after chain_id validation) - these are the AUTHORITY accounts
           authWarmAddrs = getAuthoritiesToWarm chainId authList
-          -- Update accessed addresses with auth warm addresses AND delegation targets
+          -- Check if the initial contract (TX destination) has delegation code
+          -- Per EIP-7702: "if a transaction's destination has a delegation indicator,
+          -- add the target of the delegation to accessed_addresses"
+          initialContractAddr = vm.state.contract
+          destDelegationTarget = case Map.lookup initialContractAddr contractsWithDelegations of
+            Just target -> case getDelegationTarget target.code of
+              Just delegatedTo -> [LitAddr delegatedTo]
+              Nothing -> []
+            Nothing -> []
+          -- Update accessed addresses with auth warm addresses AND destination's delegation target
           currentAccessed = vm.tx.subState.accessedAddresses
-          newAccessed = Set.union currentAccessed (Set.fromList (authWarmAddrs ++ delegationTargets))
+          newAccessed = Set.union currentAccessed (Set.fromList (authWarmAddrs ++ destDelegationTarget))
           -- Replace subState refunds with the ones from the correct pre-state
           -- (makeVm's refunds are based on incorrect contract state)
           newRefunds = authRefunds
           -- Check if the initial contract has delegation code and resolve it
-          initialContractAddr = vm.state.contract
           (resolvedCode, resolvedCodeAddr) = case Map.lookup initialContractAddr contractsWithDelegations of
             Just target -> resolveDelegatedCode target initialContractAddr contractsWithDelegations
             Nothing -> (vm.state.code, vm.state.codeContract)

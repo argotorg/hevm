@@ -2548,44 +2548,52 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
           abi <- maybeLitWordSimp . readBytes 4 (Lit 0) <$> readMemory xInOffset (Lit 4)
           -- EIP-7702: Resolve delegation if target has delegation code
           let (resolvedCode, codeAddr) = resolveDelegatedCode target addr vm0.env.contracts
-          let newContext = CallContext
-                            { target    = addr
-                            , context   = xContext
-                            , offset    = xOutOffset
-                            , size      = xOutSize
-                            , codehash  = target.codehash
-                            , callreversion = vm0.env.contracts
-                            , subState  = vm0.tx.subState
-                            , abi
-                            , calldata
-                            }
-          pushTrace (FrameTrace newContext)
-          next
-          vm1 <- get
-          pushTo #frames $ Frame
-            { state = vm1.state { stack = xs }
-            , context = newContext
-            }
+          -- EIP-7702: If delegation resolved to a different address, charge access cost
+          -- "If a code executing instruction accesses a cold account during the
+          -- resolution of delegated code, add an additional COLD_ACCOUNT_READ_COST"
+          let finishCall = do
+                let newContext = CallContext
+                              { target    = addr
+                              , context   = xContext
+                              , offset    = xOutOffset
+                              , size      = xOutSize
+                              , codehash  = target.codehash
+                              , callreversion = vm0.env.contracts
+                              , subState  = vm0.tx.subState
+                              , abi
+                              , calldata
+                              }
+                pushTrace (FrameTrace newContext)
+                next
+                vm1 <- get
+                pushTo #frames $ Frame
+                  { state = vm1.state { stack = xs }
+                  , context = newContext
+                  }
 
-          let clearInitCode = \case
-                (InitCode _ _) -> InitCode mempty mempty
-                a -> a
+                let clearInitCode = \case
+                      (InitCode _ _) -> InitCode mempty mempty
+                      a -> a
 
-          newMemory <- ConcreteMemory <$> VS.Mutable.new 0
-          zoom #state $ do
-            assign #gas xGas
-            assign #pc 0
-            -- EIP-7702: Use resolved code (possibly from delegated address)
-            assign #code (clearInitCode resolvedCode)
-            assign #codeContract codeAddr
-            assign #stack mempty
-            assign #memory newMemory
-            assign #memorySize 0
-            assign #returndata mempty
-            assign #calldata calldata
-            assign #overrideCaller Nothing
-            assign #resetCaller False
-          continue addr
+                newMemory <- ConcreteMemory <$> VS.Mutable.new 0
+                zoom #state $ do
+                  assign #gas xGas
+                  assign #pc 0
+                  -- EIP-7702: Use resolved code (possibly from delegated address)
+                  assign #code (clearInitCode resolvedCode)
+                  assign #codeContract codeAddr
+                  assign #stack mempty
+                  assign #memory newMemory
+                  assign #memorySize 0
+                  assign #returndata mempty
+                  assign #calldata calldata
+                  assign #overrideCaller Nothing
+                  assign #resetCaller False
+                continue addr
+          -- Charge access cost for delegation target if different from call target
+          if codeAddr /= addr
+            then accessAndBurn codeAddr finishCall
+            else finishCall
 
 -- -- * Contract creation
 
@@ -3497,7 +3505,11 @@ resolveDelegatedCode target targetAddr contracts =
     Nothing -> (target.code, targetAddr)
     Just delegatedTo ->
       let delegatedAddr = LitAddr delegatedTo
-      in case Map.lookup delegatedAddr contracts of
+      -- EIP-7702: If delegation target is a precompile address (0x01-0x11 or 0x100),
+      -- the retrieved code is considered empty and calls execute empty code
+      in if isPrecompileAddr' delegatedTo
+         then (RuntimeCode (ConcreteRuntimeCode ""), delegatedAddr)
+         else case Map.lookup delegatedAddr contracts of
            Just delegatedContract -> (delegatedContract.code, delegatedAddr)
            -- If delegated-to doesn't exist, treat as empty code
            Nothing -> (RuntimeCode (ConcreteRuntimeCode ""), delegatedAddr)
@@ -3632,11 +3644,11 @@ processAuthorizations chainId origin auths contracts = foldl processOne (contrac
                    newRefs = if accountReallyExists
                              then (authorityAddr, authRefundAmount) : refs
                              else refs
-                   -- EIP-7702 step 7: Add delegation target to accessed addresses (if non-zero)
-                   newWarmAddrs = if auth.authAddress /= 0
-                                  then LitAddr auth.authAddress : warmAddrs
-                                  else warmAddrs
-               in (Map.insert authorityAddr newContract cs, newRefs, newWarmAddrs)
+                   -- Note: EIP-7702 step 7 says to add the AUTHORITY account to accessed_addresses,
+                   -- which is handled separately in getAuthoritiesToWarm. The delegation TARGET
+                   -- should only be warmed if it's the transaction's destination's delegation target,
+                   -- not for every authorization. So we don't add delegation targets here.
+               in (Map.insert authorityAddr newContract cs, newRefs, warmAddrs)
 
 -- | Check if bytecode is a delegation code (0xef0100 prefix)
 isDelegationCode :: ByteString -> Bool
