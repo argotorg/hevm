@@ -17,7 +17,8 @@ cd "blst-$INSTALL_VERSION"
 
 # Build using the provided build script
 # The script auto-detects platform and uses appropriate assembly
-./build.sh CFLAGS="-O2 -fPIC -D__BLST_PORTABLE__"
+# CFLAGS must be set as environment variable, not passed as argument
+CFLAGS="-O2 -fPIC -D__BLST_PORTABLE__" ./build.sh
 
 # Install headers and library
 mkdir -p "$PREFIX/lib" "$PREFIX/include"
