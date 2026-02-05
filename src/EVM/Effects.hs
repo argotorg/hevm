@@ -68,7 +68,7 @@ defaultConfig = Config
   , simp = True
   , onlyDeployed = False
   , earlyAbort = False
-  , mergeMaxBudget = 1000   -- Default: allow up to 1000 instructions during merge speculation
+  , mergeMaxBudget = 1000
   }
 
 -- Write to the console
