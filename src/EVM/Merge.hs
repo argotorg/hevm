@@ -14,10 +14,8 @@
 -- This reduces path explosion from 2^N to linear in many common patterns.
 
 module EVM.Merge
-  ( execUntilPCSymbolic
-  , exploreNestedBranch
+  ( exploreNestedBranch
   , tryMergeForwardJump
-  , checkNoSideEffects
   ) where
 
 import Control.Monad (when)
