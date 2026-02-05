@@ -199,15 +199,15 @@ signingData tx =
           , rlpWord256 $ undefined -- TODO EIP4844 max_fee_per_blob_gas
           , undefined -- TODO EIP4844 blob_versioned_hashes
           ]
-        rlpAuthList = EVM.RLP.List $ map (\authEntry ->
-          EVM.RLP.List [ rlpWord256 authEntry.authChainId
-                       , BS $ word160Bytes authEntry.authAddress
-                       , rlpWord256 authEntry.authNonce
-                       , rlpWord256 (into authEntry.authYParity)
-                       , rlpWord256 authEntry.authR
-                       , rlpWord256 authEntry.authS
-                       ]
-          ) tx.authorizationList
+        rlpAuthList = EVM.RLP.List $ map encodeAuth tx.authorizationList
+        encodeAuth auth = EVM.RLP.List
+          [ rlpWord256 auth.authChainId
+          , BS $ word160Bytes auth.authAddress
+          , rlpWord256 auth.authNonce
+          , rlpWord256 (into auth.authYParity)
+          , rlpWord256 auth.authR
+          , rlpWord256 auth.authS
+          ]
         eip7702Data = cons 0x04 $ rlpList
           [ rlpWord256 tx.chainId
           , rlpWord256 tx.nonce
@@ -255,7 +255,7 @@ calldataFloorBase = 21000
 calldataFloorPerToken :: Word64
 calldataFloorPerToken = 10
 
-nonZeroTokenMultiplier :: Int
+nonZeroTokenMultiplier :: Word64
 nonZeroTokenMultiplier = 4
 
 -- | EIP-7623: Calculate floor gas cost based on calldata tokens
@@ -269,7 +269,7 @@ txdataFloorGas tx =
       zeroBytes    = BS.count 0 calldata
       nonZeroBytes = BS.length calldata - zeroBytes
       -- tokens_in_calldata = zero_bytes + (nonzero_bytes * nonZeroTokenMultiplier)
-      tokens       = unsafeInto zeroBytes + (unsafeInto nonZeroBytes * unsafeInto nonZeroTokenMultiplier)
+      tokens       = unsafeInto zeroBytes + unsafeInto nonZeroBytes * nonZeroTokenMultiplier
   in calldataFloorBase + calldataFloorPerToken * tokens
 
 
@@ -286,13 +286,17 @@ instance FromJSON AuthorizationEntry where
     chainId_ <- wordField val "chainId"
     address_ <- addrField val "address"
     nonce_   <- wordField val "nonce"
-    yParity_ <- fmap (fromMaybe 0 . readMaybe) <$> val JSON..:? "yParity"
+    yParityVal <- parseYParity val
     r_       <- wordField val "r"
     s_       <- wordField val "s"
-    -- yParity may be in the 'v' field instead for some test fixtures
-    v_       <- fmap (fromMaybe 0 . readMaybe) <$> val JSON..:? "v"
-    let yParityVal = fromMaybe (fromMaybe 0 v_) yParity_
     pure $ AuthorizationEntry chainId_ address_ nonce_ yParityVal r_ s_
+    where
+      -- yParity may be in the 'v' field instead for some test fixtures
+      parseYParity :: JSON.Object -> JSON.Parser Word8
+      parseYParity obj = do
+        yParity <- fmap (fromMaybe 0 . readMaybe) <$> obj JSON..:? "yParity"
+        v       <- fmap (fromMaybe 0 . readMaybe) <$> obj JSON..:? "v"
+        pure $ fromMaybe (fromMaybe 0 v) yParity
   parseJSON invalid =
     JSON.typeMismatch "AuthorizationEntry" invalid
 

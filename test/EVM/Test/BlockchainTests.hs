@@ -449,24 +449,15 @@ effectiveprice :: Transaction -> W256 -> W256
 effectiveprice tx baseFee = priorityFee tx baseFee + baseFee
 
 priorityFee :: Transaction -> W256 -> W256
-priorityFee tx baseFee = let
-    (txPrioMax, txMaxFee) = case tx.txtype of
-               EIP1559Transaction ->
-                 let maxPrio = fromJust tx.maxPriorityFeeGas
-                     maxFee = fromJust tx.maxFeePerGas
-                 in (maxPrio, maxFee)
-               EIP4844Transaction ->
-                 let maxPrio = fromJust tx.maxPriorityFeeGas
-                     maxFee = fromJust tx.maxFeePerGas
-                 in (maxPrio, maxFee)
-               EIP7702Transaction ->
-                 let maxPrio = fromJust tx.maxPriorityFeeGas
-                     maxFee = fromJust tx.maxFeePerGas
-                 in (maxPrio, maxFee)
-               _ ->
-                 let gasPrice = fromJust tx.gasPrice
-                 in (gasPrice, gasPrice)
+priorityFee tx baseFee =
+  let (txPrioMax, txMaxFee) = case tx.txtype of
+        EIP1559Transaction -> eip1559Style
+        EIP4844Transaction -> eip1559Style
+        EIP7702Transaction -> eip1559Style
+        _ -> let p = fromJust tx.gasPrice in (p, p)
   in min txPrioMax (txMaxFee - baseFee)
+  where
+    eip1559Style = (fromJust tx.maxPriorityFeeGas, fromJust tx.maxFeePerGas)
 
 maxBaseFee :: Transaction -> W256
 maxBaseFee tx =

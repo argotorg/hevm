@@ -1271,6 +1271,14 @@ precompiledContract this xGas precompileAddr recipient xValue inOffset inSize ou
 blsModulus :: Integer
 blsModulus = 52435875175126190479447740508185965837690552500527637822603658699938581184513
 
+-- Point Evaluation (EIP-4844) constants
+-- Input: versioned_hash (32) + z (32) + y (32) + commitment (48) + proof (48) = 192 bytes
+pointEvaluationInputSize :: Int
+pointEvaluationInputSize = 192
+
+versionedHashVersionKzg :: Word8
+versionedHashVersionKzg = 0x01
+
 -- BLS12-381 Precompile Input/Output Sizes (EIP-2537)
 g1PointSize, g2PointSize :: Int
 g1PointSize = 128
@@ -1488,18 +1496,14 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
       -- Point Evaluation (EIP-4844)
       0x0A ->
         forceConcreteBuf input "POINT_EVALUATION" $ \input' -> do
-          -- Input: versioned_hash (32) || z (32) || y (32) || commitment (48) || proof (48) = 192 bytes
-          -- Per EIP-4844: Input must be exactly 192 bytes
-          if BS.length input' /= 192
+          if BS.length input' /= pointEvaluationInputSize
           then precompileFail
           else do
             let versionedHash = BS.take 32 input'
                 z = BS.take 32 $ BS.drop 32 input'
                 y = BS.take 32 $ BS.drop 64 input'
-                -- commitment = BS.take 48 $ BS.drop 96 input'  -- Not used without KZG
-                -- proof = BS.take 48 $ BS.drop 144 input'      -- Not used without KZG
 
-                -- Check versioned_hash format: first byte must be 0x01 (VERSIONED_HASH_VERSION_KZG)
+                -- Check versioned_hash format: first byte must be VERSIONED_HASH_VERSION_KZG
                 hashVersion = if BS.null versionedHash then 0 else BS.head versionedHash
 
                 -- Check z and y are valid field elements (< BLS_MODULUS)
@@ -1507,7 +1511,7 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
                 yInt = into @Integer $ word y
 
             -- Validation checks per EIP-4844
-            if hashVersion /= 0x01
+            if hashVersion /= versionedHashVersionKzg
             then precompileFail  -- Invalid versioned hash version
             else if zInt >= blsModulus || yInt >= blsModulus
             then precompileFail  -- z or y out of bounds
@@ -3645,9 +3649,8 @@ processAuthorizations chainId origin auths contracts = foldl processOne (contrac
         | currentNonce == maxBound -> acc  -- Would overflow
         | into expectedNonce /= auth.authNonce -> acc  -- Nonce mismatch
         | otherwise ->
-            let newCode = if auth.authAddress == 0
-                          then RuntimeCode (ConcreteRuntimeCode mempty)
-                          else RuntimeCode (ConcreteRuntimeCode (makeDelegationCode auth.authAddress))
+            let codeBytes = if auth.authAddress == 0 then mempty else makeDelegationCode auth.authAddress
+                newCode = RuntimeCode (ConcreteRuntimeCode codeBytes)
                 newContract = case existingAccount of
                   Just c -> set #code newCode $ set #nonce (Just (currentNonce + 1)) c
                   Nothing -> set #nonce (Just 1) $ initialContract newCode
