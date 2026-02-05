@@ -3202,11 +3202,6 @@ instance VMOps Symbolic where
   whenSymbolicElse a _ = a
 
   partial e = assign #result $ Just (Unfinished e)
-  -- NOTE: We use the original forking behavior here instead of speculative merge.
-  -- Speculative merge in `branch` can cause unsoundness because the merged
-  -- ITE expressions may allow the solver to find false counterexamples.
-  -- State merging is still done in JUMPI via `tryMergeForwardJump` which has
-  -- proper soundness checks (no side effects, same stack depth, etc.)
   branch depthLimit cond continue = do
     loc <- codeloc
     pathconds <- use #constraints
