@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Changed
 - `AbiFunction` and `AbiBytes` parser is now more strict
+- We now check length of AbiArrayDynamic and don't crash in case it's too large
 - SMT queries now run in separate processes, which allows us to better manage
   timeouts and memory usage by the SMT solver.
 - We now allow limiting the SMT solver's memory usage via `--smt-memory` (in MB).
