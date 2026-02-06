@@ -823,6 +823,7 @@ data TxState = TxState
   , subState    :: SubState
   , isCreate    :: Bool
   , txReversion :: Map (Expr EAddr) Contract
+  , txdataFloorGas :: Word64
   }
   deriving (Show)
 
@@ -1007,6 +1008,7 @@ data VMOpts (t :: VMType) = VMOpts
   , freshAddresses :: Int
   , beaconRoot :: W256
   , parentHash :: W256      -- EIP-2935 parent block hash
+  , txdataFloorGas :: Word64
   }
 
 deriving instance Show (VMOpts Symbolic)
