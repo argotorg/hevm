@@ -162,11 +162,8 @@ allTestCases = do
 -- Test names are from the execution-spec-tests fixtures format.
 problematicTests :: [(String, String)]
 problematicTests =
-  [ -- EIP-4844 point evaluation precompile (0x0A) not implemented
-    ("tests/cancun/eip4844_blobs/test_point_evaluation_precompile.py::", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/cancun/eip4844_blobs/test_point_evaluation_precompile_gas.py::", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-    -- EIP-2537 precompiles
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g1add.py::", "EIP-2537 precompiles not implemented")
+  [ -- EIP-2537 precompiles
+    ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g1add.py::", "EIP-2537 precompiles not implemented")
   , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g1msm.py::", "EIP-2537 precompiles not implemented")
   , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g1mul.py::", "EIP-2537 precompiles not implemented")
   , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g2add.py::", "EIP-2537 precompiles not implemented")
@@ -179,31 +176,6 @@ problematicTests =
     -- EIP-7951
   , ("tests/osaka/eip7951_p256verify_precompiles/test_eip_mainnet.py::", "EIP-7951 precompiles not implemented")
   , ("tests/osaka/eip7951_p256verify_precompiles/test_p256verify.py::", "EIP-7951 precompiles not implemented")
-    -- Other tests that invoke the 0x0A precompile
-  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x000000000000000000000000000000000000000a", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stSpecialTest/failed_tx_xcf416c53_ParisFiller.json::", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-11]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-13]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-24]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-28]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-39]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-42]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-53]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-64]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-75]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-86]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-97]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-108]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-119]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-130]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-141]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-152]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-163]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-174]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-185]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-196]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-207]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-218]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
     -- Other precompile tests
   , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x000000000000000000000000000000000000000b", "0xB precompile not implemented")
   , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x000000000000000000000000000000000000000c", "0xC precompile not implemented")
@@ -213,6 +185,7 @@ problematicTests =
   , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x0000000000000000000000000000000000000010", "0x10 precompile not implemented")
   , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x0000000000000000000000000000000000000011", "0x11 precompile not implemented")
   , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x0000000000000000000000000000000000000100", "0x100 precompile not implemented")
+  , ("tests/static/state_tests/stSpecialTest/failed_tx_xcf416c53_ParisFiller.json::", "needs later EIP")
   , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::", "TODO")
     -- Needs EIP-7702 otherContractsFromPreState
   , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructed2Filler.json::", "needs EIP-7702")
