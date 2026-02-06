@@ -22,6 +22,7 @@ import EVM.Solidity
 import EVM.Types
 import EVM.Types qualified as Expr (Expr(Gas))
 import EVM.Sign qualified
+import EVM.RLP (RLP(..), rlpencode)
 import EVM.Concrete qualified as Concrete
 import EVM.CheatsTH
 import EVM.Effects (Config (..))
@@ -56,10 +57,10 @@ import Data.Tree
 import Data.Tree.Zipper qualified as Zipper
 import Data.Typeable
 import Data.Vector qualified as V
-import Data.Vector.Unboxed qualified as VU
 import Data.Vector.Storable qualified as VS
 import Data.Vector.Storable.Mutable qualified as VS.Mutable
 import Data.Vector.Storable.ByteString (vectorToByteString, byteStringToVector)
+import Data.Vector.Unboxed qualified as VU
 import Data.Word (Word8, Word64)
 import Text.Read (readMaybe)
 import Witch (into, tryFrom, unsafeInto, tryInto)
@@ -102,43 +103,6 @@ defaultVMOpts = VMOpts
   , txdataFloorGas = 0
   , authorizationList = []
   }
-
--- BLS12-381 Field Modulus (used by Point Evaluation precompile)
-blsModulus :: Integer
-blsModulus = 52435875175126190479447740508185965837690552500527637822603658699938581184513
-
--- Point Evaluation (EIP-4844) constants
--- Input: versioned_hash (32) + z (32) + y (32) + commitment (48) + proof (48) = 192 bytes
-pointEvaluationInputSize :: Int
-pointEvaluationInputSize = 192
-
-versionedHashVersionKzg :: Word8
-versionedHashVersionKzg = 0x01
-
--- BLS12-381 Precompile Input/Output Sizes (EIP-2537)
-g1PointSize, g2PointSize :: Int
-g1PointSize = 128
-g2PointSize = 256
-
--- Two points for ADD operations
-g1AddInputSize, g2AddInputSize :: Int
-g1AddInputSize = 256
-g2AddInputSize = 512
-
--- MSM pair sizes: point + 32-byte scalar
-g1MsmPairSize, g2MsmPairSize, blsPairingPairSize :: Int
-g1MsmPairSize = 160
-g2MsmPairSize = 288
-blsPairingPairSize = 384
-
--- Map operations input sizes
-mapFpInputSize, mapFp2InputSize :: Int
-mapFpInputSize = 64
-mapFp2InputSize = 128
-
--- Pairing output size
-blsPairingOutputSize :: Int
-blsPairingOutputSize = 32
 
 blankState :: VMOps t => ST RealWorld (FrameState t)
 blankState = do
@@ -183,12 +147,15 @@ makeVm o = do
   let txaccessList = o.txAccessList
       txorigin = o.origin
       txtoAddr = o.address
+      -- EIP-7702: Authority addresses are warmed after chain_id validation
+      authWarmAddrs = getAuthoritiesToWarm o.chainId o.authorizationList
       initialAccessedAddrs = fromList $
            [txorigin, txtoAddr, o.coinbase]
         ++ (fmap LitAddr [1..9])          -- Legacy precompiles (ECRECOVER, SHA256, etc.)
         ++ (fmap LitAddr [0x0A..0x11])    -- EIP-4844 Point Evaluation + BLS12-381 precompiles
         ++ [LitAddr 0x100]                -- EIP-7951 P256VERIFY
         ++ (Map.keys txaccessList)
+        ++ authWarmAddrs                  -- EIP-7702: Warmed authority addresses
       initialAccessedStorageKeys = fromList $ foldMap (uncurry (map . (,))) (Map.toList txaccessList)
       touched = if o.create then [txorigin] else [txorigin, txtoAddr]
   memory <- ConcreteMemory <$> VS.Mutable.new 0
@@ -202,11 +169,11 @@ makeVm o = do
       , origin = txorigin
       , toAddr = txtoAddr
       , value = o.value
-      , subState = SubState mempty touched initialAccessedAddrs initialAccessedStorageKeys mempty mempty
+      , subState = SubState mempty touched initialAccessedAddrs initialAccessedStorageKeys authRefunds mempty
       , isCreate = o.create
       , txReversion = Map.fromList ((o.address,o.contract):o.otherContracts)
       , txdataFloorGas = o.txdataFloorGas
-      , authorizationRefunds = []
+      , authorizationRefunds = authRefunds  -- EIP-7702: preserved on revert
       }
     , logs = []
     , traces = Zipper.fromForest []
@@ -246,9 +213,12 @@ makeVm o = do
     , pathsVisited = mempty
     }
     where
+    -- Process EIP-7702 authorization list to set delegation codes and collect refunds
+    baseContracts = Map.fromList ((o.address,o.contract):o.otherContracts)
+    (contractsWithDelegations, authRefunds) = processAuthorizations o.chainId o.origin o.authorizationList baseContracts
     env = Env
       { chainId = o.chainId
-      , contracts = Map.fromList ((o.address,o.contract):o.otherContracts)
+      , contracts = contractsWithDelegations
       , freshAddresses = o.freshAddresses
       , freshGasVals = 0
       }
@@ -1199,14 +1169,32 @@ callChecks
   -> EVM t ()
 callChecks this xGas xContext xTo xValue xInOffset xInSize xOutOffset xOutSize xs continue = do
   vm <- get
-  let fees = vm.block.schedule
+  let fees@FeeSchedule {..} = vm.block.schedule
   accessMemoryRange xInOffset xInSize $
     accessMemoryRange xOutOffset xOutSize $ do
-      availableGas <- use (#state % #gas)
       let recipientExists = accountExists xContext vm
       let from = fromMaybe vm.state.contract vm.state.overrideCaller
       fromBal <- preuse $ #env % #contracts % ix from % #balance
-      costOfCall fees recipientExists xValue availableGas xGas xTo $ \cost gas' -> do
+      -- EIP-7702: Check if target has delegation and calculate access cost
+      -- This cost must be included in c_extra BEFORE the 63/64 rule
+      -- We pre-burn it to reduce available gas, ensuring correct gas cap calculation
+      let doDelegationAccess = case xTo of
+            LitAddr _ -> case Map.lookup xTo vm.env.contracts of
+              Just targetContract -> case getDelegationTarget targetContract.code of
+                Just delegateTo -> do
+                  -- Check if delegation target is warm/cold and mark it accessed
+                  let delegateAddr = LitAddr delegateTo
+                  isWarm <- accessAccountForGas delegateAddr
+                  -- Pre-burn the delegation access cost so it's included before 63/64 rule
+                  let delegationGasCost = if isWarm then g_warm_storage_read else g_cold_account_access
+                  burn delegationGasCost $ pure ()
+                Nothing -> pure ()  -- No delegation
+              Nothing -> pure ()  -- Target doesn't exist
+            _ -> pure ()  -- Symbolic address
+      doDelegationAccess
+      -- Now get the updated available gas (after delegation cost is burned)
+      availableGas' <- use (#state % #gas)
+      costOfCall fees recipientExists xValue availableGas' xGas xTo $ \cost gas' -> do
         let checkCallDepth =
               if length vm.frames >= 1024
               then do
@@ -1217,6 +1205,7 @@ callChecks this xGas xContext xTo xValue xInOffset xInSize xOutOffset xOutSize x
               else continue (toGas gas')
         case (fromBal, xValue) of
           -- we're not transferring any value, and can skip the balance check
+          -- EIP-7702: Delegation cost was pre-burned, so just use cost here
           (_, Lit 0) -> burn (cost - gas') checkCallDepth
 
           -- from is in the state, we check if they have enough balance
@@ -1275,6 +1264,88 @@ precompiledContract this xGas precompileAddr recipient xValue inOffset inSize ou
             _ -> unexpectedSymArg "unexpected return value from precompile" [x]
           _ -> underrun
         _ -> pure ()
+
+-- BLS12-381 Field Modulus (used by Point Evaluation precompile)
+blsModulus :: Integer
+blsModulus = 52435875175126190479447740508185965837690552500527637822603658699938581184513
+
+-- Point Evaluation (EIP-4844) constants
+-- Input: versioned_hash (32) + z (32) + y (32) + commitment (48) + proof (48) = 192 bytes
+pointEvaluationInputSize :: Int
+pointEvaluationInputSize = 192
+
+versionedHashVersionKzg :: Word8
+versionedHashVersionKzg = 0x01
+
+-- BLS12-381 Precompile Input/Output Sizes (EIP-2537)
+g1PointSize, g2PointSize :: Int
+g1PointSize = 128
+g2PointSize = 256
+
+-- Two points for ADD operations
+g1AddInputSize, g2AddInputSize :: Int
+g1AddInputSize = 256
+g2AddInputSize = 512
+
+-- MSM pair sizes: point + 32-byte scalar
+g1MsmPairSize, g2MsmPairSize, blsPairingPairSize :: Int
+g1MsmPairSize = 160
+g2MsmPairSize = 288
+blsPairingPairSize = 384
+
+-- Map operations input sizes
+mapFpInputSize, mapFp2InputSize :: Int
+mapFpInputSize = 64
+mapFp2InputSize = 128
+
+-- Pairing output size
+blsPairingOutputSize :: Int
+blsPairingOutputSize = 32
+
+-- EIP-7702 Constants
+perEmptyAccountCost, perAuthBaseCost :: Word64
+perEmptyAccountCost = 25000
+perAuthBaseCost = 12500
+
+delegationCodeLength :: Int
+delegationCodeLength = BS.length delegationPrefix + 20
+
+maxAuthNonce :: W256
+maxAuthNonce = 0xFFFFFFFFFFFFFFFF
+
+-- | Validate chain ID and nonce for an EIP-7702 authorization entry
+-- Shared between getAuthoritiesToWarm and processAuthorizations
+isValidAuthChainAndNonce :: W256 -> AuthorizationEntry -> Bool
+isValidAuthChainAndNonce cid auth =
+  (auth.authChainId == 0 || auth.authChainId == cid) &&
+  auth.authNonce < maxAuthNonce
+
+-- | Execute a BLS precompile with standard input validation and output handling
+executeBLSPrecompile
+  :: VMOps t
+  => Int                    -- ^ Precompile address (as Int for EVM.Precompiled.execute)
+  -> String                 -- ^ Debug name for forceConcreteBuf
+  -> (Int -> Bool)          -- ^ Input length validator
+  -> Int                    -- ^ Expected output size
+  -> Expr Buf               -- ^ Input buffer
+  -> Expr EWord             -- ^ Output offset
+  -> Expr EWord             -- ^ Output size
+  -> [Expr EWord]           -- ^ Stack tail
+  -> EVM t ()               -- ^ Action on failure
+  -> EVM t ()               -- ^ Action to execute next
+  -> EVM t ()
+executeBLSPrecompile addr name validateLen outLen input outOffset outSize xs onFail onNext =
+  forceConcreteBuf input name $ \input' ->
+    if not (validateLen (BS.length input'))
+    then onFail
+    else case EVM.Precompiled.execute addr input' outLen of
+      Nothing -> onFail
+      Just output -> do
+        let result = ConcreteBuf $ truncpadlit outLen output
+        assign' (#state % #stack) (Lit 1 : xs)
+        assign (#state % #returndata) result
+        copyBytesToMemory result outSize (Lit 0) outOffset
+        onNext
 
 executePrecompile
   :: (?op :: Word8, VMOps t)
@@ -1523,57 +1594,6 @@ truncpadlit n xs = if m > n then BS.take n xs
                    else BS.append xs (BS.replicate (n - m) 0)
   where m = BS.length xs
 
-lazySlice :: W256 -> W256 -> ByteString -> LS.ByteString
-lazySlice offset size bs =
-  let bs' = LS.take (unsafeInto size) (LS.drop (unsafeInto offset) (fromStrict bs))
-  in bs' <> LS.replicate (unsafeInto size - LS.length bs') 0
-
-parseModexpLength :: ByteString -> (W256, W256, W256)
-parseModexpLength input =
-  let lenb = word $ LS.toStrict $ lazySlice  0 32 input
-      lene = word $ LS.toStrict $ lazySlice 32 32 input
-      lenm = word $ LS.toStrict $ lazySlice 64 32 input
-  in (lenb, lene, lenm)
-
---- checks if a range of ByteString bs starting at offset and length size is all zeros.
-isZero :: W256 -> W256 -> ByteString -> Bool
-isZero offset size bs =
-  LS.all (== 0) $
-    LS.take (unsafeInto size) $
-      LS.drop (unsafeInto offset) $
-        fromStrict bs
-
--- | Point Evaluation precompile (EIP-4844) KZG proof verification
--- Input: versioned_hash (32) || z (32) || y (32) || commitment (48) || proof (48)
--- Output: FIELD_ELEMENTS_PER_BLOB (32) || BLS_MODULUS (32) on success
--- Returns Nothing on verification failure
---
--- Per EIP-4844, this precompile verifies:
--- 1. versioned_hash == kzg_to_versioned_hash(commitment)
--- 2. verify_kzg_proof(commitment, z, y, proof)
---
--- Note: Full KZG proof verification requires the c-kzg-4844 library.
--- This implementation can verify the versioned_hash matches the commitment,
--- but cannot perform the actual KZG proof verification without the library.
-pointEvaluationVerify :: ByteString -> Maybe ByteString
-pointEvaluationVerify input =
-  let versionedHash = BS.take 32 input
-      commitment = BS.take 48 $ BS.drop 96 input
-      -- Per EIP-4844: kzg_to_versioned_hash(commitment) = 0x01 || SHA256(commitment)[1:32]
-      commitmentHash = BA.convert (Crypto.hash commitment :: Digest SHA256)
-      expectedVersionedHash = BS.singleton 0x01 <> BS.drop 1 commitmentHash
-  in if versionedHash /= expectedVersionedHash
-     then Nothing  -- Versioned hash doesn't match commitment
-     else
-       -- Try ethjet FFI first (in case KZG support is available)
-       case EVM.Precompiled.execute 0x0A input 64 of
-         Just output -> Just output
-         Nothing ->
-           -- Without c-kzg-4844, we cannot verify the KZG proof
-           -- Return failure - this will cause valid proofs to fail,
-           -- but at least invalid versioned hashes are caught above
-           Nothing
-
 -- | Read a 32-byte big-endian word from a ByteString at a given offset
 readWord256At :: Int -> ByteString -> Integer
 readWord256At offset bs = into @Integer $ word $ BS.take 32 $ BS.drop offset bs
@@ -1629,6 +1649,62 @@ p256Verify input =
     curveCommon (CurveFP (CurvePrime _ cc)) = cc
     curveCommon _ = error "p256Verify: unexpected curve type"
 
+-- | Point Evaluation precompile (EIP-4844) KZG proof verification
+-- Input: versioned_hash (32) || z (32) || y (32) || commitment (48) || proof (48)
+-- Output: FIELD_ELEMENTS_PER_BLOB (32) || BLS_MODULUS (32) on success
+-- Returns Nothing on verification failure
+--
+-- Per EIP-4844, this precompile verifies:
+-- 1. versioned_hash == kzg_to_versioned_hash(commitment)
+-- 2. verify_kzg_proof(commitment, z, y, proof)
+--
+-- Note: Full KZG proof verification requires the c-kzg-4844 library.
+-- This implementation can verify the versioned_hash matches the commitment,
+-- but cannot perform the actual KZG proof verification without the library.
+pointEvaluationVerify :: ByteString -> Maybe ByteString
+pointEvaluationVerify input =
+  let versionedHash = BS.take 32 input
+      commitment = BS.take 48 $ BS.drop 96 input
+      -- Per EIP-4844: kzg_to_versioned_hash(commitment) = 0x01 || SHA256(commitment)[1:32]
+      commitmentHash = BA.convert (Crypto.hash commitment :: Digest SHA256)
+      expectedVersionedHash = BS.singleton 0x01 <> BS.drop 1 commitmentHash
+  in if versionedHash /= expectedVersionedHash
+     then Nothing  -- Versioned hash doesn't match commitment
+     else
+       -- Try ethjet FFI first (in case KZG support is available)
+       case EVM.Precompiled.execute 0x0A input 64 of
+         Just output -> Just output
+         Nothing ->
+           -- Without c-kzg-4844, we cannot verify the KZG proof
+           -- Return failure - this will cause valid proofs to fail,
+           -- but at least invalid versioned hashes are caught above
+           Nothing
+
+lazySlice :: W256 -> W256 -> ByteString -> LS.ByteString
+lazySlice offset size bs =
+  let bs' = LS.take (unsafeInto size) (LS.drop (unsafeInto offset) (fromStrict bs))
+  in bs' <> LS.replicate (unsafeInto size - LS.length bs') 0
+
+parseModexpLength :: ByteString -> (W256, W256, W256)
+parseModexpLength input =
+  let lenb = word $ LS.toStrict $ lazySlice  0 32 input
+      lene = word $ LS.toStrict $ lazySlice 32 32 input
+      lenm = word $ LS.toStrict $ lazySlice 64 32 input
+  in (lenb, lene, lenm)
+
+--- checks if a range of ByteString bs starting at offset and length size is all zeros.
+isZero :: W256 -> W256 -> ByteString -> Bool
+isZero offset size bs =
+  LS.all (== 0) $
+    LS.take (unsafeInto size) $
+      LS.drop (unsafeInto offset) $
+        fromStrict bs
+
+asInteger :: LS.ByteString -> Integer
+asInteger xs = if xs == mempty then 0
+  else 256 * asInteger (LS.init xs)
+      + into (LS.last xs)
+
 -- | BLS12-381 G1 MSM discount table from EIP-2537 (128 values)
 -- Maps k (number of pairs) to discount in parts per 1000
 blsG1MsmDiscountTable :: VU.Vector Word64
@@ -1680,38 +1756,6 @@ blsG2MsmDiscount k
   | k == 0    = 0
   | k > 128   = 524
   | otherwise = blsG2MsmDiscountTable VU.! (fromIntegral k - 1)
-
--- | Execute a BLS precompile with standard input validation and output handling
-executeBLSPrecompile
-  :: VMOps t
-  => Int                    -- ^ Precompile address (as Int for EVM.Precompiled.execute)
-  -> String                 -- ^ Debug name for forceConcreteBuf
-  -> (Int -> Bool)          -- ^ Input length validator
-  -> Int                    -- ^ Expected output size
-  -> Expr Buf               -- ^ Input buffer
-  -> Expr EWord             -- ^ Output offset
-  -> Expr EWord             -- ^ Output size
-  -> [Expr EWord]           -- ^ Stack tail
-  -> EVM t ()               -- ^ Action on failure
-  -> EVM t ()               -- ^ Action to execute next
-  -> EVM t ()
-executeBLSPrecompile addr name validateLen outLen input outOffset outSize xs onFail onNext =
-  forceConcreteBuf input name $ \input' ->
-    if not (validateLen (BS.length input'))
-    then onFail
-    else case EVM.Precompiled.execute addr input' outLen of
-      Nothing -> onFail
-      Just output -> do
-        let result = ConcreteBuf $ truncpadlit outLen output
-        assign' (#state % #stack) (Lit 1 : xs)
-        assign (#state % #returndata) result
-        copyBytesToMemory result outSize (Lit 0) outOffset
-        onNext
-
-asInteger :: LS.ByteString -> Integer
-asInteger xs = if xs == mempty then 0
-  else 256 * asInteger (LS.init xs)
-      + into (LS.last xs)
 
 -- * Opcode helper actions
 
@@ -1865,7 +1909,11 @@ finalize :: VMOps t => EVM t ()
 finalize = do
   let
     revertContracts  = use (#tx % #txReversion) >>= assign (#env % #contracts)
-    revertSubstate   = assign (#tx % #subState) (SubState mempty mempty mempty mempty mempty mempty)
+    -- EIP-7702: On revert, clear execution state but preserve authorization refunds
+    -- Authorization refunds are computed before execution and should apply regardless of tx success
+    revertSubstate   = do
+      authRefunds <- use (#tx % #authorizationRefunds)
+      assign (#tx % #subState) (SubState mempty mempty mempty mempty authRefunds mempty)
 
   addAliasConstraints
   use #result >>= \case
@@ -2536,43 +2584,50 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
         burn' xGas $ do
           calldata <- readMemory xInOffset xInSize
           abi <- maybeLitWordSimp . readBytes 4 (Lit 0) <$> readMemory xInOffset (Lit 4)
-          let newContext = CallContext
-                            { target    = addr
-                            , context   = xContext
-                            , offset    = xOutOffset
-                            , size      = xOutSize
-                            , codehash  = target.codehash
-                            , callreversion = vm0.env.contracts
-                            , subState  = vm0.tx.subState
-                            , abi
-                            , calldata
-                            }
-          pushTrace (FrameTrace newContext)
-          next
-          vm1 <- get
-          pushTo #frames $ Frame
-            { state = vm1.state { stack = xs }
-            , context = newContext
-            }
+          -- EIP-7702: Resolve delegation if target has delegation code
+          let (resolvedCode, codeAddr) = resolveDelegatedCode target addr vm0.env.contracts
+          let finishCall = do
+                let newContext = CallContext
+                              { target    = addr
+                              , context   = xContext
+                              , offset    = xOutOffset
+                              , size      = xOutSize
+                              , codehash  = target.codehash
+                              , callreversion = vm0.env.contracts
+                              , subState  = vm0.tx.subState
+                              , abi
+                              , calldata
+                              }
+                pushTrace (FrameTrace newContext)
+                next
+                vm1 <- get
+                pushTo #frames $ Frame
+                  { state = vm1.state { stack = xs }
+                  , context = newContext
+                  }
 
-          let clearInitCode = \case
-                (InitCode _ _) -> InitCode mempty mempty
-                a -> a
+                let clearInitCode = \case
+                      (InitCode _ _) -> InitCode mempty mempty
+                      a -> a
 
-          newMemory <- ConcreteMemory <$> VS.Mutable.new 0
-          zoom #state $ do
-            assign #gas xGas
-            assign #pc 0
-            assign #code (clearInitCode target.code)
-            assign #codeContract addr
-            assign #stack mempty
-            assign #memory newMemory
-            assign #memorySize 0
-            assign #returndata mempty
-            assign #calldata calldata
-            assign #overrideCaller Nothing
-            assign #resetCaller False
-          continue addr
+                newMemory <- ConcreteMemory <$> VS.Mutable.new 0
+                zoom #state $ do
+                  assign #gas xGas
+                  assign #pc 0
+                  -- EIP-7702: Use resolved code (possibly from delegated address)
+                  assign #code (clearInitCode resolvedCode)
+                  assign #codeContract codeAddr
+                  assign #stack mempty
+                  assign #memory newMemory
+                  assign #memorySize 0
+                  assign #returndata mempty
+                  assign #calldata calldata
+                  assign #overrideCaller Nothing
+                  assign #resetCaller False
+                continue addr
+          -- EIP-7702: Delegation access cost is now charged in callChecks (before 63/64 rule)
+          -- The delegation target was already marked as accessed in callChecks
+          finishCall
 
 -- -- * Contract creation
 
@@ -3444,13 +3499,174 @@ freshSymAddr = do
 
 isPrecompileAddr' :: Addr -> Bool
 isPrecompileAddr' 0x100 = True
-isPrecompileAddr' x = 0x0 < x && x <= 0x11
+isPrecompileAddr' x = 0x0 < x && x <= 0x11  -- Extended for BLS12-381 precompiles (EIP-2537)
 
 isPrecompileAddr :: Expr EAddr -> Bool
 isPrecompileAddr = \case
   LitAddr a -> isPrecompileAddr' a
   SymAddr _ -> False
   GVar _ -> internalError "Unexpected GVar"
+
+
+-- EIP-7702 Delegation Handling --------------------------------------------------------------------
+
+
+-- | EIP-7702 delegation code prefix: 0xef0100
+-- A delegated account has code starting with this prefix followed by 20-byte target address
+delegationPrefix :: ByteString
+delegationPrefix = BS.pack [0xef, 0x01, 0x00]
+
+-- | Check if a contract has delegation code and return the target address
+-- Returns Just targetAddr if code is exactly delegationCodeLength bytes starting with 0xef0100
+getDelegationTarget :: ContractCode -> Maybe Addr
+getDelegationTarget = \case
+  RuntimeCode (ConcreteRuntimeCode code) ->
+    if BS.length code == delegationCodeLength && BS.take 3 code == delegationPrefix
+    then Just $ unsafeInto $ word $ BS.drop 3 code
+    else Nothing
+  _ -> Nothing
+
+-- | Resolve the code to execute for a contract, following EIP-7702 delegation
+-- Returns (code to execute, codeContract address)
+-- If the target has delegation code, returns the delegated-to contract's code
+resolveDelegatedCode
+  :: Contract           -- ^ The target contract being called
+  -> Expr EAddr         -- ^ The address of the target
+  -> Map (Expr EAddr) Contract  -- ^ All contracts
+  -> (ContractCode, Expr EAddr)  -- ^ (resolved code, code source address)
+resolveDelegatedCode target targetAddr contracts =
+  case getDelegationTarget target.code of
+    Nothing -> (target.code, targetAddr)
+    Just delegatedTo ->
+      let delegatedAddr = LitAddr delegatedTo
+      -- EIP-7702: If delegation target is a precompile address (0x01-0x11 or 0x100),
+      -- the retrieved code is considered empty and calls execute empty code
+      in if isPrecompileAddr' delegatedTo
+         then (RuntimeCode (ConcreteRuntimeCode ""), delegatedAddr)
+         else case Map.lookup delegatedAddr contracts of
+           Just delegatedContract -> (delegatedContract.code, delegatedAddr)
+           -- If delegated-to doesn't exist, treat as empty code
+           Nothing -> (RuntimeCode (ConcreteRuntimeCode ""), delegatedAddr)
+
+-- | Create a delegation designator code for EIP-7702
+-- The code is 0xef0100 || target_address (23 bytes total)
+makeDelegationCode :: Addr -> ByteString
+makeDelegationCode target = delegationPrefix <> word160Bytes target
+
+-- | Recover the authorizing address from an EIP-7702 authorization entry
+-- Returns the address that signed the authorization, or Nothing if invalid signature
+-- Note: This does NOT check chain_id - per EIP-7702 spec, ecrecover happens first,
+-- then the address is warmed, and only then is chain_id validated
+recoverAuthorityAddress :: AuthorizationEntry -> Maybe Addr
+recoverAuthorityAddress auth =
+  -- EIP-2: Reject high-s signatures to prevent transaction malleability
+  -- s must be in the lower half of the curve order
+  let secp256k1nHalf = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0 :: W256
+  in if auth.authS > secp256k1nHalf
+     then Nothing  -- Invalid signature: s value too high (EIP-2)
+     else
+       let -- EIP-7702 signing message: keccak(0x05 || rlp([chain_id, address, nonce]))
+           rlpPayload = rlpList
+             [ rlpWord256 auth.authChainId
+             , BS $ word160Bytes auth.authAddress
+             , rlpWord256 auth.authNonce
+             ]
+           signingMessage = BS.cons 0x05 rlpPayload
+           msgHash = keccak' signingMessage
+           -- v is yParity + 27 for ecrecover
+           v = into auth.authYParity + 27
+       in EVM.Sign.ecrec v auth.authR auth.authS msgHash
+  where
+    rlpList items = rlpencode $ List items
+    rlpWord256 0 = BS mempty
+    rlpWord256 n = BS $ octets n
+    octets x = BS.pack $ dropWhile (== 0) [fromIntegral (shiftR x (8 * i)) | i <- reverse [0..31 :: Int]]
+
+-- | Get all authority addresses that should be warmed from authorization list
+-- Per EIP-7702 spec, warming happens at step 4, but ONLY if steps 1-3 pass:
+--   1. Chain ID must be 0 or match current chain
+--   2. Auth nonce must be < 2^64-1
+--   3. ecrecover must succeed
+getAuthoritiesToWarm :: W256 -> [AuthorizationEntry] -> [Expr EAddr]
+getAuthoritiesToWarm chainId auths = map LitAddr $ mapMaybe (recoverIfValid chainId) auths
+  where
+    recoverIfValid :: W256 -> AuthorizationEntry -> Maybe Addr
+    recoverIfValid cid auth
+      | not (isValidAuthChainAndNonce cid auth) = Nothing
+      | otherwise = recoverAuthorityAddress auth
+
+-- | Check if an account's code allows EIP-7702 delegation (empty or already delegated)
+accountCodeAllowsDelegation :: Maybe Contract -> Bool
+accountCodeAllowsDelegation Nothing = True  -- No account = empty code
+accountCodeAllowsDelegation (Just c) = case c.code of
+  RuntimeCode (ConcreteRuntimeCode code) -> BS.null code || isDelegationCode code
+  _ -> True  -- Symbolic code, allow for now
+
+-- | Check if an account "really exists" in the trie (non-zero balance, nonce, or code)
+-- Used for EIP-7702 refund calculation
+accountReallyExists :: Maybe Contract -> Bool
+accountReallyExists Nothing = False
+accountReallyExists (Just c) = hasBalance || hasNonce || hasCode
+  where
+    hasBalance = case c.balance of
+      Lit b -> b /= 0
+      _ -> True  -- Symbolic, assume exists
+    hasNonce = case c.nonce of
+      Just n -> n /= 0
+      Nothing -> False
+    hasCode = case c.code of
+      RuntimeCode (ConcreteRuntimeCode code) -> not (BS.null code)
+      _ -> True  -- Symbolic or InitCode, assume exists
+
+-- | Process all EIP-7702 authorization entries and return the updated contracts map and refunds
+-- Per EIP-7702 spec, for each authorization:
+-- 1. ecrecover to get authority address (addresses warmed separately via getAuthoritiesToWarm)
+-- 2. Check chain_id: must be 0 or match current chain
+-- 3. Check authority's code is empty or already delegated
+-- 4. Check nonce matches (for self-sponsored: nonce == account_nonce + 1)
+-- 5. Add refund if authority exists (PER_EMPTY_ACCOUNT_COST - PER_AUTH_BASE_COST = 12500)
+-- 6. Set delegation code and increment nonce
+processAuthorizations
+  :: W256                                -- ^ Chain ID
+  -> Expr EAddr                          -- ^ Transaction origin address
+  -> [AuthorizationEntry]                -- ^ Authorization list from transaction
+  -> Map (Expr EAddr) Contract           -- ^ Current contracts state
+  -> (Map (Expr EAddr) Contract, [(Expr EAddr, Word64)])  -- ^ (Updated contracts, Refunds)
+processAuthorizations chainId origin auths contracts = foldl processOne (contracts, []) auths
+  where
+    -- EIP-7702 refund: PER_EMPTY_ACCOUNT_COST - PER_AUTH_BASE_COST
+    authRefund :: Word64
+    authRefund = perEmptyAccountCost - perAuthBaseCost
+
+    -- Validate and apply a single authorization
+    processOne acc@(cs, refs) auth = case recoverAuthorityAddress auth of
+      Nothing -> acc  -- Invalid signature
+      Just authority
+        | not (isValidAuthChainAndNonce chainId auth) -> acc
+        | not (accountCodeAllowsDelegation existingAccount) -> acc  -- Non-delegation code
+        | currentNonce == maxBound -> acc  -- Would overflow
+        | into expectedNonce /= auth.authNonce -> acc  -- Nonce mismatch
+        | otherwise ->
+            let codeBytes = if auth.authAddress == 0 then mempty else makeDelegationCode auth.authAddress
+                newCode = RuntimeCode (ConcreteRuntimeCode codeBytes)
+                newContract = case existingAccount of
+                  Just c -> set #code newCode $ set #nonce (Just (currentNonce + 1)) c
+                  Nothing -> set #nonce (Just 1) $ initialContract newCode
+                newRefs = if accountReallyExists existingAccount
+                          then (authorityAddr, authRefund) : refs
+                          else refs
+            in (Map.insert authorityAddr newContract cs, newRefs)
+        where
+          authorityAddr = LitAddr authority
+          existingAccount = Map.lookup authorityAddr cs
+          currentNonce = maybe 0 (fromMaybe 0 . (.nonce)) existingAccount
+          isSelfSponsored = authorityAddr == origin
+          expectedNonce = if isSelfSponsored then currentNonce + 1 else currentNonce
+
+-- | Check if bytecode is a delegation code (0xef0100 prefix)
+isDelegationCode :: ByteString -> Bool
+isDelegationCode code = BS.length code == delegationCodeLength && BS.isPrefixOf delegationPrefix code
+
 
 -- * Arithmetic
 
