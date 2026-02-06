@@ -162,12 +162,7 @@ allTestCases = do
 -- Test names are from the execution-spec-tests fixtures format.
 problematicTests :: [(String, String)]
 problematicTests =
-  [ -- EIP-7951
-    ("tests/osaka/eip7951_p256verify_precompiles/test_eip_mainnet.py::", "EIP-7951 precompiles not implemented")
-  , ("tests/osaka/eip7951_p256verify_precompiles/test_p256verify.py::", "EIP-7951 precompiles not implemented")
-    -- Other precompile tests (0x100 P256VERIFY not implemented yet)
-  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x0000000000000000000000000000000000000100", "0x100 precompile not implemented")
-  , ("tests/static/state_tests/stSpecialTest/failed_tx_xcf416c53_ParisFiller.json::", "needs later EIP")
+  [ ("tests/static/state_tests/stSpecialTest/failed_tx_xcf416c53_ParisFiller.json::", "needs later EIP")
     -- Needs EIP-7702 otherContractsFromPreState
   , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructed2Filler.json::", "needs EIP-7702")
   , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructedFiller.json::", "needs EIP-7702")

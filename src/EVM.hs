@@ -66,7 +66,9 @@ import Witch (into, tryFrom, unsafeInto, tryInto)
 
 import Crypto.Hash (Digest, SHA256, RIPEMD160)
 import Crypto.Hash qualified as Crypto
-import Crypto.Number.ModArithmetic (expFast)
+import Crypto.Number.ModArithmetic (expFast, inverse)
+import Crypto.PubKey.ECC.Prim (pointAddTwoMuls, isPointValid)
+import Crypto.PubKey.ECC.Types (getCurveByName, CurveName(..), Point(..), Curve(..), CurveCommon(..), CurvePrime(..))
 
 defaultVMOpts :: VMOps t => VMOpts t
 defaultVMOpts = VMOpts
@@ -185,6 +187,7 @@ makeVm o = do
            [txorigin, txtoAddr, o.coinbase]
         ++ (fmap LitAddr [1..9])          -- Legacy precompiles (ECRECOVER, SHA256, etc.)
         ++ (fmap LitAddr [0x0A..0x11])    -- EIP-4844 Point Evaluation + BLS12-381 precompiles
+        ++ [LitAddr 0x100]                -- EIP-7951 P256VERIFY
         ++ (Map.keys txaccessList)
       initialAccessedStorageKeys = fromList $ foldMap (uncurry (map . (,))) (Map.toList txaccessList)
       touched = if o.create then [txorigin] else [txorigin, txtoAddr]
@@ -1491,6 +1494,28 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
                 (== mapFp2InputSize) g2PointSize
                 input outOffset outSize xs precompileFail next
 
+      -- P256VERIFY (EIP-7212)
+      0x100 ->
+        forceConcreteBuf input "P256VERIFY" $ \input' -> do
+          -- Input: hash (32) || r (32) || s (32) || x (32) || y (32) = 160 bytes
+          -- Per EIP-7212: "If the input is less than 160 bytes, the remaining bytes
+          -- are considered to be zero"
+          let paddedInput = truncpadlit 160 input'
+              result = p256Verify paddedInput
+          if result
+          then do
+            -- Success: return 1 (32 bytes, big-endian)
+            let output = ConcreteBuf $ BS.replicate 31 0 <> BS.singleton 1
+            assign' (#state % #stack) (Lit 1 : xs)
+            assign (#state % #returndata) output
+            copyBytesToMemory output outSize (Lit 0) outOffset
+            next
+          else do
+            -- Verification failed or invalid input: return empty but CALL succeeds
+            assign' (#state % #stack) (Lit 1 : xs)
+            assign (#state % #returndata) mempty
+            next
+
       _ -> notImplemented
 
 truncpadlit :: Int -> ByteString -> ByteString
@@ -1548,6 +1573,61 @@ pointEvaluationVerify input =
            -- Return failure - this will cause valid proofs to fail,
            -- but at least invalid versioned hashes are caught above
            Nothing
+
+-- | Read a 32-byte big-endian word from a ByteString at a given offset
+readWord256At :: Int -> ByteString -> Integer
+readWord256At offset bs = into @Integer $ word $ BS.take 32 $ BS.drop offset bs
+
+-- | P-256 (secp256r1) signature verification for EIP-7212
+-- Input format: hash (32) || r (32) || s (32) || x (32) || y (32)
+-- Returns True if signature is valid, False otherwise
+-- Note: EIP-7212 provides a PRE-HASHED message, so we implement ECDSA
+-- verification manually to avoid double-hashing.
+p256Verify :: ByteString -> Bool
+p256Verify input =
+  let -- Parse input (all 32-byte big-endian words)
+      e = readWord256At 0 input    -- message hash
+      r = readWord256At 32 input   -- signature r
+      s = readWord256At 64 input   -- signature s
+      x = readWord256At 96 input   -- public key x
+      y = readWord256At 128 input  -- public key y
+
+      -- P-256 curve order
+      curve = getCurveByName SEC_p256r1
+      n = case curve of
+            CurveFP (CurvePrime _ cc) -> ecc_n cc
+            _ -> 0  -- Should never happen for P-256
+
+      -- Public key point
+      pubPoint = Point x y
+
+      -- ECDSA verification algorithm for pre-hashed message:
+      -- 1. Verify r and s are in [1, n-1]
+      -- 2. Verify public key is valid point on curve
+      -- 3. Calculate w = s^(-1) mod n
+      -- 4. Calculate u1 = (e * w) mod n
+      -- 5. Calculate u2 = (r * w) mod n
+      -- 6. Calculate R = u1*G + u2*Q
+      -- 7. If R is at infinity, fail
+      -- 8. Verify r == R.x mod n
+
+  in if r < 1 || r >= n || s < 1 || s >= n
+     then False
+     else if not (isPointValid curve pubPoint)
+     then False
+     else case inverse s n of
+       Nothing -> False  -- s has no inverse (shouldn't happen if s in [1, n-1])
+       Just w ->
+         let u1 = (e * w) `mod` n
+             u2 = (r * w) `mod` n
+             -- R = u1*G + u2*Q
+             rPoint = pointAddTwoMuls curve u1 (ecc_g $ curveCommon curve) u2 pubPoint
+         in case rPoint of
+              PointO -> False  -- Point at infinity
+              Point rx _ -> (rx `mod` n) == r
+  where
+    curveCommon (CurveFP (CurvePrime _ cc)) = cc
+    curveCommon _ = error "p256Verify: unexpected curve type"
 
 -- | BLS12-381 G1 MSM discount table from EIP-2537 (128 values)
 -- Maps k (number of pairs) to discount in parts per 1000
@@ -3296,6 +3376,8 @@ costOfPrecompile (FeeSchedule {..}) precompileAddr input =
     0x10 -> g_bls_map_fp_to_g1
     -- MAP_FP2_TO_G2 (0x11)
     0x11 -> g_bls_map_fp2_to_g2
+    -- P256VERIFY (EIP-7212)
+    0x100 -> g_p256_verify
     _ -> internalError $ "unimplemented precompiled contract " ++ show precompileAddr
 
 -- Gas cost of memory expansion
