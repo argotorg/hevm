@@ -214,93 +214,18 @@ problematicTests =
   , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x0000000000000000000000000000000000000011", "0x11 precompile not implemented")
   , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x0000000000000000000000000000000000000100", "0x100 precompile not implemented")
   , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::", "TODO")
-    -- Other tests (TODO: fix or re-sort them)
-  , ("tests/osaka/eip7823_modexp_upper_bounds/test_modexp_upper_bounds.py::test_modexp_upper_bounds[fork_Osaka-blockchain_test_from_state_test-near_uint64_max_base", "needs EIP-7623 floor gas")
-  , ("tests/osaka/eip7823_modexp_upper_bounds/test_modexp_upper_bounds.py::test_modexp_upper_bounds[fork_Osaka-blockchain_test_from_state_test-zero_exp_mod_exceed", "needs EIP-7623 floor gas")
-  , ("tests/osaka/eip7883_modexp_gas_increase/test_modexp_thresholds.py::test_modexp_used_in_transaction_entry_points[fork_Osaka-blockchain_test_from_state_test-extra_gas", "needs EIP-7623 floor gas")
-  , ("tests/osaka/eip7883_modexp_gas_increase/test_modexp_thresholds.py::test_modexp_used_in_transaction_entry_points[fork_Osaka-blockchain_test_from_state_test-extra_value", "needs EIP-7623 floor gas")
-  , ("tests/osaka/eip7883_modexp_gas_increase/test_modexp_thresholds.py::test_modexp_used_in_transaction_entry_points[fork_Osaka-blockchain_test_from_state_test-insufficient_gas", "needs EIP-7623 floor gas")
-  , ("tests/osaka/eip7883_modexp_gas_increase/test_modexp_thresholds.py::test_modexp_used_in_transaction_entry_points[fork_Osaka-blockchain_test_from_state_test-exact_gas", "needs EIP-7623 floor gas")
-  , ("tests/frontier/precompiles/test_ripemd.py::", "TODO")
-  , ("tests/osaka/eip7825_transaction_gas_limit_cap/test_tx_gas_limit.py::", "TODO")
-  , ("tests/prague/eip2935_historical_block_hashes_from_state/test_block_hashes.py::", "TODO")
-  , ("tests/prague/eip6110_deposits/test_deposits.py::", "TODO")
-  , ("tests/prague/eip7002_el_triggerable_withdrawals/test_modified_withdrawal_contract.py::", "TODO")
-  , ("tests/prague/eip7251_consolidations/test_modified_consolidation_contract.py::", "TODO")
-  , ("tests/prague/eip7623_increase_calldata_cost/test_execution_gas.py::", "TODO")
-  , ("tests/prague/eip7623_increase_calldata_cost/test_refunds.py::", "TODO")
+    -- Needs EIP-7702 otherContractsFromPreState
+  , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructed2Filler.json::", "needs EIP-7702")
+  , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructedFiller.json::", "needs EIP-7702")
+  , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructedRevertFiller.json::", "needs EIP-7702")
+    -- EIP-7685: General Purpose EL Requests - requires multi-block context
   , ("tests/prague/eip7685_general_purpose_el_requests/test_multi_type_requests.py::", "TODO")
+    -- EIP-7702: Set Code TX - not yet implemented
   , ("tests/prague/eip7702_set_code_tx/test_calls.py::", "TODO")
   , ("tests/prague/eip7702_set_code_tx/test_gas.py::", "TODO")
   , ("tests/prague/eip7702_set_code_tx/test_set_code_txs_2.py::", "TODO")
-  , ("tests/shanghai/eip3860_initcode/test_initcode.py::", "TODO")
-  , ("tests/shanghai/eip3860_initcode/test_with_eof.py::", "TODO")
-  , ("tests/static/state_tests/Cancun/stEIP5656_MCOPY/MCOPY_memory_expansion_costFiller.yml::", "TODO")
-  , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructed2Filler.json::", "TODO")
-  , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructedFiller.json::", "TODO")
-  , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructedRevertFiller.json::", "TODO")
-  , ("tests/static/state_tests/stEIP150singleCodeGasPrices/gasCostExpFiller.yml::", "TODO")
-  , ("tests/static/state_tests/stEIP150singleCodeGasPrices/gasCostMemoryFiller.yml::", "TODO")
-  , ("tests/static/state_tests/stEIP150singleCodeGasPrices/gasCostMemSegFiller.yml::", "TODO")
-  , ("tests/static/state_tests/stEIP2930/transactionCostsFiller.yml::", "TODO")
-  , ("tests/static/state_tests/stMemoryTest/memReturnFiller.json::", "TODO")
-  , ("tests/static/state_tests/stNonZeroCallsTest/NonZeroValue_TransactionCALLwithData_ToEmpty_ParisFiller.json::", "TODO")
-  , ("tests/static/state_tests/stNonZeroCallsTest/NonZeroValue_TransactionCALLwithData_ToNonNonZeroBalanceFiller.json::", "TODO")
-  , ("tests/static/state_tests/stNonZeroCallsTest/NonZeroValue_TransactionCALLwithData_ToOneStorageKey_ParisFiller.json::", "TODO")
-  , ("tests/static/state_tests/stNonZeroCallsTest/NonZeroValue_TransactionCALLwithDataFiller.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest0Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest126Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest144Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest157Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest172Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest176Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest190Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest197Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest209Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest230Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest251Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest252Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest25Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest271Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest275Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest288Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest300Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest312Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest321Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest323Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest345Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest350Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest45Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest57Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest5Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest72Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest78Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest82Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest396Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest404Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest414Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest420Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest428Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest444Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest478Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest509Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest531Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest543Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest558Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest567Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest572Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest609Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest624Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest644Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest645Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRevertTest/PythonRevertTestTue201814-1430Filler.json::", "TODO")
-  , ("tests/static/state_tests/stStackTests/stackOverflowM1PUSHFiller.json::", "TODO")
-  , ("tests/static/state_tests/stTransactionTest/HighGasLimitFiller.json::", "TODO")
-  , ("tests/static/state_tests/stTransactionTest/TransactionDataCosts652Filler.json::", "TODO")
-  , ("tests/static/state_tests/stZeroCallsTest/ZeroValue_TransactionCALLwithData_ToEmpty_ParisFiller.json::", "TODO")
-  , ("tests/static/state_tests/stZeroCallsTest/ZeroValue_TransactionCALLwithData_ToNonZeroBalanceFiller.json::", "TODO")
-  , ("tests/static/state_tests/stZeroCallsTest/ZeroValue_TransactionCALLwithData_ToOneStorageKey_ParisFiller.json::", "TODO")
-  , ("tests/static/state_tests/stZeroCallsTest/ZeroValue_TransactionCALLwithDataFiller.json::", "TODO")
+    -- EIP-2935: Historical block hashes - requires multi-block context
+  , ("tests/prague/eip2935_historical_block_hashes_from_state/test_block_hashes.py::", "TODO")
   ]
 
 
@@ -548,6 +473,7 @@ fromBlockchainCase' block tx preState postState =
        , freshAddresses = 0
        , beaconRoot     = block.beaconRoot
        , parentHash     = block.parentHash
+       , txdataFloorGas = txdataFloorGas feeSchedule tx
        })
       checkState
       postState
@@ -595,13 +521,19 @@ checkTx tx block prestate = do
   if initCodeSizeExceeded then mzero
   else pure prestate
 
+-- EIP-7825: Maximum transaction gas limit is 2^24
+maxTxGasLimit :: Word64
+maxTxGasLimit = 2 ^ (24 :: Int)
+
 validateTx :: Transaction -> Block -> BlockchainContracts -> Maybe ()
 validateTx tx block cs = do
   origin <- sender tx
   originBalance <- (.balance) <$> Map.lookup origin cs
   originNonce <- (.nonce) <$> Map.lookup origin cs
   let gasDeposit = (effectiveprice tx block.baseFee) * (into tx.gasLimit)
-  if gasDeposit + tx.value <= originBalance
+  -- EIP-7825: Reject transactions exceeding max gas limit
+  if tx.gasLimit > maxTxGasLimit then Nothing
+  else if gasDeposit + tx.value <= originBalance
     && ((unsafeInto tx.nonce) == originNonce) && block.baseFee <= maxBaseFee tx
   then Just ()
   else Nothing
