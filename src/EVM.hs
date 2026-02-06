@@ -96,6 +96,8 @@ defaultVMOpts = VMOpts
   , freshAddresses = 0
   , beaconRoot     = 0
   , parentHash     = 0
+  , txdataFloorGas = 0
+  , authorizationList = []
   }
 
 blankState :: VMOps t => ST RealWorld (FrameState t)
@@ -161,6 +163,8 @@ makeVm o = do
       , subState = SubState mempty touched initialAccessedAddrs initialAccessedStorageKeys mempty mempty
       , isCreate = o.create
       , txReversion = Map.fromList ((o.address,o.contract):o.otherContracts)
+      , txdataFloorGas = o.txdataFloorGas
+      , authorizationRefunds = []
       }
     , logs = []
     , traces = Zipper.fromForest []

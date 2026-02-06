@@ -545,6 +545,8 @@ fromBlockchainCase' block tx preState postState =
        , freshAddresses = 0
        , beaconRoot     = block.beaconRoot
        , parentHash     = block.parentHash
+       , txdataFloorGas = 0
+       , authorizationList = []
        })
       checkState
       postState

@@ -1,5 +1,7 @@
 #include "ethjet.h"
 #include "ethjet-ff.h"
+#include "ethjet-kzg.h"
+#include "ethjet-bls.h"
 #include "tinykeccak.h"
 #include "blake2.h"
 
@@ -137,6 +139,30 @@ ethjet (struct ethjet_context *ctx,
 
   case ETHJET_BLAKE2:
     return ethjet_blake2 (in, in_size, out, out_size);
+
+  case ETHJET_POINT_EVALUATION:
+    return ethjet_point_evaluation (in, in_size, out, out_size);
+
+  case ETHJET_BLS_G1ADD:
+    return ethjet_bls_g1add (in, in_size, out, out_size);
+
+  case ETHJET_BLS_G1MSM:
+    return ethjet_bls_g1msm (in, in_size, out, out_size);
+
+  case ETHJET_BLS_G2ADD:
+    return ethjet_bls_g2add (in, in_size, out, out_size);
+
+  case ETHJET_BLS_G2MSM:
+    return ethjet_bls_g2msm (in, in_size, out, out_size);
+
+  case ETHJET_BLS_PAIRING:
+    return ethjet_bls_pairing (in, in_size, out, out_size);
+
+  case ETHJET_BLS_MAP_FP_TO_G1:
+    return ethjet_bls_map_fp_to_g1 (in, in_size, out, out_size);
+
+  case ETHJET_BLS_MAP_FP2_TO_G2:
+    return ethjet_bls_map_fp2_to_g2 (in, in_size, out, out_size);
 
   default:
     return 0;

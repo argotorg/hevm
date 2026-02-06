@@ -133,15 +133,15 @@ library
     ld-options: -Wl,-keep_dwarf_unwind
     ghc-options: -fcompact-unwind
   extra-libraries:
-    secp256k1, ff, gmp
+    secp256k1, ff, gmp, ckzg, blst
   c-sources:
-    ethjet/tinykeccak.c, ethjet/blake2.c, ethjet/ethjet.c
+    ethjet/tinykeccak.c, ethjet/blake2.c, ethjet/ethjet.c, ethjet/ethjet-kzg.c, ethjet/ethjet-bls.c
   cxx-sources:
     ethjet/ethjet-ff.cc
   cxx-options:
     -std=c++0x
   install-includes:
-    ethjet/tinykeccak.h, ethjet/ethjet.h, ethjet/ethjet-ff.h, ethjet/blake2.h
+    ethjet/tinykeccak.h, ethjet/ethjet.h, ethjet/ethjet-ff.h, ethjet/blake2.h, ethjet/ethjet-kzg.h, ethjet/ethjet-bls.h
   build-depends:
     directory                         >= 1.3.6 && < 1.4,
     system-cxx-std-lib                >= 1.0 && < 2.0,

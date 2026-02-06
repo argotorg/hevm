@@ -19,9 +19,10 @@ import Data.ByteString qualified as BS
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Maybe (fromMaybe, isNothing, fromJust)
-import Data.Word (Word64)
+import Data.Word (Word8, Word64)
 import GHC.Generics (Generic)
 import Numeric (showHex)
+import Text.Read (readMaybe)
 import Witch (into, unsafeInto)
 
 data AccessListEntry = AccessListEntry
@@ -63,6 +64,7 @@ data Transaction = Transaction
   , maxPriorityFeeGas :: Maybe W256
   , maxFeePerGas      :: Maybe W256
   , chainId           :: W256
+  , authorizationList :: [AuthorizationEntry]  -- ^ EIP-7702 authorization list
   } deriving (Show, Generic)
 
 instance JSON.ToJSON Transaction where
@@ -98,6 +100,7 @@ emptyTransaction = Transaction { txdata = mempty
                                , maxPriorityFeeGas = Nothing
                                , maxFeePerGas = Nothing
                                , chainId = 1
+                               , authorizationList = []
                                }
 
 -- | utility function for getting a more useful representation of accesslistentries
@@ -196,6 +199,15 @@ signingData tx =
           , rlpWord256 $ undefined -- TODO EIP4844 max_fee_per_blob_gas
           , undefined -- TODO EIP4844 blob_versioned_hashes
           ]
+        rlpAuthList = EVM.RLP.List $ map encodeAuth tx.authorizationList
+        encodeAuth auth = EVM.RLP.List
+          [ rlpWord256 auth.authChainId
+          , BS $ word160Bytes auth.authAddress
+          , rlpWord256 auth.authNonce
+          , rlpWord256 (into auth.authYParity)
+          , rlpWord256 auth.authR
+          , rlpWord256 auth.authS
+          ]
         eip7702Data = cons 0x04 $ rlpList
           [ rlpWord256 tx.chainId
           , rlpWord256 tx.nonce
@@ -206,7 +218,7 @@ signingData tx =
           , rlpWord256 tx.value
           , BS tx.txdata
           , rlpAccessList
-          , undefined -- TODO EIP4844 authorization_list
+          , rlpAuthList
           ]
 
 accessListPrice :: FeeSchedule Word64 -> [AccessListEntry] -> Word64
@@ -224,11 +236,42 @@ txGasCost fs tx =
       nonZeroBytes = BS.length calldata - zeroBytes
       baseCost     = fs.g_transaction
         + (if isNothing tx.toAddr then fs.g_txcreate + initcodeCost else 0)
-        + (accessListPrice fs tx.accessList )
+        + (accessListPrice fs tx.accessList)
+        + (authListPrice fs tx.authorizationList)  -- EIP-7702
       zeroCost     = fs.g_txdatazero
       nonZeroCost  = fs.g_txdatanonzero
       initcodeCost = fs.g_initcodeword * unsafeInto (ceilDiv (BS.length calldata) 32)
   in baseCost + zeroCost * (unsafeInto zeroBytes) + nonZeroCost * (unsafeInto nonZeroBytes)
+
+-- | EIP-7702: Calculate intrinsic gas cost for authorization list
+-- Per EIP-7702, intrinsic gas charges PER_EMPTY_ACCOUNT_COST (g_newaccount = 25000) per auth
+authListPrice :: FeeSchedule Word64 -> [AuthorizationEntry] -> Word64
+authListPrice fs al = fs.g_newaccount * unsafeInto (length al)
+
+-- EIP-7623 calldata floor gas constants
+calldataFloorBase :: Word64
+calldataFloorBase = 21000
+
+calldataFloorPerToken :: Word64
+calldataFloorPerToken = 10
+
+nonZeroTokenMultiplier :: Word64
+nonZeroTokenMultiplier = 4
+
+-- | EIP-7623: Calculate floor gas cost based on calldata tokens
+-- tokens = zero_bytes + (nonzero_bytes * 4)
+-- floor_gas = 21000 + 10 * tokens
+-- This is the minimum total gas that must be charged for a transaction.
+-- Per EIP-7623: gas_used = 21000 + max(4*tokens + execution + creation, 10*tokens)
+txdataFloorGas :: Transaction -> Word64
+txdataFloorGas tx =
+  let calldata     = tx.txdata
+      zeroBytes    = BS.count 0 calldata
+      nonZeroBytes = BS.length calldata - zeroBytes
+      -- tokens_in_calldata = zero_bytes + (nonzero_bytes * nonZeroTokenMultiplier)
+      tokens       = unsafeInto zeroBytes + unsafeInto nonZeroBytes * nonZeroTokenMultiplier
+  in calldataFloorBase + calldataFloorPerToken * tokens
+
 
 instance FromJSON AccessListEntry where
   parseJSON (JSON.Object val) = do
@@ -237,6 +280,25 @@ instance FromJSON AccessListEntry where
     pure $ AccessListEntry accessAddress_ accessStorageKeys_
   parseJSON invalid =
     JSON.typeMismatch "AccessListEntry" invalid
+
+instance FromJSON AuthorizationEntry where
+  parseJSON (JSON.Object val) = do
+    chainId_ <- wordField val "chainId"
+    address_ <- addrField val "address"
+    nonce_   <- wordField val "nonce"
+    yParityVal <- parseYParity val
+    r_       <- wordField val "r"
+    s_       <- wordField val "s"
+    pure $ AuthorizationEntry chainId_ address_ nonce_ yParityVal r_ s_
+    where
+      -- yParity may be in the 'v' field instead for some test fixtures
+      parseYParity :: JSON.Object -> JSON.Parser Word8
+      parseYParity obj = do
+        yParity <- fmap (fromMaybe 0 . readMaybe) <$> obj JSON..:? "yParity"
+        v       <- fmap (fromMaybe 0 . readMaybe) <$> obj JSON..:? "v"
+        pure $ fromMaybe (fromMaybe 0 v) yParity
+  parseJSON invalid =
+    JSON.typeMismatch "AuthorizationEntry" invalid
 
 instance FromJSON Transaction where
   parseJSON (JSON.Object val) = do
@@ -252,24 +314,32 @@ instance FromJSON Transaction where
     v        <- wordField val "v"
     value    <- wordField val "value"
     txType   <- fmap (read :: String -> Int) <$> val JSON..:? "type"
+
+    -- Helper to construct Transaction with common fields
+    let mkTx txtype accessList maxPrio' maxFee' authList =
+          Transaction tdata gasLimit gasPrice nonce r s toAddr v value
+                      txtype accessList maxPrio' maxFee' 1 authList
+
     case txType of
-      Just 0x00 -> pure $ Transaction tdata gasLimit gasPrice nonce r s toAddr v value LegacyTransaction [] Nothing Nothing 1
+      Just 0x00 -> pure $ mkTx LegacyTransaction [] Nothing Nothing []
       Just 0x01 -> do
         accessListEntries <- (val JSON..: "accessList") >>= parseJSONList
-        pure $ Transaction tdata gasLimit gasPrice nonce r s toAddr v value AccessListTransaction accessListEntries Nothing Nothing 1
+        pure $ mkTx AccessListTransaction accessListEntries Nothing Nothing []
       Just 0x02 -> do
         accessListEntries <- (val JSON..: "accessList") >>= parseJSONList
-        pure $ Transaction tdata gasLimit gasPrice nonce r s toAddr v value EIP1559Transaction accessListEntries maxPrio maxFee 1
+        pure $ mkTx EIP1559Transaction accessListEntries maxPrio maxFee []
       Just 0x03 -> do
         accessListEntries <- (val JSON..: "accessList") >>= parseJSONList
         -- TODO: capture max_fee_per_blob_gas and blob_versioned_hashes EIP4844
-        pure $ Transaction tdata gasLimit gasPrice nonce r s toAddr v value EIP4844Transaction accessListEntries maxPrio maxFee 1
+        pure $ mkTx EIP4844Transaction accessListEntries maxPrio maxFee []
       Just 0x04 -> do
         accessListEntries <- (val JSON..: "accessList") >>= parseJSONList
-        -- TODO: capture authorization_list EIP7702
-        pure $ Transaction tdata gasLimit gasPrice nonce r s toAddr v value EIP7702Transaction accessListEntries maxPrio maxFee 1
+        authListEntries <- (val JSON..:? "authorizationList") >>= \case
+          Just list -> parseJSONList list
+          Nothing -> pure []
+        pure $ mkTx EIP7702Transaction accessListEntries maxPrio maxFee authListEntries
       Just _ -> fail "unrecognized custom transaction type"
-      Nothing -> pure $ Transaction tdata gasLimit gasPrice nonce r s toAddr v value LegacyTransaction [] Nothing Nothing 1
+      Nothing -> pure $ mkTx LegacyTransaction [] Nothing Nothing []
   parseJSON invalid =
     JSON.typeMismatch "Transaction" invalid
 
@@ -308,7 +378,8 @@ initTx vm =
     oldBalance = view (accountAt toAddr % #balance) preState
     creation = vm.tx.isCreate
     -- Check for collision at target address for CREATE transactions
-    hasCollision = creation && collision (Map.lookup toAddr preState)
+    preStateContract = Map.lookup toAddr preState
+    hasCollision = creation && collision preStateContract
     -- For collision: don't transfer value, don't create contract
     initState = if hasCollision
       then touchAccount toAddr preState
