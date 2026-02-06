@@ -60,7 +60,7 @@ import Data.Vector qualified as V
 import Data.Vector.Storable qualified as VS
 import Data.Vector.Storable.Mutable qualified as VS.Mutable
 import Data.Vector.Storable.ByteString (vectorToByteString, byteStringToVector)
-import Data.Word (Word8, Word32, Word64)
+import Data.Word (Word8, Word64)
 import Text.Read (readMaybe)
 import Witch (into, tryFrom, unsafeInto, tryInto)
 
@@ -1333,21 +1333,26 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
         forceConcreteBuf input "MODEXP" $ \input' -> do
           let
             (lenb, lene, lenm) = parseModexpLength input'
-
-            output = ConcreteBuf $
-              if isZero (96 + lenb + lene) lenm input'
-              then truncpadlit (unsafeInto lenm) (asBE (0 :: Int))
-              else
-                let
-                  b = asInteger $ lazySlice 96 lenb input'
-                  e = asInteger $ lazySlice (96 + lenb) lene input'
-                  m = asInteger $ lazySlice (96 + lenb + lene) lenm input'
-                in
-                  padLeft (unsafeInto lenm) (asBE (expFast b e m))
-          assign' (#state % #stack) (Lit 1 : xs)
-          assign (#state % #returndata) output
-          copyBytesToMemory output outSize (Lit 0) outOffset
-          next
+            -- EIP-7823: ModExp upper bounds - each input limited to 1024 bytes (8192 bits)
+            modexpLimit = 1024 :: W256
+          if lenb > modexpLimit || lene > modexpLimit || lenm > modexpLimit
+          then precompileFail  -- EIP-7823: fail and consume all gas if limits exceeded
+          else do
+            let
+              output = ConcreteBuf $
+                if isZero (96 + lenb + lene) lenm input'
+                then truncpadlit (unsafeInto lenm) (asBE (0 :: Int))
+                else
+                  let
+                    b = asInteger $ lazySlice 96 lenb input'
+                    e = asInteger $ lazySlice (96 + lenb) lene input'
+                    m = asInteger $ lazySlice (96 + lenb + lene) lenm input'
+                  in
+                    padLeft (unsafeInto lenm) (asBE (expFast b e m))
+            assign' (#state % #stack) (Lit 1 : xs)
+            assign (#state % #returndata) output
+            copyBytesToMemory output outSize (Lit 0) outOffset
+            next
 
       -- ECADD
       0x6 ->
@@ -1418,8 +1423,8 @@ lazySlice offset size bs =
 parseModexpLength :: ByteString -> (W256, W256, W256)
 parseModexpLength input =
   let lenb = word $ LS.toStrict $ lazySlice  0 32 input
-      lene = word $ LS.toStrict $ lazySlice 32 64 input
-      lenm = word $ LS.toStrict $ lazySlice 64 96 input
+      lene = word $ LS.toStrict $ lazySlice 32 32 input
+      lenm = word $ LS.toStrict $ lazySlice 64 32 input
   in (lenb, lene, lenm)
 
 --- checks if a range of ByteString bs starting at offset and length size is all zeros.
@@ -3003,28 +3008,45 @@ mkCodeOps contractCode =
 
 concreteModexpGasFee :: ByteString -> Word64
 concreteModexpGasFee input =
-  if lenb < into (maxBound :: Word32) &&
-     (lene < into (maxBound :: Word32) || (lenb == 0 && lenm == 0)) &&
-     lenm < into (maxBound :: Word64)
-  then
-    max 500 (multiplicationComplexity * iterCount)
-  else
-    maxBound -- TODO: this is not 100% correct, return Nothing on overflow
-  where
-    (lenb, lene, lenm) = parseModexpLength input
-    ez = isZero (96 + lenb) lene input
-    e' = word $ LS.toStrict $
-      lazySlice (96 + lenb) (min 32 lene) input
-    nwords :: Word64
-    nwords = ceilDiv (unsafeInto $ max lenb lenm) 8
-    maxLength = max lenb lenm
-    multiplicationComplexity = if maxLength <= 32 then 16 else 2 * nwords * nwords
-    iterCount' :: Word64
-    iterCount' | lene <= 32 && ez = 0
-               | lene <= 32 = unsafeInto (log2 e')
-               | e' == 0 = 16 * (unsafeInto lene - 32)
-               | otherwise = unsafeInto (log2 e') + 16 * (unsafeInto lene - 32)
-    iterCount = max iterCount' 1
+  let (lenb, lene, lenm) = parseModexpLength input
+      -- EIP-7823: Cap input lengths at 1024 bytes (8192 bits)
+      -- If any length exceeds this, the precompile will fail
+      -- and consume all provided gas
+      eip7823Limit :: W256
+      eip7823Limit = 1024
+  in if lenb > eip7823Limit || lene > eip7823Limit || lenm > eip7823Limit
+     then 0  -- EIP-7823: limits exceeded, gas cost is 0 (precompileFail will consume all gas)
+     else
+       let ez = isZero (96 + lenb) lene input
+           e' = word $ LS.toStrict $ lazySlice (96 + lenb) (min 32 lene) input
+           maxLength :: Word64
+           maxLength = unsafeInto $ max lenb lenm
+           nwords :: Word64
+           nwords = ceilDiv maxLength 8
+           -- Check for overflow in nwords * nwords calculation
+           multiplicationComplexity :: Word64
+           multiplicationComplexity
+             | maxLength <= 32 = 16
+             | nwords > 0xFFFFFFFF = maxBound  -- nwords^2 would overflow
+             | otherwise = let nw2 = nwords * nwords
+                           in if nw2 > maxBound `div` 2
+                              then maxBound
+                              else 2 * nw2
+           lene64 :: Word64
+           lene64 = unsafeInto lene
+           iterCount' :: Word64
+           iterCount' | lene <= 32 && ez = 0
+                      | lene <= 32 = unsafeInto (log2 e')
+                      | e' == 0 = 16 * (lene64 - 32)
+                      | otherwise = unsafeInto (log2 e') + 16 * (lene64 - 32)
+           iterCount = max iterCount' 1
+           -- Check for overflow in final multiplication
+           result = if multiplicationComplexity == maxBound
+                    then maxBound
+                    else if iterCount > maxBound `div` multiplicationComplexity
+                         then maxBound
+                         else multiplicationComplexity * iterCount
+       in max 500 result
 
 -- Gas cost of precompiles
 costOfPrecompile :: FeeSchedule Word64 -> Addr -> Expr Buf -> Word64
