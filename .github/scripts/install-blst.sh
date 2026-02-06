@@ -13,7 +13,7 @@ fi
 PREFIX="$HOME/.local"
 curl -LO "https://github.com/supranational/blst/archive/v$INSTALL_VERSION.zip"
 unzip "v$INSTALL_VERSION.zip" && rm "v$INSTALL_VERSION.zip"
-cd "blst-$INSTALL_VERSION"
+cd "blst-$INSTALL_VERSION" || exit 1
 
 # Build using the provided build script
 # The script auto-detects platform and uses appropriate assembly

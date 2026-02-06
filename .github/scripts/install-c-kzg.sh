@@ -16,7 +16,7 @@ fi
 PREFIX="$HOME/.local"
 curl -LO "https://github.com/ethereum/c-kzg-4844/archive/v$INSTALL_VERSION.zip"
 unzip "v$INSTALL_VERSION.zip" && rm "v$INSTALL_VERSION.zip"
-cd "c-kzg-4844-$INSTALL_VERSION/src"
+cd "c-kzg-4844-$INSTALL_VERSION/src" || exit 1
 
 # Compiler flags matching flake.nix
 CFLAGS="-O2 -fPIC -Wno-implicit-function-declaration -Wno-gnu-folding-constant"

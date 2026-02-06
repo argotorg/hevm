@@ -475,9 +475,9 @@ checkTx tx block prestate = do
   if initCodeSizeExceeded then mzero
   else pure prestate
 
--- EIP-7825: Maximum transaction gas limit is 2^24 (16,777,216)
+-- EIP-7825: Maximum transaction gas limit is 2^24
 maxTxGasLimit :: Word64
-maxTxGasLimit = 16777216
+maxTxGasLimit = 2 ^ (24 :: Int)
 
 validateTx :: Transaction -> Block -> BlockchainContracts -> Maybe ()
 validateTx tx block cs = do
@@ -511,7 +511,7 @@ vmForCase x = do
       let chainId = opts.chainId
           authList = opts.authorizationList
           origin = opts.origin
-          (contractsWithDelegations, authRefunds, _) = processAuthorizations chainId origin authList vm.env.contracts
+          (contractsWithDelegations, authRefunds) = processAuthorizations chainId origin authList vm.env.contracts
           -- Get addresses to warm (after chain_id validation) - these are the AUTHORITY accounts
           authWarmAddrs = getAuthoritiesToWarm chainId authList
           -- Check if the initial contract (TX destination) has delegation code

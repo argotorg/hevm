@@ -90,15 +90,8 @@ int ethjet_point_evaluation(uint8_t *in, size_t in_size,
         return 0;
     }
 
-    /* Compute commitment hash and verify versioned hash */
-    uint8_t commitment_hash[32];
-    if (sha3_256(commitment_hash, 32, commitment, 48) != 0) {
-        return 0;
-    }
-
-    /* Expected versioned hash = 0x01 || sha256(commitment)[1:] */
-    /* But EIP-4844 uses SHA-256 not Keccak, so we need proper SHA-256 */
-    /* For now, skip this check if we can't do SHA-256 */
+    /* Versioned hash validation (SHA-256 based) is done on the Haskell side
+     * before calling this FFI function. Here we only verify the KZG proof. */
 
     /* Initialize KZG if not already done */
     if (!kzg_initialized) {

@@ -149,7 +149,6 @@ makeVm o = do
       txtoAddr = o.address
       -- EIP-7702: Authority addresses are warmed after chain_id validation
       authWarmAddrs = getAuthoritiesToWarm o.chainId o.authorizationList
-      -- EIP-7702: Delegation targets are warmed for valid authorizations (included in authDelegationTargets)
       initialAccessedAddrs = fromList $
            [txorigin, txtoAddr, o.coinbase]
         ++ (fmap LitAddr [1..9])          -- Legacy precompiles (ECRECOVER, SHA256, etc.)
@@ -157,7 +156,6 @@ makeVm o = do
         ++ [LitAddr 0x100]                -- EIP-7951 P256VERIFY
         ++ (Map.keys txaccessList)
         ++ authWarmAddrs                  -- EIP-7702: Warmed authority addresses
-        ++ authDelegationTargets          -- EIP-7702: Warmed delegation targets (for valid authorizations)
       initialAccessedStorageKeys = fromList $ foldMap (uncurry (map . (,))) (Map.toList txaccessList)
       touched = if o.create then [txorigin] else [txorigin, txtoAddr]
   memory <- ConcreteMemory <$> VS.Mutable.new 0
@@ -215,9 +213,9 @@ makeVm o = do
     , pathsVisited = mempty
     }
     where
-    -- Process EIP-7702 authorization list to set delegation codes, collect refunds, and get addresses to warm
+    -- Process EIP-7702 authorization list to set delegation codes and collect refunds
     baseContracts = Map.fromList ((o.address,o.contract):o.otherContracts)
-    (contractsWithDelegations, authRefunds, authDelegationTargets) = processAuthorizations o.chainId o.origin o.authorizationList baseContracts
+    (contractsWithDelegations, authRefunds) = processAuthorizations o.chainId o.origin o.authorizationList baseContracts
     env = Env
       { chainId = o.chainId
       , contracts = contractsWithDelegations
@@ -1310,10 +1308,17 @@ perEmptyAccountCost = 25000
 perAuthBaseCost = 12500
 
 delegationCodeLength :: Int
-delegationCodeLength = 23  -- 3-byte prefix + 20-byte address
+delegationCodeLength = BS.length delegationPrefix + 20
 
 maxAuthNonce :: W256
 maxAuthNonce = 0xFFFFFFFFFFFFFFFF
+
+-- | Validate chain ID and nonce for an EIP-7702 authorization entry
+-- Shared between getAuthoritiesToWarm and processAuthorizations
+isValidAuthChainAndNonce :: W256 -> AuthorizationEntry -> Bool
+isValidAuthChainAndNonce cid auth =
+  (auth.authChainId == 0 || auth.authChainId == cid) &&
+  auth.authNonce < maxAuthNonce
 
 -- | Execute a BLS precompile with standard input validation and output handling
 executeBLSPrecompile
@@ -1516,8 +1521,7 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
             else if zInt >= blsModulus || yInt >= blsModulus
             then precompileFail  -- z or y out of bounds
             else do
-              -- TODO: Actual KZG verification requires c-kzg-4844 library
-              -- For now, we perform the cryptographic verification using the library
+              -- Verify KZG proof via c-kzg-4844 FFI
               case pointEvaluationVerify input' of
                 Just output -> do
                   assign' (#state % #stack) (Lit 1 : xs)
@@ -1637,13 +1641,13 @@ p256Verify input =
          let u1 = (e * w) `mod` n
              u2 = (r * w) `mod` n
              -- R = u1*G + u2*Q
-             rPoint = pointAddTwoMuls curve u1 (ecc_g $ common_curve curve) u2 pubPoint
+             rPoint = pointAddTwoMuls curve u1 (ecc_g $ curveCommon curve) u2 pubPoint
          in case rPoint of
               PointO -> False  -- Point at infinity
               Point rx _ -> (rx `mod` n) == r
   where
-    common_curve (CurveFP (CurvePrime _ cc)) = cc
-    common_curve _ = error "p256Verify: unexpected curve type"
+    curveCommon (CurveFP (CurvePrime _ cc)) = cc
+    curveCommon _ = error "p256Verify: unexpected curve type"
 
 -- | Point Evaluation precompile (EIP-4844) KZG proof verification
 -- Input: versioned_hash (32) || z (32) || y (32) || commitment (48) || proof (48)
@@ -3588,11 +3592,7 @@ getAuthoritiesToWarm chainId auths = map LitAddr $ mapMaybe (recoverIfValid chai
   where
     recoverIfValid :: W256 -> AuthorizationEntry -> Maybe Addr
     recoverIfValid cid auth
-      -- Step 1: Chain ID must be 0 (any chain) or match current chain
-      | auth.authChainId /= 0 && auth.authChainId /= cid = Nothing
-      -- Step 2: Auth nonce must be < 2^64-1 (per EIP-7702 step 2)
-      | auth.authNonce >= (0xFFFFFFFFFFFFFFFF :: W256) = Nothing
-      -- Step 3: ecrecover must succeed
+      | not (isValidAuthChainAndNonce cid auth) = Nothing
       | otherwise = recoverAuthorityAddress auth
 
 -- | Check if an account's code allows EIP-7702 delegation (empty or already delegated)
@@ -3618,7 +3618,7 @@ accountReallyExists (Just c) = hasBalance || hasNonce || hasCode
       RuntimeCode (ConcreteRuntimeCode code) -> not (BS.null code)
       _ -> True  -- Symbolic or InitCode, assume exists
 
--- | Process all EIP-7702 authorization entries and return the updated contracts map, refunds, and addresses to warm
+-- | Process all EIP-7702 authorization entries and return the updated contracts map and refunds
 -- Per EIP-7702 spec, for each authorization:
 -- 1. ecrecover to get authority address (addresses warmed separately via getAuthoritiesToWarm)
 -- 2. Check chain_id: must be 0 or match current chain
@@ -3626,25 +3626,23 @@ accountReallyExists (Just c) = hasBalance || hasNonce || hasCode
 -- 4. Check nonce matches (for self-sponsored: nonce == account_nonce + 1)
 -- 5. Add refund if authority exists (PER_EMPTY_ACCOUNT_COST - PER_AUTH_BASE_COST = 12500)
 -- 6. Set delegation code and increment nonce
--- 7. Add delegation target address to accessed addresses (only for valid authorizations)
 processAuthorizations
   :: W256                                -- ^ Chain ID
   -> Expr EAddr                          -- ^ Transaction origin address
   -> [AuthorizationEntry]                -- ^ Authorization list from transaction
   -> Map (Expr EAddr) Contract           -- ^ Current contracts state
-  -> (Map (Expr EAddr) Contract, [(Expr EAddr, Word64)], [Expr EAddr])  -- ^ (Updated contracts, Refunds, Delegation targets to warm)
-processAuthorizations chainId origin auths contracts = foldl processOne (contracts, [], []) auths
+  -> (Map (Expr EAddr) Contract, [(Expr EAddr, Word64)])  -- ^ (Updated contracts, Refunds)
+processAuthorizations chainId origin auths contracts = foldl processOne (contracts, []) auths
   where
     -- EIP-7702 refund: PER_EMPTY_ACCOUNT_COST - PER_AUTH_BASE_COST
     authRefund :: Word64
     authRefund = perEmptyAccountCost - perAuthBaseCost
 
     -- Validate and apply a single authorization
-    processOne acc@(cs, refs, warmAddrs) auth = case recoverAuthorityAddress auth of
+    processOne acc@(cs, refs) auth = case recoverAuthorityAddress auth of
       Nothing -> acc  -- Invalid signature
       Just authority
-        | auth.authChainId /= 0 && auth.authChainId /= chainId -> acc  -- Chain ID mismatch
-        | auth.authNonce >= maxAuthNonce -> acc  -- Auth nonce too high
+        | not (isValidAuthChainAndNonce chainId auth) -> acc
         | not (accountCodeAllowsDelegation existingAccount) -> acc  -- Non-delegation code
         | currentNonce == maxBound -> acc  -- Would overflow
         | into expectedNonce /= auth.authNonce -> acc  -- Nonce mismatch
@@ -3657,7 +3655,7 @@ processAuthorizations chainId origin auths contracts = foldl processOne (contrac
                 newRefs = if accountReallyExists existingAccount
                           then (authorityAddr, authRefund) : refs
                           else refs
-            in (Map.insert authorityAddr newContract cs, newRefs, warmAddrs)
+            in (Map.insert authorityAddr newContract cs, newRefs)
         where
           authorityAddr = LitAddr authority
           existingAccount = Map.lookup authorityAddr cs

@@ -3,6 +3,17 @@
 #include <string.h>
 #include <stdlib.h>
 
+/* EIP-2537 encoding sizes */
+#define FP_SIZE           48
+#define FP_PADDING        16
+#define FP_PADDED_SIZE    (FP_PADDING + FP_SIZE)   /* 64 */
+#define SCALAR_SIZE       32
+#define G1_POINT_SIZE     (2 * FP_PADDED_SIZE)     /* 128 */
+#define G2_POINT_SIZE     (4 * FP_PADDED_SIZE)     /* 256 */
+#define G1_SCALAR_PAIR    (G1_POINT_SIZE + SCALAR_SIZE)  /* 160 */
+#define G2_SCALAR_PAIR    (G2_POINT_SIZE + SCALAR_SIZE)  /* 288 */
+#define PAIRING_PAIR      (G1_POINT_SIZE + G2_POINT_SIZE) /* 384 */
+
 /* BLS12-381 field modulus p (big-endian)
  * p = 0x1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f6241eabfffeb153ffffb9feffffffffaaab
  */
@@ -36,8 +47,8 @@ static int is_zero(const uint8_t *data, size_t len) {
 /* Reverse byte order of a 32-byte scalar (big-endian to little-endian)
  * blst expects little-endian scalars but EIP-2537 specifies big-endian */
 static void reverse_scalar_32(uint8_t *out, const uint8_t *in) {
-    for (int i = 0; i < 32; i++) {
-        out[i] = in[31 - i];
+    for (int i = 0; i < SCALAR_SIZE; i++) {
+        out[i] = in[SCALAR_SIZE - 1 - i];
     }
 }
 
@@ -45,10 +56,10 @@ static void reverse_scalar_32(uint8_t *out, const uint8_t *in) {
  * Returns 1 if valid (padding is zero and value < modulus), 0 otherwise */
 static int is_valid_fp(const uint8_t *fp64) {
     /* First 16 bytes must be zero padding */
-    if (!is_zero(fp64, 16)) return 0;
+    if (!is_zero(fp64, FP_PADDING)) return 0;
 
     /* Remaining 48 bytes must be < modulus */
-    if (compare_be(fp64 + 16, BLS_MODULUS, 48) >= 0) return 0;
+    if (compare_be(fp64 + FP_PADDING, BLS_MODULUS, FP_SIZE) >= 0) return 0;
 
     return 1;
 }
@@ -56,7 +67,7 @@ static int is_valid_fp(const uint8_t *fp64) {
 /* Validate a 128-byte Fp2 element (c0(64) || c1(64))
  * Returns 1 if valid, 0 otherwise */
 static int is_valid_fp2(const uint8_t *fp2_128) {
-    return is_valid_fp(fp2_128) && is_valid_fp(fp2_128 + 64);
+    return is_valid_fp(fp2_128) && is_valid_fp(fp2_128 + FP_PADDED_SIZE);
 }
 
 /* Decode a 128-byte G1 point from EIP-2537 format
@@ -68,21 +79,21 @@ static int decode_g1_point(blst_p1_affine *out, const uint8_t *in128, int subgro
     if (!is_valid_fp(in128)) {
         return 0;
     }
-    if (!is_valid_fp(in128 + 64)) {
+    if (!is_valid_fp(in128 + FP_PADDED_SIZE)) {
         return 0;
     }
 
     /* Check for point at infinity (all zeros) */
-    if (is_zero(in128, 128)) {
+    if (is_zero(in128, G1_POINT_SIZE)) {
         memset(out, 0, sizeof(*out));
         return 1;
     }
 
     /* Decode x coordinate (skip 16 byte padding) */
-    blst_fp_from_bendian(&out->x, in128 + 16);
+    blst_fp_from_bendian(&out->x, in128 + FP_PADDING);
 
     /* Decode y coordinate (skip 16 byte padding) */
-    blst_fp_from_bendian(&out->y, in128 + 64 + 16);
+    blst_fp_from_bendian(&out->y, in128 + FP_PADDED_SIZE + FP_PADDING);
 
     /* Check point is on curve */
     if (!blst_p1_affine_on_curve(out)) {
@@ -102,12 +113,12 @@ static int decode_g1_point(blst_p1_affine *out, const uint8_t *in128, int subgro
  * Returns 1 on success, 0 on failure */
 static int decode_g2_point(blst_p2_affine *out, const uint8_t *in256, int subgroup_check) {
     /* Validate field elements */
-    if (!is_valid_fp2(in256) || !is_valid_fp2(in256 + 128)) {
+    if (!is_valid_fp2(in256) || !is_valid_fp2(in256 + 2 * FP_PADDED_SIZE)) {
         return 0;
     }
 
     /* Check for point at infinity (all zeros) */
-    if (is_zero(in256, 256)) {
+    if (is_zero(in256, G2_POINT_SIZE)) {
         memset(out, 0, sizeof(*out));
         return 1;
     }
@@ -115,12 +126,12 @@ static int decode_g2_point(blst_p2_affine *out, const uint8_t *in256, int subgro
     /* Decode x coordinate (Fp2 = c0 || c1)
      * EIP-2537: element is c0 + i*c1, encoded as c0 || c1
      * blst: fp[0] is c0 (real), fp[1] is c1 (imaginary) */
-    blst_fp_from_bendian(&out->x.fp[0], in256 + 16);       /* x.c0 (real) */
-    blst_fp_from_bendian(&out->x.fp[1], in256 + 64 + 16);  /* x.c1 (imag) */
+    blst_fp_from_bendian(&out->x.fp[0], in256 + FP_PADDING);       /* x.c0 (real) */
+    blst_fp_from_bendian(&out->x.fp[1], in256 + FP_PADDED_SIZE + FP_PADDING);  /* x.c1 (imag) */
 
     /* Decode y coordinate */
-    blst_fp_from_bendian(&out->y.fp[0], in256 + 128 + 16);       /* y.c0 (real) */
-    blst_fp_from_bendian(&out->y.fp[1], in256 + 128 + 64 + 16);  /* y.c1 (imag) */
+    blst_fp_from_bendian(&out->y.fp[0], in256 + 2 * FP_PADDED_SIZE + FP_PADDING);       /* y.c0 (real) */
+    blst_fp_from_bendian(&out->y.fp[1], in256 + 3 * FP_PADDED_SIZE + FP_PADDING);  /* y.c1 (imag) */
 
     /* Check point is on curve */
     if (!blst_p2_affine_on_curve(out)) {
@@ -142,42 +153,42 @@ static void encode_g1_point(uint8_t *out128, const blst_p1 *p) {
 
     /* Check for point at infinity */
     if (blst_p1_affine_is_inf(&affine)) {
-        memset(out128, 0, 128);
+        memset(out128, 0, G1_POINT_SIZE);
         return;
     }
 
     /* Encode x with 16 byte zero padding */
-    memset(out128, 0, 16);
-    blst_bendian_from_fp(out128 + 16, &affine.x);
+    memset(out128, 0, FP_PADDING);
+    blst_bendian_from_fp(out128 + FP_PADDING, &affine.x);
 
     /* Encode y with 16 byte zero padding */
-    memset(out128 + 64, 0, 16);
-    blst_bendian_from_fp(out128 + 64 + 16, &affine.y);
+    memset(out128 + FP_PADDED_SIZE, 0, FP_PADDING);
+    blst_bendian_from_fp(out128 + FP_PADDED_SIZE + FP_PADDING, &affine.y);
 }
 
 /* Encode a G2 affine point directly to 256-byte EIP-2537 format */
 static void encode_g2_point_affine(uint8_t *out256, const blst_p2_affine *affine) {
     /* Check for point at infinity */
     if (blst_p2_affine_is_inf(affine)) {
-        memset(out256, 0, 256);
+        memset(out256, 0, G2_POINT_SIZE);
         return;
     }
 
     /* Encode x.c0 with padding */
-    memset(out256, 0, 16);
-    blst_bendian_from_fp(out256 + 16, &affine->x.fp[0]);
+    memset(out256, 0, FP_PADDING);
+    blst_bendian_from_fp(out256 + FP_PADDING, &affine->x.fp[0]);
 
     /* Encode x.c1 with padding */
-    memset(out256 + 64, 0, 16);
-    blst_bendian_from_fp(out256 + 64 + 16, &affine->x.fp[1]);
+    memset(out256 + FP_PADDED_SIZE, 0, FP_PADDING);
+    blst_bendian_from_fp(out256 + FP_PADDED_SIZE + FP_PADDING, &affine->x.fp[1]);
 
     /* Encode y.c0 with padding */
-    memset(out256 + 128, 0, 16);
-    blst_bendian_from_fp(out256 + 128 + 16, &affine->y.fp[0]);
+    memset(out256 + 2 * FP_PADDED_SIZE, 0, FP_PADDING);
+    blst_bendian_from_fp(out256 + 2 * FP_PADDED_SIZE + FP_PADDING, &affine->y.fp[0]);
 
     /* Encode y.c1 with padding */
-    memset(out256 + 128 + 64, 0, 16);
-    blst_bendian_from_fp(out256 + 128 + 64 + 16, &affine->y.fp[1]);
+    memset(out256 + 3 * FP_PADDED_SIZE, 0, FP_PADDING);
+    blst_bendian_from_fp(out256 + 3 * FP_PADDED_SIZE + FP_PADDING, &affine->y.fp[1]);
 }
 
 /* Encode a G2 point to 256-byte EIP-2537 format */
@@ -189,7 +200,7 @@ static void encode_g2_point(uint8_t *out256, const blst_p2 *p) {
 
 /* G1ADD: Add two G1 points */
 int ethjet_bls_g1add(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size) {
-    if (in_size != 256 || out_size < 128) {
+    if (in_size != 2 * G1_POINT_SIZE || out_size < G1_POINT_SIZE) {
         return 0;
     }
 
@@ -197,7 +208,7 @@ int ethjet_bls_g1add(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size)
 
     /* Decode input points (no subgroup check for ADD) */
     if (!decode_g1_point(&a_affine, in, 0)) return 0;
-    if (!decode_g1_point(&b_affine, in + 128, 0)) return 0;
+    if (!decode_g1_point(&b_affine, in + G1_POINT_SIZE, 0)) return 0;
 
     /* Convert to projective and add */
     blst_p1 a, result;
@@ -212,7 +223,7 @@ int ethjet_bls_g1add(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size)
 
 /* G1MUL: Multiply G1 point by scalar */
 int ethjet_bls_g1mul(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size) {
-    if (in_size != 160 || out_size < 128) {
+    if (in_size != G1_SCALAR_PAIR || out_size < G1_POINT_SIZE) {
         return 0;
     }
 
@@ -223,7 +234,7 @@ int ethjet_bls_g1mul(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size)
 
     /* Convert scalar from big-endian to little-endian */
     uint8_t scalar_le[32];
-    reverse_scalar_32(scalar_le, in + 128);
+    reverse_scalar_32(scalar_le, in + G1_POINT_SIZE);
 
     /* Convert to projective and multiply */
     blst_p1 p, result;
@@ -239,14 +250,14 @@ int ethjet_bls_g1mul(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size)
 /* G1MSM: Multi-scalar multiplication on G1
  * Points at infinity are filtered out (they contribute 0 to the sum) */
 int ethjet_bls_g1msm(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size) {
-    if (out_size < 128) {
+    if (out_size < G1_POINT_SIZE) {
         return 0;
     }
-    if (in_size == 0 || in_size % 160 != 0) {
+    if (in_size == 0 || in_size % G1_SCALAR_PAIR != 0) {
         return 0;
     }
 
-    size_t k = in_size / 160;
+    size_t k = in_size / G1_SCALAR_PAIR;
 
     /* Empty input: EIP-2537 requires error for empty input */
     if (k == 0) {
@@ -256,7 +267,7 @@ int ethjet_bls_g1msm(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size)
     /* Allocate arrays for points and scalars */
     blst_p1_affine *points = malloc(k * sizeof(blst_p1_affine));
     const blst_p1_affine **point_ptrs = malloc(k * sizeof(blst_p1_affine*));
-    uint8_t *scalars_le = malloc(k * 32);  /* Converted little-endian scalars */
+    uint8_t *scalars_le = malloc(k * SCALAR_SIZE);  /* Converted little-endian scalars */
     const uint8_t **scalar_ptrs = malloc(k * sizeof(uint8_t*));
 
     if (!points || !point_ptrs || !scalars_le || !scalar_ptrs) {
@@ -271,7 +282,7 @@ int ethjet_bls_g1msm(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size)
      * Filter out infinity points - they contribute 0 to the sum */
     size_t valid_pairs = 0;
     for (size_t i = 0; i < k; i++) {
-        if (!decode_g1_point(&points[valid_pairs], in + i * 160, 1)) {
+        if (!decode_g1_point(&points[valid_pairs], in + i * G1_SCALAR_PAIR, 1)) {
             free(points);
             free(point_ptrs);
             free(scalars_le);
@@ -286,14 +297,14 @@ int ethjet_bls_g1msm(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size)
 
         point_ptrs[valid_pairs] = &points[valid_pairs];
         /* Convert scalar from big-endian to little-endian */
-        reverse_scalar_32(scalars_le + valid_pairs * 32, in + i * 160 + 128);
-        scalar_ptrs[valid_pairs] = scalars_le + valid_pairs * 32;
+        reverse_scalar_32(scalars_le + valid_pairs * SCALAR_SIZE, in + i * G1_SCALAR_PAIR + G1_POINT_SIZE);
+        scalar_ptrs[valid_pairs] = scalars_le + valid_pairs * SCALAR_SIZE;
         valid_pairs++;
     }
 
     /* If all points are infinity, return infinity */
     if (valid_pairs == 0) {
-        memset(out, 0, 128);
+        memset(out, 0, G1_POINT_SIZE);
         free(points);
         free(point_ptrs);
         free(scalars_le);
@@ -330,7 +341,7 @@ int ethjet_bls_g1msm(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size)
 
 /* G2ADD: Add two G2 points */
 int ethjet_bls_g2add(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size) {
-    if (in_size != 512 || out_size < 256) {
+    if (in_size != 2 * G2_POINT_SIZE || out_size < G2_POINT_SIZE) {
         return 0;
     }
 
@@ -338,7 +349,7 @@ int ethjet_bls_g2add(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size)
 
     /* Decode input points (no subgroup check for ADD) */
     if (!decode_g2_point(&a_affine, in, 0)) return 0;
-    if (!decode_g2_point(&b_affine, in + 256, 0)) return 0;
+    if (!decode_g2_point(&b_affine, in + G2_POINT_SIZE, 0)) return 0;
 
     /* Handle infinity cases explicitly */
     int a_is_inf = blst_p2_affine_is_inf(&a_affine);
@@ -346,7 +357,7 @@ int ethjet_bls_g2add(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size)
 
     if (a_is_inf && b_is_inf) {
         /* inf + inf = inf */
-        memset(out, 0, 256);
+        memset(out, 0, G2_POINT_SIZE);
         return 1;
     } else if (a_is_inf) {
         /* inf + B = B */
@@ -371,7 +382,7 @@ int ethjet_bls_g2add(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size)
 
 /* G2MUL: Multiply G2 point by scalar */
 int ethjet_bls_g2mul(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size) {
-    if (in_size != 288 || out_size < 256) {
+    if (in_size != G2_SCALAR_PAIR || out_size < G2_POINT_SIZE) {
         return 0;
     }
 
@@ -382,7 +393,7 @@ int ethjet_bls_g2mul(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size)
 
     /* Convert scalar from big-endian to little-endian */
     uint8_t scalar_le[32];
-    reverse_scalar_32(scalar_le, in + 256);
+    reverse_scalar_32(scalar_le, in + G2_POINT_SIZE);
 
     /* Convert to projective and multiply */
     blst_p2 p, result;
@@ -398,10 +409,10 @@ int ethjet_bls_g2mul(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size)
 /* G2MSM: Multi-scalar multiplication on G2
  * Points at infinity are filtered out (they contribute 0 to the sum) */
 int ethjet_bls_g2msm(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size) {
-    if (out_size < 256) return 0;
-    if (in_size == 0 || in_size % 288 != 0) return 0;
+    if (out_size < G2_POINT_SIZE) return 0;
+    if (in_size == 0 || in_size % G2_SCALAR_PAIR != 0) return 0;
 
-    size_t k = in_size / 288;
+    size_t k = in_size / G2_SCALAR_PAIR;
 
     /* Empty input: EIP-2537 requires error for empty input */
     if (k == 0) {
@@ -411,7 +422,7 @@ int ethjet_bls_g2msm(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size)
     /* Allocate arrays for points and scalars */
     blst_p2_affine *points = malloc(k * sizeof(blst_p2_affine));
     const blst_p2_affine **point_ptrs = malloc(k * sizeof(blst_p2_affine*));
-    uint8_t *scalars_le = malloc(k * 32);  /* Converted little-endian scalars */
+    uint8_t *scalars_le = malloc(k * SCALAR_SIZE);  /* Converted little-endian scalars */
     const uint8_t **scalar_ptrs = malloc(k * sizeof(uint8_t*));
 
     if (!points || !point_ptrs || !scalars_le || !scalar_ptrs) {
@@ -426,7 +437,7 @@ int ethjet_bls_g2msm(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size)
      * Filter out infinity points - they contribute 0 to the sum */
     size_t valid_pairs = 0;
     for (size_t i = 0; i < k; i++) {
-        if (!decode_g2_point(&points[valid_pairs], in + i * 288, 1)) {
+        if (!decode_g2_point(&points[valid_pairs], in + i * G2_SCALAR_PAIR, 1)) {
             free(points);
             free(point_ptrs);
             free(scalars_le);
@@ -441,14 +452,14 @@ int ethjet_bls_g2msm(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size)
 
         point_ptrs[valid_pairs] = &points[valid_pairs];
         /* Convert scalar from big-endian to little-endian */
-        reverse_scalar_32(scalars_le + valid_pairs * 32, in + i * 288 + 256);
-        scalar_ptrs[valid_pairs] = scalars_le + valid_pairs * 32;
+        reverse_scalar_32(scalars_le + valid_pairs * SCALAR_SIZE, in + i * G2_SCALAR_PAIR + G2_POINT_SIZE);
+        scalar_ptrs[valid_pairs] = scalars_le + valid_pairs * SCALAR_SIZE;
         valid_pairs++;
     }
 
     /* If all points are infinity, return infinity */
     if (valid_pairs == 0) {
-        memset(out, 0, 256);
+        memset(out, 0, G2_POINT_SIZE);
         free(points);
         free(point_ptrs);
         free(scalars_le);
@@ -488,9 +499,9 @@ int ethjet_bls_g2msm(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size)
  * Pairs where either point is infinity are skipped (e(P,0) = e(0,Q) = 1) */
 int ethjet_bls_pairing(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size) {
     if (out_size < 32) return 0;
-    if (in_size % 384 != 0) return 0;
+    if (in_size % PAIRING_PAIR != 0) return 0;
 
-    size_t k = in_size / 384;
+    size_t k = in_size / PAIRING_PAIR;
 
     /* Empty input: EIP-2537 requires error for empty input */
     if (k == 0) {
@@ -515,7 +526,7 @@ int ethjet_bls_pairing(uint8_t *in, size_t in_size, uint8_t *out, size_t out_siz
     size_t valid_pairs = 0;
     for (size_t i = 0; i < k; i++) {
         /* G1 point: 128 bytes */
-        if (!decode_g1_point(&g1_points[valid_pairs], in + i * 384, 1)) {
+        if (!decode_g1_point(&g1_points[valid_pairs], in + i * PAIRING_PAIR, 1)) {
             free(g1_points);
             free(g2_points);
             free(g1_ptrs);
@@ -523,7 +534,7 @@ int ethjet_bls_pairing(uint8_t *in, size_t in_size, uint8_t *out, size_t out_siz
             return 0;
         }
         /* G2 point: 256 bytes */
-        if (!decode_g2_point(&g2_points[valid_pairs], in + i * 384 + 128, 1)) {
+        if (!decode_g2_point(&g2_points[valid_pairs], in + i * PAIRING_PAIR + G1_POINT_SIZE, 1)) {
             free(g1_points);
             free(g2_points);
             free(g1_ptrs);
@@ -577,7 +588,7 @@ int ethjet_bls_pairing(uint8_t *in, size_t in_size, uint8_t *out, size_t out_siz
 
 /* MAP_FP_TO_G1: Map field element to G1 point */
 int ethjet_bls_map_fp_to_g1(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size) {
-    if (in_size != 64 || out_size < 128) {
+    if (in_size != FP_PADDED_SIZE || out_size < G1_POINT_SIZE) {
         return 0;
     }
 
@@ -588,7 +599,7 @@ int ethjet_bls_map_fp_to_g1(uint8_t *in, size_t in_size, uint8_t *out, size_t ou
 
     /* Decode field element (skip 16 byte padding) */
     blst_fp u;
-    blst_fp_from_bendian(&u, in + 16);
+    blst_fp_from_bendian(&u, in + FP_PADDING);
 
     /* Map to G1 */
     blst_p1 result;
@@ -602,7 +613,7 @@ int ethjet_bls_map_fp_to_g1(uint8_t *in, size_t in_size, uint8_t *out, size_t ou
 
 /* MAP_FP2_TO_G2: Map Fp2 element to G2 point */
 int ethjet_bls_map_fp2_to_g2(uint8_t *in, size_t in_size, uint8_t *out, size_t out_size) {
-    if (in_size != 128 || out_size < 256) {
+    if (in_size != 2 * FP_PADDED_SIZE || out_size < G2_POINT_SIZE) {
         return 0;
     }
 
@@ -613,8 +624,8 @@ int ethjet_bls_map_fp2_to_g2(uint8_t *in, size_t in_size, uint8_t *out, size_t o
 
     /* Decode Fp2 element (c0 || c1) */
     blst_fp2 u;
-    blst_fp_from_bendian(&u.fp[0], in + 16);       /* c0 */
-    blst_fp_from_bendian(&u.fp[1], in + 64 + 16);  /* c1 */
+    blst_fp_from_bendian(&u.fp[0], in + FP_PADDING);       /* c0 */
+    blst_fp_from_bendian(&u.fp[1], in + FP_PADDED_SIZE + FP_PADDING);  /* c1 */
 
     /* Map to G2 */
     blst_p2 result;
