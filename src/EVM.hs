@@ -29,7 +29,7 @@ import EVM.Effects (Config (..))
 import Control.Monad (unless, when)
 import Control.Monad.ST (ST, RealWorld)
 import Control.Monad.State.Strict (MonadState, State, get, gets, lift, modify', put)
-import Data.Bits (FiniteBits, countLeadingZeros, finiteBitSize)
+import Data.Bits (FiniteBits, countLeadingZeros, finiteBitSize, shiftR)
 import Data.ByteArray qualified as BA
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -56,6 +56,7 @@ import Data.Tree
 import Data.Tree.Zipper qualified as Zipper
 import Data.Typeable
 import Data.Vector qualified as V
+import Data.Vector.Unboxed qualified as VU
 import Data.Vector.Storable qualified as VS
 import Data.Vector.Storable.Mutable qualified as VS.Mutable
 import Data.Vector.Storable.ByteString (vectorToByteString, byteStringToVector)
@@ -112,6 +113,31 @@ pointEvaluationInputSize = 192
 versionedHashVersionKzg :: Word8
 versionedHashVersionKzg = 0x01
 
+-- BLS12-381 Precompile Input/Output Sizes (EIP-2537)
+g1PointSize, g2PointSize :: Int
+g1PointSize = 128
+g2PointSize = 256
+
+-- Two points for ADD operations
+g1AddInputSize, g2AddInputSize :: Int
+g1AddInputSize = 256
+g2AddInputSize = 512
+
+-- MSM pair sizes: point + 32-byte scalar
+g1MsmPairSize, g2MsmPairSize, blsPairingPairSize :: Int
+g1MsmPairSize = 160
+g2MsmPairSize = 288
+blsPairingPairSize = 384
+
+-- Map operations input sizes
+mapFpInputSize, mapFp2InputSize :: Int
+mapFpInputSize = 64
+mapFp2InputSize = 128
+
+-- Pairing output size
+blsPairingOutputSize :: Int
+blsPairingOutputSize = 32
+
 blankState :: VMOps t => ST RealWorld (FrameState t)
 blankState = do
   memory <- ConcreteMemory <$> VS.Mutable.new 0
@@ -158,7 +184,7 @@ makeVm o = do
       initialAccessedAddrs = fromList $
            [txorigin, txtoAddr, o.coinbase]
         ++ (fmap LitAddr [1..9])          -- Legacy precompiles (ECRECOVER, SHA256, etc.)
-        ++ [LitAddr 0x0A]                 -- EIP-4844 Point Evaluation precompile
+        ++ (fmap LitAddr [0x0A..0x11])    -- EIP-4844 Point Evaluation + BLS12-381 precompiles
         ++ (Map.keys txaccessList)
       initialAccessedStorageKeys = fromList $ foldMap (uncurry (map . (,))) (Map.toList txaccessList)
       touched = if o.create then [txorigin] else [txorigin, txtoAddr]
@@ -1430,6 +1456,41 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
                   next
                 Nothing -> precompileFail
 
+      -- BLS12-381 G1ADD (EIP-2537) - 0x0B
+      0x0B -> executeBLSPrecompile 0x0B "BLS_G1ADD"
+                (== g1AddInputSize) g1PointSize
+                input outOffset outSize xs precompileFail next
+
+      -- BLS12-381 G1MSM (EIP-2537) - 0x0C
+      0x0C -> executeBLSPrecompile 0x0C "BLS_G1MSM"
+                (\len -> len > 0 && len `mod` g1MsmPairSize == 0) g1PointSize
+                input outOffset outSize xs precompileFail next
+
+      -- BLS12-381 G2ADD (EIP-2537) - 0x0D
+      0x0D -> executeBLSPrecompile 0x0D "BLS_G2ADD"
+                (== g2AddInputSize) g2PointSize
+                input outOffset outSize xs precompileFail next
+
+      -- BLS12-381 G2MSM (EIP-2537) - 0x0E
+      0x0E -> executeBLSPrecompile 0x0E "BLS_G2MSM"
+                (\len -> len > 0 && len `mod` g2MsmPairSize == 0) g2PointSize
+                input outOffset outSize xs precompileFail next
+
+      -- BLS12-381 PAIRING (EIP-2537) - 0x0F
+      0x0F -> executeBLSPrecompile 0x0F "BLS_PAIRING"
+                (\len -> len `mod` blsPairingPairSize == 0) blsPairingOutputSize
+                input outOffset outSize xs precompileFail next
+
+      -- BLS12-381 MAP_FP_TO_G1 (EIP-2537) - 0x10
+      0x10 -> executeBLSPrecompile 0x10 "BLS_MAP_FP_TO_G1"
+                (== mapFpInputSize) g1PointSize
+                input outOffset outSize xs precompileFail next
+
+      -- BLS12-381 MAP_FP2_TO_G2 (EIP-2537) - 0x11
+      0x11 -> executeBLSPrecompile 0x11 "BLS_MAP_FP2_TO_G2"
+                (== mapFp2InputSize) g2PointSize
+                input outOffset outSize xs precompileFail next
+
       _ -> notImplemented
 
 truncpadlit :: Int -> ByteString -> ByteString
@@ -1487,6 +1548,85 @@ pointEvaluationVerify input =
            -- Return failure - this will cause valid proofs to fail,
            -- but at least invalid versioned hashes are caught above
            Nothing
+
+-- | BLS12-381 G1 MSM discount table from EIP-2537 (128 values)
+-- Maps k (number of pairs) to discount in parts per 1000
+blsG1MsmDiscountTable :: VU.Vector Word64
+blsG1MsmDiscountTable = VU.fromList
+  [ 1000, 949, 848, 797, 764, 750, 738, 728, 719, 712
+  , 705, 698, 692, 687, 682, 677, 673, 669, 665, 661
+  , 658, 654, 651, 648, 645, 642, 640, 637, 635, 632
+  , 630, 627, 625, 623, 621, 619, 617, 615, 613, 611
+  , 609, 608, 606, 604, 603, 601, 599, 598, 596, 595
+  , 593, 592, 591, 589, 588, 586, 585, 584, 582, 581
+  , 580, 579, 577, 576, 575, 574, 573, 572, 570, 569
+  , 568, 567, 566, 565, 564, 563, 562, 561, 560, 559
+  , 558, 557, 556, 555, 554, 553, 552, 551, 550, 549
+  , 548, 547, 547, 546, 545, 544, 543, 542, 541, 540
+  , 540, 539, 538, 537, 536, 536, 535, 534, 533, 532
+  , 532, 531, 530, 529, 528, 528, 527, 526, 525, 525
+  , 524, 523, 522, 522, 521, 520, 520, 519
+  ]
+
+-- | Lookup G1 MSM discount for k pairs (max_discount = 519 for k > 128)
+blsG1MsmDiscount :: Word64 -> Word64
+blsG1MsmDiscount k
+  | k == 0    = 0
+  | k > 128   = 519
+  | otherwise = blsG1MsmDiscountTable VU.! (fromIntegral k - 1)
+
+-- | BLS12-381 G2 MSM discount table from EIP-2537 (128 values)
+-- Maps k (number of pairs) to discount in parts per 1000
+blsG2MsmDiscountTable :: VU.Vector Word64
+blsG2MsmDiscountTable = VU.fromList
+  [ 1000, 1000, 923, 884, 855, 832, 812, 796, 782, 770
+  , 759, 749, 740, 732, 724, 717, 711, 704, 699, 693
+  , 688, 683, 679, 674, 670, 666, 663, 659, 655, 652
+  , 649, 646, 643, 640, 637, 634, 632, 629, 627, 624
+  , 622, 620, 618, 615, 613, 611, 609, 607, 606, 604
+  , 602, 600, 598, 597, 595, 593, 592, 590, 589, 587
+  , 586, 584, 583, 582, 580, 579, 578, 576, 575, 574
+  , 573, 571, 570, 569, 568, 567, 566, 565, 563, 562
+  , 561, 560, 559, 558, 557, 556, 555, 554, 553, 552
+  , 552, 551, 550, 549, 548, 547, 546, 545, 545, 544
+  , 543, 542, 541, 541, 540, 539, 538, 537, 537, 536
+  , 535, 535, 534, 533, 532, 532, 531, 530, 530, 529
+  , 528, 528, 527, 526, 526, 525, 524, 524
+  ]
+
+-- | Lookup G2 MSM discount for k pairs (max_discount = 524 for k > 128)
+blsG2MsmDiscount :: Word64 -> Word64
+blsG2MsmDiscount k
+  | k == 0    = 0
+  | k > 128   = 524
+  | otherwise = blsG2MsmDiscountTable VU.! (fromIntegral k - 1)
+
+-- | Execute a BLS precompile with standard input validation and output handling
+executeBLSPrecompile
+  :: VMOps t
+  => Int                    -- ^ Precompile address (as Int for EVM.Precompiled.execute)
+  -> String                 -- ^ Debug name for forceConcreteBuf
+  -> (Int -> Bool)          -- ^ Input length validator
+  -> Int                    -- ^ Expected output size
+  -> Expr Buf               -- ^ Input buffer
+  -> Expr EWord             -- ^ Output offset
+  -> Expr EWord             -- ^ Output size
+  -> [Expr EWord]           -- ^ Stack tail
+  -> EVM t ()               -- ^ Action on failure
+  -> EVM t ()               -- ^ Action to execute next
+  -> EVM t ()
+executeBLSPrecompile addr name validateLen outLen input outOffset outSize xs onFail onNext =
+  forceConcreteBuf input name $ \input' ->
+    if not (validateLen (BS.length input'))
+    then onFail
+    else case EVM.Precompiled.execute addr input' outLen of
+      Nothing -> onFail
+      Just output -> do
+        let result = ConcreteBuf $ truncpadlit outLen output
+        assign' (#state % #stack) (Lit 1 : xs)
+        assign (#state % #returndata) result
+        copyBytesToMemory result outSize (Lit 0) outOffset
+        onNext
 
 asInteger :: LS.ByteString -> Integer
 asInteger xs = if xs == mempty then 0
@@ -3136,6 +3276,26 @@ costOfPrecompile (FeeSchedule {..}) precompileAddr input =
              _ -> internalError "Unsupported symbolic blake2 gas calc"
     -- Point Evaluation (EIP-4844)
     0x0A -> g_point_evaluation
+    -- BLS12-381 precompiles (EIP-2537)
+    -- G1ADD (0x0B)
+    0x0B -> g_bls_g1add
+    -- G1MSM (0x0C)
+    0x0C -> let k = inputLen `div` unsafeInto g1MsmPairSize
+            in if k == 0 then 0
+               else g_bls_g1msm_base * k * blsG1MsmDiscount k `div` 1000
+    -- G2ADD (0x0D)
+    0x0D -> g_bls_g2add
+    -- G2MSM (0x0E)
+    0x0E -> let k = inputLen `div` unsafeInto g2MsmPairSize
+            in if k == 0 then 0
+               else g_bls_g2msm_base * k * blsG2MsmDiscount k `div` 1000
+    -- PAIRING (0x0F)
+    0x0F -> let k = inputLen `div` unsafeInto blsPairingPairSize
+            in g_bls_pairing_point * k + g_bls_pairing_base
+    -- MAP_FP_TO_G1 (0x10)
+    0x10 -> g_bls_map_fp_to_g1
+    -- MAP_FP2_TO_G2 (0x11)
+    0x11 -> g_bls_map_fp2_to_g2
     _ -> internalError $ "unimplemented precompiled contract " ++ show precompileAddr
 
 -- Gas cost of memory expansion
