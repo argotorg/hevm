@@ -3309,9 +3309,12 @@ instance VMOps Concrete where
     else continue
 
   gasTryFrom (forceLit -> w256) =
-    case tryFrom w256 of
-      Left _ -> Left ()
-      Right a -> Right a
+    -- EVM spec: gas values larger than Word64 max should be treated as "max gas"
+    -- The 63/64 rule will cap it appropriately later
+    -- Note: We can't use tryFrom here because TryFrom W256 Word64 always succeeds (truncates)
+    if w256 > into (maxBound :: Word64)
+    then Right maxBound  -- Cap at Word64 max for overflow
+    else Right (unsafeInto w256)
 
   -- Gas cost of create, including hash cost if needed
   costOfCreate (FeeSchedule {..}) availableGas size hashNeeded = (createCost, initGas)
@@ -3356,8 +3359,16 @@ instance VMOps Concrete where
       gasUsedBeforeRefund = tx.gaslimit - gasRemaining
       sumRefunds          = sum (snd <$> tx.subState.refunds)
       cappedRefund        = min (quot gasUsedBeforeRefund 5) sumRefunds
-      gasUsed             = gasUsedBeforeRefund - cappedRefund
-      originPay    = (into $ gasRemaining + cappedRefund) * tx.gasprice
+      gasUsedAfterRefund  = gasUsedBeforeRefund - cappedRefund
+      -- EIP-7623: Apply floor cost based on calldata tokens
+      -- gas_used = 21000 + max(4*tokens + execution + creation, 10*tokens)
+      -- Since txdataFloorGas = 21000 + 10*tokens, we just compare totals
+      gasUsed             = max gasUsedAfterRefund tx.txdataFloorGas
+      -- Adjust refund if floor kicks in
+      actualRefund        = if gasUsed > gasUsedAfterRefund
+                            then cappedRefund - (gasUsed - gasUsedAfterRefund)
+                            else cappedRefund
+      originPay    = (into $ gasRemaining + actualRefund) * tx.gasprice
       minerPay     = tx.priorityFee * (into gasUsed)
 
     modifying (#env % #contracts)
