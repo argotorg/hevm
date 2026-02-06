@@ -606,7 +606,7 @@ getExprEmptyStore solvers c signature' concreteArgs opts = do
   paths <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState runExpr noopPathHandler
   if conf.simp then (pure $ map Expr.simplify paths) else pure paths
 
--- Used only in testing
+-- Used only in testing; TODO: unify with exploreContract, and keep only one
 getExpr
   :: App m
   => SolverGroup
@@ -616,10 +616,8 @@ getExpr
   -> VeriOpts
   -> m [Expr End]
 getExpr solvers c signature' concreteArgs opts = do
+  paths <- exploreContract solvers c signature' concreteArgs opts Nothing
   conf <- readConfig
-  calldata <- mkCalldata signature' concreteArgs
-  preState <- liftIO $ stToIO $ abstractVM calldata c Nothing False
-  paths <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState runExpr noopPathHandler
   if conf.simp then (pure $ map Expr.simplify paths) else pure paths
 
 {- | Checks if an assertion violation has been encountered
