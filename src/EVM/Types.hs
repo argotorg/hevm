@@ -259,6 +259,9 @@ data Expr (a :: EType) where
   Eq             :: Expr EWord -> Expr EWord -> Expr EWord
   IsZero         :: Expr EWord -> Expr EWord
 
+  -- conditional (if-then-else for path merging)
+  ITE            :: Expr EWord -> Expr EWord -> Expr EWord -> Expr EWord
+
   -- bits
 
   And            :: Expr EWord -> Expr EWord -> Expr EWord
@@ -664,6 +667,15 @@ deriving instance Show (VMResult t)
 
 -- VM State ----------------------------------------------------------------------------------------
 
+-- | State tracking for speculative merge execution
+data MergeState = MergeState
+  { msActive          :: Bool   -- ^ Inside speculative execution
+  , msRemainingBudget :: Int    -- ^ Instructions remaining in budget
+  } deriving (Show, Eq, Generic)
+
+defaultMergeState :: MergeState
+defaultMergeState = MergeState False 0
+
 data VMType = Symbolic | Concrete
 
 type family Gas (t :: VMType) = r | r -> t where
@@ -695,6 +707,7 @@ data VM (t :: VMType) = VM
   --   during symbolic execution. See e.g. OpStaticcall
   , exploreDepth   :: Int
   , keccakPreImgs  :: Set (ByteString, W256)
+  , mergeState     :: MergeState
   }
   deriving (Generic)
 
@@ -718,10 +731,25 @@ data BaseState
   | AbstractBase
   deriving (Show)
 
+-- | A callback for looking up source location info given the contracts map,
+-- an address, and a PC. Used for debug output (e.g. showing the Solidity
+-- source line at a given PC).
+newtype SrcLookup = SrcLookup (Map (Expr EAddr) Contract -> Expr EAddr -> Int -> String)
+
+instance Show SrcLookup where
+  show _ = "<SrcLookup>"
+
+-- | Run a SrcLookup to get source location info, with a fallback for when
+-- no SrcLookup is available.
+runSrcLookup :: Maybe SrcLookup -> Map (Expr EAddr) Contract -> Expr EAddr -> Int -> String
+runSrcLookup Nothing _ addr pc = " at addr: " <> show addr <> " at pc: " <> show pc
+runSrcLookup (Just (SrcLookup f)) contracts addr pc = f contracts addr pc
+
 -- | Configuration options that need to be consulted at runtime
 data RuntimeConfig = RuntimeConfig
   { allowFFI :: Bool
   , baseState :: BaseState
+  , srcLookup :: Maybe SrcLookup
   }
   deriving (Show)
 

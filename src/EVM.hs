@@ -16,6 +16,7 @@ import EVM.Expr (readStorage, concStoreContains, writeStorage, readByte, readWor
 import EVM.Expr qualified as Expr
 import EVM.FeeSchedule (FeeSchedule (..))
 import EVM.FeeSchedule qualified as Fees (feeSchedule)
+import EVM.Merge qualified as Merge
 import EVM.Op
 import EVM.Precompiled qualified
 import EVM.Solidity
@@ -189,6 +190,7 @@ makeVm o = do
     , config = RuntimeConfig
       { allowFFI = o.allowFFI
       , baseState = o.baseState
+      , srcLookup = Nothing
       }
     , forks = Seq.singleton (ForkState env block mempty "")
     , currentFork = 0
@@ -198,6 +200,7 @@ makeVm o = do
     , exploreDepth = 0
     , keccakPreImgs = fromList []
     , pathsVisited = mempty
+    , mergeState = defaultMergeState
     }
     where
     env = Env
@@ -867,14 +870,42 @@ exec1 conf = do
 
         OpJumpi -> {-# SCC "OpJumpi" #-}
           case stk of
-            x:y:xs -> forceConcreteLimitSz x 2 "JUMPI: symbolic jumpdest" $ \x' ->
+            x:cond:xs -> forceConcreteLimitSz x 2 "JUMPI: symbolic jumpdest" $ \maybeTarget ->
               burn g_high $
+                -- Note: We must NOT check tryInto x' unconditionally!
+                -- Per EVM semantics, if condition is 0, we just fall through
+                -- without validating the destination. Only validate when jumping.
                 let jump :: Bool -> EVM t ()
                     jump False = assign' (#state % #stack) xs >> next
-                    jump _    = case tryInto x' of
+                    jump _    = case tryInto maybeTarget of
                       Left _ -> vmError BadJumpDestination
-                      Right i -> checkJump i xs
-                in branch conf.maxDepth y jump
+                      Right jumpTarget -> checkJump jumpTarget xs
+                    -- For Symbolic execution, try forward-jump merge first
+                    symbolicMerge :: EVM Symbolic ()
+                    symbolicMerge = case tryInto maybeTarget of
+                      Left _ ->
+                        -- Invalid destination - but we only error if we try to jump
+                        -- Use branch to decide based on condition
+                        branch conf.maxDepth cond $ \case
+                          False -> assign' (#state % #stack) xs >> next
+                          True -> vmError BadJumpDestination
+                      Right jumpTarget -> do
+                        -- Check if we're already in merge mode (speculative execution)
+                        ms <- use #mergeState
+                        if ms.msActive then
+                          -- Inside speculation: nested branch, bail out
+                          -- This will cause speculateLoop to return Nothing
+                          assign #result $ Just $ VMFailure BadJumpDestination
+                        else do
+                          merged <- Merge.tryMergeForwardJump conf (exec1 conf) vm.state.pc jumpTarget cond xs
+                          unless merged $ do
+                            let jumpSym :: Bool -> EVM Symbolic ()
+                                jumpSym False = assign' (#state % #stack) xs >> next
+                                jumpSym _    = checkJump jumpTarget xs
+                            branch conf.maxDepth cond jumpSym
+                in case eqT @t @Symbolic of
+                     Just Refl -> symbolicMerge
+                     Nothing -> branch conf.maxDepth cond jump
             _ -> underrun
 
         OpPc -> {-# SCC "OpPc" #-}
