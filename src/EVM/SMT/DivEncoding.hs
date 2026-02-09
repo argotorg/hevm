@@ -161,10 +161,8 @@ divModGroundAxioms props = do
             canonB = stripNeg firstB
         canonAenc <- exprToSMTAbs canonA
         canonBenc <- exprToSMTAbs canonB
-        let absAEnc = "(ite (bvsge" `sp` canonAenc `sp` zero <> ")"
-                   `sp` canonAenc `sp` "(bvsub" `sp` zero `sp` canonAenc <> "))"
-            absBEnc = "(ite (bvsge" `sp` canonBenc `sp` zero <> ")"
-                   `sp` canonBenc `sp` "(bvsub" `sp` zero `sp` canonBenc <> "))"
+        let absAEnc = smtAbs canonAenc
+            absBEnc = smtAbs canonBenc
             coreEnc = if isDiv'
                       then "(ite (=" `sp` absBName `sp` zero <> ")" `sp` zero
                         `sp` "(bvudiv" `sp` absAName `sp` absBName <> "))"
@@ -201,21 +199,10 @@ divModGroundAxioms props = do
       benc <- exprToSMTAbs b
       let fname = if kind == USDiv then "abst_evm_sdiv" else "abst_evm_smod"
           abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
-      if kind == USDiv then do
-        -- SDiv: result sign depends on whether operand signs match
-        let sameSign = "(=" `sp` "(bvslt" `sp` aenc `sp` zero <> ")"
-                    `sp` "(bvslt" `sp` benc `sp` zero <> "))"
-            concrete = "(ite (=" `sp` benc `sp` zero <> ")" `sp` zero
-                     `sp` "(ite" `sp` sameSign `sp` coreName
-                     `sp` "(bvsub" `sp` zero `sp` coreName <> ")))"
-        pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
-      else do
-        -- SMod: result sign matches dividend
-        let concrete = "(ite (=" `sp` benc `sp` zero <> ")" `sp` zero
-                     `sp` "(ite (bvsge" `sp` aenc `sp` zero <> ")"
-                     `sp` coreName
-                     `sp` "(bvsub" `sp` zero `sp` coreName <> ")))"
-        pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
+          concrete = if kind == USDiv
+                     then smtSdivResult aenc benc coreName
+                     else smtSmodResult aenc benc coreName
+      pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
 
 -- | For each pair of signed groups with the same operation type (udiv/urem),
 -- emit a congruence lemma: if abs inputs are equal, results are equal.
