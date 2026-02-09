@@ -23,7 +23,7 @@ import EVM.Types
 divModAbstractDecls :: [SMTEntry]
 divModAbstractDecls =
   [ SMTComment "abstract division/modulo (uninterpreted functions)"
-  , SMTCommand "(declare-fun evm_evm_div   ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
+  , SMTCommand "(declare-fun abst_evm_div   ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
   , SMTCommand "(declare-fun abst_evm_sdiv ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
   , SMTCommand "(declare-fun abst_evm_mod  ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
   , SMTCommand "(declare-fun abst_evm_smod ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
@@ -44,7 +44,7 @@ divModBounds props = do
   where
     collectBounds :: Expr a -> [(Builder, Expr EWord, Expr EWord)]
     collectBounds = \case
-      Div a b  -> [("evm_evm_div", a, b)]
+      Div a b  -> [("abst_evm_div", a, b)]
       Mod a b  -> [("abst_evm_mod", a, b)]
       _        -> []
 
@@ -53,11 +53,7 @@ divModBounds props = do
       aenc <- exprToSMTAbs a
       benc <- exprToSMTAbs b
       let result = "(" <> fname `sp` aenc `sp` benc <> ")"
-      if fname == "evm_evm_div"
-        -- (x / y) <= x
-        then pure $ SMTCommand $ "(assert (bvule " <> result `sp` aenc <> "))"
-        -- (x % y) <= y (ULE not ULT because y could be 0 and 0 % 0 = 0)
-        else pure $ SMTCommand $ "(assert (bvule " <> result `sp` benc <> "))"
+      pure $ SMTCommand $ "(assert (bvule " <> result `sp` aenc <> "))"
 
 -- | Encode props using uninterpreted functions for div/mod (Phase 1 of two-phase solving)
 assertPropsAbstract :: Config -> [Prop] -> Err SMT2
@@ -192,7 +188,7 @@ divModGroundAxioms props = do
     mkUnsignedAxiom _coreName (kind, a, b) = do
       aenc <- exprToSMTAbs a
       benc <- exprToSMTAbs b
-      let fname = if kind == UDiv then "evm_evm_div" else "abst_evm_mod"
+      let fname = if kind == UDiv then "abst_evm_div" else "abst_evm_mod"
           abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
           op = if kind == UDiv then "bvudiv" else "bvurem"
           concrete = "(ite (=" `sp` benc `sp` zero <> ")" `sp` zero
