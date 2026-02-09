@@ -6,6 +6,7 @@ module EVM.SMT
 (
   module EVM.SMT.Types,
   module EVM.SMT.SMTLIB,
+  module EVM.SMT.Common,
 
   collapse,
   getVar,
@@ -17,9 +18,6 @@ module EVM.SMT
   exprToSMT,
   exprToSMTWith,
   encodeConcreteStore,
-  zero,
-  one,
-  sp,
   propToSMT,
   propToSMTWith,
   parseVar,
@@ -69,6 +67,7 @@ import EVM.Keccak (keccakAssumptions, concreteKeccaks, findKeccakPropsExprs)
 import EVM.Traversals
 import EVM.Types
 import EVM.Effects
+import EVM.SMT.Common
 import EVM.SMT.Types
 import EVM.SMT.SMTLIB
 
@@ -633,12 +632,8 @@ exprToSMTWith enc = \case
       ConcreteDivision -> do
         aenc <- toSMT a
         benc <- toSMT b
-        let absa = "(ite (bvsge " <> aenc `sp` zero <> ")" `sp` aenc `sp` "(bvsub" `sp` zero `sp` aenc <> "))"
-            absb = "(ite (bvsge " <> benc `sp` zero <> ")" `sp` benc `sp` "(bvsub" `sp` zero `sp` benc <> "))"
-            udiv = "(bvudiv" `sp` absa `sp` absb <> ")"
-            sameSign = "(=" `sp` "(bvslt" `sp` aenc `sp` zero <> ")" `sp` "(bvslt" `sp` benc `sp` zero <> "))"
-        pure $ "(ite (=" `sp` benc `sp` zero <> ")" `sp` zero `sp`
-                "(ite" `sp` sameSign `sp` udiv `sp` "(bvsub" `sp` zero `sp` udiv <> ")))"
+        let udiv = "(bvudiv" `sp` smtAbs aenc `sp` smtAbs benc <> ")"
+        pure $ smtSdivResult aenc benc udiv
     -- | Encode SMod using bvurem with abs-value decomposition
     -- EVM SMOD: result has the sign of the dividend (a)
     smodOp :: Builder -> Expr x -> Expr y -> Err Builder
@@ -647,20 +642,9 @@ exprToSMTWith enc = \case
       ConcreteDivision -> do
         aenc <- toSMT a
         benc <- toSMT b
-        let absa = "(ite (bvsge " <> aenc `sp` zero <> ")" `sp` aenc `sp` "(bvsub" `sp` zero `sp` aenc <> "))"
-            absb = "(ite (bvsge " <> benc `sp` zero <> ")" `sp` benc `sp` "(bvsub" `sp` zero `sp` benc <> "))"
-            urem = "(bvurem" `sp` absa `sp` absb <> ")"
-        pure $ "(ite (=" `sp` benc `sp` zero <> ")" `sp` zero `sp`
-                "(ite (bvsge" `sp` aenc `sp` zero <> ")" `sp` urem `sp` "(bvsub" `sp` zero `sp` urem <> ")))"
+        let urem = "(bvurem" `sp` smtAbs aenc `sp` smtAbs benc <> ")"
+        pure $ smtSmodResult aenc benc urem
 
-sp :: Builder -> Builder -> Builder
-a `sp` b = a <> (fromText " ") <> b
-
-zero :: Builder
-zero = "(_ bv0 256)"
-
-one :: Builder
-one = "(_ bv1 256)"
 
 propToSMT :: Prop -> Err Builder
 propToSMT = propToSMTWith ConcreteDivision
