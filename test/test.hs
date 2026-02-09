@@ -102,6 +102,10 @@ assertBoolM
   => String -> Bool -> m ()
 assertBoolM a b = liftIO $ assertBool a b
 
+exactlyCex :: Int -> [VerifyResult] -> Bool
+exactlyCex n results = let numcex = sum $ map (fromEnum . isCex) results
+  in numcex == n && length results == n
+
 test :: TestName -> ReaderT Env IO () -> TestTree
 test a b = testCase a $ runEnv testEnv b
 
@@ -3989,6 +3993,27 @@ tests = testGroup "hevm"
           e <- withDefaultSolver $ \s -> getExpr s c sig [] defaultVeriOpts
           pure $ length e
         assertBoolM "Merging should reduce number of paths" (merge < noMerege)
+     , expectFail $ testCase "merge-simple-branches-revert" $ do
+        -- This cannot be merged due to revert unfortunately.
+        Just c <- solcRuntime "C"
+          [i|
+          contract C {
+            function f(uint256 x) public pure {
+              uint256 result = 1;
+              if (x & 0x1 != 0) result = result * 2;
+              if (x & 0x2 != 0) result = result * 3;
+              assert(result > 0);
+            }
+          }
+          |]
+        let sig = Just (Sig "f(uint256)" [AbiUIntType 256])
+        noMerege <- runEnv testEnv { config = testEnv.config {mergeMaxBudget = 0}} $ do
+          e <- withDefaultSolver $ \s -> getExpr s c sig [] defaultVeriOpts
+          pure $ length e
+        merge <- runEnv testEnv { config = testEnv.config {mergeMaxBudget = 1000}} $ do
+          e <- withDefaultSolver $ \s -> getExpr s c sig [] defaultVeriOpts
+          pure $ length e
+        assertBoolM "Merging should reduce number of paths" (merge < noMerege)
     , test "merge-finds-counterexample" $ do
         -- Merged paths should still find counterexamples
         Just c <- solcRuntime "C"
@@ -4004,8 +4029,8 @@ tests = testGroup "hevm"
           }
           |]
         let sig = Just (Sig "f(uint256)" [AbiUIntType 256])
-        (_, [Cex _]) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        putStrLnM "Counterexample found with merged paths"
+        (_, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        assertBoolM "One counterexample should be found even with merging" (exactlyCex 1 ret)
     , test "merge-many-branches-unchecked" $ do
         -- Multiple branches with unchecked arithmetic
         -- 4 branches = 2^4 = 16 paths without merging
