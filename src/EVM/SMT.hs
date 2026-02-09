@@ -606,7 +606,6 @@ exprToSMTWith enc = \case
 
   a -> internalError $ "TODO: implement: " <> show a
   where
-    -- Local alias to avoid repeating 'enc' at every recursive call
     toSMT :: Expr x -> Err Builder
     toSMT = exprToSMTWith enc
     op1 :: Builder -> Expr x -> Err Builder
@@ -628,8 +627,6 @@ exprToSMTWith enc = \case
       ConcreteDivision -> op2CheckZero concreteOp a b
       AbstractDivision -> op2 abstractOp a b
     -- | Encode SDiv using bvudiv with abs-value decomposition.
-    -- bitwuzla cannot solve UNSAT queries with bvsdiv at 256-bit,
-    -- but handles bvudiv efficiently.
     sdivOp :: Builder -> Expr x -> Expr y -> Err Builder
     sdivOp abstractOp a b = case enc of
       AbstractDivision -> op2 abstractOp a b
