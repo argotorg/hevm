@@ -1220,13 +1220,6 @@ tests = testGroup "hevm"
               , ("test/contracts/pass/etch.sol",          "prove_etch.*", (True, True))
               , ("test/contracts/pass/etch.sol",          "prove_deal.*", (True, True))
               , ("test/contracts/fail/etchFail.sol",      "prove_etch_fail.*", (False, True))
-              -- halmos-adapted arith tests
-              , ("test/contracts/pass/arith.sol",           "prove_Mod", (True, True))
-              , ("test/contracts/pass/arith.sol",           "prove_Exp", (True, True))
-              , ("test/contracts/pass/arith.sol",           "prove_Div_pass", (True, True))
-              , ("test/contracts/fail/arith.sol",           "prove_Div_fail", (False, True))
-              , ("test/contracts/pass/math.sol",            "prove_Avg", (True, True))
-              , ("test/contracts/fail/math.sol",            "prove_mint", (False, True))
               ]
         forM_ cases $ \(testFile, match, expected) -> do
           actual <- runForgeTestCustom testFile match Nothing Nothing False Fetch.noRpc
@@ -1289,20 +1282,92 @@ tests = testGroup "hevm"
   , testGroup "Abstract-Arith"
     -- Tests adapted from halmos (tests/regression/test/Arith.t.sol, tests/solver/test/SignedDiv.t.sol, tests/solver/test/Math.t.sol)
     -- Run with abstractArith = True to exercise two-phase solving
-    [ testAbstractArith "Arith-Pass" $ do
-        let testFile = "test/contracts/pass/arith.sol"
-        runForgeTest testFile "prove_Mod" >>= assertEqualM "prove_Mod" (True, True)
-        runForgeTest testFile "prove_Exp" >>= assertEqualM "prove_Exp" (True, True)
-        runForgeTest testFile "prove_Div_pass" >>= assertEqualM "prove_Div_pass" (True, True)
-    , testAbstractArith "Arith-Fail" $ do
-        let testFile = "test/contracts/fail/arith.sol"
-        runForgeTest testFile "prove_Div_fail" >>= assertEqualM "prove_Div_fail" (False, True)
-    , testAbstractArith "Math-Pass" $ do
-        let testFile = "test/contracts/pass/math.sol"
-        runForgeTest testFile "prove_Avg" >>= assertEqualM "prove_Avg" (True, True)
-    , testAbstractArith "Math-Fail" $ do
-        let testFile = "test/contracts/fail/math.sol"
-        runForgeTest testFile "prove_mint" >>= assertEqualM "prove_mint" (False, True)
+    [ testAbstractArith "arith-mod" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function unchecked_mod(uint x, uint y) internal pure returns (uint ret) {
+              assembly { ret := mod(x, y) }
+            }
+            function prove_Mod(uint x, uint y, address addr) external pure {
+              unchecked {
+                assert(unchecked_mod(x, 0) == 0);
+                assert(x % 1 == 0);
+                assert(x % 2 < 2);
+                assert(x % 4 < 4);
+                uint x_mod_y = unchecked_mod(x, y);
+                assert(x_mod_y <= y);
+                assert(uint256(uint160(addr)) % (2**160) == uint256(uint160(addr)));
+              }
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "arith-exp" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_Exp(uint x) external pure {
+              unchecked {
+                assert(x ** 0 == 1);
+                assert(x ** 1 == x);
+                assert(x ** 2 == x * x);
+                assert((x ** 2) ** 2 == x * x * x * x);
+                assert(((x ** 2) ** 2) ** 2 == (x**2) * (x**2) * (x**2) * (x**2));
+              }
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "arith-div-pass" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_Div_pass(uint x, uint y) external pure {
+              require(x > y);
+              require(y > 0);
+              uint q;
+              assembly { q := div(x, y) }
+              assert(q != 0);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "arith-div-fail" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_Div_fail(uint x, uint y) external pure {
+              require(x > y);
+              uint q;
+              assembly { q := div(x, y) }
+              assert(q != 0);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertBoolM "Expected counterexample" (any isCex res)
+    , testAbstractArith "math-avg" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_Avg(uint a, uint b) external pure {
+              require(a + b >= a);
+              unchecked {
+                uint r1 = (a & b) + (a ^ b) / 2;
+                uint r2 = (a + b) / 2;
+                assert(r1 == r2);
+              }
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "math-mint-fail" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_mint(uint s, uint A1, uint S1) external pure {
+              uint a = (s * A1) / S1;
+              uint A2 = A1 + a;
+              uint S2 = S1 + s;
+              assert(A1 * S2 <= A2 * S1);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertBoolM "Expected counterexample" (any isCex res)
     ]
   , testGroup "max-iterations"
     [ test "concrete-loops-reached" $ do
