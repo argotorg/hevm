@@ -23,10 +23,10 @@ import EVM.Types
 divModAbstractDecls :: [SMTEntry]
 divModAbstractDecls =
   [ SMTComment "abstract division/modulo (uninterpreted functions)"
-  , SMTCommand "(declare-fun evm_bvudiv ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
-  , SMTCommand "(declare-fun evm_bvsdiv ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
-  , SMTCommand "(declare-fun evm_bvurem ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
-  , SMTCommand "(declare-fun evm_bvsrem ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
+  , SMTCommand "(declare-fun evm_evm_div   ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
+  , SMTCommand "(declare-fun abst_evm_sdiv ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
+  , SMTCommand "(declare-fun abst_evm_mod  ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
+  , SMTCommand "(declare-fun abst_evm_smod ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
   ]
 
 exprToSMTAbs :: Expr a -> Err Builder
@@ -44,8 +44,8 @@ divModBounds props = do
   where
     collectBounds :: Expr a -> [(Builder, Expr EWord, Expr EWord)]
     collectBounds = \case
-      Div a b  -> [("evm_bvudiv", a, b)]
-      Mod a b  -> [("evm_bvurem", a, b)]
+      Div a b  -> [("evm_evm_div", a, b)]
+      Mod a b  -> [("abst_evm_mod", a, b)]
       _        -> []
 
     mkAssertion :: (Builder, Expr EWord, Expr EWord) -> Err SMTEntry
@@ -53,7 +53,7 @@ divModBounds props = do
       aenc <- exprToSMTAbs a
       benc <- exprToSMTAbs b
       let result = "(" <> fname `sp` aenc `sp` benc <> ")"
-      if fname == "evm_bvudiv"
+      if fname == "evm_evm_div"
         -- (x / y) <= x
         then pure $ SMTCommand $ "(assert (bvule " <> result `sp` aenc <> "))"
         -- (x % y) <= y (ULE not ULT because y could be 0 and 0 % 0 = 0)
@@ -192,7 +192,7 @@ divModGroundAxioms props = do
     mkUnsignedAxiom _coreName (kind, a, b) = do
       aenc <- exprToSMTAbs a
       benc <- exprToSMTAbs b
-      let fname = if kind == UDiv then "evm_bvudiv" else "evm_bvurem"
+      let fname = if kind == UDiv then "evm_evm_div" else "abst_evm_mod"
           abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
           op = if kind == UDiv then "bvudiv" else "bvurem"
           concrete = "(ite (=" `sp` benc `sp` zero <> ")" `sp` zero
@@ -203,7 +203,7 @@ divModGroundAxioms props = do
     mkSignedAxiom coreName (kind, a, b) = do
       aenc <- exprToSMTAbs a
       benc <- exprToSMTAbs b
-      let fname = if kind == USDiv then "evm_bvsdiv" else "evm_bvsrem"
+      let fname = if kind == USDiv then "abst_evm_sdiv" else "abst_evm_smod"
           abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
       if kind == USDiv then do
         -- SDiv: result sign depends on whether operand signs match
