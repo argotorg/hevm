@@ -466,16 +466,10 @@ yulOptimizationsSolcTests = testCase "eq-all-yul-optimization-tests" $ do
 
                     -- Takes too long, would timeout on most test setups.
                     -- We could probably fix these by "bunching together" queries
-                    , "reasoningBasedSimplifier/mulmod.yul"
                     , "loadResolver/multi_sload_loop.yul"
-                    , "reasoningBasedSimplifier/mulcheck.yul"
-                    , "reasoningBasedSimplifier/smod.yul"
                     , "fullSuite/abi_example1.yul"
-                    , "fullInliner/large_function_multi_use.yul"
                     , "loadResolver/merge_known_write_with_distance.yul"
                     , "loadResolver/second_mstore_with_delta.yul"
-                    , "rematerialiser/for_continue_2.yul"
-                    , "rematerialiser/for_continue_with_assignment_in_post.yul"
 
                     -- invalid test --
                     -- https://github.com/ethereum/solidity/issues/9500
@@ -485,12 +479,7 @@ yulOptimizationsSolcTests = testCase "eq-all-yul-optimization-tests" $ do
                     -- stack too deep --
                     , "fullSuite/abi2.yul"
                     , "fullSuite/aztec.yul"
-                    , "stackCompressor/inlineInBlock.yul"
-                    , "stackCompressor/inlineInFunction.yul"
                     , "stackCompressor/unusedPrunerWithMSize.yul"
-                    , "wordSizeTransform/function_call.yul"
-                    , "fullInliner/no_inline_into_big_function.yul"
-                    , "controlFlowSimplifier/switch_only_default.yul"
                     , "stackLimitEvader" -- all that are in this subdirectory
 
                     -- typed yul --
@@ -528,60 +517,21 @@ yulOptimizationsSolcTests = testCase "eq-all-yul-optimization-tests" $ do
                     -- New: symbolic index on MSTORE/MLOAD/CopySlice/CallDataCopy/ExtCodeCopy/Revert,
                     --      or exponent is symbolic (requires symbolic gas)
                     --      or SHA3 offset symbolic
-                    , "blockFlattener/basic.yul"
-                    , "commonSubexpressionEliminator/case2.yul"
                     , "equalStoreEliminator/indirect_inferrence.yul"
-                    , "expressionJoiner/reassignment.yul"
                     , "expressionSimplifier/exp_simplifications.yul"
-                    , "expressionSimplifier/zero_length_read.yul"
-                    , "expressionSimplifier/side_effects_in_for_condition.yul"
-                    , "fullSuite/create_and_mask.yul"
                     , "fullSuite/unusedFunctionParameterPruner_return.yul"
                     , "fullSuite/unusedFunctionParameterPruner_simple.yul"
                     , "fullSuite/unusedFunctionParameterPruner.yul"
-                    , "loadResolver/double_mload_with_other_reassignment.yul"
-                    , "loadResolver/double_mload_with_reassignment.yul"
-                    , "loadResolver/double_mload.yul"
-                    , "loadResolver/keccak_reuse_basic.yul"
-                    , "loadResolver/keccak_reuse_expr_mstore.yul"
-                    , "loadResolver/keccak_reuse_msize.yul"
-                    , "loadResolver/keccak_reuse_mstore.yul"
-                    , "loadResolver/keccak_reuse_reassigned_branch.yul"
-                    , "loadResolver/keccak_reuse_reassigned_value.yul"
                     , "loadResolver/keccak_symbolic_memory.yul"
                     , "loadResolver/merge_mload_with_known_distance.yul"
-                    , "loadResolver/mload_self.yul"
-                    , "loadResolver/keccak_reuse_in_expression.yul"
                     , "loopInvariantCodeMotion/complex_move.yul"
-                    , "loopInvariantCodeMotion/move_memory_function.yul"
-                    , "loopInvariantCodeMotion/move_state_function.yul"
                     , "loopInvariantCodeMotion/no_move_memory.yul"
                     , "loopInvariantCodeMotion/no_move_storage.yul"
-                    , "loopInvariantCodeMotion/not_first.yul"
-                    , "ssaAndBack/single_assign_if.yul"
-                    , "ssaAndBack/single_assign_switch.yul"
-                    , "structuralSimplifier/switch_inline_no_match.yul"
-                    , "unusedFunctionParameterPruner/simple.yul"
-                    , "unusedStoreEliminator/covering_calldatacopy.yul"
                     , "unusedStoreEliminator/remove_before_revert.yul"
-                    , "unusedStoreEliminator/unknown_length2.yul"
                     , "unusedStoreEliminator/unrelated_relative.yul"
                     , "fullSuite/extcodelength.yul"
                     , "unusedStoreEliminator/create_inside_function.yul"-- "trying to reset symbolic storage with writes in create"
-
-                    -- Due to tstorage warnings treated as errors when running solc with --standard-json
-                    --   these cannot be currently run. See: https://github.com/ethereum/solidity/issues/15397
-                    --   When that fix comes to upstream, we can re-enabled again
-                    , "equalStoreEliminator/transient_storage.yul"
-                    , "unusedStoreEliminator/tload.yul"
-                    , "unusedStoreEliminator/tstore.yul"
-                    , "fullSuite/transient_storage.yul"
-                    , "unusedPruner/transient_storage.yul"
-
-                    -- Bug in solidity, fixed in newer versions:
-                    -- https://github.com/ethereum/solidity/issues/15397#event-14116827816
-                    , "no_move_transient_storage.yul"
-
+                    
                     -- to investigate, currently crash
                     , "commonSubexpressionEliminator/long_literals_as_builtin_args.yul"
                     , "disambiguator/string_as_hex_and_hex_as_string.yul"
