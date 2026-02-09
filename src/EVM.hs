@@ -3188,7 +3188,7 @@ instance VMOps Symbolic where
         assign (#pathsVisited % at (loc, iteration)) (Just v)
         assign (#iterations % at loc) (Just (iteration + 1, stack))
         continue v
-      -- Both paths are possible; we ask for more input
+      -- Both paths are possible
       runBothPaths loc exploreDepth UnknownBranch =
         (fork depthLimit exploreDepth ) . PleaseRunBoth $ (runBothPaths loc exploreDepth) . Case
 
