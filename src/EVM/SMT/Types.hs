@@ -13,7 +13,7 @@ type MaybeIO = MaybeT IO
 
 -- | Controls how division/modulo operations are encoded into SMT.
 -- 'ConcreteDivision' uses inline ite-check-zero with real SMT ops (existing behavior).
--- 'AbstractDivision' uses uninterpreted functions (evm_evm_div, etc.) for performance.
+-- 'AbstractDivision' uses uninterpreted functions (abst_evm_div, etc.) for performance.
 data DivEncoding = ConcreteDivision | AbstractDivision
   deriving (Show, Eq)
 

@@ -507,7 +507,7 @@ exprToSMTWith enc = \case
   SAR a b -> op2 "bvashr" b a
   CLZ a -> op1 "clz256" a
   SEx a b -> op2 "signext" a b
-  Div a b -> divOp "bvudiv" "evm_evm_div" a b
+  Div a b -> divOp "bvudiv" "abst_evm_div" a b
   SDiv a b -> sdivOp "abst_evm_sdiv" a b
   Mod a b -> divOp "bvurem" "abst_evm_mod" a b
   SMod a b -> smodOp "abst_evm_smod" a b
