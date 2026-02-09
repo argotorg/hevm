@@ -140,35 +140,16 @@ checkSatWithProps sg props = do
       -- Phase 1: Use uninterpreted functions (overapproximation)
       let smt2Abstract = assertPropsAbstract conf allProps
       if isLeft smt2Abstract then pure $ Error $ getError smt2Abstract
-      else do
-        phase1 <- liftIO $ checkSat sg (Just props) smt2Abstract
-        case phase1 of
-          Qed -> pure Qed            -- UNSAT with abstractions => truly UNSAT (sound)
-          e@(Error _) -> pure e
-          u@(Unknown _) -> pure u
-          Cex _ -> do
-            -- Phase 2: Refine with exact definitions to validate counterexample
-            when conf.debug $ liftIO $ putStrLn "Abstract div/mod: potential cex found, refining..."
-            let smt2Refined = assertPropsRefined conf allProps
-            if isLeft smt2Refined then pure $ Error $ getError smt2Refined
-            else do
-              when conf.dumpQueries $ liftIO $ writeSMT2File (getNonError smt2Refined) "." "refined"
-              phase2 <- liftIO $ checkSat sg (Just props) smt2Refined
-              case phase2 of
-                Unknown _ -> do
-                  -- Phase 3: Try shift-based bounds (avoids bvudiv entirely).
-                  -- This is an overapproximation: only UNSAT results are sound.
-                  -- SAT/Unknown results are discarded (fall back to phase2 Unknown).
-                  when conf.debug $ liftIO $ putStrLn "Phase 2 unknown, trying shift-based bounds..."
-                  let smt2Shift = assertPropsShiftBounds conf allProps
-                  if isLeft smt2Shift then pure phase2
-                  else do
-                    when conf.dumpQueries $ liftIO $ writeSMT2File (getNonError smt2Shift) "." "shift-bounds"
-                    phase3 <- liftIO $ checkSat sg (Just props) smt2Shift
-                    case phase3 of
-                      Qed -> pure Qed  -- UNSAT with shift bounds => truly UNSAT
-                      _   -> pure phase2  -- SAT/Unknown from shift bounds is not reliable
-                _ -> pure phase2
+      else liftIO $ checkSat sg (Just props) smt2Abstract >>= \case
+        Qed -> pure Qed         -- UNSAT with abstractions => truly UNSAT (sound)
+        e@(Error _) -> pure e
+        u@(Unknown _) -> pure u
+        Cex _ -> do
+          -- Phase 2: Refine with exact definitions to validate counterexample
+          when conf.debug $ liftIO $ putStrLn "Abstract div/mod: potential cex found, refining..."
+          let smt2Refined = assertPropsRefined conf allProps
+          if isLeft smt2Refined then pure $ Error $ getError smt2Refined
+          else liftIO $ checkSat sg (Just props) smt2Refined
 
 -- When props is Nothing, the cache will not be filled or used
 checkSat :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> IO SMTResult
