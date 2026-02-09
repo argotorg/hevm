@@ -29,6 +29,9 @@ divModAbstractDecls =
   , SMTCommand "(declare-fun evm_bvsrem ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
   ]
 
+exprToSMTAbs :: Expr a -> Err Builder
+exprToSMTAbs = exprToSMTWith AbstractDivision
+
 -- | Generate bounds constraints for abstract div/mod operations.
 -- These help the solver prune impossible models without full bitvector division reasoning.
 divModBounds :: [Prop] -> Err [SMTEntry]
@@ -47,8 +50,8 @@ divModBounds props = do
 
     mkAssertion :: (Builder, Expr EWord, Expr EWord) -> Err SMTEntry
     mkAssertion (fname, a, b) = do
-      aenc <- exprToSMTWith AbstractDivision a
-      benc <- exprToSMTWith AbstractDivision b
+      aenc <- exprToSMTAbs a
+      benc <- exprToSMTAbs b
       let result = "(" <> fname `sp` aenc `sp` benc <> ")"
       if fname == "evm_bvudiv"
         -- (x / y) <= x
@@ -160,8 +163,8 @@ divModGroundAxioms props = do
         -- Use the canonical (non-negated) form for abs value encoding
         let canonA = stripNeg firstA
             canonB = stripNeg firstB
-        canonAenc <- exprToSMTWith AbstractDivision canonA
-        canonBenc <- exprToSMTWith AbstractDivision canonB
+        canonAenc <- exprToSMTAbs canonA
+        canonBenc <- exprToSMTAbs canonB
         let absAEnc = "(ite (bvsge" `sp` canonAenc `sp` zero <> ")"
                    `sp` canonAenc `sp` "(bvsub" `sp` zero `sp` canonAenc <> "))"
             absBEnc = "(ite (bvsge" `sp` canonBenc `sp` zero <> ")"
@@ -187,8 +190,8 @@ divModGroundAxioms props = do
 
     mkUnsignedAxiom :: Builder -> DivOp -> Err SMTEntry
     mkUnsignedAxiom _coreName (kind, a, b) = do
-      aenc <- exprToSMTWith AbstractDivision a
-      benc <- exprToSMTWith AbstractDivision b
+      aenc <- exprToSMTAbs a
+      benc <- exprToSMTAbs b
       let fname = if kind == UDiv then "evm_bvudiv" else "evm_bvurem"
           abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
           op = if kind == UDiv then "bvudiv" else "bvurem"
@@ -198,8 +201,8 @@ divModGroundAxioms props = do
 
     mkSignedAxiom :: Builder -> DivOp -> Err SMTEntry
     mkSignedAxiom coreName (kind, a, b) = do
-      aenc <- exprToSMTWith AbstractDivision a
-      benc <- exprToSMTWith AbstractDivision b
+      aenc <- exprToSMTAbs a
+      benc <- exprToSMTAbs b
       let fname = if kind == USDiv then "evm_bvsdiv" else "evm_bvsrem"
           abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
       if kind == USDiv then do
