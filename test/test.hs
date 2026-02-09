@@ -3993,8 +3993,9 @@ tests = testGroup "hevm"
           e <- withDefaultSolver $ \s -> getExpr s c sig [] defaultVeriOpts
           pure $ length e
         assertBoolM "Merging should reduce number of paths" (merge < noMerege)
+     -- Checked arithmetic reverts in one of the branches, which is not supported by
+     -- the current state merging implementation
      , expectFail $ testCase "merge-simple-branches-revert" $ do
-        -- This cannot be merged due to revert unfortunately.
         Just c <- solcRuntime "C"
           [i|
           contract C {
@@ -4051,20 +4052,11 @@ tests = testGroup "hevm"
           }
           |]
         let sig = Just (Sig "f(uint256)" [AbiUIntType 256])
-        (paths, []) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        paths <- withDefaultSolver $ \s -> getExpr s c sig [] defaultVeriOpts
         let numPaths = length paths
         -- Without merging: 16 paths. With unchecked + merging: should be <= 4
         liftIO $ assertBool ("Expected at most 4 paths with unchecked merging, got " ++ show numPaths) (numPaths <= 4)
-        putStrLnM $ "Many branches merged: " ++ show numPaths ++ " paths (vs 16 without merging)"
-    -- TODO: Checked arithmetic merging doesn't work well with solcRuntime's standard-json output
-    -- The bytecode structure differs from direct solc --bin-runtime compilation
-    -- Direct compile: 4 merges, 4 paths. Standard-json: 0 merges, 18 paths
-    -- This needs investigation into why standard-json produces different bytecode structure
-    -- , test "merge-many-branches-checked" $ do ...
     , test "merge-with-unchecked-arithmetic" $ do
-        -- Unchecked arithmetic should merge cleanly (no overflow check JUMPIs)
-        -- 4 branches = 2^4 = 16 paths without merging
-        -- With unchecked + merging, should be minimal paths (ideally 2)
         Just c <- solcRuntime "C"
           [i|
           contract C {
@@ -4085,7 +4077,6 @@ tests = testGroup "hevm"
         let numPaths = length paths
         -- Without merging: 16 paths. With unchecked + merging: should be <= 4
         liftIO $ assertBool ("Expected at most 4 paths with unchecked merging, got " ++ show numPaths) (numPaths <= 4)
-        putStrLnM $ "Unchecked arithmetic merged: " ++ show numPaths ++ " paths (vs 16 without merging)"
     , test "merge-counterexample-three-branches" $ do
         -- Find counterexample with 3 merged branches
         Just c <- solcRuntime "C"
@@ -4102,8 +4093,8 @@ tests = testGroup "hevm"
           }
           |]
         let sig = Just (Sig "f(uint256)" [AbiUIntType 256])
-        (_, [Cex _]) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        putStrLnM "Counterexample found with three merged branches"
+        (_, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        assertBoolM "Expected a counterexample with merged branches" (exactlyCex 1 ret)
     , test "no-false-positive-nested-branches" $ do
         -- Verify that nested branches don't cause false positives
         -- This tests soundness: if both paths of a nested branch don't converge
@@ -4168,8 +4159,8 @@ tests = testGroup "hevm"
           }
           |]
         let sig = Just (Sig "f(uint256)" [AbiUIntType 256])
-        (_, []) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        putStrLnM "Zero-mul loop merging works without expression blowup"
+        (_, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        assertEqualM "Zero-mul loop merging works without expression blowup" [] ret
     , test "no-merge-with-memory-write" $ do
         -- Branches with memory writes should not cause issues
         Just c <- solcRuntime "C"
@@ -4186,8 +4177,8 @@ tests = testGroup "hevm"
           }
           |]
         let sig = Just (Sig "f(uint256)" [AbiUIntType 256])
-        (_, []) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        putStrLnM "Memory write branches handled correctly"
+        (_, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        assertEqualM "Merging should not cause issues with memory writes" [] ret
     ]
   , testGroup "simple-checks"
     [ test "simple-stores" $ do
