@@ -131,7 +131,6 @@ checkSatWithProps sg props = do
     let concreteKeccaks = fmap (\(buf,val) -> PEq (Lit val) (Keccak buf)) (toList $ Keccak.concreteKeccaks props)
     let allProps = if conf.simp then psSimp <> concreteKeccaks else psSimp
     if not conf.abstractArith then do
-      -- Original path: direct encoding with concrete division semantics
       let smt2 = assertProps conf allProps
       if isLeft smt2 then pure $ Error $ getError smt2
       else liftIO $ checkSat sg (Just props) smt2

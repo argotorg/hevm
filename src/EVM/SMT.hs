@@ -507,10 +507,10 @@ exprToSMTWith enc = \case
   SAR a b -> op2 "bvashr" b a
   CLZ a -> op1 "clz256" a
   SEx a b -> op2 "signext" a b
-  Div a b -> divOp "bvudiv" "evm_bvudiv" a b
-  SDiv a b -> sdivOp "evm_bvsdiv" a b
-  Mod a b -> divOp "bvurem" "evm_bvurem" a b
-  SMod a b -> smodOp "evm_bvsrem" a b
+  Div a b -> divOp "bvudiv" "evm_evm_div" a b
+  SDiv a b -> sdivOp "abst_evm_sdiv" a b
+  Mod a b -> divOp "bvurem" "abst_evm_mod" a b
+  SMod a b -> smodOp "abst_evm_smod" a b
   -- NOTE: this needs to do the MUL at a higher precision, then MOD, then downcast
   MulMod a b c -> do
     aExp <- toSMT a
@@ -626,7 +626,7 @@ exprToSMTWith enc = \case
     divOp concreteOp abstractOp a b = case enc of
       ConcreteDivision -> op2CheckZero concreteOp a b
       AbstractDivision -> op2 abstractOp a b
-    -- | Encode SDiv using bvudiv with abs-value decomposition.
+    -- | Encode SDiv using bvudiv with abs-value decomposition
     sdivOp :: Builder -> Expr x -> Expr y -> Err Builder
     sdivOp abstractOp a b = case enc of
       AbstractDivision -> op2 abstractOp a b
@@ -639,8 +639,8 @@ exprToSMTWith enc = \case
             sameSign = "(=" `sp` "(bvslt" `sp` aenc `sp` zero <> ")" `sp` "(bvslt" `sp` benc `sp` zero <> "))"
         pure $ "(ite (=" `sp` benc `sp` zero <> ")" `sp` zero `sp`
                 "(ite" `sp` sameSign `sp` udiv `sp` "(bvsub" `sp` zero `sp` udiv <> ")))"
-    -- | Encode SMod using bvurem with abs-value decomposition.
-    -- EVM SMOD: result has the sign of the dividend (a).
+    -- | Encode SMod using bvurem with abs-value decomposition
+    -- EVM SMOD: result has the sign of the dividend (a)
     smodOp :: Builder -> Expr x -> Expr y -> Err Builder
     smodOp abstractOp a b = case enc of
       AbstractDivision -> op2 abstractOp a b
