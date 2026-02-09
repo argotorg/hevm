@@ -1492,7 +1492,7 @@ tests = testGroup "hevm"
         let sig = (Just $ Sig "foo(address,uint256)" [AbiAddressType, AbiUIntType 256])
         (e, res) <- withDefaultSolver $
           \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        liftIO $ printWarnings Nothing e res "the contracts under test"
+        liftIO $ printWarnings Nothing mempty e res "the contracts under test"
         assertEqualM "Must be QED" res []
     , test "extcodesize-symbolic2" $ do
         Just c <- solcRuntime "C"
@@ -1510,7 +1510,7 @@ tests = testGroup "hevm"
         let sig = (Just $ Sig "foo(address,uint256)" [AbiAddressType, AbiUIntType 256])
         (e, res@[Cex _]) <- withDefaultSolver $
           \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        liftIO $ printWarnings Nothing e res "the contracts under test"
+        liftIO $ printWarnings Nothing mempty e res "the contracts under test"
     , test "jump-into-symbolic-region" $ do
         let
           -- our initCode just jumps directly to the end
@@ -4030,6 +4030,200 @@ tests = testGroup "hevm"
           (_, []) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
           putStrLnM $ "Basic tstore check passed"
   ]
+  , testGroup "state-merging"
+    -- Tests for ITE-based state merging during symbolic execution
+    -- State merging combines multiple execution paths into a single path with ITE expressions
+    [ test "merge-simple-branches" $ do
+        -- Simple branching pattern that should be merged
+        Just c <- solcRuntime "C"
+          [i|
+          contract C {
+            function f(uint256 x) public pure {
+              uint256 result = 1;
+              if (x & 0x1 != 0) result = result * 2;
+              if (x & 0x2 != 0) result = result * 3;
+              assert(result > 0);
+            }
+          }
+          |]
+        let sig = Just (Sig "f(uint256)" [AbiUIntType 256])
+        (_, []) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        putStrLnM "Simple branch merging works"
+    , test "merge-finds-counterexample" $ do
+        -- Merged paths should still find counterexamples
+        Just c <- solcRuntime "C"
+          [i|
+          contract C {
+            function f(uint256 x) public pure {
+              uint256 result = 1;
+              if (x & 0x1 != 0) result = result * 2;
+              if (x & 0x2 != 0) result = result * 3;
+              // Bug: result == 6 when both bits are set
+              assert(result != 6);
+            }
+          }
+          |]
+        let sig = Just (Sig "f(uint256)" [AbiUIntType 256])
+        (_, [Cex _]) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        putStrLnM "Counterexample found with merged paths"
+    , test "merge-many-branches-unchecked" $ do
+        -- Multiple branches with unchecked arithmetic
+        -- 4 branches = 2^4 = 16 paths without merging
+        -- With unchecked + merging, should be minimal paths
+        Just c <- solcRuntime "C"
+          [i|
+          contract C {
+            function f(uint256 x) public pure {
+              uint256 result = 1;
+              unchecked {
+                if (x & 0x1 != 0) result = result * 2;
+                if (x & 0x2 != 0) result = result * 3;
+                if (x & 0x4 != 0) result = result * 5;
+                if (x & 0x8 != 0) result = result * 7;
+              }
+              assert(result > 0);
+            }
+          }
+          |]
+        let sig = Just (Sig "f(uint256)" [AbiUIntType 256])
+        (paths, []) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        let numPaths = length paths
+        -- Without merging: 16 paths. With unchecked + merging: should be <= 4
+        liftIO $ assertBool ("Expected at most 4 paths with unchecked merging, got " ++ show numPaths) (numPaths <= 4)
+        putStrLnM $ "Many branches merged: " ++ show numPaths ++ " paths (vs 16 without merging)"
+    -- TODO: Checked arithmetic merging doesn't work well with solcRuntime's standard-json output
+    -- The bytecode structure differs from direct solc --bin-runtime compilation
+    -- Direct compile: 4 merges, 4 paths. Standard-json: 0 merges, 18 paths
+    -- This needs investigation into why standard-json produces different bytecode structure
+    -- , test "merge-many-branches-checked" $ do ...
+    , test "merge-with-unchecked-arithmetic" $ do
+        -- Unchecked arithmetic should merge cleanly (no overflow check JUMPIs)
+        -- 4 branches = 2^4 = 16 paths without merging
+        -- With unchecked + merging, should be minimal paths (ideally 2)
+        Just c <- solcRuntime "C"
+          [i|
+          contract C {
+            function f(uint256 tick) public pure returns (uint256 ratio) {
+              ratio = 0x100000000000000000000000000000000;
+              unchecked {
+                if (tick & 0x1 != 0) ratio = 0xfffcb933bd6fad37aa2d162d1a594001;
+                if (tick & 0x2 != 0) ratio = (ratio * 0xfff97272373d413259a46990580e213a) >> 128;
+                if (tick & 0x4 != 0) ratio = (ratio * 0xfff2e50f5f656932ef12357cf3c7fdcc) >> 128;
+                if (tick & 0x8 != 0) ratio = (ratio * 0xffe5caca7e10e4e61c3624eaa0941cd0) >> 128;
+              }
+              assert(ratio > 0);
+            }
+          }
+          |]
+        let sig = Just (Sig "f(uint256)" [AbiUIntType 256])
+        (paths, []) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        let numPaths = length paths
+        -- Without merging: 16 paths. With unchecked + merging: should be <= 4
+        liftIO $ assertBool ("Expected at most 4 paths with unchecked merging, got " ++ show numPaths) (numPaths <= 4)
+        putStrLnM $ "Unchecked arithmetic merged: " ++ show numPaths ++ " paths (vs 16 without merging)"
+    , test "merge-counterexample-three-branches" $ do
+        -- Find counterexample with 3 merged branches
+        Just c <- solcRuntime "C"
+          [i|
+          contract C {
+            function f(uint256 x) public pure {
+              uint256 result = 1;
+              if (x & 0x1 != 0) result = result * 100;
+              if (x & 0x2 != 0) result = result * 100;
+              if (x & 0x4 != 0) result = result * 100;
+              // Bug: result = 1000000 when all 3 bits are set
+              assert(result < 1000000);
+            }
+          }
+          |]
+        let sig = Just (Sig "f(uint256)" [AbiUIntType 256])
+        (_, [Cex _]) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        putStrLnM "Counterexample found with three merged branches"
+    , test "no-false-positive-nested-branches" $ do
+        -- Verify that nested branches don't cause false positives
+        -- This tests soundness: if both paths of a nested branch don't converge
+        -- to the same point, merging should be disabled to avoid invalid states
+        Just c <- solcRuntime "C"
+          [i|
+          contract C {
+            function f(uint256 x, uint256 y) public pure {
+              uint256 result = 1;
+              // Nested branches that depend on different inputs
+              if (x & 0x1 != 0) {
+                if (y & 0x1 != 0) {
+                  result = result * 2;
+                } else {
+                  result = result * 3;
+                }
+              }
+              // result is either 1, 2, or 3
+              assert(result == 1 || result == 2 || result == 3);
+            }
+          }
+          |]
+        let sig = Just (Sig "f(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])
+        (_, []) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        putStrLnM "Nested branches handled correctly without false positives"
+    , test "merge-simplify-zero-mul-in-loop" $ do
+        -- Regression test: merging inside a loop where one branch multiplies by zero.
+        -- Without simplification of merged ITE expressions, Mul (Lit 0) (ITE ...)
+        -- accumulates unsimplified across loop iterations, causing unbounded memory growth.
+        -- This is the pattern from ABDKMath64x64.pow(0, x).
+        Just c <- solcRuntime "C"
+          [i|
+          contract C {
+            function f(uint256 x) public pure {
+              uint256 base = 0;
+              uint256 result = 0x100000000;
+              unchecked {
+                // Unrolled loop: 8 sequential conditional multiplications by zero.
+                // Each creates an ITE where true-branch is Mul(result, 0) and false
+                // leaves result unchanged. Without simplifying Mul(Lit 0, ITE(...))
+                // to Lit 0 at merge time, the expression tree grows unboundedly.
+                if (x & 0x1 != 0) result = result * base;
+                base = base * base;
+                if (x & 0x2 != 0) result = result * base;
+                base = base * base;
+                if (x & 0x4 != 0) result = result * base;
+                base = base * base;
+                if (x & 0x8 != 0) result = result * base;
+                base = base * base;
+                if (x & 0x10 != 0) result = result * base;
+                base = base * base;
+                if (x & 0x20 != 0) result = result * base;
+                base = base * base;
+                if (x & 0x40 != 0) result = result * base;
+                base = base * base;
+                if (x & 0x80 != 0) result = result * base;
+              }
+              // If any bit is set, result becomes 0; if x&0xff==0, result stays 0x100000000
+              // Either way result <= 0x100000000
+              assert(result <= 0x100000000);
+            }
+          }
+          |]
+        let sig = Just (Sig "f(uint256)" [AbiUIntType 256])
+        (_, []) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        putStrLnM "Zero-mul loop merging works without expression blowup"
+    , test "no-merge-with-memory-write" $ do
+        -- Branches with memory writes should not cause issues
+        Just c <- solcRuntime "C"
+          [i|
+          contract C {
+            function f(uint256 x) public pure {
+              uint256[] memory arr = new uint256[](2);
+              arr[0] = 1;
+              if (x & 0x1 != 0) {
+                arr[1] = 2;
+              }
+              assert(arr[0] == 1);
+            }
+          }
+          |]
+        let sig = Just (Sig "f(uint256)" [AbiUIntType 256])
+        (_, []) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        putStrLnM "Memory write branches handled correctly"
+    ]
   , testGroup "simple-checks"
     [ test "simple-stores" $ do
       Just c <- solcRuntime "MyContract"
@@ -4079,8 +4273,9 @@ tests = testGroup "hevm"
         }
         |]
       let sig = (Sig "func(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])
-      (_, [Cex (_, ctr1), Cex (_, ctr2)]) <- withSolvers Bitwuzla 1 Nothing defMemLimit $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
-      putStrLnM  $ "expected counterexamples found.  ctr1: " <> (show ctr1) <> " ctr2: " <> (show ctr2)
+      (_, cexs) <- withSolvers Bitwuzla 1 Nothing defMemLimit $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
+      liftIO $ assertBool ("Expected at least 1 counterexample, got " ++ show (length cexs)) (length cexs >= 1)
+      putStrLnM  $ "expected counterexamples found (" <> show (length cexs) <> "): " <> show cexs
     , test "simple-fixed-value-store1" $ do
       Just c <- solcRuntime "MyContract"
         [i|

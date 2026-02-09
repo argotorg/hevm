@@ -40,7 +40,6 @@ module EVM.Solidity
   , containsLinkerHole
   , makeSourceCache
   , getContractsMap
-  , WarningData(..)
 ) where
 
 import EVM.ABI
@@ -230,12 +229,6 @@ data SrcMap = SM {
   jump          :: JumpType,
   modifierDepth :: {-# UNPACK #-} !Int
 } deriving (Show, Eq, Ord, Generic)
-
-data WarningData t = WarningData
-  {solcContr :: SolcContract,
-   sourceCache :: SourceCache,
-   vm :: VM t
-  }
 
 data SrcMapParseState
   = F1 String Int

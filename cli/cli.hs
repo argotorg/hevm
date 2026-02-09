@@ -101,6 +101,7 @@ data CommonOptions = CommonOptions
   , onlyDeployed  ::Bool
   , cacheDir      ::Maybe String
   , earlyAbort    ::Bool
+  , mergeMaxBudget :: Int
   }
 
 commonOptions :: Parser CommonOptions
@@ -131,6 +132,7 @@ commonOptions = CommonOptions
   <*> (switch $ long "only-deployed" <> help "When trying to resolve unknown addresses, only use addresses of deployed contracts")
   <*> (optional $ strOption $ long "cache-dir" <> help "Directory to save and load RPC cache")
   <*> (switch $  long "early-abort" <> help "Stop exploration immediately upon finding the first counterexample")
+  <*> (option auto $ long "merge-max-budget" <> showDefault <> value 100 <> help "Max instructions for speculative merge exploration during path merging")
 
 data CommonExecOptions = CommonExecOptions
   { address       ::Maybe Addr
@@ -374,6 +376,7 @@ main = do
         , simp = Prelude.not cOpts.noSimplify
         , onlyDeployed = cOpts.onlyDeployed
         , earlyAbort = cOpts.earlyAbort
+        , mergeMaxBudget = cOpts.mergeMaxBudget
         } }
 
 
@@ -425,7 +428,7 @@ equivalence eqOpts cOpts = do
       (False, False) -> putStrLn "   \x1b[32m[PASS]\x1b[0m Contracts behave equivalently"
       (True, _)      -> putStrLn "   \x1b[31m[FAIL]\x1b[0m Contracts do not behave equivalently"
       (_, True)      -> putStrLn "   \x1b[31m[FAIL]\x1b[0m Contracts may not behave equivalently"
-    liftIO $ printWarnings Nothing eq.partials (map fst eq.res) "the contracts under test"
+    liftIO $ printWarnings Nothing mempty eq.partials (map fst eq.res) "the contracts under test"
     case any (isCex . fst) eq.res of
       False -> liftIO $ do
         when anyIssues exitFailure
@@ -542,7 +545,7 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = do
                  , ""
                  ] <> fmap (formatCex (fst calldata) Nothing) cexs
         liftIO $ T.putStrLn $ T.unlines counterexamples
-        liftIO $ printWarnings Nothing expr res "symbolically"
+        liftIO $ printWarnings Nothing mempty expr res "symbolically"
         showExtras solvers sOpts calldata expr
         liftIO exitFailure
 

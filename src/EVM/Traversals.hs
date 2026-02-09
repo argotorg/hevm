@@ -123,6 +123,7 @@ foldExpr f acc expr = acc <> (go expr)
       e@(SGT a b) -> f e <> (go a) <> (go b)
       e@(Eq a b) -> f e <> (go a) <> (go b)
       e@(IsZero a) -> f e <> (go a)
+      e@(ITE c t el) -> f e <> (go c) <> (go t) <> (go el)
 
       -- bits
 
@@ -449,6 +450,11 @@ mapExprM f expr = case expr of
   IsZero a -> do
     a' <- mapExprM f a
     f (IsZero a')
+  ITE c t el -> do
+    c' <- mapExprM f c
+    t' <- mapExprM f t
+    el' <- mapExprM f el
+    f (ITE c' t' el')
 
   -- bits
 
