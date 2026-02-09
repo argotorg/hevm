@@ -12,8 +12,9 @@ import Data.String.Here
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (diffUTCTime, getCurrentTime)
-import System.Directory (listDirectory, doesDirectoryExist)
 import System.Environment (lookupEnv)
+import System.FilePath (makeRelative, normalise)
+import System.FilePath.Find (find, always, filePath, fileType, (&&?), FileType(RegularFile))
 import Test.Tasty
 import Test.Tasty.ExpectedFailure (ignoreTest)
 import Test.Tasty.HUnit
@@ -432,7 +433,7 @@ yulEquivalenceTests = testGroup "Yul equivalence"
 yulOptimizationsSolcTests :: TestTree
 yulOptimizationsSolcTests = testCase "eq-all-yul-optimization-tests" $ do
         let opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf {maxIter = Just 5, askSmtIters = 20, loopHeuristic = Naive }}
-            ignoredTests =
+            ignoredTests = fmap normalise
                     -- unbounded loop --
                     [ "commonSubexpressionEliminator/branches_for.yul"
                     , "conditionalSimplifier/no_opt_if_break_is_not_last.yul"
@@ -470,7 +471,7 @@ yulOptimizationsSolcTests = testCase "eq-all-yul-optimization-tests" $ do
                     , "reasoningBasedSimplifier/mulcheck.yul"
                     , "reasoningBasedSimplifier/smod.yul"
                     , "fullSuite/abi_example1.yul"
-                    , "yulOptimizerTests/fullInliner/large_function_multi_use.yul"
+                    , "fullInliner/large_function_multi_use.yul"
                     , "loadResolver/merge_known_write_with_distance.yul"
                     , "loadResolver/second_mstore_with_delta.yul"
                     , "rematerialiser/for_continue_2.yul"
@@ -574,8 +575,8 @@ yulOptimizationsSolcTests = testCase "eq-all-yul-optimization-tests" $ do
                     , "equalStoreEliminator/transient_storage.yul"
                     , "unusedStoreEliminator/tload.yul"
                     , "unusedStoreEliminator/tstore.yul"
-                    , "yulOptimizerTests/fullSuite/transient_storage.yul"
-                    , "yulOptimizerTests/unusedPruner/transient_storage.yul"
+                    , "fullSuite/transient_storage.yul"
+                    , "unusedPruner/transient_storage.yul"
 
                     -- Bug in solidity, fixed in newer versions:
                     -- https://github.com/ethereum/solidity/issues/15397#event-14116827816
@@ -592,22 +593,10 @@ yulOptimizationsSolcTests = testCase "eq-all-yul-optimization-tests" $ do
                     ]
 
         solcRepo <- fromMaybe (internalError "cannot find solidity repo") <$> (lookupEnv "HEVM_SOLIDITY_REPO")
-        let testDir = solcRepo <> "/test/libyul/yulOptimizerTests"
-        dircontents <- listDirectory testDir
-        let
-          fullpaths = map ((testDir ++ "/") ++) dircontents
-          recursiveList :: [FilePath] -> [FilePath] -> IO [FilePath]
-          recursiveList (a:ax) b =  do
-              isdir <- doesDirectoryExist a
-              case isdir of
-                True  -> do
-                    fs <- listDirectory a
-                    let fs2 = map ((a ++ "/") ++) fs
-                    recursiveList (ax++fs2) b
-                False -> recursiveList ax (a:b)
-          recursiveList [] b = pure b
-        files <- recursiveList fullpaths []
-        let filesFiltered = filter (\file -> not $ any (`List.isInfixOf` file) ignoredTests) files
+        let testDir = normalise $ solcRepo <> "/test/libyul/yulOptimizerTests"
+            shouldIgnore fp = any (`List.isInfixOf` (makeRelative testDir fp)) ignoredTests
+            isRegularFile = (== RegularFile) <$> fileType
+        filesFiltered <- find always (isRegularFile &&? (not . shouldIgnore <$> filePath)) testDir
 
         -- Takes one file which follows the Solidity Yul optimizer unit tests format,
         -- extracts both the nonoptimized and the optimized versions, and checks equivalence.
