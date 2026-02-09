@@ -870,9 +870,6 @@ exec1 conf = do
           case stk of
             x:cond:xs -> forceConcreteLimitSz x 2 "JUMPI: symbolic jumpdest" $ \maybeTarget ->
               burn g_high $
-                -- Note: We must NOT check tryInto x' unconditionally!
-                -- Per EVM semantics, if condition is 0, we just fall through
-                -- without validating the destination. Only validate when jumping.
                 let jump :: Bool -> EVM t ()
                     jump False = assign' (#state % #stack) xs >> next
                     jump _    = case tryInto maybeTarget of
