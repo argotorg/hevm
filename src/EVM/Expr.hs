@@ -1057,6 +1057,13 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
     go (IsZero (Xor x y)) = eq x y
     go (IsZero a) = iszero a
 
+    -- ITE (if-then-else) simplification for path merging
+    go (ITE (Lit 0) _ f) = f
+    go (ITE (Lit _) t _) = t
+    go (ITE _ t f) | t == f = t
+    go (ITE c (ITE c' a _) d) | c == c' = ITE c a d -- nested same condition in then
+    go (ITE c a (ITE c' _ d)) | c == c' = ITE c a d -- nested same condition in else
+
     -- syntactic Eq reduction
     go (Eq (Lit a) (Lit b))
       | a == b = Lit 1
