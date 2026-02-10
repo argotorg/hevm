@@ -122,7 +122,7 @@ divModGroundAxioms props = do
         indexedGroups = zip [0..] groups
     entries <- concat <$> mapM (uncurry mkGroupAxioms) indexedGroups
     let links = mkCongruenceLinks indexedGroups
-    pure $ (SMTComment "division/modulo ground-instance axioms (CSE'd)") : entries <> links
+    pure $ (SMTComment "division/modulo ground-instance axioms") : entries <> links
   where
     collectDivOps :: forall a . Expr a -> [DivOp]
     collectDivOps = \case
