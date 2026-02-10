@@ -118,8 +118,7 @@ divModGroundAxioms props = do
   let allDivs = nubBy eqDivOp $ concatMap (foldProp collectDivOps []) props
   if null allDivs then pure []
   else do
-    let groups = groupBy (\a b -> absKey a == absKey b)
-               $ sortBy (comparing absKey) allDivs
+    let groups = groupBy (\a b -> absKey a == absKey b) $ sortBy (comparing absKey) allDivs
         indexedGroups = zip [0..] groups
     entries <- concat <$> mapM (uncurry mkGroupAxioms) indexedGroups
     let links = mkCongruenceLinks indexedGroups
@@ -196,23 +195,22 @@ divModGroundAxioms props = do
 -- | For each pair of signed groups with the same operation type (udiv/urem),
 -- emit a congruence lemma: if abs inputs are equal, results are equal.
 -- This is a sound tautology (function congruence for bvudiv/bvurem) that
--- helps bitwuzla avoid independent reasoning about multiple bvudiv terms.
+-- helps solvers avoid independent reasoning about multiple bvudiv terms.
 mkCongruenceLinks :: [(Int, [DivOp])] -> [SMTEntry]
 mkCongruenceLinks indexedGroups =
-  let signedDivGroups = [(i, ops) | (i, ops@((k,_,_):_)) <- indexedGroups
-                        , k == USDiv]  -- SDiv groups
-      signedModGroups = [(i, ops) | (i, ops@((k,_,_):_)) <- indexedGroups
-                        , k == USMod]  -- SMod groups
+  let signedDivGroups = [(i, ops) | (i, ops@((k,_,_):_)) <- indexedGroups , k == USDiv]  -- SDiv groups
+      signedModGroups = [(i, ops) | (i, ops@((k,_,_):_)) <- indexedGroups , k == USMod]  -- SMod groups
   in concatMap (mkPairLinks "udiv") (allPairs signedDivGroups)
      <> concatMap (mkPairLinks "urem") (allPairs signedModGroups)
   where
     allPairs xs = [(a, b) | a <- xs, b <- xs, fst a < fst b]
     mkPairLinks prefix' ((i, _), (j, _)) =
-      let absAI = fromString $ "abs_a_" <> show i
+      let absAi = fromString $ "abs_a_" <> show i
           absBi = fromString $ "abs_b_" <> show i
-          absAJ = fromString $ "abs_a_" <> show j
-          absBJ = fromString $ "abs_b_" <> show j
+          absAj = fromString $ "abs_a_" <> show j
+          absBj = fromString $ "abs_b_" <> show j
           coreI = fromString $ prefix' <> "_" <> show i
           coreJ = fromString $ prefix' <> "_" <> show j
-      in [ SMTCommand $ "(assert (=> (and (=" `sp` absAI `sp` absAJ <> ") (="
-              `sp` absBi `sp` absBJ <> ")) (=" `sp` coreI `sp` coreJ <> ")))" ]
+      in [ SMTCommand $ "(assert (=> "
+            <> "(and (=" `sp` absAi `sp` absAj <> ") (=" `sp` absBi `sp` absBj <> "))"
+            <> "(=" `sp` coreI `sp` coreJ <> ")))" ]
