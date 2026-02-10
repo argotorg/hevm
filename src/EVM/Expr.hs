@@ -1253,6 +1253,8 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
     go (CLZ v) = clz v
 
     -- Bitwise AND & OR. These MUST preserve bitwise equivalence
+    go (And a (Or b _)) | a == b = a
+    go (And a (Or _ b)) | a == b = a
     go (And a b)
       | a == b = a
       | b == (Not a) || a == (Not b) = Lit 0
@@ -1260,6 +1262,8 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
       | a == (Lit maxLit) = b
       | b == (Lit maxLit) = a
       | otherwise = EVM.Expr.and a b
+    go (Or a (And b _)) | a == b = a
+    go (Or a (And _ b)) | a == b = a
     go (Or a b)
       | a == b = a
       | a == (Lit 0) = b
