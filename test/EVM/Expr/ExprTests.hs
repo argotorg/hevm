@@ -843,42 +843,7 @@ concretizationTests = testGroup "Concretization tests"
       let simp = Expr.joinBytes (LitByte 0xff : replicate 31 (LitByte 0))
       assertEqual "JoinBytes MSB set" (Lit 0xff00000000000000000000000000000000000000000000000000000000000000) simp
 
-    -- Proposition operations
-  , testCase "conc-peq-lit-true" $ do
-      let simp = Expr.peq (Lit 42) (Lit 42)
-      assertEqual "PEq Lit equal" (PBool True) simp
-  , testCase "conc-peq-lit-false" $ do
-      let simp = Expr.peq (Lit 42) (Lit 43)
-      assertEqual "PEq Lit not equal" (PBool False) simp
-  , testCase "conc-peq-litaddr-true" $ do
-      let simp = Expr.peq (LitAddr 0x1234) (LitAddr 0x1234)
-      assertEqual "PEq LitAddr equal" (PBool True) simp
-  , testCase "conc-peq-litaddr-false" $ do
-      let simp = Expr.peq (LitAddr 0x1234) (LitAddr 0x5678)
-      assertEqual "PEq LitAddr not equal" (PBool False) simp
-  , testCase "conc-peq-litbyte-true" $ do
-      let simp = Expr.peq (LitByte 0xab) (LitByte 0xab)
-      assertEqual "PEq LitByte equal" (PBool True) simp
-  , testCase "conc-peq-litbyte-false" $ do
-      let simp = Expr.peq (LitByte 0xab) (LitByte 0xcd)
-      assertEqual "PEq LitByte not equal" (PBool False) simp
-  , testCase "conc-peq-concretebuf-true" $ do
-      let simp = Expr.peq (ConcreteBuf "hello") (ConcreteBuf "hello")
-      assertEqual "PEq ConcreteBuf equal" (PBool True) simp
-  , testCase "conc-peq-concretebuf-false" $ do
-      let simp = Expr.peq (ConcreteBuf "hello") (ConcreteBuf "world")
-      assertEqual "PEq ConcreteBuf not equal" (PBool False) simp
-  , testCase "conc-pleq-true" $ do
-      let simp = Expr.pleq (Lit 5) (Lit 10)
-      assertEqual "PLEq true" (PBool True) simp
-  , testCase "conc-pleq-equal" $ do
-      let simp = Expr.pleq (Lit 5) (Lit 5)
-      assertEqual "PLEq equal" (PBool True) simp
-  , testCase "conc-pleq-false" $ do
-      let simp = Expr.pleq (Lit 10) (Lit 5)
-      assertEqual "PLEq false" (PBool False) simp
-
-    -- Hash functions
+  -- Hash functions
   , testCase "conc-keccak" $ do
       let simp = Expr.concKeccakSimpExpr $ Keccak (ConcreteBuf "")
       assertEqual "Keccak of empty should be concretized" (Lit (keccak' "")) simp
@@ -891,6 +856,109 @@ concretizationTests = testGroup "Concretization tests"
   , testCase "conc-sha256-nonempty" $ do
       let simp = Expr.simplify $ SHA256 (ConcreteBuf "hello")
       assertEqual "SHA256 of hello should be concretized" (Lit (sha256' "hello")) simp
+
+  -- simplifyProp over Props
+  , testCase "conc-peq-lit-true" $ do
+      let simp = Expr.simplifyProp $ PEq (Lit 42) (Lit 42)
+      assertEqual "PEq Lit equal" (PBool True) simp
+  , testCase "conc-peq-lit-false" $ do
+      let simp = Expr.simplifyProp $ PEq (Lit 42) (Lit 43)
+      assertEqual "PEq Lit not equal" (PBool False) simp
+  , testCase "conc-peq-litaddr-true" $ do
+      let simp = Expr.simplifyProp $ PEq (LitAddr 0x1234) (LitAddr 0x1234)
+      assertEqual "PEq LitAddr equal" (PBool True) simp
+  , testCase "conc-peq-litaddr-false" $ do
+      let simp = Expr.simplifyProp $ PEq (LitAddr 0x1234) (LitAddr 0x5678)
+      assertEqual "PEq LitAddr not equal" (PBool False) simp
+  , testCase "conc-peq-litbyte-true" $ do
+      let simp = Expr.simplifyProp $ PEq (LitByte 0xab) (LitByte 0xab)
+      assertEqual "PEq LitByte equal" (PBool True) simp
+  , testCase "conc-peq-litbyte-false" $ do
+      let simp = Expr.simplifyProp $ PEq (LitByte 0xab) (LitByte 0xcd)
+      assertEqual "PEq LitByte not equal" (PBool False) simp
+  , testCase "conc-peq-concretebuf-true" $ do
+      let simp = Expr.simplifyProp $ PEq (ConcreteBuf "hello") (ConcreteBuf "hello")
+      assertEqual "PEq ConcreteBuf equal" (PBool True) simp
+  , testCase "conc-peq-concretebuf-false" $ do
+      let simp = Expr.simplifyProp $ PEq (ConcreteBuf "hello") (ConcreteBuf "world")
+      assertEqual "PEq ConcreteBuf not equal" (PBool False) simp
+  , testCase "conc-peq-concretestore-true" $ do
+      let simp = Expr.simplifyProp $ PEq (ConcreteStore (Map.fromList [(1, 2)])) (ConcreteStore (Map.fromList [(1, 2)]))
+      assertEqual "PEq ConcreteStore equal" (PBool True) simp
+  , testCase "conc-peq-concretestore-false" $ do
+      let store1 = ConcreteStore (Map.fromList [(1, 2)])
+          store2 = ConcreteStore (Map.fromList [(1, 3)])
+          simp = Expr.simplifyProp $ PEq store1 store2
+      -- ConcreteStore inequality is not concretized (no explicit pattern in peq)
+      assertEqual "PEq ConcreteStore not equal" (PEq store1 store2) simp
+  , testCase "conc-peq-var-self" $ do
+      let simp = Expr.simplifyProp $ PEq (Var "x") (Var "x")
+      assertEqual "PEq Var self-equal" (PBool True) simp
+  , testCase "conc-peq-symaddr-self" $ do
+      let simp = Expr.simplifyProp $ PEq (SymAddr "a") (SymAddr "a")
+      assertEqual "PEq SymAddr self-equal" (PBool True) simp
+  , testCase "conc-peq-abstractbuf-self" $ do
+      let simp = Expr.simplifyProp $ PEq (AbstractBuf "b") (AbstractBuf "b")
+      assertEqual "PEq AbstractBuf self-equal" (PBool True) simp
+  , testCase "conc-plt-true" $ do
+      let simp = Expr.simplifyProp $ PLT (Lit 1) (Lit 2)
+      assertEqual "PLT true" (PBool True) simp
+  , testCase "conc-plt-false" $ do
+      let simp = Expr.simplifyProp $ PLT (Lit 2) (Lit 1)
+      assertEqual "PLT false" (PBool False) simp
+  , testCase "conc-plt-equal" $ do
+      let simp = Expr.simplifyProp $ PLT (Lit 5) (Lit 5)
+      assertEqual "PLT equal is false" (PBool False) simp
+  , testCase "conc-pgt-true" $ do
+      let simp = Expr.simplifyProp $ PGT (Lit 2) (Lit 1)
+      -- PGT a b is simplified to PLT b a
+      assertEqual "PGT true" (PBool True) simp
+  , testCase "conc-pgt-false" $ do
+      let simp = Expr.simplifyProp $ PGT (Lit 1) (Lit 2)
+      assertEqual "PGT false" (PBool False) simp
+  , testCase "conc-pgeq-true" $ do
+      let simp = Expr.simplifyProp $ PGEq (Lit 2) (Lit 1)
+      -- PGEq a b is simplified to PLEq b a
+      assertEqual "PGEq true" (PBool True) simp
+  , testCase "conc-pgeq-false" $ do
+      let simp = Expr.simplifyProp $ PGEq (Lit 1) (Lit 2)
+      assertEqual "PGEq false" (PBool False) simp
+  , testCase "conc-pgeq-equal" $ do
+      let simp = Expr.simplifyProp $ PGEq (Lit 5) (Lit 5)
+      assertEqual "PGEq equal is true" (PBool True) simp
+  , testCase "conc-prop-pleq-true" $ do
+      let simp = Expr.simplifyProp $ PLEq (Lit 1) (Lit 2)
+      assertEqual "PLEq true" (PBool True) simp
+  , testCase "conc-prop-pleq-false" $ do
+      let simp = Expr.simplifyProp $ PLEq (Lit 2) (Lit 1)
+      assertEqual "PLEq false" (PBool False) simp
+  , testCase "conc-pneg-true" $ do
+      let simp = Expr.simplifyProp $ PNeg (PBool True)
+      assertEqual "PNeg True" (PBool False) simp
+  , testCase "conc-pneg-false" $ do
+      let simp = Expr.simplifyProp $ PNeg (PBool False)
+      assertEqual "PNeg False" (PBool True) simp
+  , testCase "conc-pand-true" $ do
+      let simp = Expr.simplifyProp $ PAnd (PBool True) (PBool True)
+      assertEqual "PAnd True True" (PBool True) simp
+  , testCase "conc-pand-false" $ do
+      let simp = Expr.simplifyProp $ PAnd (PBool True) (PBool False)
+      assertEqual "PAnd True False" (PBool False) simp
+  , testCase "conc-por-true" $ do
+      let simp = Expr.simplifyProp $ POr (PBool False) (PBool True)
+      assertEqual "POr False True" (PBool True) simp
+  , testCase "conc-por-false" $ do
+      let simp = Expr.simplifyProp $ POr (PBool False) (PBool False)
+      assertEqual "POr False False" (PBool False) simp
+  , testCase "conc-pimpl-true-true" $ do
+      let simp = Expr.simplifyProp $ PImpl (PBool True) (PBool True)
+      assertEqual "PImpl True True" (PBool True) simp
+  , testCase "conc-pimpl-true-false" $ do
+      let simp = Expr.simplifyProp $ PImpl (PBool True) (PBool False)
+      assertEqual "PImpl True False" (PBool False) simp
+  , testCase "conc-pimpl-false-any" $ do
+      let simp = Expr.simplifyProp $ PImpl (PBool False) (PBool False)
+      assertEqual "PImpl False _ is True" (PBool True) simp
   ]
 
 fuzzTests :: TestTree
