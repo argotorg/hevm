@@ -470,75 +470,33 @@ yulOptimizationsSolcTests = testCase "eq-all-yul-optimization-tests" $ do
                     , "fullSuite/abi_example1.yul"
                     , "loadResolver/merge_known_write_with_distance.yul"
                     , "loadResolver/second_mstore_with_delta.yul"
-
-                    -- invalid test --
-                    -- https://github.com/ethereum/solidity/issues/9500
-                    , "commonSubexpressionEliminator/object_access.yul"
-                    , "expressionSplitter/object_access.yul"
-
-                    -- stack too deep --
-                    , "fullSuite/abi2.yul"
-                    , "fullSuite/aztec.yul"
-                    , "stackCompressor/unusedPrunerWithMSize.yul"
                     , "stackLimitEvader" -- all that are in this subdirectory
 
-                    -- typed yul --
-                    , "conditionalSimplifier/add_correct_type_wasm.yul"
-                    , "conditionalSimplifier/add_correct_type.yul"
-                    , "disambiguator/for_statement.yul"
-                    , "disambiguator/funtion_call.yul"
-                    , "disambiguator/if_statement.yul"
-                    , "disambiguator/long_names.yul"
-                    , "disambiguator/switch_statement.yul"
-                    , "disambiguator/variables_clash.yul"
-                    , "disambiguator/variables_inside_functions.yul"
-                    , "disambiguator/variables.yul"
-                    , "expressionInliner/simple.yul"
-                    , "expressionInliner/with_args.yul"
-                    , "expressionSplitter/typed.yul"
-                    , "fullInliner/multi_return_typed.yul"
-                    , "functionGrouper/empty_block.yul"
-                    , "functionGrouper/multi_fun_mixed.yul"
-                    , "functionGrouper/nested_fun.yul"
-                    , "functionGrouper/single_fun.yul"
-                    , "functionHoister/empty_block.yul"
-                    , "functionHoister/multi_mixed.yul"
-                    , "functionHoister/nested.yul"
-                    , "functionHoister/single.yul"
-                    , "mainFunction/empty_block.yul"
-                    , "mainFunction/multi_fun_mixed.yul"
-                    , "mainFunction/nested_fun.yul"
-                    , "mainFunction/single_fun.yul"
-                    , "ssaTransform/typed_for.yul"
-                    , "ssaTransform/typed_switch.yul"
-                    , "ssaTransform/typed.yul"
-                    , "varDeclInitializer/typed.yul"
+                    -- stack too deep --
+                    , "fullSuite/aztec.yul"
+                    , "stackCompressor/unusedPrunerWithMSize.yul"
 
                     -- New: symbolic index on MSTORE/MLOAD/CopySlice/CallDataCopy/ExtCodeCopy/Revert,
                     --      or exponent is symbolic (requires symbolic gas)
                     --      or SHA3 offset symbolic
-                    , "equalStoreEliminator/indirect_inferrence.yul"
                     , "expressionSimplifier/exp_simplifications.yul"
-                    , "fullSuite/unusedFunctionParameterPruner_return.yul"
-                    , "fullSuite/unusedFunctionParameterPruner_simple.yul"
-                    , "fullSuite/unusedFunctionParameterPruner.yul"
-                    , "loadResolver/keccak_symbolic_memory.yul"
                     , "loadResolver/merge_mload_with_known_distance.yul"
                     , "loopInvariantCodeMotion/complex_move.yul"
                     , "loopInvariantCodeMotion/no_move_memory.yul"
                     , "loopInvariantCodeMotion/no_move_storage.yul"
-                    , "unusedStoreEliminator/remove_before_revert.yul"
-                    , "unusedStoreEliminator/unrelated_relative.yul"
-                    , "fullSuite/extcodelength.yul"
-                    , "unusedStoreEliminator/create_inside_function.yul"-- "trying to reset symbolic storage with writes in create"
-                    
-                    -- to investigate, currently crash
-                    , "commonSubexpressionEliminator/long_literals_as_builtin_args.yul"
-                    , "disambiguator/string_as_hex_and_hex_as_string.yul"
-                    , "fullSuite/sub_objects.yul"
+                    -- Not equivalent - TODO: Investigate
+                    , "loadResolver/keccak_symbolic_memory.yul"
+                    -- EOF
                     , "loadResolver/extstaticcall.yul"
                     , "loadResolver/memory_with_extcall_invalidation.yul"
                     , "loadResolver/zero_length_reads_eof.yul"
+                    -- Yul subobjects
+                    , "fullSuite/sub_objects.yul"
+                    -- Parser errors
+                    , "commonSubexpressionEliminator/long_literals_as_builtin_args.yul"
+                    , "commonSubexpressionEliminator/object_access.yul"
+                    , "disambiguator/string_as_hex_and_hex_as_string.yul"
+                    , "expressionSplitter/object_access.yul"
                     , "equivalentFunctionCombiner/constant_representation_datasize.yul"
                     ]
 
