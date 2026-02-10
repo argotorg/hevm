@@ -212,6 +212,7 @@ peq (Lit x) (Lit y) = PBool (x == y)
 peq (LitAddr x) (LitAddr y) = PBool (x == y)
 peq (LitByte x) (LitByte y) = PBool (x == y)
 peq (ConcreteBuf x) (ConcreteBuf y) = PBool (x == y)
+peq (ConcreteStore x) (ConcreteStore y) = PBool (x == y)
 peq a b
   | a == b = PBool True
   | otherwise = let args = sort [a, b]

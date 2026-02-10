@@ -857,7 +857,7 @@ concretizationTests = testGroup "Concretization tests"
       let simp = Expr.simplify $ SHA256 (ConcreteBuf "hello")
       assertEqual "SHA256 of hello should be concretized" (Lit (sha256' "hello")) simp
 
-  -- simplifyProp over Props
+  -- PEq simplifyProp over Props
   , testCase "conc-peq-lit-true" $ do
       let simp = Expr.simplifyProp $ PEq (Lit 42) (Lit 42)
       assertEqual "PEq Lit equal" (PBool True) simp
@@ -886,11 +886,8 @@ concretizationTests = testGroup "Concretization tests"
       let simp = Expr.simplifyProp $ PEq (ConcreteStore (Map.fromList [(1, 2)])) (ConcreteStore (Map.fromList [(1, 2)]))
       assertEqual "PEq ConcreteStore equal" (PBool True) simp
   , testCase "conc-peq-concretestore-false" $ do
-      let store1 = ConcreteStore (Map.fromList [(1, 2)])
-          store2 = ConcreteStore (Map.fromList [(1, 3)])
-          simp = Expr.simplifyProp $ PEq store1 store2
-      -- ConcreteStore inequality is not concretized (no explicit pattern in peq)
-      assertEqual "PEq ConcreteStore not equal" (PEq store1 store2) simp
+      let simp = Expr.simplifyProp $ PEq (ConcreteStore (Map.fromList [(1, 2)])) (ConcreteStore (Map.fromList [(1, 3)]))
+      assertEqual "PEq ConcreteStore not equal" (PBool False) simp
   , testCase "conc-peq-var-self" $ do
       let simp = Expr.simplifyProp $ PEq (Var "x") (Var "x")
       assertEqual "PEq Var self-equal" (PBool True) simp
@@ -900,6 +897,8 @@ concretizationTests = testGroup "Concretization tests"
   , testCase "conc-peq-abstractbuf-self" $ do
       let simp = Expr.simplifyProp $ PEq (AbstractBuf "b") (AbstractBuf "b")
       assertEqual "PEq AbstractBuf self-equal" (PBool True) simp
+
+  -- Other simplifications over Props
   , testCase "conc-plt-true" $ do
       let simp = Expr.simplifyProp $ PLT (Lit 1) (Lit 2)
       assertEqual "PLT true" (PBool True) simp
