@@ -71,17 +71,15 @@ assertPropsRefined conf ps = do
   refine <- divModGroundAxioms ps
   pure $ abst <> SMT2 (SMTScript refine) mempty mempty
 
--- | Kind of division/modulo operation
 data DivOpKind = UDiv | USDiv | UMod | USMod
   deriving (Eq, Ord)
 
--- We track (kind, dividend, divisor)
 type DivOp = (DivOpKind, Expr EWord, Expr EWord)
 
--- | Canonical key for grouping operations that share the same bvudiv/bvurem core.
--- For unsigned: (a, b, False, isMod)
--- For signed:   (canonicalAbs a, canonicalAbs b, True, isMod) where canonicalAbs normalizes negations
-type AbsKey = (Expr EWord, Expr EWord, Bool, Bool)
+data AbsKey
+  = UnsignedAbsKey (Expr EWord) (Expr EWord) Bool  -- ^ (dividend, divisor, isMod) - raw operands
+  | SignedAbsKey   (Expr EWord) (Expr EWord) Bool  -- ^ (dividend, divisor, isMod) - canonicalAbs normalized
+  deriving (Eq, Ord)
 
 -- | Normalize an expression for absolute value canonicalization.
 -- |Sub(Lit 0, x)| = |x|, so we strip the negation wrapper.
@@ -101,8 +99,8 @@ isMod _     = False
 
 absKey :: DivOp -> AbsKey
 absKey (kind, a, b)
-  | not (isSigned kind) = (a, b, False, isMod kind)         -- unsigned: exact operands
-  | otherwise           = (canonicalAbs a, canonicalAbs b, True, isMod kind)  -- signed: normalize abs
+  | not (isSigned kind) = UnsignedAbsKey a b (isMod kind)
+  | otherwise           = SignedAbsKey (canonicalAbs a) (canonicalAbs b) (isMod kind)
 
 -- | Generate ground-instance axioms with CSE'd bvudiv/bvurem intermediates.
 -- For each group of div/mod ops sharing the same (|a|, |b|), generates:
