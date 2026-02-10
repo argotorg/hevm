@@ -828,6 +828,69 @@ concretizationTests = testGroup "Concretization tests"
   , testCase "conc-max" $ do
       let simp = Expr.simplify $ Max (Lit 5) (Lit 10)
       assertEqual "Max should be concretized" (Lit 10) simp
+
+    -- Byte-level operations
+  , testCase "conc-eqbyte-true" $ do
+      let simp = Expr.eqByte (LitByte 0x42) (LitByte 0x42)
+      assertEqual "EqByte equal" (Lit 1) simp
+  , testCase "conc-eqbyte-false" $ do
+      let simp = Expr.eqByte (LitByte 0x42) (LitByte 0x43)
+      assertEqual "EqByte not equal" (Lit 0) simp
+  , testCase "conc-joinbytes" $ do
+      let simp = Expr.joinBytes (replicate 31 (LitByte 0) ++ [LitByte 0x42])
+      assertEqual "JoinBytes all concrete" (Lit 0x42) simp
+  , testCase "conc-joinbytes-msb" $ do
+      let simp = Expr.joinBytes (LitByte 0xff : replicate 31 (LitByte 0))
+      assertEqual "JoinBytes MSB set" (Lit 0xff00000000000000000000000000000000000000000000000000000000000000) simp
+
+    -- Proposition operations
+  , testCase "conc-peq-lit-true" $ do
+      let simp = Expr.peq (Lit 42) (Lit 42)
+      assertEqual "PEq Lit equal" (PBool True) simp
+  , testCase "conc-peq-lit-false" $ do
+      let simp = Expr.peq (Lit 42) (Lit 43)
+      assertEqual "PEq Lit not equal" (PBool False) simp
+  , testCase "conc-peq-litaddr-true" $ do
+      let simp = Expr.peq (LitAddr 0x1234) (LitAddr 0x1234)
+      assertEqual "PEq LitAddr equal" (PBool True) simp
+  , testCase "conc-peq-litaddr-false" $ do
+      let simp = Expr.peq (LitAddr 0x1234) (LitAddr 0x5678)
+      assertEqual "PEq LitAddr not equal" (PBool False) simp
+  , testCase "conc-peq-litbyte-true" $ do
+      let simp = Expr.peq (LitByte 0xab) (LitByte 0xab)
+      assertEqual "PEq LitByte equal" (PBool True) simp
+  , testCase "conc-peq-litbyte-false" $ do
+      let simp = Expr.peq (LitByte 0xab) (LitByte 0xcd)
+      assertEqual "PEq LitByte not equal" (PBool False) simp
+  , testCase "conc-peq-concretebuf-true" $ do
+      let simp = Expr.peq (ConcreteBuf "hello") (ConcreteBuf "hello")
+      assertEqual "PEq ConcreteBuf equal" (PBool True) simp
+  , testCase "conc-peq-concretebuf-false" $ do
+      let simp = Expr.peq (ConcreteBuf "hello") (ConcreteBuf "world")
+      assertEqual "PEq ConcreteBuf not equal" (PBool False) simp
+  , testCase "conc-pleq-true" $ do
+      let simp = Expr.pleq (Lit 5) (Lit 10)
+      assertEqual "PLEq true" (PBool True) simp
+  , testCase "conc-pleq-equal" $ do
+      let simp = Expr.pleq (Lit 5) (Lit 5)
+      assertEqual "PLEq equal" (PBool True) simp
+  , testCase "conc-pleq-false" $ do
+      let simp = Expr.pleq (Lit 10) (Lit 5)
+      assertEqual "PLEq false" (PBool False) simp
+
+    -- Hash functions
+  , testCase "conc-keccak" $ do
+      let simp = Expr.concKeccakSimpExpr $ Keccak (ConcreteBuf "")
+      assertEqual "Keccak of empty should be concretized" (Lit (keccak' "")) simp
+  , testCase "conc-keccak-nonempty" $ do
+      let simp = Expr.concKeccakSimpExpr $ Keccak (ConcreteBuf "hello")
+      assertEqual "Keccak of hello should be concretized" (Lit (keccak' "hello")) simp
+  , testCase "conc-sha256" $ do
+      let simp = Expr.simplify $ SHA256 (ConcreteBuf "")
+      assertEqual "SHA256 of empty should be concretized" (Lit (sha256' "")) simp
+  , testCase "conc-sha256-nonempty" $ do
+      let simp = Expr.simplify $ SHA256 (ConcreteBuf "hello")
+      assertEqual "SHA256 of hello should be concretized" (Lit (sha256' "hello")) simp
   ]
 
 fuzzTests :: TestTree
