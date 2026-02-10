@@ -778,6 +778,9 @@ concretizationTests = testGroup "Concretization tests"
   , testCase "conc-xor-same" $ do
       let simp = Expr.simplify $ Xor (Lit 0x1234) (Lit 0x1234)
       assertEqual "Xor of same values is 0" (Lit 0) simp
+  , testCase "conc-xor-self" $ do
+      let simp = Expr.simplify $ Xor (Var "x") (Var "x")
+      assertEqual "x xor x = 0" (Lit 0) simp
   , testCase "conc-not" $ do
       let simp = Expr.simplify $ Not (Lit 0x55)
       assertEqual "Not should be concretized" (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffaa) simp
@@ -995,6 +998,13 @@ concretizationTests = testGroup "Concretization tests"
   , testCase "conc-lt-zero" $ do
       let simp = Expr.simplify $ LT (Var "x") (Lit 0)
       assertEqual "Nothing is < 0 unsigned" (Lit 0) simp
+  , testCase "conc-lt-maxlit" $ do
+      let simp = Expr.simplify $ LT (Lit Expr.maxLit) (Var "x")
+      assertEqual "maxLit is never < anything" (Lit 0) simp
+  , testCase "conc-gt-maxlit" $ do
+      -- GT _ maxLit becomes lt maxLit _ which is 0
+      let simp = Expr.simplify $ GT (Var "x") (Lit Expr.maxLit)
+      assertEqual "Nothing is > maxLit" (Lit 0) simp
   , testCase "conc-gt-zero" $ do
       let simp = Expr.simplify $ GT (Lit 0) (Var "x")
       assertEqual "0 is not > anything unsigned" (Lit 0) simp
@@ -1055,6 +1065,12 @@ concretizationTests = testGroup "Concretization tests"
   , testCase "conc-smod-self" $ do
       let simp = Expr.simplify $ SMod (Var "x") (Var "x")
       assertEqual "x smod x = 0" (Lit 0) simp
+  , testCase "conc-mod-one" $ do
+      let simp = Expr.simplify $ Mod (Var "x") (Lit 1)
+      assertEqual "x mod 1 = 0" (Lit 0) simp
+  , testCase "conc-smod-one" $ do
+      let simp = Expr.simplify $ SMod (Var "x") (Lit 1)
+      assertEqual "x smod 1 = 0" (Lit 0) simp
 
     -- MulMod/AddMod zero cases
   , testCase "conc-mulmod-zero-first" $ do
@@ -1108,6 +1124,12 @@ concretizationTests = testGroup "Concretization tests"
   , testCase "conc-or-self" $ do
       let simp = Expr.simplify $ Or (Var "x") (Var "x")
       assertEqual "x | x = x" (Var "x") simp
+  , testCase "conc-or-maxlit-left" $ do
+      let simp = Expr.simplify $ Or (Lit Expr.maxLit) (Var "x")
+      assertEqual "maxLit | x = maxLit" (Lit Expr.maxLit) simp
+  , testCase "conc-or-maxlit-right" $ do
+      let simp = Expr.simplify $ Or (Var "x") (Lit Expr.maxLit)
+      assertEqual "x | maxLit = maxLit" (Lit Expr.maxLit) simp
 
     -- SHL/SHR with zero
   , testCase "conc-shl-zero-amount" $ do
@@ -1116,12 +1138,24 @@ concretizationTests = testGroup "Concretization tests"
   , testCase "conc-shl-zero-value" $ do
       let simp = Expr.simplify $ SHL (Var "n") (Lit 0)
       assertEqual "0 << n = 0" (Lit 0) simp
+  , testCase "conc-shl-large-shift" $ do
+      let simp = Expr.simplify $ SHL (Lit 256) (Var "x")
+      assertEqual "x << 256 = 0" (Lit 0) simp
+  , testCase "conc-shl-very-large-shift" $ do
+      let simp = Expr.simplify $ SHL (Lit 1000) (Var "x")
+      assertEqual "x << 1000 = 0" (Lit 0) simp
   , testCase "conc-shr-zero-amount" $ do
       let simp = Expr.simplify $ SHR (Lit 0) (Var "x")
       assertEqual "x >> 0 = x" (Var "x") simp
   , testCase "conc-shr-zero-value" $ do
       let simp = Expr.simplify $ SHR (Var "n") (Lit 0)
       assertEqual "0 >> n = 0" (Lit 0) simp
+  , testCase "conc-shr-large-shift" $ do
+      let simp = Expr.simplify $ SHR (Lit 256) (Var "x")
+      assertEqual "x >> 256 = 0" (Lit 0) simp
+  , testCase "conc-shr-very-large-shift" $ do
+      let simp = Expr.simplify $ SHR (Lit 1000) (Var "x")
+      assertEqual "x >> 1000 = 0" (Lit 0) simp
 
     -- ReadWord
   , testCase "conc-readword" $ do
