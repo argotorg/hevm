@@ -1214,7 +1214,7 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
 
     -- Negation: ~x + 1 = 0 - x (two's complement)
     go (Add (Lit 1) (Not b)) = Sub (Lit 0) b
-    go (Add (Lit 1) (Xor (Lit a) b)) | a == maxLit = Sub (Lit 0) b
+    go (Xor (Lit a) b) | a == maxLit = Not b
 
     -- add / sub identities
     go (Add a b)
