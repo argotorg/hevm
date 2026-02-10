@@ -1,4 +1,5 @@
 {-# LANGUAGE QuasiQuotes #-}
+{-# OPTIONS_GHC -Wno-x-partial #-}
 
 module EVM.Equivalence.EquivalenceTests (tests) where
 
@@ -19,7 +20,7 @@ import Test.Tasty
 import Test.Tasty.ExpectedFailure (ignoreTest)
 import Test.Tasty.HUnit
 import Text.RE.TDFA.String hiding (matches)
-import Text.RE.Replace (replaceAll)
+import Text.RE.Replace (replaceAll, captureText, CaptureOrdinal(..), CaptureID(..))
 
 
 import EVM.Effects qualified as Effects
@@ -492,12 +493,6 @@ yulOptimizationsSolcTests = testCase "eq-all-yul-optimization-tests" $ do
                     , "loadResolver/zero_length_reads_eof.yul"
                     -- Yul subobjects
                     , "fullSuite/sub_objects.yul"
-                    -- Parser errors
-                    , "commonSubexpressionEliminator/long_literals_as_builtin_args.yul"
-                    , "commonSubexpressionEliminator/object_access.yul"
-                    , "disambiguator/string_as_hex_and_hex_as_string.yul"
-                    , "expressionSplitter/object_access.yul"
-                    , "equivalentFunctionCombiner/constant_representation_datasize.yul"
                     ]
 
         solcRepo <- fromMaybe (internalError "cannot find solidity repo") <$> (lookupEnv "HEVM_SOLIDITY_REPO")
@@ -511,7 +506,7 @@ yulOptimizationsSolcTests = testCase "eq-all-yul-optimization-tests" $ do
         forM_ filesFiltered (\f-> do
           origcont <- readFile f
           let
-            onlyAfter pattern (a:ax) = if a =~ pattern then (a:ax) else onlyAfter pattern ax
+            onlyAfter pattern (a:ax) = if a =~ pattern then ax else onlyAfter pattern ax
             onlyAfter _ [] = []
             replaceOnce pat repl inp = go inp [] where
               go (a:ax) b = if a =~ pat then let a2 = replaceAll repl $ a *=~ pat in b ++ a2:ax
@@ -522,15 +517,25 @@ yulOptimizationsSolcTests = testCase "eq-all-yul-optimization-tests" $ do
             -- `calldatacopy(0,0,1024)`. (calldata is symbolic, but memory starts empty).
             -- This forces the exploration of more branches, and makes the test vectors a
             -- little more thorough.
-            symbolicMem (a:ax) = if a =~ [re|"^ *object"|] then
-                                      let a2 = replaceAll "a calldatacopy(0,0,1024)" $ a *=~ [re|code {|]
-                                      in (a2:ax)
-                                    else replaceOnce [re|^ *{|] "{\ncalldatacopy(0,0,1024)" $ onlyAfter [re|^ *{|] (a:ax)
+            symbolicMem program@(a:_) = if a =~ [re|^ *object|] then
+                                      let replacementTemplate = "$0\n    calldatacopy(0,0,1024)"
+                                          replaced = replaceAll replacementTemplate $ (unlines program) *=~ [re|code {|]
+                                      in lines replaced
+                                    else replaceOnce [re|^ *{|] "{\ncalldatacopy(0,0,1024)" program
             symbolicMem _ = internalError "Program too short"
 
             unfiltered = lines origcont
             filteredASym = symbolicMem [ x | x <- unfiltered, (not $ x =~ [re|^//|]) && (not $ x =~ [re|^$|]) ]
-            filteredBSym = symbolicMem [ replaceAll "" $ x *=~[re|^//|] | x <- onlyAfter [re|^// step:|] unfiltered, not $ x =~ [re|^$|] ]
+            filteredBSym = symbolicMem [ cleaned | x <- onlyAfter [re|^// step:|] unfiltered
+                                        , let cleaned = replaceAll "" $ x *=~[re|^//|]
+                                        , not $ null cleaned
+                                       ]
+            contractName = let
+               match = head filteredASym ?=~ [re|^ *object +"([^"]+)"|]
+               success = captureText (IsCaptureOrdinal $ CaptureOrdinal 1) match
+             in T.pack $ case matched match of
+                  False -> ""
+                  True-> success
           start <- getCurrentTime
           let verbosity :: Int = 0
           when (verbosity > 0) $ putStrLn $ "Checking file: " <> f
@@ -542,8 +547,8 @@ yulOptimizationsSolcTests = testCase "eq-all-yul-optimization-tests" $ do
             putStrLn "------------- Filtered B + Symb below-----------------"
             mapM_ putStrLn filteredBSym
             putStrLn "------------- END -----------------"
-          Right aPrgm <- yul "" $ T.pack $ unlines filteredASym
-          Right bPrgm <- yul "" $ T.pack $ unlines filteredBSym
+          Right aPrgm <- yul contractName $ T.pack $ unlines filteredASym
+          Right bPrgm <- yul contractName $ T.pack $ unlines filteredBSym
           eq <- Effects.runApp $ withSolvers Bitwuzla 1 (Just 100) defMemLimit $ \s -> do
             calldata <- mkCalldata Nothing []
             equivalenceCheck s Nothing aPrgm bPrgm opts calldata False
