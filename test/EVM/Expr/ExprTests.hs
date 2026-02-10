@@ -284,7 +284,7 @@ basicSimplificationTests = testGroup "Basic simplification tests"
       assertEqual "mul by -1 is negation" (Sub (Lit 0) (Var "x")) simp
   , testCase "simp-not-plus1" $ do
       let simp = Expr.simplify $ Add (Lit 1) (Not (Var "x"))
-      assertEqual "~x + 1 is negation" simp (Sub (Lit 0) (Var "x"))
+      assertEqual "~x + 1 is negation" (Sub (Lit 0) (Var "x")) simp
   , testCase "simp-xor-maxlit-plus1" $ do
       let simp = Expr.simplify $ Add (Lit 1) (Xor (Lit Expr.maxLit) (Var "x"))
       assertEqual "xor(maxLit, x) + 1 is negation" simp (Sub (Lit 0) (Var "x"))
