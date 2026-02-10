@@ -200,7 +200,7 @@ mkCongruenceLinks :: [(Int, [DivOp])] -> [SMTEntry]
 mkCongruenceLinks indexedGroups =
   let signedDivGroups = [(i, ops) | (i, ops@((k,_,_):_)) <- indexedGroups , k == USDiv]  -- SDiv groups
       signedModGroups = [(i, ops) | (i, ops@((k,_,_):_)) <- indexedGroups , k == USMod]  -- SMod groups
-  in concatMap (mkPairLinks "udiv") (allPairs signedDivGroups)
+  in    concatMap (mkPairLinks "udiv") (allPairs signedDivGroups)
      <> concatMap (mkPairLinks "urem") (allPairs signedModGroups)
   where
     allPairs xs = [(a, b) | a <- xs, b <- xs, fst a < fst b]
