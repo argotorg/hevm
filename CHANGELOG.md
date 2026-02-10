@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - State merging via speculative execution of both branches of a JUMPI, joining the
   resulting states whenever possible. Amount of speculative execution is
   controlled via `merge-max-budget`
+- Missing simplifications for Eq, Mod, SMod, XOR, SHL, SHR, Or and SHA256
 
 ## Changed
 - Simplifier now rewrites `Mul(-1, x)` and `~x + 1` to `Sub(0, x)`
