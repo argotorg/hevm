@@ -9,7 +9,8 @@ module EVM.SMT.DivEncoding
   , assertPropsRefined
   ) where
 
-import Data.List (nubBy, groupBy, sortBy)
+import Data.Containers.ListUtils (nubOrd)
+import Data.List (groupBy, sortBy)
 import Data.Ord (comparing)
 import Data.Text.Lazy.Builder
 
@@ -115,7 +116,7 @@ absKey (kind, a, b)
 --   - axioms expressing each evm_bvXdiv call in terms of the shared result
 divModGroundAxioms :: [Prop] -> Err [SMTEntry]
 divModGroundAxioms props = do
-  let allDivs = nubBy eqDivOp $ concatMap (foldProp collectDivOps []) props
+  let allDivs = nubOrd $ concatMap (foldProp collect []) props
   if null allDivs then pure []
   else do
     let groups = groupBy (\a b -> absKey a == absKey b) $ sortBy (comparing absKey) allDivs
@@ -124,17 +125,13 @@ divModGroundAxioms props = do
     let links = mkCongruenceLinks indexedGroups
     pure $ (SMTComment "division/modulo ground-instance axioms") : entries <> links
   where
-    collectDivOps :: forall a . Expr a -> [DivOp]
-    collectDivOps = \case
+    collect :: forall a . Expr a -> [DivOp]
+    collect = \case
       Div a b  -> [(UDiv, a, b)]
       SDiv a b -> [(USDiv, a, b)]
       Mod a b  -> [(UMod, a, b)]
       SMod a b -> [(USMod, a, b)]
       _        -> []
-
-    eqDivOp :: DivOp -> DivOp -> Bool
-    eqDivOp (k1, a1, b1) (k2, a2, b2) =
-      k1 == k2 && a1 == a2 && b1 == b2
 
     -- | Generate axioms for a group of ops sharing the same bvudiv/bvurem core.
     mkGroupAxioms :: Int -> [DivOp] -> Err [SMTEntry]
