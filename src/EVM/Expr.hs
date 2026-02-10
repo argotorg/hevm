@@ -1416,10 +1416,17 @@ simplifyProp prop =
     go (POr x (PBool False)) = x
     go (POr (PBool False) x) = x
 
+    -- Absoption rules
+    go (PAnd a (POr b _)) | a == b = a
+    go (PAnd a (POr _ b)) | a == b = a
+    go (POr a (PAnd b _)) | a == b = a
+    go (POr a (PAnd _ b)) | a == b = a
+
     -- Imply
     go (PImpl _ (PBool True)) = PBool True
     go (PImpl (PBool True) b) = b
     go (PImpl (PBool False) _) = PBool True
+    go (PImpl a b) | a == b = PBool True
 
 
     go p = p
