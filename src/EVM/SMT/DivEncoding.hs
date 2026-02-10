@@ -17,6 +17,7 @@ import EVM.Effects
 import EVM.SMT
 import EVM.Traversals
 import EVM.Types
+import EVM.SMT.Common
 
 
 -- | Uninterpreted function declarations for abstract div/mod encoding (Phase 1).
@@ -146,7 +147,6 @@ divModGroundAxioms props = do
 
       if not (isSigned firstKind) then mapM (mkUnsignedAxiom coreName) ops
       else do
-        -- Signed: create shared intermediates for abs values and bvudiv/bvurem result
         let absAName = fromString $ "abs_a_" <> show groupIdx
             absBName = fromString $ "abs_b_" <> show groupIdx
         -- Use the canonical (non-negated) form for abs value encoding
@@ -156,11 +156,8 @@ divModGroundAxioms props = do
         canonBenc <- exprToSMTAbs canonB
         let absAEnc = smtAbs canonAenc
             absBEnc = smtAbs canonBenc
-            coreEnc = if isDiv'
-                      then "(ite (=" `sp` absBName `sp` zero <> ")" `sp` zero
-                        `sp` "(bvudiv" `sp` absAName `sp` absBName <> "))"
-                      else "(ite (=" `sp` absBName `sp` zero <> ")" `sp` zero
-                        `sp` "(bvurem" `sp` absAName `sp` absBName <> "))"
+            op = if isDiv' then "bvudiv" else "bvurem"
+            coreEnc = smtZeroGuard absBName $ "(" <> op `sp` absAName `sp` absBName <> ")"
         let decls = [ SMTCommand $ "(declare-const" `sp` absAName `sp` "(_ BitVec 256))"
                     , SMTCommand $ "(declare-const" `sp` absBName `sp` "(_ BitVec 256))"
                     , SMTCommand $ "(declare-const" `sp` coreName `sp` "(_ BitVec 256))"
@@ -182,8 +179,7 @@ divModGroundAxioms props = do
       let fname = if kind == UDiv then "abst_evm_div" else "abst_evm_mod"
           abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
           op = if kind == UDiv then "bvudiv" else "bvurem"
-          concrete = "(ite (=" `sp` benc `sp` zero <> ")" `sp` zero
-                  `sp` "(" <> op `sp` aenc `sp` benc <> "))"
+          concrete = smtZeroGuard benc $ "(" <> op `sp` aenc `sp` benc <> ")"
       pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
 
     mkSignedAxiom :: Builder -> DivOp -> Err SMTEntry

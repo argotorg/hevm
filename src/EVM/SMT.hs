@@ -6,7 +6,6 @@ module EVM.SMT
 (
   module EVM.SMT.Types,
   module EVM.SMT.SMTLIB,
-  module EVM.SMT.Common,
 
   collapse,
   getVar,
