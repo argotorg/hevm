@@ -219,9 +219,9 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          repository: ethereum/solidity
-          ref: 8a97fa7a1db1ec509221ead6fea6802c684ee887
-          path: ethereum-solidity
+          repository: argotorg/solidity
+          ref: fd3a22656ebe9c91a96ebd846ab7699b5f2e053c
+          path: solidity
           persist-credentials: false
 
       - name: Download execution-spec-tests fixtures
@@ -250,11 +250,11 @@ jobs:
           echo CVC5_PATH="$PWD/cvc5-Win64-x86_64-static/bin" >> "$GITHUB_ENV"
           # solc
           mkdir solc
-          curl --retry 5 -fsSL https://github.com/argotorg/solidity/releases/download/v0.8.33/solc-windows.exe -o solc/solc.exe
+          curl --retry 5 -fsSL https://github.com/argotorg/solidity/releases/download/v0.8.31/solc-windows.exe -o solc/solc.exe
           echo DAPP_SOLC="$PWD/solc/solc.exe" >> "$GITHUB_ENV"
           echo DAPP_SOLC_PATH="$PWD/solc/" >> "$GITHUB_ENV"
           # repos
-          echo HEVM_SOLIDITY_REPO="$PWD/ethereum-solidity" >> "$GITHUB_ENV"
+          echo HEVM_SOLIDITY_REPO="$PWD/solidity" >> "$GITHUB_ENV"
           echo HEVM_ETHEREUM_TESTS_REPO="$PWD/fixtures/blockchain_tests" >> "$GITHUB_ENV"
           echo HEVM_FORGE_STD_REPO="$PWD/forge-std" >> "$GITHUB_ENV"
 

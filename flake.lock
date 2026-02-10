@@ -221,17 +221,17 @@
     "solidity": {
       "flake": false,
       "locked": {
-        "lastModified": 1716280767,
-        "narHash": "sha256-cvRFeJkiaYPA+SoboEZhvH5sHDmmcMNR62OoKuEOWRg=",
+        "lastModified": 1764751767,
+        "narHash": "sha256-YwM6p78wJXn2MTY8ukHGR8A2120ak+x5BfQAitTcDKA=",
         "owner": "argotorg",
         "repo": "solidity",
-        "rev": "8a97fa7a1db1ec509221ead6fea6802c684ee887",
+        "rev": "fd3a22656ebe9c91a96ebd846ab7699b5f2e053c",
         "type": "github"
       },
       "original": {
         "owner": "argotorg",
         "repo": "solidity",
-        "rev": "8a97fa7a1db1ec509221ead6fea6802c684ee887",
+        "rev": "fd3a22656ebe9c91a96ebd846ab7699b5f2e053c",
         "type": "github"
       }
     },
