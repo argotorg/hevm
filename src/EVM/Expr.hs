@@ -1212,6 +1212,10 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
       | b == c = a
       | otherwise = sub (add a b) c
 
+    -- Negation: ~x + 1 = 0 - x (two's complement)
+    go (Add (Lit 1) (Not b)) = Sub (Lit 0) b
+    go (Add (Lit 1) (Xor (Lit a) b)) | a == maxLit = Sub (Lit 0) b
+
     -- add / sub identities
     go (Add a b)
       | b == (Lit 0) = a
@@ -1271,6 +1275,7 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
     go (Mul a b) = case (a, b) of
                      (Lit 0, _) -> Lit 0
                      (Lit 1, _) -> b
+                     (Lit v, _) | v == maxLit -> Sub (Lit 0) b
                      _ -> mul a b
 
     -- Some trivial (s)div eliminations

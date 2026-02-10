@@ -279,6 +279,15 @@ basicSimplificationTests = testGroup "Basic simplification tests"
         a = successPath [PEq (Add (Lit 1) (Lit 2)) (Sub (Lit 4) (Lit 1))]
         b = Expr.simplify a
       assertEqual "Must simplify down" (successPath []) b
+  , testCase "simp-mul-neg1" $ do
+      let simp = Expr.simplify $ Mul (Lit Expr.maxLit) (Var "x")
+      assertEqual "mul by -1 is negation" simp (Sub (Lit 0) (Var "x"))
+  , testCase "simp-not-plus1" $ do
+      let simp = Expr.simplify $ Add (Lit 1) (Not (Var "x"))
+      assertEqual "~x + 1 is negation" simp (Sub (Lit 0) (Var "x"))
+  , testCase "simp-xor-maxlit-plus1" $ do
+      let simp = Expr.simplify $ Add (Lit 1) (Xor (Lit Expr.maxLit) (Var "x"))
+      assertEqual "xor(maxLit, x) + 1 is negation" simp (Sub (Lit 0) (Var "x"))
   ]
 
 propSimplificationTests :: TestTree
