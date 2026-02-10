@@ -55,30 +55,21 @@ divModBounds props = do
       let result = "(" <> fname `sp` aenc `sp` benc <> ")"
       pure $ SMTCommand $ "(assert (bvule " <> result `sp` aenc <> "))"
 
--- | Encode props using uninterpreted functions for div/mod (Phase 1 of two-phase solving)
+-- | Phase 1: Encode props using uninterpreted functions for div/mod
 assertPropsAbstract :: Config -> [Prop] -> Err SMT2
 assertPropsAbstract conf ps = do
-  let mkBase s = assertPropsHelperWith AbstractDivision s divModAbstractDecls
+  let mkBase simp = assertPropsHelperWith AbstractDivision simp divModAbstractDecls
   base <- if not conf.simp then mkBase False ps
           else mkBase True (decompose conf ps)
   bounds <- divModBounds ps
   pure $ base <> SMT2 (SMTScript bounds) mempty mempty
 
--- | Encode props using exact div/mod definitions (Phase 2 refinement).
--- Keeps declare-fun (uninterpreted) for sharing, but adds ground-instance
--- axioms with CSE'd bvudiv/bvurem intermediates. Signed division operations
--- that differ only in divisor sign share the same bvudiv result since
--- |x| = |-x|.
+-- | Phase 2: Add ground-instance axioms for div/mod operations
 assertPropsRefined :: Config -> [Prop] -> Err SMT2
 assertPropsRefined conf ps = do
-  let mkBase s = assertPropsHelperWith AbstractDivision s divModAbstractDecls
-  base <- if not conf.simp then mkBase False ps
-          else mkBase True (decompose conf ps)
-  bounds <- divModBounds ps
-  axioms <- divModGroundAxioms ps
-  pure $ base
-      <> SMT2 (SMTScript bounds) mempty mempty
-      <> SMT2 (SMTScript axioms) mempty mempty
+  abst <- assertPropsAbstract conf ps
+  refine <- divModGroundAxioms ps
+  pure $ abst <> SMT2 (SMTScript refine) mempty mempty
 
 -- | Kind of division/modulo operation
 data DivOpKind = UDiv | USDiv | UMod | USMod
