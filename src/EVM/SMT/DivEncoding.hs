@@ -71,14 +71,17 @@ assertPropsRefined conf ps = do
   refine <- divModGroundAxioms ps
   pure $ abst <> SMT2 (SMTScript refine) mempty mempty
 
+data DivModOp = IsDiv | IsMod
+  deriving (Eq, Ord)
+
 data DivOpKind = UDiv | USDiv | UMod | USMod
   deriving (Eq, Ord)
 
 type DivOp = (DivOpKind, Expr EWord, Expr EWord)
 
 data AbsKey
-  = UnsignedAbsKey (Expr EWord) (Expr EWord) Bool  -- ^ (dividend, divisor, isMod) - raw operands
-  | SignedAbsKey   (Expr EWord) (Expr EWord) Bool  -- ^ (dividend, divisor, isMod) - canonicalAbs normalized
+  = UnsignedAbsKey (Expr EWord) (Expr EWord) DivModOp  -- ^ (dividend, divisor, op) - raw operands
+  | SignedAbsKey   (Expr EWord) (Expr EWord) DivModOp  -- ^ (dividend, divisor, op) - canonicalAbs normalized
   deriving (Eq, Ord)
 
 -- | Normalize an expression for absolute value canonicalization.
@@ -92,20 +95,18 @@ isSigned USDiv = True
 isSigned USMod = True
 isSigned _     = False
 
-isMod :: DivOpKind -> Bool
-isMod UMod  = True
-isMod USMod = True
-isMod _     = False
-
 isDiv :: DivOpKind -> Bool
 isDiv UDiv  = True
 isDiv USDiv = True
 isDiv _     = False
 
+divModOp :: DivOpKind -> DivModOp
+divModOp k = if isDiv k then IsDiv else IsMod
+
 absKey :: DivOp -> AbsKey
 absKey (kind, a, b)
-  | not (isSigned kind) = UnsignedAbsKey a b (isMod kind)
-  | otherwise           = SignedAbsKey (canonicalAbs a) (canonicalAbs b) (isMod kind)
+  | not (isSigned kind) = UnsignedAbsKey a b (divModOp kind)
+  | otherwise           = SignedAbsKey (canonicalAbs a) (canonicalAbs b) (divModOp kind)
 
 -- | Generate ground-instance axioms with CSE'd bvudiv/bvurem intermediates.
 -- For each group of div/mod ops sharing the same (|a|, |b|), generates:
@@ -143,9 +144,7 @@ divModGroundAxioms props = do
           prefix = if isDiv' then "udiv" else "urem"
           coreName = fromString $ prefix <> "_" <> show groupIdx
 
-      if not (isSigned firstKind) then do
-        -- Unsigned: simple axioms, one bvudiv/bvurem per op (no abs-value needed)
-        mapM (mkUnsignedAxiom coreName) ops
+      if not (isSigned firstKind) then mapM (mkUnsignedAxiom coreName) ops
       else do
         -- Signed: create shared intermediates for abs values and bvudiv/bvurem result
         let absAName = fromString $ "abs_a_" <> show groupIdx
