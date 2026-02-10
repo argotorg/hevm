@@ -23,7 +23,6 @@ import EVM.Solvers hiding (checkSat)
 import EVM.SymExec (subModel)
 import EVM.Traversals (mapExprM)
 import EVM.Types hiding (Env)
-import EVM.Types (Expr(AbstractBuf))
 
 
 tests :: TestTree
