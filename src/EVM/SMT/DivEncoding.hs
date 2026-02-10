@@ -97,6 +97,11 @@ isMod UMod  = True
 isMod USMod = True
 isMod _     = False
 
+isDiv :: DivOpKind -> Bool
+isDiv UDiv  = True
+isDiv USDiv = True
+isDiv _     = False
+
 absKey :: DivOp -> AbsKey
 absKey (kind, a, b)
   | not (isSigned kind) = UnsignedAbsKey a b (isMod kind)
@@ -134,7 +139,7 @@ divModGroundAxioms props = do
     mkGroupAxioms :: Int -> [DivOp] -> Err [SMTEntry]
     mkGroupAxioms _ [] = pure []
     mkGroupAxioms groupIdx ops@((firstKind, firstA, firstB) : _) = do
-      let isDiv' = not (isMod firstKind)
+      let isDiv' = isDiv firstKind
           prefix = if isDiv' then "udiv" else "urem"
           coreName = fromString $ prefix <> "_" <> show groupIdx
 
