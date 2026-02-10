@@ -14,6 +14,12 @@ zero = "(_ bv0 256)"
 one :: Builder
 one = "(_ bv1 256)"
 
+-- | Guard against division by zero: if divisor is zero return zero, else use the given result.
+-- Produces: (ite (= divisor 0) 0 nonZeroResult)
+smtZeroGuard :: Builder -> Builder -> Builder
+smtZeroGuard divisor nonZeroResult =
+  "(ite (=" `sp` divisor `sp` zero <> ")" `sp` zero `sp` nonZeroResult <> ")"
+
 -- | Encode absolute value: |x| = (ite (bvsge x 0) x (- x))
 smtAbs :: Builder -> Builder
 smtAbs x = "(ite (bvsge" `sp` x `sp` zero <> ")" `sp` x `sp` "(bvsub" `sp` zero `sp` x <> "))"
@@ -35,13 +41,13 @@ smtIsNonNeg x = "(bvsge" `sp` x `sp` zero <> ")"
 -- sdiv(a, b) = if b == 0 then 0 else (if sameSign(a,b) then udiv(|a|,|b|) else -udiv(|a|,|b|))
 smtSdivResult :: Builder -> Builder -> Builder -> Builder
 smtSdivResult aenc benc udivResult =
-  "(ite (=" `sp` benc `sp` zero <> ")" `sp` zero `sp`
-  "(ite" `sp` smtSameSign aenc benc `sp` udivResult `sp` smtNeg udivResult <> "))"
+  smtZeroGuard benc $
+  "(ite" `sp` smtSameSign aenc benc `sp` udivResult `sp` smtNeg udivResult <> ")"
 
 -- | Encode SMod result given the unsigned remainder of absolute values.
 -- SMod semantics: result sign matches the dividend (a).
 -- smod(a, b) = if b == 0 then 0 else (if a >= 0 then urem(|a|,|b|) else -urem(|a|,|b|))
 smtSmodResult :: Builder -> Builder -> Builder -> Builder
 smtSmodResult aenc benc uremResult =
-  "(ite (=" `sp` benc `sp` zero <> ")" `sp` zero `sp`
-  "(ite" `sp` smtIsNonNeg aenc `sp` uremResult `sp` smtNeg uremResult <> "))"
+  smtZeroGuard benc $
+  "(ite" `sp` smtIsNonNeg aenc `sp` uremResult `sp` smtNeg uremResult <> ")"
