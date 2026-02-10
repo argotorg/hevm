@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   controlled via `merge-max-budget`
 
 ## Changed
+- Simplifier now rewrites `Mul(-1, x)` and `~x + 1` to `Sub(0, x)`
 - `AbiFunction` and `AbiBytes` parser is now more strict
 - We now check length of AbiArrayDynamic and don't crash in case it's too large
 - SMT queries now run in separate processes, which allows us to better manage
