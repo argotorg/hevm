@@ -3,6 +3,7 @@
 
 module EVM.Expr.ExprTests (tests) where
 
+import Prelude hiding (LT, GT)
 import Test.Tasty
 import Test.Tasty.ExpectedFailure (ignoreTest)
 import Test.Tasty.HUnit
@@ -35,6 +36,7 @@ unitTests = testGroup "Unit tests"
   , boundPropagationTests
   , comparisonTests
   , signExtendTests
+  , concretizationTests
   ]
 
 simplificationTests :: TestTree
@@ -291,9 +293,6 @@ basicSimplificationTests = testGroup "Basic simplification tests"
   , testCase "simp-double-not" $ do
       let simp = Expr.simplify $ Not (Not (Var "a"))
       assertEqual "Not should be concretized" (Var "a") simp
-  , testCase "simp-not-concrete" $ do
-      let simp = Expr.simplify $ Not (Lit 0x55)
-      assertEqual "Not should be concretized" (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffaa) simp
   ]
 
 propSimplificationTests :: TestTree
@@ -633,6 +632,202 @@ signExtendTests = testGroup "SEx tests"
       let Right (Lit v1) = subModel cex (Var "arg1")
       let [PEq (Lit v2) (Var "arg1")] = Expr.simplifyProps [p]
       pure $ v1 === v2
+  ]
+
+concretizationTests :: TestTree
+concretizationTests = testGroup "Concretization tests"
+  [ -- Arithmetic operations
+    testCase "conc-add" $ do
+      let simp = Expr.simplify $ Add (Lit 0x10) (Lit 0x20)
+      assertEqual "Add should be concretized" (Lit 0x30) simp
+  , testCase "conc-add-overflow" $ do
+      let simp = Expr.simplify $ Add (Lit Expr.maxLit) (Lit 1)
+      assertEqual "Add overflow should wrap" (Lit 0) simp
+  , testCase "conc-sub" $ do
+      let simp = Expr.simplify $ Sub (Lit 0x30) (Lit 0x10)
+      assertEqual "Sub should be concretized" (Lit 0x20) simp
+  , testCase "conc-sub-underflow" $ do
+      let simp = Expr.simplify $ Sub (Lit 0) (Lit 1)
+      assertEqual "Sub underflow should wrap" (Lit Expr.maxLit) simp
+  , testCase "conc-mul" $ do
+      let simp = Expr.simplify $ Mul (Lit 0x10) (Lit 0x20)
+      assertEqual "Mul should be concretized" (Lit 0x200) simp
+  , testCase "conc-mul-zero" $ do
+      let simp = Expr.simplify $ Mul (Lit 0) (Lit 0x1234)
+      assertEqual "Mul by zero" (Lit 0) simp
+  , testCase "conc-div" $ do
+      let simp = Expr.simplify $ Div (Lit 0x20) (Lit 0x10)
+      assertEqual "Div should be concretized" (Lit 0x2) simp
+  , testCase "conc-div-by-zero" $ do
+      let simp = Expr.simplify $ Div (Lit 0x20) (Lit 0)
+      assertEqual "Div by zero should be 0" (Lit 0) simp
+  , testCase "conc-sdiv" $ do
+      -- -6 / 3 = -2 in signed arithmetic
+      -- -6 in W256 is maxLit - 5
+      let neg6 = Expr.maxLit - 5
+          neg2 = Expr.maxLit - 1
+          simp = Expr.simplify $ SDiv (Lit neg6) (Lit 3)
+      assertEqual "SDiv should handle signed division" (Lit neg2) simp
+  , testCase "conc-sdiv-by-zero" $ do
+      let simp = Expr.simplify $ SDiv (Lit 0x20) (Lit 0)
+      assertEqual "SDiv by zero should be 0" (Lit 0) simp
+  , testCase "conc-mod" $ do
+      let simp = Expr.simplify $ Mod (Lit 0x25) (Lit 0x10)
+      assertEqual "Mod should be concretized" (Lit 0x5) simp
+  , testCase "conc-mod-by-zero" $ do
+      let simp = Expr.simplify $ Mod (Lit 0x25) (Lit 0)
+      assertEqual "Mod by zero should be 0" (Lit 0) simp
+  , testCase "conc-smod" $ do
+      -- -7 smod 3 = -1 in signed arithmetic
+      let neg7 = Expr.maxLit - 6
+          neg1 = Expr.maxLit
+          simp = Expr.simplify $ SMod (Lit neg7) (Lit 3)
+      assertEqual "SMod should handle signed mod" (Lit neg1) simp
+  , testCase "conc-smod-by-zero" $ do
+      let simp = Expr.simplify $ SMod (Lit 0x25) (Lit 0)
+      assertEqual "SMod by zero should be 0" (Lit 0) simp
+  , testCase "conc-addmod" $ do
+      let simp = Expr.simplify $ AddMod (Lit 10) (Lit 10) (Lit 8)
+      assertEqual "AddMod should be concretized" (Lit 4) simp
+  , testCase "conc-addmod-by-zero" $ do
+      let simp = Expr.simplify $ AddMod (Lit 10) (Lit 10) (Lit 0)
+      assertEqual "AddMod by zero should be 0" (Lit 0) simp
+  , testCase "conc-mulmod" $ do
+      let simp = Expr.simplify $ MulMod (Lit 10) (Lit 10) (Lit 8)
+      assertEqual "MulMod should be concretized" (Lit 4) simp
+  , testCase "conc-mulmod-by-zero" $ do
+      let simp = Expr.simplify $ MulMod (Lit 10) (Lit 10) (Lit 0)
+      assertEqual "MulMod by zero should be 0" (Lit 0) simp
+  , testCase "conc-exp" $ do
+      let simp = Expr.simplify $ Exp (Lit 2) (Lit 10)
+      assertEqual "Exp should be concretized" (Lit 1024) simp
+  , testCase "conc-exp-zero" $ do
+      let simp = Expr.simplify $ Exp (Lit 2) (Lit 0)
+      assertEqual "x^0 should be 1" (Lit 1) simp
+  , testCase "conc-sex" $ do
+      -- sign-extend byte 0 of 0xff -> all 1s (since bit 7 is set)
+      let simp = Expr.simplify $ SEx (Lit 0) (Lit 0xff)
+      assertEqual "SEx should be concretized" (Lit Expr.maxLit) simp
+  , testCase "conc-sex-no-extend" $ do
+      -- sign-extend byte 30 of 0xff -> 0xff (bit 247 is not set)
+      let simp = Expr.simplify $ SEx (Lit 30) (Lit 0xff)
+      assertEqual "SEx should not extend" (Lit 0xff) simp
+
+    -- Comparison operations
+  , testCase "conc-lt-true" $ do
+      let simp = Expr.simplify $ LT (Lit 1) (Lit 2)
+      assertEqual "LT true" (Lit 1) simp
+  , testCase "conc-lt-false" $ do
+      let simp = Expr.simplify $ LT (Lit 2) (Lit 1)
+      assertEqual "LT false" (Lit 0) simp
+  , testCase "conc-gt-true" $ do
+      let simp = Expr.simplify $ GT (Lit 2) (Lit 1)
+      assertEqual "GT true" (Lit 1) simp
+  , testCase "conc-gt-false" $ do
+      let simp = Expr.simplify $ GT (Lit 1) (Lit 2)
+      assertEqual "GT false" (Lit 0) simp
+  , testCase "conc-leq-true" $ do
+      let simp = Expr.simplify $ LEq (Lit 1) (Lit 1)
+      assertEqual "LEq equal" (Lit 1) simp
+  , testCase "conc-leq-false" $ do
+      let simp = Expr.simplify $ LEq (Lit 2) (Lit 1)
+      assertEqual "LEq false" (Lit 0) simp
+  , testCase "conc-geq-true" $ do
+      let simp = Expr.simplify $ GEq (Lit 2) (Lit 1)
+      assertEqual "GEq true" (Lit 1) simp
+  , testCase "conc-geq-false" $ do
+      let simp = Expr.simplify $ GEq (Lit 1) (Lit 2)
+      assertEqual "GEq false" (Lit 0) simp
+  , testCase "conc-slt-true" $ do
+      -- -1 < 0 in signed: maxLit < 0
+      let simp = Expr.simplify $ SLT (Lit Expr.maxLit) (Lit 0)
+      assertEqual "SLT true (negative < zero)" (Lit 1) simp
+  , testCase "conc-slt-false" $ do
+      let simp = Expr.simplify $ SLT (Lit 0) (Lit Expr.maxLit)
+      assertEqual "SLT false (zero < negative)" (Lit 0) simp
+  , testCase "conc-sgt-true" $ do
+      let simp = Expr.simplify $ SGT (Lit 0) (Lit Expr.maxLit)
+      assertEqual "SGT true (zero > negative)" (Lit 1) simp
+  , testCase "conc-sgt-false" $ do
+      let simp = Expr.simplify $ SGT (Lit Expr.maxLit) (Lit 0)
+      assertEqual "SGT false (negative > zero)" (Lit 0) simp
+  , testCase "conc-eq-true" $ do
+      let simp = Expr.simplify $ Eq (Lit 42) (Lit 42)
+      assertEqual "Eq true" (Lit 1) simp
+  , testCase "conc-eq-false" $ do
+      let simp = Expr.simplify $ Eq (Lit 42) (Lit 43)
+      assertEqual "Eq false" (Lit 0) simp
+  , testCase "conc-iszero-true" $ do
+      let simp = Expr.simplify $ IsZero (Lit 0)
+      assertEqual "IsZero of 0" (Lit 1) simp
+  , testCase "conc-iszero-false" $ do
+      let simp = Expr.simplify $ IsZero (Lit 42)
+      assertEqual "IsZero of non-zero" (Lit 0) simp
+
+    -- Bitwise operations
+  , testCase "conc-and" $ do
+      let simp = Expr.simplify $ And (Lit 0xff00) (Lit 0x0ff0)
+      assertEqual "And should be concretized" (Lit 0x0f00) simp
+  , testCase "conc-or" $ do
+      let simp = Expr.simplify $ Or (Lit 0xff00) (Lit 0x00ff)
+      assertEqual "Or should be concretized" (Lit 0xffff) simp
+  , testCase "conc-xor" $ do
+      let simp = Expr.simplify $ Xor (Lit 0xff00) (Lit 0x0ff0)
+      assertEqual "Xor should be concretized" (Lit 0xf0f0) simp
+  , testCase "conc-xor-same" $ do
+      let simp = Expr.simplify $ Xor (Lit 0x1234) (Lit 0x1234)
+      assertEqual "Xor of same values is 0" (Lit 0) simp
+  , testCase "conc-not" $ do
+      let simp = Expr.simplify $ Not (Lit 0x55)
+      assertEqual "Not should be concretized" (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffaa) simp
+  , testCase "conc-not-zero" $ do
+      let simp = Expr.simplify $ Not (Lit 0)
+      assertEqual "Not of 0 is maxLit" (Lit Expr.maxLit) simp
+  , testCase "conc-shl" $ do
+      let simp = Expr.simplify $ SHL (Lit 4) (Lit 0xff)
+      assertEqual "SHL should be concretized" (Lit 0xff0) simp
+  , testCase "conc-shl-overflow" $ do
+      let simp = Expr.simplify $ SHL (Lit 256) (Lit 0xff)
+      assertEqual "SHL by 256 should be 0" (Lit 0) simp
+  , testCase "conc-shr" $ do
+      let simp = Expr.simplify $ SHR (Lit 4) (Lit 0xff)
+      assertEqual "SHR should be concretized" (Lit 0xf) simp
+  , testCase "conc-shr-overflow" $ do
+      let simp = Expr.simplify $ SHR (Lit 257) (Lit 0xff)
+      assertEqual "SHR by >256 should be 0" (Lit 0) simp
+  , testCase "conc-sar-positive" $ do
+      let simp = Expr.simplify $ SAR (Lit 4) (Lit 0xff)
+      assertEqual "SAR positive should be like SHR" (Lit 0xf) simp
+  , testCase "conc-sar-negative" $ do
+      -- SAR of a negative number (MSB set) should fill with 1s
+      -- maxLit has MSB set, shifting right by 4 should fill top 4 bits with 1s
+      let simp = Expr.simplify $ SAR (Lit 4) (Lit Expr.maxLit)
+      assertEqual "SAR negative should fill with 1s" (Lit Expr.maxLit) simp
+  , testCase "conc-sar-large-shift-negative" $ do
+      -- SAR by >= 255 of negative number -> maxBound (all 1s)
+      let simp = Expr.simplify $ SAR (Lit 255) (Lit Expr.maxLit)
+      assertEqual "SAR large shift negative" (Lit Expr.maxLit) simp
+  , testCase "conc-sar-large-shift-positive" $ do
+      -- SAR by >= 255 of positive number -> 0
+      let simp = Expr.simplify $ SAR (Lit 255) (Lit 1)
+      assertEqual "SAR large shift positive" (Lit 0) simp
+  , testCase "conc-clz-zero" $ do
+      let simp = Expr.simplify $ CLZ (Lit 0)
+      assertEqual "CLZ of 0 should be 256" (Lit 256) simp
+  , testCase "conc-clz-one" $ do
+      let simp = Expr.simplify $ CLZ (Lit 1)
+      assertEqual "CLZ of 1 should be 255" (Lit 255) simp
+  , testCase "conc-clz-max" $ do
+      let simp = Expr.simplify $ CLZ (Lit Expr.maxLit)
+      assertEqual "CLZ of maxLit should be 0" (Lit 0) simp
+
+    -- Min/Max operations
+  , testCase "conc-min" $ do
+      let simp = Expr.simplify $ Min (Lit 5) (Lit 10)
+      assertEqual "Min should be concretized" (Lit 5) simp
+  , testCase "conc-max" $ do
+      let simp = Expr.simplify $ Max (Lit 5) (Lit 10)
+      assertEqual "Max should be concretized" (Lit 10) simp
   ]
 
 fuzzTests :: TestTree
