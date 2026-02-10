@@ -288,6 +288,12 @@ basicSimplificationTests = testGroup "Basic simplification tests"
   , testCase "simp-xor-maxlit-plus1" $ do
       let simp = Expr.simplify $ Add (Lit 1) (Xor (Lit Expr.maxLit) (Var "x"))
       assertEqual "xor(maxLit, x) + 1 is negation" (Sub (Lit 0) (Var "x")) simp
+  , testCase "simp-double-not" $ do
+      let simp = Expr.simplify $ Not (Not (Var "a"))
+      assertEqual "Not should be concretized" (Var "a") simp
+  , testCase "simp-not-concrete" $ do
+      let simp = Expr.simplify $ Not (Lit 0x55)
+      assertEqual "Not should be concretized" (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffaa) simp
   ]
 
 propSimplificationTests :: TestTree

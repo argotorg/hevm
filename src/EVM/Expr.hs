@@ -1214,7 +1214,6 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
 
     -- Negation: ~x + 1 = 0 - x (two's complement)
     go (Add (Lit 1) (Not b)) = Sub (Lit 0) b
-    go (Xor (Lit a) b) | a == maxLit = Not b
 
     -- add / sub identities
     go (Add a b)
@@ -1227,8 +1226,14 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
       | otherwise = sub a b
 
     -- XOR normalization
+    go (Xor (Lit a) b) | a == maxLit = Not b
     go (Xor a  b) = EVM.Expr.xor a b
 
+    -- Not simplification
+    go (EVM.Types.Not (EVM.Types.Not a)) = a
+    go (Not a) = EVM.Expr.not a
+
+    -- EqByte
     go (EqByte a b) = eqByte a b
 
     -- SHL / SHR / SAR
@@ -1261,8 +1266,6 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
       | b == (Lit 0) = a
       | otherwise = EVM.Expr.or a b
 
-    -- Double NOT is a no-op, since it's a bitwise inversion
-    go (EVM.Types.Not (EVM.Types.Not a)) = a
 
     -- Some trivial min / max eliminations
     go (Max a b) = EVM.Expr.max a b
