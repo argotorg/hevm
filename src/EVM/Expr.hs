@@ -1076,8 +1076,8 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
     go (Eq (Add a b) c)
       | a == c = iszero b
       | b == c = iszero a
-    go (Eq (Sub a b) c)
-      | a == c = iszero b
+    go (Eq (Sub a b) c) | a == c = iszero b
+    go (Eq (Sub a b) c) | b == c = iszero a
 
     go (Eq (Lit 0) a) = iszero a
     go (Eq a b)
