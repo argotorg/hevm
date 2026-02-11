@@ -1249,8 +1249,6 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
     -- XOR normalization
     go (Xor (Lit 0) a) = a
     go (Xor (Lit a) b) | a == maxLit = EVM.Expr.not b
-    go (Xor a b) | a == b = Lit 0
-
     go (Xor a  b) = EVM.Expr.xor a b
 
     -- Not simplification
