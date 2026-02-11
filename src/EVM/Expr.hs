@@ -1127,9 +1127,6 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
     -- literal addresses
     go (WAddr (LitAddr a)) = Lit $ into a
 
-    -- SHA256
-    go (SHA256 (ConcreteBuf bs)) = Lit (sha256' bs)
-
     -- Mod
     go (Mod _ (Lit 0)) = Lit 0
     go (Mod _ (Lit 1)) = Lit 0

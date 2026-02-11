@@ -846,19 +846,13 @@ concretizationTests = testGroup "Concretization tests"
       let simp = Expr.joinBytes (LitByte 0xff : replicate 31 (LitByte 0))
       assertEqual "JoinBytes MSB set" (Lit 0xff00000000000000000000000000000000000000000000000000000000000000) simp
 
-  -- Hash functions
+  -- Keccak
   , testCase "conc-keccak" $ do
       let simp = Expr.concKeccakSimpExpr $ Keccak (ConcreteBuf "")
       assertEqual "Keccak of empty should be concretized" (Lit (keccak' "")) simp
   , testCase "conc-keccak-nonempty" $ do
       let simp = Expr.concKeccakSimpExpr $ Keccak (ConcreteBuf "hello")
       assertEqual "Keccak of hello should be concretized" (Lit (keccak' "hello")) simp
-  , testCase "conc-sha256" $ do
-      let simp = Expr.simplify $ SHA256 (ConcreteBuf "")
-      assertEqual "SHA256 of empty should be concretized" (Lit (sha256' "")) simp
-  , testCase "conc-sha256-nonempty" $ do
-      let simp = Expr.simplify $ SHA256 (ConcreteBuf "hello")
-      assertEqual "SHA256 of hello should be concretized" (Lit (sha256' "hello")) simp
 
   -- PEq simplifyProp over Props
   , testCase "conc-peq-lit-true" $ do
