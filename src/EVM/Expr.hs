@@ -1056,6 +1056,8 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
     go (IsZero (IsZero (Eq x y))) = eq x y
     go (IsZero (IsZero a)) = lt (Lit 0) a
     go (IsZero (Xor x y)) = eq x y
+    go (IsZero (Sub a b)) = eq a b
+    go (IsZero (Or a b)) = EVM.Expr.and (iszero a) (iszero b)
     go (IsZero a) = iszero a
 
     -- ITE (if-then-else) simplification for path merging
@@ -1070,6 +1072,16 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
       | a == b = Lit 1
       | otherwise = Lit 0
     go (Eq (Lit 0) (Sub a b)) = eq a b
+    go (Eq (Lit 0) (Xor a b)) = eq a b
+    go (Eq (Add a b) c)
+      | a == c = iszero b
+      | b == c = iszero a
+    go (Eq (Sub a b) c)
+      | a == c = iszero b
+    go (Eq (Xor a b) c)
+      | a == c = iszero b
+      | b == c = iszero a
+
     go (Eq (Lit 0) a) = iszero a
     go (Eq a b)
       | a == b = Lit 1
@@ -1216,6 +1228,11 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
       | b == c = a
       | otherwise = sub (add a b) c
 
+    -- canonicalize Sub to top level
+    go (Add a (Sub b c)) = sub (add a b) c
+    go (Sub (Sub a b) c) = sub a (add b c)
+    go (Sub a (Sub b c)) = add (sub a b) c
+
     -- Negation: ~x + 1 = 0 - x (two's complement)
     go (Add (Lit 1) (Not b)) = Sub (Lit 0) b
 
@@ -1230,8 +1247,10 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
       | otherwise = sub a b
 
     -- XOR normalization
-    go (Xor a b) | a == b = Lit 0
+    go (Xor (Lit 0) a) = a
     go (Xor (Lit a) b) | a == maxLit = EVM.Expr.not b
+    go (Xor a b) | a == b = Lit 0
+
     go (Xor a  b) = EVM.Expr.xor a b
 
     -- Not simplification
@@ -1242,6 +1261,10 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
     go (EqByte a b) = eqByte a b
 
     -- SHL / SHR / SAR
+    go (SHL (Lit n) (SHR (Lit m) x))
+      | n == m && n < 256 = EVM.Expr.and (Lit (shiftL maxLit (fromIntegral n))) x
+    go (SHR (Lit n) (SHL (Lit m) x))
+      | n == m && n < 256 = EVM.Expr.and (Lit (shiftR maxLit (fromIntegral n))) x
     go (SHL (Lit a) _) | a >= 256 = Lit 0
     go (SHL a v)
       | a == (Lit 0) = v
@@ -1262,6 +1285,19 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
     -- Bitwise AND & OR. These MUST preserve bitwise equivalence
     go (And a (Or b _)) | a == b = a
     go (And a (Or _ b)) | a == b = a
+    go (And a (Xor b c))
+      | a == b = EVM.Expr.and a (EVM.Expr.not c)
+      | a == c = EVM.Expr.and a (EVM.Expr.not b)
+    go (And (Xor b c) a)
+      | a == b = EVM.Expr.and a (EVM.Expr.not c)
+      | a == c = EVM.Expr.and a (EVM.Expr.not b)
+    go (And a (Or b c))
+      | a == b = a
+      | a == c = a
+    go (And (Or b c) a)
+      | a == b = a
+      | a == c = a
+
     go (And a b)
       | a == b = a
       | b == (Not a) || a == (Not b) = Lit 0
@@ -1271,6 +1307,13 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
       | otherwise = EVM.Expr.and a b
     go (Or a (And b _)) | a == b = a
     go (Or a (And _ b)) | a == b = a
+
+    go (Or a (Xor b c))
+      | a == b = EVM.Expr.or a c
+      | a == c = EVM.Expr.or a b
+    go (Or (Xor b c) a)
+      | a == b = EVM.Expr.or a c
+      | a == c = EVM.Expr.or a b
     go (Or a b)
       | a == b = a
       | a == (Lit 0) = b
