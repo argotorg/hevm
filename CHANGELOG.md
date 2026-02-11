@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resulting states whenever possible. Amount of speculative execution is
   controlled via `merge-max-budget`
 - Missing simplifications for Eq, Mod, SMod, XOR, SHL, SHR, and Or
+- A few more simplification rules around Eq, SHL/SHR, Sub+Add combos, and Xor
 
 ## Changed
 - Simplifier now rewrites `Mul(-1, x)` and `~x + 1` to `Sub(0, x)`
