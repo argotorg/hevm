@@ -11,7 +11,6 @@ module EVM.SMT
   getVar,
   formatSMT2,
   declareIntermediates,
-  assertProps,
   assertPropsHelperWith,
   decompose,
   exprToSMT,
@@ -126,14 +125,6 @@ declareIntermediatesWith enc bufs stores = do
       storage <- exprToSMTWith enc expr
       pure [SMTCommand ("(define-fun store" <> (Data.Text.Lazy.Builder.Int.decimal n) <> " () Storage " <> storage <> ")")]
 
--- simplify to rewrite sload/sstore combos
--- notice: it is VERY important not to concretize early, because Keccak assumptions
---         need unconcretized Props
-assertProps :: Config -> [Prop] -> Err SMT2
-assertProps conf ps =
-  if not conf.simp then assertPropsHelper False ps
-  else assertPropsHelper True (decompose conf ps)
-
 decompose :: Config -> [Prop] -> [Prop]
 decompose conf props = if conf.decomposeStorage && safeExprs && safeProps
                     then fromMaybe props (mapM (mapPropM Expr.decomposeStorage) props)
@@ -142,12 +133,6 @@ decompose conf props = if conf.decomposeStorage && safeExprs && safeProps
     -- All in these lists must be a `Just ()` or we cannot decompose
     safeExprs = all (isJust . mapPropM_ Expr.safeToDecompose) props
     safeProps = all Expr.safeToDecomposeProp props
-
--- Note: we need a version that does NOT call simplify,
--- because we make use of it to verify the correctness of our simplification
--- passes through property-based testing.
-assertPropsHelper :: Bool -> [Prop]  -> Err SMT2
-assertPropsHelper simp = assertPropsHelperWith ConcreteDivision simp []
 
 assertPropsHelperWith :: DivEncoding -> Bool -> [SMTEntry] -> [Prop]  -> Err SMT2
 assertPropsHelperWith divEnc simp extraDecls psPreConc = do

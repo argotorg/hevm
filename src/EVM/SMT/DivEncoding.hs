@@ -5,8 +5,8 @@
 module EVM.SMT.DivEncoding
   ( divModAbstractDecls
   , divModBounds
+  , assertProps
   , assertPropsAbstract
-  , assertPropsRefined
   ) where
 
 import Data.Containers.ListUtils (nubOrd)
@@ -19,6 +19,21 @@ import EVM.SMT
 import EVM.Traversals
 import EVM.Types
 
+-- | Phase 1: Encode props using uninterpreted functions for div/mod
+assertPropsAbstract :: Config -> [Prop] -> Err SMT2
+assertPropsAbstract conf ps = do
+  let mkBase simp = assertPropsHelperWith AbstractDivision simp divModAbstractDecls
+  base <- if not conf.simp then mkBase False ps
+          else mkBase True (decompose conf ps)
+  bounds <- divModBounds ps
+  pure $ base <> SMT2 (SMTScript bounds) mempty mempty
+
+-- | Phase 2: Add ground-instance axioms for div/mod operations
+assertProps :: Config -> [Prop] -> Err SMT2
+assertProps conf ps = do
+  abst <- assertPropsAbstract conf ps
+  refine <- divModGroundAxioms ps
+  pure $ abst <> SMT2 (SMTScript refine) mempty mempty
 
 -- | Uninterpreted function declarations for abstract div/mod encoding (Phase 1).
 divModAbstractDecls :: [SMTEntry]
@@ -55,22 +70,6 @@ divModBounds props = do
       benc <- exprToSMTAbs b
       let result = "(" <> fname `sp` aenc `sp` benc <> ")"
       pure $ SMTCommand $ "(assert (bvule " <> result `sp` aenc <> "))"
-
--- | Phase 1: Encode props using uninterpreted functions for div/mod
-assertPropsAbstract :: Config -> [Prop] -> Err SMT2
-assertPropsAbstract conf ps = do
-  let mkBase simp = assertPropsHelperWith AbstractDivision simp divModAbstractDecls
-  base <- if not conf.simp then mkBase False ps
-          else mkBase True (decompose conf ps)
-  bounds <- divModBounds ps
-  pure $ base <> SMT2 (SMTScript bounds) mempty mempty
-
--- | Phase 2: Add ground-instance axioms for div/mod operations
-assertPropsRefined :: Config -> [Prop] -> Err SMT2
-assertPropsRefined conf ps = do
-  abst <- assertPropsAbstract conf ps
-  refine <- divModGroundAxioms ps
-  pure $ abst <> SMT2 (SMTScript refine) mempty mempty
 
 data DivModOp = IsDiv | IsMod
   deriving (Eq, Ord)
