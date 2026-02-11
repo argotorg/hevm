@@ -1078,9 +1078,6 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
       | b == c = iszero a
     go (Eq (Sub a b) c)
       | a == c = iszero b
-    go (Eq (Xor a b) c)
-      | a == c = iszero b
-      | b == c = iszero a
 
     go (Eq (Lit 0) a) = iszero a
     go (Eq a b)
@@ -1283,18 +1280,6 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
     -- Bitwise AND & OR. These MUST preserve bitwise equivalence
     go (And a (Or b _)) | a == b = a
     go (And a (Or _ b)) | a == b = a
-    go (And a (Xor b c))
-      | a == b = EVM.Expr.and a (EVM.Expr.not c)
-      | a == c = EVM.Expr.and a (EVM.Expr.not b)
-    go (And (Xor b c) a)
-      | a == b = EVM.Expr.and a (EVM.Expr.not c)
-      | a == c = EVM.Expr.and a (EVM.Expr.not b)
-    go (And a (Or b c))
-      | a == b = a
-      | a == c = a
-    go (And (Or b c) a)
-      | a == b = a
-      | a == c = a
 
     go (And a b)
       | a == b = a
