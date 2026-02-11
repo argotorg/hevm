@@ -18,7 +18,6 @@ import EVM.Effects
 import EVM.SMT
 import EVM.Traversals
 import EVM.Types
-import EVM.SMT.Common
 
 
 -- | Uninterpreted function declarations for abstract div/mod encoding (Phase 1).
