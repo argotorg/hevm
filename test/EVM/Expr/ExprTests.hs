@@ -1174,7 +1174,7 @@ concretizationTests = testGroup "Concretization tests"
     -- CopySlice of zero size should be a no-op
   , testCase "conc-copyslice-zero-size" $ do
       let simp = Expr.simplify $ CopySlice (Lit 0) (Lit 0) (Lit 0) (AbstractBuf "src") (AbstractBuf "dst")
-      assertEqual "CopySlice size 0 is noop" (ConcreteBuf "dst") simp
+      assertEqual "CopySlice size 0 is noop" (AbstractBuf "dst") simp
 
     -- IndexWord
   , testCase "conc-indexword" $ do
