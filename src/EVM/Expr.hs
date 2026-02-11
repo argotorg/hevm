@@ -1257,19 +1257,19 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
 
     -- SHL / SHR / SAR
     go (SHL (Lit a) _) | a >= 256 = Lit 0
-    go (SHL a v)
-      | a == (Lit 0) = v
-      | v == (Lit 0) = v
-      | otherwise = shl a v
     go (SHR (Lit a) _) | a >= 256 = Lit 0
-    go (SHR a v)
-      | a == (Lit 0) = v
-      | v == (Lit 0) = v
-      | otherwise = shr a v
     go (SHL (Lit n) (SHR (Lit m) x)) -- zero out LSB
       | n == m && n < 256 = EVM.Expr.and (Lit (shiftL maxLit (fromIntegral n))) x
     go (SHR (Lit n) (SHL (Lit m) x)) -- zero out MSB
       | n == m && n < 256 = EVM.Expr.and (Lit (shiftR maxLit (fromIntegral n))) x
+    go (SHL a v)
+      | a == (Lit 0) = v
+      | v == (Lit 0) = v
+      | otherwise = shl a v
+    go (SHR a v)
+      | a == (Lit 0) = v
+      | v == (Lit 0) = v
+      | otherwise = shr a v
     go (SAR _ (Lit v)) | v == maxBound = Lit v
     go (SAR a v)
        | a == (Lit 0) = v
