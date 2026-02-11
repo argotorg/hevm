@@ -250,7 +250,7 @@ basicSimplificationTests = testGroup "Basic simplification tests"
       let simp = Expr.simplify $ BufLength (ConcreteBuf "ab")
       assertEqual "" (Lit 2) simp
   , testCase "simplify read over write byte" $ do
-      let simp = Expr.simplify $ ReadByte (Lit 0xf0000000000000000000000000000000000000000000000000000000000000) (WriteByte (And (SHA256 (ConcreteBuf "")) (Lit 0x1)) (LitByte 0) (ConcreteBuf ""))
+      let simp = Expr.simplify $ ReadByte (Lit 0xf0000000000000000000000000000000000000000000000000000000000000) (WriteByte (And (Keccak (ConcreteBuf "")) (Lit 0x1)) (LitByte 0) (ConcreteBuf ""))
       assertEqual "" (LitByte 0) simp
   , testCase "storage-slot-single" $ do
       -- this tests that "" and "0"x32 is not equivalent in Keccak

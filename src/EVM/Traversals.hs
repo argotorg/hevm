@@ -139,7 +139,6 @@ foldExpr f acc expr = acc <> (go expr)
       -- Hashes
 
       e@(Keccak a) -> f e <> (go a)
-      e@(SHA256 a) -> f e <> (go a)
 
       -- block context
 
@@ -495,10 +494,6 @@ mapExprM f expr = case expr of
   Keccak a -> do
     a' <- mapExprM f a
     f (Keccak a')
-
-  SHA256 a -> do
-    a' <- mapExprM f a
-    f (SHA256 a')
 
   -- block context
 

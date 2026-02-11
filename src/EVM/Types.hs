@@ -276,7 +276,6 @@ data Expr (a :: EType) where
   -- Hashes
 
   Keccak         :: Expr Buf -> Expr EWord
-  SHA256         :: Expr Buf -> Expr EWord
 
   -- block context
 

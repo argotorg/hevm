@@ -840,7 +840,6 @@ formatExpr = go
 
       -- Hashes
       Keccak b -> fmt "Keccak" [b]
-      SHA256 b -> fmt "SHA256" [b]
       where
         fmt nm args = T.unlines
           [ "(" <> nm
