@@ -1226,7 +1226,6 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
       | otherwise = sub (add a b) c
 
     -- canonicalize Sub to top level
-    go (Add a (Sub b c)) = sub (add a b) c
     go (Sub (Sub a b) c) = sub a (add b c)
     go (Sub a (Sub b c)) = add (sub a b) c
 
