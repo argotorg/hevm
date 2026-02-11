@@ -19,7 +19,7 @@ import Control.Arrow ((>>>))
 import Control.Monad (mzero)
 import Control.Monad.ST (ST, RealWorld)
 import Control.Monad.State.Strict (StateT)
-import Crypto.Hash (hash, Keccak_256, SHA256, Digest)
+import Crypto.Hash (hash, Keccak_256, Digest)
 import Data.Aeson qualified as JSON
 import Data.Aeson.Types qualified as JSON
 import Data.Bifunctor (first)
@@ -1541,14 +1541,6 @@ keccak buf = Keccak buf
 
 keccak' :: ByteString -> W256
 keccak' = keccakBytes >>> BS.take 32 >>> word
-
-sha256' :: ByteString -> W256
-sha256' = sha256Bytes >>> BS.take 32 >>> word
-
-sha256Bytes :: ByteString -> ByteString
-sha256Bytes =
-  (hash :: ByteString -> Digest SHA256)
-    >>> BA.convert
 
 abiKeccak :: ByteString -> FunctionSelector
 abiKeccak =
