@@ -1225,7 +1225,7 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
       | b == c = a
       | otherwise = sub (add a b) c
 
-    -- canonicalize Sub to top level
+    -- Order sub/add around
     go (Sub (Sub a b) c) = sub a (add b c)
     go (Sub a (Sub b c)) = add (sub a b) c
 
@@ -1243,6 +1243,7 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
       | otherwise = sub a b
 
     -- XOR normalization
+    go (Xor a b) | a == b = Lit 0
     go (Xor (Lit 0) a) = a
     go (Xor (Lit a) b) | a == maxLit = EVM.Expr.not b
     go (Xor a  b) = EVM.Expr.xor a b
@@ -1255,10 +1256,6 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
     go (EqByte a b) = eqByte a b
 
     -- SHL / SHR / SAR
-    go (SHL (Lit n) (SHR (Lit m) x))
-      | n == m && n < 256 = EVM.Expr.and (Lit (shiftL maxLit (fromIntegral n))) x
-    go (SHR (Lit n) (SHL (Lit m) x))
-      | n == m && n < 256 = EVM.Expr.and (Lit (shiftR maxLit (fromIntegral n))) x
     go (SHL (Lit a) _) | a >= 256 = Lit 0
     go (SHL a v)
       | a == (Lit 0) = v
@@ -1269,6 +1266,10 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
       | a == (Lit 0) = v
       | v == (Lit 0) = v
       | otherwise = shr a v
+    go (SHL (Lit n) (SHR (Lit m) x)) -- zero out LSB
+      | n == m && n < 256 = EVM.Expr.and (Lit (shiftL maxLit (fromIntegral n))) x
+    go (SHR (Lit n) (SHL (Lit m) x)) -- zero out MSB
+      | n == m && n < 256 = EVM.Expr.and (Lit (shiftR maxLit (fromIntegral n))) x
     go (SAR _ (Lit v)) | v == maxBound = Lit v
     go (SAR a v)
        | a == (Lit 0) = v
