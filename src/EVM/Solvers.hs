@@ -146,7 +146,7 @@ checkSatWithProps sg props = do
         Cex _ -> do
           -- Phase 2: Refine with exact definitions to validate counterexample
           when conf.debug $ liftIO $ putStrLn "Abstract div/mod: potential cex found, refining..."
-          let smt2Refined = assertPropsRefined conf allProps
+          let smt2Refined = assertProps conf allProps
           if isLeft smt2Refined then pure $ Error $ getError smt2Refined
           else liftIO $ checkSat sg (Just props) smt2Refined
 
