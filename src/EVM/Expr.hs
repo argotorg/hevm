@@ -1307,13 +1307,6 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
       | otherwise = EVM.Expr.and a b
     go (Or a (And b _)) | a == b = a
     go (Or a (And _ b)) | a == b = a
-
-    go (Or a (Xor b c))
-      | a == b = EVM.Expr.or a c
-      | a == c = EVM.Expr.or a b
-    go (Or (Xor b c) a)
-      | a == b = EVM.Expr.or a c
-      | a == c = EVM.Expr.or a b
     go (Or a b)
       | a == b = a
       | a == (Lit 0) = b
