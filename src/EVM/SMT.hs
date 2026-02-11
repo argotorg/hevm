@@ -518,10 +518,6 @@ exprToSMT = \case
     enc <- exprToSMT a
     sz  <- exprToSMT $ Expr.bufLength a
     pure $ "(keccak " <> enc <> " " <> sz <> ")"
-  SHA256 a -> do
-    enc <- exprToSMT a
-    sz  <- exprToSMT $ Expr.bufLength a
-    pure $ "(sha256 " <> enc <> " " <> sz <> ")"
 
   TxValue -> pure $ fromString "txvalue"
   Balance a -> pure $ fromString "balance_" <> formatEAddr a

@@ -212,6 +212,7 @@ peq (Lit x) (Lit y) = PBool (x == y)
 peq (LitAddr x) (LitAddr y) = PBool (x == y)
 peq (LitByte x) (LitByte y) = PBool (x == y)
 peq (ConcreteBuf x) (ConcreteBuf y) = PBool (x == y)
+peq (ConcreteStore x) (ConcreteStore y) = PBool (x == y)
 peq a b
   | a == b = PBool True
   | otherwise = let args = sort [a, b]
@@ -1107,6 +1108,7 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
 
     -- LT
     go (EVM.Types.LT _ (Lit 0)) = Lit 0
+    go (EVM.Types.LT (Lit a) _) | a == maxLit = Lit 0
     go (EVM.Types.LT a (Lit 1)) = iszero a
     go (EVM.Types.LT a b) = lt a b
 
@@ -1127,7 +1129,9 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
 
     -- Mod
     go (Mod _ (Lit 0)) = Lit 0
+    go (Mod _ (Lit 1)) = Lit 0
     go (SMod _ (Lit 0)) = Lit 0
+    go (SMod _ (Lit 1)) = Lit 0
     go (Mod a b) | a == b = Lit 0
     go (SMod a b) | a == b = Lit 0
     go (Mod (Lit 0) _) = Lit 0
@@ -1226,6 +1230,7 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
       | otherwise = sub a b
 
     -- XOR normalization
+    go (Xor a b) | a == b = Lit 0
     go (Xor (Lit a) b) | a == maxLit = EVM.Expr.not b
     go (Xor a  b) = EVM.Expr.xor a b
 
@@ -1237,10 +1242,12 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
     go (EqByte a b) = eqByte a b
 
     -- SHL / SHR / SAR
+    go (SHL (Lit a) _) | a >= 256 = Lit 0
     go (SHL a v)
       | a == (Lit 0) = v
       | v == (Lit 0) = v
       | otherwise = shl a v
+    go (SHR (Lit a) _) | a >= 256 = Lit 0
     go (SHR a v)
       | a == (Lit 0) = v
       | v == (Lit 0) = v
@@ -1268,6 +1275,7 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
       | a == b = a
       | a == (Lit 0) = b
       | b == (Lit 0) = a
+      | a == (Lit maxLit) || b == (Lit maxLit) = Lit maxLit
       | otherwise = EVM.Expr.or a b
 
 

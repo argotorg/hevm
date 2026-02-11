@@ -137,7 +137,6 @@ genWord litFreq sz = frequency
     --, fmap CodeSize subWord
     --, fmap ExtCodeHash subWord
     , Keccak <$> subBuf
-    , SHA256 <$> subBuf
     , SLoad <$> subWord <*> subStore
     , ReadWord <$> genReadIndex <*> subBuf
     , BufLength <$> subBuf
