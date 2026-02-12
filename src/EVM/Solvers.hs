@@ -22,7 +22,7 @@ import Prelude hiding (LT, GT)
 import GHC.Natural
 import GHC.IO.Handle (Handle, hFlush, hSetBuffering, BufferMode(..))
 import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
-import Control.Concurrent (forkIO, killThread)
+import Control.Concurrent (forkIO, killThread, myThreadId)
 import Control.Concurrent.QSem (QSem, newQSem, waitQSem, signalQSem)
 import Control.Exception (bracket, bracket_, try, IOException)
 import Control.Concurrent.STM (writeTChan, newTChan, TChan, tryReadTChan, atomically)
@@ -282,7 +282,8 @@ getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r sem f
         )
     )
 
-getOneSol :: (MonadIO m, ReadConfig m) => Solver -> Maybe Natural -> Natural -> SMT2 -> Maybe SMTScript -> Maybe [Prop] -> Chan SMTResult -> TChan CacheEntry -> QSem -> Int -> m ()
+getOneSol :: forall m . (MonadIO m, ReadConfig m) =>
+  Solver -> Maybe Natural -> Natural -> SMT2 -> Maybe SMTScript -> Maybe [Prop] -> Chan SMTResult -> TChan CacheEntry -> QSem -> Int -> m ()
 getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r cacheq sem fileCounter = do
   conf <- readConfig
   liftIO $ bracket_
@@ -294,48 +295,47 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
         (spawnSolver solver timeout maxMemory)
         (stopSolver)
         (\inst -> do
-          out <- sendScript inst cmds
-          case out of
-            Left e -> writeChan r (Unknown $ "Issue while writing SMT to solver (maybe it got killed?): " <> T.unpack e)
-            Right () -> do
-              sat <- sendCommand inst $ SMTCommand "(check-sat)"
-              res <- case sat of
-                "unsat" -> dealWithUnsat
-                "sat" -> case refinement of
-                  Just refScript -> do
-                    when conf.debug $ liftIO $ putStrLn "   Phase 1 SAT, refining..."
-                    outRef <- liftIO $ sendScript inst refScript
-                    case outRef of
-                      Left e -> do
-                        when conf.debug $ liftIO $ putStrLn $ "   Error sending refinement: " <> T.unpack e
-                        pure $ Unknown $ "Error sending refinement: " <> T.unpack e
-                      Right () -> do
-                        sat2 <- liftIO $ sendCommand inst $ SMTCommand "(check-sat)"
-                        case sat2 of
-                          "unsat" -> dealWithUnsat
-                          "sat" -> dealWithModel conf inst
-                          "timeout" -> pure $ Unknown "Result timeout by SMT solver"
-                          "unknown" -> dealWithUnknown conf
-                          _ -> dealWithIssue conf sat2
-                  Nothing -> dealWithModel conf inst
-                "timeout" -> pure $ Unknown "Result timeout by SMT solver"
-                "unknown" -> dealWithUnknown conf
-                _ -> dealWithIssue conf sat
-              writeChan r res
+          sendAndCheck inst cmds $ \res -> do
+            ret <- case res of
+              "unsat" -> dealWithUnsat
+              "sat" -> case refinement of
+                Just refScript -> do
+                  when conf.debug $ logWithTid "Phase 1 SAT, refining..."
+                  sendAndCheck inst refScript $ \sat2 -> do
+                    ret2 <- case sat2 of
+                      "unsat" -> dealWithUnsat
+                      "sat" -> dealWithModel conf inst
+                      "timeout" -> pure $ Unknown "Result timeout by SMT solver"
+                      "unknown" -> dealWithUnknown conf
+                      _ -> dealWithIssue conf sat2
+                    writeChan r ret2
+                Nothing -> dealWithModel conf inst
+              "timeout" -> pure $ Unknown "Result timeout by SMT solver"
+              "unknown" -> dealWithUnknown conf
+              _ -> dealWithIssue conf res
+            writeChan r ret
         )
     )
   where
+    sendAndCheck :: SolverInstance -> SMTScript -> (Text -> IO ()) -> IO ()
+    sendAndCheck inst dat cont = do
+      out <- liftIO $ sendScript inst dat
+      case out of
+        Left e -> liftIO $ writeChan r (Unknown $ "Issue while writing SMT to solver (maybe it got killed?): " <> T.unpack e)
+        Right () -> do
+          res <- liftIO $ sendCommand inst $ SMTCommand "(check-sat)"
+          cont res
     dealWithUnsat = do
       when (isJust props) $ liftIO . atomically $ writeTChan cacheq (CacheEntry (fromJust props))
       pure Qed
     dealWithUnknown conf = do
       dumpUnsolved smt2 fileCounter conf.dumpUnsolved
-      when conf.debug $ liftIO $ putStrLn "Solver returned unknown result."
+      when conf.debug $ logWithTid "Solver returned unknown result after"
       pure $ Unknown "Result unknown by SMT solver"
     dealWithModel conf inst = getModel inst cexvars >>= \case
       Just model -> pure $ Cex model
       Nothing -> do
-        when conf.debug $ liftIO $ putStrLn "Solver died while extracting model."
+        when conf.debug $ logWithTid "Solver died while extracting model."
         pure $ Unknown "Solver died while extracting model"
     dealWithIssue conf sat = do
       let supportIssue = ("does not yet support" `T.isInfixOf` sat)
@@ -344,8 +344,11 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
       case supportIssue of
         True -> pure . Error $ "SMT solver reported unsupported operation: " <> T.unpack sat
         False -> do
-          when conf.debug $ liftIO $ putStrLn $ "Unexpected SMT solver response: " <> T.unpack sat
+          when conf.debug $ logWithTid $ "Unexpected SMT solver response: " <> T.unpack sat
           pure . Unknown $ "Unable to parse SMT solver output (maybe it got killed?): " <> T.unpack sat
+    logWithTid msg = do
+      tid <- liftIO myThreadId
+      liftIO $ putStrLn $ "[" <> show tid <> "] " <> msg
 
 dumpUnsolved :: SMT2 -> Int -> Maybe FilePath -> IO ()
 dumpUnsolved fullSmt fileCounter dump = do
