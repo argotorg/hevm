@@ -119,10 +119,9 @@ library
     EVM.UnitTest,
     EVM.Sign,
     EVM.Effects,
+    EVM.SMT.DivEncoding,
   other-modules:
     EVM.CheatsTH,
-    EVM.SMT.Common,
-    EVM.SMT.DivEncoding,
     EVM.SMT.Types,
     EVM.SMT.SMTLIB,
     Paths_hevm
