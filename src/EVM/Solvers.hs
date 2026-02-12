@@ -53,6 +53,7 @@ import EVM.Keccak qualified as Keccak (concreteKeccaks)
 import EVM.SMT
 import EVM.SMT.DivEncoding
 import EVM.Types
+import Debug.Trace (traceM)
 
 
 -- In megabytes, i.e. 1GB
@@ -270,7 +271,7 @@ getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r sem f
         (spawnSolver solver timeout maxMemory)
         (stopSolver)
         (\inst -> do
-          out <- sendScript inst cmds
+          out <- sendScript conf inst cmds
           case out of
             Left err -> do
               when conf.debug $ putStrLn $ "Issue while writing SMT to solver (maybe it got killed)?: " <> (T.unpack err)
@@ -299,9 +300,9 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
             case res of
               "unsat" -> dealWithUnsat
               "sat" -> case refinement of
-                Just refScript -> do
-                  when conf.debug $ logWithTid "Phase 1 SAT, refining..."
-                  sendAndCheck conf inst refScript $ \sat2 -> do
+                Just refine -> do
+                  when conf.debug $ logWithTid "Phase 1 is SAT, refining..."
+                  sendAndCheck conf inst refine $ \sat2 -> do
                     case sat2 of
                       "unsat" -> dealWithUnsat
                       "sat" -> dealWithModel conf inst
@@ -317,7 +318,7 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
     )
   where
     sendAndCheck conf inst dat cont = do
-      out <- liftIO $ sendScript inst dat
+      out <- liftIO $ sendScript conf inst dat
       case out of
         Left e -> unknown conf $ "Issue while writing SMT to solver (maybe it got killed)?: " <> T.unpack e
         Right () -> do
@@ -344,7 +345,7 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
         False -> unknown conf $ "Unable to parse SMT solver output (maybe it got killed?): " <> T.unpack sat
     logWithTid msg = do
       tid <- liftIO myThreadId
-      liftIO $ putStrLn $ "[" <> show tid <> "] " <> msg
+      traceM $ "[" <> show tid <> "] " <> msg
     unknown conf msg = do
       when conf.debug $ logWithTid msg
       pure $ Unknown msg
@@ -537,8 +538,8 @@ stopSolver :: SolverInstance -> IO ()
 stopSolver (SolverInstance _ stdin stdout process) = cleanupProcess (Just stdin, Just stdout, Nothing, process)
 
 -- | Sends a list of commands to the solver. Returns the first error, if there was one.
-sendScript :: SolverInstance -> SMTScript -> IO (Either Text ())
-sendScript solver (SMTScript entries) = do
+sendScript :: Config -> SolverInstance -> SMTScript -> IO (Either Text ())
+sendScript conf solver (SMTScript entries) = do
   go entries
   where
     go [] = pure $ Right ()
@@ -547,7 +548,9 @@ sendScript solver (SMTScript entries) = do
       out <- sendCommand solver c
       case out of
         "success" -> go cs
-        e -> pure $ Left $ "Solver returned an error:\n" <> e <> "\nwhile sending the following command: " <> toLazyText command
+        e -> do
+          when conf.debug $ putStrLn $ "Error while writing SMT to solver: " <> T.unpack e <> " -- Command was: " <> T.unpack (toLazyText command)
+          pure $ Left $ "Solver returned an error:\n" <> e <> "\nwhile sending the following command: " <> toLazyText command
 
 -- | Returns Nothing if the solver died or returned an error
 checkCommand :: SolverInstance -> SMTEntry -> IO (Maybe ())
