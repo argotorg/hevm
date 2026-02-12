@@ -300,9 +300,7 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
             Right () -> do
               sat <- sendCommand inst $ SMTCommand "(check-sat)"
               res <- case sat of
-                "unsat" -> do
-                  when (isJust props) $ liftIO . atomically $ writeTChan cacheq (CacheEntry (fromJust props))
-                  pure Qed
+                "unsat" -> dealWithUnsat
                 "sat" -> case refinement of
                   Just refScript -> do
                     when conf.debug $ liftIO $ putStrLn "   Phase 1 SAT, refining..."
@@ -314,9 +312,7 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
                       Right () -> do
                         sat2 <- liftIO $ sendCommand inst $ SMTCommand "(check-sat)"
                         case sat2 of
-                          "unsat" -> do
-                            when (isJust props) $ liftIO . atomically $ writeTChan cacheq (CacheEntry (fromJust props))
-                            pure Qed
+                          "unsat" -> dealWithUnsat
                           "sat" -> dealWithModel conf inst
                           "timeout" -> pure $ Unknown "Result timeout by SMT solver"
                           "unknown" -> dealWithUnknown conf
@@ -329,6 +325,9 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
         )
     )
   where
+    dealWithUnsat = do
+      when (isJust props) $ liftIO . atomically $ writeTChan cacheq (CacheEntry (fromJust props))
+      pure Qed
     dealWithUnknown conf = do
       dumpUnsolved smt2 fileCounter conf.dumpUnsolved
       when conf.debug $ liftIO $ putStrLn "Solver returned unknown result."
