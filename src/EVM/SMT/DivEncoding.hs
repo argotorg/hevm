@@ -4,7 +4,7 @@
 -}
 module EVM.SMT.DivEncoding
   ( divModAbstractDecls
-  , divModBounds
+  , divModGroundAxioms
   , assertProps
   , assertPropsAbstract
   ) where
