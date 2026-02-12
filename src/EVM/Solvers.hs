@@ -329,22 +329,28 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
       pure Qed
     dealWithUnknown conf = do
       dumpUnsolved smt2 fileCounter conf.dumpUnsolved
-      when conf.debug $ logWithTid "Solver returned unknown result"
-      pure $ Unknown "Result unknown by SMT solver"
+      let txt = "SMT solver returned unknown (maybe it got killed?)"
+      when conf.debug $ logWithTid txt
+      pure $ Unknown txt
     dealWithModel conf inst = getModel inst cexvars >>= \case
       Just model -> pure $ Cex model
       Nothing -> do
-        when conf.debug $ logWithTid "Solver died while extracting model."
-        pure $ Unknown "Solver died while extracting model"
+        let txt = "Solver died while extracting model."
+        when conf.debug $ logWithTid txt
+        pure $ Unknown txt
     dealWithIssue conf sat = do
       let supportIssue = ("does not yet support" `T.isInfixOf` sat)
                          || ("unsupported" `T.isInfixOf` sat)
                          || ("not support" `T.isInfixOf` sat)
       case supportIssue of
-        True -> pure . Error $ "SMT solver reported unsupported operation: " <> T.unpack sat
+        True -> do
+          let txt = "SMT solver reported unsupported operation: " <> T.unpack sat
+          when conf.debug $ logWithTid txt
+          pure $ Error txt
         False -> do
-          when conf.debug $ logWithTid $ "Unexpected SMT solver response: " <> T.unpack sat
-          pure . Unknown $ "Unable to parse SMT solver output (maybe it got killed?): " <> T.unpack sat
+          let txt = "Unable to parse SMT solver output (maybe it got killed?): " <> T.unpack sat
+          when conf.debug $ logWithTid txt
+          pure $ Unknown txt
     logWithTid msg = do
       tid <- liftIO myThreadId
       liftIO $ putStrLn $ "[" <> show tid <> "] " <> msg
