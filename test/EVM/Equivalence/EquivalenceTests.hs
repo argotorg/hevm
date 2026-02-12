@@ -485,8 +485,6 @@ yulOptimizationsSolcTests = testCase "eq-all-yul-optimization-tests" $ do
                     , "loopInvariantCodeMotion/complex_move.yul"
                     , "loopInvariantCodeMotion/no_move_memory.yul"
                     , "loopInvariantCodeMotion/no_move_storage.yul"
-                    -- Not equivalent - TODO: Investigate
-                    , "loadResolver/keccak_symbolic_memory.yul"
                     -- EOF
                     , "loadResolver/extstaticcall.yul"
                     , "loadResolver/memory_with_extcall_invalidation.yul"
