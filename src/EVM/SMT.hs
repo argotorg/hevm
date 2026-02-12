@@ -13,7 +13,6 @@ module EVM.SMT
   declareIntermediates,
   assertPropsHelperWith,
   decompose,
-  exprToSMT,
   exprToSMTWith,
   encodeConcreteStore,
   sp,
@@ -166,9 +165,9 @@ assertPropsHelperWith divEnc simp extraDecls psPreConc = do
 
     -- vars, frames, and block contexts in need of declaration
     allVars = fmap referencedVars toDeclarePsElim <> fmap referencedVars bufVals <> fmap referencedVars storeVals
-    frameCtx = fmap referencedFrameContext toDeclarePsElim <> fmap referencedFrameContext bufVals <> fmap referencedFrameContext storeVals
+    frameCtx = fmap (referencedFrameContext divEnc) toDeclarePsElim <> fmap (referencedFrameContext divEnc) bufVals <> fmap (referencedFrameContext divEnc) storeVals
     blockCtx = fmap referencedBlockContext toDeclarePsElim <> fmap referencedBlockContext bufVals <> fmap referencedBlockContext storeVals
-    gasOrder = enforceGasOrder psPreConc
+    gasOrder = enforceGasOrder divEnc psPreConc
 
     -- Buf, Storage, etc. declarations needed
     bufVals = Map.elems bufs
@@ -227,16 +226,18 @@ referencedVars expr = nubOrd $ foldTerm go [] expr
       Var s -> [fromText s]
       _ -> []
 
-referencedFrameContext :: TraversableTerm a => a -> [(Builder, [Prop])]
-referencedFrameContext expr = nubOrd $ foldTerm go [] expr
+referencedFrameContext :: DivEncoding -> TraversableTerm a => a -> [(Builder, [Prop])]
+referencedFrameContext enc expr = nubOrd $ foldTerm go [] expr
   where
     go :: Expr a -> [(Builder, [Prop])]
     go = \case
-      o@TxValue -> [(fromRight' $ exprToSMT o, [])]
-      o@(Balance _) -> [(fromRight' $ exprToSMT o, [PLT o (Lit $ 2 ^ (96 :: Int))])]
-      o@(Gas _ _) -> [(fromRight' $ exprToSMT o, [])]
-      o@(CodeHash (LitAddr _)) -> [(fromRight' $ exprToSMT o, [])]
+      o@TxValue -> [(fromRight' $ toSMT o, [])]
+      o@(Balance _) -> [(fromRight' $ toSMT o, [PLT o (Lit $ 2 ^ (96 :: Int))])]
+      o@(Gas _ _) -> [(fromRight' $ toSMT o, [])]
+      o@(CodeHash (LitAddr _)) -> [(fromRight' $ toSMT o, [])]
       _ -> []
+    toSMT :: Expr x -> Err Builder
+    toSMT = exprToSMTWith enc
 
 referencedBlockContext :: TraversableTerm a => a -> [(Builder, [Prop])]
 referencedBlockContext expr = nubOrd $ foldTerm go [] expr
@@ -360,14 +361,14 @@ declareConstrainAddrs names = SMT2 (SMTScript ([SMTComment "concrete and symboli
 -- The gas is a tuple of (prefix, index). Within each prefix, the gas is strictly decreasing as the
 -- index increases. This function gets a map of Prefix -> [Int], and for each prefix,
 -- enforces the order
-enforceGasOrder :: [Prop] -> [SMTEntry]
-enforceGasOrder ps = [SMTComment "gas ordering"] <> (concatMap (uncurry order) indices)
+enforceGasOrder :: DivEncoding -> [Prop] -> [SMTEntry]
+enforceGasOrder enc ps = [SMTComment "gas ordering"] <> (concatMap (uncurry order) indices)
   where
     order :: TS.Text -> [Int] -> [SMTEntry]
     order prefix n = consecutivePairs (nubInt n) >>= \(x, y)->
       -- The GAS instruction itself costs gas, so it's strictly decreasing
-      [SMTCommand $ "(assert (bvugt " <> fromRight' (exprToSMT (Gas prefix x)) <> " " <>
-        fromRight' ((exprToSMT (Gas prefix y))) <> "))"]
+      [SMTCommand $ "(assert (bvugt " <> fromRight' (exprToSMTWith enc (Gas prefix x)) <> " " <>
+        fromRight' ((exprToSMTWith enc (Gas prefix y))) <> "))"]
     consecutivePairs :: [Int] -> [(Int, Int)]
     consecutivePairs [] = []
     consecutivePairs l@(_:t) = zip l t
@@ -417,9 +418,6 @@ wordAsBV w = "(_ bv" <> Data.Text.Lazy.Builder.Int.decimal w <> " 256)"
 
 byteAsBV :: Word8 -> Builder
 byteAsBV b = "(_ bv" <> Data.Text.Lazy.Builder.Int.decimal b <> " 8)"
-
-exprToSMT :: Expr a -> Err Builder
-exprToSMT = exprToSMTWith ConcreteDivision
 
 exprToSMTWith :: DivEncoding -> Expr a -> Err Builder
 exprToSMTWith enc = \case
@@ -584,7 +582,7 @@ exprToSMTWith enc = \case
     copySliceWith enc srcIdx dstIdx size srcSMT dstSMT
 
   -- we need to do a bit of processing here.
-  ConcreteStore s -> encodeConcreteStore s
+  ConcreteStore s -> encodeConcreteStore enc s
   AbstractStore a idx -> pure $ storeName a idx
   SStore idx val prev -> do
     encIdx  <- toSMT idx
@@ -790,13 +788,13 @@ writeBytesWith divEnc bytes buf =  do
       where
         !idx' = idx + 1
 
-encodeConcreteStore :: Map W256 W256 -> Err Builder
-encodeConcreteStore s = foldM encodeWrite ("((as const Storage) #x0000000000000000000000000000000000000000000000000000000000000000)") (Map.toList s)
+encodeConcreteStore :: DivEncoding -> Map W256 W256 -> Err Builder
+encodeConcreteStore enc s = foldM encodeWrite ("((as const Storage) #x0000000000000000000000000000000000000000000000000000000000000000)") (Map.toList s)
   where
     encodeWrite :: Builder -> (W256, W256) -> Err Builder
     encodeWrite prev (key, val) = do
-      encKey <- exprToSMT $ Lit key
-      encVal <- exprToSMT $ Lit val
+      encKey <- exprToSMTWith enc $ Lit key
+      encVal <- exprToSMTWith enc $ Lit val
       pure $ "(store " <> prev `sp` encKey `sp` encVal <> ")"
 
 storeName :: Expr EAddr -> Maybe W256 -> Builder
@@ -971,8 +969,8 @@ getStore getVal (StorageReads innerMap) = do
 queryValue :: ValGetter -> Expr EWord -> MaybeIO W256
 queryValue _ (Lit w) = pure w
 queryValue getVal w = do
-  -- this exprToSMT should never fail, since we have already ran the solver
-  let expr = toLazyText $ fromRight' $ exprToSMT w
+  -- this exprToSMTWith should never fail, since we have already ran the solver, in refined mode
+  let expr = toLazyText $ fromRight' $ exprToSMTWith ConcreteDivision w
   raw <- getVal expr
   hoistMaybe $ do
     valTxt <- extractValue raw
