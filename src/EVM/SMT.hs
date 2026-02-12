@@ -230,13 +230,13 @@ referencedFrameContext enc expr = nubOrd $ foldTerm go [] expr
   where
     go :: Expr a -> [(Builder, [Prop])]
     go = \case
-      o@TxValue -> [(fromRight' $ toSMT o, [])]
-      o@(Balance _) -> [(fromRight' $ toSMT o, [PLT o (Lit $ 2 ^ (96 :: Int))])]
-      o@(Gas _ _) -> [(fromRight' $ toSMT o, [])]
-      o@(CodeHash (LitAddr _)) -> [(fromRight' $ toSMT o, [])]
+      o@TxValue -> [(fromRight' $ exprToSMT o, [])]
+      o@(Balance _) -> [(fromRight' $ exprToSMT o, [PLT o (Lit $ 2 ^ (96 :: Int))])]
+      o@(Gas _ _) -> [(fromRight' $ exprToSMT o, [])]
+      o@(CodeHash (LitAddr _)) -> [(fromRight' $ exprToSMT o, [])]
       _ -> []
-    toSMT :: Expr x -> Err Builder
-    toSMT = exprToSMTWith enc
+    exprToSMT :: Expr x -> Err Builder
+    exprToSMT = exprToSMTWith enc
 
 referencedBlockContext :: TraversableTerm a => a -> [(Builder, [Prop])]
 referencedBlockContext expr = nubOrd $ foldTerm go [] expr
