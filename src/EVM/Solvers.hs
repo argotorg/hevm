@@ -329,7 +329,7 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
       pure Qed
     dealWithUnknown conf = do
       dumpUnsolved smt2 fileCounter conf.dumpUnsolved
-      when conf.debug $ logWithTid "Solver returned unknown result after"
+      when conf.debug $ logWithTid "Solver returned unknown result"
       pure $ Unknown "Result unknown by SMT solver"
     dealWithModel conf inst = getModel inst cexvars >>= \case
       Just model -> pure $ Cex model
