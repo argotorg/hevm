@@ -321,7 +321,7 @@ compareTraces hevmTrace evmTrace = go hevmTrace evmTrace
       when (aOp /= bOp || aPc /= bPc) $ do
         putStrLn $ "HEVM: " <> (intToOpName aOp) <> " (pc " <> (show aPc) <> ") --- evmtool " <> (intToOpName bOp) <> " (pc " <> (show bPc) <> ")"
 
-      when (isJust b.error) $ do
+      when (isJust b.error && verbosity > 0) $ do
         putStrLn $ "Error by evmtool: " <> (show b.error)
         putStrLn $ "Error by HEVM   : " <> (show a.error)
 
@@ -710,6 +710,8 @@ tests = testGroup "contract-quickcheck-run"
               ]
         checkTraceAndOutputs contract 40000 (BS.pack [1, 2, 3, 4, 5, 6])
     ]
+verbosity :: Int
+verbosity = 0
 
 checkTraceAndOutputs :: App m => OpContract -> Int -> ByteString -> m ()
 checkTraceAndOutputs contract gasLimit txData = do
@@ -740,13 +742,14 @@ checkTraceAndOutputs contract gasLimit txData = do
       assertEqual "Traces and gas must match" traceOK True
       let resultOK = evmtoolTraceOutput.output.output == hevmTraceResult.out
       if resultOK then liftIO $ do
-        putStrLn $ "HEVM & evmtool's outputs match: '" <> (bsToHex $ bssToBs evmtoolTraceOutput.output.output) <> "'"
+        when (verbosity > 0) $ putStrLn $ "HEVM & evmtool's outputs match: '" <> (bsToHex $ bssToBs evmtoolTraceOutput.output.output) <> "'"
         assertBool "Cannot have more than one success return value" (length simplConcrExprRetval <= 1)
         if null simplConcrExprRetval || (simplConcrExprRetval !! 0) == (bssToBs hevmTraceResult.out)
            then do
-             putStr "OK, symbolic interpretation -> concrete calldata -> Expr.simplify gives the same answer."
-             if null simplConcrExprRetval then putStrLn ", but it was a Nothing, so not strong equivalence"
-                                          else putStrLn ""
+             when (verbosity > 0) $ do
+              putStr "OK, symbolic interpretation -> concrete calldata -> Expr.simplify gives the same answer."
+              if null simplConcrExprRetval then putStrLn ", but it was a Nothing, so not strong equivalence"
+                                           else putStrLn ""
            else do
              putStrLn $ "original expr                    : " <> (show expr)
              putStrLn $ "concretized expr                 : " <> (show concretizedExpr)
@@ -754,7 +757,7 @@ checkTraceAndOutputs contract gasLimit txData = do
              putStrLn $ "evmtoolTraceOutput.output.output : " <> (show (evmtoolTraceOutput.output.output))
              putStrLn $ "HEVM trace result output         : " <> (bsToHex (bssToBs hevmTraceResult.out))
              putStrLn $ "ret value computed via symb+conc : " <> (bsToHex (simplConcrExprRetval !! 0))
-             assertEqual "Simplified, concretized expression must match evmtool's output." True False
+             assertBool "Simplified, concretized expression must match evmtool's output." False
       else do
         putStrLn $ "Name of trace file: " <> (getTraceFileName evmDir $ fromJust evmtoolResult)
         putStrLn $ "HEVM result  :" <> (show hevmTraceResult)
@@ -762,13 +765,13 @@ checkTraceAndOutputs contract gasLimit txData = do
         T.putStrLn $ "evm result : " <> (formatBinary $ bssToBs evmtoolTraceOutput.output.output)
         putStrLn $ "HEVM result len: " <> (show (BS.length $ bssToBs hevmTraceResult.out))
         putStrLn $ "evm result  len: " <> (show (BS.length $ bssToBs evmtoolTraceOutput.output.output))
-      assertEqual "Contract exec successful. HEVM & evmtool's outputs must match" resultOK True
+      assertBool "Contract exec successful. HEVM & evmtool's outputs must match" resultOK
     Left (evmerr, hevmTrace) -> liftIO $ do
-      putStrLn $ "HEVM contract exec issue: " <> (show evmerr)
+      when (verbosity > 0) $ putStrLn $ "HEVM contract exec issue: " <> (show evmerr)
       -- putStrLn $ "evmtool result was: " <> show (fromJust evmtoolResult)
       -- putStrLn $ "output by evmtool is: '" <> bsToHex evmtoolTraceOutput.toOutput.output <> "'"
       traceOK <- compareTraces hevmTrace (evmtoolTraceOutput.trace)
-      assertEqual "Traces and gas must match" traceOK True
+      assertBool "Traces and gas must match" traceOK
   liftIO $ removeDirectoryRecursive evmDir
 
 -- GasLimitInt
