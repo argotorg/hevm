@@ -295,13 +295,13 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
         (spawnSolver solver timeout maxMemory)
         (stopSolver)
         (\inst -> do
-          ret <- sendAndCheck inst cmds $ \res -> do
+          ret <- sendAndCheck conf inst cmds $ \res -> do
             case res of
               "unsat" -> dealWithUnsat
               "sat" -> case refinement of
                 Just refScript -> do
                   when conf.debug $ logWithTid "Phase 1 SAT, refining..."
-                  sendAndCheck inst refScript $ \sat2 -> do
+                  sendAndCheck conf inst refScript $ \sat2 -> do
                     case sat2 of
                       "unsat" -> dealWithUnsat
                       "sat" -> dealWithModel conf inst
@@ -316,11 +316,10 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
         )
     )
   where
-    sendAndCheck :: SolverInstance -> SMTScript -> (Text -> IO SMTResult) -> IO SMTResult
-    sendAndCheck inst dat cont = do
+    sendAndCheck conf inst dat cont = do
       out <- liftIO $ sendScript inst dat
       case out of
-        Left e -> pure (Unknown $ "Issue while writing SMT to solver (maybe it got killed?): " <> T.unpack e)
+        Left e -> unknown conf $ "Issue while writing SMT to solver (maybe it got killed)?: " <> T.unpack e
         Right () -> do
           res <- liftIO $ sendCommand inst $ SMTCommand "(check-sat)"
           cont res
@@ -329,15 +328,10 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
       pure Qed
     dealWithUnknown conf = do
       dumpUnsolved smt2 fileCounter conf.dumpUnsolved
-      let txt = "SMT solver returned unknown (maybe it got killed?)"
-      when conf.debug $ logWithTid txt
-      pure $ Unknown txt
+      unknown conf "SMT solver returned unknown (maybe it got killed?)"
     dealWithModel conf inst = getModel inst cexvars >>= \case
       Just model -> pure $ Cex model
-      Nothing -> do
-        let txt = "Solver died while extracting model."
-        when conf.debug $ logWithTid txt
-        pure $ Unknown txt
+      Nothing -> unknown conf "Solver died while extracting model."
     dealWithIssue conf sat = do
       let supportIssue = ("does not yet support" `T.isInfixOf` sat)
                          || ("unsupported" `T.isInfixOf` sat)
@@ -347,13 +341,13 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
           let txt = "SMT solver reported unsupported operation: " <> T.unpack sat
           when conf.debug $ logWithTid txt
           pure $ Error txt
-        False -> do
-          let txt = "Unable to parse SMT solver output (maybe it got killed?): " <> T.unpack sat
-          when conf.debug $ logWithTid txt
-          pure $ Unknown txt
+        False -> unknown conf $ "Unable to parse SMT solver output (maybe it got killed?): " <> T.unpack sat
     logWithTid msg = do
       tid <- liftIO myThreadId
       liftIO $ putStrLn $ "[" <> show tid <> "] " <> msg
+    unknown conf msg = do
+      when conf.debug $ logWithTid msg
+      pure $ Unknown msg
 
 dumpUnsolved :: SMT2 -> Int -> Maybe FilePath -> IO ()
 dumpUnsolved fullSmt fileCounter dump = do
