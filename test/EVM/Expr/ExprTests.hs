@@ -10,6 +10,7 @@ import Test.Tasty.HUnit
 import Test.Tasty.QuickCheck hiding (Failure, Success)
 
 import Data.Bits (shiftL)
+import Data.ByteString qualified as BS (pack)
 import Data.Containers.ListUtils (nubOrd)
 import Data.List qualified as List (nub)
 import Data.Map.Strict qualified as Map
@@ -75,6 +76,15 @@ copySliceTests = testGroup "CopySlice tests"
         assertEqual "Not full simp" (Expr.simplify expr2) $ CopySlice (Lit 0x0) (Lit 0x0) (BufLength (AbstractBuf "buff")) (AbstractBuf "buff") (ConcreteBuf "aasdfasdf")
         assertEqual "Not full simp" (Expr.simplify expr3) (AbstractBuf "buff")
         assertEqual "Not full simp" (Expr.simplify expr4) $ CopySlice (Lit 0x0) (Lit 0x0) (BufLength (AbstractBuf "buff")) (AbstractBuf "buff") (ConcreteBuf "aasdfasdf")
+  , testCase "copyslice-difficult-concretization" $ do
+        let commonOffset = (Var "x")
+        let concreteVal = (Lit 0xff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00)
+        let src = WriteWord commonOffset concreteVal (AbstractBuf "buff")
+        let dst = ConcreteBuf ""
+        let e = CopySlice commonOffset (Lit 1) (Lit 3) src dst
+        let simpl = Expr.simplify e
+        let expected = ConcreteBuf $ BS.pack [0x00, 0xff, 0x00, 0xff]
+        assertEqual "" expected simpl
   ]
 
 memoryTests :: TestTree

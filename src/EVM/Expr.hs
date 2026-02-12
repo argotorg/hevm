@@ -381,6 +381,9 @@ copySlice s@(Lit srcOffset) d@(Lit dstOffset) sz@(Lit size) src ds@(ConcreteBuf 
        else CopySlice s d sz src ds
   | otherwise = CopySlice s d sz src ds
 
+copySlice srcOff dstOff (Lit size) (WriteWord srcOff2 val _) dstBuff
+  | size < 32 && srcOff == srcOff2 = copySlice (Lit 0) dstOff (Lit size) (WriteWord (Lit 0) val (ConcreteBuf "")) dstBuff
+
 -- abstract indices
 copySlice srcOffset dstOffset size src dst = CopySlice srcOffset dstOffset size src dst
 
