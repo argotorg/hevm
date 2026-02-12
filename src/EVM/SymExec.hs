@@ -960,8 +960,8 @@ equivalenceCheck' solvers sess branchesA branchesB create = do
       let differingEndStates = sortBySize $ mapMaybe (view _1) ps
       let knownIssues = foldr ((<>) . (view _2)) mempty ps
       when conf.debug $ liftIO $ putStrLn $ "Asking the SMT solver for " <> (show $ length differingEndStates) <> " pairs"
-      when conf.dumpEndStates $ forM_ (zip differingEndStates [(1::Integer)..]) (\(x, i) ->
-        liftIO $ T.writeFile ("prop-checked-" <> show i <> ".prop") (T.pack $ show x))
+      when conf.dumpEndStates $ forM_ (zip differingEndStates [(1::Integer)..]) (\((props, msg), i) ->
+        liftIO $ T.writeFile ("prop-checked-" <> show i <> ".prop") (T.pack $ show props <> msg))
 
       procs <- liftIO getNumProcessors
       newDifferences <- checkAll differingEndStates procs
