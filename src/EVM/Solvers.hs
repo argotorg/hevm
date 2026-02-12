@@ -303,10 +303,6 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
                 "unsat" -> do
                   when (isJust props) $ liftIO . atomically $ writeTChan cacheq (CacheEntry (fromJust props))
                   pure Qed
-                "timeout" -> pure $ Unknown "Result timeout by SMT solver"
-                "unknown" -> do
-                  dumpUnsolved smt2 fileCounter conf.dumpUnsolved
-                  pure $ Unknown "Result unknown by SMT solver"
                 "sat" -> case refinement of
                   Just refScript -> do
                     when conf.debug $ liftIO $ putStrLn "   Phase 1 SAT, refining..."
@@ -330,25 +326,31 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
                                 when conf.debug $ liftIO $ putStrLn "Solver died while extracting model."
                                 pure $ Unknown "Solver died while extracting model"
                           "timeout" -> pure $ Unknown "Result timeout by SMT solver"
-                          "unknown" -> pure $ Unknown "Result unknown by SMT solver"
-                          _ -> pure $ Unknown $ "Solver returned " <> T.unpack sat2 <> " after refinement"
+                          "unknown" -> do
+                            dumpUnsolved smt2 fileCounter conf.dumpUnsolved
+                            pure $ Unknown "Result unknown by SMT solver"
+                          _ -> dealWithIssue conf sat2
                   Nothing -> getModel inst cexvars >>= \case
                     Just model -> pure $ Cex model
                     Nothing -> do
                       when conf.debug $ liftIO $ putStrLn "Solver died while extracting model."
                       pure $ Unknown "Solver died while extracting model"
-                _ -> let supportIssue =
-                           ("does not yet support" `T.isInfixOf` sat)
-                           || ("unsupported" `T.isInfixOf` sat)
-                           || ("not support" `T.isInfixOf` sat)
-                     in case supportIssue of
-                       True -> pure . Error $ "SMT solver reported unsupported operation: " <> T.unpack sat
-                       False -> do
-                         when conf.debug $ liftIO $ putStrLn $ "Unexpected SMT solver response: " <> T.unpack sat
-                         pure . Unknown $ "Unable to parse SMT solver output (maybe it got killed?): " <> T.unpack sat
+                "timeout" -> pure $ Unknown "Result timeout by SMT solver"
+                "unknown" -> do
+                  dumpUnsolved smt2 fileCounter conf.dumpUnsolved
+                  pure $ Unknown "Result unknown by SMT solver"
+                _ -> dealWithIssue conf sat
               writeChan r res
         )
     )
+  where
+    dealWithIssue conf sat = do
+       let supportIssue = ("does not yet support" `T.isInfixOf` sat) || ("unsupported" `T.isInfixOf` sat) || ("not support" `T.isInfixOf` sat)
+       case supportIssue of
+         True -> pure . Error $ "SMT solver reported unsupported operation: " <> T.unpack sat
+         False -> do
+           when conf.debug $ liftIO $ putStrLn $ "Unexpected SMT solver response: " <> T.unpack sat
+           pure . Unknown $ "Unable to parse SMT solver output (maybe it got killed?): " <> T.unpack sat
 
 dumpUnsolved :: SMT2 -> Int -> Maybe FilePath -> IO ()
 dumpUnsolved fullSmt fileCounter dump = do
