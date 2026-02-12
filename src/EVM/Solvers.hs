@@ -314,7 +314,9 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
                           when conf.debug $ liftIO $ putStrLn "   Phase 1 SAT, refining..."
                           outRef <- liftIO $ sendScript inst refScript
                           case outRef of
-                            Left e -> pure $ Unknown $ "Error sending refinement: " <> T.unpack e
+                            Left e -> do
+                              when conf.debug $ liftIO $ putStrLn $ "   Error sending refinement: " <> T.unpack e
+                              pure $ Unknown $ "Error sending refinement: " <> T.unpack e
                             Right () -> do
                               sat2 <- liftIO $ sendCommand inst $ SMTCommand "(check-sat)"
                               case sat2 of
@@ -326,7 +328,9 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
                                   mmodel <- getModel inst cexvars
                                   case mmodel of
                                     Just model -> pure $ Cex model
-                                    Nothing -> pure $ Unknown "Solver died while extracting model"
+                                    Nothing -> do
+                                      when conf.debug $ liftIO $ putStrLn "Solver died while extracting model."
+                                      pure $ Unknown "Solver died while extracting model"
                                 "timeout" -> pure $ Unknown "Result timeout by SMT solver"
                                 "unknown" -> pure $ Unknown "Result unknown by SMT solver"
                                 _ -> pure $ Unknown $ "Solver returned " <> T.unpack sat2 <> " after refinement"
@@ -334,14 +338,18 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
                           mmodel <- getModel inst cexvars
                           case mmodel of
                             Just model -> pure $ Cex model
-                            Nothing -> pure $ Unknown "Solver died while extracting model"
+                            Nothing -> do
+                              when conf.debug $ liftIO $ putStrLn "Solver died while extracting model."
+                              pure $ Unknown "Solver died while extracting model"
                     _ -> let  supportIssue =
                                   ("does not yet support" `T.isInfixOf` sat)
                                   || ("unsupported" `T.isInfixOf` sat)
                                   || ("not support" `T.isInfixOf` sat)
                       in case supportIssue of
                        True -> pure . Error $ "SMT solver reported unsupported operation: " <> T.unpack sat
-                       False -> pure . Unknown $ "Unable to parse SMT solver output (maybe it got killed?): " <> T.unpack sat
+                       False -> do
+                         when conf.debug $ liftIO $ putStrLn $ "Unexpected SMT solver response: " <> T.unpack sat
+                         pure . Unknown $ "Unable to parse SMT solver output (maybe it got killed?): " <> T.unpack sat
               writeChan r res
         )
     )
