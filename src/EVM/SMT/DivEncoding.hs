@@ -28,12 +28,11 @@ assertPropsAbstract conf ps = do
   bounds <- divModBounds ps
   pure $ base <> SMT2 (SMTScript bounds) mempty mempty
 
--- | Phase 2: Add ground-instance axioms for div/mod operations
+
 assertProps :: Config -> [Prop] -> Err SMT2
-assertProps conf ps = do
-  abst <- assertPropsAbstract conf ps
-  refine <- divModGroundAxioms ps
-  pure $ abst <> SMT2 (SMTScript refine) mempty mempty
+assertProps conf ps =
+  if not conf.simp then assertPropsHelperWith ConcreteDivision False [] ps
+  else assertPropsHelperWith ConcreteDivision True [] (decompose conf ps)
 
 -- | Uninterpreted function declarations for abstract div/mod encoding (Phase 1).
 divModAbstractDecls :: [SMTEntry]

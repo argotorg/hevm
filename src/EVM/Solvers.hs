@@ -144,7 +144,6 @@ checkSatWithProps sg props = do
       else if isLeft refinement then pure $ Error $ getError refinement
       else liftIO $ checkSatTwoPhase sg (Just props) (getNonError smt2Abstract) (SMTScript (getNonError refinement))
 
--- When props is Nothing, the cache will not be filled or used
 checkSat :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> IO SMTResult
 checkSat (SolverGroup taskq) props smt2 = do
   if isLeft smt2 then pure $ Error $ getError smt2
