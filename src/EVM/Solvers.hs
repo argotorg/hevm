@@ -142,7 +142,7 @@ checkSatWithProps sg props = do
       let refinement = divModGroundAxioms allProps
       if isLeft smt2Abstract then pure $ Error $ getError smt2Abstract
       else if isLeft refinement then pure $ Error $ getError refinement
-      else liftIO $ checkSatTwoPhase sg (Just props) smt2Abstract (SMTScript (getNonError refinement))
+      else liftIO $ checkSatTwoPhase sg (Just props) (getNonError smt2Abstract) (SMTScript (getNonError refinement))
 
 -- When props is Nothing, the cache will not be filled or used
 checkSat :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> IO SMTResult
@@ -156,14 +156,12 @@ checkSat (SolverGroup taskq) props smt2 = do
     -- collect result
     readChan resChan
 
-checkSatTwoPhase :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> SMTScript -> IO SMTResult
+checkSatTwoPhase :: SolverGroup -> Maybe [Prop] -> SMT2 -> SMTScript -> IO SMTResult
 checkSatTwoPhase (SolverGroup taskq) props smt2 refinement = do
-  if isLeft smt2 then pure $ Error $ getError smt2
-  else do
     -- prepare result channel
     resChan <- newChan
     -- send task to solver group
-    writeChan taskq (TaskSingle (SingleData (getNonError smt2) (Just refinement) props resChan))
+    writeChan taskq (TaskSingle (SingleData smt2 (Just refinement) props resChan))
     -- collect result
     readChan resChan
 
