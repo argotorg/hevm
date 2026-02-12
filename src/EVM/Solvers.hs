@@ -295,33 +295,32 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
         (spawnSolver solver timeout maxMemory)
         (stopSolver)
         (\inst -> do
-          sendAndCheck inst cmds $ \res -> do
-            ret <- case res of
+          ret <- sendAndCheck inst cmds $ \res -> do
+            case res of
               "unsat" -> dealWithUnsat
               "sat" -> case refinement of
                 Just refScript -> do
                   when conf.debug $ logWithTid "Phase 1 SAT, refining..."
                   sendAndCheck inst refScript $ \sat2 -> do
-                    ret2 <- case sat2 of
+                    case sat2 of
                       "unsat" -> dealWithUnsat
                       "sat" -> dealWithModel conf inst
                       "timeout" -> pure $ Unknown "Result timeout by SMT solver"
                       "unknown" -> dealWithUnknown conf
                       _ -> dealWithIssue conf sat2
-                    writeChan r ret2
                 Nothing -> dealWithModel conf inst
               "timeout" -> pure $ Unknown "Result timeout by SMT solver"
               "unknown" -> dealWithUnknown conf
               _ -> dealWithIssue conf res
-            writeChan r ret
+          writeChan r ret
         )
     )
   where
-    sendAndCheck :: SolverInstance -> SMTScript -> (Text -> IO ()) -> IO ()
+    sendAndCheck :: SolverInstance -> SMTScript -> (Text -> IO SMTResult) -> IO SMTResult
     sendAndCheck inst dat cont = do
       out <- liftIO $ sendScript inst dat
       case out of
-        Left e -> liftIO $ writeChan r (Unknown $ "Issue while writing SMT to solver (maybe it got killed?): " <> T.unpack e)
+        Left e -> pure (Unknown $ "Issue while writing SMT to solver (maybe it got killed?): " <> T.unpack e)
         Right () -> do
           res <- liftIO $ sendCommand inst $ SMTCommand "(check-sat)"
           cont res
