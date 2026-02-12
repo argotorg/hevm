@@ -299,53 +299,49 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
             Left e -> writeChan r (Unknown $ "Issue while writing SMT to solver (maybe it got killed?): " <> T.unpack e)
             Right () -> do
               sat <- sendCommand inst $ SMTCommand "(check-sat)"
-              res <- do
-                  case sat of
-                    "unsat" -> do
-                      when (isJust props) $ liftIO . atomically $ writeTChan cacheq (CacheEntry (fromJust props))
-                      pure Qed
-                    "timeout" -> pure $ Unknown "Result timeout by SMT solver"
-                    "unknown" -> do
-                      dumpUnsolved smt2 fileCounter conf.dumpUnsolved
-                      pure $ Unknown "Result unknown by SMT solver"
-                    "sat" -> do
-                      case refinement of
-                        Just refScript -> do
-                          when conf.debug $ liftIO $ putStrLn "   Phase 1 SAT, refining..."
-                          outRef <- liftIO $ sendScript inst refScript
-                          case outRef of
-                            Left e -> do
-                              when conf.debug $ liftIO $ putStrLn $ "   Error sending refinement: " <> T.unpack e
-                              pure $ Unknown $ "Error sending refinement: " <> T.unpack e
-                            Right () -> do
-                              sat2 <- liftIO $ sendCommand inst $ SMTCommand "(check-sat)"
-                              case sat2 of
-                                "unsat" -> do
-                                  -- UNSAT after refinement => UNSAT
-                                  when (isJust props) $ liftIO . atomically $ writeTChan cacheq (CacheEntry (fromJust props))
-                                  pure Qed
-                                "sat" -> do
-                                  mmodel <- getModel inst cexvars
-                                  case mmodel of
-                                    Just model -> pure $ Cex model
-                                    Nothing -> do
-                                      when conf.debug $ liftIO $ putStrLn "Solver died while extracting model."
-                                      pure $ Unknown "Solver died while extracting model"
-                                "timeout" -> pure $ Unknown "Result timeout by SMT solver"
-                                "unknown" -> pure $ Unknown "Result unknown by SMT solver"
-                                _ -> pure $ Unknown $ "Solver returned " <> T.unpack sat2 <> " after refinement"
-                        Nothing -> do
-                          mmodel <- getModel inst cexvars
-                          case mmodel of
-                            Just model -> pure $ Cex model
-                            Nothing -> do
-                              when conf.debug $ liftIO $ putStrLn "Solver died while extracting model."
-                              pure $ Unknown "Solver died while extracting model"
-                    _ -> let  supportIssue =
-                                  ("does not yet support" `T.isInfixOf` sat)
-                                  || ("unsupported" `T.isInfixOf` sat)
-                                  || ("not support" `T.isInfixOf` sat)
-                      in case supportIssue of
+              res <- case sat of
+                "unsat" -> do
+                  when (isJust props) $ liftIO . atomically $ writeTChan cacheq (CacheEntry (fromJust props))
+                  pure Qed
+                "timeout" -> pure $ Unknown "Result timeout by SMT solver"
+                "unknown" -> do
+                  dumpUnsolved smt2 fileCounter conf.dumpUnsolved
+                  pure $ Unknown "Result unknown by SMT solver"
+                "sat" -> case refinement of
+                  Just refScript -> do
+                    when conf.debug $ liftIO $ putStrLn "   Phase 1 SAT, refining..."
+                    outRef <- liftIO $ sendScript inst refScript
+                    case outRef of
+                      Left e -> do
+                        when conf.debug $ liftIO $ putStrLn $ "   Error sending refinement: " <> T.unpack e
+                        pure $ Unknown $ "Error sending refinement: " <> T.unpack e
+                      Right () -> do
+                        sat2 <- liftIO $ sendCommand inst $ SMTCommand "(check-sat)"
+                        case sat2 of
+                          "unsat" -> do
+                            -- UNSAT after refinement => UNSAT
+                            when (isJust props) $ liftIO . atomically $ writeTChan cacheq (CacheEntry (fromJust props))
+                            pure Qed
+                          "sat" -> do
+                            mmodel <- getModel inst cexvars
+                            case mmodel of
+                              Just model -> pure $ Cex model
+                              Nothing -> do
+                                when conf.debug $ liftIO $ putStrLn "Solver died while extracting model."
+                                pure $ Unknown "Solver died while extracting model"
+                          "timeout" -> pure $ Unknown "Result timeout by SMT solver"
+                          "unknown" -> pure $ Unknown "Result unknown by SMT solver"
+                          _ -> pure $ Unknown $ "Solver returned " <> T.unpack sat2 <> " after refinement"
+                  Nothing -> getModel inst cexvars >>= \case
+                    Just model -> pure $ Cex model
+                    Nothing -> do
+                      when conf.debug $ liftIO $ putStrLn "Solver died while extracting model."
+                      pure $ Unknown "Solver died while extracting model"
+                _ -> let supportIssue =
+                           ("does not yet support" `T.isInfixOf` sat)
+                           || ("unsupported" `T.isInfixOf` sat)
+                           || ("not support" `T.isInfixOf` sat)
+                     in case supportIssue of
                        True -> pure . Error $ "SMT solver reported unsupported operation: " <> T.unpack sat
                        False -> do
                          when conf.debug $ liftIO $ putStrLn $ "Unexpected SMT solver response: " <> T.unpack sat
