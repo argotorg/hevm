@@ -136,8 +136,7 @@ checkSatWithProps sg props = do
       if isLeft smt2 then pure $ Error $ getError smt2
       else liftIO $ checkSat sg (Just props) smt2
     else do
-      -- Two-phase solving with abstract division
-      -- Phase 1: Use uninterpreted functions (overapproximation)
+      -- Two-phase solving with abstraction+refinement
       let smt2Abstract = assertPropsAbstract conf allProps
       let refinement = divModGroundAxioms allProps
       if isLeft smt2Abstract then pure $ Error $ getError smt2Abstract
