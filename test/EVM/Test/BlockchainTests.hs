@@ -1,6 +1,6 @@
 module EVM.Test.BlockchainTests (prepareTests, problematicTests, findIgnoreReason, Case, vmForCase, checkExpectation, allTestCases) where
 
-import EVM (initialContract, makeVm, setEIP4788Storage, setEIP2935Storage)
+import EVM (initialContract, makeVm, setEIP4788Storage, setEIP2935Storage, processAuthorizations, getAuthoritiesToWarm, resolveDelegatedCode, getDelegationTarget)
 import EVM.Concrete qualified as EVM
 import EVM.Effects
 import EVM.Expr (maybeLitAddrSimp)
@@ -26,6 +26,7 @@ import Data.ByteString.Lazy qualified as Lazy
 import Data.List (isPrefixOf)
 import Data.Map (Map)
 import Data.Map qualified as Map
+import Data.Set qualified as Set
 import Data.Maybe (fromJust, fromMaybe, isNothing)
 import Data.Word (Word64)
 import GHC.Generics (Generic)
@@ -157,147 +158,20 @@ allTestCases = do
     )
   pure $ Map.fromList cases
 
--- | Tests that are known to fail or are too slow to run in CI.
+-- | Tests that are known to fail due to fundamental limitations of the testing system.
 -- Uses prefix matching: any test name starting with a prefix will be ignored.
 -- Test names are from the execution-spec-tests fixtures format.
+--
+-- ONLY multi-block tests should be here - all other tests should be fixed!
 problematicTests :: [(String, String)]
 problematicTests =
-  [ -- EIP-4844 point evaluation precompile (0x0A) not implemented
-    ("tests/cancun/eip4844_blobs/test_point_evaluation_precompile.py::", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/cancun/eip4844_blobs/test_point_evaluation_precompile_gas.py::", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-    -- EIP-2537 precompiles
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g1add.py::", "EIP-2537 precompiles not implemented")
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g1msm.py::", "EIP-2537 precompiles not implemented")
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g1mul.py::", "EIP-2537 precompiles not implemented")
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g2add.py::", "EIP-2537 precompiles not implemented")
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g2msm.py::", "EIP-2537 precompiles not implemented")
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g2mul.py::", "EIP-2537 precompiles not implemented")
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_map_fp_to_g1.py::", "EIP-2537 precompiles not implemented")
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_map_fp2_to_g2.py::", "EIP-2537 precompiles not implemented")
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_pairing.py::", "EIP-2537 precompiles not implemented")
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_variable_length_input_contracts.py::", "EIP-2537 precompiles not implemented")
-    -- EIP-7951
-  , ("tests/osaka/eip7951_p256verify_precompiles/test_eip_mainnet.py::", "EIP-7951 precompiles not implemented")
-  , ("tests/osaka/eip7951_p256verify_precompiles/test_p256verify.py::", "EIP-7951 precompiles not implemented")
-    -- Other tests that invoke the 0x0A precompile
-  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x000000000000000000000000000000000000000a", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stSpecialTest/failed_tx_xcf416c53_ParisFiller.json::", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-11]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-13]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-24]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-28]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-39]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-42]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-53]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-64]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-75]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-86]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-97]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-108]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-119]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-130]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-141]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-152]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-163]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-174]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-185]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-196]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-207]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929OsakaFiller.yml::precompsEIP2929Osaka[fork_Osaka-blockchain_test_from_state_test-yes-218]", "EIP-4844 point evaluation precompile (0x0A) not implemented")
-    -- Other precompile tests
-  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x000000000000000000000000000000000000000b", "0xB precompile not implemented")
-  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x000000000000000000000000000000000000000c", "0xC precompile not implemented")
-  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x000000000000000000000000000000000000000d", "0xD precompile not implemented")
-  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x000000000000000000000000000000000000000e", "0xE precompile not implemented")
-  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x000000000000000000000000000000000000000f", "0xF precompile not implemented")
-  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x0000000000000000000000000000000000000010", "0x10 precompile not implemented")
-  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x0000000000000000000000000000000000000011", "0x11 precompile not implemented")
-  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x0000000000000000000000000000000000000100", "0x100 precompile not implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::", "TODO")
-    -- Other tests (TODO: fix or re-sort them)
-  , ("tests/frontier/precompiles/test_ripemd.py::", "TODO")
-  , ("tests/osaka/eip7823_modexp_upper_bounds/test_eip_mainnet.py::", "TODO")
-  , ("tests/osaka/eip7823_modexp_upper_bounds/test_modexp_upper_bounds.py::", "TODO")
-  , ("tests/osaka/eip7825_transaction_gas_limit_cap/test_tx_gas_limit.py::", "TODO")
-  , ("tests/osaka/eip7883_modexp_gas_increase/test_modexp_thresholds.py::", "TODO")
-  , ("tests/prague/eip2935_historical_block_hashes_from_state/test_block_hashes.py::", "TODO")
-  , ("tests/prague/eip6110_deposits/test_deposits.py::", "TODO")
-  , ("tests/prague/eip7002_el_triggerable_withdrawals/test_modified_withdrawal_contract.py::", "TODO")
-  , ("tests/prague/eip7251_consolidations/test_modified_consolidation_contract.py::", "TODO")
-  , ("tests/prague/eip7623_increase_calldata_cost/test_execution_gas.py::", "TODO")
-  , ("tests/prague/eip7623_increase_calldata_cost/test_refunds.py::", "TODO")
-  , ("tests/prague/eip7685_general_purpose_el_requests/test_multi_type_requests.py::", "TODO")
-  , ("tests/prague/eip7702_set_code_tx/test_calls.py::", "TODO")
-  , ("tests/prague/eip7702_set_code_tx/test_gas.py::", "TODO")
-  , ("tests/prague/eip7702_set_code_tx/test_set_code_txs_2.py::", "TODO")
-  , ("tests/shanghai/eip3860_initcode/test_initcode.py::", "TODO")
-  , ("tests/shanghai/eip3860_initcode/test_with_eof.py::", "TODO")
-  , ("tests/static/state_tests/Cancun/stEIP5656_MCOPY/MCOPY_memory_expansion_costFiller.yml::", "TODO")
-  , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructed2Filler.json::", "TODO")
-  , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructedFiller.json::", "TODO")
-  , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructedRevertFiller.json::", "TODO")
-  , ("tests/static/state_tests/stEIP150singleCodeGasPrices/gasCostExpFiller.yml::", "TODO")
-  , ("tests/static/state_tests/stEIP150singleCodeGasPrices/gasCostMemoryFiller.yml::", "TODO")
-  , ("tests/static/state_tests/stEIP150singleCodeGasPrices/gasCostMemSegFiller.yml::", "TODO")
-  , ("tests/static/state_tests/stEIP2930/transactionCostsFiller.yml::", "TODO")
-  , ("tests/static/state_tests/stMemoryTest/memReturnFiller.json::", "TODO")
-  , ("tests/static/state_tests/stNonZeroCallsTest/NonZeroValue_TransactionCALLwithData_ToEmpty_ParisFiller.json::", "TODO")
-  , ("tests/static/state_tests/stNonZeroCallsTest/NonZeroValue_TransactionCALLwithData_ToNonNonZeroBalanceFiller.json::", "TODO")
-  , ("tests/static/state_tests/stNonZeroCallsTest/NonZeroValue_TransactionCALLwithData_ToOneStorageKey_ParisFiller.json::", "TODO")
-  , ("tests/static/state_tests/stNonZeroCallsTest/NonZeroValue_TransactionCALLwithDataFiller.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest0Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest126Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest144Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest157Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest172Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest176Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest190Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest197Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest209Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest230Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest251Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest252Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest25Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest271Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest275Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest288Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest300Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest312Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest321Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest323Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest345Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest350Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest45Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest57Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest5Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest72Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest78Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom/randomStatetest82Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest396Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest404Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest414Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest420Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest428Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest444Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest478Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest509Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest531Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest543Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest558Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest567Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest572Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest609Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest624Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest644Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRandom2/randomStatetest645Filler.json::", "TODO")
-  , ("tests/static/state_tests/stRevertTest/PythonRevertTestTue201814-1430Filler.json::", "TODO")
-  , ("tests/static/state_tests/stStackTests/stackOverflowM1PUSHFiller.json::", "TODO")
-  , ("tests/static/state_tests/stTransactionTest/HighGasLimitFiller.json::", "TODO")
-  , ("tests/static/state_tests/stTransactionTest/TransactionDataCosts652Filler.json::", "TODO")
-  , ("tests/static/state_tests/stZeroCallsTest/ZeroValue_TransactionCALLwithData_ToEmpty_ParisFiller.json::", "TODO")
-  , ("tests/static/state_tests/stZeroCallsTest/ZeroValue_TransactionCALLwithData_ToNonZeroBalanceFiller.json::", "TODO")
-  , ("tests/static/state_tests/stZeroCallsTest/ZeroValue_TransactionCALLwithData_ToOneStorageKey_ParisFiller.json::", "TODO")
-  , ("tests/static/state_tests/stZeroCallsTest/ZeroValue_TransactionCALLwithDataFiller.json::", "TODO")
+  [ -- EIP-7685: General Purpose EL Requests - requires multi-block context for system contracts
+    ("tests/prague/eip7685_general_purpose_el_requests/test_multi_type_requests.py::test_valid_multi_type_request_from_same_tx",
+     "EIP-7685 multi-type requests require multi-block system contract context")
+
+    -- EIP-2935: Historical block hashes - requires multi-block context
+  , ("tests/prague/eip2935_historical_block_hashes_from_state/test_block_hashes.py::test_block_hashes_history",
+     "EIP-2935 historical block hash tests require multi-block context")
   ]
 
 
@@ -498,7 +372,7 @@ fromBlockchainCase :: BlockchainCase -> Either BlockchainError Case
 fromBlockchainCase (BlockchainCase blocks preState postState network) =
   case (blocks, network) of
     ([block], "Osaka") -> case block.txs of
-      [tx] | tx.txtype == EIP4844Transaction || tx.txtype == EIP7702Transaction -> Left UnsupportedTxType -- TODO EIP4844 / EIP7702
+      [tx] | tx.txtype == EIP4844Transaction -> Left UnsupportedTxType -- TODO EIP4844
       [tx] -> fromBlockchainCase' block tx preState postState
       []        -> Left NoTxs
       _         -> Left TooManyTxs
@@ -519,7 +393,7 @@ fromBlockchainCase' block tx preState postState =
     (Just origin, Just checkState) -> Right $ Case
       (VMOpts
        { contract       = EVM.initialContract theCode
-       , otherContracts = []
+       , otherContracts = otherContractsFromPreState
        , calldata       = (cd, [])
        , value          = Lit tx.value
        , address        = toAddr
@@ -545,6 +419,8 @@ fromBlockchainCase' block tx preState postState =
        , freshAddresses = 0
        , beaconRoot     = block.beaconRoot
        , parentHash     = block.parentHash
+       , txdataFloorGas = txdataFloorGas tx
+       , authorizationList = tx.authorizationList
        })
       checkState
       postState
@@ -562,26 +438,33 @@ fromBlockchainCase' block tx preState postState =
           cd = if isCreate
                then mempty
                else ConcreteBuf tx.txdata
+          -- Include all pre-state contracts except the target address (which is in 'contract')
+          otherContractsFromPreState =
+            [ (LitAddr addr, makeContract bc)
+            | (addr, bc) <- Map.toList preState
+            , LitAddr addr /= toAddr
+            ]
 
 effectiveprice :: Transaction -> W256 -> W256
 effectiveprice tx baseFee = priorityFee tx baseFee + baseFee
 
 priorityFee :: Transaction -> W256 -> W256
-priorityFee tx baseFee = let
-    (txPrioMax, txMaxFee) = case tx.txtype of
-               EIP1559Transaction ->
-                 let maxPrio = fromJust tx.maxPriorityFeeGas
-                     maxFee = fromJust tx.maxFeePerGas
-                 in (maxPrio, maxFee)
-               _ ->
-                 let gasPrice = fromJust tx.gasPrice
-                 in (gasPrice, gasPrice)
+priorityFee tx baseFee =
+  let (txPrioMax, txMaxFee) = case tx.txtype of
+        EIP1559Transaction -> eip1559Style
+        EIP4844Transaction -> eip1559Style
+        EIP7702Transaction -> eip1559Style
+        _ -> let p = fromJust tx.gasPrice in (p, p)
   in min txPrioMax (txMaxFee - baseFee)
+  where
+    eip1559Style = (fromJust tx.maxPriorityFeeGas, fromJust tx.maxFeePerGas)
 
 maxBaseFee :: Transaction -> W256
 maxBaseFee tx =
   case tx.txtype of
      EIP1559Transaction -> fromJust tx.maxFeePerGas
+     EIP4844Transaction -> fromJust tx.maxFeePerGas
+     EIP7702Transaction -> fromJust tx.maxFeePerGas
      _ -> fromJust tx.gasPrice
 
 checkTx :: Transaction -> Block -> BlockchainContracts -> Maybe (BlockchainContracts)
@@ -592,27 +475,75 @@ checkTx tx block prestate = do
   if initCodeSizeExceeded then mzero
   else pure prestate
 
+-- EIP-7825: Maximum transaction gas limit is 2^24
+maxTxGasLimit :: Word64
+maxTxGasLimit = 2 ^ (24 :: Int)
+
 validateTx :: Transaction -> Block -> BlockchainContracts -> Maybe ()
 validateTx tx block cs = do
   origin <- sender tx
   originBalance <- (.balance) <$> Map.lookup origin cs
   originNonce <- (.nonce) <$> Map.lookup origin cs
   let gasDeposit = (effectiveprice tx block.baseFee) * (into tx.gasLimit)
-  if gasDeposit + tx.value <= originBalance
+  -- EIP-7825: Reject transactions exceeding max gas limit
+  if tx.gasLimit > maxTxGasLimit then Nothing
+  else if gasDeposit + tx.value <= originBalance
     && ((unsafeInto tx.nonce) == originNonce) && block.baseFee <= maxBaseFee tx
   then Just ()
   else Nothing
 
 vmForCase :: Case -> IO (VM Concrete)
 vmForCase x = do
+  let preStateContracts = Map.mapKeys LitAddr $ Map.map makeContract x.checkContracts
   vm <- stToIO $ makeVm x.vmOpts
-    -- TODO: why do we override contracts here instead of using VMOpts otherContracts?
-    <&> set (#env % #contracts) (Map.mapKeys LitAddr $ Map.map makeContract x.checkContracts)
-    -- TODO: we need to call this again because we override contracts in the
-    -- previous line
+    -- Override contracts with pre-state
+    <&> set (#env % #contracts) preStateContracts
+    -- Process EIP-7702 authorizations on the pre-state contracts
+    <&> applyEIP7702Authorizations x.vmOpts
+    -- Set up beacon root and history storage
     <&> setEIP4788Storage x.vmOpts
     <&> setEIP2935Storage x.vmOpts
   pure $ initTx vm
+  where
+    -- Process EIP-7702 authorization list on the current contracts
+    applyEIP7702Authorizations :: VMOpts Concrete -> VM Concrete -> VM Concrete
+    applyEIP7702Authorizations opts vm =
+      let chainId = opts.chainId
+          authList = opts.authorizationList
+          origin = opts.origin
+          (contractsWithDelegations, authRefunds) = processAuthorizations chainId origin authList vm.env.contracts
+          -- Get addresses to warm (after chain_id validation) - these are the AUTHORITY accounts
+          authWarmAddrs = getAuthoritiesToWarm chainId authList
+          -- Check if the initial contract (TX destination) has delegation code
+          -- Per EIP-7702: "if a transaction's destination has a delegation indicator,
+          -- add the target of the delegation to accessed_addresses"
+          initialContractAddr = vm.state.contract
+          destDelegationTarget = case Map.lookup initialContractAddr contractsWithDelegations of
+            Just target -> case getDelegationTarget target.code of
+              Just delegatedTo -> [LitAddr delegatedTo]
+              Nothing -> []
+            Nothing -> []
+          -- Update accessed addresses with auth warm addresses AND destination's delegation target
+          currentAccessed = vm.tx.subState.accessedAddresses
+          newAccessed = Set.union currentAccessed (Set.fromList (authWarmAddrs ++ destDelegationTarget))
+          -- Replace subState refunds with the ones from the correct pre-state
+          -- (makeVm's refunds are based on incorrect contract state)
+          newRefunds = authRefunds
+          -- Check if the initial contract has delegation code and resolve it
+          -- BUT: For CREATE transactions, don't resolve - we want to run the InitCode,
+          -- not the code at the pre-existing address
+          (resolvedCode, resolvedCodeAddr) =
+            if opts.create
+            then (vm.state.code, vm.state.codeContract)  -- Keep InitCode for CREATE
+            else case Map.lookup initialContractAddr contractsWithDelegations of
+              Just target -> resolveDelegatedCode target initialContractAddr contractsWithDelegations
+              Nothing -> (vm.state.code, vm.state.codeContract)
+      in vm { env = vm.env { contracts = contractsWithDelegations }
+            , tx = vm.tx { subState = vm.tx.subState { accessedAddresses = newAccessed
+                                                     , refunds = newRefunds }
+                         , authorizationRefunds = newRefunds }  -- EIP-7702: preserve for revert
+            , state = vm.state { code = resolvedCode, codeContract = resolvedCodeAddr }
+            }
 
 forceConcreteAddrs :: Map (Expr EAddr) Contract -> Map Addr Contract
 forceConcreteAddrs cs = Map.mapKeys
