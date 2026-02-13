@@ -22,7 +22,7 @@ import Prelude hiding (LT, GT)
 import GHC.Natural
 import GHC.IO.Handle (Handle, hFlush, hSetBuffering, BufferMode(..))
 import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
-import Control.Concurrent (forkIO, killThread)
+import Control.Concurrent (forkIO, killThread, myThreadId)
 import Control.Concurrent.QSem (QSem, newQSem, waitQSem, signalQSem)
 import Control.Exception (bracket, bracket_, try, IOException)
 import Control.Concurrent.STM (writeTChan, newTChan, TChan, tryReadTChan, atomically)
@@ -51,7 +51,9 @@ import EVM.Expr (simplifyProps)
 
 import EVM.Keccak qualified as Keccak (concreteKeccaks)
 import EVM.SMT
+import EVM.SMT.DivEncoding
 import EVM.Types
+import Debug.Trace (traceM)
 
 
 -- In megabytes, i.e. 1GB
@@ -103,8 +105,9 @@ data MultiData = MultiData
 
 data SingleData = SingleData
   SMT2
-  (Maybe [Prop])
-  (Chan SMTResult) -- result channel
+  (Maybe SMTScript) -- refinement for two-phase solving, if abst-ref is used
+  (Maybe [Prop])    -- Props that generated the SMT2, if available. Used for caching
+  (Chan SMTResult)  -- result channel
 
 -- returns True if a is a superset of any of the sets in bs
 supersetAny :: Set Prop -> [Set Prop] -> Bool
@@ -128,11 +131,19 @@ checkSatWithProps sg props = do
   if psSimp == [PBool False] then pure Qed
   else do
     let concreteKeccaks = fmap (\(buf,val) -> PEq (Lit val) (Keccak buf)) (toList $ Keccak.concreteKeccaks props)
-    let smt2 = assertProps conf (if conf.simp then psSimp <> concreteKeccaks else psSimp)
-    if isLeft smt2 then pure $ Error $ getError smt2
-    else liftIO $ checkSat sg (Just props) smt2
+    let allProps = if conf.simp then psSimp <> concreteKeccaks else psSimp
+    if not conf.abstractArith then do
+      let smt2 = assertProps conf allProps
+      if isLeft smt2 then pure $ Error $ getError smt2
+      else liftIO $ checkSat sg (Just props) smt2
+    else do
+      -- Two-phase solving with abstraction+refinement
+      let smt2Abstract = assertPropsAbstract conf allProps
+      let refinement = divModGroundAxioms allProps
+      if isLeft smt2Abstract then pure $ Error $ getError smt2Abstract
+      else if isLeft refinement then pure $ Error $ getError refinement
+      else liftIO $ checkSatTwoPhase sg (Just props) (getNonError smt2Abstract) (SMTScript (getNonError refinement))
 
--- When props is Nothing, the cache will not be filled or used
 checkSat :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> IO SMTResult
 checkSat (SolverGroup taskq) props smt2 = do
   if isLeft smt2 then pure $ Error $ getError smt2
@@ -140,7 +151,16 @@ checkSat (SolverGroup taskq) props smt2 = do
     -- prepare result channel
     resChan <- newChan
     -- send task to solver group
-    writeChan taskq (TaskSingle (SingleData (getNonError smt2) props resChan))
+    writeChan taskq (TaskSingle (SingleData (getNonError smt2) Nothing props resChan))
+    -- collect result
+    readChan resChan
+
+checkSatTwoPhase :: SolverGroup -> Maybe [Prop] -> SMT2 -> SMTScript -> IO SMTResult
+checkSatTwoPhase (SolverGroup taskq) props smt2 refinement = do
+    -- prepare result channel
+    resChan <- newChan
+    -- send task to solver group
+    writeChan taskq (TaskSingle (SingleData smt2 (Just refinement) props resChan))
     -- collect result
     readChan resChan
 
@@ -178,13 +198,13 @@ withSolvers solver count timeout maxMemory cont = do
         Nothing -> do
           task <- liftIO $ readChan taskq
           case task of
-            TaskSingle (SingleData _ props r) | isJust props && supersetAny (fromList (fromJust props)) knownUnsat -> do
+            TaskSingle (SingleData _ _ props r) | isJust props && supersetAny (fromList (fromJust props)) knownUnsat -> do
               liftIO $ writeChan r Qed
               when conf.debug $ liftIO $ putStrLn "   Qed found via cache!"
               orchestrate taskq cacheq sem knownUnsat fileCounter
             _ -> do
               runTask' <- case task of
-                TaskSingle (SingleData smt2 props r) -> toIO $ getOneSol solver timeout maxMemory smt2 props r cacheq sem fileCounter
+                TaskSingle (SingleData smt2 refinement props r) -> toIO $ getOneSol solver timeout maxMemory smt2 refinement props r cacheq sem fileCounter
                 TaskMulti (MultiData smt2 multiSol r) -> toIO $ getMultiSol solver timeout maxMemory smt2 multiSol r sem fileCounter
               _ <- liftIO $ forkIO runTask'
               orchestrate taskq cacheq sem knownUnsat (fileCounter + 1)
@@ -251,7 +271,7 @@ getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r sem f
         (spawnSolver solver timeout maxMemory)
         (stopSolver)
         (\inst -> do
-          out <- sendScript inst cmds
+          out <- sendScript conf inst cmds
           case out of
             Left err -> do
               when conf.debug $ putStrLn $ "Issue while writing SMT to solver (maybe it got killed)?: " <> (T.unpack err)
@@ -263,8 +283,9 @@ getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r sem f
         )
     )
 
-getOneSol :: (MonadIO m, ReadConfig m) => Solver -> Maybe Natural -> Natural -> SMT2 -> Maybe [Prop] -> Chan SMTResult -> TChan CacheEntry -> QSem -> Int -> m ()
-getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) props r cacheq sem fileCounter = do
+getOneSol :: forall m . (MonadIO m, ReadConfig m) =>
+  Solver -> Maybe Natural -> Natural -> SMT2 -> Maybe SMTScript -> Maybe [Prop] -> Chan SMTResult -> TChan CacheEntry -> QSem -> Int -> m ()
+getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r cacheq sem fileCounter = do
   conf <- readConfig
   liftIO $ bracket_
     (waitQSem sem)
@@ -275,35 +296,59 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) props r cacheq sem
         (spawnSolver solver timeout maxMemory)
         (stopSolver)
         (\inst -> do
-          out <- sendScript inst cmds
-          case out of
-            Left e -> writeChan r (Unknown $ "Issue while writing SMT to solver (maybe it got killed?): " <> T.unpack e)
-            Right () -> do
-              sat <- sendCommand inst $ SMTCommand "(check-sat)"
-              res <- do
-                  case sat of
-                    "unsat" -> do
-                      when (isJust props) $ liftIO . atomically $ writeTChan cacheq (CacheEntry (fromJust props))
-                      pure Qed
-                    "timeout" -> pure $ Unknown "Result timeout by SMT solver"
-                    "unknown" -> do
-                      dumpUnsolved smt2 fileCounter conf.dumpUnsolved
-                      pure $ Unknown "Result unknown by SMT solver"
-                    "sat" -> do
-                      mmodel <- getModel inst cexvars
-                      case mmodel of
-                        Just model -> pure $ Cex model
-                        Nothing -> pure $ Unknown "Solver died while extracting model"
-                    _ -> let  supportIssue =
-                                  ("does not yet support" `T.isInfixOf` sat)
-                                  || ("unsupported" `T.isInfixOf` sat)
-                                  || ("not support" `T.isInfixOf` sat)
-                      in case supportIssue of
-                       True -> pure . Error $ "SMT solver reported unsupported operation: " <> T.unpack sat
-                       False -> pure . Unknown $ "Unable to parse SMT solver output (maybe it got killed?): " <> T.unpack sat
-              writeChan r res
+          ret <- sendAndCheck conf inst cmds $ \res -> do
+            case res of
+              "unsat" -> dealWithUnsat
+              "sat" -> case refinement of
+                Just refine -> do
+                  when conf.debug $ logWithTid "Phase 1 is SAT, refining..."
+                  sendAndCheck conf inst refine $ \sat2 -> do
+                    case sat2 of
+                      "unsat" -> dealWithUnsat
+                      "sat" -> dealWithModel conf inst
+                      "timeout" -> pure $ Unknown "Result timeout by SMT solver"
+                      "unknown" -> dealWithUnknown conf
+                      _ -> dealWithIssue conf sat2
+                Nothing -> dealWithModel conf inst
+              "timeout" -> pure $ Unknown "Result timeout by SMT solver"
+              "unknown" -> dealWithUnknown conf
+              _ -> dealWithIssue conf res
+          writeChan r ret
         )
     )
+  where
+    sendAndCheck conf inst dat cont = do
+      out <- liftIO $ sendScript conf inst dat
+      case out of
+        Left e -> unknown conf $ "Issue while writing SMT to solver (maybe it got killed)?: " <> T.unpack e
+        Right () -> do
+          res <- liftIO $ sendCommand inst $ SMTCommand "(check-sat)"
+          cont res
+    dealWithUnsat = do
+      when (isJust props) $ liftIO . atomically $ writeTChan cacheq (CacheEntry (fromJust props))
+      pure Qed
+    dealWithUnknown conf = do
+      dumpUnsolved smt2 fileCounter conf.dumpUnsolved
+      unknown conf "SMT solver returned unknown (maybe it got killed?)"
+    dealWithModel conf inst = getModel inst cexvars >>= \case
+      Just model -> pure $ Cex model
+      Nothing -> unknown conf "Solver died while extracting model."
+    dealWithIssue conf sat = do
+      let supportIssue = ("does not yet support" `T.isInfixOf` sat)
+                         || ("unsupported" `T.isInfixOf` sat)
+                         || ("not support" `T.isInfixOf` sat)
+      case supportIssue of
+        True -> do
+          let txt = "SMT solver reported unsupported operation: " <> T.unpack sat
+          when conf.debug $ logWithTid txt
+          pure $ Error txt
+        False -> unknown conf $ "Unable to parse SMT solver output (maybe it got killed?): " <> T.unpack sat
+    logWithTid msg = do
+      tid <- liftIO myThreadId
+      traceM $ "[" <> show tid <> "] " <> msg
+    unknown conf msg = do
+      when conf.debug $ logWithTid msg
+      pure $ Unknown msg
 
 dumpUnsolved :: SMT2 -> Int -> Maybe FilePath -> IO ()
 dumpUnsolved fullSmt fileCounter dump = do
@@ -493,8 +538,8 @@ stopSolver :: SolverInstance -> IO ()
 stopSolver (SolverInstance _ stdin stdout process) = cleanupProcess (Just stdin, Just stdout, Nothing, process)
 
 -- | Sends a list of commands to the solver. Returns the first error, if there was one.
-sendScript :: SolverInstance -> SMTScript -> IO (Either Text ())
-sendScript solver (SMTScript entries) = do
+sendScript :: Config -> SolverInstance -> SMTScript -> IO (Either Text ())
+sendScript conf solver (SMTScript entries) = do
   go entries
   where
     go [] = pure $ Right ()
@@ -503,7 +548,9 @@ sendScript solver (SMTScript entries) = do
       out <- sendCommand solver c
       case out of
         "success" -> go cs
-        e -> pure $ Left $ "Solver returned an error:\n" <> e <> "\nwhile sending the following command: " <> toLazyText command
+        e -> do
+          when conf.debug $ putStrLn $ "Error while writing SMT to solver: " <> T.unpack e <> " -- Command was: " <> T.unpack (toLazyText command)
+          pure $ Left $ "Solver returned an error:\n" <> e <> "\nwhile sending the following command: " <> toLazyText command
 
 -- | Returns Nothing if the solver died or returned an error
 checkCommand :: SolverInstance -> SMTEntry -> IO (Maybe ())

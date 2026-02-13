@@ -11,12 +11,21 @@ module EVM.SMT
   getVar,
   formatSMT2,
   declareIntermediates,
-  assertProps,
-  exprToSMT,
+  assertPropsHelperWith,
+  decompose,
+  exprToSMTWith,
   encodeConcreteStore,
+  sp,
   zero,
   one,
-  propToSMT,
+  smtZeroGuard,
+  smtAbs,
+  smtNeg,
+  smtSameSign,
+  smtIsNonNeg,
+  smtSdivResult,
+  smtSmodResult,
+  propToSMTWith,
   parseVar,
   parseEAddr,
   parseBlockCtx,
@@ -93,7 +102,10 @@ formatSMT2 (SMT2 (SMTScript entries) _ ps) = expr <> smt2
 
 -- | Reads all intermediate variables from the builder state and produces SMT declaring them as constants
 declareIntermediates :: BufEnv -> StoreEnv -> Err [SMTEntry]
-declareIntermediates bufs stores = do
+declareIntermediates = declareIntermediatesWith ConcreteDivision
+
+declareIntermediatesWith :: DivEncoding -> BufEnv -> StoreEnv -> Err [SMTEntry]
+declareIntermediatesWith enc bufs stores = do
   let encSs = Map.mapWithKey encodeStore stores
       encBs = Map.mapWithKey encodeBuf bufs
   snippets <- sequence $ Map.elems $ encSs <> encBs
@@ -101,46 +113,35 @@ declareIntermediates bufs stores = do
   pure $ (SMTComment "intermediate buffers & stores") : decls
   where
     encodeBuf n expr = do
-      buf <- exprToSMT expr
+      buf <- exprToSMTWith enc expr
       bufLen <- encodeBufLen n expr
       pure [SMTCommand ("(define-fun buf" <> (Data.Text.Lazy.Builder.Int.decimal n) <> "() Buf " <> buf <> ")\n"), bufLen]
     encodeBufLen n expr = do
-      bufLen <- exprToSMT (bufLengthEnv bufs True expr)
+      bufLen <- exprToSMTWith enc (bufLengthEnv bufs True expr)
       pure $ SMTCommand ("(define-fun buf" <> (Data.Text.Lazy.Builder.Int.decimal n) <>"_length () (_ BitVec 256) " <> bufLen <> ")")
     encodeStore n expr = do
-      storage <- exprToSMT expr
+      storage <- exprToSMTWith enc expr
       pure [SMTCommand ("(define-fun store" <> (Data.Text.Lazy.Builder.Int.decimal n) <> " () Storage " <> storage <> ")")]
 
--- simplify to rewrite sload/sstore combos
--- notice: it is VERY important not to concretize early, because Keccak assumptions
---         need unconcretized Props
-assertProps :: Config -> [Prop] -> Err SMT2
-assertProps conf ps =
-  if not conf.simp then assertPropsHelper False ps
-  else assertPropsHelper True (decompose ps)
+decompose :: Config -> [Prop] -> [Prop]
+decompose conf props = if conf.decomposeStorage && safeExprs && safeProps
+                    then fromMaybe props (mapM (mapPropM Expr.decomposeStorage) props)
+                    else props
   where
-    decompose :: [Prop] -> [Prop]
-    decompose props = if conf.decomposeStorage && safeExprs && safeProps
-                      then fromMaybe props (mapM (mapPropM Expr.decomposeStorage) props)
-                      else props
-      where
-        -- All in these lists must be a `Just ()` or we cannot decompose
-        safeExprs = all (isJust . mapPropM_ Expr.safeToDecompose) props
-        safeProps = all Expr.safeToDecomposeProp props
+    -- All in these lists must be a `Just ()` or we cannot decompose
+    safeExprs = all (isJust . mapPropM_ Expr.safeToDecompose) props
+    safeProps = all Expr.safeToDecomposeProp props
 
-
--- Note: we need a version that does NOT call simplify,
--- because we make use of it to verify the correctness of our simplification
--- passes through property-based testing.
-assertPropsHelper :: Bool -> [Prop]  -> Err SMT2
-assertPropsHelper simp psPreConc = do
- encs <- mapM propToSMT psElim
- intermediates <- declareIntermediates bufs stores
+assertPropsHelperWith :: DivEncoding -> Bool -> [SMTEntry] -> [Prop]  -> Err SMT2
+assertPropsHelperWith divEnc simp extraDecls psPreConc = do
+ encs <- mapM (propToSMTWith divEnc) psElim
+ intermediates <- declareIntermediatesWith divEnc bufs stores
  readAssumes' <- readAssumes
  keccakAssertions' <- keccakAssertions
  frameCtxs <- (declareFrameContext . nubOrd $ foldl' (<>) [] frameCtx)
  blockCtxs <- (declareBlockContext . nubOrd $ foldl' (<>) [] blockCtx)
  pure $ prelude
+  <> SMT2 (SMTScript extraDecls) mempty mempty
   <> SMT2 (SMTScript (declareAbstractStores abstractStores)) mempty mempty
   <> declareConstrainAddrs addresses
   <> (declareBufs toDeclarePsElim bufs stores)
@@ -163,9 +164,9 @@ assertPropsHelper simp psPreConc = do
 
     -- vars, frames, and block contexts in need of declaration
     allVars = fmap referencedVars toDeclarePsElim <> fmap referencedVars bufVals <> fmap referencedVars storeVals
-    frameCtx = fmap referencedFrameContext toDeclarePsElim <> fmap referencedFrameContext bufVals <> fmap referencedFrameContext storeVals
+    frameCtx = fmap (referencedFrameContext divEnc) toDeclarePsElim <> fmap (referencedFrameContext divEnc) bufVals <> fmap (referencedFrameContext divEnc) storeVals
     blockCtx = fmap referencedBlockContext toDeclarePsElim <> fmap referencedBlockContext bufVals <> fmap referencedBlockContext storeVals
-    gasOrder = enforceGasOrder psPreConc
+    gasOrder = enforceGasOrder divEnc psPreConc
 
     -- Buf, Storage, etc. declarations needed
     bufVals = Map.elems bufs
@@ -181,13 +182,13 @@ assertPropsHelper simp psPreConc = do
     keccAssump = keccakAssumptions $ Set.toList allKeccaks
     keccComp = [(PEq (Lit l) (Keccak buf)) | (buf, l) <- Set.toList concreteKecc]
     keccakAssertions = do
-      assumps <- mapM assertSMT keccAssump
-      comps <- mapM assertSMT keccComp
+      assumps <- mapM (assertSMTWith divEnc) keccAssump
+      comps <- mapM (assertSMTWith divEnc) keccComp
       pure $ ((SMTComment "keccak assumptions") : assumps) <> ((SMTComment "keccak computations") : comps)
 
     -- assert that reads beyond size of buffer & storage is zero
     readAssumes = do
-      assumps <- mapM assertSMT $ assertReads psElim bufs stores
+      assumps <- mapM (assertSMTWith divEnc) $ assertReads psElim bufs stores
       pure (SMTComment "read assumptions" : assumps)
 
     cexInfo :: StorageReads -> CexVars
@@ -224,8 +225,8 @@ referencedVars expr = nubOrd $ foldTerm go [] expr
       Var s -> [fromText s]
       _ -> []
 
-referencedFrameContext :: TraversableTerm a => a -> [(Builder, [Prop])]
-referencedFrameContext expr = nubOrd $ foldTerm go [] expr
+referencedFrameContext :: DivEncoding -> TraversableTerm a => a -> [(Builder, [Prop])]
+referencedFrameContext enc expr = nubOrd $ foldTerm go [] expr
   where
     go :: Expr a -> [(Builder, [Prop])]
     go = \case
@@ -234,6 +235,8 @@ referencedFrameContext expr = nubOrd $ foldTerm go [] expr
       o@(Gas _ _) -> [(fromRight' $ exprToSMT o, [])]
       o@(CodeHash (LitAddr _)) -> [(fromRight' $ exprToSMT o, [])]
       _ -> []
+    exprToSMT :: Expr x -> Err Builder
+    exprToSMT = exprToSMTWith enc
 
 referencedBlockContext :: TraversableTerm a => a -> [(Builder, [Prop])]
 referencedBlockContext expr = nubOrd $ foldTerm go [] expr
@@ -357,14 +360,14 @@ declareConstrainAddrs names = SMT2 (SMTScript ([SMTComment "concrete and symboli
 -- The gas is a tuple of (prefix, index). Within each prefix, the gas is strictly decreasing as the
 -- index increases. This function gets a map of Prefix -> [Int], and for each prefix,
 -- enforces the order
-enforceGasOrder :: [Prop] -> [SMTEntry]
-enforceGasOrder ps = [SMTComment "gas ordering"] <> (concatMap (uncurry order) indices)
+enforceGasOrder :: DivEncoding -> [Prop] -> [SMTEntry]
+enforceGasOrder enc ps = [SMTComment "gas ordering"] <> (concatMap (uncurry order) indices)
   where
     order :: TS.Text -> [Int] -> [SMTEntry]
     order prefix n = consecutivePairs (nubInt n) >>= \(x, y)->
       -- The GAS instruction itself costs gas, so it's strictly decreasing
-      [SMTCommand $ "(assert (bvugt " <> fromRight' (exprToSMT (Gas prefix x)) <> " " <>
-        fromRight' ((exprToSMT (Gas prefix y))) <> "))"]
+      [SMTCommand $ "(assert (bvugt " <> fromRight' (exprToSMTWith enc (Gas prefix x)) <> " " <>
+        fromRight' ((exprToSMTWith enc (Gas prefix y))) <> "))"]
     consecutivePairs :: [Int] -> [(Int, Int)]
     consecutivePairs [] = []
     consecutivePairs l@(_:t) = zip l t
@@ -402,8 +405,11 @@ declareBlockContext names = do
     cexvars = (mempty :: CexVars){ blockContext = fmap (toLazyText . fst) names }
 
 assertSMT :: Prop -> Either String SMTEntry
-assertSMT p = do
-  p' <- propToSMT p
+assertSMT = assertSMTWith ConcreteDivision
+
+assertSMTWith :: DivEncoding -> Prop -> Either String SMTEntry
+assertSMTWith enc p = do
+  p' <- propToSMTWith enc p
   pure $ SMTCommand ("(assert " <> p' <> ")")
 
 wordAsBV :: forall a. Integral a => a -> Builder
@@ -412,8 +418,8 @@ wordAsBV w = "(_ bv" <> Data.Text.Lazy.Builder.Int.decimal w <> " 256)"
 byteAsBV :: Word8 -> Builder
 byteAsBV b = "(_ bv" <> Data.Text.Lazy.Builder.Int.decimal b <> " 8)"
 
-exprToSMT :: Expr a -> Err Builder
-exprToSMT = \case
+exprToSMTWith :: DivEncoding -> Expr a -> Err Builder
+exprToSMTWith enc = \case
   Lit w -> pure $ wordAsBV w
   Var s -> pure $ fromText s
   GVar (BufVar n) -> pure $ fromString $ "buf" <> (show n)
@@ -423,7 +429,7 @@ exprToSMT = \case
     eight nine ten eleven twelve thirteen fourteen fifteen
     sixteen seventeen eighteen nineteen twenty twentyone twentytwo twentythree
     twentyfour twentyfive twentysix twentyseven twentyeight twentynine thirty thirtyone
-    -> concatBytes [
+    -> concatBytesWith enc [
         z, o, two, three, four, five, six, seven
         , eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen
         , sixteen, seventeen, eighteen, nineteen, twenty, twentyone, twentytwo, twentythree
@@ -442,7 +448,7 @@ exprToSMT = \case
         pure $ "(bvshl " <> one `sp` benc <> ")"
     _ -> case b of
       -- b is limited below, otherwise SMT query will be huge, and eventually Haskell stack overflows
-      Lit b' | b' < 1000 -> expandExp a b'
+      Lit b' | b' < 1000 -> expandExpWith enc a b'
       _ -> Left $ "Cannot encode symbolic exponent into SMT. Offending symbolic value: " <> show b
   Min a b -> do
     aenc <- exprToSMT a
@@ -490,10 +496,10 @@ exprToSMT = \case
   SAR a b -> op2 "bvashr" b a
   CLZ a -> op1 "clz256" a
   SEx a b -> op2 "signext" a b
-  Div a b -> op2CheckZero "bvudiv" a b
-  SDiv a b -> op2CheckZero "bvsdiv" a b
-  Mod a b -> op2CheckZero "bvurem" a b
-  SMod a b -> op2CheckZero "bvsrem" a b
+  Div a b -> divOp "bvudiv" "abst_evm_div" a b
+  SDiv a b -> sdivOp "abst_evm_sdiv" a b
+  Mod a b -> divOp "bvurem" "abst_evm_mod" a b
+  SMod a b -> smodOp "abst_evm_smod" a b
   -- NOTE: this needs to do the MUL at a higher precision, then MOD, then downcast
   MulMod a b c -> do
     aExp <- exprToSMT a
@@ -515,20 +521,20 @@ exprToSMT = \case
     cond <- op2 "=" a b
     pure $ "(ite " <> cond `sp` one `sp` zero <> ")"
   Keccak a -> do
-    enc <- exprToSMT a
+    e <- exprToSMT a
     sz  <- exprToSMT $ Expr.bufLength a
-    pure $ "(keccak " <> enc <> " " <> sz <> ")"
+    pure $ "(keccak " <> e <> " " <> sz <> ")"
 
   TxValue -> pure $ fromString "txvalue"
   Balance a -> pure $ fromString "balance_" <> formatEAddr a
 
   Origin ->  pure "origin"
   BlockHash a -> do
-    enc <- exprToSMT a
-    pure $ "(blockhash " <> enc <> ")"
+    e <- exprToSMT a
+    pure $ "(blockhash " <> e <> ")"
   CodeSize a -> do
-    enc <- exprToSMT a
-    pure $ "(codesize " <> enc <> ")"
+    e <- exprToSMT a
+    pure $ "(codesize " <> e <> ")"
   Coinbase -> pure "coinbase"
   Timestamp -> pure "timestamp"
   BlockNumber -> pure "blocknumber"
@@ -546,14 +552,14 @@ exprToSMT = \case
   IndexWord idx w -> case idx of
     Lit n -> if n >= 0 && n < 32
              then do
-               enc <- exprToSMT w
-               pure $ fromLazyText ("(indexWord" <> T.pack (show (into n :: Integer))) `sp` enc <> ")"
+               e <- exprToSMT w
+               pure $ fromLazyText ("(indexWord" <> T.pack (show (into n :: Integer))) `sp` e <> ")"
              else exprToSMT (LitByte 0)
     _ -> op2 "indexWord" idx w
   ReadByte idx src -> op2 "select" src idx
 
   ConcreteBuf "" -> pure "((as const Buf) #b00000000)"
-  ConcreteBuf bs -> writeBytes bs mempty
+  ConcreteBuf bs -> writeBytesWith enc bs mempty
   AbstractBuf s -> pure $ fromText s
   ReadWord idx prev -> op2 "readWord" idx prev
   BufLength (AbstractBuf b) -> pure $ fromText b <> "_length"
@@ -572,10 +578,10 @@ exprToSMT = \case
   CopySlice srcIdx dstIdx size src dst -> do
     srcSMT <- exprToSMT src
     dstSMT <- exprToSMT dst
-    copySlice srcIdx dstIdx size srcSMT dstSMT
+    copySliceWith enc srcIdx dstIdx size srcSMT dstSMT
 
   -- we need to do a bit of processing here.
-  ConcreteStore s -> encodeConcreteStore s
+  ConcreteStore s -> encodeConcreteStore enc s
   AbstractStore a idx -> pure $ storeName a idx
   SStore idx val prev -> do
     encIdx  <- exprToSMT idx
@@ -589,37 +595,110 @@ exprToSMT = \case
 
   a -> internalError $ "TODO: implement: " <> show a
   where
+    exprToSMT :: Expr x -> Err Builder
+    exprToSMT = exprToSMTWith enc
+    op1 :: Builder -> Expr x -> Err Builder
     op1 op a = do
-      enc <- exprToSMT a
-      pure $ "(" <> op `sp` enc <> ")"
+      e <- exprToSMT a
+      pure $ "(" <> op `sp` e <> ")"
+    op2 :: Builder -> Expr x -> Expr y -> Err Builder
     op2 op a b = do
        aenc <- exprToSMT a
        benc <- exprToSMT b
        pure $ "(" <> op `sp` aenc `sp` benc <> ")"
+    op2CheckZero :: Builder -> Expr x -> Expr y -> Err Builder
     op2CheckZero op a b = do
       aenc <- exprToSMT a
       benc <- exprToSMT b
       pure $ "(ite (= " <> benc <> " (_ bv0 256)) (_ bv0 256) " <>  "(" <> op `sp` aenc `sp` benc <> "))"
+    divOp :: Builder -> Builder -> Expr x -> Expr y -> Err Builder
+    divOp concreteOp abstractOp a b = case enc of
+      ConcreteDivision -> op2CheckZero concreteOp a b
+      AbstractDivision -> op2 abstractOp a b
+    -- | Encode SDiv using bvudiv with abs-value decomposition
+    sdivOp :: Builder -> Expr x -> Expr y -> Err Builder
+    sdivOp abstractOp a b = case enc of
+      AbstractDivision -> op2 abstractOp a b
+      ConcreteDivision -> do
+        aenc <- exprToSMT a
+        benc <- exprToSMT b
+        let udiv = "(bvudiv" `sp` smtAbs aenc `sp` smtAbs benc <> ")"
+        pure $ smtSdivResult aenc benc udiv
+    -- | Encode SMod using bvurem with abs-value decomposition
+    -- EVM SMOD: result has the sign of the dividend (a)
+    smodOp :: Builder -> Expr x -> Expr y -> Err Builder
+    smodOp abstractOp a b = case enc of
+      AbstractDivision -> op2 abstractOp a b
+      ConcreteDivision -> do
+        aenc <- exprToSMT a
+        benc <- exprToSMT b
+        let urem = "(bvurem" `sp` smtAbs aenc `sp` smtAbs benc <> ")"
+        pure $ smtSmodResult aenc benc urem
 
+
+-- ** SMT builder helpers ** -----------------------------------------------------------------------
+
+-- | Space-separated concatenation of two builders
 sp :: Builder -> Builder -> Builder
-a `sp` b = a <> (fromText " ") <> b
+a `sp` b = a <> " " <> b
 
+-- | Zero constant for 256-bit bitvectors
 zero :: Builder
 zero = "(_ bv0 256)"
 
+-- | One constant for 256-bit bitvectors
 one :: Builder
 one = "(_ bv1 256)"
 
-propToSMT :: Prop -> Err Builder
-propToSMT = \case
+-- | Guard against division by zero: if divisor is zero return zero, else use the given result.
+-- Produces: (ite (= divisor 0) 0 nonZeroResult)
+smtZeroGuard :: Builder -> Builder -> Builder
+smtZeroGuard divisor nonZeroResult =
+  "(ite (=" `sp` divisor `sp` zero <> ")" `sp` zero `sp` nonZeroResult <> ")"
+
+-- | Encode absolute value: |x| = (ite (bvsge x 0) x (- x))
+smtAbs :: Builder -> Builder
+smtAbs x = "(ite (bvsge" `sp` x `sp` zero <> ")" `sp` x `sp` "(bvsub" `sp` zero `sp` x <> "))"
+
+-- | Encode negation: -x = (bvsub 0 x)
+smtNeg :: Builder -> Builder
+smtNeg x = "(bvsub" `sp` zero `sp` x <> ")"
+
+-- | Check if two values have the same sign (both negative or both non-negative)
+smtSameSign :: Builder -> Builder -> Builder
+smtSameSign a b = "(=" `sp` "(bvslt" `sp` a `sp` zero <> ")" `sp` "(bvslt" `sp` b `sp` zero <> "))"
+
+-- | Check if value is non-negative: x >= 0
+smtIsNonNeg :: Builder -> Builder
+smtIsNonNeg x = "(bvsge" `sp` x `sp` zero <> ")"
+
+-- | Encode SDiv result given the unsigned division of absolute values.
+-- SDiv semantics: result sign depends on whether operand signs match.
+-- sdiv(a, b) = if b == 0 then 0 else (if sameSign(a,b) then udiv(|a|,|b|) else -udiv(|a|,|b|))
+smtSdivResult :: Builder -> Builder -> Builder -> Builder
+smtSdivResult aenc benc udivResult =
+  smtZeroGuard benc $
+  "(ite" `sp` smtSameSign aenc benc `sp` udivResult `sp` smtNeg udivResult <> ")"
+
+-- | Encode SMod result given the unsigned remainder of absolute values.
+-- SMod semantics: result sign matches the dividend (a).
+-- smod(a, b) = if b == 0 then 0 else (if a >= 0 then urem(|a|,|b|) else -urem(|a|,|b|))
+smtSmodResult :: Builder -> Builder -> Builder -> Builder
+smtSmodResult aenc benc uremResult =
+  smtZeroGuard benc $
+  "(ite" `sp` smtIsNonNeg aenc `sp` uremResult `sp` smtNeg uremResult <> ")"
+
+
+propToSMTWith :: DivEncoding -> Prop -> Err Builder
+propToSMTWith enc = \case
   PEq a b -> op2 "=" a b
   PLT a b -> op2 "bvult" a b
   PGT a b -> op2 "bvugt" a b
   PLEq a b -> op2 "bvule" a b
   PGEq a b -> op2 "bvuge" a b
   PNeg a -> do
-    enc <- propToSMT a
-    pure $ "(not " <> enc <> ")"
+    e <- propToSMT a
+    pure $ "(not " <> e <> ")"
   PAnd a b -> do
     aenc <- propToSMT a
     benc <- propToSMT b
@@ -634,9 +713,12 @@ propToSMT = \case
     pure $ "(=> " <> aenc <> " " <> benc <> ")"
   PBool b -> pure $ if b then "true" else "false"
   where
+    propToSMT :: Prop -> Err Builder
+    propToSMT = propToSMTWith enc
+    op2 :: Builder -> Expr x -> Expr y -> Err Builder
     op2 op a b = do
-      aenc <- exprToSMT a
-      benc <- exprToSMT b
+      aenc <- exprToSMTWith enc a
+      benc <- exprToSMTWith enc b
       pure $ "(" <> op <> " " <> aenc <> " " <> benc <> ")"
 
 
@@ -644,9 +726,9 @@ propToSMT = \case
 -- ** Helpers ** ---------------------------------------------------------------------------------
 
 
--- | Stores a region of src into dst
-copySlice :: Expr EWord -> Expr EWord -> Expr EWord -> Builder -> Builder -> Err Builder
-copySlice srcOffset dstOffset (Lit size) src dst = do
+
+copySliceWith :: DivEncoding -> Expr EWord -> Expr EWord -> Expr EWord -> Builder -> Builder -> Err Builder
+copySliceWith divEnc srcOffset dstOffset (Lit size) src dst = do
   sz <- internal size
   pure $ "(let ((src " <> src <> ")) " <> sz <> ")"
   where
@@ -659,38 +741,38 @@ copySlice srcOffset dstOffset (Lit size) src dst = do
       pure $ "(store " <> child `sp` encDstOff `sp` "(select src " <> encSrcOff <> "))"
     offset :: W256 -> Expr EWord -> Err Builder
     offset o (Lit b) = pure $ wordAsBV $ o + b
-    offset o e = exprToSMT $ Expr.add (Lit o) e
-copySlice _ _ _ _ _ = Left "CopySlice with a symbolically sized region not currently implemented, cannot execute SMT solver on this query"
+    offset o e = exprToSMTWith divEnc $ Expr.add (Lit o) e
+copySliceWith _ _ _ _ _ _ = Left "CopySlice with a symbolically sized region not currently implemented, cannot execute SMT solver on this query"
 
--- | Unrolls an exponentiation into a series of multiplications
-expandExp :: Expr EWord -> W256 -> Err Builder
-expandExp base expnt
+
+expandExpWith :: DivEncoding -> Expr EWord -> W256 -> Err Builder
+expandExpWith divEnc base expnt
   -- in EVM, anything (including 0) to the power of 0 is 1
   | expnt == 0 = pure one
-  | expnt == 1 = exprToSMT base
+  | expnt == 1 = exprToSMTWith divEnc base
   | otherwise = do
-    b <- exprToSMT base
-    n <- expandExp base (expnt - 1)
+    b <- exprToSMTWith divEnc base
+    n <- expandExpWith divEnc base (expnt - 1)
     pure $ "(bvmul " <> b `sp` n <> ")"
 
--- | Concatenates a list of bytes into a larger bitvector
-concatBytes :: [Expr Byte] -> Err Builder
-concatBytes bytes = do
+
+concatBytesWith :: DivEncoding -> [Expr Byte] -> Err Builder
+concatBytesWith divEnc bytes = do
   case List.uncons $ reverse bytes of
     Nothing -> Left "unexpected empty bytes"
     Just (h, t) -> do
-      a2 <- exprToSMT h
+      a2 <- exprToSMTWith divEnc h
       foldM wrap a2 t
   where
     wrap :: Builder -> Expr a -> Err Builder
     wrap inner byte = do
-      byteSMT <- exprToSMT byte
+      byteSMT <- exprToSMTWith divEnc byte
       pure $ "(concat " <> byteSMT `sp` inner <> ")"
 
--- | Concatenates a list of bytes into a larger bitvector
-writeBytes :: ByteString -> Expr Buf -> Err Builder
-writeBytes bytes buf =  do
-  smtText <- exprToSMT buf
+
+writeBytesWith :: DivEncoding -> ByteString -> Expr Buf -> Err Builder
+writeBytesWith divEnc bytes buf =  do
+  smtText <- exprToSMTWith divEnc buf
   let ret = BS.foldl wrap (0, smtText) bytes
   pure $ snd ret
   where
@@ -704,13 +786,13 @@ writeBytes bytes buf =  do
       where
         !idx' = idx + 1
 
-encodeConcreteStore :: Map W256 W256 -> Err Builder
-encodeConcreteStore s = foldM encodeWrite ("((as const Storage) #x0000000000000000000000000000000000000000000000000000000000000000)") (Map.toList s)
+encodeConcreteStore :: DivEncoding -> Map W256 W256 -> Err Builder
+encodeConcreteStore enc s = foldM encodeWrite ("((as const Storage) #x0000000000000000000000000000000000000000000000000000000000000000)") (Map.toList s)
   where
     encodeWrite :: Builder -> (W256, W256) -> Err Builder
     encodeWrite prev (key, val) = do
-      encKey <- exprToSMT $ Lit key
-      encVal <- exprToSMT $ Lit val
+      encKey <- exprToSMTWith enc $ Lit key
+      encVal <- exprToSMTWith enc $ Lit val
       pure $ "(store " <> prev `sp` encKey `sp` encVal <> ")"
 
 storeName :: Expr EAddr -> Maybe W256 -> Builder
@@ -885,8 +967,8 @@ getStore getVal (StorageReads innerMap) = do
 queryValue :: ValGetter -> Expr EWord -> MaybeIO W256
 queryValue _ (Lit w) = pure w
 queryValue getVal w = do
-  -- this exprToSMT should never fail, since we have already ran the solver
-  let expr = toLazyText $ fromRight' $ exprToSMT w
+  -- this exprToSMTWith should never fail, since we have already ran the solver, in refined mode
+  let expr = toLazyText $ fromRight' $ exprToSMTWith ConcreteDivision w
   raw <- getVal expr
   hoistMaybe $ do
     valTxt <- extractValue raw
