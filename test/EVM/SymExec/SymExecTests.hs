@@ -16,6 +16,7 @@ import EVM.ABI
 import EVM.Effects qualified as Effects
 import EVM.Expr qualified as Expr
 import EVM.Types
+import EVM.SMT qualified as SMT (getVar)
 import EVM.Solidity (solcRuntime)
 import EVM.Solvers (withSolvers, defMemLimit, Solver(..), SolverGroup)
 import EVM.SymExec
@@ -28,22 +29,96 @@ tests = testGroup "Symbolic execution"
 
 solidityExplorationTests :: TestTree
 solidityExplorationTests = testGroup "Exploration of Solidity"
-    [
-        storageTests
+    [ basicTests
+    , storageTests
     ]
 
-
-withBitwuzla :: Effects.App m => (SolverGroup -> m a) -> m a
-withBitwuzla = withSolvers Bitwuzla 1 Nothing defMemLimit
+basicTests :: TestTree
+basicTests = testGroup "simple-checks"
+    [ testCase "simple-stores" $ do
+      Just c <- solcRuntime "MyContract"
+        [i|
+        contract MyContract {
+          mapping(uint => uint) items;
+          function func() public {
+            assert(items[5] == 0);
+          }
+        }
+        |]
+      let sig = (Sig "func()" [])
+      (_, [Cex (_, _ctr)]) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
+      assertBool "" True
+    , testCase "simple-fixed-value" $ do
+      Just c <- solcRuntime "MyContract"
+        [i|
+        contract MyContract {
+          mapping(uint => uint) items;
+          function func(uint a) public {
+            assert(a != 1337);
+          }
+        }
+        |]
+      let sig = (Sig "func(uint256)" [AbiUIntType 256])
+      (_, [Cex (_, ctr)]) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
+      assertEqual "Expected input not found" (1337 :: W256) (SMT.getVar ctr "arg1")
+    , testCase "simple-fixed-value2" $ do
+      Just c <- solcRuntime "MyContract"
+        [i|
+        contract MyContract {
+          function func(uint a, uint b) public {
+            assert(!((a == 1337) && (b == 99)));
+          }
+        }
+        |]
+      let sig = (Sig "func(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])
+      (_, [Cex (_, ctr)]) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
+      let a = SMT.getVar ctr "arg1"
+      let b = SMT.getVar ctr "arg2"
+      assertBool "Expected input not found" (a == 1337 && b == 99)
+    , testCase "simple-fixed-value3" $ do
+      Just c <- solcRuntime "MyContract"
+        [i|
+        contract MyContract {
+          function func(uint a, uint b) public {
+            assert(((a != 1337) && (b != 99)));
+          }
+        }
+        |]
+      let sig = (Sig "func(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])
+      (_, cexs) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
+      assertBool ("Expected at least 1 counterexample, got " ++ show (length cexs)) (not $ null cexs)
+    , testCase "simple-fixed-value-store1" $ do
+      Just c <- solcRuntime "MyContract"
+        [i|
+        contract MyContract {
+          mapping(uint => uint) items;
+          function func(uint a) public {
+            uint f = items[2];
+            assert(a != f);
+          }
+        }
+        |]
+      let sig = (Sig "func(uint256)" [AbiUIntType 256, AbiUIntType 256])
+      (_, [Cex _]) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
+      assertBool "" True
+    , testCase "simple-fixed-value-store2" $ do
+      Just c <- solcRuntime "MyContract"
+        [i|
+        contract MyContract {
+          mapping(uint => uint) items;
+          function func(uint a) public {
+            items[0] = 1337;
+            assert(a != items[0]);
+          }
+        }
+        |]
+      let sig = (Sig "func(uint256)" [AbiUIntType 256, AbiUIntType 256])
+      (_, [Cex (_, _ctr)]) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
+      assertBool "" True
+  ]
 
 storageTests :: TestTree
 storageTests = testGroup "Storage handling" [storageDecompositionTests, storageSimplificationTests]
-
-storageTestsEnvironment :: Effects.Env
-storageTestsEnvironment = Effects.defaultEnv
-
-executeWithBitwuzla :: MonadUnliftIO m => (SolverGroup -> ReaderT Effects.Env m a) -> m a
-executeWithBitwuzla action = Effects.runEnv storageTestsEnvironment $ withBitwuzla action
 
 storageDecompositionTests :: TestTree
 storageDecompositionTests = testGroup "Storage decomposition"
@@ -407,3 +482,12 @@ badStoresInExpr exprs = any (getAny . foldExpr match mempty) exprs
   where
       match (SLoad _ (SStore _ _ _)) = Any True
       match _ = Any False
+
+symExecTestsEnvironment :: Effects.Env
+symExecTestsEnvironment = Effects.defaultEnv
+
+executeWithBitwuzla :: MonadUnliftIO m => (SolverGroup -> ReaderT Effects.Env m a) -> m a
+executeWithBitwuzla action = Effects.runEnv symExecTestsEnvironment $ withBitwuzla action
+
+withBitwuzla :: Effects.App m => (SolverGroup -> m a) -> m a
+withBitwuzla = withSolvers Bitwuzla 1 Nothing defMemLimit
