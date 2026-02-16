@@ -145,8 +145,8 @@ divModGroundAxioms props = do
         let absAName = fromString $ "abs_a_" <> show groupIdx
             absBName = fromString $ "abs_b_" <> show groupIdx
         -- Use the canonical (non-negated) form for abs value encoding
-        let canonA = stripNeg firstA
-            canonB = stripNeg firstB
+        let canonA = canonicalAbs firstA
+            canonB = canonicalAbs firstB
         canonAenc <- exprToSMTAbs canonA
         canonBenc <- exprToSMTAbs canonB
         let absAEnc = smtAbs canonAenc
@@ -162,10 +162,6 @@ divModGroundAxioms props = do
                     ]
         axioms <- mapM (mkSignedAxiom coreName) ops
         pure $ decls <> axioms
-
-    stripNeg :: Expr EWord -> Expr EWord
-    stripNeg (Sub (Lit 0) x) = x
-    stripNeg x = x
 
     mkUnsignedAxiom :: Builder -> DivOp -> Err SMTEntry
     mkUnsignedAxiom _coreName (kind, a, b) = do
@@ -283,8 +279,8 @@ divModShiftBoundAxioms props = do
       else do
         let absAName = fromString $ "abs_a_" <> show groupIdx
             absBName = fromString $ "abs_b_" <> show groupIdx
-            canonA = stripNeg firstA
-            canonB = stripNeg firstB
+            canonA = canonicalAbs firstA
+            canonB = canonicalAbs firstB
         canonAenc <- exprToSMTWith AbstractDivision canonA
         canonBenc <- exprToSMTWith AbstractDivision canonB
         let absAEnc = "(ite (bvsge" `sp` canonAenc `sp` zero <> ")"
@@ -321,10 +317,6 @@ divModShiftBoundAxioms props = do
                 ]
         axioms <- mapM (mkSignedAxiom coreName) ops
         pure $ decls <> shiftBounds <> axioms
-
-    stripNeg :: Expr EWord -> Expr EWord
-    stripNeg (Sub (Lit 0) x) = x
-    stripNeg x = x
 
     mkUnsignedAxiom :: Builder -> DivOp -> Err SMTEntry
     mkUnsignedAxiom _coreName (kind, a, b) = do
