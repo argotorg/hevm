@@ -19,7 +19,7 @@ module EVM.SMT
   zero,
   one,
   smtZeroGuard,
-  smtAbs,
+  smtAbsolute,
   smtNeg,
   smtSameSign,
   smtIsNonNeg,
@@ -623,7 +623,7 @@ exprToSMTWith enc = \case
       ConcreteDivision -> do
         aenc <- exprToSMT a
         benc <- exprToSMT b
-        let udiv = "(bvudiv" `sp` smtAbs aenc `sp` smtAbs benc <> ")"
+        let udiv = "(bvudiv" `sp` smtAbsolute aenc `sp` smtAbsolute benc <> ")"
         pure $ smtSdivResult aenc benc udiv
     -- | Encode SMod using bvurem with abs-value decomposition
     -- EVM SMOD: result has the sign of the dividend (a)
@@ -633,7 +633,7 @@ exprToSMTWith enc = \case
       ConcreteDivision -> do
         aenc <- exprToSMT a
         benc <- exprToSMT b
-        let urem = "(bvurem" `sp` smtAbs aenc `sp` smtAbs benc <> ")"
+        let urem = "(bvurem" `sp` smtAbsolute aenc `sp` smtAbsolute benc <> ")"
         pure $ smtSmodResult aenc benc urem
 
 
@@ -658,8 +658,8 @@ smtZeroGuard divisor nonZeroResult =
   "(ite (=" `sp` divisor `sp` zero <> ")" `sp` zero `sp` nonZeroResult <> ")"
 
 -- | Encode absolute value: |x| = (ite (bvsge x 0) x (- x))
-smtAbs :: Builder -> Builder
-smtAbs x = "(ite (bvsge" `sp` x `sp` zero <> ")" `sp` x `sp` "(bvsub" `sp` zero `sp` x <> "))"
+smtAbsolute :: Builder -> Builder
+smtAbsolute x = "(ite (bvsge" `sp` x `sp` zero <> ")" `sp` x `sp` "(bvsub" `sp` zero `sp` x <> "))"
 
 -- | Encode negation: -x = (bvsub 0 x)
 smtNeg :: Builder -> Builder

@@ -134,7 +134,8 @@ divModGroundAxioms props = do
           prefix = if isDiv' then "udiv" else "urem"
           coreName = fromString $ prefix <> "_" <> show groupIdx
 
-      if not (isSigned firstKind) then mapM (mkUnsignedAxiom coreName) ops
+      if not (isSigned firstKind)
+      then mapM (mkUnsignedAxiom coreName) ops
       else do
         let absAName = fromString $ "abs_a_" <> show groupIdx
             absBName = fromString $ "abs_b_" <> show groupIdx
