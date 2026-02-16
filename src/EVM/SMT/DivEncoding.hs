@@ -256,8 +256,8 @@ divModShiftBounds props = do
         -- Unsigned: fall back to full bvudiv axiom (these are usually fast)
         mapM (mkUnsignedAxiom coreName) ops
       else do
-        aenc <- exprToSMTWith AbstractDivision firstA
-        benc <- exprToSMTWith AbstractDivision firstB
+        aenc <- exprToSMTAbst firstA
+        benc <- exprToSMTAbst firstB
         let absoluteAEnc = "(ite (bvsge" `sp` aenc `sp` zero <> ")"
                    `sp` aenc `sp` "(bvsub" `sp` zero `sp` aenc <> "))"
             absoluteBEnc = "(ite (bvsge" `sp` benc `sp` zero <> ")"
