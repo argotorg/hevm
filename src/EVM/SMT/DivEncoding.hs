@@ -186,30 +186,6 @@ mkSignedAxiom coreName (kind, a, b) = do
                  else smtSmodResult aenc benc coreName
   pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
 
--- | For each pair of signed groups with the same operation type (udiv/urem),
--- emit a congruence lemma: if abs inputs are equal, results are equal.
--- This is a sound tautology (function congruence for bvudiv/bvurem) that
--- helps solvers avoid independent reasoning about multiple bvudiv terms.
-mkCongruenceLinks :: [(Int, [DivOp])] -> [SMTEntry]
-mkCongruenceLinks indexedGroups =
-  let signedDivGroups = [(i, ops) | (i, ops@((k,_,_):_)) <- indexedGroups , k == USDiv]  -- SDiv groups
-      signedModGroups = [(i, ops) | (i, ops@((k,_,_):_)) <- indexedGroups , k == USMod]  -- SMod groups
-  in    concatMap (mkPairLinks "udiv") (allPairs signedDivGroups)
-     <> concatMap (mkPairLinks "urem") (allPairs signedModGroups)
-  where
-    allPairs xs = [(a, b) | a <- xs, b <- xs, fst a < fst b]
-    mkPairLinks prefix' ((i, _), (j, _)) =
-      let absAi = fromString $ "abs_a_" <> show i
-          absBi = fromString $ "abs_b_" <> show i
-          absAj = fromString $ "abs_a_" <> show j
-          absBj = fromString $ "abs_b_" <> show j
-          coreI = fromString $ prefix' <> "_" <> show i
-          coreJ = fromString $ prefix' <> "_" <> show j
-      in [ SMTCommand $ "(assert (=> "
-            <> "(and (=" `sp` absAi `sp` absAj <> ") (=" `sp` absBi `sp` absBj <> "))"
-            <> "(=" `sp` coreI `sp` coreJ <> ")))" ]
-
-
 -- | Encode props with shift-based quotient bounds instead of bvudiv.
 -- When the dividend of a signed division has the form SHL(k, x), we know that
 -- bvudiv(|SHL(k,x)|, |y|) has a tight relationship with bvlshr(|SHL(k,x)|, k):
@@ -319,3 +295,28 @@ divModShiftBoundAxioms props = do
                 ]
         axioms <- mapM (mkSignedAxiom coreName) ops
         pure $ decls <> shiftBounds <> axioms
+
+-- | For each pair of signed groups with the same operation type (udiv/urem),
+-- emit a congruence lemma: if abs inputs are equal, results are equal.
+-- This is a sound tautology (function congruence for bvudiv/bvurem) that
+-- helps solvers avoid independent reasoning about multiple bvudiv terms.
+mkCongruenceLinks :: [(Int, [DivOp])] -> [SMTEntry]
+mkCongruenceLinks indexedGroups =
+  let signedDivGroups = [(i, ops) | (i, ops@((k,_,_):_)) <- indexedGroups , k == USDiv]  -- SDiv groups
+      signedModGroups = [(i, ops) | (i, ops@((k,_,_):_)) <- indexedGroups , k == USMod]  -- SMod groups
+  in    concatMap (mkPairLinks "udiv") (allPairs signedDivGroups)
+     <> concatMap (mkPairLinks "urem") (allPairs signedModGroups)
+  where
+    allPairs xs = [(a, b) | a <- xs, b <- xs, fst a < fst b]
+    mkPairLinks prefix' ((i, _), (j, _)) =
+      let absAi = fromString $ "abs_a_" <> show i
+          absBi = fromString $ "abs_b_" <> show i
+          absAj = fromString $ "abs_a_" <> show j
+          absBj = fromString $ "abs_b_" <> show j
+          coreI = fromString $ prefix' <> "_" <> show i
+          coreJ = fromString $ prefix' <> "_" <> show j
+      in [ SMTCommand $ "(assert (=> "
+            <> "(and (=" `sp` absAi `sp` absAj <> ") (=" `sp` absBi `sp` absBj <> "))"
+            <> "(=" `sp` coreI `sp` coreJ <> ")))" ]
+
+
