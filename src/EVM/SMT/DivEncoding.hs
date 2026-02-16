@@ -257,10 +257,8 @@ divModShiftBounds props = do
       else do
         aenc <- exprToSMTAbst firstA
         benc <- exprToSMTAbst firstB
-        let absAEnc = "(ite (bvsge" `sp` aenc `sp` zero <> ")"
-                   `sp` aenc `sp` "(bvsub" `sp` zero `sp` aenc <> "))"
-            absBEnc = "(ite (bvsge" `sp` benc `sp` zero <> ")"
-                   `sp` benc `sp` "(bvsub" `sp` zero `sp` benc <> "))"
+        let absAEnc = smtAbsolute aenc
+            absBEnc = smtAbsolute benc
         (decls, (absAName, absBName)) <- mkDivModDecls groupIdx absAEnc absBEnc coreName
 
         -- Generate shift bounds or fall back to bvudiv
