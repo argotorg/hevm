@@ -318,5 +318,3 @@ mkCongruenceLinks indexedGroups =
       in [ SMTCommand $ "(assert (=> "
             <> "(and (=" `sp` absAi `sp` absAj <> ") (=" `sp` absBi `sp` absBj <> "))"
             <> "(=" `sp` coreI `sp` coreJ <> ")))" ]
-
-
