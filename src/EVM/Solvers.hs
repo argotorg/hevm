@@ -142,7 +142,22 @@ checkSatWithProps sg props = do
       let refinement = divModGroundAxioms allProps
       if isLeft smt2Abstract then pure $ Error $ getError smt2Abstract
       else if isLeft refinement then pure $ Error $ getError refinement
-      else liftIO $ checkSatTwoPhase sg (Just props) (getNonError smt2Abstract) (SMTScript (getNonError refinement))
+      else liftIO $ do
+        ret <- checkSatTwoPhase sg (Just props) (getNonError smt2Abstract) (SMTScript (getNonError refinement))
+        case ret of
+          Cex cex -> do
+            when conf.debug $ traceM "Model from abstract query is not spurious, returning cex."
+            pure $ Cex cex
+          Qed -> do
+            when conf.debug $ traceM "Refinement successful, query is Qed."
+            pure Qed
+          Unknown msg -> do
+            when conf.debug $ traceM $ "Solver returned unknown during refinement phase: " <> msg
+            let withShiftBounds = assertPropsShiftBounds conf allProps
+            checkSat sg (Just props) withShiftBounds
+          Error msg -> do
+            when conf.debug $ traceM $ "Solver returned error during refinement phase: " <> msg
+            pure $ Error msg
 
 checkSat :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> IO SMTResult
 checkSat (SolverGroup taskq) props smt2 = do
