@@ -115,17 +115,17 @@ absKey (kind, a, b)
 --   - axioms expressing each abst_evm_bvXdiv call in terms of the shared result
 divModGroundAxioms :: [Prop] -> Err [SMTEntry]
 divModGroundAxioms props = do
-  let allDivs = nubOrd $ concatMap (foldProp collect []) props
-  if null allDivs then pure []
+  let allDivMods = nubOrd $ concatMap (foldProp collectDivMod []) props
+  if null allDivMods then pure []
   else do
-    let groups = groupBy (\a b -> absKey a == absKey b) $ sortBy (comparing absKey) allDivs
+    let groups = groupBy (\a b -> absKey a == absKey b) $ sortBy (comparing absKey) allDivMods
         indexedGroups = zip [0..] groups
     entries <- concat <$> mapM (uncurry mkGroupAxioms) indexedGroups
     let links = mkCongruenceLinks indexedGroups
     pure $ (SMTComment "division/modulo ground-instance axioms") : entries <> links
   where
-    collect :: forall a . Expr a -> [DivOp]
-    collect = \case
+    collectDivMod :: forall a . Expr a -> [DivOp]
+    collectDivMod = \case
       Div a b  -> [(UDiv, a, b)]
       SDiv a b -> [(USDiv, a, b)]
       Mod a b  -> [(UMod, a, b)]
