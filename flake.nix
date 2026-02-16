@@ -31,9 +31,19 @@
           overlays = [solc-pkgs.overlay];
           config = { allowBroken = true; };
         });
-        execution-spec-tests-fixtures = pkgs.fetchzip {
-          url = "https://github.com/ethereum/execution-spec-tests/releases/download/v5.4.0/fixtures_develop.tar.gz";
-          hash = "sha256-eHvmhnQzdIun6mgngR+LmTdh4wa7j6TPBTGkIhk9Tzc=";
+        execution-spec-tests-fixtures = pkgs.stdenv.mkDerivation {
+          name = "execution-spec-tests-fixtures";
+          src = pkgs.fetchurl {
+            url = "https://github.com/ethereum/execution-spec-tests/releases/download/v5.4.0/fixtures_develop.tar.gz";
+            hash = "sha256-PisC1J/pA+2k/Yyspcvw0TnEcOl+HemoUpmxsDT5cJk=";
+          };
+          phases = [ "unpackPhase" ];
+          unpackPhase = ''
+            mkdir -p $out
+            tar xf $src --strip-components=1 -C $out "fixtures/blockchain_tests"
+            # remove pure non-Osaka fixtures
+            grep -rLZ '"network": "Osaka"' $out | xargs -0 rm
+          '';
         };
         solc = (solc-pkgs.mkDefault pkgs pkgs.solc_0_8_31);
         testDeps = [
