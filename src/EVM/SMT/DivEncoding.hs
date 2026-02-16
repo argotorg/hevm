@@ -266,7 +266,7 @@ divModShiftBounds props = do
               (True, Just k) ->
                 let kLit = wordAsBV k
                     threshold = "(bvshl (_ bv1 256) " <> kLit <> ")"
-                    shifted = "(bvlshr" `sp` absAName <> " " <> kLit <> ")"
+                    shifted = "(bvlshr" `sp` absAName `sp` kLit <> ")"
                 in [ -- q = 0 when b = 0
                      SMTCommand $ "(assert (=> (=" `sp` absBName `sp` zero <> ") (=" `sp` coreName `sp` zero <> ")))"
                    , -- q <= abs_a (always true)
