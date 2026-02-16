@@ -85,12 +85,6 @@ data AbsKey
   | SignedAbsKey   (Expr EWord) (Expr EWord) DivModOp  -- ^ (dividend, divisor, op) - canonicalAbs normalized
   deriving (Eq, Ord)
 
--- | Normalize an expression for absolute value canonicalization.
--- |Sub(Lit 0, x)| = |x|, so we strip the negation wrapper.
-canonicalAbs :: Expr EWord -> Expr EWord
-canonicalAbs (Sub (Lit 0) x) = x
-canonicalAbs x = x
-
 isSigned :: DivOpKind -> Bool
 isSigned USDiv = True
 isSigned USMod = True
@@ -107,7 +101,7 @@ divModOp k = if isDiv k then IsDiv else IsMod
 absKey :: DivOp -> AbsKey
 absKey (kind, a, b)
   | not (isSigned kind) = UnsignedAbsKey a b (divModOp kind)
-  | otherwise           = SignedAbsKey (canonicalAbs a) (canonicalAbs b) (divModOp kind)
+  | otherwise           = SignedAbsKey a b (divModOp kind)
 
 -- | Generate ground-instance axioms with CSE'd bvudiv/bvurem intermediates.
 -- For each group of div/mod ops sharing the same (|a|, |b|), generates:
@@ -144,13 +138,10 @@ divModGroundAxioms props = do
       else do
         let absAName = fromString $ "abs_a_" <> show groupIdx
             absBName = fromString $ "abs_b_" <> show groupIdx
-        -- Use the canonical (non-negated) form for abs value encoding
-        let canonA = canonicalAbs firstA
-            canonB = canonicalAbs firstB
-        canonAenc <- exprToSMTAbs canonA
-        canonBenc <- exprToSMTAbs canonB
-        let absAEnc = smtAbs canonAenc
-            absBEnc = smtAbs canonBenc
+        aEnc <- exprToSMTAbs firstA
+        bEnc <- exprToSMTAbs firstB
+        let absAEnc = smtAbs aEnc
+            absBEnc = smtAbs bEnc
             op = if isDiv' then "bvudiv" else "bvurem"
             coreEnc = smtZeroGuard absBName $ "(" <> op `sp` absAName `sp` absBName <> ")"
         let decls = [ SMTCommand $ "(declare-const" `sp` absAName `sp` "(_ BitVec 256))"
@@ -198,10 +189,10 @@ assertPropsShiftBounds conf ps = do
   base <- if not conf.simp then mkBase False ps
           else mkBase True (decompose conf ps)
   bounds <- divModBounds ps
-  axioms <- divModShiftBoundAxioms ps
+  shiftBounds <- divModShiftBounds ps
   pure $ base
       <> SMT2 (SMTScript bounds) mempty mempty
-      <> SMT2 (SMTScript axioms) mempty mempty
+      <> SMT2 (SMTScript shiftBounds) mempty mempty
 
 isMod :: DivOpKind -> Bool
 isMod UMod  = True
@@ -211,8 +202,8 @@ isMod _     = False
 -- | Generate shift-based bound axioms (no bvudiv/bvurem).
 -- For each group of signed div/mod ops, if the dividend has a SHL(k, _) structure,
 -- generates bounds using bvlshr instead of bvudiv.
-divModShiftBoundAxioms :: [Prop] -> Err [SMTEntry]
-divModShiftBoundAxioms props = do
+divModShiftBounds :: [Prop] -> Err [SMTEntry]
+divModShiftBounds props = do
   let allDivs = nubBy eqDivOp $ concatMap (foldProp collectDivOps []) props
   if null allDivs then pure []
   else do
@@ -238,10 +229,9 @@ divModShiftBoundAxioms props = do
     -- | Extract shift amount from a dividend expression.
     -- Returns Just k if the canonical (abs-stripped) dividend is SHL(Lit k, _),
     -- or if it is a literal that is an exact power of 2 (Lit 2^k).
-    extractShift :: Expr EWord -> Maybe Int
-    extractShift (SHL (Lit k) _) = Just (fromIntegral k)
-    extractShift (Sub (Lit 0) x) = extractShift x
-    extractShift (Lit n) | n > 0, n .&. (n - 1) == 0 = Just (countTrailingZeros n)
+    extractShift :: Expr EWord -> Maybe W256
+    extractShift (SHL (Lit k) _) = Just k
+    extractShift (Lit n) | n > 0, n .&. (n - 1) == 0 = Just (fromIntegral $ countTrailingZeros n)
     extractShift _ = Nothing
 
     mkGroupShiftAxioms :: Int -> [DivOp] -> Err [SMTEntry]
@@ -257,10 +247,8 @@ divModShiftBoundAxioms props = do
       else do
         let absAName = fromString $ "abs_a_" <> show groupIdx
             absBName = fromString $ "abs_b_" <> show groupIdx
-            canonA = canonicalAbs firstA
-            canonB = canonicalAbs firstB
-        canonAenc <- exprToSMTWith AbstractDivision canonA
-        canonBenc <- exprToSMTWith AbstractDivision canonB
+        canonAenc <- exprToSMTWith AbstractDivision firstA
+        canonBenc <- exprToSMTWith AbstractDivision firstB
         let absAEnc = "(ite (bvsge" `sp` canonAenc `sp` zero <> ")"
                    `sp` canonAenc `sp` "(bvsub" `sp` zero `sp` canonAenc <> "))"
             absBEnc = "(ite (bvsge" `sp` canonBenc `sp` zero <> ")"
@@ -272,7 +260,7 @@ divModShiftBoundAxioms props = do
                     , SMTCommand $ "(assert (=" `sp` absBName `sp` absBEnc <> "))"
                     ]
         -- Generate shift bounds or fall back to bvudiv
-        let shiftBounds = case (isDiv', extractShift canonA) of
+        let shiftBounds = case (isDiv', extractShift firstA) of
               (True, Just k) ->
                 let kLit = fromString $ show k
                     threshold = "(bvshl (_ bv1 256) (_ bv" <> kLit <> " 256))"
@@ -283,8 +271,8 @@ divModShiftBoundAxioms props = do
                      SMTCommand $ "(assert (bvule" `sp` coreName `sp` absAName <> "))"
                    , -- if |b| >= 2^k then q <= |a| >> k
                      SMTCommand $ "(assert (=> (bvuge" `sp` absBName `sp` threshold <> ") (bvule" `sp` coreName `sp` shifted <> ")))"
-                   , -- if |b| < 2^k then q >= |a| >> k
-                     SMTCommand $ "(assert (=> (bvult" `sp` absBName `sp` threshold <> ") (bvuge" `sp` coreName `sp` shifted <> ")))"
+                   , -- if 0 < |b| < 2^k then q >= |a| >> k
+                     SMTCommand $ "(assert (=> (and (bvult" `sp` absBName `sp` threshold <> ") (distinct " `sp` absBName `sp` zero <> ")) (bvuge" `sp` coreName `sp` shifted <> ")))"
                    ]
               _ ->
                 -- No shift structure or it's a modulo op: use abstract bounds only.

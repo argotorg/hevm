@@ -154,7 +154,14 @@ checkSatWithProps sg props = do
           Unknown msg -> do
             when conf.debug $ traceM $ "Solver returned unknown during refinement phase: " <> msg
             let withShiftBounds = assertPropsShiftBounds conf allProps
-            checkSat sg (Just props) withShiftBounds
+            checkSat sg (Just props) withShiftBounds >>= \case
+              Qed -> do
+                when conf.debug $ traceM "Refinement with shift bounds successful, query is Qed."
+                pure Qed
+              Error msg2 -> do
+                when conf.debug $ traceM $ "Solver returned error during refinement with shift bounds: " <> msg2
+                pure $ Error msg2
+              _ -> pure ret -- can't trust Cex here, return old value
           Error msg -> do
             when conf.debug $ traceM $ "Solver returned error during refinement phase: " <> msg
             pure $ Error msg
