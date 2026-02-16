@@ -3,8 +3,7 @@
     Description: Abstract division/modulo encoding for two-phase SMT solving (Halmos-style)
 -}
 module EVM.SMT.DivEncoding
-  ( divModAbstractDecls
-  , divModGroundAxioms
+  ( divModGroundAxioms
   , assertProps
   , assertPropsAbstract
   , assertPropsShiftBounds
