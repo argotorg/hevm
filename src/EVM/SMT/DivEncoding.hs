@@ -237,7 +237,7 @@ divModShiftBounds props = do
       k1 == k2 && a1 == a2 && b1 == b2
 
     -- | Extract shift amount from a dividend expression.
-    -- Returns Just k if the canonical (abs-stripped) dividend is SHL(Lit k, _),
+    -- Returns Just k if the dividend is SHL(Lit k, _),
     -- or if it is a literal that is an exact power of 2 (Lit 2^k).
     extractShift :: Expr EWord -> Maybe W256
     extractShift (SHL (Lit k) _) = Just k
@@ -281,7 +281,7 @@ divModShiftBounds props = do
               _ ->
                 -- No shift structure or it's a modulo op: use abstract bounds only.
                 -- This avoids bvudiv entirely, making the encoding an overapproximation.
-                -- Only UNSAT results are sound (checked by caller).
+                -- Only UNSAT results are sound
                 [ SMTCommand $ "(assert (=> (=" `sp` absAName `sp` zero <> ") (=" `sp` coreName `sp` zero <> ")))"
                 , SMTCommand $ "(assert (bvule" `sp` coreName `sp` absAName <> "))"
                 ]
