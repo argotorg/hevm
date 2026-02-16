@@ -20,6 +20,7 @@ import Data.Typeable
 import EVM.Effects
 import EVM.Expr qualified as Expr
 import EVM.Expr.Generator
+import EVM.Format (hexText)
 import EVM.Solvers hiding (checkSat)
 import EVM.SymExec (subModel)
 import EVM.Traversals (mapExprM)
@@ -61,6 +62,24 @@ storageTests = testGroup "Storage tests"
     , testCase "read-past-write" $ assertEqual errorMsg
         (Lit 0xab)
         (Expr.readStorage' (Lit 0x0) (SStore (Lit 0x1) (Var "b") (ConcreteStore $ Map.fromList [(0x0, 0xab)])))
+    , testCase "simplify-storage-wordToAddr" $ do
+       let a = "0x000000000000000000000000d95322745865822719164b1fc167930754c248de000000000000000000000000000000000000000000000000000000000000004a"
+           store = ConcreteStore (Map.fromList[(W256 0xebd33f63ba5dda53a45af725baed5628cdad261db5319da5f5d921521fe1161d,W256 0x5842cf)])
+           expr = SLoad (Keccak (ConcreteBuf (hexText a))) store
+           simpExpr = Expr.wordToAddr expr
+           simpExpr2 = Expr.concKeccakSimpExpr expr
+       assertEqual "Expression should simplify to value." simpExpr (Just $ LitAddr 0x5842cf)
+       assertEqual "Expression should simplify to value." simpExpr2 (Lit 0x5842cf)
+    , testCase "simplify-storage-wordToAddr-complex" $ do
+       let a = "0x000000000000000000000000d95322745865822719164b1fc167930754c248de000000000000000000000000000000000000000000000000000000000000004a"
+           store = ConcreteStore (Map.fromList[(W256 0xebd33f63ba5dda53a45af725baed5628cdad261db5319da5f5d921521fe1161d,W256 0x5842cf)])
+           expr = SLoad (Keccak (ConcreteBuf (hexText a))) store
+           writeWChain = WriteWord (Lit 0x32) (Lit 0x72) (WriteWord (Lit 0x0) expr (ConcreteBuf ""))
+           kecc = Keccak (CopySlice (Lit 0x0) (Lit 0x0) (Lit 0x20) (WriteWord (Lit 0x0) expr (writeWChain)) (ConcreteBuf ""))
+           keccAnd =  (And (Lit 1461501637330902918203684832716283019655932542975) kecc)
+           outer = And (Lit 1461501637330902918203684832716283019655932542975) (SLoad (keccAnd) (ConcreteStore (Map.fromList[(W256 1184450375068808042203882151692185743185288360635, W256 0xacab)])))
+           simp = Expr.concKeccakSimpExpr outer
+       assertEqual "Expression should simplify to value." simp (Lit 0xacab)
   ]
   where errorMsg = "Storage read expression not simplified correctly"
 

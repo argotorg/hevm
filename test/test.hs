@@ -24,7 +24,6 @@ import Data.Either
 import Data.List qualified as List
 import Data.Map.Strict qualified as Map
 import Data.Maybe
-import Data.Monoid (Any(..))
 import Data.Set qualified as Set
 import Data.String.Here
 import Data.Text (Text)
@@ -32,8 +31,6 @@ import Data.Text qualified as T
 import Data.Tuple.Extra
 import Data.Tree (flatten)
 import Data.Vector qualified as V
-import Data.Word (Word8)
-import Data.Char (digitToInt)
 import Test.Tasty
 import Test.Tasty.QuickCheck hiding (Failure, Success)
 import Test.QuickCheck.Instances.Text()
@@ -64,7 +61,6 @@ import EVM.Stepper qualified as Stepper
 import EVM.SymExec
 import EVM.Test.FuzzSymExec qualified as FuzzSymExec
 import EVM.Test.Utils (runForgeTest, runForgeTestCustom)
-import EVM.Traversals
 import EVM.Types hiding (Env)
 import EVM.Effects
 import EVM.UnitTest (writeTrace, printWarnings)
@@ -74,6 +70,7 @@ import EVM.Keccak (concreteKeccaks)
 import EVM.Expr.ExprTests qualified as ExprTests
 import EVM.ConcreteExecution.ConcreteExecutionTests qualified as ConcreteExecutionTests
 import EVM.Equivalence.EquivalenceTests qualified as EquivalenceTests
+import EVM.SymExec.SymExecTests qualified as SymExecTests
 
 testEnv :: Env
 testEnv = Env { config = defaultConfig {
@@ -139,379 +136,8 @@ tests = testGroup "hevm"
   [ FuzzSymExec.tests
   , ExprTests.tests
   , ConcreteExecutionTests.tests
+  , SymExecTests.tests
   , EquivalenceTests.tests
-  , testGroup "simplify-storage"
-    [ test "simplify-storage-array-only-static" $ do
-       Just c <- solcRuntime "MyContract"
-        [i|
-        contract MyContract {
-          uint[] a;
-          function transfer(uint acct, uint val1, uint val2) public {
-            unchecked {
-              a[0] = val1 + 1;
-              a[1] = val2 + 2;
-              assert(a[0]+a[1] == val1 + val2 + 3);
-            }
-          }
-        }
-        |]
-       paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "transfer(uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
-       assertEqualM "Expression is not clean." (badStoresInExpr paths) False
-    -- This case is somewhat artificial. We can't simplify this using only
-    -- static rewrite rules, because acct is totally abstract and acct + 1
-    -- could overflow back to zero. we may be able to do better if we have some
-    -- smt assisted simplification that can take branch conditions into account.
-    , expectFail $ test "simplify-storage-array-symbolic-index" $ do
-       Just c <- solcRuntime "MyContract"
-        [i|
-        contract MyContract {
-          uint b;
-          uint[] a;
-          function transfer(uint acct, uint val1) public {
-            unchecked {
-              a[acct] = val1;
-              assert(a[acct] == val1);
-            }
-          }
-        }
-        |]
-       paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "transfer(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
-       -- T.writeFile "symbolic-index.expr" $ formatExpr paths
-       assertEqualM "Expression is not clean." (badStoresInExpr paths) False
-    , expectFail $ test "simplify-storage-array-of-struct-symbolic-index" $ do
-       Just c <- solcRuntime "MyContract"
-        [i|
-        contract MyContract {
-          struct MyStruct {
-            uint a;
-            uint b;
-          }
-          MyStruct[] arr;
-          function transfer(uint acct, uint val1, uint val2) public {
-            unchecked {
-              arr[acct].a = val1+1;
-              arr[acct].b = val1+2;
-              assert(arr[acct].a + arr[acct].b == val1+val2+3);
-            }
-          }
-        }
-        |]
-       paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "transfer(uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
-       assertEqualM "Expression is not clean." (badStoresInExpr paths) False
-    , test "simplify-storage-array-loop-nonstruct" $ do
-       Just c <- solcRuntime "MyContract"
-        [i|
-        contract MyContract {
-          uint[] a;
-          function transfer(uint v) public {
-            for (uint i = 0; i < a.length; i++) {
-              a[i] = v;
-              assert(a[i] == v);
-            }
-          }
-        }
-        |]
-       let veriOpts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 }}
-       paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "transfer(uint256)" [AbiUIntType 256])) [] veriOpts
-       assertEqualM "Expression is not clean." (badStoresInExpr paths) False
-    , test "simplify-storage-map-newtest1" $ do
-       Just c <- solcRuntime "MyContract"
-        [i|
-        contract MyContract {
-          mapping (uint => uint) a;
-          mapping (uint => uint) b;
-          function fun(uint v, uint i) public {
-            require(i < 1000);
-            require(v < 1000);
-            b[i+v] = v+1;
-            a[i] = v;
-            b[i+1] = v+1;
-            assert(a[i] == v);
-            assert(b[i+1] == v+1);
-          }
-        }
-        |]
-       paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "fun(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
-       assertEqualM "Expression is not clean." (badStoresInExpr paths) False
-       (_, []) <- withDefaultSolver $ \s -> checkAssert s [0x11] c (Just (Sig "fun(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
-       liftIO $ putStrLn "OK"
-    , ignoreTest $ test "simplify-storage-map-todo" $ do
-       Just c <- solcRuntime "MyContract"
-        [i|
-        contract MyContract {
-          mapping (uint => uint) a;
-          mapping (uint => uint) b;
-          function fun(uint v, uint i) public {
-            require(i < 1000);
-            require(v < 1000);
-            a[i] = v;
-            b[i+1] = v+1;
-            b[i+v] = 55; // note: this can overwrite b[i+1], hence assert below can fail
-            assert(a[i] == v);
-            assert(b[i+1] == v+1);
-          }
-        }
-        |]
-       -- TODO: expression below contains (load idx1 (store idx1 (store idx1 (store idx0)))), and the idx0
-       --       is not stripped. This is due to us not doing all we can in this case, see
-       --       note above readStorage. Decompose remedies this (when it can be decomposed)
-       -- paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "fun(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
-       -- putStrLnM $ T.unpack $ formatExpr paths
-       (_, [Cex _]) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c (Just (Sig "fun(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
-       liftIO $ putStrLn "OK"
-    , test "simplify-storage-array-loop-struct" $ do
-       Just c <- solcRuntime "MyContract"
-        [i|
-        contract MyContract {
-          struct MyStruct {
-            uint a;
-            uint b;
-          }
-          MyStruct[] arr;
-          function transfer(uint v1, uint v2) public {
-            for (uint i = 0; i < arr.length; i++) {
-              arr[i].a = v1+1;
-              arr[i].b = v2+2;
-              assert(arr[i].a + arr[i].b == v1 + v2 + 3);
-            }
-          }
-        }
-        |]
-       let veriOpts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 }}
-       paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "transfer(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) [] veriOpts
-       assertEqualM "Expression is not clean." (badStoresInExpr paths) False
-    , test "decompose-1" $ do
-      Just c <- solcRuntime "MyContract"
-        [i|
-        contract MyContract {
-          mapping (address => uint) balances;
-          function prove_mapping_access(address x, address y) public {
-              require(x != y);
-              balances[x] = 1;
-              balances[y] = 2;
-              assert(balances[x] != balances[y]);
-          }
-        }
-        |]
-      paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "prove_mapping_access(address,address)" [AbiAddressType, AbiAddressType])) [] defaultVeriOpts
-      let simpExpr = map (mapExprM Expr.decomposeStorage) paths
-      assertEqualM "Decompose did not succeed." (all isJust simpExpr) True
-    , test "decompose-2" $ do
-      Just c <- solcRuntime "MyContract"
-        [i|
-        contract MyContract {
-          mapping (address => uint) balances;
-          function prove_mixed_symoblic_concrete_writes(address x, uint v) public {
-              balances[x] = v;
-              balances[address(0)] = balances[x];
-              assert(balances[address(0)] == v);
-          }
-        }
-        |]
-      paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "prove_mixed_symoblic_concrete_writes(address,uint256)" [AbiAddressType, AbiUIntType 256])) [] defaultVeriOpts
-      let pathsSimp = map (mapExprM (Expr.decomposeStorage . Expr.concKeccakSimpExpr . Expr.simplify)) paths
-      -- putStrLnM $ T.unpack $ formatExpr (fromJust pathsSimp)
-      assertEqualM "Decompose did not succeed." (all isJust pathsSimp) True
-    , test "decompose-3" $ do
-      Just c <- solcRuntime "MyContract"
-        [i|
-        contract MyContract {
-          uint[] a;
-          function prove_array(uint x, uint v1, uint y, uint v2) public {
-              require(v1 != v2);
-              a[x] = v1;
-              a[y] = v2;
-              assert(a[x] == a[y]);
-          }
-        }
-        |]
-      paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "prove_array(uint256,uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
-      let simpExpr = map (mapExprM Expr.decomposeStorage) paths
-      assertEqualM "Decompose did not succeed." (all isJust simpExpr) True
-    , test "decompose-4-mixed" $ do
-      Just c <- solcRuntime "MyContract"
-        [i|
-        contract MyContract {
-          uint[] a;
-          mapping( uint => uint) balances;
-          function prove_array(uint x, uint v1, uint y, uint v2) public {
-              require(v1 != v2);
-              balances[x] = v1+1;
-              balances[y] = v1+2;
-              a[x] = v1;
-              assert(balances[x] != balances[y]);
-          }
-        }
-        |]
-      paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "prove_array(uint256,uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
-      let simpExpr = map (mapExprM Expr.decomposeStorage) paths
-      -- putStrLnM $ T.unpack $ formatExpr (fromJust simpExpr)
-      assertEqualM "Decompose did not succeed." (all isJust simpExpr) True
-    , test "decompose-5-mixed" $ do
-      Just c <- solcRuntime "MyContract"
-        [i|
-        contract MyContract {
-          mapping (address => uint) balances;
-          mapping (uint => bool) auth;
-          uint[] arr;
-          uint a;
-          uint b;
-          function prove_mixed(address x, address y, uint val) public {
-            b = val+1;
-            require(x != y);
-            balances[x] = val;
-            a = val;
-            arr[val] = 5;
-            auth[val+1] = true;
-            balances[y] = val+2;
-            if (balances[y] == balances[y]) {
-                assert(balances[y] == val);
-            }
-          }
-        }
-        |]
-      paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "prove_mixed(address,address,uint256)" [AbiAddressType, AbiAddressType, AbiUIntType 256])) [] defaultVeriOpts
-      let simpExpr = map (mapExprM Expr.decomposeStorage) paths
-      -- putStrLnM $ T.unpack $ formatExpr (fromJust simpExpr)
-      assertEqualM "Decompose did not succeed." (all isJust simpExpr) True
-    , test "decompose-6" $ do
-      Just c <- solcRuntime "MyContract"
-        [i|
-        contract MyContract {
-          uint[] arr;
-          function prove_mixed(uint val) public {
-            arr[val] = 5;
-            arr[val+1] = val+5;
-            assert(arr[val] == arr[val+1]);
-          }
-        }
-        |]
-      paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "prove_mixed(uint256)" [AbiUIntType 256])) [] defaultVeriOpts
-      let simpExpr = map (mapExprM Expr.decomposeStorage) paths
-      -- putStrLnM $ T.unpack $ formatExpr (fromJust simpExpr)
-      assertEqualM "Decompose did not succeed." (all isJust simpExpr) True
-    -- This test uses array.length, which is is concrete 0 only in case we start with an empty storage
-    -- otherwise (i.e. with getExpr) it's symbolic, and the exploration loops forever
-    , test "decompose-7-emtpy-storage" $ do
-       Just c <- solcRuntime "MyContract" [i|
-        contract MyContract {
-          uint[] arr;
-          function nested_append(uint v, uint w) public {
-            arr.push(w);
-            arr.push();
-            arr.push();
-            arr.push(arr[0]-1);
-
-            arr[2] = v;
-            arr[1] = arr[0]-arr[2];
-
-            assert(arr.length == 4);
-            assert(arr[0] == w);
-            assert(arr[1] == w-v);
-            assert(arr[2] == v);
-            assert(arr[3] == w-1);
-          }
-       } |]
-       let sig = Just $ Sig "nested_append(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256]
-       paths <- withDefaultSolver $ \s -> getExprEmptyStore s c sig [] defaultVeriOpts
-       assertEqualM "Expression must be clean." (badStoresInExpr paths) False
-    , test "simplify-storage-map-only-static" $ do
-       Just c <- solcRuntime "MyContract"
-        [i|
-        contract MyContract {
-          mapping(uint => uint) items1;
-          function transfer(uint acct, uint val1, uint val2) public {
-            unchecked {
-              items1[0] = val1+1;
-              items1[1] = val2+2;
-              assert(items1[0]+items1[1] == val1 + val2 + 3);
-            }
-          }
-        }
-        |]
-       let sig = (Just (Sig "transfer(uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256]))
-       paths <- withDefaultSolver $ \s -> getExpr s c sig [] defaultVeriOpts
-       let pathsSimp = map (mapExpr (Expr.concKeccakSimpExpr . Expr.simplify)) paths
-       assertEqualM "Expression is not clean." (badStoresInExpr pathsSimp) False
-    , test "simplify-storage-map-only-2" $ do
-       Just c <- solcRuntime "MyContract"
-        [i|
-        contract MyContract {
-          mapping(uint => uint) items1;
-          function transfer(uint acct, uint val1, uint val2) public {
-            unchecked {
-              items1[acct] = val1+1;
-              items1[acct+1] = val2+2;
-              assert(items1[acct]+items1[acct+1] == val1 + val2 + 3);
-            }
-          }
-        }
-        |]
-       paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "transfer(uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
-       -- putStrLnM $ T.unpack $ formatExpr paths
-       assertEqualM "Expression is not clean." (badStoresInExpr paths) False
-    , test "simplify-storage-map-with-struct" $ do
-       Just c <- solcRuntime "MyContract"
-        [i|
-        contract MyContract {
-          struct MyStruct {
-            uint a;
-            uint b;
-          }
-          mapping(uint => MyStruct) items1;
-          function transfer(uint acct, uint val1, uint val2) public {
-            unchecked {
-              items1[acct].a = val1+1;
-              items1[acct].b = val2+2;
-              assert(items1[acct].a+items1[acct].b == val1 + val2 + 3);
-            }
-          }
-        }
-        |]
-       paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "transfer(uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
-       assertEqualM "Expression is not clean." (badStoresInExpr paths) False
-    , test "simplify-storage-map-and-array" $ do
-       Just c <- solcRuntime "MyContract"
-        [i|
-        contract MyContract {
-          uint[] a;
-          mapping(uint => uint) items1;
-          mapping(uint => uint) items2;
-          function transfer(uint acct, uint val1, uint val2) public {
-            uint beforeVal1 = items1[acct];
-            uint beforeVal2 = items2[acct];
-            unchecked {
-              items1[acct] = val1+1;
-              items2[acct] = val2+2;
-              a[0] = val1 + val2 + 1;
-              a[1] = val1 + val2 + 2;
-              assert(items1[acct]+items2[acct]+a[0]+a[1] > beforeVal1 + beforeVal2);
-            }
-          }
-        }
-       |]
-       paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "transfer(uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
-       -- putStrLnM $ T.unpack $ formatExpr paths
-       assertEqualM "Expression is not clean." (badStoresInExpr paths) False
-    , test "simplify-storage-wordToAddr" $ do
-       let a = "000000000000000000000000d95322745865822719164b1fc167930754c248de000000000000000000000000000000000000000000000000000000000000004a"
-           store = ConcreteStore (Map.fromList[(W256 0xebd33f63ba5dda53a45af725baed5628cdad261db5319da5f5d921521fe1161d,W256 0x5842cf)])
-           expr = SLoad (Keccak (ConcreteBuf (hexStringToByteString a))) store
-           simpExpr = Expr.wordToAddr expr
-           simpExpr2 = Expr.concKeccakSimpExpr expr
-       assertEqualM "Expression should simplify to value." simpExpr (Just $ LitAddr 0x5842cf)
-       assertEqualM "Expression should simplify to value." simpExpr2 (Lit 0x5842cf)
-    , test "simplify-storage-wordToAddr-complex" $ do
-       let a = "000000000000000000000000d95322745865822719164b1fc167930754c248de000000000000000000000000000000000000000000000000000000000000004a"
-           store = ConcreteStore (Map.fromList[(W256 0xebd33f63ba5dda53a45af725baed5628cdad261db5319da5f5d921521fe1161d,W256 0x5842cf)])
-           expr = SLoad (Keccak (ConcreteBuf (hexStringToByteString a))) store
-           writeWChain = WriteWord (Lit 0x32) (Lit 0x72) (WriteWord (Lit 0x0) expr (ConcreteBuf ""))
-           kecc = Keccak (CopySlice (Lit 0x0) (Lit 0x0) (Lit 0x20) (WriteWord (Lit 0x0) expr (writeWChain)) (ConcreteBuf ""))
-           keccAnd =  (And (Lit 1461501637330902918203684832716283019655932542975) kecc)
-           outer = And (Lit 1461501637330902918203684832716283019655932542975) (SLoad (keccAnd) (ConcreteStore (Map.fromList[(W256 1184450375068808042203882151692185743185288360635, W256 0xacab)])))
-           simp = Expr.concKeccakSimpExpr outer
-       assertEqualM "Expression should simplify to value." simp (Lit 0xacab)
-    ]
   , testGroup "StorageTests"
     [ test "accessStorage uses fetchedStorage" $ do
         let dummyContract =
@@ -4581,15 +4207,6 @@ instance Arbitrary RLPData where
 genNat :: Gen Int
 genNat = fmap unsafeInto (arbitrary :: Gen Natural)
 
-
--- Finds SLoad -> SStore. This should not occur in most scenarios
--- as we can simplify them away
-badStoresInExpr :: [Expr a] -> Bool
-badStoresInExpr exprs = any (getAny . foldExpr match mempty) exprs
-  where
-      match (SLoad _ (SStore _ _ _)) = Any True
-      match _ = Any False
-
 data Invocation
   = SolidityCall Text [AbiValue]
   deriving Show
@@ -4654,30 +4271,3 @@ expectedConcVals nm val = case val of
   where
     mkWord = word . encodeAbiValue
 
-hexStringToByteString :: String -> BS.ByteString
-hexStringToByteString hexStr
-    | odd (length hexStr) = error "Hex string has an odd length"
-    | otherwise = case traverse hexPairToByte (pairs hexStr) of
-        Just bytes -> (BS.pack bytes)
-        Nothing -> error "Invalid hex string"
-  where
-    -- Convert a pair of hex characters to a byte
-    hexPairToByte :: (Char, Char) -> Maybe Word8
-    hexPairToByte (c1, c2) = do
-        b1 <- hexCharToDigit c1
-        b2 <- hexCharToDigit c2
-        return $ fromIntegral (b1 * 16 + b2)
-
-    -- Convert a single hex character to its integer value
-    hexCharToDigit :: Char -> Maybe Int
-    hexCharToDigit c
-        | c >= '0' && c <= '9' = Just (digitToInt c)
-        | c >= 'a' && c <= 'f' = Just (digitToInt c)
-        | c >= 'A' && c <= 'F' = Just (digitToInt c)
-        | otherwise = Nothing
-
-    -- Split a string into pairs of characters
-    pairs :: [a] -> [(a, a)]
-    pairs [] = []
-    pairs (x:y:xs) = (x, y) : pairs xs
-    pairs _ = error "Unexpected odd length"
