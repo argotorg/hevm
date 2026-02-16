@@ -82,7 +82,7 @@ type DivOp = (DivOpKind, Expr EWord, Expr EWord)
 
 data AbsKey
   = UnsignedAbsKey (Expr EWord) (Expr EWord) DivModOp  -- ^ (dividend, divisor, op) - raw operands
-  | SignedAbsKey   (Expr EWord) (Expr EWord) DivModOp  -- ^ (dividend, divisor, op) - canonicalAbs normalized
+  | SignedAbsKey   (Expr EWord) (Expr EWord) DivModOp  -- ^ (dividend, divisor, op) - absolute values
   deriving (Eq, Ord)
 
 isSigned :: DivOpKind -> Bool
@@ -102,6 +102,19 @@ absKey :: DivOp -> AbsKey
 absKey (kind, a, b)
   | not (isSigned kind) = UnsignedAbsKey a b (divModOp kind)
   | otherwise           = SignedAbsKey a b (divModOp kind)
+
+-- | Helper to generate common declarations for abs_a, abs_b, and core result.
+mkDivModDecls :: Int -> Builder -> Builder -> Builder -> Err ([SMTEntry], (Builder, Builder))
+mkDivModDecls groupIdx absAEnc absBEnc coreName = do
+  let absAName = fromString $ "abs_a_" <> show groupIdx
+      absBName = fromString $ "abs_b_" <> show groupIdx
+  let decls = [ SMTCommand $ "(declare-const" `sp` absAName `sp` "(_ BitVec 256))"
+              , SMTCommand $ "(declare-const" `sp` absBName `sp` "(_ BitVec 256))"
+              , SMTCommand $ "(declare-const" `sp` coreName `sp` "(_ BitVec 256))"
+              , SMTCommand $ "(assert (=" `sp` absAName `sp` absAEnc <> "))"
+              , SMTCommand $ "(assert (=" `sp` absBName `sp` absBEnc <> "))"
+              ]
+  pure (decls, (absAName, absBName))
 
 -- | Generate ground-instance axioms with CSE'd bvudiv/bvurem intermediates.
 -- For each group of div/mod ops sharing the same (|a|, |b|), generates:
@@ -137,23 +150,20 @@ divModGroundAxioms props = do
       if not (isSigned firstKind)
       then mapM (mkUnsignedAxiom coreName) ops
       else do
-        let absAName = fromString $ "abs_a_" <> show groupIdx
-            absBName = fromString $ "abs_b_" <> show groupIdx
-        aEnc <- exprToSMTAbst firstA
-        bEnc <- exprToSMTAbst firstB
-        let absAEnc = smtAbsolute aEnc
-            absBEnc = smtAbsolute bEnc
+        aenc <- exprToSMTAbst firstA
+        benc <- exprToSMTAbst firstB
+        let absAEnc = smtAbsolute aenc
+            absBEnc = smtAbsolute benc
             op = if isDiv' then "bvudiv" else "bvurem"
+            absAName = fromString $ "abs_a_" <> show groupIdx
+            absBName = fromString $ "abs_b_" <> show groupIdx
             coreEnc = smtZeroGuard absBName $ "(" <> op `sp` absAName `sp` absBName <> ")"
-        let decls = [ SMTCommand $ "(declare-const" `sp` absAName `sp` "(_ BitVec 256))"
-                    , SMTCommand $ "(declare-const" `sp` absBName `sp` "(_ BitVec 256))"
-                    , SMTCommand $ "(declare-const" `sp` coreName `sp` "(_ BitVec 256))"
-                    , SMTCommand $ "(assert (=" `sp` absAName `sp` absAEnc <> "))"
-                    , SMTCommand $ "(assert (=" `sp` absBName `sp` absBEnc <> "))"
-                    , SMTCommand $ "(assert (=" `sp` coreName `sp` coreEnc <> "))"
-                    ]
+
+        (decls, _) <- mkDivModDecls groupIdx absAEnc absBEnc coreName
+
+        let coreAssert = SMTCommand $ "(assert (=" `sp` coreName `sp` coreEnc <> "))"
         axioms <- mapM (mkSignedAxiom coreName) ops
-        pure $ decls <> axioms
+        pure $ decls <> [coreAssert] <> axioms
 
 -- | Encode unsigned division/remainder axiom: abstract(a,b) = concrete(a,b)
 mkUnsignedAxiom :: Builder -> DivOp -> Err SMTEntry
@@ -246,20 +256,15 @@ divModShiftBounds props = do
         -- Unsigned: fall back to full bvudiv axiom (these are usually fast)
         mapM (mkUnsignedAxiom coreName) ops
       else do
-        let absAName = fromString $ "abs_a_" <> show groupIdx
-            absBName = fromString $ "abs_b_" <> show groupIdx
-        canonAenc <- exprToSMTWith AbstractDivision firstA
-        canonBenc <- exprToSMTWith AbstractDivision firstB
-        let absAEnc = "(ite (bvsge" `sp` canonAenc `sp` zero <> ")"
-                   `sp` canonAenc `sp` "(bvsub" `sp` zero `sp` canonAenc <> "))"
-            absBEnc = "(ite (bvsge" `sp` canonBenc `sp` zero <> ")"
-                   `sp` canonBenc `sp` "(bvsub" `sp` zero `sp` canonBenc <> "))"
-        let decls = [ SMTCommand $ "(declare-const" `sp` absAName `sp` "(_ BitVec 256))"
-                    , SMTCommand $ "(declare-const" `sp` absBName `sp` "(_ BitVec 256))"
-                    , SMTCommand $ "(declare-const" `sp` coreName `sp` "(_ BitVec 256))"
-                    , SMTCommand $ "(assert (=" `sp` absAName `sp` absAEnc <> "))"
-                    , SMTCommand $ "(assert (=" `sp` absBName `sp` absBEnc <> "))"
-                    ]
+        aenc <- exprToSMTWith AbstractDivision firstA
+        benc <- exprToSMTWith AbstractDivision firstB
+        let absoluteAEnc = "(ite (bvsge" `sp` aenc `sp` zero <> ")"
+                   `sp` aenc `sp` "(bvsub" `sp` zero `sp` aenc <> "))"
+            absoluteBEnc = "(ite (bvsge" `sp` benc `sp` zero <> ")"
+                   `sp` benc `sp` "(bvsub" `sp` zero `sp` benc <> "))"
+
+        (decls, (absAName, absBName)) <- mkDivModDecls groupIdx absoluteAEnc absoluteBEnc coreName
+
         -- Generate shift bounds or fall back to bvudiv
         let shiftBounds = case (isDiv', extractShift firstA) of
               (True, Just k) ->
