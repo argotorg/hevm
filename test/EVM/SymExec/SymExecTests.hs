@@ -297,10 +297,10 @@ storageSimplificationTests = testGroup "Storage simplification"
        paths <- executeWithBitwuzla $ \s -> getExpr s c (Just (Sig "transfer(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) [] veriOpts
        assertEqual "Expression is not clean." (badStoresInExpr paths) False
     -- This case is somewhat artificial. We can't simplify this using only
-    -- static rewrite rules, because acct is totally abstract and acct + 1
-    -- could overflow back to zero. we may be able to do better if we have some
-    , expectFail $ testCase "simplify-storage-array-symbolic-index" $ do
-    -- smt assisted simplification that can take branch conditions into account.
+    -- static rewrite rules, because `acct` is totally abstract and a[acct]
+    -- could overflow the store and rewrite slot 1, where the array size is stored.
+    -- The load/store simplifications would have to take other constraints into account.
+    , ignoreTestBecause "We cannot simplify this with only static rewrite rules" $ testCase "simplify-storage-array-symbolic-index" $ do
        Just c <- solcRuntime "MyContract"
         [i|
         contract MyContract {
@@ -317,7 +317,7 @@ storageSimplificationTests = testGroup "Storage simplification"
        paths <- executeWithBitwuzla $ \s -> getExpr s c (Just (Sig "transfer(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
        -- T.writeFile "symbolic-index.expr" $ formatExpr paths
        assertEqual "Expression is not clean." (badStoresInExpr paths) False
-    , expectFail $ testCase "simplify-storage-array-of-struct-symbolic-index" $ do
+    , ignoreTestBecause "We cannot simplify this with only static rewrite rules" $ testCase "simplify-storage-array-of-struct-symbolic-index" $ do
        Just c <- solcRuntime "MyContract"
         [i|
         contract MyContract {
@@ -374,7 +374,7 @@ storageSimplificationTests = testGroup "Storage simplification"
        assertEqual "Expression is not clean." (badStoresInExpr paths) False
        (_, []) <- executeWithBitwuzla $ \s -> checkAssert s [0x11] c (Just (Sig "fun(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
        assertBool "" True
-    , ignoreTest $ testCase "simplify-storage-map-todo" $ do
+    , testCase "simplify-storage-map-todo" $ do
        Just c <- solcRuntime "MyContract"
         [i|
         contract MyContract {
