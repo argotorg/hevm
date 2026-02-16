@@ -46,8 +46,8 @@ divModAbstractDecls =
   , SMTCommand "(declare-fun abst_evm_bvsrem ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
   ]
 
-exprToSMTAbs :: Expr a -> Err Builder
-exprToSMTAbs = exprToSMTWith AbstractDivision
+exprToSMTAbst :: Expr a -> Err Builder
+exprToSMTAbst = exprToSMTWith AbstractDivision
 
 -- | Generate bounds constraints for abstract div/mod operations.
 -- These help the solver prune impossible models without full bitvector division reasoning.
@@ -67,8 +67,8 @@ divModBounds props = do
 
     mkAssertion :: (Builder, Expr EWord, Expr EWord) -> Err SMTEntry
     mkAssertion (fname, a, b) = do
-      aenc <- exprToSMTAbs a
-      benc <- exprToSMTAbs b
+      aenc <- exprToSMTAbst a
+      benc <- exprToSMTAbst b
       let result = "(" <> fname `sp` aenc `sp` benc <> ")"
       pure $ SMTCommand $ "(assert (bvule " <> result `sp` aenc <> "))"
 
@@ -138,10 +138,10 @@ divModGroundAxioms props = do
       else do
         let absAName = fromString $ "abs_a_" <> show groupIdx
             absBName = fromString $ "abs_b_" <> show groupIdx
-        aEnc <- exprToSMTAbs firstA
-        bEnc <- exprToSMTAbs firstB
-        let absAEnc = smtAbs aEnc
-            absBEnc = smtAbs bEnc
+        aEnc <- exprToSMTAbst firstA
+        bEnc <- exprToSMTAbst firstB
+        let absAEnc = smtAbsolute aEnc
+            absBEnc = smtAbsolute bEnc
             op = if isDiv' then "bvudiv" else "bvurem"
             coreEnc = smtZeroGuard absBName $ "(" <> op `sp` absAName `sp` absBName <> ")"
         let decls = [ SMTCommand $ "(declare-const" `sp` absAName `sp` "(_ BitVec 256))"
@@ -157,8 +157,8 @@ divModGroundAxioms props = do
 -- | Encode unsigned division/remainder axiom: abstract(a,b) = concrete(a,b)
 mkUnsignedAxiom :: Builder -> DivOp -> Err SMTEntry
 mkUnsignedAxiom _coreName (kind, a, b) = do
-  aenc <- exprToSMTAbs a
-  benc <- exprToSMTAbs b
+  aenc <- exprToSMTAbst a
+  benc <- exprToSMTAbst b
   let fname = if kind == UDiv then "abst_evm_bvudiv" else "abst_evm_bvurem"
       abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
       op = if kind == UDiv then "bvudiv" else "bvurem"
@@ -168,8 +168,8 @@ mkUnsignedAxiom _coreName (kind, a, b) = do
 -- | Encode signed division/remainder axiom using absolute value core result
 mkSignedAxiom :: Builder -> DivOp -> Err SMTEntry
 mkSignedAxiom coreName (kind, a, b) = do
-  aenc <- exprToSMTAbs a
-  benc <- exprToSMTAbs b
+  aenc <- exprToSMTAbst a
+  benc <- exprToSMTAbst b
   let fname = if kind == USDiv then "abst_evm_bvsdiv" else "abst_evm_bvsrem"
       abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
       concrete = if kind == USDiv
