@@ -143,7 +143,7 @@ checkSatWithProps sg props = do
       if isLeft smt2Abstract then pure $ Error $ getError smt2Abstract
       else if isLeft refinement then pure $ Error $ getError refinement
       else liftIO $ do
-        ret <- checkSatTwoPhase sg (Just props) (getNonError smt2Abstract) (SMTScript (getNonError refinement))
+        ret <- checkSatTwoPhase sg (Just props) smt2Abstract (Just $ SMTScript (getNonError refinement))
         case ret of
           Cex cex -> do
             when conf.debug $ logWithTid "Model from abstract query is not spurious, returning cex."
@@ -167,25 +167,19 @@ checkSatWithProps sg props = do
             when conf.debug $ logWithTid $ "Solver returned error during refinement phase: " <> msg
             pure $ Error msg
 
-checkSat :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> IO SMTResult
-checkSat (SolverGroup taskq) props smt2 = do
+checkSatTwoPhase :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> Maybe SMTScript -> IO SMTResult
+checkSatTwoPhase (SolverGroup taskq) props smt2 refinement = do
   if isLeft smt2 then pure $ Error $ getError smt2
   else do
     -- prepare result channel
     resChan <- newChan
     -- send task to solver group
-    writeChan taskq (TaskSingle (SingleData (getNonError smt2) Nothing props resChan))
+    writeChan taskq (TaskSingle (SingleData (getNonError smt2) refinement props resChan))
     -- collect result
     readChan resChan
 
-checkSatTwoPhase :: SolverGroup -> Maybe [Prop] -> SMT2 -> SMTScript -> IO SMTResult
-checkSatTwoPhase (SolverGroup taskq) props smt2 refinement = do
-    -- prepare result channel
-    resChan <- newChan
-    -- send task to solver group
-    writeChan taskq (TaskSingle (SingleData smt2 (Just refinement) props resChan))
-    -- collect result
-    readChan resChan
+checkSat :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> IO SMTResult
+checkSat sg props smt2 = checkSatTwoPhase sg props smt2 Nothing
 
 writeSMT2File :: SMT2 -> FilePath -> String -> IO ()
 writeSMT2File smt2 path postfix = do
