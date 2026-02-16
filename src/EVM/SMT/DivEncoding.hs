@@ -21,7 +21,6 @@ import EVM.SMT
 import EVM.Traversals
 import EVM.Types
 
--- | Phase 1: Encode props using uninterpreted functions for div/mod
 assertPropsAbstract :: Config -> [Prop] -> Err SMT2
 assertPropsAbstract conf ps = do
   let mkBase simp = assertPropsHelperWith AbstractDivision simp divModAbstractDecls

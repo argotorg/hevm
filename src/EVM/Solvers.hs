@@ -146,24 +146,25 @@ checkSatWithProps sg props = do
         ret <- checkSatTwoPhase sg (Just props) (getNonError smt2Abstract) (SMTScript (getNonError refinement))
         case ret of
           Cex cex -> do
-            when conf.debug $ traceM "Model from abstract query is not spurious, returning cex."
+            when conf.debug $ logWithTid "Model from abstract query is not spurious, returning cex."
             pure $ Cex cex
           Qed -> do
-            when conf.debug $ traceM "Refinement successful, query is Qed."
+            when conf.debug $ logWithTid "Refinement successful, query is Qed."
             pure Qed
           Unknown msg -> do
-            when conf.debug $ traceM $ "Solver returned unknown during refinement phase: " <> msg
+            -- 3rd phase: shift bounds
+            when conf.debug $ logWithTid $ "Solver returned unknown during refinement phase: " <> msg
             let withShiftBounds = assertPropsShiftBounds conf allProps
             checkSat sg (Just props) withShiftBounds >>= \case
               Qed -> do
-                when conf.debug $ traceM "Refinement with shift bounds successful, query is Qed."
+                when conf.debug $ logWithTid "Refinement with shift bounds successful, query is Qed."
                 pure Qed
               Error msg2 -> do
-                when conf.debug $ traceM $ "Solver returned error during refinement with shift bounds: " <> msg2
+                when conf.debug $ logWithTid $ "Solver returned error during refinement with shift bounds: " <> msg2
                 pure $ Error msg2
               _ -> pure ret -- can't trust Cex here, return old value
           Error msg -> do
-            when conf.debug $ traceM $ "Solver returned error during refinement phase: " <> msg
+            when conf.debug $ logWithTid $ "Solver returned error during refinement phase: " <> msg
             pure $ Error msg
 
 checkSat :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> IO SMTResult
@@ -365,12 +366,13 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
           when conf.debug $ logWithTid txt
           pure $ Error txt
         False -> unknown conf $ "Unable to parse SMT solver output (maybe it got killed?): " <> T.unpack sat
-    logWithTid msg = do
-      tid <- liftIO myThreadId
-      traceM $ "[" <> show tid <> "] " <> msg
     unknown conf msg = do
       when conf.debug $ logWithTid msg
       pure $ Unknown msg
+
+logWithTid msg = do
+  tid <- liftIO myThreadId
+  traceM $ "[" <> show tid <> "] " <> msg
 
 dumpUnsolved :: SMT2 -> Int -> Maybe FilePath -> IO ()
 dumpUnsolved fullSmt fileCounter dump = do
