@@ -163,26 +163,28 @@ divModGroundAxioms props = do
         axioms <- mapM (mkSignedAxiom coreName) ops
         pure $ decls <> axioms
 
-    mkUnsignedAxiom :: Builder -> DivOp -> Err SMTEntry
-    mkUnsignedAxiom _coreName (kind, a, b) = do
-      aenc <- exprToSMTAbs a
-      benc <- exprToSMTAbs b
-      let fname = if kind == UDiv then "abst_evm_bvudiv" else "abst_evm_bvurem"
-          abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
-          op = if kind == UDiv then "bvudiv" else "bvurem"
-          concrete = smtZeroGuard benc $ "(" <> op `sp` aenc `sp` benc <> ")"
-      pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
+-- | Encode unsigned division/remainder axiom: abstract(a,b) = concrete(a,b)
+mkUnsignedAxiom :: Builder -> DivOp -> Err SMTEntry
+mkUnsignedAxiom _coreName (kind, a, b) = do
+  aenc <- exprToSMTAbs a
+  benc <- exprToSMTAbs b
+  let fname = if kind == UDiv then "abst_evm_bvudiv" else "abst_evm_bvurem"
+      abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
+      op = if kind == UDiv then "bvudiv" else "bvurem"
+      concrete = smtZeroGuard benc $ "(" <> op `sp` aenc `sp` benc <> ")"
+  pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
 
-    mkSignedAxiom :: Builder -> DivOp -> Err SMTEntry
-    mkSignedAxiom coreName (kind, a, b) = do
-      aenc <- exprToSMTAbs a
-      benc <- exprToSMTAbs b
-      let fname = if kind == USDiv then "abst_evm_bvsdiv" else "abst_evm_bvsrem"
-          abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
-          concrete = if kind == USDiv
-                     then smtSdivResult aenc benc coreName
-                     else smtSmodResult aenc benc coreName
-      pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
+-- | Encode signed division/remainder axiom using absolute value core result
+mkSignedAxiom :: Builder -> DivOp -> Err SMTEntry
+mkSignedAxiom coreName (kind, a, b) = do
+  aenc <- exprToSMTAbs a
+  benc <- exprToSMTAbs b
+  let fname = if kind == USDiv then "abst_evm_bvsdiv" else "abst_evm_bvsrem"
+      abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
+      concrete = if kind == USDiv
+                 then smtSdivResult aenc benc coreName
+                 else smtSmodResult aenc benc coreName
+  pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
 
 -- | For each pair of signed groups with the same operation type (udiv/urem),
 -- emit a congruence lemma: if abs inputs are equal, results are equal.
@@ -317,34 +319,3 @@ divModShiftBoundAxioms props = do
                 ]
         axioms <- mapM (mkSignedAxiom coreName) ops
         pure $ decls <> shiftBounds <> axioms
-
-    mkUnsignedAxiom :: Builder -> DivOp -> Err SMTEntry
-    mkUnsignedAxiom _coreName (kind, a, b) = do
-      aenc <- exprToSMTWith AbstractDivision a
-      benc <- exprToSMTWith AbstractDivision b
-      let fname = if kind == UDiv then "abst_evm_bvudiv" else "abst_evm_bvurem"
-          abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
-          op = if kind == UDiv then "bvudiv" else "bvurem"
-          concrete = "(ite (=" `sp` benc `sp` zero <> ")" `sp` zero
-                  `sp` "(" <> op `sp` aenc `sp` benc <> "))"
-      pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
-
-    mkSignedAxiom :: Builder -> DivOp -> Err SMTEntry
-    mkSignedAxiom coreName (kind, a, b) = do
-      aenc <- exprToSMTWith AbstractDivision a
-      benc <- exprToSMTWith AbstractDivision b
-      let fname = if kind == USDiv then "abst_evm_bvsdiv" else "abst_evm_bvsrem"
-          abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
-      if kind == USDiv then do
-        let sameSign = "(=" `sp` "(bvslt" `sp` aenc `sp` zero <> ")"
-                    `sp` "(bvslt" `sp` benc `sp` zero <> "))"
-            concrete = "(ite (=" `sp` benc `sp` zero <> ")" `sp` zero
-                     `sp` "(ite" `sp` sameSign `sp` coreName
-                     `sp` "(bvsub" `sp` zero `sp` coreName <> ")))"
-        pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
-      else do
-        let concrete = "(ite (=" `sp` benc `sp` zero <> ")" `sp` zero
-                     `sp` "(ite (bvsge" `sp` aenc `sp` zero <> ")"
-                     `sp` coreName
-                     `sp` "(bvsub" `sp` zero `sp` coreName <> ")))"
-        pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
