@@ -215,7 +215,7 @@ mkCongruenceLinks indexedGroups =
 -- bvudiv(|SHL(k,x)|, |y|) has a tight relationship with bvlshr(|SHL(k,x)|, k):
 --   if |y| >= 2^k then q <= bvlshr(|a|, k)
 --   if |y| <  2^k then q >= bvlshr(|a|, k)
--- This avoids bvudiv entirely, which bitwuzla struggles with at 256 bits.
+-- This avoids bvudiv entirely
 assertPropsShiftBounds :: Config -> [Prop] -> Err SMT2
 assertPropsShiftBounds conf ps = do
   let mkBase s = assertPropsHelperWith AbstractDivision s divModAbstractDecls
