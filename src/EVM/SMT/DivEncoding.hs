@@ -114,7 +114,7 @@ mkDivModDecls groupIdx absAEnc absBEnc coreName = do
               ]
   pure (decls, (absAName, absBName))
 
--- | Generate ground-instance axioms with CSE'd bvudiv/bvurem intermediates.
+-- | Generate ground-instance axioms with bvudiv/bvurem intermediates.
 -- For each group of div/mod ops sharing the same (|a|, |b|), generates:
 --   - declare-const for abs_a, abs_b, and the bvudiv/bvurem result
 --   - axioms expressing each abst_evm_bvXdiv call in terms of the shared result
@@ -153,11 +153,9 @@ divModGroundAxioms props = do
         let absAEnc = smtAbsolute aenc
             absBEnc = smtAbsolute benc
             op = if isDiv' then "bvudiv" else "bvurem"
-            absAName = fromString $ "abs_a_" <> show groupIdx
-            absBName = fromString $ "abs_b_" <> show groupIdx
-            coreEnc = smtZeroGuard absBName $ "(" <> op `sp` absAName `sp` absBName <> ")"
 
-        (decls, _) <- mkDivModDecls groupIdx absAEnc absBEnc coreName
+        (decls, (absAName, absBName)) <- mkDivModDecls groupIdx absAEnc absBEnc coreName
+        let coreEnc = smtZeroGuard absBName $ "(" <> op `sp` absAName `sp` absBName <> ")"
 
         let coreAssert = SMTCommand $ "(assert (=" `sp` coreName `sp` coreEnc <> "))"
         axioms <- mapM (mkSignedAxiom coreName) ops
