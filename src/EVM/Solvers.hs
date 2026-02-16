@@ -364,6 +364,7 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
       when conf.debug $ logWithTid msg
       pure $ Unknown msg
 
+logWithTid :: MonadIO m => String -> m ()
 logWithTid msg = do
   tid <- liftIO myThreadId
   traceM $ "[" <> show tid <> "] " <> msg

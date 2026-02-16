@@ -497,10 +497,10 @@ exprToSMTWith enc = \case
   SAR a b -> op2 "bvashr" b a
   CLZ a -> op1 "clz256" a
   SEx a b -> op2 "signext" a b
-  Div a b -> divOp "bvudiv" "abst_evm_bvudiv" a b
-  SDiv a b -> sdivOp "abst_evm_bvsdiv" a b
-  Mod a b -> divOp "bvurem" "abst_evm_bvurem" a b
-  SMod a b -> smodOp "abst_evm_bvsrem" a b
+  Div a b -> divModOp "bvudiv" "abst_evm_bvudiv" a b
+  SDiv a b -> divModOp "bvsdiv" "abst_evm_bvsdiv" a b
+  Mod a b -> divModOp "bvurem" "abst_evm_bvurem" a b
+  SMod a b -> divModOp "bvsrem" "abst_evm_bvsrem" a b
   -- NOTE: this needs to do the MUL at a higher precision, then MOD, then downcast
   MulMod a b c -> do
     aExp <- exprToSMT a
@@ -612,30 +612,10 @@ exprToSMTWith enc = \case
       aenc <- exprToSMT a
       benc <- exprToSMT b
       pure $ "(ite (= " <> benc <> " (_ bv0 256)) (_ bv0 256) " <>  "(" <> op `sp` aenc `sp` benc <> "))"
-    divOp :: Builder -> Builder -> Expr x -> Expr y -> Err Builder
-    divOp concreteOp abstractOp a b = case enc of
+    divModOp :: Builder -> Builder -> Expr x -> Expr y -> Err Builder
+    divModOp concreteOp abstractOp a b = case enc of
       ConcreteDivision -> op2CheckZero concreteOp a b
       AbstractDivision -> op2 abstractOp a b
-    -- | Encode SDiv using bvudiv with abs-value decomposition
-    sdivOp :: Builder -> Expr x -> Expr y -> Err Builder
-    sdivOp abstractOp a b = case enc of
-      AbstractDivision -> op2 abstractOp a b
-      ConcreteDivision -> do
-        aenc <- exprToSMT a
-        benc <- exprToSMT b
-        let udiv = "(bvudiv" `sp` smtAbsolute aenc `sp` smtAbsolute benc <> ")"
-        pure $ smtSdivResult aenc benc udiv
-    -- | Encode SMod using bvurem with abs-value decomposition
-    -- EVM SMOD: result has the sign of the dividend (a)
-    smodOp :: Builder -> Expr x -> Expr y -> Err Builder
-    smodOp abstractOp a b = case enc of
-      AbstractDivision -> op2 abstractOp a b
-      ConcreteDivision -> do
-        aenc <- exprToSMT a
-        benc <- exprToSMT b
-        let urem = "(bvurem" `sp` smtAbsolute aenc `sp` smtAbsolute benc <> ")"
-        pure $ smtSmodResult aenc benc urem
-
 
 -- ** SMT builder helpers ** -----------------------------------------------------------------------
 
