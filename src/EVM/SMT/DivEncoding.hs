@@ -262,9 +262,9 @@ divModShiftBounds props = do
         -- Generate shift bounds or fall back to bvudiv
         let shiftBounds = case (isDiv', extractShift firstA) of
               (True, Just k) ->
-                let kLit = fromString $ show k
-                    threshold = "(bvshl (_ bv1 256) (_ bv" <> kLit <> " 256))"
-                    shifted = "(bvlshr" `sp` absAName `sp` "(_ bv" <> kLit <> " 256))"
+                let kLit = wordAsBV k
+                    threshold = "(bvshl (_ bv1 256) " <> kLit <> ")"
+                    shifted = "(bvlshr" `sp` absAName <> " " <> kLit <> ")"
                 in [ -- q = 0 when b = 0
                      SMTCommand $ "(assert (=> (=" `sp` absBName `sp` zero <> ") (=" `sp` coreName `sp` zero <> ")))"
                    , -- q <= abs_a (always true)

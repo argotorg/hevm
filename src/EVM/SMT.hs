@@ -34,7 +34,8 @@ module EVM.SMT
   getVars,
   queryMaxReads,
   getBufs,
-  getStore
+  getStore,
+  wordAsBV
 ) where
 
 import Prelude hiding (LT, GT, Foldable(..))
