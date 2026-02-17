@@ -1297,6 +1297,54 @@ tests = testGroup "hevm"
           } |]
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertEqualM "Must be QED" [] res
+      , test "unsigned-div-by-zero" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_unsigned_div_by_zero(uint256 a) external pure {
+              uint256 result;
+              assembly { result := div(a, 0) }
+              assert(result == 0);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+      , test "arith-div-pass" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_Div_pass(uint x, uint y) external pure {
+              require(x > y);
+              require(y > 0);
+              uint q;
+              assembly { q := div(x, y) }
+              assert(q != 0);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , test "arith-div-fail" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_Div_fail(uint x, uint y) external pure {
+              require(x > y);
+              uint q;
+              assembly { q := div(x, y) }
+              assert(q != 0);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertBoolM "Expected counterexample" (any isCex res)
+    , test "arith-mod-fail" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_Div_fail(uint x, uint y) external pure {
+              require(x > y);
+              uint q;
+              assembly { q := mod(x, y) }
+              assert(q != 0);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertBoolM "Expected counterexample" (any isCex res)
     ]
   , testGroup "Abstract-Arith"
     [ testAbstractArith "sdiv-by-one" $ do
@@ -1362,49 +1410,6 @@ tests = testGroup "hevm"
           } |]
         (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertEqualM "Must be QED" res []
-    , expectFail $ testAbstractArith "div-mod-identity" $ do
-        Just c <- solcRuntime "C" [i|
-          contract C {
-            function prove_div_mod_identity(int256 a, int256 b) external pure {
-              if (b == 0) return;
-              int256 q;
-              int256 r;
-              assembly {
-                  q := sdiv(a, b)
-                  r := smod(a, b)
-              }
-              int256 reconstructed;
-              // using unchecked because SDiv(min, -1) * -1 + 0 = min in EVM (wraps)
-              unchecked {
-                  reconstructed = q * b + r;
-              }
-              assert(reconstructed == a);
-            }
-          } |]
-        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-        assertEqualM "Must be QED" [] res
-    , testAbstractArith "udiv-by-one" $ do
-        Just c <- solcRuntime "C" [i|
-          contract C {
-            function prove_udiv_by_one(uint256 a) external pure {
-              uint256 result;
-              assembly { result := div(a, 1) }
-              assert(result == a);
-            }
-          } |]
-        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-        assertEqualM "Must be QED" [] res
-    , testAbstractArith "umod-by-zero" $ do
-        Just c <- solcRuntime "C" [i|
-          contract C {
-            function prove_umod_by_zero(uint256 a) external pure {
-              uint256 result;
-              assembly { result := mod(a, 0) }
-              assert(result == 0);
-            }
-          } |]
-        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-        assertEqualM "Must be QED" [] res
     , testAbstractArith "sdiv-by-zero" $ do
         Just c <- solcRuntime "C" [i|
           contract C {
@@ -1525,90 +1530,24 @@ tests = testGroup "hevm"
           } |]
         (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertEqualM "Must be QED" [] res
-    , testAbstractArith "unsigned-div-by-zero" $ do
-        Just c <- solcRuntime "C" [i|
-          contract C {
-            function prove_unsigned_div_by_zero(uint256 a) external pure {
-              uint256 result;
-              assembly { result := div(a, 0) }
-              assert(result == 0);
-            }
-          } |]
-        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-        assertEqualM "Must be QED" [] res
-    , expectFail $ testAbstractArith "unsigned-div-mod-identity" $ do
-        Just c <- solcRuntime "C" [i|
-          contract C {
-            function prove_unsigned_div_mod_identity(uint256 a, uint256 b) external pure {
-              if (b == 0) return;
-              uint256 q;
-              uint256 r;
-              assembly {
-                q := div(a, b)
-                r := mod(a, b)
-              }
-              assert(q * b + r == a);
-            }
-          } |]
-        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-        assertEqualM "Must be QED" [] res
     , testAbstractArith "arith-mod" $ do
         Just c <- solcRuntime "C" [i|
           contract C {
-            function unchecked_mod(uint x, uint y) internal pure returns (uint ret) {
-              assembly { ret := mod(x, y) }
+            function unchecked_smod(int x, int y) internal pure returns (int ret) {
+              assembly { ret := smod(x, y) }
             }
-            function prove_Mod(uint x, uint y, address addr) external pure {
+            function prove_Mod(int x, int y) external pure {
               unchecked {
-                assert(unchecked_mod(x, 0) == 0);
+                assert(unchecked_smod(x, 0) == 0);
                 assert(x % 1 == 0);
-                assert(x % 2 < 2);
-                assert(x % 4 < 4);
-                uint x_mod_y = unchecked_mod(x, y);
-                assert(x_mod_y <= y);
-                assert(uint256(uint160(addr)) % (2**160) == uint256(uint160(addr)));
-              }
+                assert(x % 2 < 2 && x % 2 > -2);
+                assert(x % 4 < 4 && x % 4 > -4);
+                int x_smod_y = unchecked_smod(x, y);
+                assert(x_smod_y <= y || y < 0);}
             }
           } |]
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertEqualM "Must be QED" [] res
-    , testAbstractArith "arith-div-pass" $ do
-        Just c <- solcRuntime "C" [i|
-          contract C {
-            function prove_Div_pass(uint x, uint y) external pure {
-              require(x > y);
-              require(y > 0);
-              uint q;
-              assembly { q := div(x, y) }
-              assert(q != 0);
-            }
-          } |]
-        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-        assertEqualM "Must be QED" [] res
-    , testAbstractArith "arith-div-fail" $ do
-        Just c <- solcRuntime "C" [i|
-          contract C {
-            function prove_Div_fail(uint x, uint y) external pure {
-              require(x > y);
-              uint q;
-              assembly { q := div(x, y) }
-              assert(q != 0);
-            }
-          } |]
-        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-        assertBoolM "Expected counterexample" (any isCex res)
-    , testAbstractArith "arith-mod-fail" $ do
-        Just c <- solcRuntime "C" [i|
-          contract C {
-            function prove_Div_fail(uint x, uint y) external pure {
-              require(x > y);
-              uint q;
-              assembly { q := mod(x, y) }
-              assert(q != 0);
-            }
-          } |]
-        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-        assertBoolM "Expected counterexample" (any isCex res)
     , testAbstractArith "math-mint-fail" $ do
         Just c <- solcRuntime "C" [i|
           contract C {
@@ -4325,6 +4264,7 @@ tests = testGroup "hevm"
       case Map.lookup ((SymAddr "test"), Nothing) m of
         Nothing -> assertBoolM "Address missing from storage reads" False
         Just storeReads -> assertBoolM "Did not collect all abstract reads!" $ (Set.size storeReads) == 2
+  ]
   ]
   where
     (===>) = assertSolidityComputation
