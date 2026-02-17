@@ -196,11 +196,13 @@ smtZeroGuard :: Builder -> Builder -> Builder
 smtZeroGuard divisor nonZeroResult =
   "(ite (=" `sp` divisor `sp` zero <> ")" `sp` zero `sp` nonZeroResult <> ")"
 
--- | |x| as SMT.
--- Bug 3 (Minor): smtAbsolute doesn't handle MIN_INT (line 278-279)
--- smtAbsolute computes ite(x >= 0, x, 0 - x).
--- For the minimum signed 256-bit value (-2^255), 0 - (-2^255) overflows back to -2^255 in two's complement. So |MIN_INT| = MIN_INT (negative),
--- which could produce incorrect signed div/mod results for edge cases like sdiv(-2^255, -1) (which EVM defines as -2^255).
+-- | |x| as SMT: ite(x >= 0, x, 0 - x).
+-- Note: for MIN_INT (-2^255), 0 - (-2^255) overflows back to -2^255 in two's
+-- complement. However, this is harmless because the bit pattern 0x8000...0 is
+-- 2^255 when interpreted unsigned, which is the correct absolute value.
+-- All downstream operations (udiv/urem, shift bounds) use unsigned bitvector
+-- ops, so they see the correct value. Sign correction is handled separately
+-- in smtSdivResult/smtSmodResult using the original signed operands.
 smtAbsolute :: Builder -> Builder
 smtAbsolute x = "(ite (bvsge" `sp` x `sp` zero <> ")" `sp` x `sp` "(bvsub" `sp` zero `sp` x <> "))"
 

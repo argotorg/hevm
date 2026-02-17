@@ -1530,6 +1530,50 @@ tests = testGroup "hevm"
           } |]
         (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertEqualM "Must be QED" [] res
+    , testAbstractArith "sdiv-intmin-by-neg-one" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_sdiv_intmin_by_neg_one() external pure {
+              int256 result;
+              assembly {
+                let intmin := 0x8000000000000000000000000000000000000000000000000000000000000000
+                result := sdiv(intmin, sub(0, 1))
+              }
+              // EVM defines sdiv(MIN_INT, -1) = MIN_INT (overflow)
+              assert(result == -57896044618658097711785492504343953926634992332820282019728792003956564819968);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "smod-intmin-by-neg-one" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_smod_intmin_by_neg_one() external pure {
+              int256 result;
+              assembly {
+                let intmin := 0x8000000000000000000000000000000000000000000000000000000000000000
+                result := smod(intmin, sub(0, 1))
+              }
+              // smod(MIN_INT, -1) = 0 since MIN_INT is divisible by -1
+              assert(result == 0);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "sdiv-intmin-by-intmin" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_sdiv_intmin_by_intmin() external pure {
+              int256 result;
+              assembly {
+                let intmin := 0x8000000000000000000000000000000000000000000000000000000000000000
+                result := sdiv(intmin, intmin)
+              }
+              assert(result == 1);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
     , testAbstractArith "arith-mod" $ do
         Just c <- solcRuntime "C" [i|
           contract C {
