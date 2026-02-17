@@ -49,17 +49,17 @@ exprToSMTAbst :: Expr a -> Err Builder
 exprToSMTAbst = exprToSMTWith AbstractDivision
 
 -- | Generate bounds constraints for abstract div/mod operations.
--- These help the solver prune impossible models without full bitvector division reasoning.
+-- result of div(a,b) is always <= a, and result of mod(a,b) is always <= b
 divModBounds :: [Prop] -> Err [SMTEntry]
 divModBounds props = do
-  let allBounds = concatMap (foldProp collectBounds []) props
+  let allBounds = concatMap (foldProp collectDivMod []) props
   if null allBounds then pure []
   else do
     assertions <- mapM mkAssertion allBounds
     pure $ (SMTComment "division/modulo bounds") : assertions
   where
-    collectBounds :: Expr a -> [(Builder, Expr EWord, Expr EWord)]
-    collectBounds = \case
+    collectDivMod :: Expr a -> [(Builder, Expr EWord, Expr EWord)]
+    collectDivMod = \case
       T.Div a b  -> [("abst_evm_bvudiv", a, b)]
       T.Mod a b  -> [("abst_evm_bvurem", a, b)]
       _        -> []
