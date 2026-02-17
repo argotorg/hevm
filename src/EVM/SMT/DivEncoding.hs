@@ -18,7 +18,8 @@ import Data.Text.Lazy.Builder
 import EVM.Effects
 import EVM.SMT
 import EVM.Traversals
-import EVM.Types
+import EVM.Types (Prop(..), EType(EWord), Err, W256, Expr, Expr(Lit), Expr(SHL))
+import EVM.Types qualified as T
 
 assertPropsAbstract :: Config -> [Prop] -> Err SMT2
 assertPropsAbstract conf ps = do
@@ -59,8 +60,8 @@ divModBounds props = do
   where
     collectBounds :: Expr a -> [(Builder, Expr EWord, Expr EWord)]
     collectBounds = \case
-      Div a b  -> [("abst_evm_bvudiv", a, b)]
-      Mod a b  -> [("abst_evm_bvurem", a, b)]
+      T.Div a b  -> [("abst_evm_bvudiv", a, b)]
+      T.Mod a b  -> [("abst_evm_bvurem", a, b)]
       _        -> []
 
     mkAssertion :: (Builder, Expr EWord, Expr EWord) -> Err SMTEntry
@@ -73,7 +74,7 @@ divModBounds props = do
 data DivModOp = IsDiv | IsMod
   deriving (Eq, Ord)
 
-data DivOpKind = UDiv | USDiv | UMod | USMod
+data DivOpKind = Div | SDiv | Mod | SMod
   deriving (Eq, Ord)
 
 type DivOp = (DivOpKind, Expr EWord, Expr EWord)
@@ -84,13 +85,13 @@ data AbsKey
   deriving (Eq, Ord)
 
 isSigned :: DivOpKind -> Bool
-isSigned USDiv = True
-isSigned USMod = True
+isSigned SDiv = True
+isSigned SMod = True
 isSigned _     = False
 
 isDiv :: DivOpKind -> Bool
-isDiv UDiv  = True
-isDiv USDiv = True
+isDiv Div  = True
+isDiv SDiv = True
 isDiv _     = False
 
 divModOp :: DivOpKind -> DivModOp
@@ -135,10 +136,10 @@ divModGroundAxioms props = do
   where
     collectDivMod :: forall a . Expr a -> [DivOp]
     collectDivMod = \case
-      Div a b  -> [(UDiv, a, b)]
-      SDiv a b -> [(USDiv, a, b)]
-      Mod a b  -> [(UMod, a, b)]
-      SMod a b -> [(USMod, a, b)]
+      T.Div a b  -> [(Div, a, b)]
+      T.SDiv a b -> [(SDiv, a, b)]
+      T.Mod a b  -> [(Mod, a, b)]
+      T.SMod a b -> [(SMod, a, b)]
       _        -> []
 
     -- | Generate axioms for a group of ops sharing the same bvudiv/bvurem core.
@@ -165,9 +166,9 @@ mkUnsignedAxiom :: Builder -> DivOp -> Err SMTEntry
 mkUnsignedAxiom _coreName (kind, a, b) = do
   aenc <- exprToSMTAbst a
   benc <- exprToSMTAbst b
-  let fname = if kind == UDiv then "abst_evm_bvudiv" else "abst_evm_bvurem"
+  let fname = if kind == Div then "abst_evm_bvudiv" else "abst_evm_bvurem"
       abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
-      op = if kind == UDiv then "bvudiv" else "bvurem"
+      op = if kind == Div then "bvudiv" else "bvurem"
       concrete = smtZeroGuard benc $ "(" <> op `sp` aenc `sp` benc <> ")"
   pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
 
@@ -176,9 +177,9 @@ mkSignedAxiom :: Builder -> DivOp -> Err SMTEntry
 mkSignedAxiom coreName (kind, a, b) = do
   aenc <- exprToSMTAbst a
   benc <- exprToSMTAbst b
-  let fname = if kind == USDiv then "abst_evm_bvsdiv" else "abst_evm_bvsrem"
+  let fname = if kind == SDiv then "abst_evm_bvsdiv" else "abst_evm_bvsrem"
       abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
-      concrete = if kind == USDiv
+      concrete = if kind == SDiv
                  then smtSdivResult aenc benc coreName
                  else smtSmodResult aenc benc coreName
   pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
@@ -201,8 +202,8 @@ assertPropsShiftBounds conf ps = do
       <> SMT2 (SMTScript shiftBounds) mempty mempty
 
 isMod :: DivOpKind -> Bool
-isMod UMod  = True
-isMod USMod = True
+isMod Mod  = True
+isMod SMod = True
 isMod _     = False
 
 -- | Generate shift-based bound axioms (no bvudiv/bvurem).
@@ -222,10 +223,10 @@ divModShiftBounds props = do
   where
     collectDivOps :: forall a . Expr a -> [DivOp]
     collectDivOps = \case
-      Div a b  -> [(UDiv, a, b)]
-      SDiv a b -> [(USDiv, a, b)]
-      Mod a b  -> [(UMod, a, b)]
-      SMod a b -> [(USMod, a, b)]
+      T.Div a b  -> [(Div, a, b)]
+      T.SDiv a b -> [(SDiv, a, b)]
+      T.Mod a b  -> [(Mod, a, b)]
+      T.SMod a b -> [(SMod, a, b)]
       _        -> []
 
     eqDivOp :: DivOp -> DivOp -> Bool
@@ -284,8 +285,8 @@ divModShiftBounds props = do
 -- helps solvers avoid independent reasoning about multiple bvudiv terms.
 mkCongruenceLinks :: [(Int, [DivOp])] -> [SMTEntry]
 mkCongruenceLinks indexedGroups =
-  let signedDivGroups = [(i, ops) | (i, ops@((k,_,_):_)) <- indexedGroups , k == USDiv]  -- SDiv groups
-      signedModGroups = [(i, ops) | (i, ops@((k,_,_):_)) <- indexedGroups , k == USMod]  -- SMod groups
+  let signedDivGroups = [(i, ops) | (i, ops@((k,_,_):_)) <- indexedGroups , k == SDiv]  -- SDiv groups
+      signedModGroups = [(i, ops) | (i, ops@((k,_,_):_)) <- indexedGroups , k == SMod]  -- SMod groups
   in    concatMap (mkPairLinks "udiv") (allPairs signedDivGroups)
      <> concatMap (mkPairLinks "urem") (allPairs signedModGroups)
   where
