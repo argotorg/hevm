@@ -8,7 +8,7 @@ module EVM.SMT.DivEncoding
 
 import Data.Bits ((.&.), countTrailingZeros)
 import Data.Containers.ListUtils (nubOrd)
-import Data.List (groupBy, sortBy, nubBy)
+import Data.List (groupBy, sortBy)
 import Data.Ord (comparing)
 import Data.Text.Lazy.Builder
 
@@ -49,17 +49,17 @@ exprToSMTAbst = exprToSMTWith AbstractDivision
 -- Unsigned ONLY
 divModBounds :: [Prop] -> Err [SMTEntry]
 divModBounds props = do
-  let allBounds = concatMap (foldProp collectDivMod []) props
+  let allBounds = concatMap (foldProp collectUnsigned []) props
   if null allBounds then pure []
   else do
     assertions <- mapM mkAssertion allBounds
     pure $ (SMTComment "division/modulo bounds") : assertions
   where
-    collectDivMod :: Expr a -> [(Builder, Expr EWord, Expr EWord)]
-    collectDivMod = \case
+    collectUnsigned :: Expr a -> [(Builder, Expr EWord, Expr EWord)]
+    collectUnsigned = \case
       T.Div a b  -> [("abst_evm_bvudiv", a, b)]
       T.Mod a b  -> [("abst_evm_bvurem", a, b)]
-      _        -> []
+      _          -> []
 
     mkAssertion :: (Builder, Expr EWord, Expr EWord) -> Err SMTEntry
     mkAssertion (fname, a, b) = do
@@ -94,6 +94,15 @@ isDiv _     = False
 divModOp :: DivOpKind -> DivModOp
 divModOp k = if isDiv k then IsDiv else IsMod
 
+-- | Collect all div/mod operations from an expression.
+collectDivMods :: Expr a -> [DivOp]
+collectDivMods = \case
+  T.Div a b  -> [(Div, a, b)]
+  T.SDiv a b -> [(SDiv, a, b)]
+  T.Mod a b  -> [(Mod, a, b)]
+  T.SMod a b -> [(SMod, a, b)]
+  _          -> []
+
 absKey :: DivOp -> AbsKey
 absKey (kind, a, b)
   | not (isSigned kind) = UnsignedAbsKey a b (divModOp kind)
@@ -119,7 +128,7 @@ declareAbs groupIdx firstA firstB unsignedResult = do
 -- | Ground axioms: abstract div/mod = concrete bvudiv/bvurem, grouped by operands.
 divModGroundAxioms :: [Prop] -> Err [SMTEntry]
 divModGroundAxioms props = do
-  let allDivMods = nubOrd $ concatMap (foldProp collectDivMod []) props
+  let allDivMods = nubOrd $ concatMap (foldProp collectDivMods []) props
   if null allDivMods then pure []
   else do
     let groups = groupBy (\a b -> absKey a == absKey b) $ sortBy (comparing absKey) allDivMods
@@ -128,14 +137,6 @@ divModGroundAxioms props = do
     let links = mkCongruenceLinks indexedGroups
     pure $ (SMTComment "division/modulo ground-instance axioms") : entries <> links
   where
-    collectDivMod :: forall a . Expr a -> [DivOp]
-    collectDivMod = \case
-      T.Div a b  -> [(Div, a, b)]
-      T.SDiv a b -> [(SDiv, a, b)]
-      T.Mod a b  -> [(Mod, a, b)]
-      T.SMod a b -> [(SMod, a, b)]
-      _        -> []
-
     mkGroupAxioms :: Int -> [DivOp] -> Err [SMTEntry]
     mkGroupAxioms _ [] = pure []
     mkGroupAxioms groupIdx ops@((firstKind, firstA, firstB) : _) = do
@@ -196,7 +197,7 @@ isMod _     = False
 -- | Shift-based bound axioms for div/mod with SHL dividends.
 divModShiftBounds :: [Prop] -> Err [SMTEntry]
 divModShiftBounds props = do
-  let allDivs = nubBy eqDivOp $ concatMap (foldProp collectDivOps []) props
+  let allDivs = nubOrd $ concatMap (foldProp collectDivMods []) props
   if null allDivs then pure []
   else do
     let groups = groupBy (\a b -> absKey a == absKey b)
@@ -206,18 +207,6 @@ divModShiftBounds props = do
     let links = mkCongruenceLinks indexedGroups
     pure $ (SMTComment "division/modulo shift-bound axioms (no bvudiv)") : entries <> links
   where
-    collectDivOps :: forall a . Expr a -> [DivOp]
-    collectDivOps = \case
-      T.Div a b  -> [(Div, a, b)]
-      T.SDiv a b -> [(SDiv, a, b)]
-      T.Mod a b  -> [(Mod, a, b)]
-      T.SMod a b -> [(SMod, a, b)]
-      _        -> []
-
-    eqDivOp :: DivOp -> DivOp -> Bool
-    eqDivOp (k1, a1, b1) (k2, a2, b2) =
-      k1 == k2 && a1 == a2 && b1 == b2
-
     -- | Extract shift amount k from SHL(k, _) or power-of-2 literals.
     extractShift :: Expr EWord -> Maybe W256
     extractShift (SHL (Lit k) _) = Just k
