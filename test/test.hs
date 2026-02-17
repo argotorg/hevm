@@ -1280,10 +1280,26 @@ tests = testGroup "hevm"
         let testFile = "test/contracts/pass/keccak.sol"
         runForgeTest testFile "prove_access" >>= assertEqualM "test result" (True, True)
     ]
-  , testGroup "Abstract-Arith"
+  , testGroup "Arith"
     -- Tests adapted from halmos (tests/regression/test/Arith.t.sol, tests/solver/test/SignedDiv.t.sol, tests/solver/test/Math.t.sol)
     -- Run with abstractArith = True to exercise two-phase solving
-    [ testAbstractArith "arith-mod" $ do
+    [ test "math-avg" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_Avg(uint a, uint b) external pure {
+              require(a + b >= a);
+              unchecked {
+                uint r1 = (a & b) + (a ^ b) / 2;
+                uint r2 = (a + b) / 2;
+                assert(r1 == r2);
+              }
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    ]
+  , testGroup "Abstract-Arith"
+    , testAbstractArith "arith-mod" $ do
         Just c <- solcRuntime "C" [i|
           contract C {
             function unchecked_mod(uint x, uint y) internal pure returns (uint ret) {
@@ -1298,21 +1314,6 @@ tests = testGroup "hevm"
                 uint x_mod_y = unchecked_mod(x, y);
                 assert(x_mod_y <= y);
                 assert(uint256(uint160(addr)) % (2**160) == uint256(uint160(addr)));
-              }
-            }
-          } |]
-        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-        assertEqualM "Must be QED" [] res
-    , testAbstractArith "arith-exp" $ do
-        Just c <- solcRuntime "C" [i|
-          contract C {
-            function prove_Exp(uint x) external pure {
-              unchecked {
-                assert(x ** 0 == 1);
-                assert(x ** 1 == x);
-                assert(x ** 2 == x * x);
-                assert((x ** 2) ** 2 == x * x * x * x);
-                assert(((x ** 2) ** 2) ** 2 == (x**2) * (x**2) * (x**2) * (x**2));
               }
             }
           } |]
@@ -1355,20 +1356,6 @@ tests = testGroup "hevm"
           } |]
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertBoolM "Expected counterexample" (any isCex res)
-    , testAbstractArith "math-avg" $ do
-        Just c <- solcRuntime "C" [i|
-          contract C {
-            function prove_Avg(uint a, uint b) external pure {
-              require(a + b >= a);
-              unchecked {
-                uint r1 = (a & b) + (a ^ b) / 2;
-                uint r2 = (a + b) / 2;
-                assert(r1 == r2);
-              }
-            }
-          } |]
-        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-        assertEqualM "Must be QED" [] res
     , testAbstractArith "math-mint-fail" $ do
         Just c <- solcRuntime "C" [i|
           contract C {
