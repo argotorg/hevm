@@ -147,9 +147,8 @@ divModGroundAxioms props = do
           prefix = if isDiv' then "udiv" else "urem"
           unsignedResult = fromString $ prefix <> "_" <> show groupIdx
 
-      if not (isSigned firstKind)
       -- Unsigned: directly equate abstract(a,b) = bvudiv/bvurem(a,b)
-      then mapM mkUnsignedAxiom ops
+      if not (isSigned firstKind) then mapM mkUnsignedAxiom ops
       -- Signed: compute unsigned result on |a|,|b|, then derive each signed op from it
       else do
         let  op = if isDiv' then "bvudiv" else "bvurem"
