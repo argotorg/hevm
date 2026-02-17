@@ -39,9 +39,9 @@ assertProps conf ps =
 divModAbstractDecls :: [SMTEntry]
 divModAbstractDecls =
   [ SMTComment "abstract division/modulo (uninterpreted functions)"
-  , SMTCommand "(declare-fun abst_evm_bvudiv   ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
+  , SMTCommand "(declare-fun abst_evm_bvudiv ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
   , SMTCommand "(declare-fun abst_evm_bvsdiv ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
-  , SMTCommand "(declare-fun abst_evm_bvurem  ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
+  , SMTCommand "(declare-fun abst_evm_bvurem ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
   , SMTCommand "(declare-fun abst_evm_bvsrem ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
   ]
 
