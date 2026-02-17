@@ -171,14 +171,14 @@ mkUnsignedAxiom _coreName (kind, a, b) = do
       concrete = smtZeroGuard benc $ "(" <> op `sp` aenc `sp` benc <> ")"
   pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
 
--- | Encode signed division/remainder axiom using absolute value core result
+-- | Encode signed division/remainder axiom using absolute value
 mkSignedAxiom :: Builder -> DivOp -> Err SMTEntry
 mkSignedAxiom coreName (kind, a, b) = do
   aenc <- exprToSMTAbst a
   benc <- exprToSMTAbst b
-  let fname = if kind == SDiv then "abst_evm_bvsdiv" else "abst_evm_bvsrem"
+  let fname = if isDiv kind then "abst_evm_bvsdiv" else "abst_evm_bvsrem"
       abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
-      concrete = if kind == SDiv
+      concrete = if isDiv kind
                  then smtSdivResult aenc benc coreName
                  else smtSmodResult aenc benc coreName
   pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
