@@ -36,33 +36,27 @@ exprToSMTAbst = exprToSMTWith AbstractDivision
 data DivModOp = IsDiv | IsMod
   deriving (Eq, Ord)
 
-data DivOpKind = SDiv | SMod
-  deriving (Eq, Ord)
-
-type DivOp = (DivOpKind, Expr EWord, Expr EWord)
+type DivOp = (DivModOp, Expr EWord, Expr EWord)
 
 data AbsKey = AbsKey (Expr EWord) (Expr EWord) DivModOp
   deriving (Eq, Ord)
 
-isDiv :: DivOpKind -> Bool
-isDiv SDiv = True
+isDiv :: DivModOp -> Bool
+isDiv IsDiv = True
 isDiv _     = False
 
-isMod :: DivOpKind -> Bool
+isMod :: DivModOp -> Bool
 isMod = not . isDiv
-
-divModOp :: DivOpKind -> DivModOp
-divModOp k = if isDiv k then IsDiv else IsMod
 
 -- | Collect all div/mod operations from an expression.
 collectDivMods :: Expr a -> [DivOp]
 collectDivMods = \case
-  T.SDiv a b -> [(SDiv, a, b)]
-  T.SMod a b -> [(SMod, a, b)]
+  T.SDiv a b -> [(IsDiv, a, b)]
+  T.SMod a b -> [(IsMod, a, b)]
   _          -> []
 
 absKey :: DivOp -> AbsKey
-absKey (kind, a, b) = AbsKey a b (divModOp kind)
+absKey (kind, a, b) = AbsKey a b kind
 
 -- | Declare abs_a, abs_b, and unsigned result variables for a signed group.
 declareAbs :: Int -> Expr EWord -> Expr EWord -> Builder -> Err ([SMTEntry], (Builder, Builder))
@@ -148,7 +142,7 @@ divModShiftBounds props = do
     mkGroupShiftAxioms :: Int -> [DivOp] -> Err [SMTEntry]
     mkGroupShiftAxioms _ [] = pure []
     mkGroupShiftAxioms groupIdx ops@((firstKind, firstA, firstB) : _) = do
-      let isDiv' = not (isMod firstKind)
+      let isDiv' = isDiv firstKind
           prefix = if isDiv' then "udiv" else "urem"
           unsignedResult = fromString $ prefix <> "_" <> show groupIdx
       (decls, (absAName, absBName)) <- declareAbs groupIdx firstA firstB unsignedResult
@@ -180,8 +174,8 @@ divModShiftBounds props = do
 -- | Congruence: if two signed groups have equal abs inputs, their results are equal.
 mkCongruenceLinks :: [(Int, [DivOp])] -> [SMTEntry]
 mkCongruenceLinks indexedGroups =
-  let signedDivGroups = [(i, ops) | (i, ops@((k,_,_):_)) <- indexedGroups , k == SDiv]
-      signedModGroups = [(i, ops) | (i, ops@((k,_,_):_)) <- indexedGroups , k == SMod]
+  let signedDivGroups = [(i, ops) | (i, ops@((k,_,_):_)) <- indexedGroups , k == IsDiv]
+      signedModGroups = [(i, ops) | (i, ops@((k,_,_):_)) <- indexedGroups , k == IsMod]
   in    concatMap (mkPairLinks "udiv") (allPairs signedDivGroups)
      <> concatMap (mkPairLinks "urem") (allPairs signedModGroups)
   where
@@ -226,10 +220,12 @@ smtIsNonNeg x = "(bvsge" `sp` x `sp` zero <> ")"
 smtSdivResult :: Builder -> Builder -> Builder -> Builder
 smtSdivResult aenc benc udivResult =
   smtZeroGuard benc $
-  "(ite" `sp` smtSameSign aenc benc `sp` udivResult `sp` smtNeg udivResult <> ")"
+  "(ite" `sp` (smtSameSign aenc benc) `sp`
+    udivResult `sp` (smtNeg udivResult) <> ")"
 
 -- | smod(a,b) from urem(|a|,|b|): result sign matches dividend.
 smtSmodResult :: Builder -> Builder -> Builder -> Builder
 smtSmodResult aenc benc uremResult =
   smtZeroGuard benc $
-  "(ite" `sp` smtIsNonNeg aenc `sp` uremResult `sp` smtNeg uremResult <> ")"
+  "(ite" `sp` (smtIsNonNeg aenc) `sp`
+    uremResult `sp` (smtNeg uremResult) <> ")"
