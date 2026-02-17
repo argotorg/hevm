@@ -327,7 +327,8 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
       when (isJust props) $ liftIO . atomically $ writeTChan cacheq (CacheEntry (fromJust props))
       pure Qed
     dealWithUnknown conf = do
-      dumpUnsolved smt2 fileCounter conf.dumpUnsolved
+      let fullSMT2 = smt2 <> SMT2 (fromMaybe mempty refinement) mempty mempty
+      dumpUnsolved fullSMT2 fileCounter conf.dumpUnsolved
       unknown conf "SMT solver returned unknown (maybe it got killed?)"
     dealWithModel conf inst = getModel inst cexvars >>= \case
       Just model -> pure $ Cex model
