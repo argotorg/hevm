@@ -8,7 +8,9 @@ import Test.Tasty.ExpectedFailure
 
 import Control.Monad.IO.Unlift (MonadUnliftIO)
 import Control.Monad.Reader (ReaderT)
-import Data.Maybe (isJust)
+import Data.ByteString (ByteString)
+import Data.List qualified as List (isInfixOf)
+import Data.Maybe (isJust, mapMaybe)
 import Data.Monoid (Any(..))
 import Data.String.Here
 
@@ -30,91 +32,177 @@ tests = testGroup "Symbolic execution"
 solidityExplorationTests :: TestTree
 solidityExplorationTests = testGroup "Exploration of Solidity"
     [ basicTests
+    , maxDepthTests
+    , copySliceTests
     , storageTests
+    , panicCodeTests
+    , cheatCodeTests
     ]
 
 basicTests :: TestTree
 basicTests = testGroup "simple-checks"
-    [ testCase "simple-stores" $ do
-      Just c <- solcRuntime "MyContract"
+  [ testCase "simple-stores" $ do
+    Just c <- solcRuntime "MyContract"
+      [i|
+      contract MyContract {
+        mapping(uint => uint) items;
+        function func() public {
+          assert(items[5] == 0);
+        }
+      }
+      |]
+    let sig = (Sig "func()" [])
+    (_, [Cex (_, _ctr)]) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
+    assertBool "" True
+  , testCase "simple-fixed-value" $ do
+    Just c <- solcRuntime "MyContract"
+      [i|
+      contract MyContract {
+        mapping(uint => uint) items;
+        function func(uint a) public {
+          assert(a != 1337);
+        }
+      }
+      |]
+    let sig = (Sig "func(uint256)" [AbiUIntType 256])
+    (_, [Cex (_, ctr)]) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
+    assertEqual "Expected input not found" (1337 :: W256) (SMT.getVar ctr "arg1")
+  , testCase "simple-fixed-value2" $ do
+    Just c <- solcRuntime "MyContract"
+      [i|
+      contract MyContract {
+        function func(uint a, uint b) public {
+          assert(!((a == 1337) && (b == 99)));
+        }
+      }
+      |]
+    let sig = (Sig "func(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])
+    (_, [Cex (_, ctr)]) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
+    let a = SMT.getVar ctr "arg1"
+    let b = SMT.getVar ctr "arg2"
+    assertBool "Expected input not found" (a == 1337 && b == 99)
+  , testCase "simple-fixed-value3" $ do
+    Just c <- solcRuntime "MyContract"
+      [i|
+      contract MyContract {
+        function func(uint a, uint b) public {
+          assert(((a != 1337) && (b != 99)));
+        }
+      }
+      |]
+    let sig = (Sig "func(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])
+    (_, cexs) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
+    assertBool ("Expected at least 1 counterexample, got " ++ show (length cexs)) (not $ null cexs)
+  , testCase "simple-fixed-value-store1" $ do
+    Just c <- solcRuntime "MyContract"
+      [i|
+      contract MyContract {
+        mapping(uint => uint) items;
+        function func(uint a) public {
+          uint f = items[2];
+          assert(a != f);
+        }
+      }
+      |]
+    let sig = (Sig "func(uint256)" [AbiUIntType 256, AbiUIntType 256])
+    (_, [Cex _]) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
+    assertBool "" True
+  , testCase "simple-fixed-value-store2" $ do
+    Just c <- solcRuntime "MyContract"
+      [i|
+      contract MyContract {
+        mapping(uint => uint) items;
+        function func(uint a) public {
+          items[0] = 1337;
+          assert(a != items[0]);
+        }
+      }
+      |]
+    let sig = (Sig "func(uint256)" [AbiUIntType 256, AbiUIntType 256])
+    (_, [Cex (_, _ctr)]) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
+    assertBool "" True
+  , testCase "symbolic-exp-0-to-n" $ do
+    Just c <- solcRuntime "MyContract"
         [i|
         contract MyContract {
-          mapping(uint => uint) items;
-          function func() public {
-            assert(items[5] == 0);
+          function fun(uint256 a, uint256 b, uint256 k) external pure {
+            uint x = 0 ** b;
+            assert (x == 1);
           }
-        }
+          }
         |]
-      let sig = (Sig "func()" [])
-      (_, [Cex (_, _ctr)]) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
-      assertBool "" True
-    , testCase "simple-fixed-value" $ do
-      Just c <- solcRuntime "MyContract"
+    let sig = Just (Sig "fun(uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256])
+    (_, [Cex (_, ctr)]) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+    let b = SMT.getVar ctr "arg2"
+    assertBool "b must be non-0" (b /= 0)
+  , testCase "symbolic-exp-0-to-n2" $ do
+    Just c <- solcRuntime "MyContract"
         [i|
         contract MyContract {
-          mapping(uint => uint) items;
-          function func(uint a) public {
-            assert(a != 1337);
+          function fun(uint256 a, uint256 b, uint256 k) external pure {
+            uint x = 0 ** b;
+            assert (x == 0);
           }
-        }
+          }
         |]
-      let sig = (Sig "func(uint256)" [AbiUIntType 256])
-      (_, [Cex (_, ctr)]) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
-      assertEqual "Expected input not found" (1337 :: W256) (SMT.getVar ctr "arg1")
-    , testCase "simple-fixed-value2" $ do
+    let sig = Just (Sig "fun(uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256])
+    (_, [Cex (_, ctr)]) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+    let b = SMT.getVar ctr "arg2"
+    assertBool "b must be 0" (b == 0)
+  ]
+
+copySliceTests :: TestTree
+copySliceTests = testGroup "Copyslice tests"
+  [ testCase "symbolic-mcopy" $ do
       Just c <- solcRuntime "MyContract"
-        [i|
-        contract MyContract {
-          function func(uint a, uint b) public {
-            assert(!((a == 1337) && (b == 99)));
-          }
-        }
-        |]
-      let sig = (Sig "func(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])
-      (_, [Cex (_, ctr)]) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
-      let a = SMT.getVar ctr "arg1"
-      let b = SMT.getVar ctr "arg2"
-      assertBool "Expected input not found" (a == 1337 && b == 99)
-    , testCase "simple-fixed-value3" $ do
+          [i|
+          contract MyContract {
+            function fun(uint256 a, uint256 s) external returns (uint) {
+              require(a < 5);
+              assembly {
+                  mcopy(0x2, 0, s)
+                  a:=mload(s)
+              }
+              assert(a < 5);
+              return a;
+            }
+            }
+          |]
+      let sig = Just (Sig "fun(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])
+      (_, k) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+      let numErrs = sum $ map (fromEnum . isError) k
+      assertEqual "number of errors (i.e. copySlice issues) is 1" 1 numErrs
+      let errStrings = mapMaybe getResError k
+      assertEqual "All errors are from copyslice" True $ all ("CopySlice" `List.isInfixOf`) errStrings
+  , testCase "symbolic-copyslice" $ do
       Just c <- solcRuntime "MyContract"
-        [i|
-        contract MyContract {
-          function func(uint a, uint b) public {
-            assert(((a != 1337) && (b != 99)));
-          }
-        }
-        |]
-      let sig = (Sig "func(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])
-      (_, cexs) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
-      assertBool ("Expected at least 1 counterexample, got " ++ show (length cexs)) (not $ null cexs)
-    , testCase "simple-fixed-value-store1" $ do
-      Just c <- solcRuntime "MyContract"
-        [i|
-        contract MyContract {
-          mapping(uint => uint) items;
-          function func(uint a) public {
-            uint f = items[2];
-            assert(a != f);
-          }
-        }
-        |]
-      let sig = (Sig "func(uint256)" [AbiUIntType 256, AbiUIntType 256])
-      (_, [Cex _]) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
-      assertBool "" True
-    , testCase "simple-fixed-value-store2" $ do
-      Just c <- solcRuntime "MyContract"
-        [i|
-        contract MyContract {
-          mapping(uint => uint) items;
-          function func(uint a) public {
-            items[0] = 1337;
-            assert(a != items[0]);
-          }
-        }
-        |]
-      let sig = (Sig "func(uint256)" [AbiUIntType 256, AbiUIntType 256])
-      (_, [Cex (_, _ctr)]) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
-      assertBool "" True
+          [i|
+          contract MyContract {
+            function fun(uint256 a, uint256 s) external returns (uint) {
+              require(a < 10);
+              if (a >= 8) {
+                assembly {
+                    calldatacopy(0x5, s, s)
+                    a:=mload(s)
+                }
+              } else {
+                assembly {
+                    calldatacopy(0x2, 0x2, 5)
+                    a:=mload(s)
+                }
+              }
+              assert(a < 9);
+              return a;
+            }
+            }
+          |]
+      let sig = Just (Sig "fun(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])
+      (_, k) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+      let numErrs = sum $ map (fromEnum . isError) k
+      assertEqual "number of errors (i.e. copySlice issues) is 1" 1 numErrs
+      let errStrings = mapMaybe getResError k
+      assertEqual "All errors are from copyslice" True $ all ("CopySlice" `List.isInfixOf`) errStrings
+
   ]
 
 storageTests :: TestTree
@@ -473,7 +561,346 @@ storageSimplificationTests = testGroup "Storage simplification"
        -- putStrLnM $ T.unpack $ formatExpr paths
        (_, [Cex _]) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just (Sig "fun(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
        assertBool "" True
+    ,
+    -- TODO: we can't deal with symbolic jump conditions
+    expectFail $ testCase "call-zero-inited-var-thats-a-function" $ do
+      Just c <- solcRuntime "MyContract"
+          [i|
+          contract MyContract {
+            function (uint256) internal returns (uint) funvar;
+            function fun2(uint256 a) internal returns (uint){
+              return a;
+            }
+            function fun(uint256 a) external returns (uint) {
+              if (a != 44) {
+                funvar = fun2;
+              }
+              return funvar(a);
+            }
+            }
+          |]
+      (_, [Cex (_, cex)]) <- executeWithBitwuzla $ \s -> checkAssert s [0x51] c (Just (Sig "fun(uint256)" [AbiUIntType 256])) [] defaultVeriOpts
+      let a = SMT.getVar cex "arg1"
+      assertEqual "unexpected cex value" 44 a
     ]
+
+
+panicCodeTests :: TestTree
+panicCodeTests = testGroup "Panic code tests via symbolic execution"
+  [ testCase "assert-fail" $ do
+      Just c <- solcRuntime "MyContract"
+          [i|
+          contract MyContract {
+            function fun(uint256 a) external pure {
+              assert(a != 0);
+            }
+          }
+          |]
+      (_, [Cex (_, ctr)]) <- executeWithBitwuzla $ \s -> checkAssert s [0x01] c (Just (Sig "fun(uint256)" [AbiUIntType 256])) [] defaultVeriOpts
+      assertEqual "Must be 0" 0 $ SMT.getVar ctr "arg1"
+  , testCase "safeAdd-fail" $ do
+      Just c <- solcRuntime "MyContract"
+          [i|
+          contract MyContract {
+            function fun(uint256 a, uint256 b) external pure returns (uint256 c) {
+              c = a+b;
+            }
+            }
+          |]
+      (_, [Cex (_, ctr)]) <- executeWithBitwuzla $ \s -> checkAssert s [0x11] c (Just (Sig "fun(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
+      let x = SMT.getVar ctr "arg1"
+      let y = SMT.getVar ctr "arg2"
+
+      let maxUint = 2 ^ (256 :: Integer) :: Integer
+      assertBool "Overflow must occur" (toInteger x + toInteger y >= maxUint)
+  , testCase "div-by-zero-fail" $ do
+        Just c <- solcRuntime "MyContract"
+            [i|
+            contract MyContract {
+              function fun(uint256 a, uint256 b) external pure returns (uint256 c) {
+               c = a/b;
+              }
+             }
+            |]
+        (_, [Cex (_, ctr)]) <- executeWithBitwuzla $ \s -> checkAssert s [0x12] c (Just (Sig "fun(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
+        assertEqual "Division by 0 needs b=0" (SMT.getVar ctr "arg2") 0
+        -- putStrLnM "expected counterexample found"
+  , testCase "unused-args-fail" $ do
+         Just c <- solcRuntime "C"
+             [i|
+             contract C {
+               function fun(uint256 a) public pure {
+                 assert(false);
+               }
+             }
+             |]
+         (_, results) <- executeWithBitwuzla $ \s -> checkAssert s [0x1] c Nothing [] defaultVeriOpts
+         expectOneCex results
+  , testCase "gas-decrease-monotone" $ do
+        Just c <- solcRuntime "MyContract"
+            [i|
+            contract MyContract {
+              function fun(uint8 a) external {
+                uint a = gasleft();
+                uint b = gasleft();
+                assert(a > b);
+              }
+             }
+            |]
+        let sig = (Just (Sig "fun(uint8)" [AbiUIntType 8]))
+        (_, results) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        expectNoCex results
+  , testCase "enum-conversion-fail" $ do
+        Just c <- solcRuntime "MyContract"
+            [i|
+            contract MyContract {
+              enum MyEnum { ONE, TWO }
+              function fun(uint256 a) external pure returns (MyEnum b) {
+                b = MyEnum(a);
+              }
+             }
+            |]
+        (_, [Cex (_, ctr)]) <- executeWithBitwuzla $ \s -> checkAssert s [0x21] c (Just (Sig "fun(uint256)" [AbiUIntType 256])) [] defaultVeriOpts
+        assertBool "Enum is only defined for 0 and 1" $ (SMT.getVar ctr "arg1") > 1
+  ,
+    -- TODO 0x22 is missing: "0x22: If you access a storage byte array that is incorrectly encoded."
+     -- TODO below should NOT fail
+     -- TODO this has a loop that depends on a symbolic value and currently causes interpret to loop 
+    ignoreTest $ testCase "pop-empty-array" $ do
+        Just c <- solcRuntime "MyContract"
+            [i|
+            contract MyContract {
+              uint[] private arr;
+              function fun(uint8 a) external {
+                arr.push(1);
+                arr.push(2);
+                for (uint i = 0; i < a; i++) {
+                  arr.pop();
+                }
+              }
+             }
+            |]
+        a <- executeWithBitwuzla $ \s -> checkAssert s [0x31] c (Just (Sig "fun(uint8)" [AbiUIntType 8])) [] defaultVeriOpts
+        print $ length a
+        print $ show a
+        putStrLn "expected counterexample found"
+  , testCase "access-out-of-bounds-array" $ do
+        Just c <- solcRuntime "MyContract"
+            [i|
+            contract MyContract {
+              uint[] private arr;
+              function fun(uint8 a) external returns (uint x){
+                arr.push(1);
+                arr.push(2);
+                x = arr[a];
+              }
+             }
+            |]
+        (_, [Cex (_, ctr)]) <- executeWithBitwuzla $ \s -> checkAssert s [0x32] c (Just (Sig "fun(uint8)" [AbiUIntType 8])) [] defaultVeriOpts
+        assertBool "Access must be beyond index 1" $ (SMT.getVar ctr "arg1") > 1
+  , testCase "alloc-too-much" $ do -- Note: we catch the assertion here, even though we are only able to explore partially
+        Just c <- solcRuntime "MyContract"
+            [i|
+            contract MyContract {
+              function fun(uint256 a) external {
+                uint[] memory arr = new uint[](a);
+              }
+             }
+            |]
+        (_, results) <- executeWithBitwuzla $ \s -> checkAssert s [0x41] c (Just (Sig "fun(uint256)" [AbiUIntType 256])) [] defaultVeriOpts
+        expectOneCex results
+  ]
+
+cheatCodeTests :: TestTree
+cheatCodeTests = testGroup "Cheatcode tests via symbolic execution"
+  [ testCase "vm.deal unknown address" $ do
+      Just c <- solcRuntime "C"
+        [i|
+          interface Vm {
+            function deal(address,uint256) external;
+          }
+          contract C {
+            // this is not supported yet due to restrictions around symbolic address aliasing...
+            function f(address e, uint val) external {
+                Vm vm = Vm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
+                vm.deal(e, val);
+                assert(e.balance == val);
+            }
+          }
+        |]
+      result <- verifyUserAsserts c (Just $ Sig "f(address,uint256)" [AbiAddressType, AbiUIntType 256])
+      expectPartial result -- FIXME: Ideally, we would be able to explore fully and prove the assertion
+  , testCase "vm.prank-create" $ do
+      Just c <- solcRuntime "C"
+          [i|
+            interface Vm {
+              function prank(address) external;
+            }
+            contract Owned {
+              address public owner;
+              constructor() {
+                owner = msg.sender;
+              }
+            }
+            contract C {
+              function f() external {
+                Vm vm = Vm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
+
+                Owned target = new Owned();
+                assert(target.owner() == address(this));
+
+                address usr = address(1312);
+                vm.prank(usr);
+                target = new Owned();
+                assert(target.owner() == usr);
+                target = new Owned();
+                assert(target.owner() == address(this));
+              }
+            }
+          |]
+      result <- verifyUserAsserts c (Just $ Sig "f()" [])
+      expectNoCexNoPartial result
+  , testCase "vm.prank underflow" $ do
+      Just c <- solcRuntime "C"
+          [i|
+            interface Vm {
+              function prank(address) external;
+            }
+            contract Payable {
+                function hi() public payable {}
+            }
+            contract C {
+              function f() external {
+                Vm vm = Vm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
+
+                uint amt = 10;
+                address from = address(0xacab);
+                require(from.balance < amt);
+
+                Payable target = new Payable();
+                vm.prank(from);
+                target.hi{value : amt}();
+              }
+            }
+          |]
+      expectAllBranchesFail c Nothing
+  , testCase "cheatcode-nonexistent" $ do
+      Just c <- solcRuntime "C"
+          [i|
+            interface Vm {
+              function nonexistent_cheatcode(uint) external;
+            }
+          contract C {
+            function fun(uint a) public {
+                // Cheatcode address
+                Vm vm = Vm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
+                vm.nonexistent_cheatcode(a);
+                assert(1 == 1);
+            }
+          }
+          |]
+      let sig = Just (Sig "fun(uint256)" [AbiUIntType 256])
+      result <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+      expectPartial result
+  , testCase "cheatcode-with-selector" $ do
+      Just c <- solcRuntime "C"
+          [i|
+          contract C {
+          function prove_warp_symbolic(uint128 jump) public {
+                  uint pre = block.timestamp;
+                  address hevm = 0x7109709ECfa91a80626fF3989D68f67F5b1DD12D;
+                  (bool success, ) = hevm.call(abi.encodeWithSelector(bytes4(keccak256("warp(uint256)")), block.timestamp+jump));
+                  require(success, "Call to hevm.warp failed");
+                  assert(block.timestamp == pre + jump);
+              }
+          }
+          |]
+      result <- verifyUserAsserts c Nothing
+      expectNoCexNoPartial result
+  , testCase "call ffi when disabled" $ do
+      Just c <- solcRuntime "C"
+          [i|
+            interface Vm {
+              function ffi(string[] calldata) external;
+            }
+            contract C {
+              function f() external {
+                Vm vm = Vm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
+
+                string[] memory inputs = new string[](2);
+                inputs[0] = "echo";
+                inputs[1] = "acab";
+
+                // should fail to explore this branch
+                vm.ffi(inputs);
+              }
+            }
+          |]
+      expectAllBranchesFail c Nothing
+  ]
+
+maxDepthTests :: TestTree
+maxDepthTests = testGroup "Tests for branching depth"
+  [
+      -- below we hit the limit of the depth of the symbolic execution tree
+      testCase "limit-num-explore-hit-limit" $ do
+        let conf = symExecTestsConfig {Effects.maxDepth = Just 3}
+        Just c <- solcRuntime "C"
+          [i|
+          contract C {
+              function checkval(uint256 a, uint256 b, uint256 c) public {
+                if (a == b) {
+                  if (b == c) {
+                    assert(false);
+                  }
+                }
+              }
+          }
+          |]
+        let sig = Just (Sig "checkval(uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256])
+        res@(_, ret) <- Effects.runEnv (Effects.Env conf) $ withBitwuzla $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        expectPartial res
+        expectNoCex ret
+        expectNoError ret
+      -- below we don't hit the limit of the depth of the symbolic execution tree
+      , testCase "limit-num-explore-no-hit-limit" $ do
+        let conf = symExecTestsConfig {Effects.maxDepth = Just 7}
+        Just c <- solcRuntime "C"
+          [i|
+          contract C {
+              function checkval(uint256 a, uint256 b, uint256 c) public {
+                if (a == b) {
+                  if (b == c) {
+                    assert(false);
+                  }
+                }
+              }
+          }
+          |]
+        let sig = Just (Sig "checkval(uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256])
+        (paths, ret) <- Effects.runEnv (Effects.Env conf) $ withBitwuzla $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        expectNoError ret
+        expectOneCex ret
+        assertBool "The expression MUST NOT be partial" $ Prelude.not (any isPartial paths)
+  ]
+
+expectNoCex :: [VerifyResult] -> Assertion
+expectNoCex results = assertBool "There should be no cex" (not $ any isCex results)
+
+expectNoError :: [VerifyResult] -> Assertion
+expectNoError results = assertBool "There should be no error" (not $ any isError results)
+
+expectOneCex :: [VerifyResult] -> Assertion
+expectOneCex [Cex _] = assertBool "" True
+expectOneCex _ = assertFailure "There should exactly one cex"
+
+expectPartial :: ([Expr End], [VerifyResult]) -> Assertion
+expectPartial (paths, _) = assertBool "There should be a partial path" (any isPartial paths)
+
+expectNoCexNoPartial :: ([Expr End], [VerifyResult]) -> Assertion
+expectNoCexNoPartial (paths, results) = do
+  assertBool "There should be no partial paths" (not $ any isPartial paths)
+  expectNoCex results
 
 -- Finds SLoad -> SStore. This should not occur in most scenarios
 -- as we can simplify them away
@@ -483,11 +910,26 @@ badStoresInExpr exprs = any (getAny . foldExpr match mempty) exprs
       match (SLoad _ (SStore _ _ _)) = Any True
       match _ = Any False
 
+symExecTestsConfig :: Effects.Config
+symExecTestsConfig = Effects.defaultConfig
+
 symExecTestsEnvironment :: Effects.Env
-symExecTestsEnvironment = Effects.defaultEnv
+symExecTestsEnvironment = Effects.Env symExecTestsConfig
 
 executeWithBitwuzla :: MonadUnliftIO m => (SolverGroup -> ReaderT Effects.Env m a) -> m a
 executeWithBitwuzla action = Effects.runEnv symExecTestsEnvironment $ withBitwuzla action
 
 withBitwuzla :: Effects.App m => (SolverGroup -> m a) -> m a
 withBitwuzla = withSolvers Bitwuzla 1 Nothing defMemLimit
+
+verifyUserAsserts :: ByteString -> Maybe Sig -> IO ([Expr End], [VerifyResult])
+verifyUserAsserts c sig = executeWithBitwuzla $ \s -> checkAssert s [0x01] c sig [] defaultVeriOpts
+
+expectAllBranchesFail :: ByteString -> Maybe Sig -> Assertion
+expectAllBranchesFail c sig = do
+  result <- executeWithBitwuzla $ \s -> verifyContract s c sig [] defaultVeriOpts Nothing post
+  expectNoCexNoPartial result
+  where
+    post _ = \case
+      Success _ _ _ _ -> PBool False
+      _ -> PBool True
