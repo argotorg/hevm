@@ -151,14 +151,24 @@ divModShiftBounds props = do
       let isDiv' = not (isMod firstKind)
           prefix = if isDiv' then "udiv" else "urem"
           unsignedResult = fromString $ prefix <> "_" <> show groupIdx
-
       (decls, (absAName, absBName)) <- declareAbs groupIdx firstA firstB unsignedResult
+
+      -- When the dividend is a left-shift (a = x << k, i.e. a = x * 2^k),
+      -- we can bound the unsigned division result using cheap bitshift
+      -- operations instead of the expensive bvudiv SMT theory.
+      -- The pivot point is |a| >> k (= |a| / 2^k):
+      --   - If |b| >= 2^k: result <= |a| >> k  (upper bound)
+      --   - If |b| <  2^k and b != 0: result >= |a| >> k  (lower bound)
       let shiftBounds = case (isDiv', extractShift firstA) of
             (True, Just k) ->
               let kLit = wordAsBV k
+                  -- threshold = 2^k
                   threshold = "(bvshl (_ bv1 256) " <> kLit <> ")"
+                  -- shifted = |a| >> k = |a| / 2^k
                   shifted = "(bvlshr" `sp` absAName `sp` kLit <> ")"
-              in [ SMTCommand $ "(assert (=> (bvuge" `sp` absBName `sp` threshold <> ") (bvule" `sp` unsignedResult `sp` shifted <> ")))"
+              in  -- |b| >= 2^k  =>  |a|/|b| <= |a|/2^k
+                  [ SMTCommand $ "(assert (=> (bvuge" `sp` absBName `sp` threshold <> ") (bvule" `sp` unsignedResult `sp` shifted <> ")))"
+                  -- |b| < 2^k and b != 0  =>  |a|/|b| >= |a|/2^k
                  , SMTCommand $ "(assert (=> "
                    <> "(and (bvult" `sp` absBName `sp` threshold <> ") (distinct " `sp` absBName `sp` zero <> "))"
                    <> "(bvuge" `sp` unsignedResult `sp` shifted <> ")))"
