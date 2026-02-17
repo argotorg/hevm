@@ -99,9 +99,9 @@ absKey (kind, a, b)
   | not (isSigned kind) = UnsignedAbsKey a b (divModOp kind)
   | otherwise           = SignedAbsKey a b (divModOp kind)
 
--- | Declare abs_a, abs_b, and core result variables for a signed group.
+-- | Declare abs_a, abs_b, and unsigned result variables for a signed group.
 declareAbs :: Int -> Expr EWord -> Expr EWord -> Builder -> Err ([SMTEntry], (Builder, Builder))
-declareAbs groupIdx firstA firstB coreName = do
+declareAbs groupIdx firstA firstB unsignedResult = do
   aenc <- exprToSMTAbst firstA
   benc <- exprToSMTAbst firstB
   let absAEnc = smtAbsolute aenc
@@ -110,7 +110,7 @@ declareAbs groupIdx firstA firstB coreName = do
       absBName = fromString $ "abs_b_" <> show groupIdx
   let decls = [ SMTCommand $ "(declare-const" `sp` absAName `sp` "(_ BitVec 256))"
               , SMTCommand $ "(declare-const" `sp` absBName `sp` "(_ BitVec 256))"
-              , SMTCommand $ "(declare-const" `sp` coreName `sp` "(_ BitVec 256))"
+              , SMTCommand $ "(declare-const" `sp` unsignedResult `sp` "(_ BitVec 256))"
               , SMTCommand $ "(assert (=" `sp` absAName `sp` absAEnc <> "))"
               , SMTCommand $ "(assert (=" `sp` absBName `sp` absBEnc <> "))"
               ]
@@ -141,21 +141,21 @@ divModGroundAxioms props = do
     mkGroupAxioms groupIdx ops@((firstKind, firstA, firstB) : _) = do
       let isDiv' = isDiv firstKind
           op = if isDiv' then "bvudiv" else "bvurem"
-          coreName = op <> (fromString $ "_" <> show groupIdx)
+          unsignedResult = op <> (fromString $ "_" <> show groupIdx)
 
       if not (isSigned firstKind)
-      then mapM (mkUnsignedAxiom coreName) ops
+      then mapM (mkUnsignedAxiom unsignedResult) ops
       else do
-        (decls, (absAName, absBName)) <- declareAbs groupIdx firstA firstB coreName
-        let coreEnc = smtZeroGuard absBName $ "(" <> op `sp` absAName `sp` absBName <> ")"
+        (decls, (absAName, absBName)) <- declareAbs groupIdx firstA firstB unsignedResult
+        let unsignedEnc = smtZeroGuard absBName $ "(" <> op `sp` absAName `sp` absBName <> ")"
 
-        let coreAssert = SMTCommand $ "(assert (=" `sp` coreName `sp` coreEnc <> "))"
-        axioms <- mapM (mkSignedAxiom coreName) ops
-        pure $ decls <> [coreAssert] <> axioms
+        let unsignedAssert = SMTCommand $ "(assert (=" `sp` unsignedResult `sp` unsignedEnc <> "))"
+        axioms <- mapM (mkSignedAxiom unsignedResult) ops
+        pure $ decls <> [unsignedAssert] <> axioms
 
 -- | Assert abstract(a,b) = concrete bvudiv/bvurem(a,b).
 mkUnsignedAxiom :: Builder -> DivOp -> Err SMTEntry
-mkUnsignedAxiom _coreName (kind, a, b) = do
+mkUnsignedAxiom _unsignedResult (kind, a, b) = do
   aenc <- exprToSMTAbst a
   benc <- exprToSMTAbst b
   let fname = if kind == Div then "abst_evm_bvudiv" else "abst_evm_bvurem"
@@ -164,16 +164,16 @@ mkUnsignedAxiom _coreName (kind, a, b) = do
       concrete = smtZeroGuard benc $ "(" <> op `sp` aenc `sp` benc <> ")"
   pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
 
--- | Assert abstract(a,b) = signed result derived from unsigned core.
+-- | Assert abstract(a,b) = signed result derived from unsigned result.
 mkSignedAxiom :: Builder -> DivOp -> Err SMTEntry
-mkSignedAxiom coreName (kind, a, b) = do
+mkSignedAxiom unsignedResult (kind, a, b) = do
   aenc <- exprToSMTAbst a
   benc <- exprToSMTAbst b
   let fname = if isDiv kind then "abst_evm_bvsdiv" else "abst_evm_bvsrem"
       abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
       concrete = if isDiv kind
-                 then smtSdivResult aenc benc coreName
-                 else smtSmodResult aenc benc coreName
+                 then smtSdivResult aenc benc unsignedResult
+                 else smtSmodResult aenc benc unsignedResult
   pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
 
 -- | Assert props using shift-based bounds to avoid bvudiv when possible.
@@ -229,30 +229,30 @@ divModShiftBounds props = do
     mkGroupShiftAxioms groupIdx ops@((firstKind, firstA, firstB) : _) = do
       let isDiv' = not (isMod firstKind)
           prefix = if isDiv' then "udiv" else "urem"
-          coreName = fromString $ prefix <> "_" <> show groupIdx
+          unsignedResult = fromString $ prefix <> "_" <> show groupIdx
 
       if not (isSigned firstKind) then do
         -- Unsigned: use concrete bvudiv/bvurem directly
-        mapM (mkUnsignedAxiom coreName) ops
+        mapM (mkUnsignedAxiom unsignedResult) ops
       else do
-        (decls, (absAName, absBName)) <- declareAbs groupIdx firstA firstB coreName
+        (decls, (absAName, absBName)) <- declareAbs groupIdx firstA firstB unsignedResult
 
         let shiftBounds = case (isDiv', extractShift firstA) of
               (True, Just k) ->
                 let kLit = wordAsBV k
                     threshold = "(bvshl (_ bv1 256) " <> kLit <> ")"
                     shifted = "(bvlshr" `sp` absAName `sp` kLit <> ")"
-                in [ SMTCommand $ "(assert (=> (=" `sp` absBName `sp` zero <> ") (=" `sp` coreName `sp` zero <> ")))"
-                   , SMTCommand $ "(assert (bvule" `sp` coreName `sp` absAName <> "))"
-                   , SMTCommand $ "(assert (=> (bvuge" `sp` absBName `sp` threshold <> ") (bvule" `sp` coreName `sp` shifted <> ")))"
-                   , SMTCommand $ "(assert (=> (and (bvult" `sp` absBName `sp` threshold <> ") (distinct " `sp` absBName `sp` zero <> ")) (bvuge" `sp` coreName `sp` shifted <> ")))"
+                in [ SMTCommand $ "(assert (=> (=" `sp` absBName `sp` zero <> ") (=" `sp` unsignedResult `sp` zero <> ")))"
+                   , SMTCommand $ "(assert (bvule" `sp` unsignedResult `sp` absAName <> "))"
+                   , SMTCommand $ "(assert (=> (bvuge" `sp` absBName `sp` threshold <> ") (bvule" `sp` unsignedResult `sp` shifted <> ")))"
+                   , SMTCommand $ "(assert (=> (and (bvult" `sp` absBName `sp` threshold <> ") (distinct " `sp` absBName `sp` zero <> ")) (bvuge" `sp` unsignedResult `sp` shifted <> ")))"
                    ]
               _ ->
                 -- No shift info: overapproximate (only UNSAT is sound)
-                [ SMTCommand $ "(assert (=> (=" `sp` absAName `sp` zero <> ") (=" `sp` coreName `sp` zero <> ")))"
-                , SMTCommand $ "(assert (bvule" `sp` coreName `sp` absAName <> "))"
+                [ SMTCommand $ "(assert (=> (=" `sp` absAName `sp` zero <> ") (=" `sp` unsignedResult `sp` zero <> ")))"
+                , SMTCommand $ "(assert (bvule" `sp` unsignedResult `sp` absAName <> "))"
                 ]
-        axioms <- mapM (mkSignedAxiom coreName) ops
+        axioms <- mapM (mkSignedAxiom unsignedResult) ops
         pure $ decls <> shiftBounds <> axioms
 
 -- | Congruence: if two signed groups have equal abs inputs, their results are equal.
@@ -269,11 +269,11 @@ mkCongruenceLinks indexedGroups =
           absBi = fromString $ "abs_b_" <> show i
           absAj = fromString $ "abs_a_" <> show j
           absBj = fromString $ "abs_b_" <> show j
-          coreI = fromString $ prefix' <> "_" <> show i
-          coreJ = fromString $ prefix' <> "_" <> show j
+          unsignedResultI = fromString $ prefix' <> "_" <> show i
+          unsignedResultJ = fromString $ prefix' <> "_" <> show j
       in [ SMTCommand $ "(assert (=> "
             <> "(and (=" `sp` absAi `sp` absAj <> ") (=" `sp` absBi `sp` absBj <> "))"
-            <> "(=" `sp` coreI `sp` coreJ <> ")))" ]
+            <> "(=" `sp` unsignedResultI `sp` unsignedResultJ <> ")))" ]
 
 -- | (ite (= divisor 0) 0 result)
 smtZeroGuard :: Builder -> Builder -> Builder
