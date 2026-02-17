@@ -1343,6 +1343,18 @@ tests = testGroup "hevm"
           } |]
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertBoolM "Expected counterexample" (any isCex res)
+    , testAbstractArith "arith-mod-fail" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_Div_fail(uint x, uint y) external pure {
+              require(x > y);
+              uint q;
+              assembly { q := mod(x, y) }
+              assert(q != 0);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertBoolM "Expected counterexample" (any isCex res)
     , testAbstractArith "math-avg" $ do
         Just c <- solcRuntime "C" [i|
           contract C {

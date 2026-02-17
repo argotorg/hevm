@@ -2,6 +2,7 @@
 module EVM.SMT.DivEncoding
   ( assertProps
   , assertPropsShiftBounds
+  , divModGroundTruth
   ) where
 
 import Data.Bits ((.&.), countTrailingZeros)
@@ -102,6 +103,28 @@ assertPropsShiftBounds conf ps = do
   pure $ base
       -- <> SMT2 (SMTScript bounds) mempty mempty
       <> SMT2 (SMTScript shiftBounds) mempty mempty
+
+-- | Ground-truth axioms: for each sdiv/smod op, assert that the abstract
+-- uninterpreted function equals the real bvsdiv/bvsrem.
+-- e.g. (assert (= (abst_evm_bvsdiv a b) (bvsdiv a b)))
+divModGroundTruth :: [Prop] -> Err [SMTEntry]
+divModGroundTruth props = do
+  let allDivs = nubOrd $ concatMap (foldProp collectDivMods []) props
+  if null allDivs then pure []
+  else do
+    axioms <- mapM mkGroundTruthAxiom allDivs
+    pure $ (SMTComment "division/modulo ground-truth refinement") : axioms
+  where
+    mkGroundTruthAxiom :: DivOp -> Err SMTEntry
+    mkGroundTruthAxiom (kind, a, b) = do
+      aenc <- exprToSMTAbst a
+      benc <- exprToSMTAbst b
+      let (abstFn, concFn) = if isDiv kind
+            then ("abst_evm_bvsdiv", "bvsdiv")
+            else ("abst_evm_bvsrem", "bvsrem")
+      pure $ SMTCommand $ "(assert (=" `sp`
+        "(" <> abstFn `sp` aenc `sp` benc <> ")" `sp`
+        "(" <> concFn `sp` aenc `sp` benc <> ")))"
 
 -- | Shift-based bound axioms for div/mod with SHL dividends.
 divModShiftBounds :: [Prop] -> Err [SMTEntry]

@@ -132,38 +132,28 @@ checkSatWithProps sg props = do
   else do
     let concreteKeccaks = fmap (\(buf,val) -> PEq (Lit val) (Keccak buf)) (toList $ Keccak.concreteKeccaks props)
     let allProps = if conf.simp then psSimp <> concreteKeccaks else psSimp
-    -- if not conf.abstractArith then do
-    let smt2 = assertProps conf allProps
-    if isLeft smt2 then pure $ Error $ getError smt2
-    else liftIO $ do 
-        ret <- checkSat sg (Just props) smt2
-    -- else do
+    if not conf.abstractArith then do
+      let smt2 = assertProps conf allProps
+      if isLeft smt2 then pure $ Error $ getError smt2
+      else liftIO $ checkSat sg (Just props) smt2
+    else liftIO $ do
       -- Two-phase solving with abstraction+refinement
-      -- let smt2Abstract = assertPropsAbstract conf allProps
-      -- let refinement = divModGroundAxioms allProps
-      -- if isLeft smt2Abstract then pure $ Error $ getError smt2Abstract
-      -- else if isLeft refinement then pure $ Error $ getError refinement
-      -- else liftIO $ do
-      --   ret <- checkSatTwoPhase sg (Just props) smt2Abstract (Just $ SMTScript (getNonError refinement))
+      let smt2Abstract = assertPropsShiftBounds  conf allProps
+      let refinement = divModGroundTruth allProps
+      if isLeft smt2Abstract then pure $ Error $ getError smt2Abstract
+      else if isLeft refinement then pure $ Error $ getError refinement
+      else liftIO $ do
+        ret <- checkSatTwoPhase sg (Just props) smt2Abstract (Just $ SMTScript (getNonError refinement))
         case ret of
-          Cex cex -> do
-            when conf.debug $ logWithTid "Model from abstract query is not spurious, returning cex."
-            pure $ Cex cex
+          Cex model -> do
+            when conf.debug $ logWithTid "Refinement successful, query is SAT."
+            pure $ Cex model
           Qed -> do
-            when conf.debug $ logWithTid "Refinement successful, query is Qed."
+            when conf.debug $ logWithTid "Query successful, query is Qed."
             pure Qed
           Unknown msg -> do
-            -- 3rd phase: shift bounds
             when conf.debug $ logWithTid $ "Solver returned unknown during refinement phase: " <> msg
-            let withShiftBounds = assertPropsShiftBounds conf allProps
-            checkSat sg (Just props) withShiftBounds >>= \case
-              Qed -> do
-                when conf.debug $ logWithTid "Refinement with shift bounds successful, query is Qed."
-                pure Qed
-              Error msg2 -> do
-                when conf.debug $ logWithTid $ "Solver returned error during refinement with shift bounds: " <> msg2
-                pure $ Error msg2
-              _ -> pure ret -- can't trust Cex here, return old value
+            pure $ Unknown msg
           Error msg -> do
             when conf.debug $ logWithTid $ "Solver returned error during refinement phase: " <> msg
             pure $ Error msg
@@ -316,13 +306,17 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
         (\inst -> do
           ret <- sendAndCheck conf inst cmds $ \res -> do
             case res of
-              "unsat" -> dealWithUnsat
+              "unsat" -> do
+                when conf.debug $ logWithTid "Orig Query is UNSAT."
+                dealWithUnsat
               "sat" -> case refinement of
                 Just refine -> do
                   when conf.debug $ logWithTid "Phase 1 is SAT, refining..."
                   sendAndCheck conf inst refine $ \sat2 -> do
                     case sat2 of
-                      "unsat" -> dealWithUnsat
+                      "unsat" -> do
+                        when conf.debug $ logWithTid "Refined Query is UNSAT."
+                        dealWithUnsat
                       "sat" -> dealWithModel conf inst
                       "timeout" -> pure $ Unknown "Result timeout by SMT solver"
                       "unknown" -> dealWithUnknown conf
