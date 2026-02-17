@@ -125,7 +125,11 @@ declareAbs groupIdx firstA firstB unsignedResult = do
               ]
   pure (decls, (absAName, absBName))
 
--- | Ground axioms: abstract div/mod = concrete bvudiv/bvurem, grouped by operands.
+-- | Ground axioms that tie abstract (uninterpreted) div/mod to concrete semantics.
+-- Operations sharing the same operands and signedness are grouped so they can
+-- share a single unsigned result variable. Signed ops are decomposed into
+-- unsigned ops on absolute values, with sign fixup applied per-axiom.
+-- Congruence links assert that groups with equal absolute inputs produce equal results.
 divModGroundAxioms :: [Prop] -> Err [SMTEntry]
 divModGroundAxioms props = do
   let allDivMods = nubOrd $ concatMap (foldProp collectDivMods []) props
@@ -145,11 +149,12 @@ divModGroundAxioms props = do
           unsignedResult = op <> (fromString $ "_" <> show groupIdx)
 
       if not (isSigned firstKind)
+      -- Unsigned: directly equate abstract(a,b) = bvudiv/bvurem(a,b)
       then mapM mkUnsignedAxiom ops
+      -- Signed: compute unsigned result on |a|,|b|, then derive each signed op from it
       else do
         (decls, (absAName, absBName)) <- declareAbs groupIdx firstA firstB unsignedResult
         let unsignedEnc = smtZeroGuard absBName $ "(" <> op `sp` absAName `sp` absBName <> ")"
-
         let unsignedAssert = SMTCommand $ "(assert (=" `sp` unsignedResult `sp` unsignedEnc <> "))"
         axioms <- mapM (mkSignedAxiom unsignedResult) ops
         pure $ decls <> [unsignedAssert] <> axioms
@@ -220,12 +225,10 @@ divModShiftBounds props = do
           prefix = if isDiv' then "udiv" else "urem"
           unsignedResult = fromString $ prefix <> "_" <> show groupIdx
 
-      if not (isSigned firstKind) then do
-        -- Unsigned: use concrete bvudiv/bvurem directly
-        mapM mkUnsignedAxiom ops
+      -- Unsigned: use concrete bvudiv/bvurem directly
+      if not (isSigned firstKind) then mapM mkUnsignedAxiom ops
       else do
         (decls, (absAName, absBName)) <- declareAbs groupIdx firstA firstB unsignedResult
-
         let shiftBounds = case (isDiv', extractShift firstA) of
               (True, Just k) ->
                 let kLit = wordAsBV k
@@ -234,7 +237,9 @@ divModShiftBounds props = do
                 in [ SMTCommand $ "(assert (=> (=" `sp` absBName `sp` zero <> ") (=" `sp` unsignedResult `sp` zero <> ")))"
                    , SMTCommand $ "(assert (bvule" `sp` unsignedResult `sp` absAName <> "))"
                    , SMTCommand $ "(assert (=> (bvuge" `sp` absBName `sp` threshold <> ") (bvule" `sp` unsignedResult `sp` shifted <> ")))"
-                   , SMTCommand $ "(assert (=> (and (bvult" `sp` absBName `sp` threshold <> ") (distinct " `sp` absBName `sp` zero <> ")) (bvuge" `sp` unsignedResult `sp` shifted <> ")))"
+                   , SMTCommand $ "(assert (=> "
+                     <> "(and (bvult" `sp` absBName `sp` threshold <> ") (distinct " `sp` absBName `sp` zero <> "))"
+                     <> "(bvuge" `sp` unsignedResult `sp` shifted <> ")))"
                    ]
               _ ->
                 -- No shift info: overapproximate (only UNSAT is sound)
