@@ -40,7 +40,7 @@ data DivOpKind = SDiv | SMod
 
 type DivOp = (DivOpKind, Expr EWord, Expr EWord)
 
-data AbsKey = SignedAbsKey (Expr EWord) (Expr EWord) DivModOp
+data AbsKey = AbsKey (Expr EWord) (Expr EWord) DivModOp
   deriving (Eq, Ord)
 
 isDiv :: DivOpKind -> Bool
@@ -61,7 +61,7 @@ collectDivMods = \case
   _          -> []
 
 absKey :: DivOp -> AbsKey
-absKey (kind, a, b) = SignedAbsKey a b (divModOp kind)
+absKey (kind, a, b) = AbsKey a b (divModOp kind)
 
 -- | Declare abs_a, abs_b, and unsigned result variables for a signed group.
 declareAbs :: Int -> Expr EWord -> Expr EWord -> Builder -> Err ([SMTEntry], (Builder, Builder))
