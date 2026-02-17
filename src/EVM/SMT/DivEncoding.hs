@@ -103,8 +103,8 @@ absKey (kind, a, b)
   | otherwise           = SignedAbsKey a b (divModOp kind)
 
 -- | Encode operands as absolute values and generate declarations for abs_a, abs_b, and core result.
-mkSignedDecls :: Int -> Expr EWord -> Expr EWord -> Builder -> Err ([SMTEntry], (Builder, Builder))
-mkSignedDecls groupIdx firstA firstB coreName = do
+declareAbs :: Int -> Expr EWord -> Expr EWord -> Builder -> Err ([SMTEntry], (Builder, Builder))
+declareAbs groupIdx firstA firstB coreName = do
   aenc <- exprToSMTAbst firstA
   benc <- exprToSMTAbst firstB
   let absAEnc = smtAbsolute aenc
@@ -153,7 +153,7 @@ divModGroundAxioms props = do
       if not (isSigned firstKind)
       then mapM (mkUnsignedAxiom coreName) ops
       else do
-        (decls, (absAName, absBName)) <- mkSignedDecls groupIdx firstA firstB coreName
+        (decls, (absAName, absBName)) <- declareAbs groupIdx firstA firstB coreName
         let op = if isDiv' then "bvudiv" else "bvurem"
             coreEnc = smtZeroGuard absBName $ "(" <> op `sp` absAName `sp` absBName <> ")"
 
@@ -252,7 +252,7 @@ divModShiftBounds props = do
         -- Unsigned: fall back to full bvudiv axiom (these are usually fast)
         mapM (mkUnsignedAxiom coreName) ops
       else do
-        (decls, (absAName, absBName)) <- mkSignedDecls groupIdx firstA firstB coreName
+        (decls, (absAName, absBName)) <- declareAbs groupIdx firstA firstB coreName
 
         -- Generate shift bounds or fall back to bvudiv
         let shiftBounds = case (isDiv', extractShift firstA) of
