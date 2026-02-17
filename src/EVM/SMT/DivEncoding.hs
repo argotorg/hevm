@@ -112,8 +112,8 @@ divModShiftBounds props = do
     let groups = groupBy (\a b -> absKey a == absKey b)
                $ sortBy (comparing absKey) allDivs
         indexedGroups = zip [0..] groups
-    entries <- concat <$> mapM (uncurry mkGroupShiftAxioms) indexedGroups
     let links = mkCongruenceLinks indexedGroups
+    entries <- concat <$> mapM (uncurry mkGroupShiftAxioms) indexedGroups
     pure $ (SMTComment "division/modulo shift-bound axioms (no bvudiv)") : entries <> links
   where
     -- | Extract shift amount k from SHL(k, _) or power-of-2 literals.
