@@ -45,9 +45,6 @@ isDiv :: DivModOp -> Bool
 isDiv IsDiv = True
 isDiv _     = False
 
-isMod :: DivModOp -> Bool
-isMod = not . isDiv
-
 -- | Collect all div/mod operations from an expression.
 collectDivMods :: Expr a -> [DivOp]
 collectDivMods = \case
