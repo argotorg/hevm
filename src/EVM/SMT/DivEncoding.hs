@@ -1,7 +1,6 @@
 {- | Abstract div/mod encoding for two-phase SMT solving. -}
 module EVM.SMT.DivEncoding
-  ( divModGroundAxioms
-  , assertProps
+  ( assertProps
   , assertPropsAbstract
   , assertPropsShiftBounds
   ) where
@@ -124,40 +123,6 @@ declareAbs groupIdx firstA firstB unsignedResult = do
               ]
   pure (decls, (absAName, absBName))
 
--- | Ground axioms that tie abstract (uninterpreted) div/mod to concrete semantics.
--- Operations sharing the same operands and signedness are grouped so they can
--- share a single unsigned result variable. Signed ops are decomposed into
--- unsigned ops on absolute values, with sign fixup applied per-axiom.
--- Congruence links assert that groups with equal absolute inputs produce equal results.
-divModGroundAxioms :: [Prop] -> Err [SMTEntry]
-divModGroundAxioms props = do
-  let allDivMods = nubOrd $ concatMap (foldProp collectDivMods []) props
-  if null allDivMods then pure []
-  else do
-    let groups = groupBy (\a b -> absKey a == absKey b) $ sortBy (comparing absKey) allDivMods
-        indexedGroups = zip [0..] groups
-    entries <- concat <$> mapM (uncurry mkGroupAxioms) indexedGroups
-    let links = mkCongruenceLinks indexedGroups
-    pure $ (SMTComment "division/modulo ground-instance axioms") : entries <> links
-  where
-    mkGroupAxioms :: Int -> [DivOp] -> Err [SMTEntry]
-    mkGroupAxioms _ [] = pure []
-    mkGroupAxioms groupIdx ops@((firstKind, firstA, firstB) : _) = do
-      let isDiv' = isDiv firstKind
-          prefix = if isDiv' then "udiv" else "urem"
-          unsignedResult = fromString $ prefix <> "_" <> show groupIdx
-
-      -- Unsigned: directly equate abstract(a,b) = bvudiv/bvurem(a,b)
-      if not (isSigned firstKind) then mapM mkUnsignedAxiom ops
-      -- Signed: compute unsigned result on |a|,|b|, then derive each signed op from it
-      else do
-        let  op = if isDiv' then "bvudiv" else "bvurem"
-        (decls, (absAName, absBName)) <- declareAbs groupIdx firstA firstB unsignedResult
-        let unsignedEnc = smtZeroGuard absBName $ "(" <> op `sp` absAName `sp` absBName <> ")"
-        let unsignedAssert = SMTCommand $ "(assert (=" `sp` unsignedResult `sp` unsignedEnc <> "))"
-        axioms <- mapM (mkSignedAxiom unsignedResult) ops
-        pure $ decls <> [unsignedAssert] <> axioms
-
 -- | Assert abstract(a,b) = concrete bvudiv/bvurem(a,b).
 mkUnsignedAxiom :: DivOp -> Err SMTEntry
 mkUnsignedAxiom (kind, a, b) = do
@@ -187,10 +152,10 @@ assertPropsShiftBounds conf ps = do
   let mkBase s = assertPropsHelperWith AbstractDivision s divModAbstractDecls
   base <- if not conf.simp then mkBase False ps
           else mkBase True (decompose conf ps)
-  bounds <- divModBounds ps
+  -- bounds <- divModBounds ps
   shiftBounds <- divModShiftBounds ps
   pure $ base
-      <> SMT2 (SMTScript bounds) mempty mempty
+      -- <> SMT2 (SMTScript bounds) mempty mempty
       <> SMT2 (SMTScript shiftBounds) mempty mempty
 
 isMod :: DivOpKind -> Bool

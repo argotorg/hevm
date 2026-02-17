@@ -132,18 +132,19 @@ checkSatWithProps sg props = do
   else do
     let concreteKeccaks = fmap (\(buf,val) -> PEq (Lit val) (Keccak buf)) (toList $ Keccak.concreteKeccaks props)
     let allProps = if conf.simp then psSimp <> concreteKeccaks else psSimp
-    if not conf.abstractArith then do
-      let smt2 = assertProps conf allProps
-      if isLeft smt2 then pure $ Error $ getError smt2
-      else liftIO $ checkSat sg (Just props) smt2
-    else do
+    -- if not conf.abstractArith then do
+    let smt2 = assertProps conf allProps
+    if isLeft smt2 then pure $ Error $ getError smt2
+    else liftIO $ do 
+        ret <- checkSat sg (Just props) smt2
+    -- else do
       -- Two-phase solving with abstraction+refinement
-      let smt2Abstract = assertPropsAbstract conf allProps
-      let refinement = divModGroundAxioms allProps
-      if isLeft smt2Abstract then pure $ Error $ getError smt2Abstract
-      else if isLeft refinement then pure $ Error $ getError refinement
-      else liftIO $ do
-        ret <- checkSatTwoPhase sg (Just props) smt2Abstract (Just $ SMTScript (getNonError refinement))
+      -- let smt2Abstract = assertPropsAbstract conf allProps
+      -- let refinement = divModGroundAxioms allProps
+      -- if isLeft smt2Abstract then pure $ Error $ getError smt2Abstract
+      -- else if isLeft refinement then pure $ Error $ getError refinement
+      -- else liftIO $ do
+      --   ret <- checkSatTwoPhase sg (Just props) smt2Abstract (Just $ SMTScript (getNonError refinement))
         case ret of
           Cex cex -> do
             when conf.debug $ logWithTid "Model from abstract query is not spurious, returning cex."
