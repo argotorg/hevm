@@ -45,7 +45,7 @@ divModAbstractDecls =
 exprToSMTAbst :: Expr a -> Err Builder
 exprToSMTAbst = exprToSMTWith AbstractDivision
 
--- | Result of div(a,b) is always <= a, and result of mod(a,b) is always <= b
+-- | Result of div(a,b) is always <= b, and result of mod(a,b) is always <= b
 -- Unsigned ONLY
 divModBounds :: [Prop] -> Err [SMTEntry]
 divModBounds props = do
@@ -66,7 +66,7 @@ divModBounds props = do
       aenc <- exprToSMTAbst a
       benc <- exprToSMTAbst b
       let result = "(" <> fname `sp` aenc `sp` benc <> ")"
-      pure $ SMTCommand $ "(assert (bvule " <> result `sp` aenc <> "))"
+      pure $ SMTCommand $ "(assert (bvule " <> result `sp` benc <> "))"
 
 data DivModOp = IsDiv | IsMod
   deriving (Eq, Ord)
@@ -145,14 +145,15 @@ divModGroundAxioms props = do
     mkGroupAxioms _ [] = pure []
     mkGroupAxioms groupIdx ops@((firstKind, firstA, firstB) : _) = do
       let isDiv' = isDiv firstKind
-          op = if isDiv' then "bvudiv" else "bvurem"
-          unsignedResult = op <> (fromString $ "_" <> show groupIdx)
+          prefix = if isDiv' then "udiv" else "urem"
+          unsignedResult = fromString $ prefix <> "_" <> show groupIdx
 
       if not (isSigned firstKind)
       -- Unsigned: directly equate abstract(a,b) = bvudiv/bvurem(a,b)
       then mapM mkUnsignedAxiom ops
       -- Signed: compute unsigned result on |a|,|b|, then derive each signed op from it
       else do
+        let  op = if isDiv' then "bvudiv" else "bvurem"
         (decls, (absAName, absBName)) <- declareAbs groupIdx firstA firstB unsignedResult
         let unsignedEnc = smtZeroGuard absBName $ "(" <> op `sp` absAName `sp` absBName <> ")"
         let unsignedAssert = SMTCommand $ "(assert (=" `sp` unsignedResult `sp` unsignedEnc <> "))"
