@@ -147,15 +147,14 @@ divModGroundAxioms props = do
     mkGroupAxioms _ [] = pure []
     mkGroupAxioms groupIdx ops@((firstKind, firstA, firstB) : _) = do
       let isDiv' = isDiv firstKind
-          prefix = if isDiv' then "udiv" else "urem"
-          coreName = fromString $ prefix <> "_" <> show groupIdx
+          op = if isDiv' then "bvudiv" else "bvurem"
+          coreName = op <> (fromString $ "_" <> show groupIdx)
 
       if not (isSigned firstKind)
       then mapM (mkUnsignedAxiom coreName) ops
       else do
         (decls, (absAName, absBName)) <- declareAbs groupIdx firstA firstB coreName
-        let op = if isDiv' then "bvudiv" else "bvurem"
-            coreEnc = smtZeroGuard absBName $ "(" <> op `sp` absAName `sp` absBName <> ")"
+        let coreEnc = smtZeroGuard absBName $ "(" <> op `sp` absAName `sp` absBName <> ")"
 
         let coreAssert = SMTCommand $ "(assert (=" `sp` coreName `sp` coreEnc <> "))"
         axioms <- mapM (mkSignedAxiom coreName) ops
@@ -206,9 +205,7 @@ isMod Mod  = True
 isMod SMod = True
 isMod _     = False
 
--- | Generate shift-based bound axioms (no bvudiv/bvurem).
--- For each group of signed div/mod ops, if the dividend has a SHL(k, _) structure,
--- generates bounds using bvlshr instead of bvudiv.
+-- | Generate shift-based bound axioms
 divModShiftBounds :: [Prop] -> Err [SMTEntry]
 divModShiftBounds props = do
   let allDivs = nubBy eqDivOp $ concatMap (foldProp collectDivOps []) props
