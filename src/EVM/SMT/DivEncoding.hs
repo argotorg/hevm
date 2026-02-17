@@ -45,8 +45,7 @@ divModAbstractDecls =
 exprToSMTAbst :: Expr a -> Err Builder
 exprToSMTAbst = exprToSMTWith AbstractDivision
 
--- | Result of div(a,b) is always <= b, and result of mod(a,b) is always <= b
--- Unsigned ONLY
+-- | For unsigned, result of div(a,b) is always <= b, and result of mod(a,b) is always <= b
 divModBounds :: [Prop] -> Err [SMTEntry]
 divModBounds props = do
   let allBounds = concatMap (foldProp collectUnsigned []) props
