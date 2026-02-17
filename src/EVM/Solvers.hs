@@ -285,11 +285,11 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
     (waitQSem sem)
     (signalQSem sem)
     (do
-      when (conf.dumpQueries) $ writeSMT2File smt2 "." (show fileCounter)
       bracket
         (spawnSolver solver timeout maxMemory)
         (stopSolver)
         (\inst -> do
+          when (conf.dumpQueries) $ writeSMT2File smt2 "-abst." (show fileCounter)
           ret <- sendAndCheck conf inst cmds $ \res -> do
             case res of
               "unsat" -> do
@@ -298,6 +298,7 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
               "sat" -> case refinement of
                 Just refine -> do
                   when conf.debug $ logWithTid "Abstract query is SAT, refining..."
+                  when (conf.dumpQueries) $ writeSMT2File (smt2 <> (SMT2 refine mempty mempty)) "-ref." (show fileCounter)
                   sendAndCheck conf inst refine $ \sat2 -> do
                     case sat2 of
                       "unsat" -> do
