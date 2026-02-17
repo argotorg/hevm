@@ -25,9 +25,7 @@ assertProps conf ps =
 divModAbstractDecls :: [SMTEntry]
 divModAbstractDecls =
   [ SMTComment "abstract division/modulo (uninterpreted functions)"
-  , SMTCommand "(declare-fun abst_evm_bvudiv ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
   , SMTCommand "(declare-fun abst_evm_bvsdiv ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
-  , SMTCommand "(declare-fun abst_evm_bvurem ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
   , SMTCommand "(declare-fun abst_evm_bvsrem ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
   ]
 
@@ -37,25 +35,20 @@ exprToSMTAbst = exprToSMTWith AbstractDivision
 data DivModOp = IsDiv | IsMod
   deriving (Eq, Ord)
 
-data DivOpKind = Div | SDiv | Mod | SMod
+data DivOpKind = SDiv | SMod
   deriving (Eq, Ord)
 
 type DivOp = (DivOpKind, Expr EWord, Expr EWord)
 
-data AbsKey
-  = UnsignedAbsKey (Expr EWord) (Expr EWord) DivModOp
-  | SignedAbsKey   (Expr EWord) (Expr EWord) DivModOp
+data AbsKey = SignedAbsKey (Expr EWord) (Expr EWord) DivModOp
   deriving (Eq, Ord)
 
-isSigned :: DivOpKind -> Bool
-isSigned SDiv = True
-isSigned SMod = True
-isSigned _     = False
-
 isDiv :: DivOpKind -> Bool
-isDiv Div  = True
 isDiv SDiv = True
 isDiv _     = False
+
+isMod :: DivOpKind -> Bool
+isMod = not . isDiv
 
 divModOp :: DivOpKind -> DivModOp
 divModOp k = if isDiv k then IsDiv else IsMod
@@ -63,16 +56,12 @@ divModOp k = if isDiv k then IsDiv else IsMod
 -- | Collect all div/mod operations from an expression.
 collectDivMods :: Expr a -> [DivOp]
 collectDivMods = \case
-  T.Div a b  -> [(Div, a, b)]
   T.SDiv a b -> [(SDiv, a, b)]
-  T.Mod a b  -> [(Mod, a, b)]
   T.SMod a b -> [(SMod, a, b)]
   _          -> []
 
 absKey :: DivOp -> AbsKey
-absKey (kind, a, b)
-  | not (isSigned kind) = UnsignedAbsKey a b (divModOp kind)
-  | otherwise           = SignedAbsKey a b (divModOp kind)
+absKey (kind, a, b) = SignedAbsKey a b (divModOp kind)
 
 -- | Declare abs_a, abs_b, and unsigned result variables for a signed group.
 declareAbs :: Int -> Expr EWord -> Expr EWord -> Builder -> Err ([SMTEntry], (Builder, Builder))
@@ -90,17 +79,6 @@ declareAbs groupIdx firstA firstB unsignedResult = do
               , SMTCommand $ "(assert (=" `sp` absBName `sp` absBEnc <> "))"
               ]
   pure (decls, (absAName, absBName))
-
--- | Assert abstract(a,b) = concrete bvudiv/bvurem(a,b).
-mkUnsignedAxiom :: DivOp -> Err SMTEntry
-mkUnsignedAxiom (kind, a, b) = do
-  aenc <- exprToSMTAbst a
-  benc <- exprToSMTAbst b
-  let fname = if kind == Div then "abst_evm_bvudiv" else "abst_evm_bvurem"
-      abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
-      op = if kind == Div then "bvudiv" else "bvurem"
-      concrete = smtZeroGuard benc $ "(" <> op `sp` aenc `sp` benc <> ")"
-  pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
 
 -- | Assert abstract(a,b) = signed result derived from unsigned result.
 mkSignedAxiom :: Builder -> DivOp -> Err SMTEntry
@@ -124,11 +102,6 @@ assertPropsShiftBounds conf ps = do
   pure $ base
       -- <> SMT2 (SMTScript bounds) mempty mempty
       <> SMT2 (SMTScript shiftBounds) mempty mempty
-
-isMod :: DivOpKind -> Bool
-isMod Mod  = True
-isMod SMod = True
-isMod _     = False
 
 -- | Shift-based bound axioms for div/mod with SHL dividends.
 divModShiftBounds :: [Prop] -> Err [SMTEntry]
@@ -156,23 +129,20 @@ divModShiftBounds props = do
           prefix = if isDiv' then "udiv" else "urem"
           unsignedResult = fromString $ prefix <> "_" <> show groupIdx
 
-      -- Unsigned: use concrete bvudiv/bvurem directly
-      if not (isSigned firstKind) then mapM mkUnsignedAxiom ops
-      else do
-        (decls, (absAName, absBName)) <- declareAbs groupIdx firstA firstB unsignedResult
-        let shiftBounds = case (isDiv', extractShift firstA) of
-              (True, Just k) ->
-                let kLit = wordAsBV k
-                    threshold = "(bvshl (_ bv1 256) " <> kLit <> ")"
-                    shifted = "(bvlshr" `sp` absAName `sp` kLit <> ")"
-                in [ SMTCommand $ "(assert (=> (bvuge" `sp` absBName `sp` threshold <> ") (bvule" `sp` unsignedResult `sp` shifted <> ")))"
-                   , SMTCommand $ "(assert (=> "
-                     <> "(and (bvult" `sp` absBName `sp` threshold <> ") (distinct " `sp` absBName `sp` zero <> "))"
-                     <> "(bvuge" `sp` unsignedResult `sp` shifted <> ")))"
-                   ]
-              _ -> []
-        axioms <- mapM (mkSignedAxiom unsignedResult) ops
-        pure $ decls <> shiftBounds <> axioms
+      (decls, (absAName, absBName)) <- declareAbs groupIdx firstA firstB unsignedResult
+      let shiftBounds = case (isDiv', extractShift firstA) of
+            (True, Just k) ->
+              let kLit = wordAsBV k
+                  threshold = "(bvshl (_ bv1 256) " <> kLit <> ")"
+                  shifted = "(bvlshr" `sp` absAName `sp` kLit <> ")"
+              in [ SMTCommand $ "(assert (=> (bvuge" `sp` absBName `sp` threshold <> ") (bvule" `sp` unsignedResult `sp` shifted <> ")))"
+                 , SMTCommand $ "(assert (=> "
+                   <> "(and (bvult" `sp` absBName `sp` threshold <> ") (distinct " `sp` absBName `sp` zero <> "))"
+                   <> "(bvuge" `sp` unsignedResult `sp` shifted <> ")))"
+                 ]
+            _ -> []
+      axioms <- mapM (mkSignedAxiom unsignedResult) ops
+      pure $ decls <> shiftBounds <> axioms
 
 -- | Congruence: if two signed groups have equal abs inputs, their results are equal.
 mkCongruenceLinks :: [(Int, [DivOp])] -> [SMTEntry]

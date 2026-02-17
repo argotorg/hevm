@@ -490,9 +490,9 @@ exprToSMTWith enc = \case
   SAR a b -> op2 "bvashr" b a
   CLZ a -> op1 "clz256" a
   SEx a b -> op2 "signext" a b
-  Div a b -> divModOp "bvudiv" "abst_evm_bvudiv" a b
+  Div a b -> op2 "bvudiv" a b
   SDiv a b -> divModOp "bvsdiv" "abst_evm_bvsdiv" a b
-  Mod a b -> divModOp "bvurem" "abst_evm_bvurem" a b
+  Mod a b -> op2  "bvurem" a b
   SMod a b -> divModOp "bvsrem" "abst_evm_bvsrem" a b
   -- NOTE: this needs to do the MUL at a higher precision, then MOD, then downcast
   MulMod a b c -> do
