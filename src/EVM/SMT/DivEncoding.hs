@@ -1,7 +1,6 @@
 {- | Abstract div/mod encoding for two-phase SMT solving. -}
 module EVM.SMT.DivEncoding
   ( assertProps
-  , assertPropsAbstract
   , assertPropsShiftBounds
   ) where
 
@@ -16,15 +15,6 @@ import EVM.SMT
 import EVM.Traversals
 import EVM.Types (Prop(..), EType(EWord), Err, W256, Expr, Expr(Lit), Expr(SHL))
 import EVM.Types qualified as T
-
-assertPropsAbstract :: Config -> [Prop] -> Err SMT2
-assertPropsAbstract conf ps = do
-  let mkBase simp = assertPropsHelperWith AbstractDivision simp divModAbstractDecls
-  base <- if not conf.simp then mkBase False ps
-          else mkBase True (decompose conf ps)
-  bounds <- divModBounds ps
-  pure $ base <> SMT2 (SMTScript bounds) mempty mempty
-
 
 assertProps :: Config -> [Prop] -> Err SMT2
 assertProps conf ps =
@@ -43,28 +33,6 @@ divModAbstractDecls =
 
 exprToSMTAbst :: Expr a -> Err Builder
 exprToSMTAbst = exprToSMTWith AbstractDivision
-
--- | For unsigned, result of div(a,b) is always <= b, and result of mod(a,b) is always <= b
-divModBounds :: [Prop] -> Err [SMTEntry]
-divModBounds props = do
-  let allBounds = concatMap (foldProp collectUnsigned []) props
-  if null allBounds then pure []
-  else do
-    assertions <- mapM mkAssertion allBounds
-    pure $ (SMTComment "division/modulo bounds") : assertions
-  where
-    collectUnsigned :: Expr a -> [(Builder, Expr EWord, Expr EWord)]
-    collectUnsigned = \case
-      T.Div a b  -> [("abst_evm_bvudiv", a, b)]
-      T.Mod a b  -> [("abst_evm_bvurem", a, b)]
-      _          -> []
-
-    mkAssertion :: (Builder, Expr EWord, Expr EWord) -> Err SMTEntry
-    mkAssertion (fname, a, b) = do
-      aenc <- exprToSMTAbst a
-      benc <- exprToSMTAbst b
-      let result = "(" <> fname `sp` aenc `sp` benc <> ")"
-      pure $ SMTCommand $ "(assert (bvule " <> result `sp` benc <> "))"
 
 data DivModOp = IsDiv | IsMod
   deriving (Eq, Ord)
@@ -152,7 +120,6 @@ assertPropsShiftBounds conf ps = do
   let mkBase s = assertPropsHelperWith AbstractDivision s divModAbstractDecls
   base <- if not conf.simp then mkBase False ps
           else mkBase True (decompose conf ps)
-  -- bounds <- divModBounds ps
   shiftBounds <- divModShiftBounds ps
   pure $ base
       -- <> SMT2 (SMTScript bounds) mempty mempty
@@ -198,18 +165,12 @@ divModShiftBounds props = do
                 let kLit = wordAsBV k
                     threshold = "(bvshl (_ bv1 256) " <> kLit <> ")"
                     shifted = "(bvlshr" `sp` absAName `sp` kLit <> ")"
-                in [ SMTCommand $ "(assert (=> (=" `sp` absBName `sp` zero <> ") (=" `sp` unsignedResult `sp` zero <> ")))"
-                   , SMTCommand $ "(assert (bvule" `sp` unsignedResult `sp` absAName <> "))"
-                   , SMTCommand $ "(assert (=> (bvuge" `sp` absBName `sp` threshold <> ") (bvule" `sp` unsignedResult `sp` shifted <> ")))"
+                in [ SMTCommand $ "(assert (=> (bvuge" `sp` absBName `sp` threshold <> ") (bvule" `sp` unsignedResult `sp` shifted <> ")))"
                    , SMTCommand $ "(assert (=> "
                      <> "(and (bvult" `sp` absBName `sp` threshold <> ") (distinct " `sp` absBName `sp` zero <> "))"
                      <> "(bvuge" `sp` unsignedResult `sp` shifted <> ")))"
                    ]
-              _ ->
-                -- No shift info: overapproximate (only UNSAT is sound)
-                [ SMTCommand $ "(assert (=> (=" `sp` absAName `sp` zero <> ") (=" `sp` unsignedResult `sp` zero <> ")))"
-                , SMTCommand $ "(assert (bvule" `sp` unsignedResult `sp` absAName <> "))"
-                ]
+              _ -> []
         axioms <- mapM (mkSignedAxiom unsignedResult) ops
         pure $ decls <> shiftBounds <> axioms
 
