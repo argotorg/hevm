@@ -275,6 +275,10 @@ smtZeroGuard divisor nonZeroResult =
   "(ite (=" `sp` divisor `sp` zero <> ")" `sp` zero `sp` nonZeroResult <> ")"
 
 -- | |x| as SMT.
+-- Bug 3 (Minor): smtAbsolute doesn't handle MIN_INT (line 278-279)
+-- smtAbsolute computes ite(x >= 0, x, 0 - x).
+-- For the minimum signed 256-bit value (-2^255), 0 - (-2^255) overflows back to -2^255 in two's complement. So |MIN_INT| = MIN_INT (negative),
+-- which could produce incorrect signed div/mod results for edge cases like sdiv(-2^255, -1) (which EVM defines as -2^255).
 smtAbsolute :: Builder -> Builder
 smtAbsolute x = "(ite (bvsge" `sp` x `sp` zero <> ")" `sp` x `sp` "(bvsub" `sp` zero `sp` x <> "))"
 
