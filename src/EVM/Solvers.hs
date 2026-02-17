@@ -142,21 +142,7 @@ checkSatWithProps sg props = do
       let refinement = divModGroundTruth allProps
       if isLeft smt2Abstract then pure $ Error $ getError smt2Abstract
       else if isLeft refinement then pure $ Error $ getError refinement
-      else liftIO $ do
-        ret <- checkSatTwoPhase sg (Just props) smt2Abstract (Just $ SMTScript (getNonError refinement))
-        case ret of
-          Cex model -> do
-            when conf.debug $ logWithTid "Refinement successful, query is SAT."
-            pure $ Cex model
-          Qed -> do
-            when conf.debug $ logWithTid "Query successful, query is Qed."
-            pure Qed
-          Unknown msg -> do
-            when conf.debug $ logWithTid $ "Solver returned unknown during refinement phase: " <> msg
-            pure $ Unknown msg
-          Error msg -> do
-            when conf.debug $ logWithTid $ "Solver returned error during refinement phase: " <> msg
-            pure $ Error msg
+      else liftIO $ checkSatTwoPhase sg (Just props) smt2Abstract (Just $ SMTScript (getNonError refinement))
 
 checkSatTwoPhase :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> Maybe SMTScript -> IO SMTResult
 checkSatTwoPhase (SolverGroup taskq) props smt2 refinement = do
@@ -307,22 +293,22 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
           ret <- sendAndCheck conf inst cmds $ \res -> do
             case res of
               "unsat" -> do
-                when conf.debug $ logWithTid "Orig Query is UNSAT."
+                when conf.debug $ logWithTid "Abstract query is UNSAT."
                 dealWithUnsat
               "sat" -> case refinement of
                 Just refine -> do
-                  when conf.debug $ logWithTid "Phase 1 is SAT, refining..."
+                  when conf.debug $ logWithTid "Abstract query is SAT, refining..."
                   sendAndCheck conf inst refine $ \sat2 -> do
                     case sat2 of
                       "unsat" -> do
-                        when conf.debug $ logWithTid "Refined Query is UNSAT."
+                        when conf.debug $ logWithTid "Refined query is UNSAT."
                         dealWithUnsat
                       "sat" -> dealWithModel conf inst
-                      "timeout" -> pure $ Unknown "Result timeout by SMT solver"
+                      "timeout" -> pure $ Unknown "Refined query timeout"
                       "unknown" -> dealWithUnknown conf
                       _ -> dealWithIssue conf sat2
                 Nothing -> dealWithModel conf inst
-              "timeout" -> pure $ Unknown "Result timeout by SMT solver"
+              "timeout" -> pure $ Unknown "Abstract query timeout"
               "unknown" -> dealWithUnknown conf
               _ -> dealWithIssue conf res
           writeChan r ret
