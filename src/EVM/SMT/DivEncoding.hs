@@ -144,7 +144,7 @@ divModGroundAxioms props = do
           unsignedResult = op <> (fromString $ "_" <> show groupIdx)
 
       if not (isSigned firstKind)
-      then mapM (mkUnsignedAxiom unsignedResult) ops
+      then mapM mkUnsignedAxiom ops
       else do
         (decls, (absAName, absBName)) <- declareAbs groupIdx firstA firstB unsignedResult
         let unsignedEnc = smtZeroGuard absBName $ "(" <> op `sp` absAName `sp` absBName <> ")"
@@ -154,8 +154,8 @@ divModGroundAxioms props = do
         pure $ decls <> [unsignedAssert] <> axioms
 
 -- | Assert abstract(a,b) = concrete bvudiv/bvurem(a,b).
-mkUnsignedAxiom :: Builder -> DivOp -> Err SMTEntry
-mkUnsignedAxiom _unsignedResult (kind, a, b) = do
+mkUnsignedAxiom :: DivOp -> Err SMTEntry
+mkUnsignedAxiom (kind, a, b) = do
   aenc <- exprToSMTAbst a
   benc <- exprToSMTAbst b
   let fname = if kind == Div then "abst_evm_bvudiv" else "abst_evm_bvurem"
@@ -233,7 +233,7 @@ divModShiftBounds props = do
 
       if not (isSigned firstKind) then do
         -- Unsigned: use concrete bvudiv/bvurem directly
-        mapM (mkUnsignedAxiom unsignedResult) ops
+        mapM mkUnsignedAxiom ops
       else do
         (decls, (absAName, absBName)) <- declareAbs groupIdx firstA firstB unsignedResult
 
