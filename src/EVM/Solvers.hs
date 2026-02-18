@@ -104,7 +104,6 @@ data MultiData = MultiData
 
 data SingleData = SingleData
   SMT2
-  (Maybe SMTScript) -- refinement for two-phase solving, if abst-ref is used
   (Maybe [Prop])    -- Props that generated the SMT2, if available. Used for caching
   (Chan SMTResult)  -- result channel
 
@@ -141,21 +140,22 @@ checkSatWithProps sg props = do
       let refinement = divModGroundTruth (exprToSMTWith AbstractDivMod) allProps
       if isLeft smt2Abstract then pure $ Error $ getError smt2Abstract
       else if isLeft refinement then pure $ Error $ getError refinement
-      else liftIO $ checkSatTwoPhase sg (Just props) smt2Abstract (Just $ SMTScript (getNonError refinement))
+      -- else liftIO $ checkSatTwoPhase sg (Just props) smt2Abstract (Just $ SMTScript (getNonError refinement))
+      else do
+        let x = (getNonError smt2Abstract) <> (SMT2 (SMTScript (getNonError refinement)) mempty mempty)
+        liftIO $ checkSat sg (Just props) (Right x)
 
-checkSatTwoPhase :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> Maybe SMTScript -> IO SMTResult
-checkSatTwoPhase (SolverGroup taskq) props smt2 refinement = do
+checkSat :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> IO SMTResult
+checkSat (SolverGroup taskq) props smt2 = do
   if isLeft smt2 then pure $ Error $ getError smt2
   else do
     -- prepare result channel
     resChan <- newChan
     -- send task to solver group
-    writeChan taskq (TaskSingle (SingleData (getNonError smt2) refinement props resChan))
+    writeChan taskq (TaskSingle (SingleData (getNonError smt2) props resChan))
     -- collect result
     readChan resChan
 
-checkSat :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> IO SMTResult
-checkSat sg props smt2 = checkSatTwoPhase sg props smt2 Nothing
 
 writeSMT2File :: SMT2 -> FilePath -> String -> IO ()
 writeSMT2File smt2 path postfix = do
@@ -191,13 +191,13 @@ withSolvers solver count timeout maxMemory cont = do
         Nothing -> do
           task <- liftIO $ readChan taskq
           case task of
-            TaskSingle (SingleData _ _ props r) | isJust props && supersetAny (fromList (fromJust props)) knownUnsat -> do
+            TaskSingle (SingleData _ props r) | isJust props && supersetAny (fromList (fromJust props)) knownUnsat -> do
               liftIO $ writeChan r Qed
               when conf.debug $ liftIO $ putStrLn "   Qed found via cache!"
               orchestrate taskq cacheq sem knownUnsat fileCounter
             _ -> do
               runTask' <- case task of
-                TaskSingle (SingleData smt2 refinement props r) -> toIO $ getOneSol solver timeout maxMemory smt2 refinement props r cacheq sem fileCounter
+                TaskSingle (SingleData smt2 props r) -> toIO $ getOneSol solver timeout maxMemory smt2 props r cacheq sem fileCounter
                 TaskMulti (MultiData smt2 multiSol r) -> toIO $ getMultiSol solver timeout maxMemory smt2 multiSol r sem fileCounter
               _ <- liftIO $ forkIO runTask'
               orchestrate taskq cacheq sem knownUnsat (fileCounter + 1)
@@ -277,8 +277,8 @@ getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r sem f
     )
 
 getOneSol :: forall m . (MonadIO m, ReadConfig m) =>
-  Solver -> Maybe Natural -> Natural -> SMT2 -> Maybe SMTScript -> Maybe [Prop] -> Chan SMTResult -> TChan CacheEntry -> QSem -> Int -> m ()
-getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r cacheq sem fileCounter = do
+  Solver -> Maybe Natural -> Natural -> SMT2 -> Maybe [Prop] -> Chan SMTResult -> TChan CacheEntry -> QSem -> Int -> m ()
+getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) props r cacheq sem fileCounter = do
   conf <- readConfig
   liftIO $ bracket_
     (waitQSem sem)
@@ -294,20 +294,7 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
               "unsat" -> do
                 when conf.debug $ logWithTid "Query is UNSAT."
                 dealWithUnsat
-              "sat" -> case refinement of
-                Just refine -> do
-                  when conf.debug $ logWithTid "Abstract query is SAT, refining..."
-                  when (conf.dumpQueries) $ writeSMT2File (smt2 <> (SMT2 refine mempty mempty)) "-ref." (show fileCounter)
-                  sendAndCheck conf inst refine $ \sat2 -> do
-                    case sat2 of
-                      "unsat" -> do
-                        when conf.debug $ logWithTid "Refined query is UNSAT."
-                        dealWithUnsat
-                      "sat" -> dealWithModel conf inst
-                      "timeout" -> pure $ Unknown "Refined query timeout"
-                      "unknown" -> dealWithUnknown conf
-                      _ -> dealWithIssue conf sat2
-                Nothing -> dealWithModel conf inst
+              "sat" -> dealWithModel conf inst
               "timeout" -> pure $ Unknown "Abstract query timeout"
               "unknown" -> dealWithUnknown conf
               _ -> dealWithIssue conf res
@@ -326,8 +313,7 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
       when (isJust props) $ liftIO . atomically $ writeTChan cacheq (CacheEntry (fromJust props))
       pure Qed
     dealWithUnknown conf = do
-      let fullSMT2 = smt2 <> SMT2 (fromMaybe mempty refinement) mempty mempty
-      dumpUnsolved fullSMT2 fileCounter conf.dumpUnsolved
+      dumpUnsolved smt2 fileCounter conf.dumpUnsolved
       unknown conf "SMT solver returned unknown (maybe it got killed?)"
     dealWithModel conf inst = getModel inst cexvars >>= \case
       Just model -> pure $ Cex model
