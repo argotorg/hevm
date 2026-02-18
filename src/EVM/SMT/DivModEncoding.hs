@@ -171,11 +171,11 @@ mkCongruenceLinks indexedGroups =
           abosluteBi = fromString $ "absolute_b" <> show i
           absoluteAj = fromString $ "absolute_a" <> show j
           absoluteBj = fromString $ "absolute_b" <> show j
-          unsignedResultI = fromString $ prefix' <> "_" <> show i
-          unsignedResultJ = fromString $ prefix' <> "_" <> show j
+          absoluteResI = fromString $ prefix' <> "_" <> show i
+          absoluteRedJ = fromString $ prefix' <> "_" <> show j
       in [ SMTCommand $ "(assert (=> "
             <> "(and (=" `sp` absoluteAi `sp` absoluteAj <> ") (=" `sp` abosluteBi `sp` absoluteBj <> "))"
-            <> "(=" `sp` unsignedResultI `sp` unsignedResultJ <> ")))" ]
+            <> "(=" `sp` absoluteResI `sp` absoluteRedJ <> ")))" ]
 
 -- | (ite (= divisor 0) 0 result)
 smtZeroGuard :: Builder -> Builder -> Builder
