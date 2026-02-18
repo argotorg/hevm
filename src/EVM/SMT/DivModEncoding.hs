@@ -90,10 +90,10 @@ assertSignedEqualsUnsignedDerived enc unsignedResult (kind, a, b) = do
 -- e.g. (assert (= (abst_evm_bvsdiv a b) (bvsdiv a b)))
 divModGroundTruth :: (Expr EWord -> Err Builder) -> [Prop] -> Err [SMTEntry]
 divModGroundTruth enc props = do
-  let allDivs = nubOrd $ concatMap (foldProp collectDivMods []) props
-  if null allDivs then pure []
+  let allDivMods = nubOrd $ concatMap (foldProp collectDivMods []) props
+  if null allDivMods then pure []
   else do
-    axioms <- mapM mkGroundTruthAxiom allDivs
+    axioms <- mapM mkGroundTruthAxiom allDivMods
     pure $ (SMTComment "division/modulo ground-truth refinement") : axioms
   where
     mkGroundTruthAxiom :: DivModOp -> Err SMTEntry
@@ -110,20 +110,19 @@ divModGroundTruth enc props = do
 -- | Encode div/mod operations using abs values, shift-bounds, and congruence (no bvudiv).
 divModEncoding :: (Expr EWord -> Err Builder) -> [Prop] -> Err [SMTEntry]
 divModEncoding enc props = do
-  let allDivs = nubOrd $ concatMap (foldProp collectDivMods []) props
-  if null allDivs then pure []
+  let allDivMods = nubOrd $ concatMap (foldProp collectDivMods []) props
+  if null allDivMods then pure []
   else do
-    let groups = groupBy (\a b -> abstractKey a == abstractKey b) $ sortBy (comparing abstractKey) allDivs
+    let groups = groupBy (\a b -> abstractKey a == abstractKey b) $ sortBy (comparing abstractKey) allDivMods
         indexedGroups = zip [0..] groups
     let links = mkCongruenceLinks indexedGroups
     entries <- concat <$> mapM (uncurry mkGroupEncoding) indexedGroups
     pure $ (SMTComment "division/modulo encoding (abs + shift-bounds + congruence, no bvudiv)") : entries <> links
   where
-    -- | Extract shift amount k from SHL(k, _) or power-of-2 literals.
-    extractShift :: Expr EWord -> Maybe W256
-    extractShift (SHL (Lit k) _) = Just k
-    extractShift (Lit n) | n > 0, n .&. (n - 1) == 0 = Just (fromIntegral $ countTrailingZeros n)
-    extractShift _ = Nothing
+    knownPow2Bound :: Expr EWord -> Maybe W256
+    knownPow2Bound (SHL (Lit k) _) = Just k
+    knownPow2Bound (Lit n) | n > 0 = Just (fromIntegral $ countTrailingZeros n)
+    knownPow2Bound _ = Nothing
 
     mkGroupEncoding :: Int -> [DivModOp] -> Err [SMTEntry]
     mkGroupEncoding _ [] = pure []
@@ -131,7 +130,7 @@ divModEncoding enc props = do
       let isDiv' = isDiv firstKind
           prefix = if isDiv' then "udiv" else "urem"
           unsignedResult = fromString $ prefix <> "_" <> show groupIdx
-      (decls, (absoluteAName, absoluteBName)) <- declareAbsolute enc groupIdx firstA firstB unsignedResult
+      (decls, (absoluteA, absoluteB)) <- declareAbsolute enc groupIdx firstA firstB unsignedResult
 
       -- When the dividend is a left-shift (a = x << k, i.e. a = x * 2^k),
       -- we can bound the unsigned division result using cheap bitshift
@@ -139,18 +138,18 @@ divModEncoding enc props = do
       -- The pivot point is |a| >> k (= |a| / 2^k):
       --   - If |b| >= 2^k: result <= |a| >> k  (upper bound)
       --   - If |b| <  2^k and b != 0: result >= |a| >> k  (lower bound)
-      let shiftBounds = case (isDiv', extractShift firstA) of
+      let shiftBounds = case (isDiv', knownPow2Bound firstA) of
             (True, Just k) ->
               let kLit = wordAsBV k
-                  -- threshold = 2^k
-                  threshold = "(bvshl (_ bv1 256) " <> kLit <> ")"
+                  -- twoPowK = 2^k
+                  twoPowK = "(bvshl (_ bv1 256) " <> kLit <> ")"
                   -- shifted = |a| >> k = |a| / 2^k
-                  shifted = "(bvlshr" `sp` absoluteAName `sp` kLit <> ")"
+                  shifted = "(bvlshr" `sp` absoluteA `sp` kLit <> ")"
               in  -- |b| >= 2^k  =>  |a|/|b| <= |a|/2^k
-                  [ SMTCommand $ "(assert (=> (bvuge" `sp` absoluteBName `sp` threshold <> ") (bvule" `sp` unsignedResult `sp` shifted <> ")))"
-                  -- |b| < 2^k and b != 0  =>  |a|/|b| >= |a|/2^k
+                 [ SMTCommand $ "(assert (=> (bvuge" `sp` absoluteB `sp` twoPowK <> ") (bvule" `sp` unsignedResult `sp` shifted <> ")))"
+                  -- |b| < 2^k and |b| != 0  =>  |a|/|b| >= |a|/2^k
                  , SMTCommand $ "(assert (=> "
-                   <> "(and (bvult" `sp` absoluteBName `sp` threshold <> ") (distinct " `sp` absoluteBName `sp` zero <> "))"
+                   <> "(and (bvult" `sp` absoluteB `sp` twoPowK <> ") (distinct " `sp` absoluteB `sp` zero <> "))"
                    <> "(bvuge" `sp` unsignedResult `sp` shifted <> ")))"
                  ]
             _ -> []
