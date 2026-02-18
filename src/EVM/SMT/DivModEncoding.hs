@@ -73,7 +73,7 @@ declareAbsolute enc groupIdx firstA firstB unsignedResult = do
               ]
   pure (decls, (absoluteAName, absoluteBName))
 
--- | Assert abstract(a,b) = signed result derived from unsigned result.
+-- | Assert "abstract sdiv/smod(a,b)" = signed result derived from unsigned result.
 assertAbstEqSignedResult :: (Expr EWord -> Err Builder) -> Builder -> DivModOp -> Err SMTEntry
 assertAbstEqSignedResult enc unsignedResult (kind, a, b) = do
   aenc <- enc a
@@ -197,14 +197,18 @@ smtSameSign a b = "(=" `sp` "(bvslt" `sp` a `sp` zero <> ")" `sp` "(bvslt" `sp` 
 smtIsNonNeg :: Builder -> Builder
 smtIsNonNeg x = "(bvsge" `sp` x `sp` zero <> ")"
 
--- | sdiv(a,b) from udiv(|a|,|b|): negate result if signs differ
+-- | sdiv(a,b) = ITE(b = 0,              0,
+--               ITE(sign(a) = sign(b),  udiv(|a|,|b|),
+--                                      -udiv(|a|,|b|)))
 signedFromUnsignedDiv :: Builder -> Builder -> Builder -> Builder
 signedFromUnsignedDiv aenc benc udivResult =
   smtZeroGuard benc $
   "(ite" `sp` (smtSameSign aenc benc) `sp`
     udivResult `sp` (smtNeg udivResult) <> ")"
 
--- | smod(a,b) from urem(|a|,|b|): result sign matches dividend.
+-- | smod(a,b) = ITE(b = 0,   0,
+--               ITE(a ≥ 0,   urem(|a|,|b|),
+--                           -urem(|a|,|b|)))
 signedFromUnsignedMod :: Builder -> Builder -> Builder -> Builder
 signedFromUnsignedMod aenc benc uremResult =
   smtZeroGuard benc $
