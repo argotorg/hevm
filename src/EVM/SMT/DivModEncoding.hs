@@ -61,21 +61,21 @@ declareAbsolute :: (Expr EWord -> Err Builder) -> Int -> Expr EWord -> Expr EWor
 declareAbsolute enc groupIdx firstA firstB unsignedResult = do
   aenc <- enc firstA
   benc <- enc firstB
-  let absAEnc = smtAbsolute aenc
-      absBEnc = smtAbsolute benc
+  let absoluteAEnc = smtAbsolute aenc
+      absoluteBEnc = smtAbsolute benc
       absoluteAName = fromString $ "absolute_a" <> show groupIdx
       absoluteBName = fromString $ "absolute_b" <> show groupIdx
   let decls = [ SMTCommand $ "(declare-const" `sp` absoluteAName `sp` "(_ BitVec 256))"
               , SMTCommand $ "(declare-const" `sp` absoluteBName `sp` "(_ BitVec 256))"
               , SMTCommand $ "(declare-const" `sp` unsignedResult `sp` "(_ BitVec 256))"
-              , SMTCommand $ "(assert (=" `sp` absoluteAName `sp` absAEnc <> "))"
-              , SMTCommand $ "(assert (=" `sp` absoluteBName `sp` absBEnc <> "))"
+              , SMTCommand $ "(assert (=" `sp` absoluteAName `sp` absoluteAEnc <> "))"
+              , SMTCommand $ "(assert (=" `sp` absoluteBName `sp` absoluteBEnc <> "))"
               ]
   pure (decls, (absoluteAName, absoluteBName))
 
 -- | Assert abstract(a,b) = signed result derived from unsigned result.
-assertSignedEqualsUnsignedDerived :: (Expr EWord -> Err Builder) -> Builder -> DivModOp -> Err SMTEntry
-assertSignedEqualsUnsignedDerived enc unsignedResult (kind, a, b) = do
+assertAbstEqSignedResult :: (Expr EWord -> Err Builder) -> Builder -> DivModOp -> Err SMTEntry
+assertAbstEqSignedResult enc unsignedResult (kind, a, b) = do
   aenc <- enc a
   benc <- enc b
   let fname = if isDiv kind then "abst_evm_bvsdiv" else "abst_evm_bvsrem"
@@ -126,7 +126,7 @@ divModEncoding enc props = do
 
     mkGroupEncoding :: Int -> [DivModOp] -> Err [SMTEntry]
     mkGroupEncoding _ [] = pure []
-    mkGroupEncoding groupIdx ops@((firstKind, firstA, firstB) : _) = do
+    mkGroupEncoding groupIdx lhs@((firstKind, firstA, firstB) : _) = do
       let isDiv' = isDiv firstKind
           prefix = if isDiv' then "udiv" else "urem"
           unsignedResult = fromString $ prefix <> "_" <> show groupIdx
@@ -153,7 +153,7 @@ divModEncoding enc props = do
                    <> "(bvuge" `sp` unsignedResult `sp` shifted <> ")))"
                  ]
             _ -> []
-      axioms <- mapM (assertSignedEqualsUnsignedDerived enc unsignedResult) ops
+      axioms <- mapM (assertAbstEqSignedResult enc unsignedResult) lhs
       pure $ decls <> shiftBounds <> axioms
 
 -- | Congruence: if two signed groups have equal absolute inputs, their results are equal.
