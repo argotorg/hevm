@@ -1,5 +1,5 @@
 {- | Abstract div/mod encoding for two-phase SMT solving. -}
-module EVM.SMT.DivEncoding
+module EVM.SMT.DivModEncoding
   ( divModGroundTruth
   , divModEncoding
   , divModAbstractDecls

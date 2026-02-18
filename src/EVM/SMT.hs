@@ -6,7 +6,7 @@ module EVM.SMT
 (
   module EVM.SMT.Types,
   module EVM.SMT.SMTLIB,
-  module EVM.SMT.DivEncoding,
+  module EVM.SMT.DivModEncoding,
 
   collapse,
   getVar,
@@ -72,7 +72,7 @@ import EVM.Types
 import EVM.Effects
 import EVM.SMT.Types
 import EVM.SMT.SMTLIB
-import EVM.SMT.DivEncoding
+import EVM.SMT.DivModEncoding
 
 
 -- ** Encoding ** ----------------------------------------------------------------------------------
@@ -100,9 +100,9 @@ formatSMT2 (SMT2 (SMTScript entries) _ ps) = expr <> smt2
 
 -- | Reads all intermediate variables from the builder state and produces SMT declaring them as constants
 declareIntermediates :: BufEnv -> StoreEnv -> Err [SMTEntry]
-declareIntermediates = declareIntermediatesWith ConcreteDivision
+declareIntermediates = declareIntermediatesWith ConcreteDivMod
 
-declareIntermediatesWith :: DivEncoding -> BufEnv -> StoreEnv -> Err [SMTEntry]
+declareIntermediatesWith :: DivModEncoding -> BufEnv -> StoreEnv -> Err [SMTEntry]
 declareIntermediatesWith enc bufs stores = do
   let encSs = Map.mapWithKey encodeStore stores
       encBs = Map.mapWithKey encodeBuf bufs
@@ -135,22 +135,22 @@ decompose conf props = if conf.decomposeStorage && safeExprs && safeProps
 --         need unconcretized Props
 assertProps :: Config -> [Prop] -> Err SMT2
 assertProps conf ps =
-  if not conf.simp then assertPropsHelperWith ConcreteDivision False [] ps
-  else assertPropsHelperWith ConcreteDivision True [] (decompose conf ps)
+  if not conf.simp then assertPropsHelperWith ConcreteDivMod False [] ps
+  else assertPropsHelperWith ConcreteDivMod True [] (decompose conf ps)
 
 -- | Assert props with abstract div/mod (uninterpreted functions + encoding constraints).
 assertPropsAbstract :: Config -> [Prop] -> Err SMT2
 assertPropsAbstract conf ps = do
-  let mkBase s = assertPropsHelperWith AbstractDivision s divModAbstractDecls
+  let mkBase s = assertPropsHelperWith AbstractDivMod s divModAbstractDecls
   base <- if not conf.simp then mkBase False ps
           else mkBase True (decompose conf ps)
-  shiftBounds <- divModEncoding (exprToSMTWith AbstractDivision) ps
+  shiftBounds <- divModEncoding (exprToSMTWith AbstractDivMod) ps
   pure $ base <> SMT2 (SMTScript shiftBounds) mempty mempty
 
 -- Note: we need a version that does NOT call simplify,
 -- because we make use of it to verify the correctness of our simplification
 -- passes through property-based testing.
-assertPropsHelperWith :: DivEncoding -> Bool -> [SMTEntry] -> [Prop]  -> Err SMT2
+assertPropsHelperWith :: DivModEncoding -> Bool -> [SMTEntry] -> [Prop]  -> Err SMT2
 assertPropsHelperWith divEnc simp extraDecls psPreConc = do
  encs <- mapM (propToSMTWith divEnc) psElim
  intermediates <- declareIntermediatesWith divEnc bufs stores
@@ -243,7 +243,7 @@ referencedVars expr = nubOrd $ foldTerm go [] expr
       Var s -> [fromText s]
       _ -> []
 
-referencedFrameContext :: DivEncoding -> TraversableTerm a => a -> [(Builder, [Prop])]
+referencedFrameContext :: DivModEncoding -> TraversableTerm a => a -> [(Builder, [Prop])]
 referencedFrameContext enc expr = nubOrd $ foldTerm go [] expr
   where
     go :: Expr a -> [(Builder, [Prop])]
@@ -378,7 +378,7 @@ declareConstrainAddrs names = SMT2 (SMTScript ([SMTComment "concrete and symboli
 -- The gas is a tuple of (prefix, index). Within each prefix, the gas is strictly decreasing as the
 -- index increases. This function gets a map of Prefix -> [Int], and for each prefix,
 -- enforces the order
-enforceGasOrder :: DivEncoding -> [Prop] -> [SMTEntry]
+enforceGasOrder :: DivModEncoding -> [Prop] -> [SMTEntry]
 enforceGasOrder enc ps = [SMTComment "gas ordering"] <> (concatMap (uncurry order) indices)
   where
     order :: TS.Text -> [Int] -> [SMTEntry]
@@ -423,9 +423,9 @@ declareBlockContext names = do
     cexvars = (mempty :: CexVars){ blockContext = fmap (toLazyText . fst) names }
 
 assertSMT :: Prop -> Either String SMTEntry
-assertSMT = assertSMTWith ConcreteDivision
+assertSMT = assertSMTWith ConcreteDivMod
 
-assertSMTWith :: DivEncoding -> Prop -> Either String SMTEntry
+assertSMTWith :: DivModEncoding -> Prop -> Either String SMTEntry
 assertSMTWith enc p = do
   p' <- propToSMTWith enc p
   pure $ SMTCommand ("(assert " <> p' <> ")")
@@ -436,7 +436,7 @@ wordAsBV w = "(_ bv" <> Data.Text.Lazy.Builder.Int.decimal w <> " 256)"
 byteAsBV :: Word8 -> Builder
 byteAsBV b = "(_ bv" <> Data.Text.Lazy.Builder.Int.decimal b <> " 8)"
 
-exprToSMTWith :: DivEncoding -> Expr a -> Err Builder
+exprToSMTWith :: DivModEncoding -> Expr a -> Err Builder
 exprToSMTWith divEnc = \case
   Lit w -> pure $ wordAsBV w
   Var s -> pure $ fromText s
@@ -631,8 +631,8 @@ exprToSMTWith divEnc = \case
       pure $ "(ite (= " <> benc <> " (_ bv0 256)) (_ bv0 256) " <>  "(" <> op `sp` aenc `sp` benc <> "))"
     divModOp :: Builder -> Builder -> Expr x -> Expr y -> Err Builder
     divModOp concreteOp abstractOp a b = case divEnc of
-      ConcreteDivision -> op2CheckZero concreteOp a b
-      AbstractDivision -> op2 abstractOp a b
+      ConcreteDivMod -> op2CheckZero concreteOp a b
+      AbstractDivMod -> op2 abstractOp a b
 
 sp :: Builder -> Builder -> Builder
 a `sp` b = a <> " " <> b
@@ -643,7 +643,7 @@ zero = "(_ bv0 256)"
 one :: Builder
 one = "(_ bv1 256)"
 
-propToSMTWith :: DivEncoding -> Prop -> Err Builder
+propToSMTWith :: DivModEncoding -> Prop -> Err Builder
 propToSMTWith divEnc = \case
   PEq a b -> op2 "=" a b
   PLT a b -> op2 "bvult" a b
@@ -677,7 +677,7 @@ propToSMTWith divEnc = \case
 
 -- ** Helpers ** ---------------------------------------------------------------------------------
 
-copySliceWith :: DivEncoding -> Expr EWord -> Expr EWord -> Expr EWord -> Builder -> Builder -> Err Builder
+copySliceWith :: DivModEncoding -> Expr EWord -> Expr EWord -> Expr EWord -> Builder -> Builder -> Err Builder
 copySliceWith divEnc srcOffset dstOffset (Lit size) src dst = do
   sz <- internal size
   pure $ "(let ((src " <> src <> ")) " <> sz <> ")"
@@ -694,7 +694,7 @@ copySliceWith divEnc srcOffset dstOffset (Lit size) src dst = do
     offset o e = exprToSMTWith divEnc $ Expr.add (Lit o) e
 copySliceWith _ _ _ _ _ _ = Left "CopySlice with a symbolically sized region not currently implemented, cannot execute SMT solver on this query"
 
-expandExpWith :: DivEncoding -> Expr EWord -> W256 -> Err Builder
+expandExpWith :: DivModEncoding -> Expr EWord -> W256 -> Err Builder
 expandExpWith divEnc base expnt
   -- in EVM, anything (including 0) to the power of 0 is 1
   | expnt == 0 = pure one
@@ -704,7 +704,7 @@ expandExpWith divEnc base expnt
     n <- expandExpWith divEnc base (expnt - 1)
     pure $ "(bvmul " <> b `sp` n <> ")"
 
-concatBytesWith :: DivEncoding -> [Expr Byte] -> Err Builder
+concatBytesWith :: DivModEncoding -> [Expr Byte] -> Err Builder
 concatBytesWith divEnc bytes = do
   case List.uncons $ reverse bytes of
     Nothing -> Left "unexpected empty bytes"
@@ -717,7 +717,7 @@ concatBytesWith divEnc bytes = do
       byteSMT <- exprToSMTWith divEnc byte
       pure $ "(concat " <> byteSMT `sp` inner <> ")"
 
-writeBytesWith :: DivEncoding -> ByteString -> Expr Buf -> Err Builder
+writeBytesWith :: DivModEncoding -> ByteString -> Expr Buf -> Err Builder
 writeBytesWith divEnc bytes buf =  do
   smtText <- exprToSMTWith divEnc buf
   let ret = BS.foldl wrap (0, smtText) bytes
@@ -733,7 +733,7 @@ writeBytesWith divEnc bytes buf =  do
       where
         !idx' = idx + 1
 
-encodeConcreteStore :: DivEncoding -> Map W256 W256 -> Err Builder
+encodeConcreteStore :: DivModEncoding -> Map W256 W256 -> Err Builder
 encodeConcreteStore enc s = foldM encodeWrite ("((as const Storage) #x0000000000000000000000000000000000000000000000000000000000000000)") (Map.toList s)
   where
     encodeWrite :: Builder -> (W256, W256) -> Err Builder
@@ -915,7 +915,7 @@ queryValue :: ValGetter -> Expr EWord -> MaybeIO W256
 queryValue _ (Lit w) = pure w
 queryValue getVal w = do
   -- this exprToSMTWith should never fail, since we have already ran the solver, in refined mode
-  let expr = toLazyText $ fromRight' $ exprToSMTWith ConcreteDivision w
+  let expr = toLazyText $ fromRight' $ exprToSMTWith ConcreteDivMod w
   raw <- getVal expr
   hoistMaybe $ do
     valTxt <- extractValue raw

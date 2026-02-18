@@ -4209,7 +4209,7 @@ tests = testGroup "hevm"
   [ testCase "encodeConcreteStore-overwrite" $
     assertEqual ""
       (pure "(store (store ((as const Storage) #x0000000000000000000000000000000000000000000000000000000000000000) (_ bv1 256) (_ bv2 256)) (_ bv3 256) (_ bv4 256))")
-      (EVM.SMT.encodeConcreteStore ConcreteDivision $ Map.fromList [(W256 1, W256 2), (W256 3, W256 4)])
+      (EVM.SMT.encodeConcreteStore ConcreteDivMod $ Map.fromList [(W256 1, W256 2), (W256 3, W256 4)])
   ]
   , testGroup "calling-solvers"
   [ test "no-error-on-large-buf" $ do

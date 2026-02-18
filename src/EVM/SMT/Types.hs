@@ -11,7 +11,7 @@ import EVM.Types
 
 type MaybeIO = MaybeT IO
 
-data DivEncoding = ConcreteDivision | AbstractDivision
+data DivModEncoding = ConcreteDivMod | AbstractDivMod
   deriving (Show, Eq)
 
 data SMTEntry = SMTCommand Builder | SMTComment Builder
