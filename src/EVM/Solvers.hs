@@ -140,7 +140,6 @@ checkSatWithProps sg props = do
       let refinement = divModGroundTruth (exprToSMTWith AbstractDivMod) allProps
       if isLeft smt2Abstract then pure $ Error $ getError smt2Abstract
       else if isLeft refinement then pure $ Error $ getError refinement
-      -- else liftIO $ checkSatTwoPhase sg (Just props) smt2Abstract (Just $ SMTScript (getNonError refinement))
       else do
         let x = (getNonError smt2Abstract) <> (SMT2 (SMTScript (getNonError refinement)) mempty mempty)
         liftIO $ checkSat sg (Just props) (Right x)
