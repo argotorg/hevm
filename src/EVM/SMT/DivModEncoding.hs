@@ -1,4 +1,4 @@
-{- | Abstract div/mod encoding for two-phase SMT solving. -}
+{- | Abstract div/mobsolud encoding for two-phase SMT solving. -}
 module EVM.SMT.DivModEncoding
   ( divModGroundTruth
   , divModEncoding
@@ -39,7 +39,7 @@ data DivModKind = IsDiv | IsMod
 
 type DivModOp = (DivModKind, Expr EWord, Expr EWord)
 
-data AbsKey = AbsKey (Expr EWord) (Expr EWord) DivModKind
+data AbstractKey = AbstractKey (Expr EWord) (Expr EWord) DivModKind
   deriving (Eq, Ord)
 
 isDiv :: DivModKind -> Bool
@@ -53,25 +53,25 @@ collectDivMods = \case
   T.SMod a b -> [(IsMod, a, b)]
   _          -> []
 
-absKey :: DivModOp -> AbsKey
-absKey (kind, a, b) = AbsKey a b kind
+abstractKey :: DivModOp -> AbstractKey
+abstractKey (kind, a, b) = AbstractKey a b kind
 
 -- | Declare abs_a, abs_b, and unsigned result variables for a signed group.
-declareAbs :: (Expr EWord -> Err Builder) -> Int -> Expr EWord -> Expr EWord -> Builder -> Err ([SMTEntry], (Builder, Builder))
-declareAbs enc groupIdx firstA firstB unsignedResult = do
+declareAbsolute :: (Expr EWord -> Err Builder) -> Int -> Expr EWord -> Expr EWord -> Builder -> Err ([SMTEntry], (Builder, Builder))
+declareAbsolute enc groupIdx firstA firstB unsignedResult = do
   aenc <- enc firstA
   benc <- enc firstB
   let absAEnc = smtAbsolute aenc
       absBEnc = smtAbsolute benc
-      absAName = fromString $ "abs_a_" <> show groupIdx
-      absBName = fromString $ "abs_b_" <> show groupIdx
-  let decls = [ SMTCommand $ "(declare-const" `sp` absAName `sp` "(_ BitVec 256))"
-              , SMTCommand $ "(declare-const" `sp` absBName `sp` "(_ BitVec 256))"
+      absoluteAName = fromString $ "absolute_a" <> show groupIdx
+      absoluteBName = fromString $ "absolute_b" <> show groupIdx
+  let decls = [ SMTCommand $ "(declare-const" `sp` absoluteAName `sp` "(_ BitVec 256))"
+              , SMTCommand $ "(declare-const" `sp` absoluteBName `sp` "(_ BitVec 256))"
               , SMTCommand $ "(declare-const" `sp` unsignedResult `sp` "(_ BitVec 256))"
-              , SMTCommand $ "(assert (=" `sp` absAName `sp` absAEnc <> "))"
-              , SMTCommand $ "(assert (=" `sp` absBName `sp` absBEnc <> "))"
+              , SMTCommand $ "(assert (=" `sp` absoluteAName `sp` absAEnc <> "))"
+              , SMTCommand $ "(assert (=" `sp` absoluteBName `sp` absBEnc <> "))"
               ]
-  pure (decls, (absAName, absBName))
+  pure (decls, (absoluteAName, absoluteBName))
 
 -- | Assert abstract(a,b) = signed result derived from unsigned result.
 assertSignedEqualsUnsignedDerived :: (Expr EWord -> Err Builder) -> Builder -> DivModOp -> Err SMTEntry
@@ -113,8 +113,7 @@ divModEncoding enc props = do
   let allDivs = nubOrd $ concatMap (foldProp collectDivMods []) props
   if null allDivs then pure []
   else do
-    let groups = groupBy (\a b -> absKey a == absKey b)
-               $ sortBy (comparing absKey) allDivs
+    let groups = groupBy (\a b -> abstractKey a == abstractKey b) $ sortBy (comparing abstractKey) allDivs
         indexedGroups = zip [0..] groups
     let links = mkCongruenceLinks indexedGroups
     entries <- concat <$> mapM (uncurry mkGroupEncoding) indexedGroups
@@ -132,7 +131,7 @@ divModEncoding enc props = do
       let isDiv' = isDiv firstKind
           prefix = if isDiv' then "udiv" else "urem"
           unsignedResult = fromString $ prefix <> "_" <> show groupIdx
-      (decls, (absAName, absBName)) <- declareAbs enc groupIdx firstA firstB unsignedResult
+      (decls, (absoluteAName, absoluteBName)) <- declareAbsolute enc groupIdx firstA firstB unsignedResult
 
       -- When the dividend is a left-shift (a = x << k, i.e. a = x * 2^k),
       -- we can bound the unsigned division result using cheap bitshift
@@ -146,12 +145,12 @@ divModEncoding enc props = do
                   -- threshold = 2^k
                   threshold = "(bvshl (_ bv1 256) " <> kLit <> ")"
                   -- shifted = |a| >> k = |a| / 2^k
-                  shifted = "(bvlshr" `sp` absAName `sp` kLit <> ")"
+                  shifted = "(bvlshr" `sp` absoluteAName `sp` kLit <> ")"
               in  -- |b| >= 2^k  =>  |a|/|b| <= |a|/2^k
-                  [ SMTCommand $ "(assert (=> (bvuge" `sp` absBName `sp` threshold <> ") (bvule" `sp` unsignedResult `sp` shifted <> ")))"
+                  [ SMTCommand $ "(assert (=> (bvuge" `sp` absoluteBName `sp` threshold <> ") (bvule" `sp` unsignedResult `sp` shifted <> ")))"
                   -- |b| < 2^k and b != 0  =>  |a|/|b| >= |a|/2^k
                  , SMTCommand $ "(assert (=> "
-                   <> "(and (bvult" `sp` absBName `sp` threshold <> ") (distinct " `sp` absBName `sp` zero <> "))"
+                   <> "(and (bvult" `sp` absoluteBName `sp` threshold <> ") (distinct " `sp` absoluteBName `sp` zero <> "))"
                    <> "(bvuge" `sp` unsignedResult `sp` shifted <> ")))"
                  ]
             _ -> []
@@ -168,10 +167,10 @@ mkCongruenceLinks indexedGroups =
   where
     allPairs xs = [(a, b) | a <- xs, b <- xs, fst a < fst b]
     mkPairLinks prefix' ((i, _), (j, _)) =
-      let absAi = fromString $ "abs_a_" <> show i
-          absBi = fromString $ "abs_b_" <> show i
-          absAj = fromString $ "abs_a_" <> show j
-          absBj = fromString $ "abs_b_" <> show j
+      let absAi = fromString $ "absolute_a" <> show i
+          absBi = fromString $ "absolute_b" <> show i
+          absAj = fromString $ "absolute_a" <> show j
+          absBj = fromString $ "absolute_b" <> show j
           unsignedResultI = fromString $ prefix' <> "_" <> show i
           unsignedResultJ = fromString $ prefix' <> "_" <> show j
       in [ SMTCommand $ "(assert (=> "
