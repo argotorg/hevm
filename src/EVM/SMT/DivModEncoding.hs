@@ -167,14 +167,14 @@ mkCongruenceLinks indexedGroups =
   where
     allPairs xs = [(a, b) | a <- xs, b <- xs, fst a < fst b]
     mkPairLinks prefix' ((i, _), (j, _)) =
-      let absAi = fromString $ "absolute_a" <> show i
-          absBi = fromString $ "absolute_b" <> show i
-          absAj = fromString $ "absolute_a" <> show j
-          absBj = fromString $ "absolute_b" <> show j
+      let absoluteAi = fromString $ "absolute_a" <> show i
+          abosluteBi = fromString $ "absolute_b" <> show i
+          absoluteAj = fromString $ "absolute_a" <> show j
+          absoluteBj = fromString $ "absolute_b" <> show j
           unsignedResultI = fromString $ prefix' <> "_" <> show i
           unsignedResultJ = fromString $ prefix' <> "_" <> show j
       in [ SMTCommand $ "(assert (=> "
-            <> "(and (=" `sp` absAi `sp` absAj <> ") (=" `sp` absBi `sp` absBj <> "))"
+            <> "(and (=" `sp` absoluteAi `sp` absoluteAj <> ") (=" `sp` abosluteBi `sp` absoluteBj <> "))"
             <> "(=" `sp` unsignedResultI `sp` unsignedResultJ <> ")))" ]
 
 -- | (ite (= divisor 0) 0 result)
