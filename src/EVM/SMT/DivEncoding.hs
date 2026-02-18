@@ -73,15 +73,15 @@ declareAbs groupIdx firstA firstB unsignedResult = do
   pure (decls, (absAName, absBName))
 
 -- | Assert abstract(a,b) = signed result derived from unsigned result.
-mkSignedAxiom :: Builder -> DivOp -> Err SMTEntry
-mkSignedAxiom unsignedResult (kind, a, b) = do
+assertSignedEqualsUnsignedDerived :: Builder -> DivOp -> Err SMTEntry
+assertSignedEqualsUnsignedDerived unsignedResult (kind, a, b) = do
   aenc <- exprToSMTAbst a
   benc <- exprToSMTAbst b
   let fname = if isDiv kind then "abst_evm_bvsdiv" else "abst_evm_bvsrem"
       abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
       concrete = if isDiv kind
-                 then smtSdivResult aenc benc unsignedResult
-                 else smtSmodResult aenc benc unsignedResult
+                 then signedFromUnsignedDiv aenc benc unsignedResult
+                 else signedFromUnsignedMod aenc benc unsignedResult
   pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
 
 -- | Assert props using shift-based bounds to avoid bvudiv when possible.
@@ -165,7 +165,7 @@ divModShiftBounds props = do
                    <> "(bvuge" `sp` unsignedResult `sp` shifted <> ")))"
                  ]
             _ -> []
-      axioms <- mapM (mkSignedAxiom unsignedResult) ops
+      axioms <- mapM (assertSignedEqualsUnsignedDerived unsignedResult) ops
       pure $ decls <> shiftBounds <> axioms
 
 -- | Congruence: if two signed groups have equal abs inputs, their results are equal.
@@ -194,12 +194,6 @@ smtZeroGuard divisor nonZeroResult =
   "(ite (=" `sp` divisor `sp` zero <> ")" `sp` zero `sp` nonZeroResult <> ")"
 
 -- | |x| as SMT: ite(x >= 0, x, 0 - x).
--- Note: for MIN_INT (-2^255), 0 - (-2^255) overflows back to -2^255 in two's
--- complement. However, this is harmless because the bit pattern 0x8000...0 is
--- 2^255 when interpreted unsigned, which is the correct absolute value.
--- All downstream operations (udiv/urem, shift bounds) use unsigned bitvector
--- ops, so they see the correct value. Sign correction is handled separately
--- in smtSdivResult/smtSmodResult using the original signed operands.
 smtAbsolute :: Builder -> Builder
 smtAbsolute x = "(ite (bvsge" `sp` x `sp` zero <> ")" `sp` x `sp` "(bvsub" `sp` zero `sp` x <> "))"
 
@@ -207,7 +201,7 @@ smtAbsolute x = "(ite (bvsge" `sp` x `sp` zero <> ")" `sp` x `sp` "(bvsub" `sp` 
 smtNeg :: Builder -> Builder
 smtNeg x = "(bvsub" `sp` zero `sp` x <> ")"
 
--- | True if a and b have the same sign.
+-- | True if a and b have the same sign
 smtSameSign :: Builder -> Builder -> Builder
 smtSameSign a b = "(=" `sp` "(bvslt" `sp` a `sp` zero <> ")" `sp` "(bvslt" `sp` b `sp` zero <> "))"
 
@@ -215,16 +209,16 @@ smtSameSign a b = "(=" `sp` "(bvslt" `sp` a `sp` zero <> ")" `sp` "(bvslt" `sp` 
 smtIsNonNeg :: Builder -> Builder
 smtIsNonNeg x = "(bvsge" `sp` x `sp` zero <> ")"
 
--- | sdiv(a,b) from udiv(|a|,|b|): negate result if signs differ.
-smtSdivResult :: Builder -> Builder -> Builder -> Builder
-smtSdivResult aenc benc udivResult =
+-- | sdiv(a,b) from udiv(|a|,|b|): negate result if signs differ
+signedFromUnsignedDiv :: Builder -> Builder -> Builder -> Builder
+signedFromUnsignedDiv aenc benc udivResult =
   smtZeroGuard benc $
   "(ite" `sp` (smtSameSign aenc benc) `sp`
     udivResult `sp` (smtNeg udivResult) <> ")"
 
 -- | smod(a,b) from urem(|a|,|b|): result sign matches dividend.
-smtSmodResult :: Builder -> Builder -> Builder -> Builder
-smtSmodResult aenc benc uremResult =
+signedFromUnsignedMod :: Builder -> Builder -> Builder -> Builder
+signedFromUnsignedMod aenc benc uremResult =
   smtZeroGuard benc $
   "(ite" `sp` (smtIsNonNeg aenc) `sp`
     uremResult `sp` (smtNeg uremResult) <> ")"
