@@ -1346,7 +1346,59 @@ tests = testGroup "hevm"
         assertBoolM "Expected counterexample" (any isCex res)
     ]
   , testGroup "Abstract-Arith"
-    [ testAbstractArith "sdiv-by-one" $ do
+    [ testCase "fast-prove" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+              bool public IS_TEST = true;
+
+              int128 private constant MIN_64x64 = -0x80000000000000000000000000000000;
+              int128 private constant MAX_64x64 = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF;
+
+              // ABDKMath64x64.fromInt(0) == 0
+              int128 private constant ZERO_FP = 0;
+              // ABDKMath64x64.fromInt(1) == 1 << 64
+              int128 private constant ONE_FP = 0x10000000000000000;
+
+              // ABDKMath64x64.div
+              function div(int128 x, int128 y) internal pure returns (int128) {
+                  unchecked {
+                      require(y != 0);
+                      int256 result = (int256(x) << 64) / y;
+                      require(result >= MIN_64x64 && result <= MAX_64x64);
+                      return int128(result);
+                  }
+              }
+
+              // ABDKMath64x64.abs
+              function abs(int128 x) internal pure returns (int128) {
+                  unchecked {
+                      require(x != MIN_64x64);
+                      return x < 0 ? -x : x;
+                  }
+              }
+
+              // Property: |x / y| <= |x| when |y| >= 1, and |x / y| >= |x| when |y| < 1
+              function prove_div_values(int128 x, int128 y) public pure {
+                  require(y != ZERO_FP);
+
+                  int128 x_y = abs(div(x, y));
+
+                  if (abs(y) >= ONE_FP) {
+                      assert(x_y <= abs(x));
+                  } else {
+                      assert(x_y >= abs(x));
+                  }
+              }
+          } |]
+        let sig = (Just $ Sig "prove_div_values(int128,int128)" [AbiIntType 128, AbiIntType 128])
+        let testEnvAbstract = Env { config = testEnv.config { abstractArith = True } }
+        runEnv testEnvAbstract $ do
+          (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+          assertEqualM "Must be QED" res []
+        runEnv testEnv $ do
+          (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+          liftIO $ assertBool "Must be unknown" (all isUnknown res)
+    , testAbstractArith "sdiv-by-one" $ do
         Just c <- solcRuntime "C" [i|
           contract C {
             function prove_sdiv_by_one(int256 a) external pure {

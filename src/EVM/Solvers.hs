@@ -292,7 +292,7 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props r
           ret <- sendAndCheck conf inst cmds $ \res -> do
             case res of
               "unsat" -> do
-                when conf.debug $ logWithTid "Abstract query is UNSAT."
+                when conf.debug $ logWithTid "Query is UNSAT."
                 dealWithUnsat
               "sat" -> case refinement of
                 Just refine -> do

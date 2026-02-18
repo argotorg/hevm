@@ -303,6 +303,7 @@ test-suite test
     quickcheck-instances,
     regex,
     tasty-quickcheck,
+    vector,
 
 -- these tests require network access so we split them into a separate test
 -- suite to make it easy to skip them when running nix-build
