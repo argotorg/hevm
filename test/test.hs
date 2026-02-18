@@ -55,7 +55,6 @@ import EVM.Format (hexText)
 import EVM.Precompiled
 import EVM.RLP
 import EVM.SMT
-import EVM.SMT.DivEncoding
 import EVM.Solidity
 import EVM.Solvers
 import EVM.Stepper qualified as Stepper
