@@ -128,7 +128,7 @@ divModShiftBounds props = do
         indexedGroups = zip [0..] groups
     let links = mkCongruenceLinks indexedGroups
     entries <- concat <$> mapM (uncurry mkGroupShiftAxioms) indexedGroups
-    pure $ (SMTComment "division/modulo shift-bound axioms (no bvudiv)") : entries <> links
+    pure $ (SMTComment "division/modulo encoding (abs + shift-bounds + congruence, no bvudiv)") : entries <> links
   where
     -- | Extract shift amount k from SHL(k, _) or power-of-2 literals.
     extractShift :: Expr EWord -> Maybe W256
