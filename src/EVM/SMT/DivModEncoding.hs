@@ -157,7 +157,7 @@ divModEncoding enc props = do
       axioms <- mapM (assertSignedEqualsUnsignedDerived enc unsignedResult) ops
       pure $ decls <> shiftBounds <> axioms
 
--- | Congruence: if two signed groups have equal abs inputs, their results are equal.
+-- | Congruence: if two signed groups have equal absolute inputs, their results are equal.
 mkCongruenceLinks :: [(Int, [DivModOp])] -> [SMTEntry]
 mkCongruenceLinks indexedGroups =
   let signedDivGroups = [(i, ops) | (i, ops@((k,_,_):_)) <- indexedGroups , k == IsDiv]
