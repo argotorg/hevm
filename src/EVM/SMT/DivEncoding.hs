@@ -117,7 +117,7 @@ divModGroundTruth props = do
         "(" <> abstFn `sp` aenc `sp` benc <> ")" `sp`
         "(" <> concFn `sp` aenc `sp` benc <> ")))"
 
--- | Shift-based bound axioms for div/mod with SHL dividends.
+-- | Encode div/mod operations using abs values, shift-bounds, and congruence (no bvudiv).
 divModEncoding :: [Prop] -> Err [SMTEntry]
 divModEncoding props = do
   let allDivs = nubOrd $ concatMap (foldProp collectDivMods []) props
