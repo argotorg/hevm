@@ -138,7 +138,7 @@ checkSatWithProps sg props = do
       else liftIO $ checkSat sg (Just props) smt2
     else liftIO $ do
       -- Two-phase solving with abstraction+refinement
-      let smt2Abstract = assertPropsShiftBounds  conf allProps
+      let smt2Abstract = assertPropsAbstract  conf allProps
       let refinement = divModGroundTruth allProps
       if isLeft smt2Abstract then pure $ Error $ getError smt2Abstract
       else if isLeft refinement then pure $ Error $ getError refinement

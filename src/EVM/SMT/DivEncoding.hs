@@ -1,7 +1,7 @@
 {- | Abstract div/mod encoding for two-phase SMT solving. -}
 module EVM.SMT.DivEncoding
   ( assertProps
-  , assertPropsShiftBounds
+  , assertPropsAbstract
   , divModGroundTruth
   ) where
 
@@ -33,26 +33,26 @@ divModAbstractDecls =
 exprToSMTAbst :: Expr a -> Err Builder
 exprToSMTAbst = exprToSMTWith AbstractDivision
 
-data DivModOp = IsDiv | IsMod
+data DivModKind = IsDiv | IsMod
   deriving (Eq, Ord)
 
-type DivOp = (DivModOp, Expr EWord, Expr EWord)
+type DivModOp = (DivModKind, Expr EWord, Expr EWord)
 
-data AbsKey = AbsKey (Expr EWord) (Expr EWord) DivModOp
+data AbsKey = AbsKey (Expr EWord) (Expr EWord) DivModKind
   deriving (Eq, Ord)
 
-isDiv :: DivModOp -> Bool
+isDiv :: DivModKind -> Bool
 isDiv IsDiv = True
 isDiv _     = False
 
 -- | Collect all div/mod operations from an expression.
-collectDivMods :: Expr a -> [DivOp]
+collectDivMods :: Expr a -> [DivModOp]
 collectDivMods = \case
   T.SDiv a b -> [(IsDiv, a, b)]
   T.SMod a b -> [(IsMod, a, b)]
   _          -> []
 
-absKey :: DivOp -> AbsKey
+absKey :: DivModOp -> AbsKey
 absKey (kind, a, b) = AbsKey a b kind
 
 -- | Declare abs_a, abs_b, and unsigned result variables for a signed group.
@@ -73,7 +73,7 @@ declareAbs groupIdx firstA firstB unsignedResult = do
   pure (decls, (absAName, absBName))
 
 -- | Assert abstract(a,b) = signed result derived from unsigned result.
-assertSignedEqualsUnsignedDerived :: Builder -> DivOp -> Err SMTEntry
+assertSignedEqualsUnsignedDerived :: Builder -> DivModOp -> Err SMTEntry
 assertSignedEqualsUnsignedDerived unsignedResult (kind, a, b) = do
   aenc <- exprToSMTAbst a
   benc <- exprToSMTAbst b
@@ -84,15 +84,14 @@ assertSignedEqualsUnsignedDerived unsignedResult (kind, a, b) = do
                  else signedFromUnsignedMod aenc benc unsignedResult
   pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
 
--- | Assert props using shift-based bounds to avoid bvudiv when possible.
-assertPropsShiftBounds :: Config -> [Prop] -> Err SMT2
-assertPropsShiftBounds conf ps = do
+-- | Assert props with abstract div/mod (uninterpreted functions + encoding constraints).
+assertPropsAbstract :: Config -> [Prop] -> Err SMT2
+assertPropsAbstract conf ps = do
   let mkBase s = assertPropsHelperWith AbstractDivision s divModAbstractDecls
   base <- if not conf.simp then mkBase False ps
           else mkBase True (decompose conf ps)
   shiftBounds <- divModEncoding ps
   pure $ base
-      -- <> SMT2 (SMTScript bounds) mempty mempty
       <> SMT2 (SMTScript shiftBounds) mempty mempty
 
 -- | Ground-truth axioms: for each sdiv/smod op, assert that the abstract
@@ -106,7 +105,7 @@ divModGroundTruth props = do
     axioms <- mapM mkGroundTruthAxiom allDivs
     pure $ (SMTComment "division/modulo ground-truth refinement") : axioms
   where
-    mkGroundTruthAxiom :: DivOp -> Err SMTEntry
+    mkGroundTruthAxiom :: DivModOp -> Err SMTEntry
     mkGroundTruthAxiom (kind, a, b) = do
       aenc <- exprToSMTAbst a
       benc <- exprToSMTAbst b
@@ -127,7 +126,7 @@ divModEncoding props = do
                $ sortBy (comparing absKey) allDivs
         indexedGroups = zip [0..] groups
     let links = mkCongruenceLinks indexedGroups
-    entries <- concat <$> mapM (uncurry mkGroupShiftAxioms) indexedGroups
+    entries <- concat <$> mapM (uncurry mkGroupEncoding) indexedGroups
     pure $ (SMTComment "division/modulo encoding (abs + shift-bounds + congruence, no bvudiv)") : entries <> links
   where
     -- | Extract shift amount k from SHL(k, _) or power-of-2 literals.
@@ -136,9 +135,9 @@ divModEncoding props = do
     extractShift (Lit n) | n > 0, n .&. (n - 1) == 0 = Just (fromIntegral $ countTrailingZeros n)
     extractShift _ = Nothing
 
-    mkGroupShiftAxioms :: Int -> [DivOp] -> Err [SMTEntry]
-    mkGroupShiftAxioms _ [] = pure []
-    mkGroupShiftAxioms groupIdx ops@((firstKind, firstA, firstB) : _) = do
+    mkGroupEncoding :: Int -> [DivModOp] -> Err [SMTEntry]
+    mkGroupEncoding _ [] = pure []
+    mkGroupEncoding groupIdx ops@((firstKind, firstA, firstB) : _) = do
       let isDiv' = isDiv firstKind
           prefix = if isDiv' then "udiv" else "urem"
           unsignedResult = fromString $ prefix <> "_" <> show groupIdx
@@ -169,7 +168,7 @@ divModEncoding props = do
       pure $ decls <> shiftBounds <> axioms
 
 -- | Congruence: if two signed groups have equal abs inputs, their results are equal.
-mkCongruenceLinks :: [(Int, [DivOp])] -> [SMTEntry]
+mkCongruenceLinks :: [(Int, [DivModOp])] -> [SMTEntry]
 mkCongruenceLinks indexedGroups =
   let signedDivGroups = [(i, ops) | (i, ops@((k,_,_):_)) <- indexedGroups , k == IsDiv]
       signedModGroups = [(i, ops) | (i, ops@((k,_,_):_)) <- indexedGroups , k == IsMod]
