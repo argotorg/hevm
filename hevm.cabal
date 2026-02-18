@@ -271,7 +271,6 @@ common test-common
     ghc-options: -threaded -with-rtsopts=-N
   build-depends:
     test-utils,
-    vector,
   other-modules:
     EVM.Test.Utils
     EVM.Test.BlockchainTests
