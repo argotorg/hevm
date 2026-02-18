@@ -98,7 +98,7 @@ library
     EVM.Dapp,
     EVM.Expr,
     EVM.SMT,
-    EVM.SMT.DivEncoding,
+    EVM.SMT.DivModEncoding,
     EVM.Solvers,
     EVM.Exec,
     EVM.Format,
