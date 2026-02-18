@@ -90,7 +90,7 @@ assertPropsShiftBounds conf ps = do
   let mkBase s = assertPropsHelperWith AbstractDivision s divModAbstractDecls
   base <- if not conf.simp then mkBase False ps
           else mkBase True (decompose conf ps)
-  shiftBounds <- divModShiftBounds ps
+  shiftBounds <- divModEncoding ps
   pure $ base
       -- <> SMT2 (SMTScript bounds) mempty mempty
       <> SMT2 (SMTScript shiftBounds) mempty mempty
@@ -118,8 +118,8 @@ divModGroundTruth props = do
         "(" <> concFn `sp` aenc `sp` benc <> ")))"
 
 -- | Shift-based bound axioms for div/mod with SHL dividends.
-divModShiftBounds :: [Prop] -> Err [SMTEntry]
-divModShiftBounds props = do
+divModEncoding :: [Prop] -> Err [SMTEntry]
+divModEncoding props = do
   let allDivs = nubOrd $ concatMap (foldProp collectDivMods []) props
   if null allDivs then pure []
   else do
