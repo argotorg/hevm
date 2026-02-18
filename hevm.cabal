@@ -98,6 +98,7 @@ library
     EVM.Dapp,
     EVM.Expr,
     EVM.SMT,
+    EVM.SMT.DivEncoding,
     EVM.Solvers,
     EVM.Exec,
     EVM.Format,
@@ -119,7 +120,6 @@ library
     EVM.UnitTest,
     EVM.Sign,
     EVM.Effects,
-    EVM.SMT.DivEncoding,
   other-modules:
     EVM.CheatsTH,
     EVM.SMT.Types,

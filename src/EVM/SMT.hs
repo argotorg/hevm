@@ -6,11 +6,14 @@ module EVM.SMT
 (
   module EVM.SMT.Types,
   module EVM.SMT.SMTLIB,
+  module EVM.SMT.DivEncoding,
 
   collapse,
   getVar,
   formatSMT2,
   declareIntermediates,
+  assertProps,
+  assertPropsAbstract,
   assertPropsHelperWith,
   decompose,
   exprToSMTWith,
@@ -69,6 +72,7 @@ import EVM.Types
 import EVM.Effects
 import EVM.SMT.Types
 import EVM.SMT.SMTLIB
+import EVM.SMT.DivEncoding
 
 
 -- ** Encoding ** ----------------------------------------------------------------------------------
@@ -126,6 +130,26 @@ decompose conf props = if conf.decomposeStorage && safeExprs && safeProps
     safeExprs = all (isJust . mapPropM_ Expr.safeToDecompose) props
     safeProps = all Expr.safeToDecomposeProp props
 
+-- simplify to rewrite sload/sstore combos
+-- notice: it is VERY important not to concretize early, because Keccak assumptions
+--         need unconcretized Props
+assertProps :: Config -> [Prop] -> Err SMT2
+assertProps conf ps =
+  if not conf.simp then assertPropsHelperWith ConcreteDivision False [] ps
+  else assertPropsHelperWith ConcreteDivision True [] (decompose conf ps)
+
+-- | Assert props with abstract div/mod (uninterpreted functions + encoding constraints).
+assertPropsAbstract :: Config -> [Prop] -> Err SMT2
+assertPropsAbstract conf ps = do
+  let mkBase s = assertPropsHelperWith AbstractDivision s divModAbstractDecls
+  base <- if not conf.simp then mkBase False ps
+          else mkBase True (decompose conf ps)
+  shiftBounds <- divModEncoding (exprToSMTWith AbstractDivision) ps
+  pure $ base <> SMT2 (SMTScript shiftBounds) mempty mempty
+
+-- Note: we need a version that does NOT call simplify,
+-- because we make use of it to verify the correctness of our simplification
+-- passes through property-based testing.
 assertPropsHelperWith :: DivEncoding -> Bool -> [SMTEntry] -> [Prop]  -> Err SMT2
 assertPropsHelperWith divEnc simp extraDecls psPreConc = do
  encs <- mapM (propToSMTWith divEnc) psElim

@@ -1,8 +1,8 @@
 {- | Abstract div/mod encoding for two-phase SMT solving. -}
 module EVM.SMT.DivEncoding
-  ( assertProps
-  , assertPropsAbstract
-  , divModGroundTruth
+  ( divModGroundTruth
+  , divModEncoding
+  , divModAbstractDecls
   ) where
 
 import Data.Bits ((.&.), countTrailingZeros)
@@ -10,17 +10,11 @@ import Data.Containers.ListUtils (nubOrd)
 import Data.List (groupBy, sortBy)
 import Data.Ord (comparing)
 import Data.Text.Lazy.Builder
-
-import EVM.Effects
-import EVM.SMT
+import qualified Data.Text.Lazy.Builder.Int
+import EVM.SMT.Types
 import EVM.Traversals
 import EVM.Types (Prop(..), EType(EWord), Err, W256, Expr, Expr(Lit), Expr(SHL))
 import EVM.Types qualified as T
-
-assertProps :: Config -> [Prop] -> Err SMT2
-assertProps conf ps =
-  if not conf.simp then assertPropsHelperWith ConcreteDivision False [] ps
-  else assertPropsHelperWith ConcreteDivision True [] (decompose conf ps)
 
 -- | Uninterpreted function declarations for abstract div/mod.
 divModAbstractDecls :: [SMTEntry]
@@ -30,8 +24,15 @@ divModAbstractDecls =
   , SMTCommand "(declare-fun abst_evm_bvsrem ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
   ]
 
-exprToSMTAbst :: Expr a -> Err Builder
-exprToSMTAbst = exprToSMTWith AbstractDivision
+-- | Local helper for trivial SMT constructs
+sp :: Builder -> Builder -> Builder
+a `sp` b = a <> " " <> b
+
+zero :: Builder
+zero = "(_ bv0 256)"
+
+wordAsBV :: forall a. Integral a => a -> Builder
+wordAsBV w = "(_ bv" <> Data.Text.Lazy.Builder.Int.decimal w <> " 256)"
 
 data DivModKind = IsDiv | IsMod
   deriving (Eq, Ord)
@@ -56,10 +57,10 @@ absKey :: DivModOp -> AbsKey
 absKey (kind, a, b) = AbsKey a b kind
 
 -- | Declare abs_a, abs_b, and unsigned result variables for a signed group.
-declareAbs :: Int -> Expr EWord -> Expr EWord -> Builder -> Err ([SMTEntry], (Builder, Builder))
-declareAbs groupIdx firstA firstB unsignedResult = do
-  aenc <- exprToSMTAbst firstA
-  benc <- exprToSMTAbst firstB
+declareAbs :: (Expr EWord -> Err Builder) -> Int -> Expr EWord -> Expr EWord -> Builder -> Err ([SMTEntry], (Builder, Builder))
+declareAbs enc groupIdx firstA firstB unsignedResult = do
+  aenc <- enc firstA
+  benc <- enc firstB
   let absAEnc = smtAbsolute aenc
       absBEnc = smtAbsolute benc
       absAName = fromString $ "abs_a_" <> show groupIdx
@@ -73,10 +74,10 @@ declareAbs groupIdx firstA firstB unsignedResult = do
   pure (decls, (absAName, absBName))
 
 -- | Assert abstract(a,b) = signed result derived from unsigned result.
-assertSignedEqualsUnsignedDerived :: Builder -> DivModOp -> Err SMTEntry
-assertSignedEqualsUnsignedDerived unsignedResult (kind, a, b) = do
-  aenc <- exprToSMTAbst a
-  benc <- exprToSMTAbst b
+assertSignedEqualsUnsignedDerived :: (Expr EWord -> Err Builder) -> Builder -> DivModOp -> Err SMTEntry
+assertSignedEqualsUnsignedDerived enc unsignedResult (kind, a, b) = do
+  aenc <- enc a
+  benc <- enc b
   let fname = if isDiv kind then "abst_evm_bvsdiv" else "abst_evm_bvsrem"
       abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
       concrete = if isDiv kind
@@ -84,21 +85,11 @@ assertSignedEqualsUnsignedDerived unsignedResult (kind, a, b) = do
                  else signedFromUnsignedMod aenc benc unsignedResult
   pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
 
--- | Assert props with abstract div/mod (uninterpreted functions + encoding constraints).
-assertPropsAbstract :: Config -> [Prop] -> Err SMT2
-assertPropsAbstract conf ps = do
-  let mkBase s = assertPropsHelperWith AbstractDivision s divModAbstractDecls
-  base <- if not conf.simp then mkBase False ps
-          else mkBase True (decompose conf ps)
-  shiftBounds <- divModEncoding ps
-  pure $ base
-      <> SMT2 (SMTScript shiftBounds) mempty mempty
-
 -- | Ground-truth axioms: for each sdiv/smod op, assert that the abstract
 -- uninterpreted function equals the real bvsdiv/bvsrem.
 -- e.g. (assert (= (abst_evm_bvsdiv a b) (bvsdiv a b)))
-divModGroundTruth :: [Prop] -> Err [SMTEntry]
-divModGroundTruth props = do
+divModGroundTruth :: (Expr EWord -> Err Builder) -> [Prop] -> Err [SMTEntry]
+divModGroundTruth enc props = do
   let allDivs = nubOrd $ concatMap (foldProp collectDivMods []) props
   if null allDivs then pure []
   else do
@@ -107,8 +98,8 @@ divModGroundTruth props = do
   where
     mkGroundTruthAxiom :: DivModOp -> Err SMTEntry
     mkGroundTruthAxiom (kind, a, b) = do
-      aenc <- exprToSMTAbst a
-      benc <- exprToSMTAbst b
+      aenc <- enc a
+      benc <- enc b
       let (abstFn, concFn) = if isDiv kind
             then ("abst_evm_bvsdiv", "bvsdiv")
             else ("abst_evm_bvsrem", "bvsrem")
@@ -117,8 +108,8 @@ divModGroundTruth props = do
         "(" <> concFn `sp` aenc `sp` benc <> ")))"
 
 -- | Encode div/mod operations using abs values, shift-bounds, and congruence (no bvudiv).
-divModEncoding :: [Prop] -> Err [SMTEntry]
-divModEncoding props = do
+divModEncoding :: (Expr EWord -> Err Builder) -> [Prop] -> Err [SMTEntry]
+divModEncoding enc props = do
   let allDivs = nubOrd $ concatMap (foldProp collectDivMods []) props
   if null allDivs then pure []
   else do
@@ -141,7 +132,7 @@ divModEncoding props = do
       let isDiv' = isDiv firstKind
           prefix = if isDiv' then "udiv" else "urem"
           unsignedResult = fromString $ prefix <> "_" <> show groupIdx
-      (decls, (absAName, absBName)) <- declareAbs groupIdx firstA firstB unsignedResult
+      (decls, (absAName, absBName)) <- declareAbs enc groupIdx firstA firstB unsignedResult
 
       -- When the dividend is a left-shift (a = x << k, i.e. a = x * 2^k),
       -- we can bound the unsigned division result using cheap bitshift
@@ -164,7 +155,7 @@ divModEncoding props = do
                    <> "(bvuge" `sp` unsignedResult `sp` shifted <> ")))"
                  ]
             _ -> []
-      axioms <- mapM (assertSignedEqualsUnsignedDerived unsignedResult) ops
+      axioms <- mapM (assertSignedEqualsUnsignedDerived enc unsignedResult) ops
       pure $ decls <> shiftBounds <> axioms
 
 -- | Congruence: if two signed groups have equal abs inputs, their results are equal.

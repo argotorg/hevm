@@ -51,7 +51,6 @@ import EVM.Expr (simplifyProps)
 
 import EVM.Keccak qualified as Keccak (concreteKeccaks)
 import EVM.SMT
-import EVM.SMT.DivEncoding
 import EVM.Types
 import Debug.Trace (traceM)
 
@@ -139,7 +138,7 @@ checkSatWithProps sg props = do
     else liftIO $ do
       -- Two-phase solving with abstraction+refinement
       let smt2Abstract = assertPropsAbstract conf allProps
-      let refinement = divModGroundTruth allProps
+      let refinement = divModGroundTruth (exprToSMTWith AbstractDivision) allProps
       if isLeft smt2Abstract then pure $ Error $ getError smt2Abstract
       else if isLeft refinement then pure $ Error $ getError refinement
       else liftIO $ checkSatTwoPhase sg (Just props) smt2Abstract (Just $ SMTScript (getNonError refinement))

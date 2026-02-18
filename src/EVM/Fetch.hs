@@ -34,7 +34,7 @@ import EVM (initialContract, unknownContract)
 import EVM.ABI
 import EVM.FeeSchedule (feeSchedule)
 import EVM.Format (hexText)
-import EVM.SMT.DivEncoding
+import EVM.SMT
 import EVM.Solvers
 import EVM.Types hiding (ByteStringS)
 import EVM.Types (ByteStringS(..))
