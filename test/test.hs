@@ -1346,7 +1346,8 @@ tests = testGroup "hevm"
         assertBoolM "Expected counterexample" (any isCex res)
     ]
   , testGroup "Abstract-Arith"
-    [ testCase "fast-prove" $ do
+    -- "make verify-hevm T=prove_div_negative_divisor" in https://github.com/gustavo-grieco/abdk-math-64.64-verification
+    [ testCase "prove_div_values-abdk" $ do
         Just c <- solcRuntime "C" [i|
           contract C {
               bool public IS_TEST = true;
@@ -1394,10 +1395,63 @@ tests = testGroup "hevm"
         let testEnvAbstract = Env { config = testEnv.config { abstractArith = True } }
         runEnv testEnvAbstract $ do
           (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        -- with abstract arith, we prove it
           assertEqualM "Must be QED" res []
         runEnv testEnv $ do
           (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+          -- without abstract arith, we time out
           liftIO $ assertBool "Must be unknown" (all isUnknown res)
+    -- "make verify-hevm T=prove_div_negative_divisor" in https://github.com/gustavo-grieco/abdk-math-64.64-verification
+    , testCase "prove_div_negative_divisor" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+              bool public IS_TEST = true;
+
+              int128 private constant MIN_64x64 = -0x80000000000000000000000000000000;
+              int128 private constant MAX_64x64 = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF;
+
+              // ABDKMath64x64.fromInt(0) == 0
+              int128 private constant ZERO_FP = 0;
+
+              // ABDKMath64x64.div
+              function div(int128 x, int128 y) internal pure returns (int128) {
+                  unchecked {
+                      require(y != 0);
+                      int256 result = (int256(x) << 64) / y;
+                      require(result >= MIN_64x64 && result <= MAX_64x64);
+                      return int128(result);
+                  }
+              }
+
+              // ABDKMath64x64.neg
+              function neg(int128 x) internal pure returns (int128) {
+                  unchecked {
+                      require(x != MIN_64x64);
+                      return -x;
+                  }
+              }
+
+              // Property: x / (-y) == -(x / y)
+              function prove_div_negative_divisor(int128 x, int128 y) public pure {
+                  require(y < ZERO_FP);
+
+                  int128 x_y = div(x, y);
+                  int128 x_minus_y = div(x, neg(y));
+
+                  assert(x_y == neg(x_minus_y));
+              }
+          } |]
+        let sig = (Just $ Sig "prove_div_negative_divisor(int128,int128)" [AbiIntType 128, AbiIntType 128])
+        let testEnvAbstract = Env { config = testEnv.config { abstractArith = True } }
+        runEnv testEnvAbstract $ do
+          (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+          -- with abstract arith, we prove it
+          assertEqualM "Must be QED" res []
+        runEnv testEnv $ do
+          (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+          -- without abstract arith, we time out
+          liftIO $ assertBool "Must be unknown" (all isUnknown res)
+
     , testAbstractArith "sdiv-by-one" $ do
         Just c <- solcRuntime "C" [i|
           contract C {
