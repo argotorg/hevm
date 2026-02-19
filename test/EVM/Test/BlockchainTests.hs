@@ -163,28 +163,10 @@ allTestCases = do
 -- Test names are from the execution-spec-tests fixtures format.
 problematicTests :: [(String, String)]
 problematicTests =
-  [ -- EIP-2537 precompiles
-    ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g1add.py::", "EIP-2537 precompiles not implemented")
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g1msm.py::", "EIP-2537 precompiles not implemented")
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g1mul.py::", "EIP-2537 precompiles not implemented")
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g2add.py::", "EIP-2537 precompiles not implemented")
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g2msm.py::", "EIP-2537 precompiles not implemented")
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_g2mul.py::", "EIP-2537 precompiles not implemented")
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_map_fp_to_g1.py::", "EIP-2537 precompiles not implemented")
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_map_fp2_to_g2.py::", "EIP-2537 precompiles not implemented")
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_pairing.py::", "EIP-2537 precompiles not implemented")
-  , ("tests/prague/eip2537_bls_12_381_precompiles/test_bls12_variable_length_input_contracts.py::", "EIP-2537 precompiles not implemented")
-    -- EIP-7951
-  , ("tests/osaka/eip7951_p256verify_precompiles/test_eip_mainnet.py::", "EIP-7951 precompiles not implemented")
+  [ -- EIP-7951
+    ("tests/osaka/eip7951_p256verify_precompiles/test_eip_mainnet.py::", "EIP-7951 precompiles not implemented")
   , ("tests/osaka/eip7951_p256verify_precompiles/test_p256verify.py::", "EIP-7951 precompiles not implemented")
     -- Other precompile tests
-  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x000000000000000000000000000000000000000b", "0xB precompile not implemented")
-  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x000000000000000000000000000000000000000c", "0xC precompile not implemented")
-  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x000000000000000000000000000000000000000d", "0xD precompile not implemented")
-  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x000000000000000000000000000000000000000e", "0xE precompile not implemented")
-  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x000000000000000000000000000000000000000f", "0xF precompile not implemented")
-  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x0000000000000000000000000000000000000010", "0x10 precompile not implemented")
-  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x0000000000000000000000000000000000000011", "0x11 precompile not implemented")
   , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x0000000000000000000000000000000000000100", "0x100 precompile not implemented")
   , ("tests/static/state_tests/stSpecialTest/failed_tx_xcf416c53_ParisFiller.json::", "needs all precompiles implemented")
   , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::", "TODO")
@@ -192,17 +174,10 @@ problematicTests =
   , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructed2Filler.json::", "create2collision SELFDESTRUCT interaction")
   , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructedFiller.json::", "create2collision SELFDESTRUCT interaction")
   , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructedRevertFiller.json::", "create2collision SELFDESTRUCT interaction")
-    -- EIP-7702 tests that involve unimplemented precompiles (0x0A-0x11, 0x100)
+    -- EIP-7702 tests that involve unimplemented precompiles (0x100)
     -- These will be fixed as precompiles are implemented in subsequent commits
   , ("tests/prague/eip7702_set_code_tx/test_set_code_txs_2.py::test_pointer_to_precompile", "needs precompile implementations")
   , ("tests/prague/eip7702_set_code_tx/test_set_code_txs_2.py::test_call_to_precompile_in_pointer_context", "needs precompile implementations")
-  , ("tests/prague/eip7702_set_code_tx/test_set_code_txs.py::test_set_code_to_precompile[fork_Osaka-precompile_0x000000000000000000000000000000000000000b", "needs BLS precompile")
-  , ("tests/prague/eip7702_set_code_tx/test_set_code_txs.py::test_set_code_to_precompile[fork_Osaka-precompile_0x000000000000000000000000000000000000000c", "needs BLS precompile")
-  , ("tests/prague/eip7702_set_code_tx/test_set_code_txs.py::test_set_code_to_precompile[fork_Osaka-precompile_0x000000000000000000000000000000000000000d", "needs BLS precompile")
-  , ("tests/prague/eip7702_set_code_tx/test_set_code_txs.py::test_set_code_to_precompile[fork_Osaka-precompile_0x000000000000000000000000000000000000000e", "needs BLS precompile")
-  , ("tests/prague/eip7702_set_code_tx/test_set_code_txs.py::test_set_code_to_precompile[fork_Osaka-precompile_0x000000000000000000000000000000000000000f", "needs BLS precompile")
-  , ("tests/prague/eip7702_set_code_tx/test_set_code_txs.py::test_set_code_to_precompile[fork_Osaka-precompile_0x0000000000000000000000000000000000000010", "needs BLS precompile")
-  , ("tests/prague/eip7702_set_code_tx/test_set_code_txs.py::test_set_code_to_precompile[fork_Osaka-precompile_0x0000000000000000000000000000000000000011", "needs BLS precompile")
   , ("tests/prague/eip7702_set_code_tx/test_set_code_txs.py::test_set_code_to_precompile[fork_Osaka-precompile_0x0000000000000000000000000000000000000100", "needs P256VERIFY precompile")
     -- EIP-7685: General Purpose EL Requests - requires multi-block context for system contracts
   , ("tests/prague/eip7685_general_purpose_el_requests/test_multi_type_requests.py::test_valid_multi_type_request_from_same_tx",

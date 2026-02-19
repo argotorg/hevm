@@ -169,6 +169,9 @@ jobs:
           echo "::group::Installing libff"
           ./.github/scripts/install-libff.sh
           echo "::endgroup::"
+          echo "::group::Installing blst"
+          ./.github/scripts/install-blst.sh
+          echo "::endgroup::"
           echo "::group::Installing c-kzg"
           ./.github/scripts/install-c-kzg.sh
           echo "::endgroup::"
