@@ -23,6 +23,7 @@ import EVM.Solidity
 import EVM.Types
 import EVM.Types qualified as Expr (Expr(Gas))
 import EVM.Sign qualified
+import EVM.RLP (RLP(..), rlpencode)
 import EVM.Concrete qualified as Concrete
 import EVM.CheatsTH
 import EVM.Effects (Config (..))
@@ -30,7 +31,7 @@ import EVM.Effects (Config (..))
 import Control.Monad (unless, when)
 import Control.Monad.ST (ST, RealWorld)
 import Control.Monad.State.Strict (MonadState, State, get, gets, lift, modify', put)
-import Data.Bits (FiniteBits, countLeadingZeros, finiteBitSize)
+import Data.Bits (FiniteBits, countLeadingZeros, finiteBitSize, shiftR)
 import Data.ByteArray qualified as BA
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -98,6 +99,7 @@ defaultVMOpts = VMOpts
   , beaconRoot     = 0
   , parentHash     = 0
   , txdataFloorGas = Fees.feeSchedule.g_transaction
+  , authorizationList = []
   }
 
 blankState :: VMOps t => ST RealWorld (FrameState t)
@@ -143,10 +145,13 @@ makeVm o = do
   let txaccessList = o.txAccessList
       txorigin = o.origin
       txtoAddr = o.address
+      -- EIP-7702: Authority addresses are warmed after chain_id validation
+      authWarmAddrs = getAuthoritiesToWarm o.chainId o.authorizationList
       initialAccessedAddrs = fromList $
            [txorigin, txtoAddr, o.coinbase]
         ++ (fmap LitAddr [1..9])
         ++ (Map.keys txaccessList)
+        ++ authWarmAddrs                  -- EIP-7702: Warmed authority addresses
       initialAccessedStorageKeys = fromList $ foldMap (uncurry (map . (,))) (Map.toList txaccessList)
       touched = if o.create then [txorigin] else [txorigin, txtoAddr]
   memory <- ConcreteMemory <$> VS.Mutable.new 0
@@ -160,10 +165,11 @@ makeVm o = do
       , origin = txorigin
       , toAddr = txtoAddr
       , value = o.value
-      , subState = SubState mempty touched initialAccessedAddrs initialAccessedStorageKeys mempty mempty
+      , subState = SubState mempty touched initialAccessedAddrs initialAccessedStorageKeys authRefunds mempty
       , isCreate = o.create
       , txReversion = Map.fromList ((o.address,o.contract):o.otherContracts)
       , txdataFloorGas = o.txdataFloorGas
+      , authorizationRefunds = authRefunds  -- EIP-7702: preserved on revert
       }
     , logs = []
     , traces = Zipper.fromForest []
@@ -204,9 +210,12 @@ makeVm o = do
     , mergeState = defaultMergeState
     }
     where
+    -- Process EIP-7702 authorization list to set delegation codes and collect refunds
+    baseContracts = Map.fromList ((o.address,o.contract):o.otherContracts)
+    (contractsWithDelegations, authRefunds) = processAuthorizations o.chainId o.origin o.authorizationList baseContracts
     env = Env
       { chainId = o.chainId
-      , contracts = Map.fromList ((o.address,o.contract):o.otherContracts)
+      , contracts = contractsWithDelegations
       , freshAddresses = o.freshAddresses
       , freshGasVals = 0
       }
@@ -1182,14 +1191,32 @@ callChecks
   -> EVM t ()
 callChecks this xGas xContext xTo xValue xInOffset xInSize xOutOffset xOutSize xs continue = do
   vm <- get
-  let fees = vm.block.schedule
+  let fees@FeeSchedule {..} = vm.block.schedule
   accessMemoryRange xInOffset xInSize $
     accessMemoryRange xOutOffset xOutSize $ do
-      availableGas <- use (#state % #gas)
       let recipientExists = accountExists xContext vm
       let from = fromMaybe vm.state.contract vm.state.overrideCaller
       fromBal <- preuse $ #env % #contracts % ix from % #balance
-      costOfCall fees recipientExists xValue availableGas xGas xTo $ \cost gas' -> do
+      -- EIP-7702: Check if target has delegation and calculate access cost
+      -- This cost must be included in c_extra BEFORE the 63/64 rule
+      -- We pre-burn it to reduce available gas, ensuring correct gas cap calculation
+      let doDelegationAccess = case xTo of
+            LitAddr _ -> case Map.lookup xTo vm.env.contracts of
+              Just targetContract -> case getDelegationTarget targetContract.code of
+                Just delegateTo -> do
+                  -- Check if delegation target is warm/cold and mark it accessed
+                  let delegateAddr = LitAddr delegateTo
+                  isWarm <- accessAccountForGas delegateAddr
+                  -- Pre-burn the delegation access cost so it's included before 63/64 rule
+                  let delegationGasCost = if isWarm then g_warm_storage_read else g_cold_account_access
+                  burn delegationGasCost $ pure ()
+                Nothing -> pure ()  -- No delegation
+              Nothing -> pure ()  -- Target doesn't exist
+            _ -> pure ()  -- Symbolic address
+      doDelegationAccess
+      -- Now get the updated available gas (after delegation cost is burned)
+      availableGas' <- use (#state % #gas)
+      costOfCall fees recipientExists xValue availableGas' xGas xTo $ \cost gas' -> do
         let checkCallDepth =
               if length vm.frames >= 1024
               then do
@@ -1200,6 +1227,7 @@ callChecks this xGas xContext xTo xValue xInOffset xInSize xOutOffset xOutSize x
               else continue (toGas gas')
         case (fromBal, xValue) of
           -- we're not transferring any value, and can skip the balance check
+          -- EIP-7702: Delegation cost was pre-burned, so just use cost here
           (_, Lit 0) -> burn (cost - gas') checkCallDepth
 
           -- from is in the state, we check if they have enough balance
@@ -1258,6 +1286,24 @@ precompiledContract this xGas precompileAddr recipient xValue inOffset inSize ou
             _ -> unexpectedSymArg "unexpected return value from precompile" [x]
           _ -> underrun
         _ -> pure ()
+
+-- EIP-7702 Constants
+perEmptyAccountCost, perAuthBaseCost :: Word64
+perEmptyAccountCost = 25000
+perAuthBaseCost = 12500
+
+delegationCodeLength :: Int
+delegationCodeLength = BS.length delegationPrefix + 20
+
+maxAuthNonce :: W256
+maxAuthNonce = 0xFFFFFFFFFFFFFFFF
+
+-- | Validate chain ID and nonce for an EIP-7702 authorization entry
+-- Shared between getAuthoritiesToWarm and processAuthorizations
+isValidAuthChainAndNonce :: W256 -> AuthorizationEntry -> Bool
+isValidAuthChainAndNonce cid auth =
+  (auth.authChainId == 0 || auth.authChainId == cid) &&
+  auth.authNonce < maxAuthNonce
 
 executePrecompile
   :: (?op :: Word8, VMOps t)
@@ -1594,7 +1640,11 @@ finalize :: VMOps t => EVM t ()
 finalize = do
   let
     revertContracts  = use (#tx % #txReversion) >>= assign (#env % #contracts)
-    revertSubstate   = assign (#tx % #subState) (SubState mempty mempty mempty mempty mempty mempty)
+    -- EIP-7702: On revert, clear execution state but preserve authorization refunds
+    -- Authorization refunds are computed before execution and should apply regardless of tx success
+    revertSubstate   = do
+      authRefunds <- use (#tx % #authorizationRefunds)
+      assign (#tx % #subState) (SubState mempty mempty mempty mempty authRefunds mempty)
 
   addAliasConstraints
   use #result >>= \case
@@ -2265,43 +2315,50 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
         burn' xGas $ do
           calldata <- readMemory xInOffset xInSize
           abi <- maybeLitWordSimp . readBytes 4 (Lit 0) <$> readMemory xInOffset (Lit 4)
-          let newContext = CallContext
-                            { target    = addr
-                            , context   = xContext
-                            , offset    = xOutOffset
-                            , size      = xOutSize
-                            , codehash  = target.codehash
-                            , callreversion = vm0.env.contracts
-                            , subState  = vm0.tx.subState
-                            , abi
-                            , calldata
-                            }
-          pushTrace (FrameTrace newContext)
-          next
-          vm1 <- get
-          pushTo #frames $ Frame
-            { state = vm1.state { stack = xs }
-            , context = newContext
-            }
+          -- EIP-7702: Resolve delegation if target has delegation code
+          let (resolvedCode, codeAddr) = resolveDelegatedCode target addr vm0.env.contracts
+          let finishCall = do
+                let newContext = CallContext
+                              { target    = addr
+                              , context   = xContext
+                              , offset    = xOutOffset
+                              , size      = xOutSize
+                              , codehash  = target.codehash
+                              , callreversion = vm0.env.contracts
+                              , subState  = vm0.tx.subState
+                              , abi
+                              , calldata
+                              }
+                pushTrace (FrameTrace newContext)
+                next
+                vm1 <- get
+                pushTo #frames $ Frame
+                  { state = vm1.state { stack = xs }
+                  , context = newContext
+                  }
 
-          let clearInitCode = \case
-                (InitCode _ _) -> InitCode mempty mempty
-                a -> a
+                let clearInitCode = \case
+                      (InitCode _ _) -> InitCode mempty mempty
+                      a -> a
 
-          newMemory <- ConcreteMemory <$> VS.Mutable.new 0
-          zoom #state $ do
-            assign #gas xGas
-            assign #pc 0
-            assign #code (clearInitCode target.code)
-            assign #codeContract addr
-            assign #stack mempty
-            assign #memory newMemory
-            assign #memorySize 0
-            assign #returndata mempty
-            assign #calldata calldata
-            assign #overrideCaller Nothing
-            assign #resetCaller False
-          continue addr
+                newMemory <- ConcreteMemory <$> VS.Mutable.new 0
+                zoom #state $ do
+                  assign #gas xGas
+                  assign #pc 0
+                  -- EIP-7702: Use resolved code (possibly from delegated address)
+                  assign #code (clearInitCode resolvedCode)
+                  assign #codeContract codeAddr
+                  assign #stack mempty
+                  assign #memory newMemory
+                  assign #memorySize 0
+                  assign #returndata mempty
+                  assign #calldata calldata
+                  assign #overrideCaller Nothing
+                  assign #resetCaller False
+                continue addr
+          -- EIP-7702: Delegation access cost is now charged in callChecks (before 63/64 rule)
+          -- The delegation target was already marked as accessed in callChecks
+          finishCall
 
 -- -- * Contract creation
 
@@ -3156,6 +3213,167 @@ isPrecompileAddr = \case
   LitAddr a -> isPrecompileAddr' a
   SymAddr _ -> False
   GVar _ -> internalError "Unexpected GVar"
+
+
+-- EIP-7702 Delegation Handling --------------------------------------------------------------------
+
+
+-- | EIP-7702 delegation code prefix: 0xef0100
+-- A delegated account has code starting with this prefix followed by 20-byte target address
+delegationPrefix :: ByteString
+delegationPrefix = BS.pack [0xef, 0x01, 0x00]
+
+-- | Check if a contract has delegation code and return the target address
+-- Returns Just targetAddr if code is exactly delegationCodeLength bytes starting with 0xef0100
+getDelegationTarget :: ContractCode -> Maybe Addr
+getDelegationTarget = \case
+  RuntimeCode (ConcreteRuntimeCode code) ->
+    if BS.length code == delegationCodeLength && BS.take 3 code == delegationPrefix
+    then Just $ unsafeInto $ word $ BS.drop 3 code
+    else Nothing
+  _ -> Nothing
+
+-- | Resolve the code to execute for a contract, following EIP-7702 delegation
+-- Returns (code to execute, codeContract address)
+-- If the target has delegation code, returns the delegated-to contract's code
+resolveDelegatedCode
+  :: Contract           -- ^ The target contract being called
+  -> Expr EAddr         -- ^ The address of the target
+  -> Map (Expr EAddr) Contract  -- ^ All contracts
+  -> (ContractCode, Expr EAddr)  -- ^ (resolved code, code source address)
+resolveDelegatedCode target targetAddr contracts =
+  case getDelegationTarget target.code of
+    Nothing -> (target.code, targetAddr)
+    Just delegatedTo ->
+      let delegatedAddr = LitAddr delegatedTo
+      -- EIP-7702: If delegation target is a precompile address (0x01-0x11 or 0x100),
+      -- the retrieved code is considered empty and calls execute empty code
+      in if isPrecompileAddr' delegatedTo
+         then (RuntimeCode (ConcreteRuntimeCode ""), delegatedAddr)
+         else case Map.lookup delegatedAddr contracts of
+           Just delegatedContract -> (delegatedContract.code, delegatedAddr)
+           -- If delegated-to doesn't exist, treat as empty code
+           Nothing -> (RuntimeCode (ConcreteRuntimeCode ""), delegatedAddr)
+
+-- | Create a delegation designator code for EIP-7702
+-- The code is 0xef0100 || target_address (23 bytes total)
+makeDelegationCode :: Addr -> ByteString
+makeDelegationCode target = delegationPrefix <> word160Bytes target
+
+-- | Recover the authorizing address from an EIP-7702 authorization entry
+-- Returns the address that signed the authorization, or Nothing if invalid signature
+-- Note: This does NOT check chain_id - per EIP-7702 spec, ecrecover happens first,
+-- then the address is warmed, and only then is chain_id validated
+recoverAuthorityAddress :: AuthorizationEntry -> Maybe Addr
+recoverAuthorityAddress auth =
+  -- EIP-2: Reject high-s signatures to prevent transaction malleability
+  -- s must be in the lower half of the curve order
+  let secp256k1nHalf = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0 :: W256
+  in if auth.authS > secp256k1nHalf
+     then Nothing  -- Invalid signature: s value too high (EIP-2)
+     else
+       let -- EIP-7702 signing message: keccak(0x05 || rlp([chain_id, address, nonce]))
+           rlpPayload = rlpList
+             [ rlpWord256 auth.authChainId
+             , BS $ word160Bytes auth.authAddress
+             , rlpWord256 auth.authNonce
+             ]
+           signingMessage = BS.cons 0x05 rlpPayload
+           msgHash = keccak' signingMessage
+           -- v is yParity + 27 for ecrecover
+           v = into auth.authYParity + 27
+       in EVM.Sign.ecrec v auth.authR auth.authS msgHash
+  where
+    rlpList items = rlpencode $ List items
+    rlpWord256 0 = BS mempty
+    rlpWord256 n = BS $ octets n
+    octets x = BS.pack $ dropWhile (== 0) [fromIntegral (shiftR x (8 * i)) | i <- reverse [0..31 :: Int]]
+
+-- | Get all authority addresses that should be warmed from authorization list
+-- Per EIP-7702 spec, warming happens at step 4, but ONLY if steps 1-3 pass:
+--   1. Chain ID must be 0 or match current chain
+--   2. Auth nonce must be < 2^64-1
+--   3. ecrecover must succeed
+getAuthoritiesToWarm :: W256 -> [AuthorizationEntry] -> [Expr EAddr]
+getAuthoritiesToWarm chainId auths = map LitAddr $ mapMaybe (recoverIfValid chainId) auths
+  where
+    recoverIfValid :: W256 -> AuthorizationEntry -> Maybe Addr
+    recoverIfValid cid auth
+      | not (isValidAuthChainAndNonce cid auth) = Nothing
+      | otherwise = recoverAuthorityAddress auth
+
+-- | Check if an account's code allows EIP-7702 delegation (empty or already delegated)
+accountCodeAllowsDelegation :: Maybe Contract -> Bool
+accountCodeAllowsDelegation Nothing = True  -- No account = empty code
+accountCodeAllowsDelegation (Just c) = case c.code of
+  RuntimeCode (ConcreteRuntimeCode code) -> BS.null code || isDelegationCode code
+  _ -> True  -- Symbolic code, allow for now
+
+-- | Check if an account "really exists" in the trie (non-zero balance, nonce, or code)
+-- Used for EIP-7702 refund calculation
+accountReallyExists :: Maybe Contract -> Bool
+accountReallyExists Nothing = False
+accountReallyExists (Just c) = hasBalance || hasNonce || hasCode
+  where
+    hasBalance = case c.balance of
+      Lit b -> b /= 0
+      _ -> True  -- Symbolic, assume exists
+    hasNonce = case c.nonce of
+      Just n -> n /= 0
+      Nothing -> False
+    hasCode = case c.code of
+      RuntimeCode (ConcreteRuntimeCode code) -> not (BS.null code)
+      _ -> True  -- Symbolic or InitCode, assume exists
+
+-- | Process all EIP-7702 authorization entries and return the updated contracts map and refunds
+-- Per EIP-7702 spec, for each authorization:
+-- 1. ecrecover to get authority address (addresses warmed separately via getAuthoritiesToWarm)
+-- 2. Check chain_id: must be 0 or match current chain
+-- 3. Check authority's code is empty or already delegated
+-- 4. Check nonce matches (for self-sponsored: nonce == account_nonce + 1)
+-- 5. Add refund if authority exists (PER_EMPTY_ACCOUNT_COST - PER_AUTH_BASE_COST = 12500)
+-- 6. Set delegation code and increment nonce
+processAuthorizations
+  :: W256                                -- ^ Chain ID
+  -> Expr EAddr                          -- ^ Transaction origin address
+  -> [AuthorizationEntry]                -- ^ Authorization list from transaction
+  -> Map (Expr EAddr) Contract           -- ^ Current contracts state
+  -> (Map (Expr EAddr) Contract, [(Expr EAddr, Word64)])  -- ^ (Updated contracts, Refunds)
+processAuthorizations chainId origin auths contracts = foldl processOne (contracts, []) auths
+  where
+    -- EIP-7702 refund: PER_EMPTY_ACCOUNT_COST - PER_AUTH_BASE_COST
+    authRefund :: Word64
+    authRefund = perEmptyAccountCost - perAuthBaseCost
+
+    -- Validate and apply a single authorization
+    processOne acc@(cs, refs) auth = case recoverAuthorityAddress auth of
+      Nothing -> acc  -- Invalid signature
+      Just authority
+        | not (isValidAuthChainAndNonce chainId auth) -> acc
+        | not (accountCodeAllowsDelegation existingAccount) -> acc  -- Non-delegation code
+        | currentNonce == maxBound -> acc  -- Would overflow
+        | into expectedNonce /= auth.authNonce -> acc  -- Nonce mismatch
+        | otherwise ->
+            let codeBytes = if auth.authAddress == 0 then mempty else makeDelegationCode auth.authAddress
+                newCode = RuntimeCode (ConcreteRuntimeCode codeBytes)
+                newContract = case existingAccount of
+                  Just c -> set #code newCode $ set #nonce (Just (currentNonce + 1)) c
+                  Nothing -> set #nonce (Just 1) $ initialContract newCode
+                newRefs = if accountReallyExists existingAccount
+                          then (authorityAddr, authRefund) : refs
+                          else refs
+            in (Map.insert authorityAddr newContract cs, newRefs)
+        where
+          authorityAddr = LitAddr authority
+          existingAccount = Map.lookup authorityAddr cs
+          currentNonce = maybe 0 (fromMaybe 0 . (.nonce)) existingAccount
+          isSelfSponsored = authorityAddr == origin
+          expectedNonce = if isSelfSponsored then currentNonce + 1 else currentNonce
+
+-- | Check if bytecode is a delegation code (0xef0100 prefix)
+isDelegationCode :: ByteString -> Bool
+isDelegationCode code = BS.length code == delegationCodeLength && BS.isPrefixOf delegationPrefix code
+
 
 -- * Arithmetic
 

@@ -52,6 +52,7 @@ data FeeSchedule n = FeeSchedule
   , g_access_list_address :: n
   , g_access_list_storage_key :: n
   , g_txdatafloor :: n
+  , g_auth_base :: n              -- EIP-7702: base cost per authorization
   } deriving Show
 
 feeSchedule :: Num n => FeeSchedule n
@@ -107,4 +108,5 @@ feeSchedule = FeeSchedule
   , g_access_list_address = 2400
   , g_access_list_storage_key = 1900
   , g_txdatafloor = 10
+  , g_auth_base = 12500           -- EIP-7702: PER_AUTH_BASE_COST
   }
