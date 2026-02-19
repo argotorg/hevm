@@ -37,6 +37,7 @@ solidityExplorationTests = testGroup "Exploration of Solidity"
     , storageTests
     , panicCodeTests
     , cheatCodeTests
+    , arithmeticTests
     ]
 
 basicTests :: TestTree
@@ -884,6 +885,433 @@ maxDepthTests = testGroup "Tests for branching depth"
         assertBool "The expression MUST NOT be partial" $ Prelude.not (any isPartial paths)
   ]
 
+arithmeticTests :: TestTree
+arithmeticTests = testGroup "Arithmetic tests"
+  [ testCase "math-avg" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function prove_Avg(uint a, uint b) external pure {
+            require(a + b >= a);
+            unchecked {
+              uint r1 = (a & b) + (a ^ b) / 2;
+              uint r2 = (a + b) / 2;
+              assert(r1 == r2);
+            }
+          }
+        } |]
+      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+      expectProved res
+  , testCase "unsigned-div-by-zero" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function prove_unsigned_div_by_zero(uint256 a) external pure {
+            uint256 result;
+            assembly { result := div(a, 0) }
+            assert(result == 0);
+          }
+        } |]
+      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+      expectProved res
+  , testCase "arith-div-pass" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function prove_Div_pass(uint x, uint y) external pure {
+            require(x > y);
+            require(y > 0);
+            uint q;
+            assembly { q := div(x, y) }
+            assert(q != 0);
+          }
+        } |]
+      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+      expectProved res
+  , testCase "arith-div-fail" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function prove_Div_fail(uint x, uint y) external pure {
+            require(x > y);
+            uint q;
+            assembly { q := div(x, y) }
+            assert(q != 0);
+          }
+        } |]
+      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+      expectOneCex res
+  , testCase "arith-mod-fail" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_Div_fail(uint x, uint y) external pure {
+              require(x > y);
+              uint q;
+              assembly { q := mod(x, y) }
+              assert(q != 0);
+            }
+          } |]
+        (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        expectOneCex res
+  ,testCase "arith-mod" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function unchecked_smod(int x, int y) internal pure returns (int ret) {
+            assembly { ret := smod(x, y) }
+          }
+          function prove_Mod(int x, int y) external pure {
+            unchecked {
+              assert(unchecked_smod(x, 0) == 0);
+              assert(x % 1 == 0);
+              assert(x % 2 < 2 && x % 2 > -2);
+              assert(x % 4 < 4 && x % 4 > -4);
+              int x_smod_y = unchecked_smod(x, y);
+              assert(x_smod_y <= y || y < 0);}
+          }
+        } |]
+      (_, res) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+      expectProved res
+  , ignoreTestBecause "Currently takes too long" $ testCase "math-mint-fail" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_mint(uint s, uint A1, uint S1) external pure {
+              uint a = (s * A1) / S1;
+              uint A2 = A1 + a;
+              uint S2 = S1 + s;
+              assert(A1 * S2 <= A2 * S1);
+            }
+          } |]
+        (_, res) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        expectOneCex res
+  , signedDivModTests
+  , abdkMathTests
+  ]
+
+signedDivModTests :: TestTree
+signedDivModTests = testGroup "Tests for signed division and modulo"
+  [ testCase "sdiv-by-one" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function prove_sdiv_by_one(int256 a) external pure {
+            int256 result;
+            assembly { result := sdiv(a, 1) }
+            assert(result == a);
+          }
+        } |]
+      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+      expectProved res
+  , testCase "sdiv-by-neg-one" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function prove_sdiv_by_neg_one(int256 a) external pure {
+            int256 result;
+            assembly { result := sdiv(a, sub(0, 1)) }
+            if (a == -170141183460469231731687303715884105728 * 2**128) { // type(int256).min
+                assert(result == a);
+            } else {
+                assert(result == -a);
+            }
+          }
+        } |]
+      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+      expectProved res
+  , testCase "sdiv-intmin-by-two" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function prove_sdiv_intmin_by_two() external pure {
+            int256 result;
+            assembly {
+              let intmin := 0x8000000000000000000000000000000000000000000000000000000000000000
+              result := sdiv(intmin, 2)
+            }
+            // -2**254 is 0xc000...0000
+            assert(result == -0x4000000000000000000000000000000000000000000000000000000000000000);
+          }
+        } |]
+      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+      expectProved res
+  , testCase "smod-by-zero" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function prove_smod_by_zero(int256 a) external pure {
+            int256 result;
+            assembly { result := smod(a, 0) }
+            assert(result == 0);
+          }
+        } |]
+      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+      expectProved res
+  , testCase "smod-intmin-by-three" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function prove_smod_intmin_by_three() external pure {
+            int256 result;
+            assembly { result := smod(0x8000000000000000000000000000000000000000000000000000000000000000, 3) }
+            assert(result == -2);
+          }
+        } |]
+      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+      expectProved res
+  , testCase "sdiv-by-zero" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function prove_sdiv_by_zero(int256 a) external pure {
+            int256 result;
+            assembly { result := sdiv(a, 0) }
+            assert(result == 0);
+          }
+        } |]
+      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+      expectProved res
+  , testCase "sdiv-zero-dividend" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function prove_sdiv_zero_dividend(int256 b) external pure {
+            int256 result;
+            assembly { result := sdiv(0, b) }
+            assert(result == 0);
+          }
+        } |]
+      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+      expectProved res
+  , testCase "sdiv-truncation" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function prove_sdiv_truncation() external pure {
+            int256 result;
+            assembly { result := sdiv(sub(0, 7), 2) }
+            assert(result == -3);
+          }
+        } |]
+      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+      expectProved res
+  , ignoreTestBecause "Currently takes too long" $ testCase "sdiv-sign-symmetry" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function prove_sdiv_sign_symmetry(int256 a, int256 b) external pure {
+            if (a == -57896044618658097711785492504343953926634992332820282019728792003956564819968) return;
+            if (b == -57896044618658097711785492504343953926634992332820282019728792003956564819968) return;
+            if (b == 0) return;
+            int256 r1;
+            int256 r2;
+            assembly {
+              r1 := sdiv(a, b)
+              r2 := sdiv(sub(0, a), sub(0, b))
+            }
+            assert(r1 == r2);
+          }
+        } |]
+      (_, res) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+      expectProved res
+  , ignoreTestBecause "Currently takes too long" $ testCase "sdiv-sign-antisymmetry" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function prove_sdiv_sign_antisymmetry(int256 a, int256 b) external pure {
+            if (a == -57896044618658097711785492504343953926634992332820282019728792003956564819968) return;
+            if (b == 0) return;
+            int256 r1;
+            int256 r2;
+            assembly {
+              r1 := sdiv(a, b)
+              r2 := sdiv(sub(0, a), b)
+            }
+            assert(r1 == -r2);
+          }
+        } |]
+      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+      expectProved res
+  , testCase "smod-by-one" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function prove_smod_by_one(int256 a) external pure {
+            int256 r1;
+            int256 r2;
+            assembly {
+              r1 := smod(a, 1)
+              r2 := smod(a, sub(0, 1))
+            }
+            assert(r1 == 0);
+            assert(r2 == 0);
+          }
+        } |]
+      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+      expectProved res
+  , testCase "smod-zero-dividend" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function prove_smod_zero_dividend(int256 b) external pure {
+            int256 result;
+            assembly { result := smod(0, b) }
+            assert(result == 0);
+          }
+        } |]
+      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+      expectProved res
+  , testCase "smod-sign-matches-dividend" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function prove_smod_sign_matches_dividend(int256 a, int256 b) external pure {
+            if (b == 0 || a == 0) return;
+            int256 result;
+            assembly { result := smod(a, b) }
+            if (result != 0) {
+              assert((a > 0 && result > 0) || (a < 0 && result < 0));
+            }
+          }
+        } |]
+      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+      expectProved res
+  , testCase "smod-intmin" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function prove_smod_intmin() external pure {
+            int256 result;
+            assembly { result := smod(0x8000000000000000000000000000000000000000000000000000000000000000, 2) }
+            assert(result == 0);
+          }
+        } |]
+      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+      expectProved res
+  , testCase "sdiv-intmin-by-neg-one" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function prove_sdiv_intmin_by_neg_one() external pure {
+            int256 result;
+            assembly {
+              let intmin := 0x8000000000000000000000000000000000000000000000000000000000000000
+              result := sdiv(intmin, sub(0, 1))
+            }
+            // EVM defines sdiv(MIN_INT, -1) = MIN_INT (overflow)
+            assert(result == -57896044618658097711785492504343953926634992332820282019728792003956564819968);
+          }
+        } |]
+      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+      expectProved res
+  , testCase "smod-intmin-by-neg-one" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function prove_smod_intmin_by_neg_one() external pure {
+            int256 result;
+            assembly {
+              let intmin := 0x8000000000000000000000000000000000000000000000000000000000000000
+              result := smod(intmin, sub(0, 1))
+            }
+            // smod(MIN_INT, -1) = 0 since MIN_INT is divisible by -1
+            assert(result == 0);
+          }
+        } |]
+      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+      expectProved res
+  , testCase "sdiv-intmin-by-intmin" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function prove_sdiv_intmin_by_intmin() external pure {
+            int256 result;
+            assembly {
+              let intmin := 0x8000000000000000000000000000000000000000000000000000000000000000
+              result := sdiv(intmin, intmin)
+            }
+            assert(result == 1);
+          }
+        } |]
+      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+      expectProved res
+  ]
+
+abdkMathTests :: TestTree
+abdkMathTests = testGroup "ABDK math tests"
+  [ -- "make verify-hevm T=prove_div_negative_divisor" in https://github.com/gustavo-grieco/abdk-math-64.64-verification
+    ignoreTestBecause "Currently takes too long" $ testCase "prove_div_values-abdk" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+            bool public IS_TEST = true;
+
+            int128 private constant MIN_64x64 = -0x80000000000000000000000000000000;
+            int128 private constant MAX_64x64 = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF;
+
+            // ABDKMath64x64.fromInt(0) == 0
+            int128 private constant ZERO_FP = 0;
+            // ABDKMath64x64.fromInt(1) == 1 << 64
+            int128 private constant ONE_FP = 0x10000000000000000;
+
+            // ABDKMath64x64.div
+            function div(int128 x, int128 y) internal pure returns (int128) {
+                unchecked {
+                    require(y != 0);
+                    int256 result = (int256(x) << 64) / y;
+                    require(result >= MIN_64x64 && result <= MAX_64x64);
+                    return int128(result);
+                }
+            }
+
+            // ABDKMath64x64.abs
+            function abs(int128 x) internal pure returns (int128) {
+                unchecked {
+                    require(x != MIN_64x64);
+                    return x < 0 ? -x : x;
+                }
+            }
+
+            // Property: |x / y| <= |x| when |y| >= 1, and |x / y| >= |x| when |y| < 1
+            function prove_div_values(int128 x, int128 y) public pure {
+                require(y != ZERO_FP);
+
+                int128 x_y = abs(div(x, y));
+
+                if (abs(y) >= ONE_FP) {
+                    assert(x_y <= abs(x));
+                } else {
+                    assert(x_y >= abs(x));
+                }
+            }
+        } |]
+      let sig = (Just $ Sig "prove_div_values(int128,int128)" [AbiIntType 128, AbiIntType 128])
+      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+      expectProved res
+  -- "make verify-hevm T=prove_div_negative_divisor" in https://github.com/gustavo-grieco/abdk-math-64.64-verification
+  , ignoreTestBecause "Currently takes too long" $ testCase "prove_div_negative_divisor" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+            bool public IS_TEST = true;
+
+            int128 private constant MIN_64x64 = -0x80000000000000000000000000000000;
+            int128 private constant MAX_64x64 = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF;
+
+            // ABDKMath64x64.fromInt(0) == 0
+            int128 private constant ZERO_FP = 0;
+            
+            // ABDKMath64x64.div
+            function div(int128 x, int128 y) internal pure returns (int128) {
+                unchecked {
+                    require(y != 0);
+                    int256 result = (int256(x) << 64) / y;
+                    require(result >= MIN_64x64 && result <= MAX_64x64);
+                    return int128(result);
+                }
+            }
+            
+            // ABDKMath64x64.neg
+            function neg(int128 x) internal pure returns (int128) {
+                unchecked {
+                    require(x != MIN_64x64);
+                    return -x;
+                }
+            }
+
+            // Property: x / (-y) == -(x / y)
+            function prove_div_negative_divisor(int128 x, int128 y) public pure {
+                require(y < ZERO_FP);
+
+                int128 x_y = div(x, y);
+                int128 x_minus_y = div(x, neg(y));
+
+                assert(x_y == neg(x_minus_y));
+            }
+        } |]
+      let sig = (Just $ Sig "prove_div_negative_divisor(int128,int128)" [AbiIntType 128, AbiIntType 128])
+      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+      expectProved res
+  ]
+
+expectProved :: [VerifyResult] -> Assertion
+expectProved results = assertBool "Must be proved" (null results)
+
 expectNoCex :: [VerifyResult] -> Assertion
 expectNoCex results = assertBool "There should be no cex" (not $ any isCex results)
 
@@ -918,6 +1346,10 @@ symExecTestsEnvironment = Effects.Env symExecTestsConfig
 
 executeWithBitwuzla :: MonadUnliftIO m => (SolverGroup -> ReaderT Effects.Env m a) -> m a
 executeWithBitwuzla action = Effects.runEnv symExecTestsEnvironment $ withBitwuzla action
+
+executeWithShortBitwuzla :: MonadUnliftIO m => (SolverGroup -> ReaderT Effects.Env m a) -> m a
+executeWithShortBitwuzla action = Effects.runEnv symExecTestsEnvironment $ withSolvers Bitwuzla 1 (Just 5) defMemLimit action
+
 
 withBitwuzla :: Effects.App m => (SolverGroup -> m a) -> m a
 withBitwuzla = withSolvers Bitwuzla 1 Nothing defMemLimit
