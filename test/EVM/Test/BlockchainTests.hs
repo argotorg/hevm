@@ -158,30 +158,17 @@ allTestCases = do
     )
   pure $ Map.fromList cases
 
--- | Tests that are known to fail or are too slow to run in CI.
+-- | Tests that are known to fail due to fundamental limitations of the testing system.
 -- Uses prefix matching: any test name starting with a prefix will be ignored.
 -- Test names are from the execution-spec-tests fixtures format.
+--
+-- ONLY multi-block tests should be here - all other tests should be fixed!
 problematicTests :: [(String, String)]
 problematicTests =
-  [ -- EIP-7951
-    ("tests/osaka/eip7951_p256verify_precompiles/test_eip_mainnet.py::", "EIP-7951 precompiles not implemented")
-  , ("tests/osaka/eip7951_p256verify_precompiles/test_p256verify.py::", "EIP-7951 precompiles not implemented")
-    -- Other precompile tests
-  , ("tests/frontier/precompiles/test_precompiles.py::test_precompiles[fork_Osaka-address_0x0000000000000000000000000000000000000100", "0x100 precompile not implemented")
-  , ("tests/static/state_tests/stSpecialTest/failed_tx_xcf416c53_ParisFiller.json::", "needs all precompiles implemented")
-  , ("tests/static/state_tests/stPreCompiledContracts/precompsEIP2929CancunFiller.yml::", "TODO")
-    -- create2collision tests that need SELFDESTRUCT + CREATE2 interaction fix
-  , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructed2Filler.json::", "create2collision SELFDESTRUCT interaction")
-  , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructedFiller.json::", "create2collision SELFDESTRUCT interaction")
-  , ("tests/static/state_tests/stCreate2/create2collisionSelfdestructedRevertFiller.json::", "create2collision SELFDESTRUCT interaction")
-    -- EIP-7702 tests that involve unimplemented precompiles (0x100)
-    -- These will be fixed as precompiles are implemented in subsequent commits
-  , ("tests/prague/eip7702_set_code_tx/test_set_code_txs_2.py::test_pointer_to_precompile", "needs precompile implementations")
-  , ("tests/prague/eip7702_set_code_tx/test_set_code_txs_2.py::test_call_to_precompile_in_pointer_context", "needs precompile implementations")
-  , ("tests/prague/eip7702_set_code_tx/test_set_code_txs.py::test_set_code_to_precompile[fork_Osaka-precompile_0x0000000000000000000000000000000000000100", "needs P256VERIFY precompile")
-    -- EIP-7685: General Purpose EL Requests - requires multi-block context for system contracts
-  , ("tests/prague/eip7685_general_purpose_el_requests/test_multi_type_requests.py::test_valid_multi_type_request_from_same_tx",
+  [ -- EIP-7685: General Purpose EL Requests - requires multi-block context for system contracts
+    ("tests/prague/eip7685_general_purpose_el_requests/test_multi_type_requests.py::test_valid_multi_type_request_from_same_tx",
      "EIP-7685 multi-type requests require multi-block system contract context")
+
     -- EIP-2935: Historical block hashes - requires multi-block context
   , ("tests/prague/eip2935_historical_block_hashes_from_state/test_block_hashes.py::test_block_hashes_history",
      "EIP-2935 historical block hash tests require multi-block context")

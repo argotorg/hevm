@@ -64,6 +64,8 @@ data FeeSchedule n = FeeSchedule
   , g_bls_map_fp2_to_g2 :: n
   -- EIP-4844
   , g_point_evaluation :: n
+  -- EIP-7951 (P256VERIFY)
+  , g_p256_verify :: n
   } deriving Show
 
 feeSchedule :: Num n => FeeSchedule n
@@ -131,4 +133,6 @@ feeSchedule = FeeSchedule
   , g_bls_map_fp2_to_g2 = 23800
   -- EIP-4844
   , g_point_evaluation = 50000
+  -- EIP-7951 (P256VERIFY)
+  , g_p256_verify = 6900
   }
