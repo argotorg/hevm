@@ -149,7 +149,8 @@ makeVm o = do
       authWarmAddrs = getAuthoritiesToWarm o.chainId o.authorizationList
       initialAccessedAddrs = fromList $
            [txorigin, txtoAddr, o.coinbase]
-        ++ (fmap LitAddr [1..9])
+        ++ (fmap LitAddr [1..9])          -- Legacy precompiles (ECRECOVER, SHA256, etc.)
+        ++ [LitAddr 0x0A]                 -- EIP-4844 Point Evaluation precompile
         ++ (Map.keys txaccessList)
         ++ authWarmAddrs                  -- EIP-7702: Warmed authority addresses
       initialAccessedStorageKeys = fromList $ foldMap (uncurry (map . (,))) (Map.toList txaccessList)
@@ -1287,6 +1288,18 @@ precompiledContract this xGas precompileAddr recipient xValue inOffset inSize ou
           _ -> underrun
         _ -> pure ()
 
+-- BLS12-381 Field Modulus (used by Point Evaluation precompile)
+blsModulus :: Integer
+blsModulus = 52435875175126190479447740508185965837690552500527637822603658699938581184513
+
+-- Point Evaluation (EIP-4844) constants
+-- Input: versioned_hash (32) + z (32) + y (32) + commitment (48) + proof (48) = 192 bytes
+pointEvaluationInputSize :: Int
+pointEvaluationInputSize = 192
+
+versionedHashVersionKzg :: Word8
+versionedHashVersionKzg = 0x01
+
 -- EIP-7702 Constants
 perEmptyAccountCost, perAuthBaseCost :: Word64
 perEmptyAccountCost = 25000
@@ -1456,12 +1469,75 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
               Nothing -> precompileFail
             _ -> precompileFail
 
+      -- Point Evaluation (EIP-4844)
+      0x0A ->
+        forceConcreteBuf input "POINT_EVALUATION" $ \input' -> do
+          if BS.length input' /= pointEvaluationInputSize
+          then precompileFail
+          else do
+            let versionedHash = BS.take 32 input'
+                z = BS.take 32 $ BS.drop 32 input'
+                y = BS.take 32 $ BS.drop 64 input'
+
+                -- Check versioned_hash format: first byte must be VERSIONED_HASH_VERSION_KZG
+                hashVersion = if BS.null versionedHash then 0 else BS.head versionedHash
+
+                -- Check z and y are valid field elements (< BLS_MODULUS)
+                zInt = into @Integer $ word z
+                yInt = into @Integer $ word y
+
+            -- Validation checks per EIP-4844
+            if hashVersion /= versionedHashVersionKzg
+            then precompileFail  -- Invalid versioned hash version
+            else if zInt >= blsModulus || yInt >= blsModulus
+            then precompileFail  -- z or y out of bounds
+            else do
+              -- Verify KZG proof via c-kzg-4844 FFI
+              case pointEvaluationVerify input' of
+                Just output -> do
+                  assign' (#state % #stack) (Lit 1 : xs)
+                  assign (#state % #returndata) (ConcreteBuf output)
+                  copyBytesToMemory (ConcreteBuf output) outSize (Lit 0) outOffset
+                  next
+                Nothing -> precompileFail
+
       _ -> notImplemented
 
 truncpadlit :: Int -> ByteString -> ByteString
 truncpadlit n xs = if m > n then BS.take n xs
                    else BS.append xs (BS.replicate (n - m) 0)
   where m = BS.length xs
+
+-- | Point Evaluation precompile (EIP-4844) KZG proof verification
+-- Input: versioned_hash (32) || z (32) || y (32) || commitment (48) || proof (48)
+-- Output: FIELD_ELEMENTS_PER_BLOB (32) || BLS_MODULUS (32) on success
+-- Returns Nothing on verification failure
+--
+-- Per EIP-4844, this precompile verifies:
+-- 1. versioned_hash == kzg_to_versioned_hash(commitment)
+-- 2. verify_kzg_proof(commitment, z, y, proof)
+--
+-- Note: Full KZG proof verification requires the c-kzg-4844 library.
+-- This implementation can verify the versioned_hash matches the commitment,
+-- but cannot perform the actual KZG proof verification without the library.
+pointEvaluationVerify :: ByteString -> Maybe ByteString
+pointEvaluationVerify input =
+  let versionedHash = BS.take 32 input
+      commitment = BS.take 48 $ BS.drop 96 input
+      -- Per EIP-4844: kzg_to_versioned_hash(commitment) = 0x01 || SHA256(commitment)[1:32]
+      commitmentHash = BA.convert (Crypto.hash commitment :: Digest SHA256)
+      expectedVersionedHash = BS.singleton 0x01 <> BS.drop 1 commitmentHash
+  in if versionedHash /= expectedVersionedHash
+     then Nothing  -- Versioned hash doesn't match commitment
+     else
+       -- Try ethjet FFI first (in case KZG support is available)
+       case EVM.Precompiled.execute 0x0A input 64 of
+         Just output -> Just output
+         Nothing ->
+           -- Without c-kzg-4844, we cannot verify the KZG proof
+           -- Return failure - this will cause valid proofs to fail,
+           -- but at least invalid versioned hashes are caught above
+           Nothing
 
 lazySlice :: W256 -> W256 -> ByteString -> LS.ByteString
 lazySlice offset size bs =
@@ -3140,6 +3216,8 @@ costOfPrecompile (FeeSchedule {..}) precompileAddr input =
     0x9 -> case input of
              ConcreteBuf i -> g_fround * (unsafeInto $ asInteger $ lazySlice 0 4 i)
              _ -> internalError "Unsupported symbolic blake2 gas calc"
+    -- Point Evaluation (EIP-4844)
+    0x0A -> g_point_evaluation
     _ -> internalError $ "unimplemented precompiled contract " ++ show precompileAddr
 
 -- Gas cost of memory expansion

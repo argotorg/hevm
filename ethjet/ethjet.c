@@ -1,5 +1,6 @@
 #include "ethjet.h"
 #include "ethjet-ff.h"
+#include "ethjet-kzg.h"
 #include "tinykeccak.h"
 #include "blake2.h"
 
@@ -137,6 +138,9 @@ ethjet (struct ethjet_context *ctx,
 
   case ETHJET_BLAKE2:
     return ethjet_blake2 (in, in_size, out, out_size);
+
+  case ETHJET_POINT_EVALUATION:
+    return ethjet_point_evaluation (in, in_size, out, out_size);
 
   default:
     return 0;
