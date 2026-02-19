@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- Source location info (file, line, code snippet) is now shown in state merge debug messages
 - New opcode: CLZ
 - New POr/PAnd/PImpl/Or/And simplification rules
 - Support for `--early-abort` flag that aborts symbolic execution as soon as a counterexample is found

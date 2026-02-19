@@ -699,6 +699,7 @@ data VM (t :: VMType) = VM
   , config         :: RuntimeConfig
   , forks          :: Seq ForkState
   , currentFork    :: Int
+  , srcLookup      :: Maybe SrcLookup
   , labels         :: Map Addr Text
   , osEnv          :: Map String String
   , freshVar       :: Int
@@ -718,9 +719,6 @@ data ForkState = ForkState
   }
   deriving (Show, Generic)
 
-deriving instance Show (VM Symbolic)
-deriving instance Show (VM Concrete)
-
 -- | Alias for the type of e.g. @exec1@.
 type EVM (t :: VMType) a = StateT (VM t) (ST RealWorld) a
 
@@ -730,12 +728,24 @@ data BaseState
   | AbstractBase
   deriving (Show)
 
+-- | A callback for looking up source location info given the contracts map,
+-- an address, and a PC
+newtype SrcLookup = SrcLookup (Map (Expr EAddr) Contract -> Expr EAddr -> Int -> String)
+
+instance Show SrcLookup where
+  show _ = "<SrcLookup Info>"
+
+-- | Run a SrcLookup to get source location info, with a fallback for when
+-- no SrcLookup is available.
+runSrcLookup :: Maybe SrcLookup -> Map (Expr EAddr) Contract -> Expr EAddr -> Int -> String
+runSrcLookup Nothing _ addr pc = " at addr: " <> show addr <> " at pc: " <> show pc
+runSrcLookup (Just (SrcLookup f)) contracts addr pc = f contracts addr pc
+
 -- | Configuration options that need to be consulted at runtime
 data RuntimeConfig = RuntimeConfig
   { allowFFI :: Bool
   , baseState :: BaseState
   }
-  deriving (Show)
 
 -- | An entry in the VM's "call/create stack"
 data Frame (t :: VMType) = Frame
