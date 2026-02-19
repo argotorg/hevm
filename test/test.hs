@@ -698,7 +698,7 @@ tests = testGroup "hevm"
         let sig = (Just $ Sig "foo(address,uint256)" [AbiAddressType, AbiUIntType 256])
         (e, res) <- withDefaultSolver $
           \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        liftIO $ printWarnings Nothing e res "the contracts under test"
+        liftIO $ printWarnings Nothing mempty e res "the contracts under test"
         assertEqualM "Must be QED" res []
     , test "extcodesize-symbolic2" $ do
         Just c <- solcRuntime "C"
@@ -716,7 +716,7 @@ tests = testGroup "hevm"
         let sig = (Just $ Sig "foo(address,uint256)" [AbiAddressType, AbiUIntType 256])
         (e, res@[Cex _]) <- withDefaultSolver $
           \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        liftIO $ printWarnings Nothing e res "the contracts under test"
+        liftIO $ printWarnings Nothing mempty e res "the contracts under test"
     , test "jump-into-symbolic-region" $ do
         let
           -- our initCode just jumps directly to the end
