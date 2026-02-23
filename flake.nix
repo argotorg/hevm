@@ -10,11 +10,7 @@
       inputs.flake-utils.follows = "flake-utils";
     };
     solidity = {
-      url = "github:argotorg/solidity/8a97fa7a1db1ec509221ead6fea6802c684ee887";
-      flake = false;
-    };
-    ethereum-tests = {
-      url = "github:ethereum/tests/v13";
+      url = "github:argotorg/solidity/fd3a22656ebe9c91a96ebd846ab7699b5f2e053c";
       flake = false;
     };
     forge-std = {
@@ -33,7 +29,7 @@
     };
   };
 
-  outputs = { nixpkgs, flake-utils, solidity, empty-smt-solver, forge-std, ethereum-tests, foundry, solc-pkgs, ... }:
+  outputs = { nixpkgs, flake-utils, solidity, empty-smt-solver, forge-std, foundry, solc-pkgs, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = (import nixpkgs {
@@ -43,7 +39,21 @@
             solc-pkgs.overlay
           ];
         });
-        solc = (solc-pkgs.mkDefault pkgs pkgs.solc_0_8_26);
+        execution-spec-tests-fixtures = pkgs.stdenv.mkDerivation {
+          name = "execution-spec-tests-fixtures";
+          src = pkgs.fetchurl {
+            url = "https://github.com/ethereum/execution-spec-tests/releases/download/v5.4.0/fixtures_develop.tar.gz";
+            hash = "sha256-PisC1J/pA+2k/Yyspcvw0TnEcOl+HemoUpmxsDT5cJk=";
+          };
+          phases = [ "unpackPhase" ];
+          unpackPhase = ''
+            mkdir -p $out
+            tar xf $src --strip-components=1 -C $out "fixtures/blockchain_tests"
+            # remove pure non-Osaka fixtures
+            grep -rLZ '"network": "Osaka"' $out | xargs -0 rm
+          '';
+        };
+        solc = (solc-pkgs.mkDefault pkgs pkgs.solc_0_8_31);
         testDeps = [
           solc
           pkgs.foundry-bin
@@ -69,7 +79,7 @@
               secp256k1 = ps.secp256k1;
             }).overrideAttrs(final: prev: {
               HEVM_SOLIDITY_REPO = solidity;
-              HEVM_ETHEREUM_TESTS_REPO = ethereum-tests;
+              HEVM_ETHEREUM_TESTS_REPO = "${execution-spec-tests-fixtures}/blockchain_tests";
               HEVM_FORGE_STD_REPO = forge-std;
               DAPP_SOLC = "${solc}/bin/solc";
             }))
@@ -205,7 +215,7 @@
           # hevm tests expect these to be set
           HEVM_SOLIDITY_REPO = solidity;
           DAPP_SOLC = "${solc}/bin/solc";
-          HEVM_ETHEREUM_TESTS_REPO = ethereum-tests;
+          HEVM_ETHEREUM_TESTS_REPO = "${execution-spec-tests-fixtures}/blockchain_tests";
           HEVM_FORGE_STD_REPO = forge-std;
 
           # point cabal repl to system deps

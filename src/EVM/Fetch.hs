@@ -2,21 +2,30 @@
 module EVM.Fetch
   ( fetchContractWithSession
   , fetchBlockWithSession
-  , fetchSlotWithSession
-  , fetchWithSession
   , fetchQuery
   , oracle
   , Fetcher
   , RpcInfo (..)
   , RpcQuery (..)
   , EVM.Fetch.zero
-  , readMockData
+  , noRpc
+  , noRpcFetcher
   , BlockNumber (..)
-  , mkRpcInfo
   , mkSession
+  , mkSessionWithoutCache
   , Session (..)
   , FetchCache (..)
   , addFetchCache
+  , saveCache
+  , RPCContract (..)
+  , makeContractFromRPC
+  -- Below 4 are needed for Echidna
+  , fetchSlotWithSession
+  , fetchSlotWithCache
+  , fetchWithSession
+  , getCacheState
+  , FetchStatus(..)
+  , FetchResult(..)
   ) where
 
 import Prelude hiding (Foldable(..))
@@ -27,22 +36,29 @@ import EVM.FeeSchedule (feeSchedule)
 import EVM.Format (hexText)
 import EVM.SMT
 import EVM.Solvers
-import EVM.Types
+import EVM.Types hiding (ByteStringS)
+import EVM.Types (ByteStringS(..))
 import EVM (emptyContract)
 
 import Optics.Core
+import GHC.Generics (Generic)
+import System.FilePath ((</>))
+import System.Directory (createDirectoryIfMissing, doesFileExist)
+import Data.Aeson.Encode.Pretty (encodePretty)
+import qualified Data.ByteString.Lazy as BSL
+import Data.Bifunctor (first)
+import Control.Exception (try, SomeException)
 
-import Control.Monad.Trans.Maybe
-import Control.Applicative (Alternative(..))
 import Data.Aeson hiding (Error)
 import Data.Aeson.Optics
 import Data.ByteString qualified as BS
 import Data.Text (Text, unpack, pack)
 import Data.Text qualified as T
-import Data.Text.Encoding qualified as T
 import Data.Foldable (Foldable(..))
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, isJust, fromJust)
+import Data.Maybe (fromMaybe, fromJust, isNothing)
+import Data.Set qualified as Set
+import Data.Set (Set)
 import Data.Vector qualified as RegularVector
 import Network.Wreq
 import Network.Wreq.Session qualified as NetSession
@@ -53,30 +69,65 @@ import Control.Monad.IO.Class
 import Control.Monad (when)
 import EVM.Effects
 import qualified EVM.Expr as Expr
-import Data.Aeson.Encode.Pretty (encodePretty)
-import Data.ByteString.Base16 qualified as BS16
-import qualified Data.ByteString.Lazy as BSL
-import Data.ByteString.Char8 qualified as Char8
 import Control.Concurrent.MVar (MVar, newMVar, readMVar, modifyMVar_)
 
-type Fetcher t m s = App m => Query t s -> m (EVM t s ())
+type Fetcher t m = App m => Query t -> m (EVM t ())
+
+data FetchStatus = Cached | Fresh
+  deriving (Show, Eq)
+
+data FetchResult a
+  = FetchSuccess a FetchStatus
+  | FetchFailure FetchStatus
+  | FetchError Text
+  deriving (Show, Eq)
 
 data Session = Session
-  { sess           :: NetSession.Session
-  , latestBlockNum :: MVar (Maybe W256)
-  , sharedCache    :: MVar FetchCache
+  { sess            :: NetSession.Session
+  , latestBlockNum  :: MVar (Maybe W256)
+  , sharedCache     :: MVar FetchCache
+  , cacheDir        :: Maybe FilePath
+  -- Track ephemeral failures (network errors, not found, etc.)
+  -- These are NOT persisted to disk
+  , failedContracts :: MVar (Set Addr)
+  , failedSlots     :: MVar (Set (Addr, W256))
   }
 
 data FetchCache = FetchCache
-  { contractCache :: Map.Map Addr Contract
+  { contractCache :: Map.Map Addr RPCContract
   , slotCache     :: Map.Map (Addr, W256) W256
   , blockCache    :: Map.Map W256 Block
-  }
+  } deriving (Generic)
+
+
+instance ToJSON FetchCache where
+  toJSON (FetchCache cs ss bs) = object
+    [ "contracts" .= Map.toList cs
+    , "slots"     .= map (first (T.pack . show)) (Map.toList ss)
+    , "blocks"    .= bs
+    ]
+
+instance FromJSON FetchCache where
+  parseJSON = withObject "FetchCache" $ \v -> FetchCache
+    <$> (Map.fromList <$> v .: "contracts")
+    <*> (Map.fromList . map (first (read . T.unpack)) <$> v .: "slots")
+    <*> (v .:? "blocks" .!= Map.empty)
+
 instance Show FetchCache where
   show (FetchCache c s b) =
     "FetchCache { contractCache: " ++ show (Map.keys c) ++
     ", slotCache: " ++ show (Map.keys s) ++
     ", blockCache: " ++ show (Map.keys b) ++ " }"
+
+data Signedness = Signed | Unsigned
+  deriving (Show)
+
+showDec :: Signedness -> W256 -> T.Text
+showDec signed (W256 w) = T.pack (show (i :: Integer))
+  where
+    i = case signed of
+          Signed   -> fromIntegral (fromIntegral w :: Int)
+          Unsigned -> fromIntegral w
 
 -- | Abstract representation of an RPC fetch request
 data RpcQuery a where
@@ -93,27 +144,21 @@ data BlockNumber = Latest | BlockNumber W256
 deriving instance Show (RpcQuery a)
 
 data RPCContract = RPCContract
-  { mcCode    :: BS.ByteString
-  , mcNonce   :: W64
-  , mcBalance :: W256
+  { code    :: ByteStringS
+  , nonce   :: W64
+  , balance :: W256
   }
-  deriving (Eq, Show)
+  deriving (Eq, Show, Generic)
 
-data RpcInfo = RpcInfo
-  { blockNumURL  :: Maybe (BlockNumber, Text) -- ^ (block number, RPC url)
-  , mockContract :: Maybe (Map.Map Addr RPCContract) -- ^ mock contracts (addr -> contract)
-  , mockSlot     :: Maybe (Map.Map (Addr, W256) W256) -- ^ mock storage slots (addr, slot) -> value
-  , mockBlock    :: Maybe (Map.Map W256 Block) -- ^ mock blocks (block number -> block)
-  }
+instance ToJSON RPCContract
+
+instance FromJSON RPCContract
+
+newtype RpcInfo = RpcInfo { blockNumURL  :: Maybe (BlockNumber, Text)} -- ^ (block number, RPC url)
   deriving (Show)
-instance Semigroup RpcInfo where
-  RpcInfo a1 a2 a3 a4 <> RpcInfo b1 b2 b3 b4 =
-    RpcInfo (a1 <|> b1) (a2 <|> b2) (a3 <|> b3) (a4 <|> b4)
-instance Monoid RpcInfo where
-  mempty = RpcInfo Nothing Nothing Nothing Nothing
 
-mkRpcInfo :: Maybe (BlockNumber, Text) -> MockData -> RpcInfo
-mkRpcInfo blockNumURL (MockData {..}) = RpcInfo blockNumURL mockContract mockSlot mockBlock
+noRpc :: RpcInfo
+noRpc = RpcInfo Nothing
 
 rpc :: String -> [Value] -> Value
 rpc method args = object
@@ -142,7 +187,7 @@ instance ToRPC BlockNumber where
 readText :: Read a => Text -> a
 readText = read . unpack
 
-addFetchCache :: Session -> Addr -> Contract -> IO ()
+addFetchCache :: Session -> Addr -> RPCContract -> IO ()
 addFetchCache sess address ctrct = do
   cache <- readMVar sess.sharedCache
   liftIO $ modifyMVar_ sess.sharedCache $ \c -> pure $ c { contractCache = (Map.insert address ctrct cache.contractCache) }
@@ -150,39 +195,33 @@ addFetchCache sess address ctrct = do
 fetchQuery
   :: Show a
   => BlockNumber
-  -> (Value -> IO (Maybe Value))
+  -> (Value -> IO (Either Text Value))
   -> RpcQuery a
-  -> IO (Maybe a)
+  -> IO (Either Text a)
 fetchQuery n f q =
   case q of
     QueryCode addr -> do
         m <- f (rpc "eth_getCode" [toRPC addr, toRPC n])
-        pure $ do
-          t <- preview _String <$> m
-          hexText <$> t
+        pure $ m >>= \v -> maybeToRight "Parse error" (hexText <$> preview _String v)
     QueryNonce addr -> do
         m <- f (rpc "eth_getTransactionCount" [toRPC addr, toRPC n])
-        pure $ do
-          t <- preview _String <$> m
-          readText <$> t
+        pure $ m >>= \v -> maybeToRight "Parse error" (readText <$> preview _String v)
     QueryBlock -> do
       m <- f (rpc "eth_getBlockByNumber" [toRPC n, toRPC False])
-      pure $ m >>= parseBlock
+      pure $ m >>= \v -> maybeToRight "Parse error" (parseBlock v)
     QueryBalance addr -> do
         m <- f (rpc "eth_getBalance" [toRPC addr, toRPC n])
-        pure $ do
-          t <- preview _String <$> m
-          readText <$> t
+        pure $ m >>= \v -> maybeToRight "Parse error" (readText <$> preview _String v)
     QuerySlot addr slot -> do
         m <- f (rpc "eth_getStorageAt" [toRPC addr, toRPC slot, toRPC n])
-        pure $ do
-          t <- preview _String <$> m
-          readText <$> t
+        pure $ m >>= \v -> maybeToRight "Parse error" (readText <$> preview _String v)
     QueryChainId -> do
         m <- f (rpc "eth_chainId" [toRPC n])
-        pure $ do
-          t <- preview _String <$> m
-          readText <$> t
+        pure $ m >>= \v -> maybeToRight "Parse error" (readText <$> preview _String v)
+
+maybeToRight :: b -> Maybe a -> Either b a
+maybeToRight _ (Just x) = Right x
+maybeToRight y Nothing  = Left y
 
 parseBlock :: (AsValue s, Show s) => s -> Maybe Block
 parseBlock j = do
@@ -237,79 +276,55 @@ instance FromJSON Block where
       <*> v .: "maxCodeSize"
       <*> pure feeSchedule
 
-data MockData = MockData
-  { mockContract :: Maybe (Map.Map Addr RPCContract) -- ^ mock contracts (addr -> contract)
-  , mockSlot     :: Maybe (Map.Map (Addr, W256) W256) -- ^ mock storage slots (addr, slot) -> value
-  , mockBlock    :: Maybe (Map.Map W256 Block) -- ^ mock blocks (block number -> block)
-  }
-instance Semigroup MockData where
-  MockData a1 a2 a3 <> MockData b1 b2 b3 =
-    MockData (a1 <|> b1) (a2 <|> b2) (a3 <|> b3)
-instance Monoid MockData where
-  mempty = MockData Nothing Nothing Nothing
-instance ToJSON RPCContract where
-  toJSON (RPCContract code nonce balance) = object
-    [ "mcCode" .= (T.pack $ "0x" ++ (concatMap (paddedShowHex 2) . BS.unpack $ code))
-    , "mcNonce" .= nonce
-    , "mcBalance" .= balance
-    ]
-
-instance FromJSON RPCContract where
-  parseJSON = withObject "RPCContract" $ \v -> do
-    codeHex <- v .: "mcCode"
-    case (BS16.decodeBase16Untyped . strip0x . T.encodeUtf8) codeHex of
-       Left _ -> fail "Invalid hex encoding for mcCode"
-       Right bs -> RPCContract bs <$> v .: "mcNonce" <*> v .: "mcBalance"
-    where
-      strip0x :: BS.ByteString -> BS.ByteString
-      strip0x bs = if "0x" `Char8.isPrefixOf` bs then Char8.drop 2 bs else bs
-
-instance ToJSON MockData where
-  toJSON (MockData contracts slots blocks) = object
-    [ "mockContract" .= contracts
-    , "mockSlot" .= slots
-    , "mockBlock" .= blocks
-    ]
-
-instance FromJSON MockData where
-  parseJSON = withObject "MockData" $ \v ->
-    MockData <$> v .:? "mockContract" <*> v .:? "mockSlot" <*> v .:? "mockBlock"
-
-readMockData :: FilePath -> IO (Either String MockData)
-readMockData filePath = do
-  jsonData <- BSL.readFile filePath
-  pure $ eitherDecode jsonData
-
-writeMockDataToFile :: FilePath -> MockData -> IO ()
-writeMockDataToFile filePath mockData = do
-  let jsonData = encodePretty mockData
-  BSL.writeFile filePath jsonData
-  putStrLn $ "Successfully wrote JSON to: " ++ filePath
-
-fetchWithSession :: Text -> NetSession.Session -> Value -> IO (Maybe Value)
+fetchWithSession :: Text -> NetSession.Session -> Value -> IO (Either Text Value)
 fetchWithSession url sess x = do
   r <- asValue =<< NetSession.post sess (unpack url) x
-  pure (r ^? (lensVL responseBody) % key "result")
+  let body = r ^. (lensVL responseBody)
+  case body ^? key "result" of
+    Just val -> pure $ Right val
+    Nothing -> case body ^? key "error" of
+      Just err -> pure $ Left $ pack $ show err
+      Nothing -> pure $ Left "Unknown RPC error"
 
-fetchContractWithSession :: Config -> Session -> BlockNumber -> Text -> Addr -> IO (Maybe Contract)
+fetchContractWithSession :: Config -> Session -> BlockNumber -> Text -> Addr -> IO (FetchResult RPCContract)
 fetchContractWithSession conf sess nPre url addr = do
   n <- getLatestBlockNum conf sess nPre url
+  -- Check successful cache first
   cache <- readMVar sess.sharedCache
   case Map.lookup addr cache.contractCache of
     Just c -> do
       when (conf.debug) $ putStrLn $ "-> Using cached contract at " ++ show addr
-      pure $ Just c
-    Nothing -> runMaybeT $ do
-      let fetch :: Show a => RpcQuery a -> IO (Maybe a)
-          fetch = fetchQuery n (fetchWithSession url sess.sess)
-          fname  = "fetched_contract_" ++ show addr ++ ".json"
-      code    <- MaybeT $ fetch (QueryCode addr)
-      nonce   <- MaybeT $ fetch (QueryNonce addr)
-      balance <- MaybeT $ fetch (QueryBalance addr)
-      when (conf.debug) $ liftIO $ writeMockDataToFile fname (MockData (Just (Map.singleton addr (RPCContract code nonce balance))) Nothing Nothing)
-      let contr = makeContractFromRPC (RPCContract code nonce balance)
-      liftIO $ modifyMVar_ sess.sharedCache $ \c -> pure $ c { contractCache = (Map.insert addr contr cache.contractCache) }
-      pure contr
+      pure (FetchSuccess c Cached)
+    Nothing -> do
+      -- Check failure cache
+      failures <- readMVar sess.failedContracts
+      if Set.member addr failures
+      then do
+        when (conf.debug) $ putStrLn $ "-> Skipping previously failed contract " ++ show addr
+        pure (FetchFailure Cached)
+      else do
+        -- Attempt fetch
+        when (conf.debug) $ putStrLn $ "-> Fetching contract at " ++ show addr
+        let fetch :: Show a => RpcQuery a -> IO (Either Text a)
+            fetch = fetchQuery n (fetchWithSession url sess.sess)
+
+        codeRes <- fetch (QueryCode addr)
+        nonceRes <- fetch (QueryNonce addr)
+        balRes <- fetch (QueryBalance addr)
+
+        case (codeRes, nonceRes, balRes) of
+          (Right c, Right no, Right ba) -> do
+            let contr = RPCContract (ByteStringS c) no ba
+            if c /= BS.empty 
+              then do
+                modifyMVar_ sess.sharedCache $ \x -> pure $ x { contractCache = Map.insert addr contr x.contractCache }
+                pure (FetchSuccess contr Fresh)
+              else do
+                modifyMVar_ sess.failedContracts $ \f -> pure $ Set.insert addr f
+                pure (FetchFailure Fresh)
+          (Left e, _, _) -> pure (FetchError e)
+          (_, Left e, _) -> pure (FetchError e)
+          (_, _, Left e) -> pure (FetchError e)
 
 -- In case the user asks for Latest, and we have not yet established what Latest is,
 -- we fetch the block to find out. Otherwise, we update Latest to the value we have stored
@@ -332,73 +347,165 @@ getLatestBlockNum conf sess n url =
    _ -> pure n
 
 makeContractFromRPC :: RPCContract -> Contract
-makeContractFromRPC (RPCContract code nonce balance) =
+makeContractFromRPC (RPCContract (ByteStringS code) nonce balance) =
     initialContract (RuntimeCode (ConcreteRuntimeCode code))
       & set #nonce    (Just nonce)
       & set #balance  (Lit balance)
       & set #external True
 
-fetchSlotWithSession :: NetSession.Session -> BlockNumber -> Text -> Addr -> W256 -> IO (Maybe W256)
+-- Needed for Echidna only
+fetchSlotWithCache :: Config -> Session -> BlockNumber -> Text -> Addr -> W256 -> IO (FetchResult W256)
+fetchSlotWithCache conf sess nPre url addr slot = do
+  n <- getLatestBlockNum conf sess nPre url
+  -- Check successful cache
+  cache <- readMVar sess.sharedCache
+  case Map.lookup (addr, slot) cache.slotCache of
+    Just s -> do
+      when (conf.debug) $ putStrLn $ "-> Using cached slot value for slot " <> show slot <> " at " <> show addr
+      pure (FetchSuccess s Cached)
+    Nothing -> do
+      -- Check failure cache
+      failures <- readMVar sess.failedSlots
+      if Set.member (addr, slot) failures
+      then do
+        when (conf.debug) $ putStrLn $ "-> Skipping previously failed slot " <> show slot <> " at " <> show addr
+        pure (FetchFailure Cached)
+      else do
+        -- Attempt fetch
+        when (conf.debug) $ putStrLn $ "-> Fetching slot " <> show slot <> " at " <> show addr
+        ret <- fetchSlotWithSession sess.sess n url addr slot
+        case ret of
+          Right val -> do
+            -- Success: cache it
+            modifyMVar_ sess.sharedCache $ \c ->
+              pure $ c { slotCache = Map.insert (addr, slot) val c.slotCache }
+            pure (FetchSuccess val Fresh)
+          Left err -> do
+            pure (FetchError err)
+
+-- | Get the complete cache state including both successes and failures
+-- Returns in the format expected by Echidna's UI:
+--   - Map Addr (Maybe Contract): Just = success, Nothing = failure
+--   - Map Addr (Map W256 (Maybe W256)): Just = success, Nothing = failure
+getCacheState
+  :: Session
+  -> IO (Map.Map Addr (Maybe Contract), Map.Map Addr (Map.Map W256 (Maybe W256)))
+getCacheState sess = do
+  cache <- readMVar sess.sharedCache
+  failedContracts <- readMVar sess.failedContracts
+  failedSlots <- readMVar sess.failedSlots
+
+  -- Convert contract cache
+  let successfulContracts = fmap (Just . makeContractFromRPC) cache.contractCache
+  let allContracts = successfulContracts
+                  <> Map.fromSet (const Nothing) failedContracts
+
+  -- Convert slot cache: group by address
+  let successfulSlotsByAddr = Map.foldrWithKey
+        (\(addr, slot) value acc ->
+          Map.insertWith Map.union addr (Map.singleton slot (Just value)) acc)
+        Map.empty
+        cache.slotCache
+
+  -- Add failed slots
+  let allSlots = Set.foldr
+        (\(addr, slot) acc ->
+          Map.insertWith Map.union addr (Map.singleton slot Nothing) acc)
+        successfulSlotsByAddr
+        failedSlots
+
+  pure (allContracts, allSlots)
+
+fetchSlotWithSession :: NetSession.Session -> BlockNumber -> Text -> Addr -> W256 -> IO (Either Text W256)
 fetchSlotWithSession sess n url addr slot =
   fetchQuery n (fetchWithSession url sess) (QuerySlot addr slot)
 
 fetchBlockWithSession :: Config -> Session  -> BlockNumber -> Text -> IO (Maybe Block)
 fetchBlockWithSession conf sess nPre url = do
   n <- getLatestBlockNum conf sess nPre url
-  internalBlockFetch conf sess n url
+  case n of
+    Latest -> internalBlockFetch conf sess n url
+    EVM.Fetch.BlockNumber blockNum -> do
+      cache <- readMVar sess.sharedCache
+      case Map.lookup blockNum cache.blockCache of
+        Just b -> do
+          when (conf.debug) $ putStrLn $ "-> Using cached block " ++ show n
+          pure (Just b)
+        Nothing -> internalBlockFetch conf sess n url
 
 internalBlockFetch :: Config -> Session -> BlockNumber -> Text -> IO (Maybe Block)
 internalBlockFetch conf sess n url = do
   when (conf.debug) $ putStrLn $ "Fetching block " ++ show n ++ " from " ++ unpack url
   ret <- fetchQuery n (fetchWithSession url sess.sess) QueryBlock
   case ret of
-    Nothing -> pure ret
-    Just b -> do
+    Left _ -> pure Nothing
+    Right b -> do
       let bn = forceLit b.number
-      cache <- readMVar sess.sharedCache
-      liftIO $ modifyMVar_ sess.sharedCache $ \c -> pure $ c { blockCache = (Map.insert bn b cache.blockCache) }
-      when (conf.debug) $ do
-        let fname = "fetched_block_" ++ show bn ++ ".json"
-        writeMockDataToFile fname (MockData Nothing Nothing (Just (Map.singleton bn b)))
-      pure ret
+      liftIO $ modifyMVar_ sess.sharedCache $ \c ->
+        pure $ c { blockCache = Map.insert bn b c.blockCache }
+      pure (Just b)
 
-fetchSlotFrom :: App m => Session -> BlockNumber -> Text -> Addr -> W256 -> m (Maybe W256)
-fetchSlotFrom sess nPre url addr slot = do
-  conf <- readConfig
-  n <- liftIO $ getLatestBlockNum conf sess nPre url
-  cache <- liftIO $ readMVar sess.sharedCache
-  case Map.lookup (addr, slot) cache.slotCache of
-    Just s -> do
-      when (conf.debug) $ liftIO $ putStrLn $ "-> Using cached slot value for slot " <> show slot <> " at " <> show addr
-      pure $ Just s
-    Nothing -> do
-      ret <- liftIO $ fetchSlotWithSession sess.sess n url addr slot
-      when (isJust ret) $ let val = fromJust ret in
-        liftIO $ modifyMVar_ sess.sharedCache $ \c -> pure $ c { slotCache = (Map.insert (addr,slot) val cache.slotCache) }
-      when (conf.debug) $ liftIO $ do
-        let fname = "fetched_slot_" ++ show addr ++ "_" ++ show slot ++ ".json"
-        case ret of
-          Just v -> writeMockDataToFile fname (MockData Nothing (Just (Map.singleton (addr, slot) v)) Nothing)
-          Nothing -> pure ()
-      pure ret
+cacheFileName :: W256 -> FilePath
+cacheFileName n = "rpc-cache-" ++ T.unpack (showDec Unsigned n) ++ ".json"
 
-mkSession :: App m => m Session
-mkSession = do
+emptyCache :: FetchCache
+emptyCache = FetchCache Map.empty Map.empty Map.empty
+
+loadCache :: FilePath -> W256 -> IO FetchCache
+loadCache dir n = do
+  let fp = dir </> cacheFileName n
+  exists <- doesFileExist fp
+  if exists
+    then do
+      res <- try (BSL.readFile fp) :: IO (Either SomeException BSL.ByteString)
+      case res of
+        Left e -> do
+          putStrLn $ "Warning: could not read cache file " ++ fp ++ ": " ++ show e
+          pure emptyCache
+        Right content ->
+          case eitherDecode content of
+            Left err -> do
+              putStrLn $ "Warning: could not parse cache file " ++ fp ++ ": " ++ err
+              pure emptyCache
+            Right cache -> pure cache
+    else
+      pure emptyCache
+
+saveCache :: FilePath -> W256 -> FetchCache -> IO ()
+saveCache dir n cache = do
+  createDirectoryIfMissing True dir
+  let fp = dir </> cacheFileName n
+  putStrLn $ "Saving RPC cache to " ++ fp
+  BSL.writeFile fp (encodePretty cache)
+
+mkSession :: App m => Maybe FilePath -> Maybe W256 -> m Session
+mkSession cacheDir mblock = do
   sess <- liftIO NetSession.newAPISession
-  let emptyCache = FetchCache Map.empty Map.empty Map.empty
-  cache <- liftIO $ newMVar emptyCache
+  initialCache <- case (cacheDir, mblock) of
+      (Just dir, Just block) -> liftIO $ loadCache dir block
+      _ -> pure emptyCache
+  cache <- liftIO $ newMVar initialCache
   latestBlockNum <- liftIO $ newMVar Nothing
-  pure $ Session sess latestBlockNum cache
+  -- Initialize ephemeral failure tracking
+  failedContracts <- liftIO $ newMVar Set.empty
+  failedSlots <- liftIO $ newMVar Set.empty
+  pure $ Session sess latestBlockNum cache cacheDir failedContracts failedSlots
+
+mkSessionWithoutCache :: App m => m Session
+mkSessionWithoutCache = mkSession Nothing Nothing
 
 -- Only used for testing (test.hs, BlockchainTests.hs)
-zero :: Natural -> Maybe Natural -> Fetcher t m s
-zero smtjobs smttimeout q = do
-  sess <- mkSession
-  withSolvers Z3 smtjobs 1 smttimeout $ \s ->
-    oracle s (Just sess) mempty q
+zero :: Natural -> Maybe Natural -> Natural -> Fetcher t m
+zero smtjobs smttimeout maxMemoryMB q = do
+  sess <- mkSessionWithoutCache
+  withSolvers Z3 smtjobs smttimeout maxMemoryMB $ \s ->
+    oracle s (Just sess) noRpc q
+
+noRpcFetcher :: forall t m . App m => SolverGroup -> Fetcher t m
+noRpcFetcher sg = oracle sg Nothing noRpc
 
 -- SMT solving + RPC data fetching + reading from environment
-oracle :: forall t m s . App m => SolverGroup -> Maybe Session -> RpcInfo -> Fetcher t m s
+oracle :: forall t m . App m => SolverGroup -> Maybe Session -> RpcInfo -> Fetcher t m
 oracle solvers preSess rpcInfo q = do
   case q of
     PleaseDoFFI vals envs continue -> case vals of
@@ -414,59 +521,70 @@ oracle solvers preSess rpcInfo q = do
     PleaseAskSMT branchcondition pathconditions continue -> do
          let pathconds = foldl' PAnd (PBool True) pathconditions
          -- Is is possible to satisfy the condition?
-         continue <$> checkBranch solvers (branchcondition ./= (Lit 0)) pathconds
+         case branchcondition of
+           Lit 0 -> pure $ continue (Case False)
+           Lit _ -> pure $ continue (Case True)
+           _     -> continue <$> checkBranch solvers (branchcondition ./= (Lit 0)) pathconds
 
     PleaseGetSols symExpr numBytes pathconditions continue -> do
          let pathconds = foldl' PAnd (PBool True) pathconditions
          continue <$> getSolutions solvers symExpr numBytes pathconds
 
-    PleaseFetchContract addr base continue -> withSession addr (continue (nothingContract base addr)) $ \sess -> do
-      conf <- readConfig
-      when (conf.debug) $ liftIO $ putStrLn $ "Fetching contract at " ++ show addr
-      when (addr == 0 && conf.verb > 0) $ liftIO $ putStrLn "Warning: fetching contract at address 0"
-      contract <- case rpcInfo.mockContract >>= Map.lookup addr of
-        Just c  -> do
-          when (conf.debug) $ liftIO $ putStrLn $ "Using mocked contract at " ++ show addr
-          pure $ Just (makeContractFromRPC c)
-        Nothing -> case rpcInfo.blockNumURL of
-            Nothing -> pure $ Just $ nothingContract base addr
-            Just (block, url) -> liftIO $ fetchContractWithSession conf sess block url addr
-      case contract of
-        Just x -> pure $ continue x
-        Nothing -> internalError $ "oracle error: " ++ show q
+    PleaseFetchContract addr base continue
+      | isAddressSpecial addr -> pure $ continue nothingContract
+      | isNothing rpcInfo.blockNumURL -> pure $ continue nothingContract
+      | otherwise -> do
+        let sess = fromMaybe (internalError $ "oracle: no session provided for fetch addr: " ++ show addr) preSess
+        conf <- readConfig
+        cache <- liftIO $ readMVar sess.sharedCache
+        case Map.lookup addr cache.contractCache of
+          Just c -> do
+            when (conf.debug) $ liftIO $ putStrLn $ "-> Using cached contract at " ++ show addr
+            pure $ continue $ makeContractFromRPC c
+          Nothing -> do
+            when (conf.debug) $ liftIO $ putStrLn $ "Fetching contract at " ++ show addr
+            let (block, url) = fromJust rpcInfo.blockNumURL
+            res <- liftIO $ fetchContractWithSession conf sess block url addr
+            case res of
+              FetchSuccess x _ -> pure $ continue (makeContractFromRPC x)
+              FetchFailure _ -> internalError $ "oracle error: " ++ show q
+              FetchError e -> internalError $ "oracle error: " ++ show e
+      where
+        nothingContract = case base of
+          AbstractBase -> unknownContract (LitAddr addr)
+          EmptyBase -> emptyContract
 
-    PleaseFetchSlot addr slot continue -> withSession addr (continue 0)$ \sess -> do
-      conf <- readConfig
-      when (conf.debug) $ liftIO $ putStrLn $ "Fetching slot " <> (show slot) <> " at " <> (show addr)
-      when (addr == 0 && conf.verb > 0) $ liftIO $ putStrLn "Warning: fetching slot from a contract at address 0"
-      case rpcInfo.mockSlot >>= Map.lookup (addr, slot) of
-        Just v  -> do
-          when (conf.debug) $ liftIO $ putStrLn $ "Using mocked slot value for slot " <> show slot <> " at " <> show addr
-          pure $ continue v
-        Nothing -> case rpcInfo.blockNumURL of
-            Nothing -> pure $ continue 0
-            Just (block, url) -> fetchSlotFrom sess block url addr slot >>= \case
-               Just x  -> pure $ continue x
-               Nothing -> internalError $ "oracle error: " ++ show q
+    PleaseFetchSlot addr slot continue
+      | isAddressSpecial addr -> pure $ continue 0
+      | isNothing rpcInfo.blockNumURL -> pure $ continue 0
+      | otherwise -> do
+        let sess = fromMaybe (internalError $ "oracle: no session provided for fetch addr: " ++ show addr) preSess
+        conf <- readConfig
+        cache <- liftIO $ readMVar sess.sharedCache
+        case Map.lookup (addr, slot) cache.slotCache of
+          Just s -> do
+            when (conf.debug) $ liftIO $ putStrLn $ "-> Using cached slot value for slot " <> show slot <> " at " <> show addr
+            pure $ continue s
+          Nothing -> do
+            when (conf.debug) $ liftIO $ putStrLn $ "Fetching slot " <> (show slot) <> " at " <> (show addr)
+            let (block, url) = fromJust rpcInfo.blockNumURL
+            n <- liftIO $ getLatestBlockNum conf sess block url
+            ret <- liftIO $ fetchSlotWithSession sess.sess n url addr slot
+            case ret of
+              Right val -> do
+                liftIO $ modifyMVar_ sess.sharedCache $ \c ->
+                  pure $ c { slotCache = Map.insert (addr, slot) val c.slotCache }
+                pure $ continue val
+              Left err -> internalError $ "oracle error: " ++ show err
 
     PleaseReadEnv variable continue -> do
       value <- liftIO $ lookupEnv variable
       pure . continue $ fromMaybe "" value
 
     where
-      nothingContract base addr =
-        case base of
-          AbstractBase -> unknownContract (LitAddr addr)
-          EmptyBase -> emptyContract
-      withSession addr def f =
-        case addr of
-          -- special values such as 0, 0xdeadbeef, 0xacab, hevm cheatcodes, and the precompile addresses
-          -- do not require a session, there is nothing deployed there, it's way too small or special, RPC would be pointless
-          a | a <= 0xdeadbeef -> pure def
-          0x7109709ECfa91a80626fF3989D68f67F5b1DD12D -> pure def
-          _ -> case preSess of
-            Just sess  -> f sess
-            Nothing -> internalError $ "oracle: no session provided for fetch addr: " ++ show addr
+      -- special values such as 0, 0xdeadbeef, 0xacab, hevm cheatcodes, and the precompile addresses
+      isAddressSpecial addr = addr <= 0xdeadbeef || addr == 0x7109709ECfa91a80626fF3989D68f67F5b1DD12D
+
 
 getSolutions :: forall m . App m => SolverGroup -> Expr EWord -> Int -> Prop -> m (Maybe [W256])
 getSolutions solvers symExprPreSimp numBytes pathconditions = do

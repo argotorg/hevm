@@ -9,7 +9,7 @@ module EVM.Expr where
 import Prelude hiding (LT, GT)
 import Control.Monad (unless, when)
 import Control.Monad.ST (ST)
-import Control.Monad.State (put, get, modify, execState, State)
+import Control.Monad.State (put, get, execState, State)
 import Data.Bits hiding (And, Xor)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -177,7 +177,7 @@ not :: Expr EWord -> Expr EWord
 not = op1 Not complement
 
 shl :: Expr EWord -> Expr EWord -> Expr EWord
-shl = op2 SHL (\x y -> if x > 256 then 0 else shiftL y (fromIntegral x))
+shl = op2 SHL (\x y -> if x >= 256 then 0 else shiftL y (fromIntegral x))
 
 shr :: Expr EWord -> Expr EWord -> Expr EWord
 shr = op2
@@ -202,6 +202,8 @@ sar = op2 SAR (\x y ->
      else
        fromIntegral $ shiftR asSigned (fromIntegral x))
 
+clz :: Expr EWord -> Expr EWord
+clz = op1 CLZ (\x -> if x == 0 then 256 else fromIntegral $ countLeadingZeros x)
 
 -- Props
 
@@ -210,6 +212,7 @@ peq (Lit x) (Lit y) = PBool (x == y)
 peq (LitAddr x) (LitAddr y) = PBool (x == y)
 peq (LitByte x) (LitByte y) = PBool (x == y)
 peq (ConcreteBuf x) (ConcreteBuf y) = PBool (x == y)
+peq (ConcreteStore x) (ConcreteStore y) = PBool (x == y)
 peq a b
   | a == b = PBool True
   | otherwise = let args = sort [a, b]
@@ -246,6 +249,8 @@ readByte i@(Lit x) (WriteByte (Lit idx) val src)
   = if x == idx
     then val
     else readByte i src
+readByte i@(Lit x) (WriteByte (And (Lit idx) _) _ src)
+  | x > idx = readByte i src
 readByte i@(Lit x) (WriteWord (Lit idx) val src)
   = if x - idx < 32
     then case val of
@@ -375,6 +380,9 @@ copySlice s@(Lit srcOffset) d@(Lit dstOffset) sz@(Lit size) src ds@(ConcreteBuf 
        then ConcreteBuf $ hd <> (BS.pack . (mapMaybe maybeLitByteSimp) $ sl) <> tl
        else CopySlice s d sz src ds
   | otherwise = CopySlice s d sz src ds
+
+copySlice srcOff dstOff (Lit size) (WriteWord srcOff2 val _) dstBuff
+  | size < 32 && srcOff == srcOff2 = copySlice (Lit 0) dstOff (Lit size) (WriteWord (Lit 0) val (ConcreteBuf "")) dstBuff
 
 -- abstract indices
 copySlice srcOffset dstOffset size src dst = CopySlice srcOffset dstOffset size src dst
@@ -1001,20 +1009,6 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
     go (ReadByte idx buf) = readByte idx buf
     go (BufLength buf) = bufLength buf
 
-    -- We can zero out any bytes in a base ConcreteBuf that we know will be overwritten by a later write
-    -- TODO: make this fully general for entire write chains, not just a single write.
-    go o@(WriteWord (Lit idx) val (ConcreteBuf b))
-      | idx >= maxBytes = o
-      | BS.length b >= (unsafeInto idx + 32) =
-          let
-            slot = BS.take 32 (BS.drop (unsafeInto idx) b)
-            isSlotZero = BS.all (== 0) slot
-            content = if isSlotZero
-              then b
-              else (BS.take (unsafeInto idx) b)
-                <> (BS.replicate 32 0)
-                <> (BS.drop (unsafeInto idx + 32) b)
-          in writeWord (Lit idx) val (ConcreteBuf content)
     go (WriteWord a b c) = writeWord a b c
 
     go (WriteByte a b c) = writeByte a b c
@@ -1063,23 +1057,76 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
     go (IsZero (IsZero (IsZero a))) = iszero a
     go (IsZero (IsZero (LT x y))) = lt x y
     go (IsZero (IsZero (Eq x y))) = eq x y
+    go (IsZero (IsZero a)) = lt (Lit 0) a
     go (IsZero (Xor x y)) = eq x y
+    go (IsZero (Sub a b)) = eq a b
+    go (IsZero (Or a b)) = EVM.Expr.and (iszero a) (iszero b)
     go (IsZero a) = iszero a
+
+    -- ITE (if-then-else) simplification for path merging
+    go (ITE (Lit 0) _ f) = f
+    go (ITE (Lit _) t _) = t
+    go (ITE _ t f) | t == f = t
+    go (ITE c (ITE c' a _) d) | c == c' = ITE c a d -- nested same condition in then
+    go (ITE c a (ITE c' _ d)) | c == c' = ITE c a d -- nested same condition in else
 
     -- syntactic Eq reduction
     go (Eq (Lit a) (Lit b))
       | a == b = Lit 1
       | otherwise = Lit 0
     go (Eq (Lit 0) (Sub a b)) = eq a b
+    go (Eq (Lit 0) (Xor a b)) = eq a b
+    go (Eq (Add a b) c)
+      | a == c = iszero b
+      | b == c = iszero a
+    go (Eq (Sub a b) c) | a == c = iszero b
+
     go (Eq (Lit 0) a) = iszero a
     go (Eq a b)
       | a == b = Lit 1
       | otherwise = eq a b
 
-    -- redundant ITE
-    go (ITE (Lit x) a b)
-      | x == 0 = b
-      | otherwise = a
+    -- COMPARISONS
+    -- First special cases
+
+    -- we write at least 32, so if x <= 32, it's FALSE
+    go o@(EVM.Types.LT (BufLength (WriteWord {})) (Lit x))
+      | x <= 32 = Lit 0
+      | otherwise = o
+    -- we write at least 32, so if x < 32, it's TRUE
+    go o@(EVM.Types.LT (Lit x) (BufLength (WriteWord {})))
+      | x < 32 = Lit 1
+      | otherwise = o
+
+    -- If a >= b then the value of the `Max` expression can never be < b
+    go o@(LT (Max (Lit a) _) (Lit b))
+      | a >= b = Lit 0
+      | otherwise = o
+    go o@(SLT (Sub (Max (Lit a) _) (Lit b)) (Lit c))
+      = let sa, sb, sc :: Int256
+            sa = fromIntegral a
+            sb = fromIntegral b
+            sc = fromIntegral c
+        in if sa >= sb && sa - sb >= sc
+           then Lit 0
+           else o
+
+    -- normalize all comparisons in terms of (S)LT
+    go (EVM.Types.GT a b) = lt b a
+    go (EVM.Types.GEq a b) = iszero (lt a b)
+    go (EVM.Types.LEq a b) = iszero (lt b a)
+    go (SGT a b) = slt b a
+
+    -- LT
+    go (EVM.Types.LT _ (Lit 0)) = Lit 0
+    go (EVM.Types.LT (Lit a) _) | a == maxLit = Lit 0
+    go (EVM.Types.LT a (Lit 1)) = iszero a
+    go (EVM.Types.LT a b) = lt a b
+
+    -- SLT
+    go (SLT _ (Lit a)) | a == minLitSigned = Lit 0
+    go (SLT (Lit a) _) | a == maxLitSigned = Lit 0
+    go (SLT a b) = slt a b
 
     -- Masking as as per Solidity bit-packing of e.g. function parameters
     go (And (Lit mask1) (Or (And (Lit mask2) _) x)) | (mask1 .&. mask2 == 0)
@@ -1093,7 +1140,9 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
 
     -- Mod
     go (Mod _ (Lit 0)) = Lit 0
+    go (Mod _ (Lit 1)) = Lit 0
     go (SMod _ (Lit 0)) = Lit 0
+    go (SMod _ (Lit 1)) = Lit 0
     go (Mod a b) | a == b = Lit 0
     go (SMod a b) | a == b = Lit 0
     go (Mod (Lit 0) _) = Lit 0
@@ -1172,17 +1221,18 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
       where l = sort [a, b, c]
             an = EVM.Expr.and
 
-    -- A special pattern sometimes generated from Solidity that uses exponentiation to simulate bit shift.
-    -- We can rewrite the exponentiation into a bit-shift under certain conditions.
-    go (Exp (Lit 0x100) offset@(Mul (Lit a) (Mod _ (Lit b))))
-      | a * b <= 32 && (maxWord256 `Prelude.div` a) > b = shl (mul (Lit 8) offset) (Lit 1)
-    go (Exp (Lit 0x100) offset@(Mod _ (Lit 32))) = (shl (mul (Lit 8) offset)) (Lit 1)
-
     -- redundant add / sub
     go (Sub (Add a b) c)
       | a == c = b
       | b == c = a
       | otherwise = sub (add a b) c
+
+    -- Order sub/add around
+    go (Sub (Sub a b) c) = sub a (add b c)
+    go (Sub a (Sub b c)) = add (sub a b) c
+
+    -- Negation: ~x + 1 = 0 - x (two's complement)
+    go (Add (Lit 1) (Not b)) = Sub (Lit 0) b
 
     -- add / sub identities
     go (Add a b)
@@ -1195,11 +1245,25 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
       | otherwise = sub a b
 
     -- XOR normalization
+    go (Xor a b) | a == b = Lit 0
+    go (Xor (Lit 0) a) = a
+    go (Xor (Lit a) b) | a == maxLit = EVM.Expr.not b
     go (Xor a  b) = EVM.Expr.xor a b
 
+    -- Not simplification
+    go (EVM.Types.Not (EVM.Types.Not a)) = a
+    go (Not a) = EVM.Expr.not a
+
+    -- EqByte
     go (EqByte a b) = eqByte a b
 
     -- SHL / SHR / SAR
+    go (SHL (Lit a) _) | a >= 256 = Lit 0
+    go (SHR (Lit a) _) | a >= 256 = Lit 0
+    go (SHL (Lit n) (SHR (Lit m) x)) -- zero out LSB
+      | n == m && n < 256 = EVM.Expr.and (Lit (shiftL maxLit (fromIntegral n))) x
+    go (SHR (Lit n) (SHL (Lit m) x)) -- zero out MSB
+      | n == m && n < 256 = EVM.Expr.and (Lit (shiftR maxLit (fromIntegral n))) x
     go (SHL a v)
       | a == (Lit 0) = v
       | v == (Lit 0) = v
@@ -1213,8 +1277,12 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
        | a == (Lit 0) = v
        | v == (Lit 0) = v
        | otherwise = sar a v
+    go (CLZ v) = clz v
 
     -- Bitwise AND & OR. These MUST preserve bitwise equivalence
+    go (And a (Or b _)) | a == b = a
+    go (And a (Or _ b)) | a == b = a
+
     go (And a b)
       | a == b = a
       | b == (Not a) || a == (Not b) = Lit 0
@@ -1222,30 +1290,15 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
       | a == (Lit maxLit) = b
       | b == (Lit maxLit) = a
       | otherwise = EVM.Expr.and a b
+    go (Or a (And b _)) | a == b = a
+    go (Or a (And _ b)) | a == b = a
     go (Or a b)
       | a == b = a
       | a == (Lit 0) = b
       | b == (Lit 0) = a
+      | a == (Lit maxLit) || b == (Lit maxLit) = Lit maxLit
       | otherwise = EVM.Expr.or a b
 
-    -- If x is ever non zero the Or will always evaluate to some non zero value and the false branch will be unreachable
-    -- NOTE: with AND this does not work, because and(0x8, 0x4) = 0
-    go (ITE (Or (Lit x) a) t f)
-      | x == 0 = ITE a t f
-      | otherwise = t
-    go (ITE (Or a b@(Lit _)) t f) = ITE (Or b a) t f
-
-    -- we write at least 32, so if x <= 32, it's FALSE
-    go o@(EVM.Types.LT (BufLength (WriteWord {})) (Lit x))
-      | x <= 32 = Lit 0
-      | otherwise = o
-    -- we write at least 32, so if x < 32, it's TRUE
-    go o@(EVM.Types.LT (Lit x) (BufLength (WriteWord {})))
-      | x < 32 = Lit 1
-      | otherwise = o
-
-    -- Double NOT is a no-op, since it's a bitwise inversion
-    go (EVM.Types.Not (EVM.Types.Not a)) = a
 
     -- Some trivial min / max eliminations
     go (Max a b) = EVM.Expr.max a b
@@ -1258,6 +1311,7 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
     go (Mul a b) = case (a, b) of
                      (Lit 0, _) -> Lit 0
                      (Lit 1, _) -> b
+                     (Lit v, _) | v == maxLit -> Sub (Lit 0) b
                      _ -> mul a b
 
     -- Some trivial (s)div eliminations
@@ -1268,42 +1322,21 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
     go (SDiv _ (Lit 0)) = Lit 0 -- divide anything by 0 is zero in EVM
     go (SDiv a (Lit 1)) = a
     -- NOTE: Div x x is NOT 1, because Div 0 0 is 0, not 1.
-    --
+
+    --- Some trivial exp eliminations
     go (Exp _ (Lit 0)) = Lit 1 -- everything, including 0, to the power of 0 is 1
     go (Exp a (Lit 1)) = a -- everything, including 0, to the power of 1 is itself
     go (Exp (Lit 1) _) = Lit 1 -- 1 to any value (including 0) is 1
     -- NOTE: we can't simplify (Lit 0)^k. If k is 0 it's 1, otherwise it's 0.
     --       this is encoded in SMT.hs instead, via an SMT "ite"
-
-    -- If a >= b then the value of the `Max` expression can never be < b
-    go o@(LT (Max (Lit a) _) (Lit b))
-      | a >= b = Lit 0
-      | otherwise = o
-    go o@(SLT (Sub (Max (Lit a) _) (Lit b)) (Lit c))
-      = let sa, sb, sc :: Int256
-            sa = fromIntegral a
-            sb = fromIntegral b
-            sc = fromIntegral c
-        in if sa >= sb && sa - sb >= sc
-           then Lit 0
-           else o
-
-    -- normalize all comparisons in terms of (S)LT
-    go (EVM.Types.GT a b) = lt b a
-    go (EVM.Types.GEq a b) = leq b a
-    go (EVM.Types.LEq a b) = iszero (lt b a)
-    go (SGT a b) = slt b a
-
-    -- LT
-    go (EVM.Types.LT _ (Lit 0)) = Lit 0
-    go (EVM.Types.LT a (Lit 1)) = iszero a
-    go (EVM.Types.LT (Lit 0) a) = iszero (Eq (Lit 0) a)
-    go (EVM.Types.LT a b) = lt a b
-
-    -- SLT
-    go (SLT _ (Lit a)) | a == minLitSigned = Lit 0
-    go (SLT (Lit a) _) | a == maxLitSigned = Lit 0
-    go (SLT a b) = slt a b
+    --
+    -- A special pattern sometimes generated from Solidity that uses exponentiation to simulate bit shift.
+    -- We can rewrite the exponentiation into a bit-shift under certain conditions.
+    go (Exp (Lit 0x100) offset@(Mul (Lit a) (Mod _ (Lit b))))
+      | a * b <= 32 && (maxWord256 `Prelude.div` a) > b = shl (mul (Lit 8) offset) (Lit 1)
+    go (Exp (Lit 0x100) offset@(Mod _ (Lit 32))) = (shl (mul (Lit 8) offset)) (Lit 1)
+    go (Exp (Lit 2) k) = shl k (Lit 1)
+    go (Exp a b) = EVM.Expr.exp a b
 
     -- simple div/mod/add/sub
     go (Div  o1 o2) = EVM.Expr.div  o1 o2
@@ -1333,6 +1366,16 @@ simplifyProp prop =
   let new = mapProp' go (simpInnerExpr prop)
   in if (new == prop) then prop else simplifyProp new
   where
+    isBoolLike :: Expr EWord -> Bool
+    isBoolLike = \case
+      LT{} -> True
+      SLT{} -> True
+      Eq{} -> True
+      IsZero{} -> True
+      GT{} -> internalError "Should not encounter GT at this point!"
+      LEq{} -> internalError "Should not encounter LEq at this point!"
+      GEq{} -> internalError "Should not encounter GEq at this point!"
+      _ -> False
     go :: Prop -> Prop
 
     -- Rewrite PGT/GEq to PLT/PLEq
@@ -1355,16 +1398,29 @@ simplifyProp prop =
     go (PLEq (Sub a b) c) | a == c = PLEq b a
     go (PLEq a (Lit 0)) = peq (Lit 0) a
     go (PLT (Max (Lit a) b) (Lit c)) | a < c = PLT b (Lit c)
-    go (PLT (Lit 0) (Eq a b)) = peq a b
-    go (PLEq a b) = pleq a b
 
-    -- when it's PLT but comparison on the RHS then it's just (PEq 1 RHS)
-    go (PLT (Lit 0) (a@LT {})) = peq (Lit 1) a
-    go (PLT (Lit 0) (a@LEq {})) = peq (Lit 1) a
-    go (PLT (Lit 0) (a@SLT {})) = peq (Lit 1) a
-    go (PLT (Lit 0) (a@GT {})) = peq (Lit 1) a
-    go (PLT (Lit 0) (a@GEq {})) = peq (Lit 1) a
-    go (PLT (Lit 0) (a@SGT {})) = peq (Lit 1) a
+    go (PLT (Lit 0) e)
+      | isBoolLike e = peq (Lit 1) e
+
+    -- all possible simplifications for PLT and PLEq have to be covered by this point
+    go p@(PLT {}) = p
+    go p@(PLEq {}) = p
+
+    go (PEq (Lit 1) (Eq a b)) = peq a b
+    go (PEq (Lit 1) (LT a b)) = PLT a b
+    go (PEq (Lit 1) (IsZero e)) = PEq (Lit 0) e
+
+    go (PEq (Lit 0) (IsZero e))
+      | isBoolLike e = PEq (Lit 1) e
+    go (PEq (Lit 0) (IsZero e)) = PNeg (PEq (Lit 0) e)
+    go (PEq (Lit 0) (Eq a b)) = PNeg (peq a b)
+    go (PEq (Lit 0) (LT a b)) = PLEq b a
+
+    go (PEq (Lit 0) (Sub a b)) = peq a b
+    go (PEq (Lit 0) (Or a b)) = peq (Lit 0) a `PAnd` peq (Lit 0) b
+    go (PEq a1 (Add a2 y)) | a1 == a2 = peq (Lit 0) y
+    go (PEq l r) = peq l r
+
     go (POr (PLEq a1 (Lit b)) (PLEq (Lit c) a2)) | a1 == a2 && c == b+1 = PBool True
 
     -- negations
@@ -1372,39 +1428,14 @@ simplifyProp prop =
     go (PNeg (PNeg a)) = a
     go (PNeg (PGT a b)) = PLEq a b
     go (PNeg (PGEq a b)) = PLT a b
-    go (PNeg (PLT a b)) = PGEq a b
-    go (PNeg (PLEq a b)) = PGT a b
+    go (PNeg (PLT a b)) = PLEq b a
+    go (PNeg (PLEq a b)) = PLT b a
     go (PNeg (PAnd a b)) = POr (PNeg a) (PNeg b)
     go (PNeg (POr a b)) = PAnd (PNeg a) (PNeg b)
-    go (PNeg (PEq (Lit 1) (IsZero b))) = PEq (Lit 0) (IsZero b)
-
-    -- Empty buf
-    go (PEq (Lit 0) (BufLength k)) = peq k (ConcreteBuf "")
-    go (PEq (Lit 0) (Or a b)) = peq (Lit 0) a `PAnd` peq (Lit 0) b
-
-    -- PEq rewrites (notice -- GT/GEq is always rewritten to LT by simplify)
-    go (PEq (Lit 1) (IsZero (LT a b))) = PLEq b a
-    go (PEq (Lit 1) (IsZero (LEq a b))) = PLT b a
-    go (PEq (Lit 0) (IsZero a)) = PLT (Lit 0) a
-    go (PEq a1 (Add a2 y)) | a1 == a2 = peq (Lit 0) y
-
-    -- solc specific stuff
-    go (PLT (Lit 0) (IsZero (Eq a b))) = PNeg (peq a b)
-
-    -- iszero(a) -> (a == 0)
-    -- iszero(iszero(a))) -> ~(a == 0) -> a > 0
-    -- iszero(iszero(a)) == 0 -> ~~(a == 0) -> a == 0
-    -- ~(iszero(iszero(a)) == 0) -> ~~~(a == 0) -> ~(a == 0) -> a > 0
-    go (PNeg (PEq (Lit 0) (IsZero (IsZero a)))) = PLT (Lit 0) a
-
-    -- iszero(a) -> (a == 0)
-    -- iszero(a) == 0 -> ~(a == 0)
-    -- ~(iszero(a) == 0) -> ~~(a == 0) -> a == 0
-    go (PNeg (PEq (Lit 0) (IsZero a))) = peq (Lit 0) a
-
-    -- a < b == 0 -> ~(a < b)
-    -- ~(a < b == 0) -> ~~(a < b) -> a < b
-    go (PNeg (PEq (Lit 0) (LT a b))) = PLT a b
+    go (PNeg (PEq (Lit 1) e))
+      | isBoolLike e = PEq (Lit 0) e
+    go (PNeg (PEq (Lit 0) e))
+      | isBoolLike e = PEq (Lit 1) e
 
     -- And/Or
     go (PAnd (PBool l) (PBool r)) = PBool (l && r)
@@ -1418,24 +1449,18 @@ simplifyProp prop =
     go (POr x (PBool False)) = x
     go (POr (PBool False) x) = x
 
+    -- Absoption rules
+    go (PAnd a (POr b _)) | a == b = a
+    go (PAnd a (POr _ b)) | a == b = a
+    go (POr a (PAnd b _)) | a == b = a
+    go (POr a (PAnd _ b)) | a == b = a
+
     -- Imply
     go (PImpl _ (PBool True)) = PBool True
     go (PImpl (PBool True) b) = b
     go (PImpl (PBool False) _) = PBool True
+    go (PImpl a b) | a == b = PBool True
 
-    -- Double negation (no need for GT/GEq, as it's rewritten to LT/LEq)
-
-    -- Eq
-    go (PEq (Lit 0) (Eq a b)) = PNeg (peq a b)
-    go (PEq (Lit 1) (Eq a b)) = peq a b
-    go (PEq (Lit 0) (Sub a b)) = peq a b
-    go (PEq (Lit 0) (LT a b)) = PLEq b a
-    go (PEq (Lit 0) (LEq a b)) = PLT b a
-    go (PEq (Lit 1) (LT a b)) = PLT a b
-    go (PEq (Lit 1) (LEq a b)) = PLEq a b
-    go (PEq (Lit 1) (GT a b)) = PGT a b
-    go (PEq (Lit 1) (GEq a b)) = PGEq a b
-    go (PEq l r) = peq l r
 
     go p = p
 
@@ -1672,10 +1697,6 @@ max (Lit 0) y = y
 max x (Lit 0) = x
 max x y = normArgs Max Prelude.max x y
 
-numBranches :: Expr End -> Int
-numBranches (ITE _ t f) = numBranches t + numBranches f
-numBranches _ = 1
-
 allLit :: [Expr Byte] -> Bool
 allLit = all isLitByte
 
@@ -1698,8 +1719,11 @@ preImages = [(keccak' (word256Bytes . into $ i), i) | i <- [0..255]]
 -- | images of keccak(bytes32(x)) where 0 <= x < 256
 preImageLookupMap :: Map.Map W256 Word8
 preImageLookupMap = Map.fromList preImages
+
 data ConstState = ConstState
   { values :: Map.Map (Expr EWord) W256
+  , lowerBounds :: Map.Map (Expr EWord) W256
+  , upperBounds :: Map.Map (Expr EWord) W256
   , canBeSat :: Bool
   }
   deriving (Show)
@@ -1707,7 +1731,7 @@ data ConstState = ConstState
 -- | Performs constant propagation
 constPropagate :: [Prop] -> [Prop]
 constPropagate ps =
- let consts = collectConsts ps (ConstState mempty True)
+ let consts = collectConsts ps emptyState
  in if consts.canBeSat then substitute consts ps ++ fixVals consts
     else [PBool False]
   where
@@ -1720,7 +1744,7 @@ constPropagate ps =
     --       hence we need the fixVals function to add them back in
     substitute :: ConstState -> [Prop] -> [Prop]
     substitute cs ps2 = map (mapProp (subsGo cs)) ps2
-    subsGo :: ConstState -> Expr a-> Expr a
+    subsGo :: ConstState -> Expr a -> Expr a
     subsGo cs (Var v) = case Map.lookup (Var v) cs.values of
       Just x -> Lit x
       Nothing -> Var v
@@ -1728,20 +1752,96 @@ constPropagate ps =
 
     -- Collects all the constants in the given props, and sets canBeSat to False if UNSAT
     collectConsts ps2 startState = execState (mapM go ps2) startState
+    emptyState = ConstState mempty mempty mempty True
+    conflictState = ConstState mempty mempty mempty False
+    conflict = put conflictState
+
+    setExactValue :: Expr EWord -> W256 -> State ConstState ()
+    setExactValue e v = do
+      s <- get
+      case Map.lookup e s.values of
+        Just old -> when (old /= v) conflict
+        _ -> put s { values = Map.insert e v s.values }
+
+    updateLower :: Expr EWord -> W256 -> State ConstState ()
+    updateLower a l = do
+      s <- get
+      let currentL = fromMaybe 0 (Map.lookup a s.lowerBounds)
+          currentU = fromMaybe maxLit (Map.lookup a s.upperBounds)
+          newL = Prelude.max currentL l
+      if newL > currentU
+        then conflict
+        else put s { lowerBounds = Map.insert a newL s.lowerBounds }
+      when (newL == currentU) $ setExactValue a newL
+
+    updateUpper :: Expr EWord -> W256 -> State ConstState ()
+    updateUpper a u = do
+      s <- get
+      let currentL = fromMaybe 0 (Map.lookup a s.lowerBounds)
+          currentU = fromMaybe maxLit (Map.lookup a s.upperBounds)
+          newU = Prelude.min currentU u
+      if currentL > newU
+        then conflict
+        else put s { upperBounds = Map.insert a newU s.upperBounds }
+      -- Check if equal to lower, then it's a constant
+      when (currentL == newU) $ setExactValue a newU
+
+    genericEq :: Expr EWord -> W256 -> State ConstState ()
+    genericEq a v = do
+      setExactValue a v
+      updateLower a v
+      updateUpper a v
+
     go :: Prop -> State ConstState ()
     go = \case
-        PEq (Lit l) a -> do
-          s <- get
-          case Map.lookup a s.values of
-            Just l2 -> unless (l==l2) $ put ConstState {canBeSat=False, values=mempty}
-            Nothing -> modify (\s' -> s'{values=Map.insert a l s'.values})
-        PEq a b@(Lit _) -> go (PEq b a)
+        -- signed inequalities
+        PEq (Lit 1) term@(SLT a (Lit 0)) -> do
+            genericEq term 1
+            updateLower a minLitSigned
+        PEq (Lit 1) term@(SLT (Lit 0) a) -> do
+            genericEq term 1
+            updateLower a 1
+            updateUpper a maxLitSigned
+
+        -- normal equality propagation
+        PEq (Lit l) a -> genericEq a l
+        PEq a (Lit l) -> genericEq a l
+
         PNeg (PEq (Lit l) a) -> do
           s <- get
           case Map.lookup a s.values of
-            Just l2 -> when (l==l2) $ put ConstState {canBeSat=False, values=mempty}
+            Just l2 -> when (l == l2) conflict
             Nothing -> pure ()
         PNeg (PEq a b@(Lit _)) -> go $ PNeg (PEq b a)
+
+        -- inequalities (with overflow checks to prevent wraparound)
+        -- PLT a (Lit b) means a < b, so a <= b-1
+        PLT a (Lit b) ->
+          if b == 0
+            then conflict
+            else updateUpper a (b - 1)
+        -- PLT (Lit a) b means a < b, so b >= a+1
+        PLT (Lit a) b ->
+          if a == maxLit
+            then conflict
+            else updateLower b (a + 1)
+        -- PLEq a (Lit b) means a <= b
+        PLEq a (Lit b) -> updateUpper a b
+        PLEq (Lit a) b -> updateLower b a
+        -- PGT a (Lit b) means a > b, so a >= b+1
+        PGT a (Lit b) ->
+          if b == maxLit
+            then conflict
+            else updateLower a (b + 1)
+        -- PGT (Lit a) b means a > b, so b <= a-1
+        PGT (Lit a) b ->
+          if a == 0
+            then conflict
+            else updateUpper b (a - 1)
+        -- PGEq a (Lit b) means a >= b
+        PGEq a (Lit b) -> updateLower a b
+        PGEq (Lit a) b -> updateUpper b a
+
         PAnd a b -> do
           go a
           go b
@@ -1752,7 +1852,7 @@ constPropagate ps =
             v2 = collectConsts [b] s
           unless v1.canBeSat $ go b
           unless v2.canBeSat $ go a
-        PBool False -> put $ ConstState {canBeSat=False, values=mempty}
+        PBool False -> conflict
         _ -> pure ()
 
 -- Concretize & simplify Keccak expressions until fixed-point.
@@ -1827,4 +1927,3 @@ maybeConcStoreSimp (ConcreteStore s) = Just s
 maybeConcStoreSimp e = case concKeccakSimpExpr e of
   ConcreteStore s -> Just s
   _ -> Nothing
-

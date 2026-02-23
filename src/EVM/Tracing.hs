@@ -15,7 +15,7 @@ import Optics.Core
 import Optics.State
 
 import Control.Monad.IO.Class
-import Control.Monad.ST (stToIO, RealWorld)
+import Control.Monad.ST (stToIO)
 import Data.Aeson qualified as JSON
 import Data.Word (Word8, Word64)
 import GHC.Generics (Generic)
@@ -70,14 +70,14 @@ data VMTraceStepResult =
 instance JSON.ToJSON VMTraceStepResult where
   toEncoding = JSON.genericToEncoding JSON.defaultOptions
 
-type TraceState s = (VM Concrete s, [VMTraceStep])
+type TraceState = (VM Concrete, [VMTraceStep])
 
-execWithTrace :: App m => StateT (TraceState RealWorld) m (VMResult Concrete RealWorld)
+execWithTrace :: App m => StateT (TraceState) m (VMResult Concrete)
 execWithTrace = do
   _ <- runWithTrace
   fromJust <$> use (_1 % #result)
 
-runWithTrace :: App m => StateT (TraceState RealWorld) m (VM Concrete RealWorld)
+runWithTrace :: App m => StateT (TraceState) m (VM Concrete)
 runWithTrace = do
   -- This is just like `exec` except for every instruction evaluated,
   -- we also increment a counter indexed by the current code location.
@@ -100,16 +100,16 @@ runWithTrace = do
 
 interpretWithTrace
   :: forall m a . App m
-  => Fetch.Fetcher Concrete m RealWorld
-  -> Stepper Concrete RealWorld a
-  -> StateT (TraceState RealWorld) m a
+  => Fetch.Fetcher Concrete m
+  -> Stepper Concrete a
+  -> StateT TraceState m a
 interpretWithTrace fetcher =
   eval . Operational.view
   where
     eval
       :: App m
-      => Operational.ProgramView (Action Concrete RealWorld) a
-      -> StateT (TraceState RealWorld) m a
+      => Operational.ProgramView (Action Concrete) a
+      -> StateT TraceState m a
     eval (Operational.Return x) = pure x
     eval (action Operational.:>>= k) =
       case action of
@@ -127,7 +127,7 @@ interpretWithTrace fetcher =
           assign _1 vm'
           interpretWithTrace fetcher (k r)
 
-vmTraceStep :: VM Concrete s -> VMTraceStep
+vmTraceStep :: VM Concrete -> VMTraceStep
 vmTraceStep vm =
   let
     memsize = vm.state.memorySize
@@ -143,11 +143,11 @@ vmTraceStep vm =
     , error = readoutError vm.result
     }
   where
-    readoutError :: Maybe (VMResult t s) -> Maybe String
+    readoutError :: Maybe (VMResult t) -> Maybe String
     readoutError (Just (VMFailure e)) = Just $ evmErrToString e
     readoutError _ = Nothing
 
-getOpFromVM :: VM t s -> Word8
+getOpFromVM :: VM t -> Word8
 getOpFromVM vm =
   let pcpos  = vm ^. #state % #pc
       code' = vm ^. #state % #code

@@ -17,7 +17,7 @@ import GHC.Stack (HasCallStack, prettyCallStack, callStack)
 import GHC.ByteOrder (targetByteOrder, ByteOrder(..))
 import Control.Arrow ((>>>))
 import Control.Monad (mzero)
-import Control.Monad.ST (ST)
+import Control.Monad.ST (ST, RealWorld)
 import Control.Monad.State.Strict (StateT)
 import Crypto.Hash (hash, Keccak_256, Digest)
 import Data.Aeson qualified as JSON
@@ -231,7 +231,6 @@ data Expr (a :: EType) where
   Partial        :: [Prop] -> TraceContext -> PartialExec -> Expr End
   Failure        :: [Prop] -> TraceContext -> EvmError -> Expr End
   Success        :: [Prop] -> TraceContext -> Expr Buf -> Map (Expr EAddr) (Expr EContract) -> Expr End
-  ITE            :: Expr EWord -> Expr End -> Expr End -> Expr End
 
   -- integers
 
@@ -260,6 +259,9 @@ data Expr (a :: EType) where
   Eq             :: Expr EWord -> Expr EWord -> Expr EWord
   IsZero         :: Expr EWord -> Expr EWord
 
+  -- conditional (if-then-else for path merging)
+  ITE            :: Expr EWord -> Expr EWord -> Expr EWord -> Expr EWord
+
   -- bits
 
   And            :: Expr EWord -> Expr EWord -> Expr EWord
@@ -269,11 +271,11 @@ data Expr (a :: EType) where
   SHL            :: Expr EWord -> Expr EWord -> Expr EWord
   SHR            :: Expr EWord -> Expr EWord -> Expr EWord
   SAR            :: Expr EWord -> Expr EWord -> Expr EWord
+  CLZ            :: Expr EWord -> Expr EWord
 
   -- Hashes
 
   Keccak         :: Expr Buf -> Expr EWord
-  SHA256         :: Expr Buf -> Expr EWord
 
   -- block context
 
@@ -559,6 +561,7 @@ data EvmError
   | NonceOverflow
   | BadCheatCode String FunctionSelector
   | NonexistentFork Int
+  | AssumeCheatFailed
   deriving (Show, Eq, Ord)
 
 evmErrToString :: EvmError -> String
@@ -598,34 +601,29 @@ data PartialExec
   deriving (Show, Eq, Ord)
 
 -- | Effect types used by the vm implementation for side effects & control flow
-data Effect t s where
-  Query :: Query t s -> Effect t s
-  RunBoth :: RunBoth s -> Effect Symbolic s
-  RunAll :: RunAll s -> Effect Symbolic s
-deriving instance Show (Effect t s)
+data Effect t where
+  Query :: Query t -> Effect t
+  Branch :: BranchContext -> Effect Symbolic
+deriving instance Show (Effect t)
 
 -- | Queries halt execution until resolved through RPC calls or SMT queries
-data Query t s where
-  PleaseFetchContract :: Addr -> BaseState -> (Contract -> EVM t s ()) -> Query t s
-  PleaseFetchSlot     :: Addr -> W256 -> (W256 -> EVM t s ()) -> Query t s
-  PleaseAskSMT        :: Expr EWord -> [Prop] -> (BranchCondition -> EVM Symbolic s ()) -> Query Symbolic s
-  PleaseGetSols       :: Expr EWord -> Int -> [Prop] -> (Maybe [W256] -> EVM Symbolic s ()) -> Query Symbolic s
-  PleaseDoFFI         :: [String] -> Map String String -> (ByteString -> EVM t s ()) -> Query t s
-  PleaseReadEnv       :: String -> (String -> EVM t s ()) -> Query t s
+data Query t where
+  PleaseFetchContract :: Addr -> BaseState -> (Contract -> EVM t ()) -> Query t
+  PleaseFetchSlot     :: Addr -> W256 -> (W256 -> EVM t ()) -> Query t
+  PleaseAskSMT        :: Expr EWord -> [Prop] -> (BranchCondition -> EVM Symbolic ()) -> Query Symbolic
+  PleaseGetSols       :: Expr EWord -> Int -> [Prop] -> (Maybe [W256] -> EVM Symbolic ()) -> Query Symbolic
+  PleaseDoFFI         :: [String] -> Map String String -> (ByteString -> EVM t ()) -> Query t
+  PleaseReadEnv       :: String -> (String -> EVM t ()) -> Query t
 
--- | Execution could proceed down one of two branches
-data RunBoth s where
-  PleaseRunBoth    :: Expr EWord -> (Bool -> EVM Symbolic s ()) -> RunBoth s
-
--- | Execution could proceed down one of several branches
-data RunAll s where
-  PleaseRunAll    :: Expr EWord -> [Expr EWord] -> (Expr EWord -> EVM Symbolic s ()) -> RunAll s
+data BranchContext where
+  PleaseRunBoth :: (Bool -> EVM Symbolic ()) -> BranchContext
+  PleaseRunAll  :: [Expr EWord] -> (Expr EWord -> EVM Symbolic ()) -> BranchContext
 
 -- | The possible return values of a SMT query
 data BranchCondition = Case Bool | UnknownBranch
   deriving Show
 
-instance Show (Query t s) where
+instance Show (Query t) where
   showsPrec _ = \case
     PleaseFetchContract addr base _ ->
       (("<EVM.Query: fetch contract " ++ show addr ++ show base ++ ">") ++)
@@ -648,27 +646,34 @@ instance Show (Query t s) where
     PleaseReadEnv variable _ ->
       (("<EVM.Query: read env: " ++ variable) ++)
 
-instance Show (RunBoth s) where
+instance Show (BranchContext) where
   showsPrec _ = \case
-    PleaseRunBoth _ _ ->
+    PleaseRunBoth _ ->
       (("<EVM.RunBoth: system running both paths") ++)
 
-instance Show (RunAll s) where
-  showsPrec _ = \case
-    PleaseRunAll _ _ _ ->
+    PleaseRunAll _ _ ->
       (("<EVM.RunAll: system running all paths for Expr EWord-s") ++)
 
 -- | The possible result states of a VM
-data VMResult (t :: VMType) s where
-  Unfinished :: PartialExec -> VMResult Symbolic s -- ^ Execution could not continue further
-  VMFailure :: EvmError -> VMResult t s            -- ^ An operation failed
-  VMSuccess :: (Expr Buf) -> VMResult t s          -- ^ Reached STOP, RETURN, or end-of-code
-  HandleEffect :: (Effect t s) -> VMResult t s     -- ^ An effect must be handled for execution to continue
+data VMResult (t :: VMType) where
+  Unfinished :: PartialExec -> VMResult Symbolic -- ^ Execution could not continue further
+  VMFailure :: EvmError -> VMResult t            -- ^ An operation failed
+  VMSuccess :: (Expr Buf) -> VMResult t          -- ^ Reached STOP, RETURN, or end-of-code
+  HandleEffect :: (Effect t) -> VMResult t     -- ^ An effect must be handled for execution to continue
 
-deriving instance Show (VMResult t s)
+deriving instance Show (VMResult t)
 
 
 -- VM State ----------------------------------------------------------------------------------------
+
+-- | State tracking for speculative merge execution
+data MergeState = MergeState
+  { msActive          :: Bool   -- ^ Inside speculative execution
+  , msRemainingBudget :: Int    -- ^ Instructions remaining in budget
+  } deriving (Show, Eq, Generic)
+
+defaultMergeState :: MergeState
+defaultMergeState = MergeState False 0
 
 data VMType = Symbolic | Concrete
 
@@ -677,10 +682,10 @@ type family Gas (t :: VMType) = r | r -> t where
   Gas Concrete = Word64
 
 -- | The state of a stepwise EVM execution
-data VM (t :: VMType) s = VM
-  { result         :: Maybe (VMResult t s)
-  , state          :: FrameState t s
-  , frames         :: [Frame t s]
+data VM (t :: VMType) = VM
+  { result         :: Maybe (VMResult t)
+  , state          :: FrameState t
+  , frames         :: [Frame t]
   , env            :: Env
   , block          :: Block
   , tx             :: TxState
@@ -694,6 +699,7 @@ data VM (t :: VMType) s = VM
   , config         :: RuntimeConfig
   , forks          :: Seq ForkState
   , currentFork    :: Int
+  , srcLookup      :: Maybe SrcLookup
   , labels         :: Map Addr Text
   , osEnv          :: Map String String
   , freshVar       :: Int
@@ -701,6 +707,7 @@ data VM (t :: VMType) s = VM
   --   during symbolic execution. See e.g. OpStaticcall
   , exploreDepth   :: Int
   , keccakPreImgs  :: Set (ByteString, W256)
+  , mergeState     :: MergeState
   }
   deriving (Generic)
 
@@ -712,17 +719,30 @@ data ForkState = ForkState
   }
   deriving (Show, Generic)
 
-deriving instance Show (VM Symbolic s)
-deriving instance Show (VM Concrete s)
+deriving instance Show (VM Symbolic)
+deriving instance Show (VM Concrete)
 
 -- | Alias for the type of e.g. @exec1@.
-type EVM (t :: VMType) s a = StateT (VM t s) (ST s) a
+type EVM (t :: VMType) a = StateT (VM t) (ST RealWorld) a
 
 -- | The VM base state (i.e. should new contracts be created with abstract balance / storage?)
 data BaseState
   = EmptyBase
   | AbstractBase
   deriving (Show)
+
+-- | A callback for looking up source location info given the contracts map,
+-- an address, and a PC
+newtype SrcLookup = SrcLookup (Map (Expr EAddr) Contract -> Expr EAddr -> Int -> String)
+
+instance Show SrcLookup where
+  show _ = "<SrcLookup Info>"
+
+-- | Run a SrcLookup to get source location info, with a fallback for when
+-- no SrcLookup is available.
+runSrcLookup :: Maybe SrcLookup -> Map (Expr EAddr) Contract -> Expr EAddr -> Int -> String
+runSrcLookup Nothing _ addr pc = " at addr: " <> show addr <> " at pc: " <> show pc
+runSrcLookup (Just (SrcLookup f)) contracts addr pc = f contracts addr pc
 
 -- | Configuration options that need to be consulted at runtime
 data RuntimeConfig = RuntimeConfig
@@ -732,13 +752,13 @@ data RuntimeConfig = RuntimeConfig
   deriving (Show)
 
 -- | An entry in the VM's "call/create stack"
-data Frame (t :: VMType) s = Frame
+data Frame (t :: VMType) = Frame
   { context :: FrameContext
-  , state   :: FrameState t s
+  , state   :: FrameState t
   }
 
-deriving instance Show (Frame Symbolic s)
-deriving instance Show (Frame Concrete s)
+deriving instance Show (Frame Symbolic)
+deriving instance Show (Frame Concrete)
 
 -- | Call/create info
 data FrameContext
@@ -774,13 +794,13 @@ data SubState = SubState
   deriving (Eq, Ord, Show)
 
 -- | The "registers" of the VM along with memory and data stack
-data FrameState (t :: VMType) s = FrameState
+data FrameState (t :: VMType) = FrameState
   { contract     :: Expr EAddr
   , codeContract :: Expr EAddr
   , code         :: ContractCode
   , pc           :: {-# UNPACK #-} !Int -- program counter in BYTES (not ops). PUSH ops will increment pc by more than 1
   , stack        :: [Expr EWord]
-  , memory       :: Memory s
+  , memory       :: Memory
   , memorySize   :: Word64
   , calldata     :: Expr Buf
   , callvalue    :: Expr EWord
@@ -793,18 +813,18 @@ data FrameState (t :: VMType) s = FrameState
   }
   deriving (Generic)
 
-deriving instance Show (FrameState Symbolic s)
-deriving instance Show (FrameState Concrete s)
+deriving instance Show (FrameState Symbolic)
+deriving instance Show (FrameState Concrete)
 
-data Memory s
-  = ConcreteMemory (MutableMemory s)
+data Memory
+  = ConcreteMemory (MutableMemory)
   | SymbolicMemory !(Expr Buf)
 
-instance Show (Memory s) where
+instance Show (Memory) where
   show (ConcreteMemory _) = "<can't show mutable memory>"
   show (SymbolicMemory m) = show m
 
-type MutableMemory s = STVector s Word8
+type MutableMemory = STVector RealWorld Word8
 
 -- | The state that spans a whole transaction
 data TxState = TxState
@@ -817,6 +837,7 @@ data TxState = TxState
   , subState    :: SubState
   , isCreate    :: Bool
   , txReversion :: Map (Expr EAddr) Contract
+  , txdataFloorGas :: Word64
   }
   deriving (Show)
 
@@ -857,18 +878,18 @@ data Contract = Contract
   deriving (Show, Eq, Ord)
 
 class VMOps (t :: VMType) where
-  burn' :: Gas t -> EVM t s () -> EVM t s ()
+  burn' :: Gas t -> EVM t () -> EVM t ()
   -- TODO: change to EvmWord t
-  burnExp :: Expr EWord -> EVM t s () -> EVM t s ()
-  burnSha3 :: Expr EWord -> EVM t s () -> EVM t s ()
-  burnCalldatacopy :: Expr EWord -> EVM t s () -> EVM t s ()
-  burnCodecopy :: Expr EWord -> EVM t s () -> EVM t s ()
-  burnExtcodecopy :: Expr EAddr -> Expr EWord -> EVM t s () -> EVM t s ()
-  burnReturndatacopy :: Expr EWord -> EVM t s () -> EVM t s ()
-  burnLog :: Expr EWord -> Word8 -> EVM t s () -> EVM t s ()
+  burnExp :: Expr EWord -> EVM t () -> EVM t ()
+  burnSha3 :: Expr EWord -> EVM t () -> EVM t ()
+  burnCalldatacopy :: Expr EWord -> EVM t () -> EVM t ()
+  burnCodecopy :: Expr EWord -> EVM t () -> EVM t ()
+  burnExtcodecopy :: Expr EAddr -> Expr EWord -> EVM t () -> EVM t ()
+  burnReturndatacopy :: Expr EWord -> EVM t () -> EVM t ()
+  burnLog :: Expr EWord -> Word8 -> EVM t () -> EVM t ()
 
   initialGas :: Gas t
-  ensureGas :: Word64 -> EVM t s () -> EVM t s ()
+  ensureGas :: Word64 -> EVM t () -> EVM t ()
   -- TODO: change to EvmWord t
   gasTryFrom :: Expr EWord -> Either () (Gas t)
 
@@ -877,20 +898,20 @@ class VMOps (t :: VMType) where
 
   costOfCall
     :: FeeSchedule Word64 -> Bool -> Expr EWord -> Gas t -> Gas t -> Expr EAddr
-    -> (Word64 -> Word64 -> EVM t s ()) -> EVM t s ()
+    -> (Word64 -> Word64 -> EVM t ()) -> EVM t ()
 
-  reclaimRemainingGasAllowance :: VM t s -> EVM t s ()
-  payRefunds :: EVM t s ()
-  pushGas :: EVM t s ()
+  reclaimRemainingGasAllowance :: VM t -> EVM t ()
+  payRefunds :: EVM t ()
+  pushGas :: EVM t ()
   enoughGas :: Word64 -> Gas t -> Bool
   subGas :: Gas t -> Word64 -> Gas t
   toGas :: Word64 -> Gas t
 
-  whenSymbolicElse :: EVM t s a -> EVM t s a -> EVM t s a
+  whenSymbolicElse :: EVM t a -> EVM t a -> EVM t a
 
-  partial :: PartialExec -> EVM t s ()
-  branch :: Maybe Int -> Expr EWord -> (Bool -> EVM t s ()) -> EVM t s ()
-  manySolutions :: Maybe Int -> Expr EWord -> Int -> (Maybe W256 -> EVM t s ()) -> EVM t s ()
+  partial :: PartialExec -> EVM t ()
+  branch :: Maybe Int -> Expr EWord -> (Bool -> EVM t ()) -> EVM t ()
+  manySolutions :: Maybe Int -> Expr EWord -> Int -> (Maybe W256 -> EVM t ()) -> EVM t ()
 
 -- Bytecode Representations ------------------------------------------------------------------------
 
@@ -1000,6 +1021,8 @@ data VMOpts (t :: VMType) = VMOpts
   , allowFFI :: Bool
   , freshAddresses :: Int
   , beaconRoot :: W256
+  , parentHash :: W256      -- EIP-2935 parent block hash
+  , txdataFloorGas :: Word64
   }
 
 deriving instance Show (VMOpts Symbolic)
@@ -1038,6 +1061,7 @@ data GenericOp a
   | OpShl
   | OpShr
   | OpSar
+  | OpClz
   | OpSha3
   | OpAddress
   | OpBalance
@@ -1222,6 +1246,9 @@ isQed _ = False
 newtype FunctionSelector = FunctionSelector { unFunctionSelector :: Word32 }
   deriving (Bits, Num, Eq, Ord, Real, Enum, Integral)
 instance Show FunctionSelector where show s = "0x" <> showHex s ""
+instance Read FunctionSelector where
+  readsPrec _ ('0':'x':s) = first FunctionSelector <$> readHex s
+  readsPrec _ s = first FunctionSelector <$> readHex s
 
 
 -- ByteString wrapper ------------------------------------------------------------------------------
@@ -1237,7 +1264,9 @@ instance Show ByteStringS where
         T.decodeUtf8 . toStrict . toLazyByteString . byteStringHex
 
 instance JSON.FromJSON ByteStringS where
-  parseJSON (JSON.String x) = case BS16.decodeBase16Untyped (T.encodeUtf8 x) of
+  parseJSON (JSON.String x) =
+    let x' = if "0x" `T.isPrefixOf` x then T.drop 2 x else x in
+    case BS16.decodeBase16Untyped (T.encodeUtf8 x') of
                                 Left _ -> mzero
                                 Right bs -> pure (ByteStringS bs)
   parseJSON _ = mzero

@@ -10,10 +10,11 @@ execution of HEVM and check that against evmtool from go-ethereum. Re-using some
 of this code, we also generate a symbolic expression then evaluate it
 concretely through Expr.simplify, then check that against evmtool's output.
 -}
-module EVM.Test.FuzzSymExec where
+module EVM.Test.FuzzSymExec (tests) where
 
 import Control.Monad (when)
-import Control.Monad.ST (ST, stToIO)
+import Control.Monad.IO.Unlift
+import Control.Monad.ST (ST, stToIO, RealWorld)
 import Control.Monad.State.Strict (StateT(..))
 import Control.Monad.Reader (ReaderT)
 import Data.Aeson ((.:), (.:?))
@@ -21,7 +22,7 @@ import Data.Aeson qualified as JSON
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as Char8
-import Data.Maybe (fromJust, isJust, isNothing)
+import Data.Maybe (fromJust, isJust, mapMaybe)
 import Data.Map.Strict qualified as Map
 import Data.Text.IO qualified as T
 import Data.Vector qualified as Vector
@@ -29,6 +30,7 @@ import Data.Word (Word8, Word64)
 import GHC.Generics (Generic)
 import GHC.IO.Exception (ExitCode(ExitSuccess))
 import Numeric (showHex)
+import Optics.Core hiding (pre)
 import System.Directory (removeDirectoryRecursive)
 import System.FilePath ((</>))
 import System.IO.Temp (getCanonicalTemporaryDirectory, createTempDirectory)
@@ -38,13 +40,11 @@ import Test.QuickCheck.Instances.Text()
 import Test.QuickCheck.Instances.Natural()
 import Test.QuickCheck.Instances.ByteString()
 import Test.Tasty (testGroup, after, TestTree, TestName, DependencyType(..))
-import Test.Tasty.HUnit (assertEqual, testCase)
+import Test.Tasty.HUnit (assertEqual, testCase, assertBool)
 import Test.Tasty.QuickCheck hiding (Failure, Success)
 import Witch (into, unsafeInto)
 
-import Optics.Core hiding (pre)
-
-import EVM (makeVm, initialContract, symbolify)
+import EVM (makeVm, initialContract, symbolify, defaultVMOpts)
 import EVM.Assembler (assemble)
 import EVM.Expr qualified as Expr
 import EVM.Exec (ethrunAddress)
@@ -60,7 +60,6 @@ import EVM.Traversals (mapExpr)
 import EVM.Transaction qualified
 import EVM.Types hiding (Env)
 import EVM.Effects
-import Control.Monad.IO.Unlift
 import EVM.Tracing (interpretWithTrace, VMTraceStep(..), VMTraceStepResult(..))
 
 data EVMToolTrace =
@@ -149,20 +148,6 @@ instance JSON.ToJSON EVMToolEnv where
                               Lit a -> a
                               _ -> internalError "Timestamp needs to be a Lit"
 
-emptyEvmToolEnv :: EVMToolEnv
-emptyEvmToolEnv = EVMToolEnv { coinbase = 0
-                             , timestamp = Lit 0
-                             , number     = Lit 0
-                             , gasLimit   = 0xffffffffffffffff
-                             , baseFee    = 0
-                             , maxCodeSize= 0xffffffff
-                             , schedule   = feeSchedule
-                             , blockHashes = mempty
-                             , withdrawals = mempty
-                             , currentRandom = 42
-                             , parentBeaconBlockRoot = 5
-                             }
-
 data EVMToolReceipt =
   EVMToolReceipt
     { _type :: String
@@ -224,11 +209,6 @@ instance JSON.ToJSON EVMToolAlloc where
                          , ("nonce", (JSON.toJSON b.nonce))
                          ]
 
-emptyEVMToolAlloc :: EVMToolAlloc
-emptyEVMToolAlloc = EVMToolAlloc { balance = 0
-                                 , code = mempty
-                                 , nonce = 0
-                                 }
 -- Sets up common parts such as TX, origin contract, and environment that can
 -- later be used to create & execute either an evmtool (from go-ethereum) or an
 -- HEVM transaction. Some elements here are hard-coded such as the secret key,
@@ -280,10 +260,10 @@ evmSetup contr txData gaslimitExec = (txn, evmEnv, contrAlloc, fromAddress, toAd
 
 getHEVMRet
   :: App m
-  => OpContract -> ByteString -> Int -> m (Either (EvmError, [VMTraceStep]) (Expr 'End, [VMTraceStep], VMTraceStepResult))
+  => OpContract -> ByteString -> Int -> m (Either (EvmError, [VMTraceStep]) ([Expr 'End], [VMTraceStep], VMTraceStepResult))
 getHEVMRet contr txData gaslimitExec = do
   let (txn, evmEnv, contrAlloc, fromAddress, toAddress, _) = evmSetup contr txData gaslimitExec
-  runCodeWithTrace mempty evmEnv contrAlloc txn (LitAddr fromAddress) (LitAddr toAddress)
+  runCodeWithTrace Fetch.noRpc evmEnv contrAlloc txn (LitAddr fromAddress) (LitAddr toAddress)
 
 getEVMToolRet :: FilePath -> OpContract -> ByteString -> Int -> IO (Maybe EVMToolResult)
 getEVMToolRet evmDir contr txData gaslimitExec = do
@@ -299,7 +279,7 @@ getEVMToolRet evmDir contr txData gaslimitExec = do
   JSON.encodeFile (evmDir </> "alloc.json") alloc
   JSON.encodeFile (evmDir </> "env.json") evmEnv
   let cmd = (proc "evm" [ "transition"
-                        , "--state.fork", "Cancun"
+                        , "--state.fork", "Osaka"
                         , "--input.alloc", "alloc.json"
                         , "--input.env", "env.json"
                         , "--input.txs", "txs.json"
@@ -341,7 +321,7 @@ compareTraces hevmTrace evmTrace = go hevmTrace evmTrace
       when (aOp /= bOp || aPc /= bPc) $ do
         putStrLn $ "HEVM: " <> (intToOpName aOp) <> " (pc " <> (show aPc) <> ") --- evmtool " <> (intToOpName bOp) <> " (pc " <> (show bPc) <> ")"
 
-      when (isJust b.error) $ do
+      when (isJust b.error && verbosity > 0) $ do
         putStrLn $ "Error by evmtool: " <> (show b.error)
         putStrLn $ "Error by HEVM   : " <> (show a.error)
 
@@ -401,13 +381,13 @@ decodeTraceOutputHelper traceFileName = do
 runCodeWithTrace
   :: App m
   => Fetch.RpcInfo -> EVMToolEnv -> EVMToolAlloc -> EVM.Transaction.Transaction
-  -> Expr EAddr -> Expr EAddr -> m (Either (EvmError, [VMTraceStep]) ((Expr 'End, [VMTraceStep], VMTraceStepResult)))
-runCodeWithTrace rpcinfo evmEnv alloc txn fromAddr toAddress = withSolvers Z3 0 1 Nothing $ \solvers -> do
+  -> Expr EAddr -> Expr EAddr -> m (Either (EvmError, [VMTraceStep]) (([Expr 'End], [VMTraceStep], VMTraceStepResult)))
+runCodeWithTrace rpcinfo evmEnv alloc txn fromAddr toAddress = withSolvers Z3 0 Nothing defMemLimit $ \solvers -> do
   let calldata' = ConcreteBuf txn.txdata
       code' = alloc.code
       iterConf = IterConfig { maxIter = Nothing, askSmtIters = 1, loopHeuristic = Naive }
       fetcherSym = Fetch.oracle solvers Nothing rpcinfo
-      buildExpr vm = interpret fetcherSym iterConf vm runExpr
+      buildExpr vm = interpret fetcherSym iterConf vm runExpr noopPathHandler
   origVM <- liftIO $ stToIO $ vmForRuntimeCode code' calldata' evmEnv alloc txn fromAddr toAddress
   expr <- buildExpr $ symbolify origVM
 
@@ -417,16 +397,14 @@ runCodeWithTrace rpcinfo evmEnv alloc txn fromAddr toAddress = withSolvers Z3 0 
     Left x -> pure $ Left (x, trace)
     Right _ -> pure $ Right (expr, trace, vmres vm)
 
-vmForRuntimeCode :: ByteString -> Expr Buf -> EVMToolEnv -> EVMToolAlloc -> EVM.Transaction.Transaction -> Expr EAddr -> Expr EAddr -> ST s (VM Concrete s)
+vmForRuntimeCode :: ByteString -> Expr Buf -> EVMToolEnv -> EVMToolAlloc -> EVM.Transaction.Transaction -> Expr EAddr -> Expr EAddr -> ST RealWorld (VM Concrete)
 vmForRuntimeCode runtimecode calldata' evmToolEnv alloc txn fromAddr toAddress =
   let contract = initialContract (RuntimeCode (ConcreteRuntimeCode runtimecode))
                  & set #balance (Lit alloc.balance)
-  in (makeVm $ VMOpts
+  in (makeVm $ (defaultVMOpts @Concrete)
     { contract = contract
-    , otherContracts = []
     , calldata = (calldata', [])
     , value = Lit txn.value
-    , baseState = EmptyBase
     , address =  toAddress
     , caller = fromAddr
     , origin = fromAddr
@@ -443,16 +421,11 @@ vmForRuntimeCode runtimecode calldata' evmToolEnv alloc txn fromAddr toAddress =
     , maxCodeSize = evmToolEnv.maxCodeSize
     , schedule = evmToolEnv.schedule
     , chainId = txn.chainId
-    , create = False
-    , txAccessList = mempty
-    , allowFFI = False
-    , freshAddresses = 0
-    , beaconRoot = 0
     }) <&> set (#env % #contracts % at (LitAddr ethrunAddress))
              (Just (initialContract (RuntimeCode (ConcreteRuntimeCode BS.empty))))
        <&> set (#state % #calldata) calldata'
 
-vmres :: VM Concrete s -> VMTraceStepResult
+vmres :: VM Concrete -> VMTraceStepResult
 vmres vm =
   let
     gasUsed' = vm.tx.gaslimit - vm.state.gas
@@ -682,18 +655,6 @@ genContract n = do
 randItem :: [a] -> IO a
 randItem = generate . Test.QuickCheck.elements
 
-getOpFromVM :: VM t s -> Word8
-getOpFromVM vm =
-  let pcpos  = vm ^. #state % #pc
-      code' = vm ^. #state % #code
-      xs = case code' of
-        UnknownCode _ -> internalError "UnknownCode instead of RuntimeCode"
-        InitCode bs _ -> BS.drop pcpos bs
-        RuntimeCode (ConcreteRuntimeCode xs') -> BS.drop pcpos xs'
-        RuntimeCode (SymbolicRuntimeCode _) -> internalError "RuntimeCode is symbolic"
-  in if xs == BS.empty then 0
-                       else BS.head xs
-
 testEnv :: Env
 testEnv = Env { config = defaultConfig }
 
@@ -749,6 +710,8 @@ tests = testGroup "contract-quickcheck-run"
               ]
         checkTraceAndOutputs contract 40000 (BS.pack [1, 2, 3, 4, 5, 6])
     ]
+verbosity :: Int
+verbosity = 0
 
 checkTraceAndOutputs :: App m => OpContract -> Int -> ByteString -> m ()
 checkTraceAndOutputs contract gasLimit txData = do
@@ -760,39 +723,41 @@ checkTraceAndOutputs contract gasLimit txData = do
   case hevmRun of
     (Right (expr, hevmTrace, hevmTraceResult)) -> liftIO $ do
       let
-        concretize :: Expr a -> Expr Buf -> Expr a
-        concretize a c = mapExpr go a
+        concretize :: Expr Buf -> Expr a ->  Expr a
+        concretize c a = mapExpr go a
           where
             go :: Expr a -> Expr a
             go = \case
                        AbstractBuf "calldata" -> c
                        y -> y
-        concretizedExpr = concretize expr (ConcreteBuf txData)
-        simplConcExpr = Expr.simplify concretizedExpr
+        concretizedExpr = map (concretize (ConcreteBuf txData)) $ expr
+        simplConcExpr = map Expr.simplify concretizedExpr
         getReturnVal :: Expr End -> Maybe ByteString
         getReturnVal (Success _ _ (ConcreteBuf bs) _) = Just bs
         getReturnVal _ = Nothing
-        simplConcrExprRetval = getReturnVal simplConcExpr
+        simplConcrExprRetval = mapMaybe getReturnVal simplConcExpr
       traceOK <- compareTraces hevmTrace (evmtoolTraceOutput.trace)
       -- putStrLn $ "HEVM trace   : " <> show hevmTrace
       -- putStrLn $ "evmtool trace: " <> show (evmtoolTraceOutput.trace)
       assertEqual "Traces and gas must match" traceOK True
       let resultOK = evmtoolTraceOutput.output.output == hevmTraceResult.out
       if resultOK then liftIO $ do
-        putStrLn $ "HEVM & evmtool's outputs match: '" <> (bsToHex $ bssToBs evmtoolTraceOutput.output.output) <> "'"
-        if isNothing simplConcrExprRetval || (fromJust simplConcrExprRetval) == (bssToBs hevmTraceResult.out)
+        when (verbosity > 0) $ putStrLn $ "HEVM & evmtool's outputs match: '" <> (bsToHex $ bssToBs evmtoolTraceOutput.output.output) <> "'"
+        assertBool "Cannot have more than one success return value" (length simplConcrExprRetval <= 1)
+        if null simplConcrExprRetval || (simplConcrExprRetval !! 0) == (bssToBs hevmTraceResult.out)
            then do
-             putStr "OK, symbolic interpretation -> concrete calldata -> Expr.simplify gives the same answer."
-             if isNothing simplConcrExprRetval then putStrLn ", but it was a Nothing, so not strong equivalence"
-                                               else putStrLn ""
+             when (verbosity > 0) $ do
+              putStr "OK, symbolic interpretation -> concrete calldata -> Expr.simplify gives the same answer."
+              if null simplConcrExprRetval then putStrLn ", but it was a Nothing, so not strong equivalence"
+                                           else putStrLn ""
            else do
              putStrLn $ "original expr                    : " <> (show expr)
              putStrLn $ "concretized expr                 : " <> (show concretizedExpr)
              putStrLn $ "simplified concretized expr      : " <> (show simplConcExpr)
              putStrLn $ "evmtoolTraceOutput.output.output : " <> (show (evmtoolTraceOutput.output.output))
              putStrLn $ "HEVM trace result output         : " <> (bsToHex (bssToBs hevmTraceResult.out))
-             putStrLn $ "ret value computed via symb+conc : " <> (bsToHex (fromJust simplConcrExprRetval))
-             assertEqual "Simplified, concretized expression must match evmtool's output." True False
+             putStrLn $ "ret value computed via symb+conc : " <> (bsToHex (simplConcrExprRetval !! 0))
+             assertBool "Simplified, concretized expression must match evmtool's output." False
       else do
         putStrLn $ "Name of trace file: " <> (getTraceFileName evmDir $ fromJust evmtoolResult)
         putStrLn $ "HEVM result  :" <> (show hevmTraceResult)
@@ -800,13 +765,13 @@ checkTraceAndOutputs contract gasLimit txData = do
         T.putStrLn $ "evm result : " <> (formatBinary $ bssToBs evmtoolTraceOutput.output.output)
         putStrLn $ "HEVM result len: " <> (show (BS.length $ bssToBs hevmTraceResult.out))
         putStrLn $ "evm result  len: " <> (show (BS.length $ bssToBs evmtoolTraceOutput.output.output))
-      assertEqual "Contract exec successful. HEVM & evmtool's outputs must match" resultOK True
+      assertBool "Contract exec successful. HEVM & evmtool's outputs must match" resultOK
     Left (evmerr, hevmTrace) -> liftIO $ do
-      putStrLn $ "HEVM contract exec issue: " <> (show evmerr)
+      when (verbosity > 0) $ putStrLn $ "HEVM contract exec issue: " <> (show evmerr)
       -- putStrLn $ "evmtool result was: " <> show (fromJust evmtoolResult)
       -- putStrLn $ "output by evmtool is: '" <> bsToHex evmtoolTraceOutput.toOutput.output <> "'"
       traceOK <- compareTraces hevmTrace (evmtoolTraceOutput.trace)
-      assertEqual "Traces and gas must match" traceOK True
+      assertBool "Traces and gas must match" traceOK
   liftIO $ removeDirectoryRecursive evmDir
 
 -- GasLimitInt
@@ -815,7 +780,7 @@ newtype GasLimitInt = GasLimitInt (Int)
 
 instance Arbitrary GasLimitInt where
   arbitrary = do
-    let mkLimit = chooseInt (50000, 0xfffff)
+    let mkLimit = chooseInt (60000, 0xfffff)
     fmap GasLimitInt mkLimit
 
 -- GenTxDataRaw

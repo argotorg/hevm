@@ -16,6 +16,7 @@ module EVM.Format
   , showTraceTree'
   , showValues
   , prettyvmresult
+  , prettyvmresults
   , showCall
   , showWordExact
   , showWordExplanation
@@ -40,7 +41,7 @@ import EVM (traceForest, traceForest', traceContext, cheatCode)
 import EVM.ABI (getAbiSeq, parseTypeName, AbiValue(..), AbiType(..), SolError(..), Indexed(..), Event(..))
 import EVM.Dapp (DappContext(..), DappInfo(..), findSrc, showTraceLocation)
 import EVM.Expr qualified as Expr
-import EVM.Solidity (SolcContract(..), Method(..), SrcMap (..), WarningData (..), SourceCache(..))
+import EVM.Solidity (SolcContract(..), Method(..))
 import EVM.Types
 import EVM.Expr (maybeLitWordSimp, maybeLitAddrSimp)
 
@@ -68,8 +69,6 @@ import Data.Vector (Vector)
 import Hexdump (prettyHex)
 import Numeric (showHex)
 import Witch (into, unsafeInto, tryFrom)
-import Data.Vector.Storable qualified as VS
-import Data.Sequence qualified as Seq
 
 data Signedness = Signed | Unsigned
   deriving (Show)
@@ -191,7 +190,7 @@ formatSBinary e = format $ Expr.concKeccakSimpExpr e
     format (AbstractBuf t) = "<" <> t <> " abstract buf>"
     format e2 = T.pack $ "Symbolic expression: " <> show e2
 
-showTraceTree :: DappInfo -> VM t s -> Text
+showTraceTree :: DappInfo -> VM t -> Text
 showTraceTree dapp vm =
   let ?context = DappContext { info = dapp
                              , contracts = vm.env.contracts
@@ -201,7 +200,6 @@ showTraceTree dapp vm =
   in pack $ concatMap showTree traces
 
 showTraceTree' :: DappInfo -> Expr End -> Text
-showTraceTree' _ (ITE {}) = internalError "ITE does not contain a trace"
 showTraceTree' dapp leaf =
   let ?context = DappContext { info = dapp, contracts, labels }
   in let forest = traceForest' leaf
@@ -440,6 +438,7 @@ prettyError = \case
   NonceOverflow -> "Nonce overflow"
   BadCheatCode reason a -> "Bad cheat code: " <>  reason <> " sig: " <> show a
   NonexistentFork a -> "Fork ID does not exist: " <> show a
+  AssumeCheatFailed -> "Assume failed"
 
 prettyvmresult :: Expr End -> String
 prettyvmresult (Failure _ _ (Revert (ConcreteBuf ""))) = "Revert"
@@ -452,6 +451,10 @@ prettyvmresult (Success _ _ _ _) =
 prettyvmresult (Failure _ _ err) = prettyError err
 prettyvmresult (Partial _ _ p) = T.unpack $ formatPartial p
 prettyvmresult r = internalError $ "Invalid result: " <> show r
+
+prettyvmresults :: [Expr End] -> String
+prettyvmresults results =
+  T.unpack $ indent 2 $ T.unlines $ zipWith (\i r -> T.pack ("Result " <> show (i :: Integer) <> ": " <> prettyvmresult r)) [0..] results
 
 indent :: Int -> Text -> Text
 indent n = rstrip . T.unlines . fmap (T.replicate n (T.pack [' ']) <>) . T.lines
@@ -520,9 +523,9 @@ formatPartial = \case
     ]
 
 
-formatPartialDetailed :: Maybe (WarningData s t) -> PartialExec -> Text
-formatPartialDetailed warnData p =
-  let toTxt addr pc = pack $ getSrcInfo warnData addr pc
+formatPartialDetailed :: Maybe SrcLookup -> Map.Map (Expr EAddr) Contract -> PartialExec -> Text
+formatPartialDetailed srcLookupM contracts p =
+  let toTxt addr pc = pack $ runSrcLookup srcLookupM contracts addr pc
   in case p of
     UnexpectedSymbolicArg {..} -> "Unexpected symbolic arguments to opcode: " <> T.pack opcode <> toTxt addr pc
     MaxIterationsReached {..}  -> "Max iterations reached" <> toTxt addr pc
@@ -530,20 +533,6 @@ formatPartialDetailed warnData p =
     CheatCodeMissing {..}      -> "Cheat code not recognized: " <> T.pack (show selector) <> toTxt addr pc
     PrecompileMissing {..}     -> "Precompile at address " <> pack (show preAddr) <> " does not exist, called from" <> toTxt addr pc
     BranchTooDeep {..}         -> "Branches too deep" <> toTxt addr pc
-
-getSrcInfo :: Maybe (WarningData s t) -> Expr EAddr -> Int -> String
-getSrcInfo Nothing addr pc = " at addr: " <> show addr <> " at pc: " <> show pc
-getSrcInfo (Just dat) addr pc = fromMaybe (getSrcInfo Nothing addr pc) $ do
-  contr <- Map.lookup addr dat.vm.env.contracts
-  pcOp <- contr.opIxMap VS.!? pc
-  sMap <- Seq.lookup pcOp dat.solcContr.runtimeSrcmap
-  (fname, fcontent) <- Map.lookup sMap.file dat.sourceCache.files
-  let eols = BS.count 10 $ BS.take sMap.offset fcontent  -- 10 is \n
-  let str = " in file \"" <> fname <> "\" on line " <> show (eols+1)
-  case (BS.length fcontent > (sMap.offset + sMap.length)) of
-    False -> pure str
-    True  -> let relevant = BS.take sMap.length $ BS.drop sMap.offset fcontent
-      in pure $ str <> " : " <> show relevant
 
 formatSomeExpr :: SomeExpr -> Text
 formatSomeExpr (SomeExpr e) = formatExpr $ Expr.simplify e
@@ -565,14 +554,6 @@ formatExpr = go
       (GVar v) -> "(GVar " <> T.pack (show v) <> ")"
       LitByte w -> T.pack $ show w
 
-      ITE c t f -> T.unlines
-        [ "(ITE"
-        , indent 2 $ T.unlines
-          [ formatExpr c
-          , formatExpr t
-          , formatExpr f
-          ]
-        , ")"]
       Success asserts _ buf store -> T.unlines
         [ "(Success"
         , indent 2 $ T.unlines
@@ -658,6 +639,7 @@ formatExpr = go
       Eq a b -> fmt "Eq" [a, b]
       EqByte a b -> fmt "EqByte" [a, b]
       IsZero a -> fmt "IsZero" [a]
+      ITE c t el -> fmt "ITE" [c, t, el]
 
       And a b -> fmt "And" [a, b]
       Or a b -> fmt "Or" [a, b]
@@ -666,6 +648,7 @@ formatExpr = go
       SHL a b -> fmt "SHL" [a, b]
       SHR a b -> fmt "SHR" [a, b]
       SAR a b -> fmt "SAR" [a, b]
+      CLZ a -> fmt "CLZ" [a]
 
       e@Origin -> T.pack (show e)
       e@Coinbase -> T.pack (show e)
@@ -841,7 +824,6 @@ formatExpr = go
 
       -- Hashes
       Keccak b -> fmt "Keccak" [b]
-      SHA256 b -> fmt "SHA256" [b]
       where
         fmt nm args = T.unlines
           [ "(" <> nm

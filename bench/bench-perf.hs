@@ -20,11 +20,10 @@ import EVM.Types
 import EVM.UnitTest
 import Test.Tasty.Bench
 import Control.Monad.ST
-import EVM.FeeSchedule (feeSchedule)
 
 -- benchmark hevm using tasty-bench
 
-vmFromRawByteString :: App m => ByteString -> m (VM Concrete RealWorld)
+vmFromRawByteString :: App m => ByteString -> m (VM Concrete)
 vmFromRawByteString bs = liftIO $
   bs
     & ConcreteRuntimeCode
@@ -34,39 +33,14 @@ vmFromRawByteString bs = liftIO $
     & stToIO
     & fmap EVM.Transaction.initTx
 
-vm0 :: Contract -> ST s (VM Concrete s)
+vm0 :: Contract -> ST RealWorld (VM Concrete)
 vm0 c = makeVm $ vm0Opts c
 
 vm0Opts :: Contract -> VMOpts Concrete
-vm0Opts c =
-  VMOpts
-    { contract = c,
-      calldata = (ConcreteBuf "", []),
-      value = Lit 0xfffffffffffff, -- balance
-      baseState = EmptyBase,
-      address = LitAddr 0xacab,
-      caller = LitAddr 0,
-      origin = LitAddr 0,
-      gas = 0xffffffffffffffff,
-      baseFee = 0,
-      priorityFee = 0,
-      gaslimit = 0xffffffffffffffff,
-      coinbase = LitAddr 0,
-      number = Lit 0,
-      timestamp = Lit 0,
-      blockGaslimit = 0xffffffffffffffff,
-      gasprice = 0,
-      maxCodeSize = 0xffffffff,
-      prevRandao = 0,
-      schedule = feeSchedule,
-      chainId = 1,
-      create = False,
-      txAccessList = mempty, -- TODO: support me soon
-      allowFFI = False,
-      otherContracts = [],
-      freshAddresses = 0,
-      beaconRoot = 0
-    }
+vm0Opts c = defaultVMOpts
+  { contract = c,
+    value = Lit 0xfffffffffffff -- balance
+  }
 
 vmOptsToTestVMParams :: VMOpts Concrete -> TestVMParams
 vmOptsToTestVMParams v =
@@ -98,7 +72,7 @@ vmOptsToTestVMParams v =
 callMainForBytecode :: App m => ByteString -> m (Either EvmError (Expr 'Buf))
 callMainForBytecode bs = do
   vm <- vmFromRawByteString bs
-  Stepper.interpret (Fetch.zero 0 Nothing) vm (Stepper.evm (abiCall (vmOptsToTestVMParams (vm0Opts (initialContract (RuntimeCode (ConcreteRuntimeCode bs))))) (Left ("main()", emptyAbi))) >> Stepper.execFully)
+  Stepper.interpret (Fetch.zero 0 Nothing 1024) vm (Stepper.evm (abiCall (vmOptsToTestVMParams (vm0Opts (initialContract (RuntimeCode (ConcreteRuntimeCode bs))))) (Left ("main()", emptyAbi))) >> Stepper.execFully)
 
 benchMain :: (String, ByteString) -> Benchmark
 benchMain (name, bs) = bench name $ nfIO $ runApp $ (\x -> if isRight x then () else internalError "failed") <$> callMainForBytecode bs

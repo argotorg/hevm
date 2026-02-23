@@ -24,23 +24,6 @@
         "type": "github"
       }
     },
-    "ethereum-tests": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1698656397,
-        "narHash": "sha256-1zhBaJ3X5kQ94qv9Yz12/3d83w3jNP6OtzjH+ykK8sg=",
-        "owner": "ethereum",
-        "repo": "tests",
-        "rev": "428f218d7d6f4a52544e12684afbfe6e2882ffbf",
-        "type": "github"
-      },
-      "original": {
-        "owner": "ethereum",
-        "ref": "v13",
-        "repo": "tests",
-        "type": "github"
-      }
-    },
     "flake-utils": {
       "inputs": {
         "systems": "systems"
@@ -62,11 +45,11 @@
     "forge-std": {
       "flake": false,
       "locked": {
-        "lastModified": 1758198291,
-        "narHash": "sha256-kPF5n6T0ho1sJ7ZS21/RpoaG/lc/9LvE2mLQfXwwyWQ=",
+        "lastModified": 1771846526,
+        "narHash": "sha256-SP6ojjtgz+WUbDesuwxx4nJN+ayRO9th3zSYNe337ps=",
         "owner": "foundry-rs",
         "repo": "forge-std",
-        "rev": "0768d9c08c085c79bb31d88683a78770764fec49",
+        "rev": "722afcc99a78706335b5a2ece83a4f0de4bc083d",
         "type": "github"
       },
       "original": {
@@ -85,11 +68,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1758100230,
-        "narHash": "sha256-sARl8NpG4ifzhd7j5D04A5keJIf0zkP1XYIuDEkzXb4=",
+        "lastModified": 1769159706,
+        "narHash": "sha256-HPU5Dr7NlbKFgv79BBhmKQrWjI+uDdSeMTFZAZfYzX4=",
         "owner": "shazow",
         "repo": "foundry.nix",
-        "rev": "e632b06dc759e381ef04f15ff9541f889eda6013",
+        "rev": "27e7cb16e47bb9028801e5ae0105bf9893f794e0",
         "type": "github"
       },
       "original": {
@@ -101,11 +84,11 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1760596604,
-        "narHash": "sha256-J/i5K6AAz/y5dBePHQOuzC7MbhyTOKsd/GLezSbEFiM=",
+        "lastModified": 1771423170,
+        "narHash": "sha256-K7Dg9TQ0mOcAtWTO/FX/FaprtWQ8BmEXTpLIaNRhEwU=",
         "owner": "nixos",
         "repo": "nixpkgs",
-        "rev": "3cbe716e2346710d6e1f7c559363d14e11c32a43",
+        "rev": "bcc4a9d9533c033d806a46b37dc444f9b0da49dd",
         "type": "github"
       },
       "original": {
@@ -118,7 +101,6 @@
     "root": {
       "inputs": {
         "empty-smt-solver": "empty-smt-solver",
-        "ethereum-tests": "ethereum-tests",
         "flake-utils": "flake-utils",
         "forge-std": "forge-std",
         "foundry": "foundry",
@@ -130,13 +112,13 @@
     "solc-macos-amd64-list-json": {
       "flake": false,
       "locked": {
-        "narHash": "sha256-AvITkfpNYgCypXuLJyqco0li+unVw39BAfdOZvd/SPE=",
+        "narHash": "sha256-P+ZslplK4cQ/wnV/wykVKb+yTCviI0eylA3sk9uHmRo=",
         "type": "file",
-        "url": "https://github.com/argotorg/solc-bin/raw/26fc3fd/macosx-amd64/list.json"
+        "url": "https://github.com/argotorg/solc-bin/raw/a11f1ad/macosx-amd64/list.json"
       },
       "original": {
         "type": "file",
-        "url": "https://github.com/argotorg/solc-bin/raw/26fc3fd/macosx-amd64/list.json"
+        "url": "https://github.com/argotorg/solc-bin/raw/a11f1ad/macosx-amd64/list.json"
       }
     },
     "solc-pkgs": {
@@ -150,11 +132,11 @@
         "solc-macos-amd64-list-json": "solc-macos-amd64-list-json"
       },
       "locked": {
-        "lastModified": 1756368702,
-        "narHash": "sha256-cqEHv7uCV0LibmQphyiXZ1+jYtGjMNb9Pae4tfcAcF8=",
+        "lastModified": 1768831671,
+        "narHash": "sha256-0mmlYRtZK+eomevkQCCH7PL8QlSuALZQsjLroCWGE08=",
         "owner": "hellwolf",
         "repo": "solc.nix",
-        "rev": "d83e90df2fa8359a690f6baabf76099432193c3f",
+        "rev": "80ad871b93d15c7bccf71617f78f73c2d291a9c7",
         "type": "github"
       },
       "original": {
@@ -166,17 +148,17 @@
     "solidity": {
       "flake": false,
       "locked": {
-        "lastModified": 1716280767,
-        "narHash": "sha256-cvRFeJkiaYPA+SoboEZhvH5sHDmmcMNR62OoKuEOWRg=",
+        "lastModified": 1764751767,
+        "narHash": "sha256-YwM6p78wJXn2MTY8ukHGR8A2120ak+x5BfQAitTcDKA=",
         "owner": "argotorg",
         "repo": "solidity",
-        "rev": "8a97fa7a1db1ec509221ead6fea6802c684ee887",
+        "rev": "fd3a22656ebe9c91a96ebd846ab7699b5f2e053c",
         "type": "github"
       },
       "original": {
         "owner": "argotorg",
         "repo": "solidity",
-        "rev": "8a97fa7a1db1ec509221ead6fea6802c684ee887",
+        "rev": "fd3a22656ebe9c91a96ebd846ab7699b5f2e053c",
         "type": "github"
       }
     },

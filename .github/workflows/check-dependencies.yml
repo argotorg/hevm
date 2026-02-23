@@ -5,8 +5,9 @@ on:
     - cron: '30 5 * * 1' # At 05:30 AM, only on Monday
   pull_request:
     paths:
-      - '.github/workflows/check-dependencies.yml'
       - '.github/scripts/**'
+      - '.github/workflows/build.yml'
+      - '.github/workflows/check-dependencies.yml'
       - 'flake.*'
 jobs:
   check:
@@ -16,7 +17,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Nix
-        uses: nixbuild/nix-quick-install-action@v30
+        uses: nixbuild/nix-quick-install-action@v34
       - name: lookup nix versions
         id: nixpkgs
         run: |
@@ -31,7 +32,18 @@ jobs:
         run: |
           LIBFF_REV="$(grep '^INSTALL_VERSION=' .github/scripts/install-libff.sh | cut -f2 -d=)"
           LIBSECP256K1_REV="$(grep '^INSTALL_VERSION=' .github/scripts/install-libsecp256k1.sh | cut -f2 -d=)"
-          { echo "libff=$LIBFF_REV"; echo "libsecp256k1=$LIBSECP256K1_REV"; } >> "$GITHUB_OUTPUT"
+          SOLIDITY_REV_FLAKE="$(jq -r '.nodes.solidity.locked.rev' < flake.lock)"
+          SOLIDITY_REV_BUILD="$(grep -A2 'repository: argotorg/solidity' .github/workflows/build.yml | grep 'ref:' | tr -d ' ' | cut -f2 -d:)"
+          SOLC_VERSION_FLAKE="$(grep -oP 'solc_\K[0-9_]+' flake.nix | head -1 | tr '_' '.')"
+          SOLC_VERSION_BUILD="$(grep -oP 'solidity/releases/download/v\K[0-9.]+' .github/workflows/build.yml)"
+          {
+            echo "libff=$LIBFF_REV"
+            echo "libsecp256k1=$LIBSECP256K1_REV"
+            echo "solidity_rev_flake=$SOLIDITY_REV_FLAKE"
+            echo "solidity_rev_build=$SOLIDITY_REV_BUILD"
+            echo "solc_version_flake=$SOLC_VERSION_FLAKE"
+            echo "solc_version_build=$SOLC_VERSION_BUILD"
+          } >> "$GITHUB_OUTPUT"
       - name: compare versions
         run: |
           if [ "$LIBFF_NIXPKGS" != "$LIBFF_LOCAL" ]; then
@@ -42,8 +54,20 @@ jobs:
             echo "libsecp256k1 versions do not match! nix=$LIBSECP256K1_NIXPKGS local=$LIBSECP256K1_LOCAL"
             exit 1
           fi
+          if [ "$SOLIDITY_REV_FLAKE" != "$SOLIDITY_REV_BUILD" ]; then
+            echo "solidity repo revisions do not match! flake.lock=$SOLIDITY_REV_FLAKE build.yml=$SOLIDITY_REV_BUILD"
+            exit 1
+          fi
+          if [ "$SOLC_VERSION_FLAKE" != "$SOLC_VERSION_BUILD" ]; then
+            echo "solc versions do not match! flake.nix=$SOLC_VERSION_FLAKE build.yml=$SOLC_VERSION_BUILD"
+            exit 1
+          fi
         env:
           LIBFF_NIXPKGS: ${{ steps.nixpkgs.outputs.libff }}
           LIBFF_LOCAL: ${{ steps.local.outputs.libff }}
           LIBSECP256K1_NIXPKGS: ${{ steps.nixpkgs.outputs.libsecp256k1 }}
           LIBSECP256K1_LOCAL: ${{ steps.local.outputs.libsecp256k1 }}
+          SOLIDITY_REV_FLAKE: ${{ steps.local.outputs.solidity_rev_flake }}
+          SOLIDITY_REV_BUILD: ${{ steps.local.outputs.solidity_rev_build }}
+          SOLC_VERSION_FLAKE: ${{ steps.local.outputs.solc_version_flake }}
+          SOLC_VERSION_BUILD: ${{ steps.local.outputs.solc_version_build }}

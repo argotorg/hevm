@@ -7,8 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## Added
+- Source location info (file, line, code snippet) is now shown in state merge debug messages
+- New opcode: CLZ
+- New POr/PAnd/PImpl/Or/And simplification rules
+- Support for `--early-abort` flag that aborts symbolic execution as soon as a counterexample is found
+- Support for `vm.etch(address, bytecode)` cheatcode to set the code of a contract at a given address
+- State merging via speculative execution of both branches of a JUMPI, joining the
+  resulting states whenever possible. Amount of speculative execution is
+  controlled via `merge-max-budget`
+- Missing simplifications for Eq, Mod, SMod, XOR, SHL, SHR, and Or
+- A few more simplification rules around Eq, SHL/SHR, Sub+Add combos, and Xor
+
+## Changed
+- Simplifier now rewrites `Mul(-1, x)` and `~x + 1` to `Sub(0, x)`
+- `AbiFunction` and `AbiBytes` parser is now more strict
+- We now check length of AbiArrayDynamic and don't crash in case it's too large
+- SMT queries now run in separate processes, which allows us to better manage
+  timeouts and memory usage by the SMT solver.
+- We now allow limiting the SMT solver's memory usage via `--smt-memory` (in MB).
+- The option `--smttimeout` is now called `--smt-timeout` for consistency with other
+  options.
+- We now abort VM run on a failed `assume`.
+- Removed SHA256 from the Expr since it was not being used
+
+## [0.57.0] - 2026-01-08
+
+## Added
+- We support RPC in equivalence checking now
+- Inequality propagation in constant propagation to prune impossible execution paths earlier.
+  The constraint solver now tracks lower and upper bounds for symbolic values and detects
+  conflicts (e.g., x < 5 && x > 10), significantly reducing the number of paths explored
+- Encode symbolic power of 2 as bit-shift in SMT encoding.
+- Limit the expansion of the EXP operation to avoid blow-up in the size of the SMT expressions.
+- New EXP rewrite rule for base-2 exponents
+
 ## Fixed
 - Fix incorrect simplification rule for `PEq (Lit 1) (IsZero (LT a b))`
+
+## Changed
+- Replaced RPC mocking by a full block cache support. This allows users to cache responses from an RPC
+  node via `--cache-dir dir`.
+- Changed `verify*` methods to always require postcodition.
+- We now use a symbolic execution queue, so as not to run out of resources when there are
+  too many branches to explore.
+- Removed type parameter of mutable memory from VM definition.
+- Removed simplification that were rewriting concrete bytes-to-be-overwritten
+  with zero bytes. Benefits were unclear while it had negative effect on
+  analysis' performance.
+- We now use the symbolic execution queue to also run the SMT solver in `test` mode,
+  and verify the results using a cexHandler
 
 ## [0.56.0] - 2025-10-13
 

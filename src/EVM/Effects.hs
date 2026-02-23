@@ -46,6 +46,8 @@ data Config = Config
   , verb             :: Int
   , simp             :: Bool
   , onlyDeployed     :: Bool
+  , earlyAbort       :: Bool
+  , mergeMaxBudget   :: Int        -- ^ Max instructions for speculative merge exploration
   }
   deriving (Show, Eq)
 
@@ -65,6 +67,8 @@ defaultConfig = Config
   , verb = 0
   , simp = True
   , onlyDeployed = False
+  , earlyAbort = False
+  , mergeMaxBudget = 100
   }
 
 -- Write to the console

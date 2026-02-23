@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: UNLICENSED
 // pragma solidity 0.8.10;
 
-import "forge-std/Test.sol";
+//import "forge-std/Test.sol";
 // import "./../interface.sol";
 
 /*
@@ -40,7 +40,8 @@ interface IBancor {
 // Loading from addr LitAddr 0x28dee01D53FED0Edf5f6E310BF8Ef9311513Ae40 slot Lit 0xab39bd4ed4f120ab16b799b542a9f20cadc701e31bfb4bc86052bf201b781ebc
 // Fetching slot 0xab39bd4ed4f120ab16b799b542a9f20cadc701e31bfb4bc86052bf201b781ebc at 0x28dee01D53FED0Edf5f6E310BF8Ef9311513Ae40
 
-contract BancorExploit is Test {
+contract BancorExploit {
+    bool public IS_TEST = true;
     address bancorAddress = 0x5f58058C0eC971492166763c8C22632B583F667f;
     address victim = 0xfd0B4DAa7bA535741E6B5Ba28Cba24F9a816E67E;
     address attacker = address(this);

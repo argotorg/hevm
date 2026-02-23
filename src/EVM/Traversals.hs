@@ -96,7 +96,6 @@ foldExpr f acc expr = acc <> (go expr)
       e@(Failure a _ (Revert c)) -> f e <> (foldl' (foldProp f) mempty a) <> go c
       e@(Failure a _ _) -> f e <> (foldl' (foldProp f) mempty a)
       e@(Partial a _ _) -> f e <> (foldl' (foldProp f) mempty a)
-      e@(ITE a b c) -> f e <> (go a) <> (go b) <> (go c)
 
       -- integers
 
@@ -124,6 +123,7 @@ foldExpr f acc expr = acc <> (go expr)
       e@(SGT a b) -> f e <> (go a) <> (go b)
       e@(Eq a b) -> f e <> (go a) <> (go b)
       e@(IsZero a) -> f e <> (go a)
+      e@(ITE c t el) -> f e <> (go c) <> (go t) <> (go el)
 
       -- bits
 
@@ -134,11 +134,11 @@ foldExpr f acc expr = acc <> (go expr)
       e@(SHL a b) -> f e <> (go a) <> (go b)
       e@(SHR a b) -> f e <> (go a) <> (go b)
       e@(SAR a b) -> f e <> (go a) <> (go b)
+      e@(CLZ a) -> f e <> (go a)
 
       -- Hashes
 
       e@(Keccak a) -> f e <> (go a)
-      e@(SHA256 a) -> f e <> (go a)
 
       -- block context
 
@@ -358,11 +358,6 @@ mapExprM f expr = case expr of
         pure (k',v')
       pure $ Map.fromList x'
     f (Success a' b c' d')
-  ITE a b c -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    c' <- mapExprM f c
-    f (ITE a' b' c')
 
   -- integers
 
@@ -454,6 +449,11 @@ mapExprM f expr = case expr of
   IsZero a -> do
     a' <- mapExprM f a
     f (IsZero a')
+  ITE c t el -> do
+    c' <- mapExprM f c
+    t' <- mapExprM f t
+    el' <- mapExprM f el
+    f (ITE c' t' el')
 
   -- bits
 
@@ -484,6 +484,9 @@ mapExprM f expr = case expr of
     a' <- mapExprM f a
     b' <- mapExprM f b
     f (SAR a' b')
+  CLZ a -> do
+    a' <- mapExprM f a
+    f (CLZ a')
 
 
   -- Hashes
@@ -491,10 +494,6 @@ mapExprM f expr = case expr of
   Keccak a -> do
     a' <- mapExprM f a
     f (Keccak a')
-
-  SHA256 a -> do
-    a' <- mapExprM f a
-    f (SHA256 a')
 
   -- block context
 

@@ -17,14 +17,13 @@ import EVM.Solidity
 import EVM.Solvers
 import EVM.UnitTest
 import EVM.SymExec qualified as SymExec
-import Control.Monad.ST (RealWorld)
 import Control.Monad.IO.Unlift
 import Control.Monad.Catch (MonadMask)
 import EVM.Effects
 import Data.Maybe (fromMaybe)
 import EVM.Types (internalError)
 import System.Environment (lookupEnv)
-import EVM.Fetch (RpcInfo)
+import EVM.Fetch (RpcInfo, noRpc)
 import EVM.Fetch qualified as Fetch
 
 -- Returns tuple of (No cex, No warnings)
@@ -39,7 +38,7 @@ runForgeTestCustom testFile match timeout maxIter ffiAllowed rpcinfo = do
         internalError $ "Error compiling test file " <> show testFile <> " in directory "
           <> show root
       Right buildOut -> do
-        withSolvers Bitwuzla 3 1 timeout $ \solvers -> do
+        withSolvers Bitwuzla 3 timeout defMemLimit $ \solvers -> do
           opts <- testOpts solvers root (Just buildOut) match maxIter ffiAllowed rpcinfo
           unitTest opts buildOut
 
@@ -47,12 +46,12 @@ runForgeTestCustom testFile match timeout maxIter ffiAllowed rpcinfo = do
 runForgeTest
   :: (MonadMask m, App m)
   => FilePath -> Text -> m (Bool, Bool)
-runForgeTest testFile match = runForgeTestCustom testFile match Nothing Nothing True mempty
+runForgeTest testFile match = runForgeTestCustom testFile match Nothing Nothing True noRpc
 
-testOpts :: forall m . App m => SolverGroup -> FilePath -> Maybe BuildOutput -> Text -> Maybe Integer -> Bool -> RpcInfo -> m (UnitTestOptions RealWorld)
+testOpts :: forall m . App m => SolverGroup -> FilePath -> Maybe BuildOutput -> Text -> Maybe Integer -> Bool -> RpcInfo -> m (UnitTestOptions)
 testOpts solvers root buildOutput match maxIter allowFFI rpcinfo = do
   let srcInfo = maybe emptyDapp (dappInfo root) buildOutput
-  sess <- Fetch.mkSession
+  sess <- Fetch.mkSessionWithoutCache
   params <- paramsFromRpc rpcinfo sess
 
   pure UnitTestOptions
@@ -88,11 +87,13 @@ callProcessCwd cmd args cwd = do
 
 compileWithForge :: App m => FilePath -> FilePath -> m (Either String BuildOutput)
 compileWithForge root src = do
-  liftIO $ createDirectory (root </> "src")
-  liftIO $ writeFile (root </> "src" </> "unit-tests.t.sol") =<< readFile =<< Paths.getDataFileName src
-  liftIO $ initLib (root </> "lib" </> "tokens") ("test" </> "contracts" </> "lib" </> "erc20.sol") "erc20.sol"
-  liftIO $ initStdForgeDir (root </> "lib" </> "forge-std")
-  (res,out,err) <- liftIO $ readProcessWithExitCode "forge" ["build", "--ast", "--root", root] ""
+  (res, out, err) <- liftIO $ do
+    createDirectory (root </> "src")
+    writeFile (root </> "foundry.toml") "[profile.default]\nevm_version = \"Osaka\"\nast = true\n"
+    writeFile (root </> "src" </> "unit-tests.t.sol") =<< readFile =<< Paths.getDataFileName src
+    initLib (root </> "lib" </> "tokens") ("test" </> "contracts" </> "lib" </> "erc20.sol") "erc20.sol"
+    initStdForgeDir (root </> "lib" </> "forge-std")
+    readProcessWithExitCode "forge" ["build", "--root", root] ""
   case res of
     ExitFailure _ -> pure . Left $ "compilation failed: " <> "exit code: " <> show res <> "\n\nstdout:\n" <> out <> "\n\nstderr:\n" <> err
     ExitSuccess -> readFilteredBuildOutput root (\path -> "unit-tests.t.sol" `Data.List.isInfixOf` path) Foundry

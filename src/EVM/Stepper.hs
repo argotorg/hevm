@@ -23,7 +23,7 @@ where
 
 import Control.Monad.IO.Class
 import Control.Monad.Operational (Program, ProgramViewT(..), ProgramView, singleton, view)
-import Control.Monad.ST (stToIO, RealWorld)
+import Control.Monad.ST (stToIO)
 import Control.Monad.State.Strict (execStateT, get, StateT(..))
 import Data.Text (Text)
 
@@ -34,43 +34,39 @@ import EVM.Fetch qualified as Fetch
 import EVM.Types
 
 -- | The instruction type of the operational monad
-data Action t s a where
+data Action t a where
   -- | Keep executing until an intermediate result is reached
-  Exec :: Action t s (VMResult t s)
+  Exec :: Action t (VMResult t)
   -- | Embed a VM state transformation
-  EVM  :: EVM t s a -> Action t s a
+  EVM  :: EVM t a -> Action t a
   -- | Wait for a query to be resolved
-  Wait :: Query t s -> Action t s ()
-  -- | Two things can happen
-  Fork :: RunBoth s -> Action Symbolic s ()
-  -- | Many (>2) things can happen
-  ForkMany :: RunAll s -> Action Symbolic s ()
+  Wait :: Query t -> Action t ()
+  -- | More than one thing can happen
+  Fork :: BranchContext -> Action Symbolic ()
+
 
 -- | Type alias for an operational monad of @Action@
-type Stepper t s a = Program (Action t s) a
+type Stepper t a = Program (Action t) a
 
 -- Singleton actions
 
-exec :: Stepper t s (VMResult t s)
+exec :: Stepper t (VMResult t)
 exec = singleton Exec
 
-run :: Stepper t s (VM t s)
+run :: Stepper t (VM t)
 run = exec >> evm get
 
-wait :: Query t s -> Stepper t s ()
+wait :: Query t -> Stepper t ()
 wait = singleton . Wait
 
-fork :: RunBoth s -> Stepper Symbolic s ()
+fork :: BranchContext -> Stepper Symbolic ()
 fork = singleton . Fork
 
-forkMany :: RunAll s -> Stepper Symbolic s ()
-forkMany = singleton . ForkMany
-
-evm :: EVM t s a -> Stepper t s a
+evm :: EVM t a -> Stepper t a
 evm = singleton . EVM
 
 -- | Run the VM until final result, resolving all queries
-execFully :: Stepper Concrete s (Either EvmError (Expr Buf))
+execFully :: Stepper Concrete (Either EvmError (Expr Buf))
 execFully =
   exec >>= \case
     HandleEffect (Query q) ->
@@ -81,32 +77,31 @@ execFully =
       pure (Right x)
 
 -- | Run the VM until its final state
-runFully :: Stepper t s (VM t s)
+runFully :: Stepper t (VM t)
 runFully = do
   vm <- run
   case vm.result of
     Nothing -> internalError "should not occur"
     Just (HandleEffect (Query q)) ->
       wait q >> runFully
-    Just (HandleEffect (RunBoth q)) ->
-      fork q >> runFully
-    Just (HandleEffect (RunAll q)) ->
-      forkMany q >> runFully
+    Just (HandleEffect (Branch context)) ->
+      fork context >> runFully
     Just _ ->
       pure vm
 
-enter :: Text -> Stepper t s ()
+enter :: Text -> Stepper t ()
 enter t = evm (EVM.pushTrace (EntryTrace t))
 
+-- Concrete interpretation
 interpret
   :: forall m a . (App m)
-  => Fetch.Fetcher Concrete m RealWorld
-  -> VM Concrete RealWorld
-  -> Stepper Concrete RealWorld a
+  => Fetch.Fetcher Concrete m
+  -> VM Concrete
+  -> Stepper Concrete a
   -> m a
 interpret fetcher vm = eval . view
   where
-    eval :: ProgramView (Action Concrete RealWorld) a -> m a
+    eval :: ProgramView (Action Concrete) a -> m a
     eval (Return x) = pure x
     eval (action :>>= k) =
       case action of

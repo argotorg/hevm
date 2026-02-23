@@ -9,10 +9,11 @@ module Main where
 
 import Control.Monad (when, forM_, unless)
 import Control.Monad.State.Strict (runStateT)
-import Control.Monad.ST (RealWorld, stToIO)
+import Control.Monad.ST (stToIO)
 import Control.Monad.IO.Unlift
 import Control.Exception (try, IOException)
 import Data.ByteString (ByteString)
+import Control.Concurrent.MVar (readMVar)
 import qualified Data.ByteString.Lazy as BS
 import Data.ByteString.Builder (toLazyByteString)
 import qualified Data.ByteString.Char8 as BC
@@ -24,6 +25,7 @@ import Data.Text.IO qualified as T
 import Data.Version (showVersion)
 import Data.Word (Word64)
 import GHC.Conc (getNumProcessors)
+import GitHash
 import Numeric.Natural (Natural)
 import Optics.Core ((&), set)
 import Witch (unsafeInto)
@@ -37,15 +39,13 @@ import Data.List.Split (splitOn)
 import Text.Read (readMaybe)
 import JSONL (jsonlBuilder, jsonLine)
 
-import EVM (initialContract, abstractContract, makeVm)
+import EVM (initialContract, abstractContract, makeVm, defaultVMOpts)
 import EVM.ABI (Sig(..))
 import EVM.Dapp (dappInfo, DappInfo, emptyDapp)
 import EVM.Expr qualified as Expr
 import EVM.Concrete qualified as Concrete
-import GitHash
-import EVM.FeeSchedule (feeSchedule)
 import EVM.Fetch qualified as Fetch
-import EVM.Format (hexByteString, strip0x, formatExpr)
+import EVM.Format (hexByteString, strip0x, formatExpr, indent)
 import EVM.Solidity
 import EVM.Solvers
 import EVM.Stepper qualified
@@ -87,9 +87,9 @@ data CommonOptions = CommonOptions
   , verb          ::Int
   , root          ::Maybe String
   , assertionType ::AssertionType
-  , solverThreads ::Natural
-  , smttimeout    ::Natural
-  , smtdebug      ::Bool
+  , smtTimeout    ::Natural
+  , smtMemory     ::Natural
+  , smtDebug      ::Bool
   , dumpUnsolved  ::Maybe String
   , numSolvers    ::Maybe Natural
   , maxIterations ::Integer
@@ -99,6 +99,9 @@ data CommonOptions = CommonOptions
   , maxDepth      ::Maybe Int
   , noSimplify    ::Bool
   , onlyDeployed  ::Bool
+  , cacheDir      ::Maybe String
+  , earlyAbort    ::Bool
+  , mergeMaxBudget :: Int
   }
 
 commonOptions :: Parser CommonOptions
@@ -115,9 +118,9 @@ commonOptions = CommonOptions
   <*> (option auto $ long "verb"            <> showDefault <> value 1 <> help "Append call trace: {1} failures {2} all")
   <*> (optional $ strOption $ long "root"   <> help "Path to  project root directory")
   <*> (option auto $ long "assertion-type"  <> showDefault <> value Forge <> help "Assertions as per Forge or DSTest")
-  <*> (option auto $ long "solver-threads"  <> showDefault <> value 1 <> help "Number of threads for each solver instance. Only respected for Z3")
-  <*> (option auto $ long "smttimeout"      <> value 300 <> help "Timeout given to SMT solver in seconds")
-  <*> (switch $ long "smtdebug"             <> help "Print smt queries sent to the solver")
+  <*> (option auto $ long "smt-timeout"     <> value 300 <> help "Timeout given to SMT solver in seconds. Not available on Windows")
+  <*> (option auto $ long "smt-memory"      <> value defMemLimit <> help "Maximum memory limit for SMT solver in MB. Only available on Linux")
+  <*> (switch $ long "smt-debug"            <> help "Print smt queries sent to the solver")
   <*> (optional $ strOption $ long "dump-unsolved" <> help "Dump unsolved SMT queries to this (relative) path")
   <*> (optional $ option auto $ long "num-solvers" <> help "Number of solver instances to use (default: number of cpu cores)")
   <*> (option auto $ long "max-iterations"  <> showDefault <> value 5 <> help "Number of times we may revisit a particular branching point. For no bound, set -1")
@@ -127,6 +130,9 @@ commonOptions = CommonOptions
   <*> (optional $ option auto $ long "max-depth" <> help "Limit maximum depth of branching during exploration (default: unlimited)")
   <*> (switch $ long "no-simplify" <> help "Don't perform simplification of expressions")
   <*> (switch $ long "only-deployed" <> help "When trying to resolve unknown addresses, only use addresses of deployed contracts")
+  <*> (optional $ strOption $ long "cache-dir" <> help "Directory to save and load RPC cache")
+  <*> (switch $  long "early-abort" <> help "Stop exploration immediately upon finding the first counterexample")
+  <*> (option auto $ long "merge-max-budget" <> showDefault <> value 100 <> help "Max instructions for speculative merge exploration during path merging")
 
 data CommonExecOptions = CommonExecOptions
   { address       ::Maybe Addr
@@ -188,7 +194,6 @@ data TestOptions = TestOptions
   , match         ::Maybe String
   , prefix        ::String
   , ffi           ::Bool
-  , mockFile      ::Maybe String
   }
 
 testOptions :: Parser TestOptions
@@ -200,8 +205,6 @@ testOptions = TestOptions
   <*> (optional $ strOption $ long "match" <> help "Test case filter - only run methods matching regex")
   <*> (strOption $ long "prefix"  <> showDefault <> value "prove" <> help "Prefix for test cases to prove")
   <*> (switch $ long "ffi" <> help "Allow the usage of the hevm.ffi() cheatcode (WARNING: this allows test authors to execute arbitrary code on your machine)")
-  <*> (optional $ strOption $ long "mock-file" <> help "Read mocked RPC response data from JSON file")
-
 
 data EqOptions = EqOptions
   { codeA         ::Maybe ByteString
@@ -330,7 +333,7 @@ main = do
       solver <- getSolver cOpts.solver
       cores <- liftIO $ unsafeInto <$> getNumProcessors
       let solverCount = fromMaybe cores cOpts.numSolvers
-      runEnv env $ withSolvers solver solverCount cOpts.solverThreads (Just cOpts.smttimeout) $ \solvers -> do
+      runEnv env $ withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
         buildOut <- readBuildOutput root testOpts.projectType
         case buildOut of
           Left e -> liftIO $ do
@@ -340,6 +343,9 @@ main = do
             -- TODO: which functions here actually require a BuildOutput, and which can take it as a Maybe?
             unitTestOpts <- unitTestOptions testOpts cOpts solvers (Just out)
             res <- unitTest unitTestOpts out
+            liftIO $ forM_ ((,) <$> cOpts.cacheDir <*> testOpts.number) $ \(dir, fetchedBlock) -> do
+              cache <- readMVar (unitTestOpts.sess.sharedCache)
+              Fetch.saveCache dir fetchedBlock cache
             liftIO $ unless (uncurry (&&) res) exitFailure
     Exec cFileOpts execOpts cExecOpts cOpts-> do
       env <- makeEnv cOpts
@@ -355,7 +361,7 @@ main = do
         putStrLn "Error: maxBufSize must be at least 0. Negative values do not make sense. A value of zero means at most 1 byte long buffers"
         exitFailure
       pure Env { config = defaultConfig
-        { dumpQueries = cOpts.smtdebug
+        { dumpQueries = cOpts.smtDebug
         , dumpUnsolved = cOpts.dumpUnsolved
         , debug = cOpts.debug
         , dumpEndStates = cOpts.debug
@@ -369,6 +375,8 @@ main = do
         , verb = cOpts.verb
         , simp = Prelude.not cOpts.noSimplify
         , onlyDeployed = cOpts.onlyDeployed
+        , earlyAbort = cOpts.earlyAbort
+        , mergeMaxBudget = cOpts.mergeMaxBudget
         } }
 
 
@@ -402,25 +410,25 @@ equivalence eqOpts cOpts = do
   when (isNothing bytecodeB) $ liftIO $ do
     putStrLn "Error: invalid or no bytecode for program B. Provide a valid one with --code-b or --code-b-file"
     exitFailure
-  let veriOpts = VeriOpts { iterConf = IterConfig {
+  let veriOpts = (defaultVeriOpts :: VeriOpts) { iterConf = IterConfig {
                             maxIter = parseMaxIters cOpts.maxIterations
                             , askSmtIters = cOpts.askSmtIterations
                             , loopHeuristic = cOpts.loopDetectionHeuristic
                             }
-                          , rpcInfo = mempty
                           }
   calldata <- buildCalldata cOpts eqOpts.sig eqOpts.arg
   solver <- liftIO $ getSolver cOpts.solver
   cores <- liftIO $ unsafeInto <$> getNumProcessors
   let solverCount = fromMaybe cores cOpts.numSolvers
-  withSolvers solver solverCount cOpts.solverThreads (Just cOpts.smttimeout) $ \s -> do
-    eq <- equivalenceCheck s (fromJust bytecodeA) (fromJust bytecodeB) veriOpts calldata eqOpts.create
+  withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \s -> do
+    sess <- Fetch.mkSession cOpts.cacheDir Nothing
+    eq <- equivalenceCheck s (Just sess) (fromJust bytecodeA) (fromJust bytecodeB) veriOpts calldata eqOpts.create
     let anyIssues =  not (null eq.partials) || any (isUnknown . fst) eq.res  || any (isError . fst) eq.res
     liftIO $ case (any (isCex . fst) eq.res, anyIssues) of
       (False, False) -> putStrLn "   \x1b[32m[PASS]\x1b[0m Contracts behave equivalently"
       (True, _)      -> putStrLn "   \x1b[31m[FAIL]\x1b[0m Contracts do not behave equivalently"
       (_, True)      -> putStrLn "   \x1b[31m[FAIL]\x1b[0m Contracts may not behave equivalently"
-    liftIO $ printWarnings Nothing eq.partials (map fst eq.res) "the contracts under test"
+    liftIO $ printWarnings Nothing mempty eq.partials (map fst eq.res) "the contracts under test"
     case any (isCex . fst) eq.res of
       False -> liftIO $ do
         when anyIssues exitFailure
@@ -496,7 +504,7 @@ symbCheck :: App m => CommonFileOptions -> SymbolicOptions -> CommonExecOptions 
 symbCheck cFileOpts sOpts cExecOpts cOpts = do
   let block' = maybe Fetch.Latest Fetch.BlockNumber cExecOpts.block
       blockUrlInfo = (,) block' <$> cExecOpts.rpc
-  sess <- Fetch.mkSession
+  sess <- Fetch.mkSession cOpts.cacheDir cExecOpts.block
   calldata <- buildCalldata cOpts sOpts.sig sOpts.arg
   preState <- symvmFromCommand cExecOpts sOpts cFileOpts sess calldata
   errCodes <- case sOpts.assertions of
@@ -510,18 +518,21 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = do
   cores <- liftIO $ unsafeInto <$> getNumProcessors
   let solverCount = fromMaybe cores cOpts.numSolvers
   solver <- liftIO $ getSolver cOpts.solver
-  withSolvers solver solverCount cOpts.solverThreads (Just cOpts.smttimeout) $ \solvers -> do
+  withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
     let veriOpts = VeriOpts { iterConf = IterConfig {
                               maxIter = parseMaxIters cOpts.maxIterations
                               , askSmtIters = cOpts.askSmtIterations
                               , loopHeuristic = cOpts.loopDetectionHeuristic
                               }
-                            , rpcInfo = mempty {Fetch.blockNumURL = blockUrlInfo}
+                            , rpcInfo = Fetch.RpcInfo blockUrlInfo
                             }
     let fetcher = Fetch.oracle solvers (Just sess) veriOpts.rpcInfo
-    (expr, res) <- verify solvers fetcher veriOpts preState (Just $ checkAssertions errCodes)
+    (expr, res) <- verify solvers fetcher veriOpts preState (checkAssertions errCodes) Nothing
+    liftIO $ forM_ ((,) <$> cOpts.cacheDir <*> cExecOpts.block) $ \(dir, block) -> do
+      cache <- readMVar sess.sharedCache
+      Fetch.saveCache dir block cache
     case res of
-      [Qed] -> do
+      [] -> do
         liftIO $ putStrLn "\nQED: No reachable property violations discovered\n"
         showExtras solvers sOpts calldata expr
       _ -> do
@@ -534,26 +545,29 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = do
                  , ""
                  ] <> fmap (formatCex (fst calldata) Nothing) cexs
         liftIO $ T.putStrLn $ T.unlines counterexamples
-        liftIO $ printWarnings Nothing [expr] res "symbolically"
+        liftIO $ printWarnings Nothing mempty expr res "symbolically"
         showExtras solvers sOpts calldata expr
         liftIO exitFailure
 
-showExtras :: App m => SolverGroup ->SymbolicOptions -> (Expr Buf, [Prop]) -> Expr End -> m ()
+showExtras :: App m => SolverGroup ->SymbolicOptions -> (Expr Buf, [Prop]) -> [Expr End] -> m ()
 showExtras solvers sOpts calldata expr = do
   when sOpts.showTree $ liftIO $ do
-    putStrLn "=== Expression ===\n"
-    T.putStrLn $ formatExpr $ Expr.simplify expr
+    putStrLn "=== Leafs ===\n"
+    printLeafs $ map (formatExpr . Expr.simplify) expr
     putStrLn ""
   when sOpts.showReachableTree $ do
     reached <- reachable solvers expr
     liftIO $ do
-      putStrLn "=== Potentially Reachable Expression ===\n"
-      T.putStrLn (formatExpr . Expr.simplify $ reached)
+      putStrLn "=== Potentially Reachable Leafs ===\n"
+      printLeafs $ map (formatExpr . Expr.simplify) reached
       putStrLn ""
   when sOpts.getModels $ do
-    liftIO $ putStrLn $ "=== Models for " <> show (Expr.numBranches expr) <> " branches ==="
+    liftIO $ putStrLn $ "=== Models for " <> show (length expr) <> " branches ==="
     ms <- produceModels solvers expr
     liftIO $ forM_ ms (showModel (fst calldata))
+  where
+    printLeafs leafs =
+      T.putStrLn $ indent 2 $ T.unlines $ zipWith (\i r -> "Leaf " <> T.pack (show (i :: Integer)) <> ":\n" <> r) [0..] leafs
 
 isTestOrLib :: Text -> Bool
 isTestOrLib file = T.isSuffixOf ".t.sol" file || areAnyPrefixOf ["src/test/", "src/tests/", "lib/"] file
@@ -564,15 +578,15 @@ areAnyPrefixOf prefixes t = any (flip T.isPrefixOf t) prefixes
 launchExec :: App m => CommonFileOptions -> ExecOptions -> CommonExecOptions -> CommonOptions -> m ()
 launchExec cFileOpts execOpts cExecOpts cOpts = do
   dapp <- getSrcInfo execOpts cOpts
-  sess <- Fetch.mkSession
+  sess <- Fetch.mkSession cOpts.cacheDir cExecOpts.block
   vm <- vmFromCommand cOpts cExecOpts cFileOpts execOpts sess
   let
     block = maybe Fetch.Latest Fetch.BlockNumber cExecOpts.block
     blockUrlInfo = (,) block <$> cExecOpts.rpc
-    rpcDat :: Fetch.RpcInfo = mempty { Fetch.blockNumURL = blockUrlInfo }
+    rpcDat :: Fetch.RpcInfo = Fetch.RpcInfo blockUrlInfo
 
   -- TODO: we shouldn't need solvers to execute this code
-  withSolvers Z3 0 1 Nothing $ \solvers -> do
+  withSolvers Z3 0 Nothing cOpts.smtMemory $ \solvers -> do
     let fetcher = Fetch.oracle solvers (Just sess) rpcDat
     vm' <- if execOpts.jsonTrace
            then do
@@ -590,6 +604,9 @@ launchExec cFileOpts execOpts cExecOpts cOpts = do
              pure vm'
            else EVM.Stepper.interpret fetcher vm EVM.Stepper.runFully
     writeTraceDapp dapp vm'
+    liftIO $ forM_ ((,) <$> cOpts.cacheDir <*> cExecOpts.block) $ \(dir, fetchedBlock) -> do
+      cache <- readMVar sess.sharedCache
+      Fetch.saveCache dir fetchedBlock cache
     case vm'.result of
       Just (VMFailure (Revert msg)) -> liftIO $ do
         let res = case msg of
@@ -609,7 +626,7 @@ launchExec cFileOpts execOpts cExecOpts cOpts = do
         internalError "no EVM result"
 
 -- | Creates a (concrete) VM from command line options
-vmFromCommand :: App m => CommonOptions -> CommonExecOptions -> CommonFileOptions -> ExecOptions -> Fetch.Session -> m (VM Concrete RealWorld)
+vmFromCommand :: App m => CommonOptions -> CommonExecOptions -> CommonFileOptions -> ExecOptions -> Fetch.Session -> m (VM Concrete)
 vmFromCommand cOpts cExecOpts cFileOpts execOpts sess = do
   conf <- readConfig
   (miner,ts,baseFee,blockNum,prevRan) <- case cExecOpts.rpc of
@@ -634,23 +651,28 @@ vmFromCommand cOpts cExecOpts cFileOpts execOpts sess = do
         exitFailure
       else
         Fetch.fetchContractWithSession conf sess block url addr' >>= \case
-          Nothing -> do
+          Fetch.FetchFailure _ -> do
             putStrLn $ "Error: contract not found: " <> show address
             exitFailure
-          Just contract ->
+          Fetch.FetchError e -> do
+            putStrLn $ "Error: RPC failure: " <> show e
+            exitFailure
+          Fetch.FetchSuccess rpcContract _ ->
             -- if both code and url is given,
             -- fetch the contract and overwrite the code
-            pure $ initialContract (mkCode $ fromJust code)
-                & set #balance  (contract.balance)
-                & set #nonce    (contract.nonce)
-                & set #external (contract.external)
+              pure $ initialContract (mkCode $ fromJust code)
+                & set #balance  (Lit rpcContract.balance)
+                & set #nonce    (Just rpcContract.nonce)
 
     (Just url, Just addr', Nothing) ->
       liftIO $ Fetch.fetchContractWithSession conf sess block url addr' >>= \case
-        Nothing -> do
+        Fetch.FetchFailure _ -> do
           putStrLn $ "Error, contract not found: " <> show address
           exitFailure
-        Just contract -> pure contract
+        Fetch.FetchError e -> do
+          putStrLn $ "Error: RPC failure: " <> show e
+          exitFailure
+        Fetch.FetchSuccess rpcContract _ -> pure $ Fetch.makeContractFromRPC rpcContract
 
     (_, _, Just c)  -> do
       let code = hexByteString $ strip0x c
@@ -688,9 +710,8 @@ vmFromCommand cOpts cExecOpts cFileOpts execOpts sess = do
                   then addr (.address) (Concrete.createAddress (fromJust $ maybeLitAddrSimp origin) (W64 $ word64 (.nonce) 0))
                   else addr (.address) (LitAddr 0xacab)
 
-        vm0 baseFee miner ts blockNum prevRan c = makeVm $ VMOpts
+        vm0 baseFee miner ts blockNum prevRan c = makeVm $ (defaultVMOpts @Concrete)
           { contract       = c
-          , otherContracts = []
           , calldata       = (calldata, [])
           , value          = Lit val
           , address        = address
@@ -707,14 +728,8 @@ vmFromCommand cOpts cExecOpts cFileOpts execOpts sess = do
           , gasprice       = word (.gasprice) 0
           , maxCodeSize    = word (.maxcodesize) 0xffffffff
           , prevRandao     = word (.prevRandao) prevRan
-          , schedule       = feeSchedule
           , chainId        = word (.chainid) 1
           , create         = (.create) execOpts
-          , baseState      = EmptyBase
-          , txAccessList   = mempty -- TODO: support me soon
-          , allowFFI       = False
-          , freshAddresses = 0
-          , beaconRoot     = 0
           }
         word f def = fromMaybe def (f cExecOpts)
         word64 f def = fromMaybe def (f cExecOpts)
@@ -723,7 +738,7 @@ vmFromCommand cOpts cExecOpts cFileOpts execOpts sess = do
 
 symvmFromCommand :: App m =>
   CommonExecOptions -> SymbolicOptions -> CommonFileOptions -> Fetch.Session ->
-  (Expr Buf, [Prop]) -> m (VM EVM.Types.Symbolic RealWorld)
+  (Expr Buf, [Prop]) -> m (VM EVM.Types.Symbolic)
 symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
   conf <- readConfig
   (miner,blockNum,baseFee,prevRan) <- case cExecOpts.rpc of
@@ -748,11 +763,14 @@ symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
   contract <- case (cExecOpts.rpc, cExecOpts.address, codeWrapped) of
     (Just url, Just addr', _) ->
       liftIO $ Fetch.fetchContractWithSession conf sess block url addr' >>= \case
-        Nothing -> do
+        Fetch.FetchFailure _ -> do
           putStrLn "Error, contract not found."
           exitFailure
-        Just contract' -> case codeWrapped of
-              Nothing -> pure contract'
+        Fetch.FetchError e -> do
+          putStrLn $ "Error: RPC failure: " <> show e
+          exitFailure
+        Fetch.FetchSuccess rpcContract' _ -> case codeWrapped of
+              Nothing -> pure $ Fetch.makeContractFromRPC rpcContract'
               -- if both code and url is given,
               -- fetch the contract and overwrite the code
               Just c -> do
@@ -762,10 +780,8 @@ symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
                   exitFailure
                 else pure $ do
                   initialContract (mkCode $ fromJust c')
-                        & set #origStorage (contract'.origStorage)
-                        & set #balance     (contract'.balance)
-                        & set #nonce       (contract'.nonce)
-                        & set #external    (contract'.external)
+                        & set #balance (Lit rpcContract'.balance)
+                        & set #nonce (Just rpcContract'.nonce)
 
     (_, _, Just c) -> liftIO $ do
       let c' = decipher c
@@ -793,7 +809,7 @@ symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
     address = eaddr (.address) (SymAddr "entrypoint")
     originAddr = eaddr (.origin) (SymAddr "origin")
     originContr = abstractContract (RuntimeCode (SymbolicRuntimeCode mempty)) originAddr
-    vm0 baseFee miner ts blockNum prevRan cd callvalue caller c baseState = makeVm $ VMOpts
+    vm0 baseFee miner ts blockNum prevRan cd callvalue caller c baseState = makeVm $ defaultVMOpts
       { contract       = c
       , otherContracts = [(originAddr, originContr)]
       , calldata       = cd
@@ -801,7 +817,6 @@ symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
       , address        = address
       , caller         = caller
       , origin         = origin
-      , gas            = ()
       , gaslimit       = word64 (.gaslimit) 0xffffffffffffffff
       , baseFee        = baseFee
       , priorityFee    = word (.priorityFee) 0
@@ -812,38 +827,25 @@ symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
       , gasprice       = word (.gasprice) 0
       , maxCodeSize    = word (.maxcodesize) 0xffffffff
       , prevRandao     = word (.prevRandao) prevRan
-      , schedule       = feeSchedule
       , chainId        = word (.chainid) 1
       , create         = (.create) sOpts
       , baseState      = baseState
-      , txAccessList   = mempty
-      , allowFFI       = False
-      , freshAddresses = 0
-      , beaconRoot     = 0
       }
     word f def = fromMaybe def (f cExecOpts)
     word64 f def = fromMaybe def (f cExecOpts)
     eaddr f def = maybe def LitAddr (f cExecOpts)
 
-unitTestOptions :: App m => TestOptions -> CommonOptions -> SolverGroup -> Maybe BuildOutput -> m (UnitTestOptions RealWorld)
+unitTestOptions :: App m => TestOptions -> CommonOptions -> SolverGroup -> Maybe BuildOutput -> m (UnitTestOptions)
 unitTestOptions testOpts cOpts solvers buildOutput = do
   root <- liftIO $ getRoot cOpts
-  mockData <- if isJust testOpts.mockFile then liftIO $ do
-      ret <- Fetch.readMockData (fromJust testOpts.mockFile)
-      case ret of
-        Left err -> do
-          putStrLn $ "Error reading mock file: " <> err
-          exitFailure
-        Right md -> pure md
-    else pure mempty
 
   let srcInfo = maybe emptyDapp (dappInfo root) buildOutput
   let blockUrlInfo = case (testOpts.number, testOpts.rpc) of
           (Just block, Just url) -> Just (Fetch.BlockNumber block, url)
           (Nothing, Just url) -> Just (Fetch.Latest, url)
           _ -> Nothing
-      rpcDat = Fetch.mkRpcInfo blockUrlInfo mockData
-  sess <- Fetch.mkSession
+      rpcDat = Fetch.RpcInfo blockUrlInfo
+  sess <- Fetch.mkSession cOpts.cacheDir testOpts.number
   params <- paramsFromRpc rpcDat sess
   let testn = params.number
       block' = if 0 == testn
@@ -858,7 +860,7 @@ unitTestOptions testOpts cOpts solvers buildOutput = do
                 in rpcDat { Fetch.blockNumURL = i }
     , maxIter = parseMaxIters cOpts.maxIterations
     , askSmtIters = cOpts.askSmtIterations
-    , smtTimeout = Just cOpts.smttimeout
+    , smtTimeout = Just cOpts.smtTimeout
     , match = T.pack $ fromMaybe ".*" testOpts.match
     , prefix = T.pack testOpts.prefix
     , testParams = params

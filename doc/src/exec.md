@@ -13,11 +13,11 @@ Usage: hevm exec [--code ARG] [--code-file ARG] [--project-type ARG] [--create]
                  [--loop-detection-heuristic ARG] [--no-decompose]
                  [--solver ARG] [--debug] [--calldata ARG] [--trace]
                  [--verb ARG] [--root ARG] [--assertion-type ARG]
-                 [--solver-threads ARG] [--smttimeout ARG] [--smtdebug]
-                 [--dump-unsolved ARG] [--num-solvers ARG] [--num-cex-fuzz ARG]
+                 [--smt-timeout ARG] [--smt-memory ARG] [--smtdebug]
+                 [--dump-unsolved ARG] [--num-solvers ARG]
                  [--max-iterations ARG] [--promise-no-reent]
                  [--max-buf-size ARG] [--max-width ARG] [--max-depth ARG]
-                 [--no-simplify] [--only-deployed]
+                 [--no-simplify] [--only-deployed] [--cache-dir ARG]
 ```
 
 Concretely execute a given EVM bytecode with the specified parameters. Minimum
