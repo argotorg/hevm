@@ -1238,7 +1238,7 @@ wrappingTests = testGroup "W256 wrapping edge cases"
       assertBool "readByte with near-maxBound dstOffset and symbolic size" result
 
   , -- A2: readByte, CopySlice before-region, concrete size, dstOffset+size wraps
-    -- dstOffset + size wraps past zero, overwriting low addresses like x=10.
+    -- dstOffset + size wraps past zero, overwriting low addresses.
     testCase "readByte-copySlice-before-concSize-wrap" $ do
       let dstOff = maxBound - 30 :: W256
           size = 58 :: W256
@@ -1261,7 +1261,7 @@ wrappingTests = testGroup "W256 wrapping edge cases"
       assertBool "readWord with near-maxBound dstOffset and symbolic size" result
 
   , -- B2: readWord, CopySlice before-region, concrete size, wrapping
-    -- dstOffset + size wraps; the 32-byte read at x=3 falls in the wrapped region.
+    -- Same as A2 but for word reads.
     testCase "readWord-copySlice-before-concSize-wrap" $ do
       let dstOff = maxBound - 30 :: W256
           size = 100 :: W256
@@ -1285,8 +1285,7 @@ wrappingTests = testGroup "W256 wrapping edge cases"
       assertBool "readWord with x+32 wrapping" result
 
   , -- C2: readWord, CopySlice after-region, concrete size, dstOffset+size wraps
-    -- x is inside the wrapped CopySlice region but old code's dstOffset+size wraps to
-    -- a small value, making x >= dstOffset+size true -> incorrect skip.
+    -- x is inside the wrapped CopySlice region => the expression cannot be simplified
     testCase "readWord-copySlice-after-concSize-wrap" $ do
       let dstOff = maxBound - 100 :: W256
           size = 200 :: W256
@@ -1298,8 +1297,7 @@ wrappingTests = testGroup "W256 wrapping edge cases"
       assertBool "readWord after-region with wrapping dstOffset+size" result
 
   , -- D1: readWordFromBytes, ConcreteBuf, idx+31 wraps
-    -- When idx is near maxBound, [idx..idx+31] wraps and is empty in Haskell,
-    -- causing the old code to return Lit 0 instead of the correct wrapped read.
+    -- readWordFromBytes previously did not handle this case correctly due to overflow of idx+31
     testCase "readWordFromBytes-concreteBuf-wrap" $ do
       let idx = maxBound - 19 :: W256
           buf = ConcreteBuf (BS.pack [1..50])
@@ -1309,7 +1307,7 @@ wrappingTests = testGroup "W256 wrapping edge cases"
       assertBool "readWordFromBytes with idx+31 wrapping on ConcreteBuf" result
 
   , -- D2: readWordFromBytes, non-concrete buf, idx+31 wraps
-    -- Same wrapping issue but with a non-concrete buffer (WriteByte over ConcreteBuf).
+    -- Same wrapping issue as D1 but with a non-concrete buffer (WriteByte over ConcreteBuf).
     -- WriteByte at maxBound-5 is within the read range and won't be incorrectly skipped.
     testCase "readWordFromBytes-abstractBuf-wrap" $ do
       let idx = maxBound - 10 :: W256

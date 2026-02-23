@@ -349,7 +349,7 @@ readWordFromBytes (Lit idx) (ConcreteBuf bs)
       Right i -> Lit $ word $ padRight 32 $ BS.take 32 $ BS.drop i bs
 readWordFromBytes idx buf@(AbstractBuf _) = ReadWord idx buf
 readWordFromBytes i@(Lit idx) buf
-  -- guard: idx+31 must not wrap past maxBound (would make [idx..idx+31] empty)
+  -- idx+31 must not wrap past maxBound (would make [idx..idx+31] empty)
   | idx + 31 < idx = ReadWord i buf
   | otherwise = let
     bytes = [readByte (Lit i') buf | i' <- [idx .. idx + 31]]
@@ -393,7 +393,7 @@ copySlice srcOffset dstOffset (Lit 32) src dst = writeWord dstOffset (readWord s
 copySlice a@(Lit srcOffset) b@(Lit dstOffset) c@(Lit size) d@(ConcreteBuf src) e@(ConcreteBuf dst)
   | dstOffset < maxBytes
   , size < maxBytes
-  , size == 0 || srcOffset + (size - 1) >= srcOffset -- guard: srcOffset must not wrap
+  , srcOffset + size >= srcOffset -- srcOffset must not wrap
   = let hd = padRight (unsafeInto dstOffset) $ BS.take (unsafeInto dstOffset) dst
         sl = if srcOffset > unsafeInto (BS.length src)
           then BS.replicate (unsafeInto size) 0
