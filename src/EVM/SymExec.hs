@@ -62,8 +62,6 @@ import EVM.Stepper qualified as Stepper
 import EVM.Traversals (mapExpr, mapExprM, foldTerm)
 import EVM.Types hiding (Comp)
 import EVM.Types qualified
-import EVM.Solidity (WarningData (..))
-
 data LoopHeuristic
   = Naive
   | StackBased
@@ -78,11 +76,11 @@ groupIssues results = map (\g -> (into (length g), NE.head g)) grouped
     getIssue _ = Nothing
     grouped = NE.group $ sort $ mapMaybe getIssue results
 
-groupPartials :: Maybe (WarningData t) -> [Expr End] -> [(Integer, String)]
-groupPartials warnData e = map (\g -> (into (length g), NE.head g)) grouped
+groupPartials :: Maybe SrcLookup -> Map (Expr EAddr) Contract -> [Expr End] -> [(Integer, String)]
+groupPartials srcLookupM contracts e = map (\g -> (into (length g), NE.head g)) grouped
   where
     getPartial :: Expr End -> Maybe String
-    getPartial (Partial _ _ reason) = Just $ T.unpack $ formatPartialDetailed warnData reason
+    getPartial (Partial _ _ reason) = Just $ T.unpack $ formatPartialDetailed srcLookupM contracts reason
     getPartial _ = Nothing
     grouped = NE.group $ sort $ mapMaybe getPartial e
 

@@ -195,6 +195,7 @@ makeVm o = do
       }
     , forks = Seq.singleton (ForkState env block mempty "")
     , currentFork = 0
+    , srcLookup = Nothing
     , labels = mempty
     , osEnv = mempty
     , freshVar = 0
