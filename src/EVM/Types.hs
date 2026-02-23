@@ -719,6 +719,9 @@ data ForkState = ForkState
   }
   deriving (Show, Generic)
 
+deriving instance Show (VM Symbolic)
+deriving instance Show (VM Concrete)
+
 -- | Alias for the type of e.g. @exec1@.
 type EVM (t :: VMType) a = StateT (VM t) (ST RealWorld) a
 
@@ -746,6 +749,7 @@ data RuntimeConfig = RuntimeConfig
   { allowFFI :: Bool
   , baseState :: BaseState
   }
+  deriving (Show)
 
 -- | An entry in the VM's "call/create stack"
 data Frame (t :: VMType) = Frame
