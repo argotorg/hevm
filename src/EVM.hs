@@ -530,7 +530,9 @@ exec1 conf = do
             next >> pushSym vm.state.callvalue
 
         OpCalldataload -> {-# SCC "OpCalldataload" #-} stackOp1 g_verylow $
-          \ind -> Expr.readWord ind vm.state.calldata
+          \ind -> case (ind, vm.state.calldata) of
+            (Lit i, ConcreteBuf bs) | i > (fromIntegral $ BS.length bs) -> Lit 0 -- Reading past call data length returns 0; `Expr.readWord` has wrap-around semantics
+            _ -> Expr.readWord ind vm.state.calldata
 
         OpCalldatasize -> {-# SCC "OpCalldatasize" #-}
           limitStack 1 . burn g_base $
