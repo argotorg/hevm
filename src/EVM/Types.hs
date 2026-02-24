@@ -874,8 +874,17 @@ data Contract = Contract
   , opIxMap     :: VS.Vector Int -- ^ map from byte index to op index
   , codeOps     :: V.Vector (Int, Op)
   , external    :: Bool
+  , getterLoops :: Map Int StorageCopyLoop -- ^ detected storage-copy loop heads
   }
   deriving (Show, Eq, Ord)
+
+-- | Describes a storage-to-memory copy loop found in contract bytecode.
+-- See 'EVM.GetterDetection.detectStorageCopyLoops' for how these are detected.
+data StorageCopyLoop = StorageCopyLoop
+  { loopHeadPC  :: !Int -- ^ PC of the JUMPDEST (loop entry)
+  , loopJumpiPC :: !Int -- ^ PC of the backward JUMP or JUMPI instruction
+  , loopExitPC  :: !Int -- ^ PC immediately after the backward jump (fall-through / loop exit)
+  } deriving (Show, Eq, Ord, Generic)
 
 class VMOps (t :: VMType) where
   burn' :: Gas t -> EVM t () -> EVM t ()

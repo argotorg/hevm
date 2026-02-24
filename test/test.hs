@@ -66,6 +66,7 @@ import EVM.Effects
 import EVM.UnitTest (writeTrace, printWarnings)
 import EVM.Expr (maybeLitByteSimp)
 import EVM.Keccak (concreteKeccaks)
+import EVM.GetterDetection (detectStorageCopyLoops)
 
 import EVM.Expr.ExprTests qualified as ExprTests
 import EVM.ConcreteExecution.ConcreteExecutionTests qualified as ConcreteExecutionTests
@@ -3552,6 +3553,65 @@ tests = testGroup "hevm"
         Nothing -> assertBoolM "Address missing from storage reads" False
         Just storeReads -> assertBoolM "Did not collect all abstract reads!" $ (Set.size storeReads) == 2
   ]
+  , testGroup "GetterDetection"
+    [ testCase "detects storage-copy loop" $ do
+        -- Bytecode pattern: JUMPDEST SLOAD MSTORE PUSH2 0x0000 JUMPI
+        -- PC: 0           1      2       3        6
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpSload)
+              , (2, OpMstore)
+              , (3, OpPush (Lit 0))  -- push target 0 = loop head
+              , (6, OpJumpi)
+              ]
+        let result = detectStorageCopyLoops ops
+        assertEqual "should detect one loop" 1 (Map.size result)
+        case Map.lookup 0 result of
+          Nothing -> assertFailure "loop head not found at PC 0"
+          Just loop -> do
+            assertEqual "loopHeadPC"  0 loop.loopHeadPC
+            assertEqual "loopJumpiPC" 6 loop.loopJumpiPC
+            assertEqual "loopExitPC"  7 loop.loopExitPC
+
+    , testCase "no loop for simple uint getter" $ do
+        -- Bytecode: SLOAD RETURN  (no backward jump)
+        let ops = V.fromList
+              [ (0, OpSload)
+              , (1, OpReturn)
+              ]
+        assertEqual "should detect no loops" Map.empty (detectStorageCopyLoops ops)
+
+    , testCase "rejects loop containing SSTORE" $ do
+        -- JUMPDEST SSTORE MSTORE PUSH1 0x00 JUMPI
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpSstore)       -- side effect!
+              , (2, OpMstore)
+              , (3, OpPush (Lit 0)) -- push target 0
+              , (5, OpJumpi)
+              ]
+        assertEqual "should detect no loops (side effect)" Map.empty (detectStorageCopyLoops ops)
+
+    , testCase "rejects loop without SLOAD" $ do
+        -- JUMPDEST MSTORE PUSH1 0x00 JUMPI  (no SLOAD)
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpMstore)
+              , (2, OpPush (Lit 0))
+              , (4, OpJumpi)
+              ]
+        assertEqual "should detect no loops (no SLOAD)" Map.empty (detectStorageCopyLoops ops)
+
+    , testCase "rejects loop without MSTORE" $ do
+        -- JUMPDEST SLOAD PUSH1 0x00 JUMPI  (no MSTORE)
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpSload)
+              , (2, OpPush (Lit 0))
+              , (4, OpJumpi)
+              ]
+        assertEqual "should detect no loops (no MSTORE)" Map.empty (detectStorageCopyLoops ops)
+    ]
   ]
   where
     (===>) = assertSolidityComputation
