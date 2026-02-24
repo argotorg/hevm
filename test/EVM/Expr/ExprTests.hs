@@ -1296,26 +1296,26 @@ wrappingTests = testGroup "W256 wrapping edge cases"
       result <- proveEquivExpr full simplified
       assertBool "readWord after-region with wrapping dstOffset+size" result
 
-  , -- D1: readWordFromBytes, ConcreteBuf, idx+31 wraps
-    -- readWordFromBytes previously did not handle this case correctly due to overflow of idx+31
-    testCase "readWordFromBytes-concreteBuf-wrap" $ do
+  , -- D1: readWord, ConcreteBuf, idx+31 wraps
+    -- readWord previously did not handle this case correctly due to overflow of idx+31
+    testCase "readWord-concreteBuf-wrap" $ do
       let idx = maxBound - 19 :: W256
           buf = ConcreteBuf (BS.pack [1..50])
           full = ReadWord (Lit idx) buf
           simplified = Expr.readWord (Lit idx) buf
       result <- proveEquivExpr full simplified
-      assertBool "readWordFromBytes with idx+31 wrapping on ConcreteBuf" result
+      assertBool "readWord with idx+31 wrapping on ConcreteBuf" result
 
-  , -- D2: readWordFromBytes, non-concrete buf, idx+31 wraps
+  , -- D2: readWord, non-concrete buf, idx+31 wraps
     -- Same wrapping issue as D1 but with a non-concrete buffer (WriteByte over ConcreteBuf).
     -- WriteByte at maxBound-5 is within the read range and won't be incorrectly skipped.
-    testCase "readWordFromBytes-abstractBuf-wrap" $ do
+    testCase "readWord-abstractBuf-wrap" $ do
       let idx = maxBound - 10 :: W256
           buf = WriteByte (Lit (maxBound - 5)) (LitByte 0xAB) (ConcreteBuf (BS.pack [1..50]))
           full = ReadWord (Lit idx) buf
           simplified = Expr.readWord (Lit idx) buf
       result <- proveEquivExpr full simplified
-      assertBool "readWordFromBytes with idx+31 wrapping on abstract buf" result
+      assertBool "readWord with idx+31 wrapping on abstract buf" result
 
   , -- E1: copySlice fully concrete, srcOffset near maxBound wraps
     -- When srcOffset is near maxBound, srcOffset > BS.length triggers zero-fill,

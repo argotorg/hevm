@@ -712,7 +712,7 @@ exec1 conf = do
                 accessMemoryWord x $ do
                   next
                   buf <- readMemory x (Lit 32)
-                  let w = Expr.readWordFromBytes (Lit 0) buf
+                  let w = Expr.readWord (Lit 0) buf
                   assign' (#state % #stack) (w : xs)
             _ -> underrun
 
