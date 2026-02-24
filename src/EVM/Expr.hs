@@ -4,17 +4,146 @@
    Helper functions for working with Expr instances.
    All functions here will return a concrete result if given a concrete input.
 -}
-module EVM.Expr where
+module EVM.Expr
+  ( -- * Constants
+    maxLit
+  , maxLitSigned
+  , minLitSigned
 
-import Prelude hiding (LT, GT)
+    -- * Stack Ops
+  , op1
+  , op2
+  , op3
+  , normArgs
+
+    -- * Arithmetic
+  , add
+  , sub
+  , mul
+  , div
+  , sdiv
+  , mod
+  , smod
+  , addmod
+  , mulmod
+  , exp
+  , sex
+
+    -- * Comparisons / Booleans
+  , lt
+  , gt
+  , leq
+  , geq
+  , slt
+  , sgt
+  , eq
+  , iszero
+
+    -- * Bit operations
+  , and
+  , or
+  , xor
+  , not
+  , shl
+  , shr
+  , sar
+  , clz
+
+    -- * Props
+  , peq
+  , pleq
+
+    -- * Buffers
+  , readByte
+  , readBytes
+  , readWord
+  , maxBytes
+  , copySlice
+  , writeByte
+  , writeWord
+  , bufLength
+  , bufLengthEnv
+  , minLength
+  , concretePrefix
+  , take
+  , drop
+  , toList
+  , fromList
+  , simplifyReads
+
+    -- * Storage
+  , readStorage'
+  , readStorage
+  , writeStorage
+  , concStoreContains
+  , getAddr
+  , getLogicalIdx
+
+    -- * Storage patterns / helpers
+  , pattern MappingSlot
+  , pattern ArraySlotWithOffs
+  , pattern ArraySlotWithOffs2
+  , pattern ArraySlotZero
+  , idsDontMatch
+  , slotPos
+  , litToArrayPreimage
+  , litToKeccak
+
+    -- * Decomposition
+  , safeToDecomposeProp
+  , safeToDecompose
+  , decomposeStorage
+
+    -- * Simplification
+  , simplify
+  , simplifyProps
+  , simplifyProp
+
+    -- * Conversions
+  , litAddr
+  , litCode
+  , exprToAddr
+  , wordToAddr
+
+    -- * Other helpers
+  , isLitWord
+  , isSuccess
+  , isFailure
+  , isPartial
+  , isSymAddr
+  , indexWord
+  , padByte
+  , joinBytes
+  , eqByte
+  , min
+  , max
+  , containsNode
+  , inRange
+  , preImages
+  , constPropagate
+  , concKeccakSimpExpr
+  , concKeccakProps
+  , concKeccakSimpProps
+  , concKeccakOnePass
+  , checkLHSConstProp
+  , checkLHSConst
+  , maybeLitByteSimp
+  , maybeLitWordSimp
+  , maybeLitAddrSimp
+  , maybeConcStoreSimp
+  ) where
+
+import Prelude hiding (LT, GT, exp, drop, take, not, and, or, div, mod, min, max)
+import Prelude qualified (div, mod, not, take, min, max)
 import Control.Monad (unless, when)
 import Control.Monad.ST (ST)
 import Control.Monad.State (put, get, execState, State)
-import Data.Bits hiding (And, Xor)
+import Data.Bits hiding (And, Xor, xor)
+import Data.Bits qualified (xor)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.DoubleWord (Int256, Word256(Word256), Word128(Word128))
-import Data.List
+import Data.List (sort, find)
 import Data.Map qualified as LMap
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe, isJust, fromMaybe)
@@ -29,8 +158,6 @@ import Data.Vector.Storable.ByteString
 import Data.Word (Word8, Word32)
 import Witch (unsafeInto, into, tryInto)
 import Data.Containers.ListUtils (nubOrd)
-
-import Optics.Core
 
 import EVM.Traversals
 import EVM.Types
@@ -568,11 +695,6 @@ concretePrefix b = V.create $ do
             go (i+1) v
           _ -> pure (i, v)
 
-
-word256At :: Expr EWord -> Lens (Expr Buf) (Expr Buf) (Expr EWord) (Expr EWord)
-word256At i = lens getter setter where
-  getter = readWord i
-  setter m x = writeWord i x m
 
 -- | Returns the first n bytes of buf
 take :: W256 -> Expr Buf -> Expr Buf
@@ -1736,9 +1858,6 @@ max :: Expr EWord -> Expr EWord -> Expr EWord
 max (Lit 0) y = y
 max x (Lit 0) = x
 max x y = normArgs Max Prelude.max x y
-
-allLit :: [Expr Byte] -> Bool
-allLit = all isLitByte
 
 -- | True if the given expression contains any node that satisfies the
 -- input predicate
