@@ -3611,6 +3611,42 @@ tests = testGroup "hevm"
               , (4, OpJumpi)
               ]
         assertEqual "should detect no loops (no MSTORE)" Map.empty (detectStorageCopyLoops ops)
+
+    -- Symbolic execution tests: bytes public getter
+    -- The Solidity compiler generates a storage-copy loop for bytes/string getters.
+    -- With skipGetterLoops enabled, we take the loop-exit path immediately and
+    -- avoid MaxIterationsReached. With it disabled, a low maxIter causes a Partial.
+    , test "bytes-getter-no-partial-with-detection" $ do
+        -- Contract with only a bytes public variable; we check its auto-generated getter.
+        Just c <- solcRuntime "C"
+          [i|
+          pragma solidity ^0.8.0;
+          contract C {
+            bytes public myBytes;
+          }
+          |]
+        let sig  = Just (Sig "myBytes()" [])
+            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 } }
+        -- skipGetterLoops = True (default): loop is short-circuited, no Partial
+        (paths, _) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] opts
+        assertBoolM "should have no partial results with getter detection" $
+          not (any isPartial paths)
+
+    , testCase "bytes-getter-partial-without-detection" $ do
+        -- Same contract, but with skipGetterLoops = False: the loop hits maxIter
+        Just c <- solcRuntime "C"
+          [i|
+          pragma solidity ^0.8.0;
+          contract C {
+            bytes public myBytes;
+          }
+          |]
+        let sig  = Just (Sig "myBytes()" [])
+            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 } }
+            noSkipEnv = Env { config = testEnv.config { skipGetterLoops = False } }
+        (paths, _) <- runEnv noSkipEnv $ withDefaultSolver $ \s ->
+          checkAssert s defaultPanicCodes c sig [] opts
+        assertBool "should be partial without getter detection" (any isPartial paths)
     ]
   ]
   where

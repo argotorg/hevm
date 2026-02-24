@@ -48,6 +48,7 @@ data Config = Config
   , onlyDeployed     :: Bool
   , earlyAbort       :: Bool
   , mergeMaxBudget   :: Int        -- ^ Max instructions for speculative merge exploration
+  , skipGetterLoops  :: Bool       -- ^ Short-circuit detected storage-copy loops (bytes/string getters)
   }
   deriving (Show, Eq)
 
@@ -69,6 +70,7 @@ defaultConfig = Config
   , onlyDeployed = False
   , earlyAbort = False
   , mergeMaxBudget = 100
+  , skipGetterLoops = True
   }
 
 -- Write to the console
