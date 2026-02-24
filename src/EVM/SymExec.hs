@@ -513,29 +513,42 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
                     interpretInternal t { vm = vm', stepper = (k r) }
 
               -- the condition is symbolic
-              _ ->
-                -- are in we a loop, have we hit maxIters, have we hit askSmtIters?
-                case (isLoopHead iterConf.loopHeuristic vm, askSmtItersReached vm iterConf.askSmtIters, maxIterationsReached vm iterConf.maxIter) of
-                  -- we're in a loop and maxIters has been reached
-                  (Just True, _, Just n) -> do
-                    -- continue execution down the opposite branch than the one that
-                    -- got us to this point and queue a task to return a partial leaf for the other side
-                    let partialLeaf = Partial [] (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) (MaxIterationsReached vm.state.pc vm.state.contract)
-                    liftIO $ atomically $ modifyTVar numTasks (+1)
-                    liftIO $ writeChan taskQ $ t { vm = vm, stepper = pure partialLeaf }
-                    (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case $ not n)) vm
+              _ -> do
+                conf <- readConfig
+                -- Short-circuit detected storage-copy loops (bytes/string getters).
+                -- If enabled and the current JUMPI is the backward jump of a known
+                -- getter loop, take the fall-through (loop-exit) path directly,
+                -- avoiding unbounded symbolic exploration.
+                if isGetterLoopJumpi conf vm
+                  then do
+                    let vm0 = case lookupGetterLoop vm of
+                                Just loop -> applyGetterLoopSummary loop vm
+                                Nothing   -> vm
+                    (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case False)) vm0
                     interpretInternal t { vm = vm', stepper = (k r) }
-                  -- we're in a loop and askSmtIters has been reached
-                  (Just True, True, _) ->
-                    -- ask the smt solver about the loop condition
-                    performQuery
-                  _ -> do
-                    let simpProps = Expr.concKeccakSimpProps ((cond ./= Lit 0):preconds)
-                    (r, vm') <- case simpProps of
-                      [PBool False] -> liftIO $ stToIO $ runStateT (continue (Case False)) vm
-                      [] -> liftIO $ stToIO $ runStateT (continue (Case True)) vm
-                      _ -> liftIO $ stToIO $ runStateT (continue UnknownBranch) vm
-                    interpretInternal t { vm = vm', stepper = (k r) }
+                  else
+                    -- are in we a loop, have we hit maxIters, have we hit askSmtIters?
+                    case (isLoopHead iterConf.loopHeuristic vm, askSmtItersReached vm iterConf.askSmtIters, maxIterationsReached vm iterConf.maxIter) of
+                      -- we're in a loop and maxIters has been reached
+                      (Just True, _, Just n) -> do
+                        -- continue execution down the opposite branch than the one that
+                        -- got us to this point and queue a task to return a partial leaf for the other side
+                        let partialLeaf = Partial [] (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) (MaxIterationsReached vm.state.pc vm.state.contract)
+                        liftIO $ atomically $ modifyTVar numTasks (+1)
+                        liftIO $ writeChan taskQ $ t { vm = vm, stepper = pure partialLeaf }
+                        (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case $ not n)) vm
+                        interpretInternal t { vm = vm', stepper = (k r) }
+                      -- we're in a loop and askSmtIters has been reached
+                      (Just True, True, _) ->
+                        -- ask the smt solver about the loop condition
+                        performQuery
+                      _ -> do
+                        let simpProps = Expr.concKeccakSimpProps ((cond ./= Lit 0):preconds)
+                        (r, vm') <- case simpProps of
+                          [PBool False] -> liftIO $ stToIO $ runStateT (continue (Case False)) vm
+                          [] -> liftIO $ stToIO $ runStateT (continue (Case True)) vm
+                          _ -> liftIO $ stToIO $ runStateT (continue UnknownBranch) vm
+                        interpretInternal t { vm = vm', stepper = (k r) }
           _ -> performQuery
 
 maxIterationsReached :: VM Symbolic -> Maybe Integer -> Maybe Bool
@@ -571,6 +584,57 @@ isLoopHead StackBased vm = let
   in case oldIters of
        Just (_, oldStack) -> Just $ filter isValid oldStack == filter isValid vm.state.stack
        Nothing -> Nothing
+
+-- | Returns True if the current VM program counter is the backward JUMPI of a
+-- statically detected storage-copy loop (bytes/string getter) and the
+-- 'skipGetterLoops' option is enabled.
+isGetterLoopJumpi :: Config -> VM Symbolic -> Bool
+isGetterLoopJumpi conf vm =
+  conf.skipGetterLoops &&
+  let pc = vm.state.pc
+  in case Map.lookup vm.state.contract vm.env.contracts of
+       Just c  -> any (\loop -> loop.loopJumpiPC == pc) c.getterLoops
+       Nothing -> False
+
+-- | Look up the StorageCopyLoop descriptor for the current JUMPI PC.
+lookupGetterLoop :: VM Symbolic -> Maybe StorageCopyLoop
+lookupGetterLoop vm =
+  let pc = vm.state.pc
+  in case Map.lookup vm.state.contract vm.env.contracts of
+       Just c  -> listToMaybe [loop | loop <- Map.elems c.getterLoops, loop.loopJumpiPC == pc]
+       Nothing -> Nothing
+
+-- | Apply a symbolic summary of a memory-to-memory copy loop before taking
+-- the loop-exit branch.
+--
+-- At the JUMPI the stack is:
+--   [loopHead, condition, loopVar_0, loopVar_1, ...]
+-- where loopVar_k = vm.state.stack !! (2 + k).
+--
+-- For memory-to-memory loops: apply a single CopySlice from srcOff to dstOff
+-- covering (endOff - srcOff) bytes.  When the source is AbstractBuf k this
+-- reduces to b = a.
+--
+-- For storage-to-memory loops (stackLayout = Nothing): return the VM unchanged;
+-- the caller already takes the loop-exit branch, so the only effect is avoiding
+-- MaxIterationsReached.
+applyGetterLoopSummary :: StorageCopyLoop -> VM Symbolic -> VM Symbolic
+applyGetterLoopSummary loop vm =
+  case loop.stackLayout of
+    Nothing -> vm  -- storage-to-memory: exit without memory modification
+    Just layout ->
+      let stk     = vm.state.stack
+          srcOff  = stk !! (2 + layout.srcOffDepth)
+          endOff  = stk !! (2 + layout.endOffDepth)
+          dstOff  = stk !! (2 + layout.dstOffDepth)
+          baseMem = case vm.state.memory of
+                      SymbolicMemory b -> b
+                      ConcreteMemory _ -> ConcreteBuf ""
+          size    = Expr.sub endOff srcOff
+          -- CopySlice srcStart dstStart size srcBuf dstBuf
+          -- When baseMem is AbstractBuf k this reduces to b = a.
+          newMem  = CopySlice srcOff dstOff size baseMem baseMem
+      in vm & #state % #memory .~ SymbolicMemory newMem
 
 type Precondition = VM Symbolic -> Prop
 type Postcondition = VM Symbolic -> Expr End -> Prop

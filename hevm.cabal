@@ -119,6 +119,7 @@ library
     EVM.UnitTest,
     EVM.Sign,
     EVM.Effects,
+    EVM.GetterDetection,
   other-modules:
     EVM.CheatsTH,
     EVM.SMT.Types,

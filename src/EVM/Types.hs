@@ -874,8 +874,28 @@ data Contract = Contract
   , opIxMap     :: VS.Vector Int -- ^ map from byte index to op index
   , codeOps     :: V.Vector (Int, Op)
   , external    :: Bool
+  , getterLoops :: Map Int StorageCopyLoop -- ^ detected storage-copy loop heads
   }
   deriving (Show, Eq, Ord)
+
+-- | Stack positions (depth from stack[2], i.e. below the jump-target and
+-- condition at the JUMPI) of the key variables of a memory-to-memory copy loop.
+-- Index 0 means vm.state.stack[2], index 1 means vm.state.stack[3], etc.
+-- When the source buffer is AbstractBuf the CopySlice summary reduces to b = a.
+data LoopStackInfo = LoopStackInfo
+  { srcOffDepth :: !Int  -- ^ stack[2 + n] holds the current source memory offset
+  , endOffDepth :: !Int  -- ^ stack[2 + n] holds the end-of-source offset (loop bound)
+  , dstOffDepth :: !Int  -- ^ stack[2 + n] holds the current destination memory offset
+  } deriving (Show, Eq, Ord, Generic)
+
+-- | Describes a storage-to-memory copy loop found in contract bytecode.
+-- See 'EVM.GetterDetection.detectStorageCopyLoops' for how these are detected.
+data StorageCopyLoop = StorageCopyLoop
+  { loopHeadPC   :: !Int               -- ^ PC of the JUMPDEST (loop entry)
+  , loopJumpiPC  :: !Int               -- ^ PC of the backward JUMP or JUMPI instruction
+  , loopExitPC   :: !Int               -- ^ PC immediately after the backward jump (fall-through / loop exit)
+  , stackLayout  :: !(Maybe LoopStackInfo) -- ^ stack positions of loop vars at the JUMPI (if detected)
+  } deriving (Show, Eq, Ord, Generic)
 
 class VMOps (t :: VMType) where
   burn' :: Gas t -> EVM t () -> EVM t ()

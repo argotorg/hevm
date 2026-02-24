@@ -66,6 +66,7 @@ import EVM.Effects
 import EVM.UnitTest (writeTrace, printWarnings)
 import EVM.Expr (maybeLitByteSimp)
 import EVM.Keccak (concreteKeccaks)
+import EVM.GetterDetection (detectStorageCopyLoops)
 
 import EVM.Expr.ExprTests qualified as ExprTests
 import EVM.ConcreteExecution.ConcreteExecutionTests qualified as ConcreteExecutionTests
@@ -3552,6 +3553,344 @@ tests = testGroup "hevm"
         Nothing -> assertBoolM "Address missing from storage reads" False
         Just storeReads -> assertBoolM "Did not collect all abstract reads!" $ (Set.size storeReads) == 2
   ]
+  , testGroup "GetterDetection"
+    [ testCase "detects memory-copy loop" $ do
+        -- A stack-neutral memory-to-memory copy loop (required by isStackNeutral check):
+        -- JUMPDEST DUP1 MLOAD DUP3 MSTORE DUP2 DUP2 LT PUSH1 0 JUMPI
+        -- PC:  0    1    2    3    4       5    6    7   8     10
+        -- Deltas: 0 +1   0   +1   -2      +1  +1   -1  +1    -2  = 0 ✓
+        let ops = V.fromList
+              [ (0,  OpJumpdest)
+              , (1,  OpDup 1)
+              , (2,  OpMload)
+              , (3,  OpDup 3)
+              , (4,  OpMstore)
+              , (5,  OpDup 2)
+              , (6,  OpDup 2)
+              , (7,  OpLt)
+              , (8,  OpPush (Lit 0))  -- push target 0 = loop head (PUSH1 = 2 bytes)
+              , (10, OpJumpi)
+              ]
+        let result = detectStorageCopyLoops ops
+        assertEqual "should detect one loop" 1 (Map.size result)
+        case Map.lookup 0 result of
+          Nothing -> assertFailure "loop head not found at PC 0"
+          Just loop -> do
+            assertEqual "loopHeadPC"  0  loop.loopHeadPC
+            assertEqual "loopJumpiPC" 10 loop.loopJumpiPC
+            assertEqual "loopExitPC"  11 loop.loopExitPC
+
+    , testCase "no loop for simple uint getter" $ do
+        -- Bytecode: SLOAD RETURN  (no backward jump)
+        let ops = V.fromList
+              [ (0, OpSload)
+              , (1, OpReturn)
+              ]
+        assertEqual "should detect no loops" Map.empty (detectStorageCopyLoops ops)
+
+    , testCase "rejects storage-to-memory loop (SLOAD not handled)" $ do
+        -- JUMPDEST DUP1 SLOAD DUP3 MSTORE DUP2 DUP2 LT PUSH1 0 JUMPI
+        -- Storage-to-memory loops are not detected; only MLOAD→MSTORE loops are.
+        let ops = V.fromList
+              [ (0,  OpJumpdest)
+              , (1,  OpDup 1)
+              , (2,  OpSload)
+              , (3,  OpDup 3)
+              , (4,  OpMstore)
+              , (5,  OpDup 2)
+              , (6,  OpDup 2)
+              , (7,  OpLt)
+              , (8,  OpPush (Lit 0))
+              , (10, OpJumpi)
+              ]
+        assertEqual "should detect no loops (SLOAD→MSTORE not handled)" Map.empty (detectStorageCopyLoops ops)
+
+    , testCase "rejects loop containing SSTORE" $ do
+        -- JUMPDEST SLOAD SSTORE MSTORE PUSH1 0x00 JUMPI
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpSload)
+              , (2, OpSstore)       -- side effect!
+              , (3, OpMstore)
+              , (4, OpPush (Lit 0)) -- push target 0
+              , (6, OpJumpi)
+              ]
+        assertEqual "should detect no loops (SSTORE side effect)" Map.empty (detectStorageCopyLoops ops)
+
+    , testCase "rejects loop containing TSTORE" $ do
+        -- JUMPDEST SLOAD TSTORE MSTORE PUSH1 0x00 JUMPI
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpSload)
+              , (2, OpTstore)       -- side effect!
+              , (3, OpMstore)
+              , (4, OpPush (Lit 0))
+              , (6, OpJumpi)
+              ]
+        assertEqual "should detect no loops (TSTORE side effect)" Map.empty (detectStorageCopyLoops ops)
+
+    , testCase "rejects loop containing LOG0" $ do
+        -- JUMPDEST SLOAD LOG0 MSTORE PUSH1 0x00 JUMPI
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpSload)
+              , (2, OpLog 0)        -- side effect!
+              , (3, OpMstore)
+              , (4, OpPush (Lit 0))
+              , (6, OpJumpi)
+              ]
+        assertEqual "should detect no loops (LOG0 side effect)" Map.empty (detectStorageCopyLoops ops)
+
+    , testCase "rejects loop containing LOG4" $ do
+        -- JUMPDEST SLOAD LOG4 MSTORE PUSH1 0x00 JUMPI
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpSload)
+              , (2, OpLog 4)        -- side effect!
+              , (3, OpMstore)
+              , (4, OpPush (Lit 0))
+              , (6, OpJumpi)
+              ]
+        assertEqual "should detect no loops (LOG4 side effect)" Map.empty (detectStorageCopyLoops ops)
+
+    , testCase "rejects loop containing CALL" $ do
+        -- JUMPDEST SLOAD CALL MSTORE PUSH1 0x00 JUMPI
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpSload)
+              , (2, OpCall)         -- side effect!
+              , (3, OpMstore)
+              , (4, OpPush (Lit 0))
+              , (6, OpJumpi)
+              ]
+        assertEqual "should detect no loops (CALL side effect)" Map.empty (detectStorageCopyLoops ops)
+
+    , testCase "rejects loop containing CALLCODE" $ do
+        -- JUMPDEST SLOAD CALLCODE MSTORE PUSH1 0x00 JUMPI
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpSload)
+              , (2, OpCallcode)     -- side effect!
+              , (3, OpMstore)
+              , (4, OpPush (Lit 0))
+              , (6, OpJumpi)
+              ]
+        assertEqual "should detect no loops (CALLCODE side effect)" Map.empty (detectStorageCopyLoops ops)
+
+    , testCase "rejects loop containing DELEGATECALL" $ do
+        -- JUMPDEST SLOAD DELEGATECALL MSTORE PUSH1 0x00 JUMPI
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpSload)
+              , (2, OpDelegatecall) -- side effect!
+              , (3, OpMstore)
+              , (4, OpPush (Lit 0))
+              , (6, OpJumpi)
+              ]
+        assertEqual "should detect no loops (DELEGATECALL side effect)" Map.empty (detectStorageCopyLoops ops)
+
+    , testCase "rejects loop containing CREATE" $ do
+        -- JUMPDEST SLOAD CREATE MSTORE PUSH1 0x00 JUMPI
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpSload)
+              , (2, OpCreate)       -- side effect!
+              , (3, OpMstore)
+              , (4, OpPush (Lit 0))
+              , (6, OpJumpi)
+              ]
+        assertEqual "should detect no loops (CREATE side effect)" Map.empty (detectStorageCopyLoops ops)
+
+    , testCase "rejects loop containing CREATE2" $ do
+        -- JUMPDEST SLOAD CREATE2 MSTORE PUSH1 0x00 JUMPI
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpSload)
+              , (2, OpCreate2)      -- side effect!
+              , (3, OpMstore)
+              , (4, OpPush (Lit 0))
+              , (6, OpJumpi)
+              ]
+        assertEqual "should detect no loops (CREATE2 side effect)" Map.empty (detectStorageCopyLoops ops)
+
+    , testCase "rejects loop containing SELFDESTRUCT" $ do
+        -- JUMPDEST SLOAD SELFDESTRUCT MSTORE PUSH1 0x00 JUMPI
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpSload)
+              , (2, OpSelfdestruct) -- side effect!
+              , (3, OpMstore)
+              , (4, OpPush (Lit 0))
+              , (6, OpJumpi)
+              ]
+        assertEqual "should detect no loops (SELFDESTRUCT side effect)" Map.empty (detectStorageCopyLoops ops)
+
+    , testCase "rejects loop without SLOAD or MLOAD" $ do
+        -- JUMPDEST MSTORE PUSH1 0x00 JUMPI  (has MSTORE but neither SLOAD nor MLOAD)
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpMstore)
+              , (2, OpPush (Lit 0))
+              , (4, OpJumpi)
+              ]
+        assertEqual "should detect no loops (no SLOAD or MLOAD)" Map.empty (detectStorageCopyLoops ops)
+
+    , testCase "rejects loop without MSTORE" $ do
+        -- JUMPDEST SLOAD PUSH1 0x00 JUMPI  (has SLOAD but no MSTORE)
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpSload)
+              , (2, OpPush (Lit 0))
+              , (4, OpJumpi)
+              ]
+        assertEqual "should detect no loops (no MSTORE)" Map.empty (detectStorageCopyLoops ops)
+
+    -- Memory-to-memory copy loop detection tests.
+    -- Pattern: MLOAD → MSTORE, no SLOAD, no side effects, stack neutral, backward JUMPI.
+    -- Stack layout: [srcOff, endOff, dstOff, ...]
+    --   JUMPDEST DUP1 MLOAD DUP4 MSTORE DUP2 DUP2 LT PUSH1 0 JUMPI
+    --   PC:      0    1     2    3      4     5    6  7   8  10
+    --   Deltas:  0   +1     0   +1    -2    +1   +1  -1  +1  -2 = 0 ✓
+    , testCase "detects memory-to-memory copy loop" $ do
+        let ops = V.fromList
+              [ (0,  OpJumpdest)
+              , (1,  OpDup 1)      -- dup srcOff
+              , (2,  OpMload)      -- mem[srcOff]
+              , (3,  OpDup 4)      -- dup dstOff (depth 4 = index 3 = dstOff)
+              , (4,  OpMstore)     -- mem[dstOff] = mem[srcOff]
+              , (5,  OpDup 2)      -- dup endOff
+              , (6,  OpDup 2)      -- dup srcOff
+              , (7,  OpLt)         -- srcOff < endOff
+              , (8,  OpPush (Lit 0)) -- push loop head = 0
+              , (10, OpJumpi)
+              ]
+        let result = detectStorageCopyLoops ops
+        assertEqual "should detect one mem-to-mem loop" 1 (Map.size result)
+        case Map.lookup 0 result of
+          Nothing -> assertFailure "loop head not found at PC 0"
+          Just loop -> do
+            assertEqual "loopHeadPC"  0  loop.loopHeadPC
+            assertEqual "loopJumpiPC" 10 loop.loopJumpiPC
+            assertEqual "loopExitPC"  11 loop.loopExitPC
+            case loop.stackLayout of
+              Nothing -> assertFailure "expected LoopStackInfo for mem-to-mem loop"
+              Just layout -> do
+                assertEqual "srcOffDepth" 0 layout.srcOffDepth  -- DUP1 on Orig 0
+                assertEqual "endOffDepth" 1 layout.endOffDepth  -- comparison: srcOff vs endOff (Orig 1)
+                assertEqual "dstOffDepth" 2 layout.dstOffDepth  -- MSTORE addr: DUP4 = Orig 2
+
+    , testCase "rejects mem-to-mem loop with MLOAD but no MSTORE" $ do
+        -- JUMPDEST MLOAD PUSH1 0x00 JUMPI  (has MLOAD but no MSTORE)
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpMload)
+              , (2, OpPush (Lit 0))
+              , (4, OpJumpi)
+              ]
+        assertEqual "should detect no loops (MLOAD but no MSTORE)" Map.empty (detectStorageCopyLoops ops)
+
+    , testCase "bytes-getter-partial-without-detection" $ do
+        -- Same contract, but with skipGetterLoops = False: the loop hits maxIter
+        Just c <- solcRuntime "C"
+          [i|
+          pragma solidity ^0.8.0;
+          contract C {
+            bytes public myBytes;
+          }
+          |]
+        let sig  = Just (Sig "myBytes()" [])
+            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 } }
+            noSkipEnv = Env { config = testEnv.config { skipGetterLoops = False } }
+        (paths, _) <- runEnv noSkipEnv $ withDefaultSolver $ \s ->
+          checkAssert s defaultPanicCodes c sig [] opts
+        assertBool "should be partial without getter detection" (any isPartial paths)
+
+    , testCase "bytes-getter-partial-with-detection" $ do
+        -- Storage-to-memory loops (bytes getter) are not handled by the detector,
+        -- so skipGetterLoops=True still results in a Partial.
+        Just c <- solcRuntime "C"
+          [i|
+          pragma solidity ^0.8.0;
+          contract C {
+            bytes public myBytes;
+          }
+          |]
+        let sig  = Just (Sig "myBytes()" [])
+            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 } }
+            skipEnv = Env { config = testEnv.config { skipGetterLoops = True } }
+        (paths, _) <- runEnv skipEnv $ withDefaultSolver $ \s ->
+          checkAssert s defaultPanicCodes c sig [] opts
+        assertBool "should still be partial even with getter detection enabled (storage-to-memory not handled)" (any isPartial paths)
+
+    -- Memory-to-memory loop detection: the Solidity compiler generates an
+    -- MLOAD→MSTORE loop when ABI-encoding a bytes memory return value.
+    -- Memory-to-memory loop detection: Solidity 0.8+ uses `mcopy` for high-level
+    -- bytes copies, so we use inline assembly to produce an explicit MLOAD/MSTORE
+    -- loop that our detector can find.
+    , testCase "mem-copy-loop-no-partial-with-detection" $ do
+        -- With skipGetterLoops=True the detector short-circuits the loop and
+        -- no Partial is produced.
+        Just c <- solcRuntime "C"
+          [i|
+          pragma solidity ^0.8.0;
+          contract C {
+            function memcpy(bytes memory src) external pure returns (bytes memory dst) {
+              assembly {
+                let len := mload(src)
+                dst := mload(0x40)
+                mstore(dst, len)
+                mstore(0x40, add(dst, add(and(add(len, 31), not(31)), 0x20)))
+                let srcPtr := add(src, 0x20)
+                let dstPtr := add(dst, 0x20)
+                let end := add(srcPtr, and(add(len, 31), not(31)))
+                for {} lt(srcPtr, end) {
+                  srcPtr := add(srcPtr, 0x20)
+                  dstPtr := add(dstPtr, 0x20)
+                } {
+                  mstore(dstPtr, mload(srcPtr))
+                }
+              }
+            }
+          }
+          |]
+        let opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 } }
+            skipEnv = Env { config = testEnv.config { skipGetterLoops = True } }
+        (paths, _) <- runEnv skipEnv $ withDefaultSolver $ \s ->
+          checkAssert s defaultPanicCodes c Nothing [] opts
+        assertBool "should have no partial results with mem-copy loop detection" $ not (any isPartial paths)
+
+    , testCase "mem-copy-loop-partial-without-detection" $ do
+        -- Same contract, but with skipGetterLoops=False: the loop is explored
+        -- symbolically and hits maxIter, causing a Partial.
+        Just c <- solcRuntime "C"
+          [i|
+          pragma solidity ^0.8.0;
+          contract C {
+            function memcpy(bytes memory src) external pure returns (bytes memory dst) {
+              assembly {
+                let len := mload(src)
+                dst := mload(0x40)
+                mstore(dst, len)
+                mstore(0x40, add(dst, add(and(add(len, 31), not(31)), 0x20)))
+                let srcPtr := add(src, 0x20)
+                let dstPtr := add(dst, 0x20)
+                let end := add(srcPtr, and(add(len, 31), not(31)))
+                for {} lt(srcPtr, end) {
+                  srcPtr := add(srcPtr, 0x20)
+                  dstPtr := add(dstPtr, 0x20)
+                } {
+                  mstore(dstPtr, mload(srcPtr))
+                }
+              }
+            }
+          }
+          |]
+        let opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 } }
+            noSkipEnv = Env { config = testEnv.config { skipGetterLoops = False } }
+        (paths, _) <- runEnv noSkipEnv $ withDefaultSolver $ \s ->
+          checkAssert s defaultPanicCodes c Nothing [] opts
+        assertBool "should be partial without mem-copy loop detection" (any isPartial paths)
+    ]
   ]
   where
     (===>) = assertSolidityComputation

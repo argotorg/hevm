@@ -26,6 +26,7 @@ import EVM.Sign qualified
 import EVM.Concrete qualified as Concrete
 import EVM.CheatsTH
 import EVM.Effects (Config (..))
+import EVM.GetterDetection (detectStorageCopyLoops)
 
 import Control.Monad (unless, when)
 import Control.Monad.ST (ST, RealWorld)
@@ -283,6 +284,7 @@ unknownContract addr = Contract
   , opIxMap     = mempty
   , codeOps     = mempty
   , external    = False
+  , getterLoops = mempty
   }
 
 -- | Initialize an abstract contract with known code
@@ -298,6 +300,7 @@ abstractContract code addr = Contract
   , opIxMap     = mkOpIxMap code
   , codeOps     = mkCodeOps code
   , external    = False
+  , getterLoops = detectStorageCopyLoops (mkCodeOps code)
   }
 
 -- | Initialize an empty contract without code
@@ -317,6 +320,7 @@ initialContract code = Contract
   , opIxMap     = mkOpIxMap code
   , codeOps     = mkCodeOps code
   , external    = False
+  , getterLoops = detectStorageCopyLoops (mkCodeOps code)
   }
 
 isCreation :: ContractCode -> Bool
@@ -2481,6 +2485,7 @@ replaceCodeEtch target newCode =
               , codehash = hashcode newCode
               , opIxMap = mkOpIxMap newCode
               , codeOps = mkCodeOps newCode
+              , getterLoops = detectStorageCopyLoops (mkCodeOps newCode)
               })
         UnknownCode _ -> internalError "Can't etch unknown code"
       Nothing -> put . Just $ initialContract newCode
