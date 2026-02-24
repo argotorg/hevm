@@ -342,11 +342,18 @@ readWord i b = readWordFromBytes i b
 -- returns an abstract ReadWord expression if a concrete word cannot be constructed
 readWordFromBytes :: Expr EWord -> Expr Buf -> Expr EWord
 readWordFromBytes (Lit idx) (ConcreteBuf bs)
-  -- guard: idx+31 must not wrap past maxBound (would make [idx..idx+31] empty)
-  | idx + 31 < idx = ReadWord (Lit idx) (ConcreteBuf bs)
-  | otherwise = case tryInto idx of
-      Left _ -> Lit 0
+  =  case tryInto idx of
       Right i -> Lit $ word $ padRight 32 $ BS.take 32 $ BS.drop i bs
+      Left _ -> if noOverflow then Lit 0 else Lit . word $ wrappedBytes
+        where
+          noOverflow = idx <= (maxBound :: W256) - 31
+          wrappedBytes = zeroes <> bytesFromBeginning
+          fromEnd :: Int = fromIntegral ((maxBound :: W256) - idx + 1)
+          fromBeginning = 32 - fromEnd
+          zeroes = BS.replicate fromEnd 0
+          bytesFromBeginning = padRight 32 $ BS.take fromBeginning bs
+
+
 readWordFromBytes idx buf@(AbstractBuf _) = ReadWord idx buf
 readWordFromBytes i@(Lit idx) buf
   -- idx+31 must not wrap past maxBound (would make [idx..idx+31] empty)
