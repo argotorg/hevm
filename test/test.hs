@@ -3824,43 +3824,71 @@ tests = testGroup "hevm"
 
     -- Memory-to-memory loop detection: the Solidity compiler generates an
     -- MLOAD→MSTORE loop when ABI-encoding a bytes memory return value.
+    -- Memory-to-memory loop detection: Solidity 0.8+ uses `mcopy` for high-level
+    -- bytes copies, so we use inline assembly to produce an explicit MLOAD/MSTORE
+    -- loop that our detector can find.
     , testCase "mem-copy-loop-no-partial-with-detection" $ do
-        -- A function returning a bytes memory argument causes the compiler to
-        -- emit an MLOAD→MSTORE copy loop for ABI encoding the return value.
-        -- With skipGetterLoops=True the loop is summarised and no Partial occurs.
+        -- With skipGetterLoops=True the detector short-circuits the loop and
+        -- no Partial is produced.
         Just c <- solcRuntime "C"
           [i|
           pragma solidity ^0.8.0;
           contract C {
-            function echo(bytes memory data) external pure returns (bytes memory) {
-              return data;
+            function memcpy(bytes memory src) external pure returns (bytes memory dst) {
+              assembly {
+                let len := mload(src)
+                dst := mload(0x40)
+                mstore(dst, len)
+                mstore(0x40, add(dst, add(and(add(len, 31), not(31)), 0x20)))
+                let srcPtr := add(src, 0x20)
+                let dstPtr := add(dst, 0x20)
+                let end := add(srcPtr, and(add(len, 31), not(31)))
+                for {} lt(srcPtr, end) {
+                  srcPtr := add(srcPtr, 0x20)
+                  dstPtr := add(dstPtr, 0x20)
+                } {
+                  mstore(dstPtr, mload(srcPtr))
+                }
+              }
             }
           }
           |]
-        let sig  = Just (Sig "echo(bytes)" [AbiBytesDynamicType])
-            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 } }
+        let opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 } }
             skipEnv = Env { config = testEnv.config { skipGetterLoops = True } }
         (paths, _) <- runEnv skipEnv $ withDefaultSolver $ \s ->
-          checkAssert s defaultPanicCodes c sig [] opts
+          checkAssert s defaultPanicCodes c Nothing [] opts
         assertBool "should have no partial results with mem-copy loop detection" $ not (any isPartial paths)
 
     , testCase "mem-copy-loop-partial-without-detection" $ do
-        -- Same contract, but with skipGetterLoops=False: the MLOAD→MSTORE loop
-        -- is explored symbolically and hits maxIter, causing a Partial.
+        -- Same contract, but with skipGetterLoops=False: the loop is explored
+        -- symbolically and hits maxIter, causing a Partial.
         Just c <- solcRuntime "C"
           [i|
           pragma solidity ^0.8.0;
           contract C {
-            function echo(bytes memory data) external pure returns (bytes memory) {
-              return data;
+            function memcpy(bytes memory src) external pure returns (bytes memory dst) {
+              assembly {
+                let len := mload(src)
+                dst := mload(0x40)
+                mstore(dst, len)
+                mstore(0x40, add(dst, add(and(add(len, 31), not(31)), 0x20)))
+                let srcPtr := add(src, 0x20)
+                let dstPtr := add(dst, 0x20)
+                let end := add(srcPtr, and(add(len, 31), not(31)))
+                for {} lt(srcPtr, end) {
+                  srcPtr := add(srcPtr, 0x20)
+                  dstPtr := add(dstPtr, 0x20)
+                } {
+                  mstore(dstPtr, mload(srcPtr))
+                }
+              }
             }
           }
           |]
-        let sig  = Just (Sig "echo(bytes)" [AbiBytesDynamicType])
-            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 } }
+        let opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 } }
             noSkipEnv = Env { config = testEnv.config { skipGetterLoops = False } }
         (paths, _) <- runEnv noSkipEnv $ withDefaultSolver $ \s ->
-          checkAssert s defaultPanicCodes c sig [] opts
+          checkAssert s defaultPanicCodes c Nothing [] opts
         assertBool "should be partial without mem-copy loop detection" (any isPartial paths)
     ]
   ]
