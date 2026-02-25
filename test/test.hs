@@ -3782,6 +3782,22 @@ tests = testGroup "hevm"
         let retBufs = [ buf | Success _ _ buf _ <- paths ]
         assertBool "should have at least one success state" $ not (null retBufs)
         assertBool "return buffer should contain WriteWord from loop summary" $ any bufContainsWriteWord retBufs
+
+    , testCase "string-getter-returns-correct-symbolic-structure" $ do
+        Just c <- solcRuntime "C"
+          [i|
+          pragma solidity ^0.8.0;
+          contract C {
+            string public myString;
+          }
+          |]
+        let sig  = Just (Sig "myString()" [])
+            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 } }
+            skipEnv = Env { config = testEnv.config { skipGetterLoops = True } }
+        paths <- runEnv skipEnv $ withDefaultSolver $ \s -> getExpr s c sig [] opts
+        let retBufs = [ buf | Success _ _ buf _ <- paths ]
+        assertBool "should have at least one success state" $ not (null retBufs)
+        assertBool "return buffer should contain SLoad from SHA3(0) + i" $ any bufContainsStringStorageAccess retBufs
     ]
   ]
   where
@@ -3797,6 +3813,25 @@ bufContainsWriteWord = \case
   WriteByte _ _         b  -> bufContainsWriteWord b
   CopySlice _ _ _     s d  -> bufContainsWriteWord s || bufContainsWriteWord d
   _                        -> False
+-- | True if the Buf expression tree contains a WriteWord whose value is an
+-- ITE expression where the "then" branch is an SLoad from SHA3(0) + offset.
+bufContainsStringStorageAccess :: Expr Buf -> Bool
+bufContainsStringStorageAccess = \case
+  -- Detect: WriteWord _ (ITE _ (SLoad (Add (SHA3 (ConcreteBuf 0..)) i) _) _) _
+  -- Or: SLoad (Lit k) where k >= keccak(0) && k < keccak(0) + 100
+  WriteWord _ (ITE _ (SLoad key _) _) b -> isSHA3Zero key || bufContainsStringStorageAccess b
+  WriteWord _ _         b -> bufContainsStringStorageAccess b
+  WriteByte _ _         b -> bufContainsStringStorageAccess b
+  CopySlice _ _ _     s d -> bufContainsStringStorageAccess s || bufContainsStringStorageAccess d
+  _                       -> False
+  where
+    keccakZero = 0x290decd9548b62a8d60345a988386fc84ba6bc95484008f6362f93160ef3e563
+    isSHA3Zero (Add (Keccak (ConcreteBuf bs)) _) = BS.length bs == 32 && BS.all (== 0) bs
+    isSHA3Zero (Add _ (Keccak (ConcreteBuf bs))) = BS.length bs == 32 && BS.all (== 0) bs
+    isSHA3Zero (Add (Lit k) _) = k == keccakZero
+    isSHA3Zero (Add _ (Lit k)) = k == keccakZero
+    isSHA3Zero (Lit k) = k >= keccakZero && k < keccakZero + 100
+    isSHA3Zero _ = False
 
 -- | Takes a runtime code and calls it with the provided calldata
 
