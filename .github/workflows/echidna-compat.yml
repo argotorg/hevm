@@ -88,7 +88,7 @@ jobs:
           # care about compilation, not runtime perf.
           nix-shell \
             -I nixpkgs=channel:nixpkgs-unstable \
-            -p secp256k1 libff gmp pkg-config stack \
+            -p secp256k1 libff gmp ncurses zlib pkg-config stack \
             --run 'stack build --fast \
               --test --no-run-tests &&
               stack exec -- echidna --help' \
