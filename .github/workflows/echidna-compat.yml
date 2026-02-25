@@ -87,7 +87,7 @@ jobs:
           # --fast skips optimizations since we only
           # care about compilation, not runtime perf.
           nix-shell \
-            -I nixpkgs=channel:nixpkgs-unstable \
+            -I nixpkgs=channel:nixos-25.05 \
             -p secp256k1 libff gmp ncurses zlib pkg-config stack \
             --run 'stack build --fast \
               --test --no-run-tests &&
