@@ -19,8 +19,9 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Vector qualified as V
 
-import EVM.Types (Op, GenericOp(..), StorageCopyLoop(..))
+import EVM.Types (StorageCopyLoop(..))
 import EVM.Expr (maybeLitWordSimp)
+import EVM.Op
 
 -- | Scan a contract's already-parsed op vector for storage-copy loops.
 --
@@ -41,10 +42,6 @@ detectStorageCopyLoops ops =
       candidates = findBackwardJumps ops jumpdests
       loops      = [loop | (p, q) <- candidates, Just loop <- [analyseBody ops p q]]
   in Map.fromList [(l.loopHeadPC, l) | l <- loops]
-
--- ---------------------------------------------------------------------------
--- Internal helpers
--- ---------------------------------------------------------------------------
 
 -- | Collect all byte-PCs that have a JUMPDEST.
 buildJumpdestSet :: V.Vector (Int, Op) -> Set Int
@@ -95,30 +92,17 @@ analyseBody ops p q = do
   let hasMstore     = V.any (\op -> op == OpMstore || op == OpMstore8) opcodes
   let hasSideEffect = V.any isSideEffect opcodes
   let innerJumpsOk  = checkInnerJumps body p q
+  let isStackNeutral = case traverse stackDelta (V.toList opcodes) of
+        Just deltas -> sum deltas == 0
+        Nothing     -> False
 
-  if hasSload && hasMstore && not hasSideEffect && innerJumpsOk
+  if hasSload && hasMstore && not hasSideEffect && innerJumpsOk && isStackNeutral
     then Just StorageCopyLoop
            { loopHeadPC  = p
            , loopJumpiPC = q
            , loopExitPC  = q + 1  -- JUMP/JUMPI are single-byte opcodes
            }
     else Nothing
-
--- | True for opcodes that have observable side effects beyond memory/stack.
-isSideEffect :: Op -> Bool
-isSideEffect = \case
-  OpSstore       -> True
-  OpTstore       -> True
-  OpLog _        -> True
-  OpCall         -> True
-  OpCallcode     -> True
-  OpDelegatecall -> True
-  OpCreate       -> True
-  OpCreate2      -> True
-  OpSelfdestruct -> True
-  OpRevert       -> True
-  OpUnknown _    -> True
-  _              -> False
 
 -- | Check that all JUMP/JUMPI instructions in the body whose target is
 -- statically known stay within [p, q].

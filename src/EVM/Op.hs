@@ -5,6 +5,8 @@ module EVM.Op
   , intToOpName
   , getOp
   , readOp
+  , stackDelta
+  , isSideEffect
   ) where
 
 import EVM.Expr qualified as Expr
@@ -362,3 +364,126 @@ getOp x = case x of
   0xfa -> OpStaticcall
   0xff -> OpSelfdestruct
   _    -> OpUnknown x
+
+-- | Net stack depth change produced by a single opcode (pushes minus pops).
+-- Returns 'Nothing' for opcodes with indeterminate effects; callers treat
+-- that conservatively (loop rejected).
+stackDelta :: Op -> Maybe Int
+stackDelta = \case
+  -- 0-input, 1-output
+  OpAddress        -> Just 1
+  OpOrigin         -> Just 1
+  OpCaller         -> Just 1
+  OpCallvalue      -> Just 1
+  OpCalldatasize   -> Just 1
+  OpCodesize       -> Just 1
+  OpGasprice       -> Just 1
+  OpReturndatasize -> Just 1
+  OpCoinbase       -> Just 1
+  OpTimestamp      -> Just 1
+  OpNumber         -> Just 1
+  OpPrevRandao     -> Just 1
+  OpGaslimit       -> Just 1
+  OpChainid        -> Just 1
+  OpSelfbalance    -> Just 1
+  OpBaseFee        -> Just 1
+  OpBlobBaseFee    -> Just 1
+  OpPc             -> Just 1
+  OpMsize          -> Just 1
+  OpGas            -> Just 1
+  OpPush0          -> Just 1
+  OpPush _         -> Just 1
+  OpDup _          -> Just 1    -- copies nth item, net +1
+  -- 1-input, 1-output
+  OpNot            -> Just 0
+  OpIszero         -> Just 0
+  OpClz            -> Just 0
+  OpBalance        -> Just 0
+  OpExtcodesize    -> Just 0
+  OpExtcodehash    -> Just 0
+  OpBlobhash       -> Just 0
+  OpBlockhash      -> Just 0
+  OpSload          -> Just 0
+  OpTload          -> Just 0
+  OpMload          -> Just 0
+  OpCalldataload   -> Just 0
+  OpSwap _         -> Just 0    -- exchanges items, no net change
+  OpJumpdest       -> Just 0
+  -- 2-input, 1-output
+  OpAdd            -> Just (-1)
+  OpMul            -> Just (-1)
+  OpSub            -> Just (-1)
+  OpDiv            -> Just (-1)
+  OpSdiv           -> Just (-1)
+  OpMod            -> Just (-1)
+  OpSmod           -> Just (-1)
+  OpExp            -> Just (-1)
+  OpSignextend     -> Just (-1)
+  OpLt             -> Just (-1)
+  OpGt             -> Just (-1)
+  OpSlt            -> Just (-1)
+  OpSgt            -> Just (-1)
+  OpEq             -> Just (-1)
+  OpAnd            -> Just (-1)
+  OpOr             -> Just (-1)
+  OpXor            -> Just (-1)
+  OpByte           -> Just (-1)
+  OpShl            -> Just (-1)
+  OpShr            -> Just (-1)
+  OpSar            -> Just (-1)
+  OpSha3           -> Just (-1)  -- keccak256(offset, size) -> hash
+  OpPop            -> Just (-1)
+  OpJump           -> Just (-1)  -- pops target
+  -- 3-input, 1-output
+  OpAddmod         -> Just (-2)
+  OpMulmod         -> Just (-2)
+  -- 2-input, 0-output
+  OpMstore         -> Just (-2)
+  OpMstore8        -> Just (-2)
+  OpSstore         -> Just (-2)
+  OpTstore         -> Just (-2)
+  OpJumpi          -> Just (-2)  -- pops target + condition
+  OpReturn         -> Just (-2)  -- pops offset + size (halts)
+  OpRevert         -> Just (-2)  -- pops offset + size (halts)
+  -- 3-input, 0-output
+  OpCalldatacopy   -> Just (-3)
+  OpCodecopy       -> Just (-3)
+  OpReturndatacopy -> Just (-3)
+  OpMcopy          -> Just (-3)
+  -- 3-input, 1-output
+  OpCreate         -> Just (-2)  -- value, offset, size -> addr
+  -- 4-input, 0-output
+  OpExtcodecopy    -> Just (-4)
+  -- 4-input, 1-output
+  OpCreate2        -> Just (-3)  -- value, offset, size, salt -> addr
+  -- 1-input, 0-output
+  OpSelfdestruct   -> Just (-1)
+  -- 6-input, 1-output
+  OpDelegatecall   -> Just (-5)
+  OpStaticcall     -> Just (-5)
+  -- 7-input, 1-output
+  OpCall           -> Just (-6)
+  OpCallcode       -> Just (-6)
+  -- LOG n: pops offset + size + n topics
+  OpLog n          -> Just (-(fromIntegral n + 2))
+  -- Unknown/invalid: indeterminate
+  OpUnknown _      -> Nothing
+
+
+-- | True for opcodes that have observable side effects beyond memory/stack.
+isSideEffect :: Op -> Bool
+isSideEffect = \case
+  OpSstore       -> True
+  OpTstore       -> True
+  OpLog _        -> True
+  OpCall         -> True
+  OpCallcode     -> True
+  OpDelegatecall -> True
+  OpStaticcall   -> True
+  OpCreate       -> True
+  OpCreate2      -> True
+  OpSelfdestruct -> True
+  OpRevert       -> True
+  OpUnknown _    -> True
+  _              -> False
+
