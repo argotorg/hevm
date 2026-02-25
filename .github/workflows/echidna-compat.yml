@@ -94,16 +94,11 @@ jobs:
           # care about compilation, not runtime perf.
           nix-shell \
             -I "nixpkgs=${NIXPKGS}" \
-            -p secp256k1 libff gmp pkg-config \
-               haskellPackages.ghc stack \
+            -p secp256k1 libff gmp pkg-config stack \
             --run 'stack build --fast \
-              --test --no-run-tests \
-              --system-ghc --no-install-ghc \
-              --skip-ghc-check &&
-              stack exec --system-ghc \
-              --no-install-ghc --skip-ghc-check \
-              -- echidna --help' \
-            2>&1 | tee build.log
+              --test --no-run-tests &&
+              stack exec -- echidna --help' \
+            > >(tee build.log) 2>&1
 
       - name: Prepare build log
         if: >-
