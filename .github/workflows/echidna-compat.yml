@@ -81,4 +81,4 @@ jobs:
           # We use the nix development shell from the hevm subdirectory to provide 
           # necessary C dependencies like libsecp256k1 and libff.
           # We build with --fast to skip optimizations since we only care about compilation.
-          nix develop ./hevm -c stack build --fast --test --no-run-tests
+          nix develop ./hevm -c stack build --fast --test --no-run-tests --system-ghc
