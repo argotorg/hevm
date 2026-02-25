@@ -1,9 +1,10 @@
+---
 name: Echidna Compatibility Check
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-    branches: [ main ]
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -43,8 +44,11 @@ jobs:
               new_deps = []
               found_hevm = False
               for dep in data['extra-deps']:
-                  # Identify if this is the remote hevm dependency block
-                  if isinstance(dep, dict) and 'git' in dep and 'hevm' in dep['git']:
+                  # Identify if this is the remote hevm dependency
+                  is_hevm = (isinstance(dep, dict)
+                             and 'git' in dep
+                             and 'hevm' in dep['git'])
+                  if is_hevm:
                       if not found_hevm:
                           new_deps.append('./hevm')
                           found_hevm = True
@@ -82,7 +86,9 @@ jobs:
         continue-on-error: true
         working-directory: echidna-src
         run: |
-          # We use the nix development shell from the hevm subdirectory to provide 
-          # necessary C dependencies like libsecp256k1 and libff.
-          # We build with --fast to skip optimizations since we only care about compilation.
-          nix develop ./hevm -c stack build --fast --test --no-run-tests --system-ghc
+          # Use the nix dev shell from hevm for C deps
+          # (libsecp256k1, libff). --fast skips optimizations
+          # since we only care about compilation.
+          nix develop ./hevm -c \
+            stack build --fast \
+            --test --no-run-tests --system-ghc
