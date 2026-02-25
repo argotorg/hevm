@@ -28,6 +28,8 @@ jobs:
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: false
 
       - name: Patch stack.yaml
         working-directory: echidna-src
