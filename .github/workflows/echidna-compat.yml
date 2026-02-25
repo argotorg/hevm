@@ -87,11 +87,14 @@ jobs:
           # --fast skips optimizations since we only
           # care about compilation, not runtime perf.
           nix-shell \
-            -I nixpkgs=channel:nixos-25.05 \
+            -I nixpkgs=channel:nixpkgs-unstable \
             -p secp256k1 libff gmp ncurses zlib pkg-config stack \
+               'haskell.compiler.ghc984' \
             --run 'stack build --fast \
-              --test --no-run-tests &&
-              stack exec -- echidna --help' \
+              --test --no-run-tests \
+              --system-ghc --skip-ghc-check &&
+              stack exec --system-ghc --skip-ghc-check \
+              -- echidna --help' \
             > >(tee build.log) 2>&1
 
       - name: Prepare build log
