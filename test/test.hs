@@ -3582,18 +3582,127 @@ tests = testGroup "hevm"
         assertEqual "should detect no loops" Map.empty (detectStorageCopyLoops ops)
 
     , testCase "rejects loop containing SSTORE" $ do
-        -- JUMPDEST SSTORE MSTORE PUSH1 0x00 JUMPI
+        -- JUMPDEST SLOAD SSTORE MSTORE PUSH1 0x00 JUMPI
         let ops = V.fromList
               [ (0, OpJumpdest)
-              , (1, OpSstore)       -- side effect!
-              , (2, OpMstore)
-              , (3, OpPush (Lit 0)) -- push target 0
-              , (5, OpJumpi)
+              , (1, OpSload)
+              , (2, OpSstore)       -- side effect!
+              , (3, OpMstore)
+              , (4, OpPush (Lit 0)) -- push target 0
+              , (6, OpJumpi)
               ]
-        assertEqual "should detect no loops (side effect)" Map.empty (detectStorageCopyLoops ops)
+        assertEqual "should detect no loops (SSTORE side effect)" Map.empty (detectStorageCopyLoops ops)
+
+    , testCase "rejects loop containing TSTORE" $ do
+        -- JUMPDEST SLOAD TSTORE MSTORE PUSH1 0x00 JUMPI
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpSload)
+              , (2, OpTstore)       -- side effect!
+              , (3, OpMstore)
+              , (4, OpPush (Lit 0))
+              , (6, OpJumpi)
+              ]
+        assertEqual "should detect no loops (TSTORE side effect)" Map.empty (detectStorageCopyLoops ops)
+
+    , testCase "rejects loop containing LOG0" $ do
+        -- JUMPDEST SLOAD LOG0 MSTORE PUSH1 0x00 JUMPI
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpSload)
+              , (2, OpLog 0)        -- side effect!
+              , (3, OpMstore)
+              , (4, OpPush (Lit 0))
+              , (6, OpJumpi)
+              ]
+        assertEqual "should detect no loops (LOG0 side effect)" Map.empty (detectStorageCopyLoops ops)
+
+    , testCase "rejects loop containing LOG4" $ do
+        -- JUMPDEST SLOAD LOG4 MSTORE PUSH1 0x00 JUMPI
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpSload)
+              , (2, OpLog 4)        -- side effect!
+              , (3, OpMstore)
+              , (4, OpPush (Lit 0))
+              , (6, OpJumpi)
+              ]
+        assertEqual "should detect no loops (LOG4 side effect)" Map.empty (detectStorageCopyLoops ops)
+
+    , testCase "rejects loop containing CALL" $ do
+        -- JUMPDEST SLOAD CALL MSTORE PUSH1 0x00 JUMPI
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpSload)
+              , (2, OpCall)         -- side effect!
+              , (3, OpMstore)
+              , (4, OpPush (Lit 0))
+              , (6, OpJumpi)
+              ]
+        assertEqual "should detect no loops (CALL side effect)" Map.empty (detectStorageCopyLoops ops)
+
+    , testCase "rejects loop containing CALLCODE" $ do
+        -- JUMPDEST SLOAD CALLCODE MSTORE PUSH1 0x00 JUMPI
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpSload)
+              , (2, OpCallcode)     -- side effect!
+              , (3, OpMstore)
+              , (4, OpPush (Lit 0))
+              , (6, OpJumpi)
+              ]
+        assertEqual "should detect no loops (CALLCODE side effect)" Map.empty (detectStorageCopyLoops ops)
+
+    , testCase "rejects loop containing DELEGATECALL" $ do
+        -- JUMPDEST SLOAD DELEGATECALL MSTORE PUSH1 0x00 JUMPI
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpSload)
+              , (2, OpDelegatecall) -- side effect!
+              , (3, OpMstore)
+              , (4, OpPush (Lit 0))
+              , (6, OpJumpi)
+              ]
+        assertEqual "should detect no loops (DELEGATECALL side effect)" Map.empty (detectStorageCopyLoops ops)
+
+    , testCase "rejects loop containing CREATE" $ do
+        -- JUMPDEST SLOAD CREATE MSTORE PUSH1 0x00 JUMPI
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpSload)
+              , (2, OpCreate)       -- side effect!
+              , (3, OpMstore)
+              , (4, OpPush (Lit 0))
+              , (6, OpJumpi)
+              ]
+        assertEqual "should detect no loops (CREATE side effect)" Map.empty (detectStorageCopyLoops ops)
+
+    , testCase "rejects loop containing CREATE2" $ do
+        -- JUMPDEST SLOAD CREATE2 MSTORE PUSH1 0x00 JUMPI
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpSload)
+              , (2, OpCreate2)      -- side effect!
+              , (3, OpMstore)
+              , (4, OpPush (Lit 0))
+              , (6, OpJumpi)
+              ]
+        assertEqual "should detect no loops (CREATE2 side effect)" Map.empty (detectStorageCopyLoops ops)
+
+    , testCase "rejects loop containing SELFDESTRUCT" $ do
+        -- JUMPDEST SLOAD SELFDESTRUCT MSTORE PUSH1 0x00 JUMPI
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpSload)
+              , (2, OpSelfdestruct) -- side effect!
+              , (3, OpMstore)
+              , (4, OpPush (Lit 0))
+              , (6, OpJumpi)
+              ]
+        assertEqual "should detect no loops (SELFDESTRUCT side effect)" Map.empty (detectStorageCopyLoops ops)
 
     , testCase "rejects loop without SLOAD" $ do
-        -- JUMPDEST MSTORE PUSH1 0x00 JUMPI  (no SLOAD)
+        -- JUMPDEST MSTORE PUSH1 0x00 JUMPI  (has MSTORE but no SLOAD)
         let ops = V.fromList
               [ (0, OpJumpdest)
               , (1, OpMstore)
@@ -3603,7 +3712,7 @@ tests = testGroup "hevm"
         assertEqual "should detect no loops (no SLOAD)" Map.empty (detectStorageCopyLoops ops)
 
     , testCase "rejects loop without MSTORE" $ do
-        -- JUMPDEST SLOAD PUSH1 0x00 JUMPI  (no MSTORE)
+        -- JUMPDEST SLOAD PUSH1 0x00 JUMPI  (has SLOAD but no MSTORE)
         let ops = V.fromList
               [ (0, OpJumpdest)
               , (1, OpSload)
