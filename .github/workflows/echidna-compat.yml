@@ -84,16 +84,10 @@ jobs:
         continue-on-error: true
         working-directory: echidna-src
         run: |
-          # Pin nixpkgs to echidna's flake.lock rev
-          REV=$(jq -r '
-            .nodes[.nodes.root.inputs.nixpkgs].locked.rev
-          ' flake.lock)
-          NIXPKGS="https://github.com/NixOS/nixpkgs/archive/${REV}.tar.gz"
-
           # --fast skips optimizations since we only
           # care about compilation, not runtime perf.
           nix-shell \
-            -I "nixpkgs=${NIXPKGS}" \
+            -I nixpkgs=channel:nixpkgs-unstable \
             -p secp256k1 libff gmp pkg-config stack \
             --run 'stack build --fast \
               --test --no-run-tests &&
