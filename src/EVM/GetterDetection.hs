@@ -91,7 +91,7 @@ analyseBody ops p q = do
   let hasSload      = V.any (== OpSload) opcodes
   let hasMstore     = V.any (\op -> op == OpMstore || op == OpMstore8) opcodes
   let hasSideEffect = V.any isSideEffect opcodes
-  let innerJumpsOk  = checkInnerJumps body p q
+  let innerJumpsOk  = noInnerJumps body p q
   let isStackNeutral = case traverse stackDelta (V.toList opcodes) of
         Just deltas -> sum deltas == 0
         Nothing     -> False
@@ -107,8 +107,8 @@ analyseBody ops p q = do
 -- | Check that the only JUMP/JUMPI in the body is the loop-closing one at q.
 -- A genuine getter loop has no internal control flow other than the single
 -- backward jump that closes the loop.
-checkInnerJumps :: V.Vector (Int, Op) -> Int -> Int -> Bool
-checkInnerJumps body _ q = V.all noInnerJump body
+noInnerJumps :: V.Vector (Int, Op) -> Int -> Int -> Bool
+noInnerJumps body _ q = V.all noInnerJump body
   where
     noInnerJump (pc, op) = case op of
       OpJump  -> pc == q
