@@ -10,10 +10,7 @@ jobs:
   echidna-build:
     name: Build Echidna with local HEVM
     runs-on: ubuntu-latest
-    # This job is optional and will only show a warning if it fails.
-    # It does not block PR merges unless explicitly set as a required check.
-    continue-on-error: true
-    
+
     steps:
       - name: Checkout Echidna
         uses: actions/checkout@v4
@@ -80,6 +77,9 @@ jobs:
           enable-stack: true
 
       - name: Build Echidna
+        # This step is optional and will only show a warning if it fails.
+        # It does not block PR merges unless explicitly set as a required check.
+        continue-on-error: true
         working-directory: echidna-src
         run: |
           # We use the nix development shell from the hevm subdirectory to provide 
