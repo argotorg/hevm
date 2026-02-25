@@ -91,12 +91,12 @@ analyseBody ops p q = do
   let hasSload      = V.any (== OpSload) opcodes
   let hasMstore     = V.any (\op -> op == OpMstore || op == OpMstore8) opcodes
   let hasSideEffect = V.any isSideEffect opcodes
-  let innerJumpsOk  = noInnerJumps body p q
+  let jumpsOK       = noInnerJumps body p q
   let isStackNeutral = case traverse stackDelta (V.toList opcodes) of
         Just deltas -> sum deltas == 0
         Nothing     -> False
 
-  if hasSload && hasMstore && not hasSideEffect && innerJumpsOk && isStackNeutral
+  if hasSload && hasMstore && not hasSideEffect && jumpsOK && isStackNeutral
     then Just StorageCopyLoop
            { loopHeadPC  = p
            , loopJumpiPC = q
