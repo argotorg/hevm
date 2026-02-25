@@ -3725,7 +3725,7 @@ tests = testGroup "hevm"
     -- The Solidity compiler generates a storage-copy loop for bytes/string getters.
     -- With skipGetterLoops enabled, we take the loop-exit path immediately and
     -- avoid MaxIterationsReached. With it disabled, a low maxIter causes a Partial.
-    , test "bytes-getter-no-partial-with-detection" $ do
+    , testCase "bytes-getter-no-partial-with-detection" $ do
         -- Contract with only a bytes public variable; we check its auto-generated getter.
         Just c <- solcRuntime "C"
           [i|
@@ -3736,10 +3736,9 @@ tests = testGroup "hevm"
           |]
         let sig  = Just (Sig "myBytes()" [])
             opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 } }
-        -- skipGetterLoops = True (default): loop is short-circuited, no Partial
-        (paths, _) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] opts
-        assertBoolM "should have no partial results with getter detection" $
-          not (any isPartial paths)
+            skipEnv = Env { config = testEnv.config { skipGetterLoops = True } }
+        (paths, _) <- runEnv skipEnv $ withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] opts
+        assertBool "should have no partial results with getter detection" $ not (any isPartial paths)
 
     , testCase "bytes-getter-partial-without-detection" $ do
         -- Same contract, but with skipGetterLoops = False: the loop hits maxIter
@@ -3756,10 +3755,41 @@ tests = testGroup "hevm"
         (paths, _) <- runEnv noSkipEnv $ withDefaultSolver $ \s ->
           checkAssert s defaultPanicCodes c sig [] opts
         assertBool "should be partial without getter detection" (any isPartial paths)
+
+    -- End-to-end: verify the loop summary writes storage data into the return buffer.
+    -- With skipGetterLoops=True the symbolic getter must terminate AND the return
+    -- buffer must contain WriteWord nodes produced by applyGetterLoopSummary
+    -- (rather than just an AbstractBuf, which would mean the summary was not applied).
+    , testCase "bytes-getter-returns-storage" $ do
+        Just c <- solcRuntime "C"
+          [i|
+          pragma solidity ^0.8.0;
+          contract C {
+            bytes public myBytes;
+          }
+          |]
+        let sig  = Just (Sig "myBytes()" [])
+            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 } }
+            skipEnv = Env { config = testEnv.config { skipGetterLoops = True } }
+        paths <- runEnv skipEnv $ withDefaultSolver $ \s -> getExpr s c sig [] opts
+        let retBufs = [ buf | Success _ _ buf _ <- paths ]
+        assertBool "should have at least one success state" $ not (null retBufs)
+        assertBool "return buffer should contain WriteWord from loop summary" $ any bufContainsWriteWord retBufs
     ]
   ]
   where
     (===>) = assertSolidityComputation
+
+-- | True if the Buf expression tree contains a WriteWord whose value is an
+-- ITE expression (the specific pattern produced by applyGetterLoopSummary).
+-- The first loop iteration writes a plain SLoad; the summary writes ITE(cond, SLoad, 0).
+bufContainsWriteWord :: Expr Buf -> Bool
+bufContainsWriteWord = \case
+  WriteWord _ (ITE _ _ _) _ -> True
+  WriteWord _ _         b  -> bufContainsWriteWord b
+  WriteByte _ _         b  -> bufContainsWriteWord b
+  CopySlice _ _ _     s d  -> bufContainsWriteWord s || bufContainsWriteWord d
+  _                        -> False
 
 -- | Takes a runtime code and calls it with the provided calldata
 

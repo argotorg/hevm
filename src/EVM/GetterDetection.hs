@@ -19,7 +19,7 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Vector qualified as V
 
-import EVM.Types (StorageCopyLoop(..))
+import EVM.Types (StorageCopyLoop(..), LoopStackInfo(..))
 import EVM.Expr (maybeLitWordSimp)
 import EVM.Op
 
@@ -101,6 +101,7 @@ analyseBody ops p q = do
            { loopHeadPC  = p
            , loopJumpiPC = q
            , loopExitPC  = q + 1  -- JUMP/JUMPI are single-byte opcodes
+           , stackLayout = extractStackLayout ops p q
            }
     else Nothing
 
@@ -114,3 +115,118 @@ noInnerJumps body _ q = V.all noInnerJump body
       OpJump  -> pc == q
       OpJumpi -> pc == q
       _       -> True
+
+-- ---------------------------------------------------------------------------
+-- Abstract stack simulation for extracting loop variable positions
+
+-- | Abstract stack value.
+-- 'Orig i' means the value that was at depth i (0 = TOS) at the loop head.
+-- 'Computed' means the value was produced by some computation.
+data AV = Orig Int | Computed deriving (Eq, Show)
+
+type AbstractStack = [AV]
+
+-- | Simulate the loop body on an abstract stack to find which original stack
+-- positions hold storageKey, endKey and memOffset at the JUMPI.
+--
+-- The body is filtered to opcodes with PCs in [p, q].  We skip the final
+-- PUSH<loopHead> + JUMP/JUMPI pair (the loop-closing instructions) because
+-- we want the stack state *just before* they execute — that gives us the
+-- condition and the remaining loop variables.
+extractStackLayout :: V.Vector (Int, Op) -> Int -> Int -> Maybe LoopStackInfo
+extractStackLayout ops p q =
+  let body     = V.toList $ V.filter (\(pc, _) -> pc >= p && pc <= q) ops
+      -- Drop the last two ops: PUSH<loopHead> and JUMP/JUMPI
+      bodyOps  = map snd $ if length body >= 2 then init (init body) else []
+      initStk  = map Orig [0..]  -- infinite list of Orig 0, Orig 1, ...
+  in go bodyOps initStk Nothing Nothing Nothing
+  where
+    -- Recurse through opcodes accumulating (sloadKey, mstoreAddr, cmpOperands)
+    go :: [Op] -> AbstractStack
+       -> Maybe AV       -- ^ AV consumed by SLOAD (storageKey)
+       -> Maybe AV       -- ^ AV of mem address consumed by MSTORE
+       -> Maybe (AV, AV) -- ^ Two operands of the comparison opcode
+       -> Maybe LoopStackInfo
+    go [] stk sloadK mstoreA cmpOps = do
+      -- After simulating the pre-condition body, TOS is the comparison result.
+      -- We already captured the comparison operands in cmpOps.
+      skAV  <- sloadK
+      maAV  <- mstoreA
+      (c1, c2) <- cmpOps
+      skDepth <- getOrig skAV
+      maDepth <- getOrig maAV
+      -- endKey is the operand in the comparison that is NOT the storageKey
+      -- (storageKey may have been incremented and appear as Computed)
+      ekDepth <- case (c1, c2) of
+        (Orig a, Orig b)
+          | a == skDepth -> Just b
+          | b == skDepth -> Just a
+          | otherwise    -> Nothing  -- neither matches — unrecognised
+        (Computed, Orig b) -> Just b
+        (Orig a, Computed) -> Just a
+        _ -> Nothing
+      pure LoopStackInfo
+        { storageKeyDepth = skDepth
+        , endKeyDepth     = ekDepth
+        , memOffDepth     = maDepth
+        }
+    go _ [] _ _ _ = Nothing  -- stack underflow — shouldn't happen for neutral body
+    go (op:rest) stk sloadK mstoreA cmpOps =
+      case op of
+        OpJumpdest -> go rest stk sloadK mstoreA cmpOps
+
+        OpPush _   -> go rest (Computed : stk) sloadK mstoreA cmpOps
+
+        OpPush0    -> go rest (Computed : stk) sloadK mstoreA cmpOps
+
+        OpDup n ->
+          let idx = fromIntegral n - 1  -- DUP1 → index 0
+          in if idx < length stk
+             then go rest (stk !! idx : stk) sloadK mstoreA cmpOps
+             else Nothing  -- stack underflow
+
+        OpSwap n ->
+          let idx = fromIntegral n  -- SWAP1 exchanges TOS with index 1
+          in if idx < length stk
+             then let (top:rest') = stk
+                      (before, target:after) = splitAt (idx - 1) rest'
+                  in go rest (target : before ++ [top] ++ after) sloadK mstoreA cmpOps
+             else Nothing
+
+        OpPop -> go rest (tail stk) sloadK mstoreA cmpOps
+
+        OpSload ->
+          let key = head stk
+          in go rest (Computed : tail stk) (Just key) mstoreA cmpOps
+
+        OpMstore ->
+          let addr = head stk
+          in go rest (drop 2 stk) sloadK (Just addr) cmpOps
+
+        OpMstore8 ->
+          let addr = head stk
+          in go rest (drop 2 stk) sloadK (Just addr) cmpOps
+
+        OpLt  -> recordCmp stk rest sloadK mstoreA cmpOps
+        OpGt  -> recordCmp stk rest sloadK mstoreA cmpOps
+        OpSlt -> recordCmp stk rest sloadK mstoreA cmpOps
+        OpSgt -> recordCmp stk rest sloadK mstoreA cmpOps
+        OpEq  -> recordCmp stk rest sloadK mstoreA cmpOps
+
+        _ -> case stackDelta op of
+               -- Assume all remaining ops produce exactly 1 output (Computed).
+               -- This holds for all EVM arithmetic/logic ops.  The 0-output ops
+               -- (MSTORE, MSTORE8, POP, side-effect ops) are handled above.
+               Just d ->
+                 let pops = 1 - d  -- inputs = outputs - delta, assuming outputs = 1
+                 in if pops > length stk
+                    then Nothing  -- stack underflow
+                    else go rest (Computed : drop pops stk) sloadK mstoreA cmpOps
+               Nothing -> Nothing  -- indeterminate — bail out
+
+    recordCmp stk rest sloadK mstoreA _ =
+      let (a:b:rest') = stk
+      in go rest (Computed : rest') sloadK mstoreA (Just (a, b))
+
+    getOrig (Orig i) = Just i
+    getOrig Computed = Nothing

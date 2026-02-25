@@ -878,12 +878,22 @@ data Contract = Contract
   }
   deriving (Show, Eq, Ord)
 
+-- | Stack positions (depth from stack[2], i.e. below the jump-target and
+-- condition at the JUMPI) of the key loop variables.
+-- Index 0 means vm.state.stack[2], index 1 means vm.state.stack[3], etc.
+data LoopStackInfo = LoopStackInfo
+  { storageKeyDepth :: !Int  -- ^ stack[2 + storageKeyDepth] holds the current storage key
+  , endKeyDepth     :: !Int  -- ^ stack[2 + endKeyDepth] holds the loop end key
+  , memOffDepth     :: !Int  -- ^ stack[2 + memOffDepth] holds the current memory offset
+  } deriving (Show, Eq, Ord, Generic)
+
 -- | Describes a storage-to-memory copy loop found in contract bytecode.
 -- See 'EVM.GetterDetection.detectStorageCopyLoops' for how these are detected.
 data StorageCopyLoop = StorageCopyLoop
-  { loopHeadPC  :: !Int -- ^ PC of the JUMPDEST (loop entry)
-  , loopJumpiPC :: !Int -- ^ PC of the backward JUMP or JUMPI instruction
-  , loopExitPC  :: !Int -- ^ PC immediately after the backward jump (fall-through / loop exit)
+  { loopHeadPC   :: !Int               -- ^ PC of the JUMPDEST (loop entry)
+  , loopJumpiPC  :: !Int               -- ^ PC of the backward JUMP or JUMPI instruction
+  , loopExitPC   :: !Int               -- ^ PC immediately after the backward jump (fall-through / loop exit)
+  , stackLayout  :: !(Maybe LoopStackInfo) -- ^ stack positions of loop vars at the JUMPI (if detected)
   } deriving (Show, Eq, Ord, Generic)
 
 class VMOps (t :: VMType) where

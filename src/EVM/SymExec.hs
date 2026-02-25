@@ -521,7 +521,11 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
                 -- avoiding unbounded symbolic exploration.
                 if isGetterLoopJumpi conf vm
                   then do
-                    (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case False)) vm
+                    let maxW   = conf.maxGetterLoopWords
+                        vm0    = case lookupGetterLoop vm of
+                                   Just loop -> applyGetterLoopSummary maxW loop vm
+                                   Nothing   -> vm
+                    (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case False)) vm0
                     interpretInternal t { vm = vm', stepper = (k r) }
                   else
                     -- are in we a loop, have we hit maxIters, have we hit askSmtIters?
@@ -592,6 +596,49 @@ isGetterLoopJumpi conf vm =
   in case Map.lookup vm.state.contract vm.env.contracts of
        Just c  -> any (\loop -> loop.loopJumpiPC == pc) c.getterLoops
        Nothing -> False
+
+-- | Look up the StorageCopyLoop descriptor for the current JUMPI PC.
+lookupGetterLoop :: VM Symbolic -> Maybe StorageCopyLoop
+lookupGetterLoop vm =
+  let pc = vm.state.pc
+  in case Map.lookup vm.state.contract vm.env.contracts of
+       Just c  -> listToMaybe [loop | loop <- Map.elems c.getterLoops, loop.loopJumpiPC == pc]
+       Nothing -> Nothing
+
+-- | Apply a symbolic summary of the remaining getter loop iterations to the
+-- VM's memory before taking the loop-exit branch.
+--
+-- At the JUMPI (after the first iteration has already run), the stack is:
+--   [loopHead, condition, loopVar_0, loopVar_1, ...]
+-- where loopVar_k = vm.state.stack !! (2 + k).
+--
+-- For each i in [0 .. maxWords-1] we write:
+--   WriteWord(memOff + i*32, ITE(storageKey+i < endKey, SLoad(storageKey+i, store), 0), mem)
+--
+-- If 'stackLayout' is Nothing the VM is returned unchanged (safe fallback).
+applyGetterLoopSummary :: Int -> StorageCopyLoop -> VM Symbolic -> VM Symbolic
+applyGetterLoopSummary maxWords loop vm =
+  case loop.stackLayout of
+    Nothing     -> vm  -- no layout info: fall through unchanged
+    Just layout ->
+      let stk        = vm.state.stack
+          storageKey = stk !! (2 + layout.storageKeyDepth)
+          endKey     = stk !! (2 + layout.endKeyDepth)
+          memOff     = stk !! (2 + layout.memOffDepth)
+          store      = case Map.lookup vm.state.contract vm.env.contracts of
+                         Just c  -> c.storage
+                         Nothing -> AbstractStore vm.state.contract Nothing
+          baseMem    = case vm.state.memory of
+                         SymbolicMemory b -> b
+                         ConcreteMemory _ -> ConcreteBuf ""
+          newMem     = foldl' (writeSlot storageKey endKey memOff store)
+                              baseMem [0 .. fromIntegral maxWords - 1]
+      in vm & #state % #memory .~ SymbolicMemory newMem
+  where
+    writeSlot key endKey memOff store mem (i :: W256) =
+      let inRange = Expr.lt (Expr.add key (Lit i)) endKey
+          value   = ITE inRange (SLoad (Expr.add key (Lit i)) store) (Lit 0)
+      in WriteWord (Expr.add memOff (Lit (i * 32))) value mem
 
 type Precondition = VM Symbolic -> Prop
 type Postcondition = VM Symbolic -> Expr End -> Prop

@@ -48,7 +48,8 @@ data Config = Config
   , onlyDeployed     :: Bool
   , earlyAbort       :: Bool
   , mergeMaxBudget   :: Int        -- ^ Max instructions for speculative merge exploration
-  , skipGetterLoops  :: Bool       -- ^ Short-circuit detected storage-copy loops (bytes/string getters)
+  , skipGetterLoops      :: Bool  -- ^ Short-circuit detected storage-copy loops (bytes/string getters)
+  , maxGetterLoopWords   :: Int   -- ^ Max words to unroll in getter loop summary (default 32)
   }
   deriving (Show, Eq)
 
@@ -70,7 +71,8 @@ defaultConfig = Config
   , onlyDeployed = False
   , earlyAbort = False
   , mergeMaxBudget = 100
-  , skipGetterLoops = True
+  , skipGetterLoops = False
+  , maxGetterLoopWords = 32
   }
 
 -- Write to the console
