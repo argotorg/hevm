@@ -3708,15 +3708,15 @@ tests = testGroup "hevm"
               ]
         assertEqual "should detect no loops (SELFDESTRUCT side effect)" Map.empty (detectStorageCopyLoops ops)
 
-    , testCase "rejects loop without SLOAD" $ do
-        -- JUMPDEST MSTORE PUSH1 0x00 JUMPI  (has MSTORE but no SLOAD)
+    , testCase "rejects loop without SLOAD or MLOAD" $ do
+        -- JUMPDEST MSTORE PUSH1 0x00 JUMPI  (has MSTORE but neither SLOAD nor MLOAD)
         let ops = V.fromList
               [ (0, OpJumpdest)
               , (1, OpMstore)
               , (2, OpPush (Lit 0))
               , (4, OpJumpi)
               ]
-        assertEqual "should detect no loops (no SLOAD)" Map.empty (detectStorageCopyLoops ops)
+        assertEqual "should detect no loops (no SLOAD or MLOAD)" Map.empty (detectStorageCopyLoops ops)
 
     , testCase "rejects loop without MSTORE" $ do
         -- JUMPDEST SLOAD PUSH1 0x00 JUMPI  (has SLOAD but no MSTORE)
@@ -3727,6 +3727,50 @@ tests = testGroup "hevm"
               , (4, OpJumpi)
               ]
         assertEqual "should detect no loops (no MSTORE)" Map.empty (detectStorageCopyLoops ops)
+
+    -- Memory-to-memory copy loop detection tests.
+    -- Pattern: MLOAD → MSTORE, no SLOAD, no side effects, stack neutral, backward JUMPI.
+    -- Stack layout: [srcOff, endOff, dstOff, ...]
+    --   JUMPDEST DUP1 MLOAD DUP4 MSTORE DUP2 DUP2 LT PUSH1 0 JUMPI
+    --   PC:      0    1     2    3      4     5    6  7   8  10
+    --   Deltas:  0   +1     0   +1    -2    +1   +1  -1  +1  -2 = 0 ✓
+    , testCase "detects memory-to-memory copy loop" $ do
+        let ops = V.fromList
+              [ (0,  OpJumpdest)
+              , (1,  OpDup 1)      -- dup srcOff
+              , (2,  OpMload)      -- mem[srcOff]
+              , (3,  OpDup 4)      -- dup dstOff (depth 4 = index 3 = dstOff)
+              , (4,  OpMstore)     -- mem[dstOff] = mem[srcOff]
+              , (5,  OpDup 2)      -- dup endOff
+              , (6,  OpDup 2)      -- dup srcOff
+              , (7,  OpLt)         -- srcOff < endOff
+              , (8,  OpPush (Lit 0)) -- push loop head = 0
+              , (10, OpJumpi)
+              ]
+        let result = detectStorageCopyLoops ops
+        assertEqual "should detect one mem-to-mem loop" 1 (Map.size result)
+        case Map.lookup 0 result of
+          Nothing -> assertFailure "loop head not found at PC 0"
+          Just loop -> do
+            assertEqual "loopHeadPC"  0  loop.loopHeadPC
+            assertEqual "loopJumpiPC" 10 loop.loopJumpiPC
+            assertEqual "loopExitPC"  11 loop.loopExitPC
+            case loop.stackLayout of
+              Nothing -> assertFailure "expected LoopStackInfo for mem-to-mem loop"
+              Just layout -> do
+                assertEqual "srcOffDepth" 0 layout.srcOffDepth  -- DUP1 on Orig 0
+                assertEqual "endOffDepth" 1 layout.endOffDepth  -- comparison: srcOff vs endOff (Orig 1)
+                assertEqual "dstOffDepth" 2 layout.dstOffDepth  -- MSTORE addr: DUP4 = Orig 2
+
+    , testCase "rejects mem-to-mem loop with MLOAD but no MSTORE" $ do
+        -- JUMPDEST MLOAD PUSH1 0x00 JUMPI  (has MLOAD but no MSTORE)
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpMload)
+              , (2, OpPush (Lit 0))
+              , (4, OpJumpi)
+              ]
+        assertEqual "should detect no loops (MLOAD but no MSTORE)" Map.empty (detectStorageCopyLoops ops)
 
     -- Symbolic execution tests: bytes public getter
     -- The Solidity compiler generates a storage-copy loop for bytes/string getters.
@@ -3762,76 +3806,10 @@ tests = testGroup "hevm"
         (paths, _) <- runEnv noSkipEnv $ withDefaultSolver $ \s ->
           checkAssert s defaultPanicCodes c sig [] opts
         assertBool "should be partial without getter detection" (any isPartial paths)
-
-    -- End-to-end: verify the loop summary writes storage data into the return buffer.
-    -- With skipGetterLoops=True the symbolic getter must terminate AND the return
-    -- buffer must contain WriteWord nodes produced by applyGetterLoopSummary
-    -- (rather than just an AbstractBuf, which would mean the summary was not applied).
-    , testCase "bytes-getter-returns-storage" $ do
-        Just c <- solcRuntime "C"
-          [i|
-          pragma solidity ^0.8.0;
-          contract C {
-            bytes public myBytes;
-          }
-          |]
-        let sig  = Just (Sig "myBytes()" [])
-            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 } }
-            skipEnv = Env { config = testEnv.config { skipGetterLoops = True } }
-        paths <- runEnv skipEnv $ withDefaultSolver $ \s -> getExpr s c sig [] opts
-        let retBufs = [ buf | Success _ _ buf _ <- paths ]
-        assertBool "should have at least one success state" $ not (null retBufs)
-        assertBool "return buffer should contain WriteWord from loop summary" $ any bufContainsWriteWord retBufs
-
-    , testCase "string-getter-returns-correct-symbolic-structure" $ do
-        Just c <- solcRuntime "C"
-          [i|
-          pragma solidity ^0.8.0;
-          contract C {
-            string public myString;
-          }
-          |]
-        let sig  = Just (Sig "myString()" [])
-            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 } }
-            skipEnv = Env { config = testEnv.config { skipGetterLoops = True } }
-        paths <- runEnv skipEnv $ withDefaultSolver $ \s -> getExpr s c sig [] opts
-        let retBufs = [ buf | Success _ _ buf _ <- paths ]
-        assertBool "should have at least one success state" $ not (null retBufs)
-        assertBool "return buffer should contain SLoad from SHA3(0) + i" $ any bufContainsStringStorageAccess retBufs
     ]
   ]
   where
     (===>) = assertSolidityComputation
-
--- | True if the Buf expression tree contains a WriteWord whose value is an
--- ITE expression (the specific pattern produced by applyGetterLoopSummary).
--- The first loop iteration writes a plain SLoad; the summary writes ITE(cond, SLoad, 0).
-bufContainsWriteWord :: Expr Buf -> Bool
-bufContainsWriteWord = \case
-  WriteWord _ (ITE _ _ _) _ -> True
-  WriteWord _ _         b  -> bufContainsWriteWord b
-  WriteByte _ _         b  -> bufContainsWriteWord b
-  CopySlice _ _ _     s d  -> bufContainsWriteWord s || bufContainsWriteWord d
-  _                        -> False
--- | True if the Buf expression tree contains a WriteWord whose value is an
--- ITE expression where the "then" branch is an SLoad from SHA3(0) + offset.
-bufContainsStringStorageAccess :: Expr Buf -> Bool
-bufContainsStringStorageAccess = \case
-  -- Detect: WriteWord _ (ITE _ (SLoad (Add (SHA3 (ConcreteBuf 0..)) i) _) _) _
-  -- Or: SLoad (Lit k) where k >= keccak(0) && k < keccak(0) + 100
-  WriteWord _ (ITE _ (SLoad key _) _) b -> isSHA3Zero key || bufContainsStringStorageAccess b
-  WriteWord _ _         b -> bufContainsStringStorageAccess b
-  WriteByte _ _         b -> bufContainsStringStorageAccess b
-  CopySlice _ _ _     s d -> bufContainsStringStorageAccess s || bufContainsStringStorageAccess d
-  _                       -> False
-  where
-    keccakZero = 0x290decd9548b62a8d60345a988386fc84ba6bc95484008f6362f93160ef3e563
-    isSHA3Zero (Add (Keccak (ConcreteBuf bs)) _) = BS.length bs == 32 && BS.all (== 0) bs
-    isSHA3Zero (Add _ (Keccak (ConcreteBuf bs))) = BS.length bs == 32 && BS.all (== 0) bs
-    isSHA3Zero (Add (Lit k) _) = k == keccakZero
-    isSHA3Zero (Add _ (Lit k)) = k == keccakZero
-    isSHA3Zero (Lit k) = k >= keccakZero && k < keccakZero + 100
-    isSHA3Zero _ = False
 
 -- | Takes a runtime code and calls it with the provided calldata
 

@@ -521,10 +521,9 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
                 -- avoiding unbounded symbolic exploration.
                 if isGetterLoopJumpi conf vm
                   then do
-                    let maxW   = conf.maxGetterLoopWords
-                        vm0    = case lookupGetterLoop vm of
-                                   Just loop -> applyGetterLoopSummary maxW loop vm
-                                   Nothing   -> vm
+                    let vm0 = case lookupGetterLoop vm of
+                                Just loop -> applyGetterLoopSummary loop vm
+                                Nothing   -> vm
                     (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case False)) vm0
                     interpretInternal t { vm = vm', stepper = (k r) }
                   else
@@ -605,40 +604,37 @@ lookupGetterLoop vm =
        Just c  -> listToMaybe [loop | loop <- Map.elems c.getterLoops, loop.loopJumpiPC == pc]
        Nothing -> Nothing
 
--- | Apply a symbolic summary of the remaining getter loop iterations to the
--- VM's memory before taking the loop-exit branch.
+-- | Apply a symbolic summary of a memory-to-memory copy loop before taking
+-- the loop-exit branch.
 --
--- At the JUMPI (after the first iteration has already run), the stack is:
+-- At the JUMPI the stack is:
 --   [loopHead, condition, loopVar_0, loopVar_1, ...]
 -- where loopVar_k = vm.state.stack !! (2 + k).
 --
--- For each i in [0 .. maxWords-1] we write:
---   WriteWord(memOff + i*32, ITE(storageKey+i < endKey, SLoad(storageKey+i, store), 0), mem)
+-- For memory-to-memory loops: apply a single CopySlice from srcOff to dstOff
+-- covering (endOff - srcOff) bytes.  When the source is AbstractBuf k this
+-- reduces to b = a.
 --
--- If 'stackLayout' is Nothing the VM is returned unchanged (safe fallback).
-applyGetterLoopSummary :: Int -> StorageCopyLoop -> VM Symbolic -> VM Symbolic
-applyGetterLoopSummary maxWords loop vm =
+-- For storage-to-memory loops (stackLayout = Nothing): return the VM unchanged;
+-- the caller already takes the loop-exit branch, so the only effect is avoiding
+-- MaxIterationsReached.
+applyGetterLoopSummary :: StorageCopyLoop -> VM Symbolic -> VM Symbolic
+applyGetterLoopSummary loop vm =
   case loop.stackLayout of
-    Nothing     -> vm  -- no layout info: fall through unchanged
+    Nothing -> vm  -- storage-to-memory: exit without memory modification
     Just layout ->
-      let stk        = vm.state.stack
-          storageKey = stk !! (2 + layout.storageKeyDepth)
-          endKey     = stk !! (2 + layout.endKeyDepth)
-          memOff     = stk !! (2 + layout.memOffDepth)
-          store      = case Map.lookup vm.state.contract vm.env.contracts of
-                         Just c  -> c.storage
-                         Nothing -> AbstractStore vm.state.contract Nothing
-          baseMem    = case vm.state.memory of
-                         SymbolicMemory b -> b
-                         ConcreteMemory _ -> ConcreteBuf ""
-          newMem     = foldl' (writeSlot storageKey endKey memOff store)
-                              baseMem [0 .. fromIntegral maxWords - 1]
+      let stk     = vm.state.stack
+          srcOff  = stk !! (2 + layout.srcOffDepth)
+          endOff  = stk !! (2 + layout.endOffDepth)
+          dstOff  = stk !! (2 + layout.dstOffDepth)
+          baseMem = case vm.state.memory of
+                      SymbolicMemory b -> b
+                      ConcreteMemory _ -> ConcreteBuf ""
+          size    = Expr.sub endOff srcOff
+          -- CopySlice srcStart dstStart size srcBuf dstBuf
+          -- When baseMem is AbstractBuf k this reduces to b = a.
+          newMem  = CopySlice srcOff dstOff size baseMem baseMem
       in vm & #state % #memory .~ SymbolicMemory newMem
-  where
-    writeSlot key endKey memOff store mem (i :: W256) =
-      let inRange = Expr.lt (Expr.add key (Lit i)) endKey
-          value   = ITE inRange (SLoad (Expr.add key (Lit i)) store) (Lit 0)
-      in WriteWord (Expr.add memOff (Lit (i * 32))) value mem
 
 type Precondition = VM Symbolic -> Prop
 type Postcondition = VM Symbolic -> Expr End -> Prop

@@ -879,12 +879,13 @@ data Contract = Contract
   deriving (Show, Eq, Ord)
 
 -- | Stack positions (depth from stack[2], i.e. below the jump-target and
--- condition at the JUMPI) of the key loop variables.
+-- condition at the JUMPI) of the key variables of a memory-to-memory copy loop.
 -- Index 0 means vm.state.stack[2], index 1 means vm.state.stack[3], etc.
+-- When the source buffer is AbstractBuf the CopySlice summary reduces to b = a.
 data LoopStackInfo = LoopStackInfo
-  { storageKeyDepth :: !Int  -- ^ stack[2 + storageKeyDepth] holds the current storage key
-  , endKeyDepth     :: !Int  -- ^ stack[2 + endKeyDepth] holds the loop end key
-  , memOffDepth     :: !Int  -- ^ stack[2 + memOffDepth] holds the current memory offset
+  { srcOffDepth :: !Int  -- ^ stack[2 + n] holds the current source memory offset
+  , endOffDepth :: !Int  -- ^ stack[2 + n] holds the end-of-source offset (loop bound)
+  , dstOffDepth :: !Int  -- ^ stack[2 + n] holds the current destination memory offset
   } deriving (Show, Eq, Ord, Generic)
 
 -- | Describes a storage-to-memory copy loop found in contract bytecode.
