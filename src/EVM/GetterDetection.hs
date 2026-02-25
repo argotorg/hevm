@@ -104,28 +104,13 @@ analyseBody ops p q = do
            }
     else Nothing
 
--- | Check that all JUMP/JUMPI instructions in the body whose target is
--- statically known stay within [p, q].
+-- | Check that the only JUMP/JUMPI in the body is the loop-closing one at q.
+-- A genuine getter loop has no internal control flow other than the single
+-- backward jump that closes the loop.
 checkInnerJumps :: V.Vector (Int, Op) -> Int -> Int -> Bool
-checkInnerJumps body p q = go 1
+checkInnerJumps body _ q = V.all noInnerJump body
   where
-    n = V.length body
-    go i
-      | i >= n    = True
-      | otherwise =
-          let (_, op)     = body V.! i
-              (_, prevOp) = body V.! (i - 1)
-          in case op of
-               OpJump  -> checkTarget prevOp (go (i + 1))
-               OpJumpi -> checkTarget prevOp (go (i + 1))
-               _       -> go (i + 1)
-
-    checkTarget prevOp cont =
-      case prevOp of
-        OpPush w ->
-          case maybeLitWordSimp w of
-            Just target ->
-              let t = fromIntegral target
-              in if t >= p && t <= q then cont else False
-            Nothing -> cont  -- unknown target; conservatively allow
-        _ -> cont  -- unknown target; conservatively allow
+    noInnerJump (pc, op) = case op of
+      OpJump  -> pc == q
+      OpJumpi -> pc == q
+      _       -> True

@@ -370,6 +370,8 @@ getOp x = case x of
 -- that conservatively (loop rejected).
 stackDelta :: Op -> Maybe Int
 stackDelta = \case
+  -- 0 input, 0 output
+  OpStop           -> Just 0
   -- 0-input, 1-output
   OpAddress        -> Just 1
   OpOrigin         -> Just 1
