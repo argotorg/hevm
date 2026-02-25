@@ -11,6 +11,8 @@ jobs:
   echidna-build:
     name: Build Echidna with local HEVM
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
 
     steps:
       - name: Checkout Echidna
@@ -76,6 +78,7 @@ jobs:
         uses: nixbuild/nix-quick-install-action@v34
 
       - name: Build Echidna
+        id: build
         continue-on-error: true
         working-directory: echidna-src
         run: |
@@ -86,4 +89,47 @@ jobs:
             -p secp256k1 libff gmp pkg-config \
                haskellPackages.ghc stack \
             --run 'stack build --fast \
-              --test --no-run-tests --system-ghc'
+              --test --no-run-tests --system-ghc' \
+            2>&1 | tee build.log
+
+      - name: Prepare build log
+        if: >-
+          always()
+          && steps.build.outcome == 'failure'
+          && github.event_name == 'pull_request'
+        run: |
+          {
+            echo '## :warning: Echidna build failed'
+            echo ''
+            echo 'Building [Echidna](https://github.com/crytic/echidna)'
+            echo 'against this PR'"'"'s hevm failed.'
+            echo ''
+            echo '<details>'
+            echo '<summary>Build log (last 200 lines)</summary>'
+            echo ''
+            echo '```'
+            tail -200 echidna-src/build.log
+            echo '```'
+            echo ''
+            echo '</details>'
+          } > build-comment.md
+
+      - name: Post failure comment
+        if: >-
+          always()
+          && steps.build.outcome == 'failure'
+          && github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: echidna-compat
+          path: build-comment.md
+
+      - name: Remove stale failure comment
+        if: >-
+          always()
+          && steps.build.outcome == 'success'
+          && github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: echidna-compat
+          delete: true
