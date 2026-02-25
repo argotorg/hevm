@@ -1,0 +1,84 @@
+name: Echidna Compatibility Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  echidna-build:
+    name: Build Echidna with local HEVM
+    runs-on: ubuntu-latest
+    # This job is optional and will only show a warning if it fails.
+    # It does not block PR merges unless explicitly set as a required check.
+    continue-on-error: true
+    
+    steps:
+      - name: Checkout Echidna
+        uses: actions/checkout@v4
+        with:
+          repository: crytic/echidna
+          path: echidna-src
+
+      - name: Checkout HEVM
+        uses: actions/checkout@v4
+        with:
+          path: echidna-src/hevm
+
+      - name: Patch stack.yaml
+        working-directory: echidna-src
+        run: |
+          # Ensure PyYAML is available for the script
+          pip install PyYAML
+          # Use python3 to safely patch stack.yaml to use local hevm
+          python3 -c "
+          import yaml
+          import os
+
+          with open('stack.yaml', 'r') as f:
+              data = yaml.safe_load(f)
+          
+          if 'extra-deps' in data:
+              new_deps = []
+              found_hevm = False
+              for dep in data['extra-deps']:
+                  # Identify if this is the remote hevm dependency block
+                  if isinstance(dep, dict) and 'git' in dep and 'hevm' in dep['git']:
+                      if not found_hevm:
+                          new_deps.append('./hevm')
+                          found_hevm = True
+                      continue
+                  if dep == './hevm':
+                      found_hevm = True
+                      new_deps.append(dep)
+                      continue
+                  new_deps.append(dep)
+              
+              if not found_hevm:
+                  # Insert hevm at the beginning of extra-deps
+                  new_deps.insert(0, './hevm')
+              
+              data['extra-deps'] = new_deps
+
+          with open('stack.yaml', 'w') as f:
+              yaml.dump(data, f)
+          "
+          echo "==== Patched stack.yaml ===="
+          cat stack.yaml
+
+      - name: Install Nix
+        uses: nixbuild/nix-quick-install-action@v34
+
+      - name: Setup Haskell Stack
+        uses: haskell-actions/setup@v2
+        with:
+          enable-stack: true
+
+      - name: Build Echidna
+        working-directory: echidna-src
+        run: |
+          # We use the nix development shell from the hevm subdirectory to provide 
+          # necessary C dependencies like libsecp256k1 and libff.
+          # We build with --fast to skip optimizations since we only care about compilation.
+          nix develop ./hevm -c stack build --fast --test --no-run-tests
