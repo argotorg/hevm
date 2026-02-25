@@ -75,20 +75,15 @@ jobs:
       - name: Install Nix
         uses: nixbuild/nix-quick-install-action@v34
 
-      - name: Setup Haskell Stack
-        uses: haskell-actions/setup@v2
-        with:
-          enable-stack: true
-
       - name: Build Echidna
-        # This step is optional and will only show a warning if it fails.
-        # It does not block PR merges unless explicitly set as a required check.
         continue-on-error: true
         working-directory: echidna-src
         run: |
-          # Use the nix dev shell from hevm for C deps
-          # (libsecp256k1, libff). --fast skips optimizations
-          # since we only care about compilation.
-          nix develop ./hevm -c \
-            stack build --fast \
-            --test --no-run-tests --system-ghc
+          # --fast skips optimizations since we only
+          # care about compilation, not runtime perf.
+          nix-shell \
+            -I nixpkgs=flake:nixpkgs \
+            -p secp256k1 libff gmp pkg-config \
+               haskellPackages.ghc stack \
+            --run 'stack build --fast \
+              --test --no-run-tests --system-ghc'
