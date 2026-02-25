@@ -138,7 +138,7 @@ extractStackLayout ops p q =
   let body     = V.toList $ V.filter (\(pc, _) -> pc >= p && pc <= q) ops
       -- Drop the last two ops: PUSH<loopHead> and JUMP/JUMPI
       bodyOps  = map snd $ if length body >= 2 then init (init body) else []
-      initStk  = map Orig [0..]  -- infinite list of Orig 0, Orig 1, ...
+      initStk  = map Orig [0..1023]  -- EVM max stack depth is 1024
   in go bodyOps initStk Nothing Nothing Nothing
   where
     -- Recurse through opcodes accumulating (sloadKey, mstoreAddr, cmpOperands)

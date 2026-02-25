@@ -3555,23 +3555,30 @@ tests = testGroup "hevm"
   ]
   , testGroup "GetterDetection"
     [ testCase "detects storage-copy loop" $ do
-        -- Bytecode pattern: JUMPDEST SLOAD MSTORE PUSH2 0x0000 JUMPI
-        -- PC: 0           1      2       3        6
+        -- A stack-neutral storage-copy loop (required by isStackNeutral check):
+        -- JUMPDEST DUP1 SLOAD DUP3 MSTORE DUP2 DUP2 LT PUSH1 0 JUMPI
+        -- PC:  0    1    2    3    4       5    6    7   8     10
+        -- Deltas: 0 +1   0   +1   -2      +1  +1   -1  +1    -2  = 0 ✓
         let ops = V.fromList
-              [ (0, OpJumpdest)
-              , (1, OpSload)
-              , (2, OpMstore)
-              , (3, OpPush (Lit 0))  -- push target 0 = loop head
-              , (6, OpJumpi)
+              [ (0,  OpJumpdest)
+              , (1,  OpDup 1)
+              , (2,  OpSload)
+              , (3,  OpDup 3)
+              , (4,  OpMstore)
+              , (5,  OpDup 2)
+              , (6,  OpDup 2)
+              , (7,  OpLt)
+              , (8,  OpPush (Lit 0))  -- push target 0 = loop head (PUSH1 = 2 bytes)
+              , (10, OpJumpi)
               ]
         let result = detectStorageCopyLoops ops
         assertEqual "should detect one loop" 1 (Map.size result)
         case Map.lookup 0 result of
           Nothing -> assertFailure "loop head not found at PC 0"
           Just loop -> do
-            assertEqual "loopHeadPC"  0 loop.loopHeadPC
-            assertEqual "loopJumpiPC" 6 loop.loopJumpiPC
-            assertEqual "loopExitPC"  7 loop.loopExitPC
+            assertEqual "loopHeadPC"  0  loop.loopHeadPC
+            assertEqual "loopJumpiPC" 10 loop.loopJumpiPC
+            assertEqual "loopExitPC"  11 loop.loopExitPC
 
     , testCase "no loop for simple uint getter" $ do
         -- Bytecode: SLOAD RETURN  (no backward jump)
