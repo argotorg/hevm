@@ -26,19 +26,22 @@ jobs:
         with:
           path: echidna-src/hevm
 
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
+
       - name: Patch stack.yaml
         working-directory: echidna-src
+        shell: uv run --script {0}
         run: |
-          # Ensure PyYAML is available for the script
-          pip install PyYAML
-          # Use python3 to safely patch stack.yaml to use local hevm
-          python3 -c "
+          # /// script
+          # requires-python = ">=3.12"
+          # dependencies = ["pyyaml"]
+          # ///
           import yaml
-          import os
 
           with open('stack.yaml', 'r') as f:
               data = yaml.safe_load(f)
-          
+
           if 'extra-deps' in data:
               new_deps = []
               found_hevm = False
@@ -54,18 +57,19 @@ jobs:
                       new_deps.append(dep)
                       continue
                   new_deps.append(dep)
-              
+
               if not found_hevm:
                   # Insert hevm at the beginning of extra-deps
                   new_deps.insert(0, './hevm')
-              
+
               data['extra-deps'] = new_deps
 
           with open('stack.yaml', 'w') as f:
               yaml.dump(data, f)
-          "
-          echo "==== Patched stack.yaml ===="
-          cat stack.yaml
+
+          print("==== Patched stack.yaml ====")
+          with open('stack.yaml', 'r') as f:
+              print(f.read())
 
       - name: Install Nix
         uses: nixbuild/nix-quick-install-action@v34
