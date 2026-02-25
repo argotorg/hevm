@@ -97,7 +97,9 @@ jobs:
             -p secp256k1 libff gmp pkg-config \
                haskellPackages.ghc stack \
             --run 'stack build --fast \
-              --test --no-run-tests --system-ghc' \
+              --test --no-run-tests \
+              --system-ghc --no-install-ghc \
+              --skip-ghc-check' \
             2>&1 | tee build.log
 
       - name: Prepare build log
