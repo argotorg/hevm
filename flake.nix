@@ -68,7 +68,7 @@
           configureFlags = attrs.configureFlags ++ [ "--enable-static" ];
         }));
 
-        hspkgs = ps: ps.haskellPackages;
+        hspkgs = ps: ps.haskell.packages.ghc912;
         hlib = pkgs.haskell.lib;
 
         # base hevm derivation.
