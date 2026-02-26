@@ -3,3 +3,7 @@ packages: .
 -- work around windows build failure
 -- https://github.com/kazu-yamamoto/crypton-certificate/issues/27
 constraints: crypton-x509-store <1.6.13 || >1.6.13
+
+-- allow newer base on aeson-optics
+-- https://github.com/phadej/aeson-optics/issues/20
+allow-newer: aeson-optics:base
