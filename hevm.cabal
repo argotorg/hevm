@@ -291,6 +291,7 @@ test-suite test
     EVM.ConcreteExecution.ConcreteExecutionTests
     EVM.SymExec.SymExecTests
     EVM.Test.FuzzSymExec
+    EVM.Test.FoundryTests
   build-depends:
     base16,
     binary,
