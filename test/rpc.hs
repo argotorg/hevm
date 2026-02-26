@@ -7,11 +7,12 @@ import Test.Tasty.HUnit
 
 import Data.Maybe
 import Data.Map qualified as Map
-import Data.Text (Text)
+import Data.Text (Text, isPrefixOf)
 import Data.Vector qualified as V
 
 import EVM (makeVm, symbolify, defaultVMOpts)
 import EVM.ABI
+import EVM.Dapp (TestMethodInfo(..))
 import EVM.Fetch
 import EVM.SMT
 import EVM.Solvers
@@ -75,7 +76,7 @@ tests = testGroup "rpc"
     -- execute against remote state from a ds-test harness
     [ test "dapp-test" $ do
         let testFile = "test/contracts/pass/rpc.sol"
-        res <- runForgeTestCustom testFile ".*" Nothing Nothing False testRpcInfo
+        res <- runForgeTestCustom testFile (\(TestMethodInfo _ (Sig name _)) -> "prove" `isPrefixOf` name) Nothing Nothing False testRpcInfo
         liftIO $ assertEqual "test result" (True, True) res
 
     -- concretely exec "transfer" on WETH9 using remote rpc

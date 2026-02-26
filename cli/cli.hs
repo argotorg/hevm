@@ -41,7 +41,7 @@ import JSONL (jsonlBuilder, jsonLine)
 
 import EVM (initialContract, abstractContract, makeVm, defaultVMOpts)
 import EVM.ABI (Sig(..))
-import EVM.Dapp (dappInfo, DappInfo, emptyDapp)
+import EVM.Dapp (dappInfo, DappInfo, emptyDapp, TestMethodInfo(..))
 import EVM.Expr qualified as Expr
 import EVM.Concrete qualified as Concrete
 import EVM.Fetch qualified as Fetch
@@ -191,8 +191,8 @@ data TestOptions = TestOptions
   , rpc           ::Maybe URL
   , number        ::Maybe W256
   , coverage      ::Bool
-  , match         ::Maybe String
-  , prefix        ::String
+  , match         ::Maybe Text
+  , prefix        ::Text
   , ffi           ::Bool
   }
 
@@ -861,8 +861,7 @@ unitTestOptions testOpts cOpts solvers buildOutput = do
     , maxIter = parseMaxIters cOpts.maxIterations
     , askSmtIters = cOpts.askSmtIterations
     , smtTimeout = Just cOpts.smtTimeout
-    , match = T.pack $ fromMaybe ".*" testOpts.match
-    , prefix = T.pack testOpts.prefix
+    , methodFilter = \(TestMethodInfo _ (Sig name _)) -> testOpts.prefix `T.isPrefixOf` name && maybe True (\match -> regexMatches match name) testOpts.match
     , testParams = params
     , dapp = srcInfo
     , ffiAllowed = testOpts.ffi

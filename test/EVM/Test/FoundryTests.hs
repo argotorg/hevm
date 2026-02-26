@@ -1,15 +1,20 @@
 module EVM.Test.FoundryTests (tests) where
 
 import Control.Monad (forM_)
+import Control.Monad.Catch (MonadMask)
 import Control.Monad.IO.Class
 import Control.Monad.Reader (ReaderT)
+import Data.Text (Text, isPrefixOf)
 import Test.Tasty
 import Test.Tasty.ExpectedFailure (ignoreTestBecause)
 import Test.Tasty.HUnit
 
+import EVM.ABI (Sig(..))
+import EVM.Dapp (TestMethodInfo(..))
 import EVM.Effects
 import EVM.Fetch qualified as Fetch
 import EVM.Test.Utils (runForgeTest, runForgeTestCustom)
+import EVM.Types (regexMatches)
 
 foundryTestConfig :: Config
 foundryTestConfig = defaultConfig
@@ -25,7 +30,7 @@ tests :: TestTree
 tests = testGroup "Foundry tests"
     [ test "Trivial-Pass" $ do
         let testFile = "test/contracts/pass/trivial.sol"
-        runForgeTest testFile ".*" >>= assertEqualM "test result" (True, True)
+        executeAllTestMethods testFile >>= assertEqualM "test result" (True, True)
     , test "Foundry" $ do
         -- quick smokecheck to make sure that we can parse ForgeStdLib style build outputs
         -- return is a pair of (No Cex, No Warnings)
@@ -62,59 +67,68 @@ tests = testGroup "Foundry tests"
               , ("test/contracts/fail/etchFail.sol",      "prove_etch_fail.*", (False, True))
               ]
         forM_ cases $ \(testFile, match, expected) -> do
-          actual <- runForgeTestCustom testFile match Nothing Nothing False Fetch.noRpc
+          actual <- executeTestMethodsMatching testFile match
           assertEqualM "Must match" expected actual
     , test "Trivial-Fail" $ do
         let testFile = "test/contracts/fail/trivial.sol"
-        runForgeTest testFile "prove_false" >>= assertEqualM "test result" (False, False)
+        executeSingleMethod testFile "prove_false" >>= assertEqualM "test result" (False, False)
     , test "Abstract" $ do
         let testFile = "test/contracts/pass/abstract.sol"
-        runForgeTest testFile ".*" >>= assertEqualM "test result" (True, True)
+        executeAllTestMethods testFile >>= assertEqualM "test result" (True, True)
     , test "Constantinople" $ do
         let testFile = "test/contracts/pass/constantinople.sol"
-        runForgeTest testFile ".*" >>= assertEqualM "test result" (True, True)
+        executeAllTestMethods testFile >>= assertEqualM "test result" (True, True)
     , test "ConstantinopleMin" $ do
         let testFile = "test/contracts/pass/constantinople_min.sol"
-        runForgeTest testFile ".*" >>= assertEqualM "test result" (True, True)
+        executeAllTestMethods testFile >>= assertEqualM "test result" (True, True)
     , test "Fusaka" $ do
         let testFile = "test/contracts/pass/fusaka.sol"
-        runForgeTest testFile ".*" >>= assertEqualM "test result" (True, True)
+        executeAllTestMethods testFile >>= assertEqualM "test result" (True, True)
     , test "Prove-Tests-Pass" $ do
         let testFile = "test/contracts/pass/dsProvePass.sol"
-        runForgeTest testFile ".*" >>= assertEqualM "test result" (True, True)
+        executeAllTestMethods testFile >>= assertEqualM "test result" (True, True)
     , ignoreTestBecause "Function selection does not work correctly" $ test "prefix-check" $ do
         let testFile = "test/contracts/fail/check-prefix.sol"
-        runForgeTest testFile "check_trivial" >>= assertEqualM "test result" (False, False)
+        executeSingleMethod testFile "check_trivial" >>= assertEqualM "test result" (False, False)
     , test "transfer-dapp" $ do
         let testFile = "test/contracts/pass/transfer.sol"
-        runForgeTest testFile "prove_transfer" >>= assertEqualM "should prove transfer" (True, True)
+        executeSingleMethod testFile "prove_transfer" >>= assertEqualM "should prove transfer" (True, True)
     , test "nonce-issues" $ do
         let testFile = "test/contracts/pass/nonce-issues.sol"
-        runForgeTest testFile "prove_prank_addr_exists" >>= assertEqualM "should not bail" (True, True)
-        runForgeTest testFile "prove_nonce_addr_nonexistent" >>= assertEqualM "should not bail" (True, True)
+        executeSingleMethod testFile "prove_prank_addr_exists" >>= assertEqualM "should not bail" (True, True)
+        executeSingleMethod testFile "prove_nonce_addr_nonexistent" >>= assertEqualM "should not bail" (True, True)
     , test "Prove-Tests-Fail" $ do
         let testFile = "test/contracts/fail/dsProveFail.sol"
-        runForgeTest testFile "prove_trivial" >>= assertEqualM "prove_trivial" (False, False)
-        runForgeTest testFile "prove_trivial_dstest" >>= assertEqualM "prove_trivial_dstest" (False, False)
-        runForgeTest testFile "prove_add" >>= assertEqualM "prove_add" (False, True)
-        runForgeTestCustom testFile "prove_smtTimeout" (Just 1) Nothing False Fetch.noRpc
+        executeSingleMethod testFile "prove_trivial" >>= assertEqualM "prove_trivial" (False, False)
+        executeSingleMethod testFile "prove_trivial_dstest" >>= assertEqualM "prove_trivial_dstest" (False, False)
+        executeSingleMethod testFile "prove_add" >>= assertEqualM "prove_add" (False, True)
+        runForgeTestCustom testFile (\(TestMethodInfo _ (Sig name _)) -> regexMatches "prove_smtTimeout" name) (Just 1) Nothing False Fetch.noRpc
           >>= assertEqualM "prove_smtTimeout" (True, False)
-        runForgeTest testFile "prove_multi" >>= assertEqualM "prove_multi" (False, True)
-        runForgeTest testFile "prove_distributivity" >>= assertEqualM "prove_distributivity" (False, True)
+        executeSingleMethod testFile "prove_multi" >>= assertEqualM "prove_multi" (False, True)
+        executeSingleMethod testFile "prove_distributivity" >>= assertEqualM "prove_distributivity" (False, True)
     , test "Loop-Tests" $ do
         let testFile = "test/contracts/pass/loops.sol"
-        runForgeTestCustom testFile "prove_loop" Nothing (Just 10) False Fetch.noRpc  >>= assertEqualM "test result" (True, False)
-        runForgeTestCustom testFile "prove_loop" Nothing (Just 100) False Fetch.noRpc >>= assertEqualM "test result" (False, False)
+        runForgeTestCustom testFile (\(TestMethodInfo _ (Sig name _)) -> regexMatches "prove_loop" name) Nothing (Just 10) False Fetch.noRpc  >>= assertEqualM "test result" (True, False)
+        runForgeTestCustom testFile (\(TestMethodInfo _ (Sig name _)) -> regexMatches "prove_loop" name) Nothing (Just 100) False Fetch.noRpc >>= assertEqualM "test result" (False, False)
     , test "Cheat-Codes-Pass" $ do
         let testFile = "test/contracts/pass/cheatCodes.sol"
-        runForgeTest testFile ".*" >>= assertEqualM "test result" (True, False)
+        executeAllTestMethods testFile >>= assertEqualM "test result" (True, False)
     , test "Cheat-Codes-Fork-Pass" $ do
         let testFile = "test/contracts/pass/cheatCodesFork.sol"
-        runForgeTest testFile ".*" >>= assertEqualM "test result" (True, True)
+        executeAllTestMethods testFile >>= assertEqualM "test result" (True, True)
     , test "Unwind" $ do
         let testFile = "test/contracts/pass/unwind.sol"
-        runForgeTest testFile ".*" >>= assertEqualM "test result" (True, True)
+        executeAllTestMethods testFile >>= assertEqualM "test result" (True, True)
     , test "Keccak" $ do
         let testFile = "test/contracts/pass/keccak.sol"
-        runForgeTest testFile "prove_access" >>= assertEqualM "test result" (True, True)
+        executeSingleMethod testFile "prove_access" >>= assertEqualM "test result" (True, True)
     ]
+
+executeSingleMethod :: (App m, MonadMask m) => FilePath -> Text -> m (Bool, Bool)
+executeSingleMethod file methodName = runForgeTest file (\(TestMethodInfo _ (Sig name _)) -> regexMatches methodName name)
+
+executeAllTestMethods :: (App m, MonadMask m) => FilePath -> m (Bool, Bool)
+executeAllTestMethods file = runForgeTest file (\(TestMethodInfo _ (Sig name _)) -> "prove" `isPrefixOf` name)
+
+executeTestMethodsMatching :: (App m, MonadMask m) => FilePath -> Text -> m (Bool, Bool)
+executeTestMethodsMatching file matcher = runForgeTest file (\(TestMethodInfo _ (Sig name _)) -> regexMatches matcher name && "prove" `isPrefixOf` name)

@@ -1,6 +1,5 @@
 module EVM.Test.Utils where
 
-import Data.Text (Text)
 import Data.List (isInfixOf)
 import GHC.IO.Exception (IOErrorType(..))
 import GHC.Natural
@@ -12,7 +11,7 @@ import System.Process
 import System.Exit
 import System.IO.Error (mkIOError)
 
-import EVM.Dapp (dappInfo, emptyDapp)
+import EVM.Dapp (dappInfo, emptyDapp, TestMethodFilter)
 import EVM.Solidity
 import EVM.Solvers
 import EVM.UnitTest
@@ -29,8 +28,8 @@ import EVM.Fetch qualified as Fetch
 -- Returns tuple of (No cex, No warnings)
 runForgeTestCustom
   :: (MonadMask m, App m)
-  => FilePath -> Text -> Maybe Natural -> Maybe Integer -> Bool -> RpcInfo -> m (Bool, Bool)
-runForgeTestCustom testFile match timeout maxIter ffiAllowed rpcinfo = do
+  => FilePath -> TestMethodFilter -> Maybe Natural -> Maybe Integer -> Bool -> RpcInfo -> m (Bool, Bool)
+runForgeTestCustom testFile methodFilter timeout maxIter ffiAllowed rpcinfo = do
   withSystemTempDirectory "dapp-test" $ \root -> do
     compileWithForge root testFile >>= \case
       Left e -> liftIO $ do
@@ -39,17 +38,17 @@ runForgeTestCustom testFile match timeout maxIter ffiAllowed rpcinfo = do
           <> show root
       Right buildOut -> do
         withSolvers Bitwuzla 3 timeout defMemLimit $ \solvers -> do
-          opts <- testOpts solvers root (Just buildOut) match maxIter ffiAllowed rpcinfo
+          opts <- testOpts solvers root (Just buildOut) methodFilter maxIter ffiAllowed rpcinfo
           unitTest opts buildOut
 
 -- Returns tuple of (No cex, No warnings)
 runForgeTest
   :: (MonadMask m, App m)
-  => FilePath -> Text -> m (Bool, Bool)
-runForgeTest testFile match = runForgeTestCustom testFile match Nothing Nothing True noRpc
+  => FilePath -> TestMethodFilter -> m (Bool, Bool)
+runForgeTest testFile methodFilter = runForgeTestCustom testFile methodFilter Nothing Nothing True noRpc
 
-testOpts :: forall m . App m => SolverGroup -> FilePath -> Maybe BuildOutput -> Text -> Maybe Integer -> Bool -> RpcInfo -> m (UnitTestOptions)
-testOpts solvers root buildOutput match maxIter allowFFI rpcinfo = do
+testOpts :: forall m . App m => SolverGroup -> FilePath -> Maybe BuildOutput -> TestMethodFilter -> Maybe Integer -> Bool -> RpcInfo -> m (UnitTestOptions)
+testOpts solvers root buildOutput methodFilter maxIter allowFFI rpcinfo = do
   let srcInfo = maybe emptyDapp (dappInfo root) buildOutput
   sess <- Fetch.mkSessionWithoutCache
   params <- paramsFromRpc rpcinfo sess
@@ -61,8 +60,7 @@ testOpts solvers root buildOutput match maxIter allowFFI rpcinfo = do
     , maxIter = maxIter
     , askSmtIters = 1
     , smtTimeout = Nothing
-    , match = match
-    , prefix = "prove"
+    , methodFilter = methodFilter
     , testParams = params
     , dapp = srcInfo
     , ffiAllowed = allowFFI

@@ -13,9 +13,9 @@ import Data.ByteString qualified as BS
 import Data.List (find, sort)
 import Data.Map (Map)
 import Data.Map qualified as Map
-import Data.Maybe (mapMaybe)
+import Data.Maybe (mapMaybe, isJust)
 import Data.Sequence qualified as Seq
-import Data.Text (Text, isPrefixOf, pack)
+import Data.Text (Text, pack)
 import Data.Text.Encoding (encodeUtf8)
 import Data.Vector qualified as V
 import Optics.Core
@@ -46,6 +46,13 @@ data DappContext = DappContext
   , contracts :: Map (Expr EAddr) Contract
   , labels :: Map Addr Text
   }
+
+data TestMethodInfo = TestMethodInfo
+  { contract :: SolcContract
+  , methodSignature :: Sig
+  }
+
+type TestMethodFilter = TestMethodInfo -> Bool
 
 dappInfo :: FilePath -> BuildOutput -> DappInfo
 dappInfo root (BuildOutput (Contracts cs) sources) =
@@ -80,43 +87,30 @@ dappInfo root (BuildOutput (Contracts cs) sources) =
 emptyDapp :: DappInfo
 emptyDapp = dappInfo "" mempty
 
--- Dapp unit tests are detected by searching within abi methods
--- that begin with "check" or "prove", that are in a contract with
--- the "IS_TEST()" abi marker, for a given regular expression.
---
--- The regex is matched on the full test method name, including path
--- and contract, i.e. "path/to/file.sol:TestContract.test_name()".
+-- Unit tests are detected by searching within abi methods
+-- in a contract with the "IS_TEST()" abi marker.
 
 unitTestMarkerAbi :: FunctionSelector
 unitTestMarkerAbi = abiKeccak (encodeUtf8 "IS_TEST()")
 
-mkSig :: Text -> Method -> Maybe Sig
-mkSig prefix method
-  | prefix `isPrefixOf` testname = Just (Sig testname argtypes)
-  | otherwise = Nothing
+mkSig :: Method -> Sig
+mkSig method = Sig method.name argtypes
   where
-    testname = method.name
     argtypes = snd <$> method.inputs
 
-findUnitTests :: Text -> Text -> ([SolcContract] -> [(Text, [Sig])])
-findUnitTests prefix match =
-  concatMap $ \c ->
-    case Map.lookup unitTestMarkerAbi c.abiMap of
-      Nothing -> []
-      Just _  ->
-        let testNames = unitTestMethodsFiltered prefix (regexMatches match) c
-        in [(c.contractName, testNames) | not (BS.null c.runtimeCode) && not (null testNames)]
+findUnitTests :: TestMethodFilter -> SolcContract -> [Sig]
+findUnitTests methodFilter c = if isTestContract c then contractMethodsFiltered methodFilter c else []
+  where
+    isTestContract c' = not (BS.null c'.runtimeCode) && (isJust $ Map.lookup unitTestMarkerAbi c'.abiMap)
 
-unitTestMethodsFiltered :: Text -> (Text -> Bool) -> (SolcContract -> [Sig])
-unitTestMethodsFiltered prefix matcher c =
-  let testName (Sig n _) = c.contractName <> "." <> n
-  in filter (matcher . testName) (unitTestMethods prefix c)
+contractMethodsFiltered :: TestMethodFilter -> SolcContract -> [Sig]
+contractMethodsFiltered testMethodFilter c = filter (\sig -> testMethodFilter (TestMethodInfo c sig)) $ contractMethods c
 
-unitTestMethods :: Text -> SolcContract -> [Sig]
-unitTestMethods prefix =
+contractMethods :: SolcContract -> [Sig]
+contractMethods =
   (.abiMap)
   >>> Map.elems
-  >>> mapMaybe (mkSig prefix)
+  >>> map mkSig
 
 traceSrcMap :: DappInfo -> Trace -> Maybe SrcMap
 traceSrcMap dapp trace = srcMap dapp trace.contract trace.opIx
