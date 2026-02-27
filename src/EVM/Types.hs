@@ -838,6 +838,7 @@ data TxState = TxState
   , isCreate    :: Bool
   , txReversion :: Map (Expr EAddr) Contract
   , txdataFloorGas :: Word64
+  , authorizationRefunds :: [(Expr EAddr, Word64)]  -- EIP-7702: refunds from authorization processing (preserved on revert)
   }
   deriving (Show)
 
@@ -958,6 +959,22 @@ instance Show RuntimeCode
       ConcreteRuntimeCode e -> "ConcreteRuntimeCode 0x" <> bsToHex e
       SymbolicRuntimeCode e -> show e
 
+
+-- EIP-7702 Authorization Entry --------------------------------------------------------------------
+
+
+-- | Authorization entry for EIP-7702 Set Code transactions
+-- An authorization allows an EOA to delegate its code execution to another address
+data AuthorizationEntry = AuthorizationEntry
+  { authChainId :: W256       -- ^ Chain ID (0 means valid on any chain)
+  , authAddress :: Addr       -- ^ Address of the code to delegate to
+  , authNonce   :: W256       -- ^ Nonce requirement for the authorizing account
+  , authYParity :: Word8      -- ^ Recovery parameter (0 or 1)
+  , authR       :: W256       -- ^ ECDSA signature r
+  , authS       :: W256       -- ^ ECDSA signature s
+  } deriving (Show, Eq, Generic)
+
+
 -- Execution Traces --------------------------------------------------------------------------------
 
 
@@ -1023,6 +1040,7 @@ data VMOpts (t :: VMType) = VMOpts
   , beaconRoot :: W256
   , parentHash :: W256      -- EIP-2935 parent block hash
   , txdataFloorGas :: Word64
+  , authorizationList :: [AuthorizationEntry]  -- EIP-7702: authorization list for set code tx
   }
 
 deriving instance Show (VMOpts Symbolic)

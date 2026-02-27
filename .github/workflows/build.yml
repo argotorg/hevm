@@ -115,6 +115,7 @@ jobs:
             git
             unzip
             bash
+            python
           pacboy: >-
             cmake:p
             ninja:p
@@ -167,6 +168,12 @@ jobs:
           echo "::endgroup::"
           echo "::group::Installing libff"
           ./.github/scripts/install-libff.sh
+          echo "::endgroup::"
+          echo "::group::Installing blst"
+          ./.github/scripts/install-blst.sh
+          echo "::endgroup::"
+          echo "::group::Installing c-kzg"
+          ./.github/scripts/install-c-kzg.sh
           echo "::endgroup::"
       - name: Configure the build
         run: |
