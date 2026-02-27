@@ -29,7 +29,7 @@ tests :: TestTree
 tests = testGroup "Foundry tests"
     [ test "Trivial-Pass" $ do
         let testFile = "test/contracts/pass/trivial.sol"
-        executeAllTestMethods testFile >>= assertEqualM "test result" (True, True)
+        executeSingleMethod testFile "prove_true" >>= assertEqualM "test result" (True, True)
     , test "Foundry" $ do
         -- quick smokecheck to make sure that we can parse ForgeStdLib style build outputs
         -- return is a pair of (No Cex, No Warnings)
@@ -73,16 +73,16 @@ tests = testGroup "Foundry tests"
         executeSingleMethod testFile "prove_false" >>= assertEqualM "test result" (False, False)
     , test "Abstract" $ do
         let testFile = "test/contracts/pass/abstract.sol"
-        executeAllTestMethods testFile >>= assertEqualM "test result" (True, True)
+        executeAllMethodsWithPrefix testFile "test" >>= assertEqualM "test result" (True, True)
     , test "Constantinople" $ do
         let testFile = "test/contracts/pass/constantinople.sol"
-        executeAllTestMethods testFile >>= assertEqualM "test result" (True, True)
+        executeAllMethodsWithPrefix testFile "check_" >>= assertEqualM "test result" (True, True)
     , test "Fusaka" $ do
         let testFile = "test/contracts/pass/fusaka.sol"
-        executeAllTestMethods testFile >>= assertEqualM "test result" (True, True)
+        executeAllMethodsWithPrefix testFile "check_" >>= assertEqualM "test result" (True, True)
     , test "Prove-Tests-Pass" $ do
         let testFile = "test/contracts/pass/dsProvePass.sol"
-        executeAllTestMethods testFile >>= assertEqualM "test result" (True, True)
+        executeAllMethodsWithPrefix testFile "prove" >>= assertEqualM "test result" (True, True)
     , test "prefix-check" $ do
         let testFile = "test/contracts/fail/check-prefix.sol"
         executeSingleMethod testFile "check_trivial" >>= assertEqualM "test result" (False, False)
@@ -108,13 +108,13 @@ tests = testGroup "Foundry tests"
         runForgeTestCustom testFile (\(TestMethodInfo _ (Sig name _)) -> regexMatches "prove_loop" name) Nothing (Just 100) False Fetch.noRpc >>= assertEqualM "test result" (False, False)
     , test "Cheat-Codes-Pass" $ do
         let testFile = "test/contracts/pass/cheatCodes.sol"
-        executeAllTestMethods testFile >>= assertEqualM "test result" (True, False)
+        executeAllMethodsWithPrefix testFile "prove" >>= assertEqualM "test result" (True, False)
     , test "Cheat-Codes-Fork-Pass" $ do
         let testFile = "test/contracts/pass/cheatCodesFork.sol"
-        executeAllTestMethods testFile >>= assertEqualM "test result" (True, True)
+        executeAllMethodsWithPrefix testFile "prove" >>= assertEqualM "test result" (True, True)
     , test "Unwind" $ do
         let testFile = "test/contracts/pass/unwind.sol"
-        executeAllTestMethods testFile >>= assertEqualM "test result" (True, True)
+        executeAllMethodsWithPrefix testFile "prove" >>= assertEqualM "test result" (True, True)
     , test "Keccak" $ do
         let testFile = "test/contracts/pass/keccak.sol"
         executeSingleMethod testFile "prove_access" >>= assertEqualM "test result" (True, True)
@@ -123,8 +123,8 @@ tests = testGroup "Foundry tests"
 executeSingleMethod :: (App m, MonadMask m) => FilePath -> Text -> m (Bool, Bool)
 executeSingleMethod file methodName = runForgeTest file (\(TestMethodInfo _ (Sig name _)) -> regexMatches methodName name)
 
-executeAllTestMethods :: (App m, MonadMask m) => FilePath -> m (Bool, Bool)
-executeAllTestMethods file = runForgeTest file (\(TestMethodInfo _ (Sig name _)) -> "prove" `isPrefixOf` name)
+executeAllMethodsWithPrefix :: (App m, MonadMask m) => FilePath -> Text -> m (Bool, Bool)
+executeAllMethodsWithPrefix file prefix = runForgeTest file (\(TestMethodInfo _ (Sig name _)) -> prefix `isPrefixOf` name)
 
 executeTestMethodsMatching :: (App m, MonadMask m) => FilePath -> Text -> m (Bool, Bool)
 executeTestMethodsMatching file matcher = runForgeTest file (\(TestMethodInfo _ (Sig name _)) -> regexMatches matcher name && "prove" `isPrefixOf` name)
