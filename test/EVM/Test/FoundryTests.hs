@@ -6,7 +6,6 @@ import Control.Monad.IO.Class
 import Control.Monad.Reader (ReaderT)
 import Data.Text (Text, isPrefixOf)
 import Test.Tasty
-import Test.Tasty.ExpectedFailure (ignoreTestBecause)
 import Test.Tasty.HUnit
 
 import EVM.ABI (Sig(..))
@@ -87,7 +86,7 @@ tests = testGroup "Foundry tests"
     , test "Prove-Tests-Pass" $ do
         let testFile = "test/contracts/pass/dsProvePass.sol"
         executeAllTestMethods testFile >>= assertEqualM "test result" (True, True)
-    , ignoreTestBecause "Function selection does not work correctly" $ test "prefix-check" $ do
+    , test "prefix-check" $ do
         let testFile = "test/contracts/fail/check-prefix.sol"
         executeSingleMethod testFile "check_trivial" >>= assertEqualM "test result" (False, False)
     , test "transfer-dapp" $ do
