@@ -22,7 +22,7 @@ import EVM.Stepper qualified as Stepper
 import EVM.Tracing qualified as Tracing
 import EVM.Expr (maybeLitWordSimp)
 
-import Control.Monad (void, when, forM, forM_)
+import Control.Monad (void, when, unless, forM, forM_)
 import Control.Monad.ST (RealWorld, ST, stToIO)
 import Control.Monad.State.Strict (execState, get, put, liftIO, runStateT)
 import Optics.Core
@@ -58,8 +58,7 @@ data UnitTestOptions = UnitTestOptions
   , maxIter       :: Maybe Integer
   , askSmtIters   :: Integer
   , smtTimeout    :: Maybe Natural
-  , match         :: Text
-  , prefix        :: Text
+  , methodFilter  :: TestMethodFilter
   , dapp          :: DappInfo
   , testParams    :: TestVMParams
   , ffiAllowed    :: Bool
@@ -122,15 +121,14 @@ makeVeriOpts opts =
 -- | Returns tuple of (No Cex, No warnings)
 unitTest :: App m => UnitTestOptions -> BuildOutput -> m (Bool, Bool)
 unitTest opts bo@(BuildOutput (Contracts cs) _) = do
-  let unitTestContrs = findUnitTests opts.prefix opts.match $ Map.elems cs
+  let unitTestContrs = [(c, methods) | c <- Map.elems cs, let methods = findUnitTests opts.methodFilter c, not (null methods)]
   conf <- readConfig
   when conf.debug $ liftIO $ do
     putStrLn $ "Found " ++ show (length unitTestContrs) ++ " unit test contract(s) to test:"
-    let x = map (\(a,b) -> "  --> " <> a <> "  ---  functions: " <> (Text.pack $ show b)) unitTestContrs
+    let x = map (\(a,b) -> "  --> " <> a.contractName <> "  ---  functions: " <> (Text.pack $ show b)) unitTestContrs
     putStrLn $ unlines $ map Text.unpack x
-  results <- concatMapM (runUnitTestContract opts bo) unitTestContrs
-  when conf.debug $ liftIO $ putStrLn $ "unitTest individual results: " <> show results
-  let (firsts, seconds) = unzip results
+  results <- mapM (runUnitTestContract opts bo) unitTestContrs
+  let (firsts, seconds) = unzip $ concat results
   pure (and firsts, and seconds)
 
 -- | Assuming a constructor is loaded, this stepper will run the constructor
@@ -206,33 +204,29 @@ runUnitTestContract
   :: App m
   => UnitTestOptions
   -> BuildOutput
-  -> (Text, [Sig])
+  -> (SolcContract, [Sig])
   -> m [(Bool, Bool)]
 runUnitTestContract
-  opts@(UnitTestOptions {..}) buildOut (name, testSigs) = do
-  liftIO $ putStrLn $ "Checking " ++ show (length testSigs) ++ " function(s) in contract " ++ unpack name
+  opts@(UnitTestOptions {..}) buildOut (contract, testSigs) = do
+  unless (Map.member contract.contractName (getContractsMap buildOut.contracts)) $ internalError $ "Contract " ++ unpack contract.contractName ++ " not found"
+  liftIO $ putStrLn $ "Checking " ++ show (length testSigs) ++ " function(s) in contract " ++ unpack contract.contractName
+  -- Construct the initial VM and begin the contract's constructor
+  vm0 :: VM Concrete <- liftIO $ stToIO $ initialUnitTestVm opts contract
+  vm1 <- Stepper.interpret (Fetch.oracle solvers (Just sess) rpcInfo) vm0 $ do
+    Stepper.enter contract.contractName
+    initializeUnitTest opts contract
+    Stepper.evm get
 
-  -- Look for the wanted contract by name from the Solidity info
-  case Map.lookup name (getContractsMap buildOut.contracts) of
-    Nothing -> internalError $ "Contract " ++ unpack name ++ " not found"
-    Just solcContr -> do
-      -- Construct the initial VM and begin the contract's constructor
-      vm0 :: VM Concrete <- liftIO $ stToIO $ initialUnitTestVm opts solcContr
-      vm1 <- Stepper.interpret (Fetch.oracle solvers (Just sess) rpcInfo) vm0 $ do
-        Stepper.enter name
-        initializeUnitTest opts solcContr
-        Stepper.evm get
-
-      writeTraceDapp dapp vm1
-      failOut <- failOutput vm1 opts "setUp()"
-      case vm1.result of
-        Just (VMFailure _) -> liftIO $ do
-          Text.putStrLn "   \x1b[31m[BAIL]\x1b[0m setUp() "
-          tick $ indentLines 3 failOut
-          pure [(True, False)]
-        Just (VMSuccess _) -> do
-          forM testSigs $ \s -> symRun opts vm1 s buildOut.sources
-        _ -> internalError "setUp() did not end with a result"
+  writeTraceDapp dapp vm1
+  failOut <- failOutput vm1 opts "setUp()"
+  case vm1.result of
+    Just (VMFailure _) -> liftIO $ do
+      Text.putStrLn "   \x1b[31m[BAIL]\x1b[0m setUp() "
+      tick $ indentLines 3 failOut
+      pure [(True, False)]
+    Just (VMSuccess _) -> do
+      forM testSigs $ \s -> symRun opts vm1 s buildOut.sources
+    _ -> internalError "setUp() did not end with a result"
 
 dsTestFailedSym :: Map (Expr 'EAddr) (Expr EContract) -> VM t -> Prop
 dsTestFailedSym store vm =
