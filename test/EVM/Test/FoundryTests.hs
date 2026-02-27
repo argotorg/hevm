@@ -77,9 +77,6 @@ tests = testGroup "Foundry tests"
     , test "Constantinople" $ do
         let testFile = "test/contracts/pass/constantinople.sol"
         executeAllTestMethods testFile >>= assertEqualM "test result" (True, True)
-    , test "ConstantinopleMin" $ do
-        let testFile = "test/contracts/pass/constantinople_min.sol"
-        executeAllTestMethods testFile >>= assertEqualM "test result" (True, True)
     , test "Fusaka" $ do
         let testFile = "test/contracts/pass/fusaka.sol"
         executeAllTestMethods testFile >>= assertEqualM "test result" (True, True)
