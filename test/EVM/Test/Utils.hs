@@ -45,7 +45,7 @@ runForgeTestCustom testFile methodFilter timeout maxIter ffiAllowed rpcinfo = do
 runForgeTest
   :: (MonadMask m, App m)
   => FilePath -> TestMethodFilter -> m (Bool, Bool)
-runForgeTest testFile methodFilter = runForgeTestCustom testFile methodFilter Nothing Nothing True noRpc
+runForgeTest testFile methodFilter = runForgeTestCustom testFile methodFilter Nothing Nothing False noRpc
 
 testOpts :: forall m . App m => SolverGroup -> FilePath -> Maybe BuildOutput -> TestMethodFilter -> Maybe Integer -> Bool -> RpcInfo -> m (UnitTestOptions)
 testOpts solvers root buildOutput methodFilter maxIter allowFFI rpcinfo = do
