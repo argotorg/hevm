@@ -1,0 +1,144 @@
+---
+name: Echidna Compatibility Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  echidna-build:
+    name: Build Echidna with local HEVM
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+
+    steps:
+      - name: Checkout Echidna
+        uses: actions/checkout@v4
+        with:
+          repository: crytic/echidna
+          path: echidna-src
+
+      - name: Checkout HEVM
+        uses: actions/checkout@v4
+        with:
+          path: echidna-src/hevm
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: false
+
+      - name: Patch stack.yaml
+        working-directory: echidna-src
+        shell: uv run --script {0}
+        run: |
+          # /// script
+          # requires-python = ">=3.12"
+          # dependencies = ["pyyaml"]
+          # ///
+          import yaml
+
+          with open('stack.yaml', 'r') as f:
+              data = yaml.safe_load(f)
+
+          if 'extra-deps' in data:
+              new_deps = []
+              found_hevm = False
+              for dep in data['extra-deps']:
+                  # Identify if this is the remote hevm dependency
+                  is_hevm = (isinstance(dep, dict)
+                             and 'git' in dep
+                             and 'hevm' in dep['git'])
+                  if is_hevm:
+                      if not found_hevm:
+                          new_deps.append('./hevm')
+                          found_hevm = True
+                      continue
+                  if dep == './hevm':
+                      found_hevm = True
+                      new_deps.append(dep)
+                      continue
+                  new_deps.append(dep)
+
+              if not found_hevm:
+                  # Insert hevm at the beginning of extra-deps
+                  new_deps.insert(0, './hevm')
+
+              data['extra-deps'] = new_deps
+
+          with open('stack.yaml', 'w') as f:
+              yaml.dump(data, f)
+
+          print("==== Patched stack.yaml ====")
+          with open('stack.yaml', 'r') as f:
+              print(f.read())
+
+      - name: Install Nix
+        uses: nixbuild/nix-quick-install-action@v34
+
+      - name: Build Echidna
+        id: build
+        continue-on-error: true
+        working-directory: echidna-src
+        run: |
+          # --fast skips optimizations since we only
+          # care about compilation, not runtime perf.
+          nix-shell \
+            -I nixpkgs=channel:nixpkgs-unstable \
+            -p secp256k1 libff gmp ncurses zlib pkg-config stack \
+               'haskell.compiler.ghc984' \
+            --run 'stack build --fast \
+              --test --no-run-tests \
+              --system-ghc --skip-ghc-check &&
+              stack exec --system-ghc --skip-ghc-check \
+              -- echidna --help' \
+            > >(tee build.log) 2>&1
+
+      - name: Prepare build log
+        if: >-
+          always()
+          && steps.build.outcome == 'failure'
+          && github.event_name == 'pull_request'
+        run: |
+          {
+            echo '## :warning: Echidna build failed'
+            echo ''
+            echo 'Building [Echidna](https://github.com/crytic/echidna)'
+            echo 'against this PR'"'"'s hevm failed.'
+            echo ''
+            echo '<details>'
+            echo '<summary>Build log (last 200 lines)</summary>'
+            echo ''
+            echo '```'
+            tail -200 echidna-src/build.log
+            echo '```'
+            echo ''
+            echo '</details>'
+          } > build-comment.md
+
+      - name: Post failure comment
+        if: >-
+          always()
+          && steps.build.outcome == 'failure'
+          && github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: echidna-compat
+          path: build-comment.md
+
+      - name: Remove stale failure comment
+        if: >-
+          always()
+          && steps.build.outcome == 'success'
+          && github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: echidna-compat
+          delete: true
