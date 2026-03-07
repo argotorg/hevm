@@ -23,10 +23,11 @@ jobs:
         run: |
           NIXPKGS_REV="$(jq -r '.nodes.nixpkgs_2.locked.rev' < flake.lock)"
           VERSIONS="$(nix eval -I "nixpkgs=https://github.com/NixOS/nixpkgs/archive/$NIXPKGS_REV.tar.gz" --impure --json \
-                      --expr 'let pkgs = (import <nixpkgs> {}); in { "secp256k1" = pkgs.secp256k1.version; "ff" = pkgs.libff.version; }')"
+                      --expr 'let pkgs = (import <nixpkgs> {}); in { "secp256k1" = pkgs.secp256k1.version; "ff" = pkgs.libff.version; "geth" = pkgs.go-ethereum.version; }')"
           LIBFF_REV="$(jq .ff -r <<<"$VERSIONS")"
           LIBSECP256K1_REV="$(jq .secp256k1 -r <<<"$VERSIONS")"
-          { echo "nixpkgs=$NIXPKGS_REV"; echo "libff=$LIBFF_REV"; echo "libsecp256k1=$LIBSECP256K1_REV"; } >> "$GITHUB_OUTPUT"
+          GETH_VERSION="$(jq .geth -r <<<"$VERSIONS")"
+          { echo "nixpkgs=$NIXPKGS_REV"; echo "libff=$LIBFF_REV"; echo "libsecp256k1=$LIBSECP256K1_REV"; echo "geth=$GETH_VERSION"; } >> "$GITHUB_OUTPUT"
       - name: lookup local versions
         id: local
         run: |
@@ -36,6 +37,7 @@ jobs:
           SOLIDITY_REV_BUILD="$(grep -A2 'repository: argotorg/solidity' .github/workflows/build.yml | grep 'ref:' | tr -d ' ' | cut -f2 -d:)"
           SOLC_VERSION_FLAKE="$(grep -oP 'solc_\K[0-9_]+' flake.nix | head -1 | tr '_' '.')"
           SOLC_VERSION_BUILD="$(grep -oP 'solidity/releases/download/v\K[0-9.]+' .github/workflows/build.yml)"
+          GETH_VERSION_BUILD="$(grep -oP 'go-ethereum/cmd/evm@v\K[0-9.]+' .github/workflows/build.yml)"
           {
             echo "libff=$LIBFF_REV"
             echo "libsecp256k1=$LIBSECP256K1_REV"
@@ -43,6 +45,7 @@ jobs:
             echo "solidity_rev_build=$SOLIDITY_REV_BUILD"
             echo "solc_version_flake=$SOLC_VERSION_FLAKE"
             echo "solc_version_build=$SOLC_VERSION_BUILD"
+            echo "geth=$GETH_VERSION_BUILD"
           } >> "$GITHUB_OUTPUT"
       - name: compare versions
         run: |
@@ -52,6 +55,10 @@ jobs:
           fi
           if [ "$LIBSECP256K1_NIXPKGS" != "$LIBSECP256K1_LOCAL" ]; then
             echo "libsecp256k1 versions do not match! nix=$LIBSECP256K1_NIXPKGS local=$LIBSECP256K1_LOCAL"
+            exit 1
+          fi
+          if [ "$GETH_NIXPKGS" != "$GETH_LOCAL" ]; then
+            echo "go-ethereum versions do not match! nix=$GETH_NIXPKGS local=$GETH_LOCAL"
             exit 1
           fi
           if [ "$SOLIDITY_REV_FLAKE" != "$SOLIDITY_REV_BUILD" ]; then
@@ -67,6 +74,8 @@ jobs:
           LIBFF_LOCAL: ${{ steps.local.outputs.libff }}
           LIBSECP256K1_NIXPKGS: ${{ steps.nixpkgs.outputs.libsecp256k1 }}
           LIBSECP256K1_LOCAL: ${{ steps.local.outputs.libsecp256k1 }}
+          GETH_NIXPKGS: ${{ steps.nixpkgs.outputs.geth }}
+          GETH_LOCAL: ${{ steps.local.outputs.geth }}
           SOLIDITY_REV_FLAKE: ${{ steps.local.outputs.solidity_rev_flake }}
           SOLIDITY_REV_BUILD: ${{ steps.local.outputs.solidity_rev_build }}
           SOLC_VERSION_FLAKE: ${{ steps.local.outputs.solc_version_flake }}
