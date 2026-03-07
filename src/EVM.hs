@@ -1,5 +1,6 @@
 {-# LANGUAGE ImplicitParams #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# OPTIONS_GHC -O2 -fworker-wrapper-cbv #-}
 
 module EVM where
 
