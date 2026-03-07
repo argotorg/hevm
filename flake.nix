@@ -4,7 +4,11 @@
   inputs = {
     flake-utils.url = "github:numtide/flake-utils";
     nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
-    foundry.url = "github:shazow/foundry.nix/stable";
+    foundry = {
+      url = "github:shazow/foundry.nix/stable";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.flake-utils.follows = "flake-utils";
+    };
     solidity = {
       url = "github:argotorg/solidity/fd3a22656ebe9c91a96ebd846ab7699b5f2e053c";
       flake = false;
@@ -15,11 +19,13 @@
     };
     empty-smt-solver = {
       url = "github:msooseth/empty-smt-solver/74bd120fdb730fde8e44243305e669e5e8a3e02a";
-      flake = true;
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.flake-utils.follows = "flake-utils";
     };
     solc-pkgs = {
       url = "github:hellwolf/solc.nix";
       inputs.nixpkgs.follows = "nixpkgs";
+      inputs.flake-utils.follows = "flake-utils";
     };
   };
 

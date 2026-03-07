@@ -242,7 +242,7 @@ jobs:
           unzip bitwuzla.zip && rm bitwuzla.zip
           echo BITWUZLA_PATH="$PWD/Bitwuzla-Win64-x86_64-static/bin" >> "$GITHUB_ENV"
           # evm
-          go install github.com/ethereum/go-ethereum/cmd/evm@v1.16.0
+          go install github.com/ethereum/go-ethereum/cmd/evm@v1.16.1
           echo EVM_PATH="$(cygpath -u "$(go env GOPATH)/bin")" >> "$GITHUB_ENV"
           # cvc5
           curl --retry 5 -fsSL https://github.com/cvc5/cvc5/releases/download/cvc5-1.3.0/cvc5-Win64-x86_64-static.zip -o cvc5.zip
