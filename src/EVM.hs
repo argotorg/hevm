@@ -417,16 +417,15 @@ exec1 conf = do
                   pushSym y
 
         OpSwap i -> {-# SCC "OpSwap" #-}
-          case (stk ^? ix_i, stk ^? ix_0) of
-            (Just ei, Just e0) ->
-              burn g_verylow $ do
-                next
-                zoom (#state % #stack) $ do
-                  ix_i .= e0
-                  ix_0 .= ei
+          let idx = into i in
+          case stk of
+            e0:rest -> case splitAt (idx - 1) rest of
+              (middle, ei:after) ->
+                burn g_verylow $ do
+                  next
+                  assign' (#state % #stack) $ ei : middle ++ (e0 : after)
+              _ -> underrun
             _ -> underrun
-          where
-            (ix_i, ix_0) = (ix (into i), ix 0)
 
         OpLog n -> {-# SCC "OpLog" #-}
           notStatic $
