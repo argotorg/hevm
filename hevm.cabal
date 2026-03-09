@@ -200,7 +200,7 @@ executable hevm
     cli
   main-is:
     cli.hs
-  ghc-options: -threaded -with-rtsopts=-N
+  ghc-options: -threaded "-with-rtsopts=-N -A32m"
   other-modules:
     Paths_hevm
   autogen-modules:
@@ -267,7 +267,7 @@ common test-common
   import: test-base
   default-language: GHC2021
   if flag(devel)
-    ghc-options: -threaded -with-rtsopts=-N
+    ghc-options: -threaded "-with-rtsopts=-N -A32m"
   build-depends:
     test-utils,
     vector,
@@ -381,7 +381,7 @@ benchmark bench-perf
   hs-source-dirs:
     bench
   ghc-options:
-    -O2 -threaded -with-rtsopts=-N -fproc-alignment=64
+    -O2 -threaded "-with-rtsopts=-N -A32m" -fproc-alignment=64
   other-modules:
     Paths_hevm
   autogen-modules:
