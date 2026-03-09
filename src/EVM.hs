@@ -37,6 +37,7 @@ import Data.Bits (FiniteBits, countLeadingZeros, finiteBitSize)
 import Data.ByteArray qualified as BA
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.ByteString.Unsafe qualified as BS.Unsafe
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Base16 qualified as BS16
 import Data.ByteString.Lazy (fromStrict)
@@ -3646,26 +3647,8 @@ opSize _                          = 1
 -- entries are per operation, not per byte.
 mkOpIxMap :: ContractCode -> VS.Vector Int
 mkOpIxMap (UnknownCode _) = internalError "Cannot build opIxMap for unknown code"
-mkOpIxMap (InitCode conc _)
-  = VS.create $ VS.Mutable.new (BS.length conc) >>= \v ->
-      -- Loop over the byte string accumulating a vector-mutating action.
-      -- This is somewhat obfuscated, but should be fast.
-      let (_, _, _, m) = BS.foldl' (go v) (0 :: Word8, 0, 0, pure ()) conc
-      in m >> pure v
-      where
-        -- concrete case
-        go v (0, !i, !j, !m) x | x >= 0x60 && x <= 0x7f =
-          {- Start of PUSH op. -} (x - 0x60 + 1, i + 1, j,     m >> VS.Mutable.write v i j)
-        go v (1, !i, !j, !m) _ =
-          {- End of PUSH op. -}   (0,            i + 1, j + 1, m >> VS.Mutable.write v i j)
-        go v (0, !i, !j, !m) _ =
-          {- Other op. -}         (0,            i + 1, j + 1, m >> VS.Mutable.write v i j)
-        go v (n, !i, !j, !m) _ =
-          {- PUSH data. -}        (n - 1,        i + 1, j,     m >> VS.Mutable.write v i j)
-
-mkOpIxMap (RuntimeCode (ConcreteRuntimeCode ops)) =
-  mkOpIxMap (InitCode ops mempty) -- a bit hacky
-
+mkOpIxMap (InitCode conc _) = mkConcreteOpIxMap conc
+mkOpIxMap (RuntimeCode (ConcreteRuntimeCode ops)) = mkConcreteOpIxMap ops
 mkOpIxMap (RuntimeCode (SymbolicRuntimeCode ops))
   = VS.create $ VS.Mutable.new (length ops) >>= \v ->
       let (_, _, _, m) = foldl' (go v) (0, 0, 0, pure ()) (stripBytecodeMetadataSym $ V.toList ops)
@@ -3683,6 +3666,30 @@ mkOpIxMap (RuntimeCode (SymbolicRuntimeCode ops))
           {- End of PUSH op. -}   (0,            i + 1, j + 1, m >> VS.Mutable.write v i j)
         go v (n, !i, !j, !m) _ =
           {- PUSH data. -}        (n - 1,        i + 1, j,     m >> VS.Mutable.write v i j)
+
+mkConcreteOpIxMap :: ByteString -> VS.Vector Int
+mkConcreteOpIxMap bs = VS.create $ do
+  let !len = BS.length bs
+  v <- VS.Mutable.new len
+  let go !pushBytesLeft !i !j
+        | i >= len = pure ()
+        | otherwise = do
+            -- Both buffers have length len, and 0 <= i < len here.
+            let x = BS.Unsafe.unsafeIndex bs i
+            VS.Mutable.unsafeWrite v i j
+            case pushBytesLeft of
+              -- Start of PUSH: its payload shares the current operation index.
+              0 | x >= 0x60 && x <= 0x7f ->
+                    go (x - 0x60 + 1) (i + 1) j
+                -- Other opcode, including PUSH0: the next byte starts a new op.
+                | otherwise ->
+                    go 0 (i + 1) (j + 1)
+              -- Last PUSH payload byte: the next byte starts a new operation.
+              1 -> go 0 (i + 1) (j + 1)
+              -- More PUSH payload remains: keep the same operation index.
+              n -> go (n - 1 :: Word8) (i + 1) j
+  go 0 0 0
+  pure v
 
 
 vmOpIx :: VM t -> Maybe Int
