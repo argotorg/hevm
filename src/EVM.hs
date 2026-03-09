@@ -2991,16 +2991,13 @@ vmOpIx vm =
 
 -- Maps operation indices into a pair of (bytecode index, operation)
 mkCodeOps :: ContractCode -> V.Vector (Int, Op)
-mkCodeOps contractCode =
-  let l = case contractCode of
-            UnknownCode _ -> internalError "Cannot make codeOps for unknown code"
-            InitCode bytes _ ->
-              LitByte <$> (BS.unpack bytes)
-            RuntimeCode (ConcreteRuntimeCode ops) ->
-              LitByte <$> (BS.unpack $ stripBytecodeMetadata ops)
-            RuntimeCode (SymbolicRuntimeCode ops) ->
-              stripBytecodeMetadataSym $ V.toList ops
-  in V.fromList . toList $ go 0 l
+mkCodeOps contractCode = case contractCode of
+  UnknownCode _ -> internalError "Cannot make codeOps for unknown code"
+  InitCode bytes _ -> mkConcreteOps bytes
+  RuntimeCode (ConcreteRuntimeCode ops) -> mkConcreteOps (stripBytecodeMetadata ops)
+  RuntimeCode (SymbolicRuntimeCode ops) ->
+    let l = stripBytecodeMetadataSym $ V.toList ops
+    in V.fromList . toList $ go 0 l
   where
     go !i !xs =
       case uncons xs of
@@ -3010,6 +3007,20 @@ mkCodeOps contractCode =
           let x' = fromMaybe (internalError "unexpected symbolic code argument") $ maybeLitByteSimp x
               j = opSize x'
           in (i, readOp x' xs') Seq.<| go (i + j) (drop j xs)
+
+-- | Optimized mkCodeOps for concrete bytecode: works directly on ByteString
+-- without intermediate [Expr Byte] list allocation
+mkConcreteOps :: ByteString -> V.Vector (Int, Op)
+mkConcreteOps bs = V.fromList $ goBS 0
+  where
+    !len = BS.length bs
+    goBS !i
+      | i >= len = []
+      | otherwise =
+          let x = BS.index bs i
+              j = opSize x
+              pushData = [LitByte (BS.index bs k) | k <- [i+1..min (i+j-1) (len-1)]]
+          in (i, readOp x pushData) : goBS (i + j)
 
 -- * Gas cost calculation helpers
 
