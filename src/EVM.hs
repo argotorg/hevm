@@ -418,14 +418,12 @@ exec1 conf = do
 
         OpSwap i -> {-# SCC "OpSwap" #-}
           let idx = into i in
-          case stk of
-            e0:rest -> case splitAt (idx - 1) rest of
-              (middle, ei:after) ->
-                burn g_verylow $ do
-                  next
-                  assign' (#state % #stack) $ ei : middle ++ (e0 : after)
-              _ -> underrun
-            _ -> underrun
+          case splitAt idx stk of
+          (e0:middle, ei:after) ->
+            burn g_verylow $ do
+              next
+              assign' (#state % #stack) $ ei : middle ++ (e0 : after)
+          _ -> underrun
 
         OpLog n -> {-# SCC "OpLog" #-}
           notStatic $
