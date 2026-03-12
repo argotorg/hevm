@@ -2926,26 +2926,8 @@ opSize _                          = 1
 -- entries are per operation, not per byte.
 mkOpIxMap :: ContractCode -> VS.Vector Int
 mkOpIxMap (UnknownCode _) = internalError "Cannot build opIxMap for unknown code"
-mkOpIxMap (InitCode conc _)
-  = VS.create $ VS.Mutable.new (BS.length conc) >>= \v ->
-      -- Loop over the byte string accumulating a vector-mutating action.
-      -- This is somewhat obfuscated, but should be fast.
-      let (_, _, _, m) = BS.foldl' (go v) (0 :: Word8, 0, 0, pure ()) conc
-      in m >> pure v
-      where
-        -- concrete case
-        go v (0, !i, !j, !m) x | x >= 0x60 && x <= 0x7f =
-          {- Start of PUSH op. -} (x - 0x60 + 1, i + 1, j,     m >> VS.Mutable.write v i j)
-        go v (1, !i, !j, !m) _ =
-          {- End of PUSH op. -}   (0,            i + 1, j + 1, m >> VS.Mutable.write v i j)
-        go v (0, !i, !j, !m) _ =
-          {- Other op. -}         (0,            i + 1, j + 1, m >> VS.Mutable.write v i j)
-        go v (n, !i, !j, !m) _ =
-          {- PUSH data. -}        (n - 1,        i + 1, j,     m >> VS.Mutable.write v i j)
-
-mkOpIxMap (RuntimeCode (ConcreteRuntimeCode ops)) =
-  mkOpIxMap (InitCode ops mempty) -- a bit hacky
-
+mkOpIxMap (InitCode conc _) = mkConcreteOpIxMap conc
+mkOpIxMap (RuntimeCode (ConcreteRuntimeCode ops)) = mkConcreteOpIxMap ops
 mkOpIxMap (RuntimeCode (SymbolicRuntimeCode ops))
   = VS.create $ VS.Mutable.new (length ops) >>= \v ->
       let (_, _, _, m) = foldl' (go v) (0, 0, 0, pure ()) (stripBytecodeMetadataSym $ V.toList ops)
@@ -2963,6 +2945,25 @@ mkOpIxMap (RuntimeCode (SymbolicRuntimeCode ops))
           {- End of PUSH op. -}   (0,            i + 1, j + 1, m >> VS.Mutable.write v i j)
         go v (n, !i, !j, !m) _ =
           {- PUSH data. -}        (n - 1,        i + 1, j,     m >> VS.Mutable.write v i j)
+
+mkConcreteOpIxMap :: ByteString -> VS.Vector Int
+mkConcreteOpIxMap bs = VS.create $ do
+  let !len = BS.length bs
+  v <- VS.Mutable.new len
+  let go !push !i !j
+        | i >= len = pure ()
+        | otherwise = do
+            let x = BS.index bs i
+            VS.Mutable.write v i j
+            case push of
+              0 | x >= 0x60 && x <= 0x7f ->
+                    go (x - 0x60 + 1) (i + 1) j
+                | otherwise ->
+                    go 0 (i + 1) (j + 1)
+              1 -> go 0 (i + 1) (j + 1)
+              n -> go (n - 1 :: Word8) (i + 1) j
+  go 0 0 0
+  pure v
 
 
 vmOp :: VM t -> Maybe Op
@@ -2988,16 +2989,13 @@ vmOpIx vm =
 
 -- Maps operation indices into a pair of (bytecode index, operation)
 mkCodeOps :: ContractCode -> V.Vector (Int, Op)
-mkCodeOps contractCode =
-  let l = case contractCode of
-            UnknownCode _ -> internalError "Cannot make codeOps for unknown code"
-            InitCode bytes _ ->
-              LitByte <$> (BS.unpack bytes)
-            RuntimeCode (ConcreteRuntimeCode ops) ->
-              LitByte <$> (BS.unpack $ stripBytecodeMetadata ops)
-            RuntimeCode (SymbolicRuntimeCode ops) ->
-              stripBytecodeMetadataSym $ V.toList ops
-  in V.fromList . toList $ go 0 l
+mkCodeOps contractCode = case contractCode of
+  UnknownCode _ -> internalError "Cannot make codeOps for unknown code"
+  InitCode bytes _ -> mkConcreteOps bytes
+  RuntimeCode (ConcreteRuntimeCode ops) -> mkConcreteOps (stripBytecodeMetadata ops)
+  RuntimeCode (SymbolicRuntimeCode ops) ->
+    let l = stripBytecodeMetadataSym $ V.toList ops
+    in V.fromList . toList $ go 0 l
   where
     go !i !xs =
       case uncons xs of
@@ -3007,6 +3005,20 @@ mkCodeOps contractCode =
           let x' = fromMaybe (internalError "unexpected symbolic code argument") $ maybeLitByteSimp x
               j = opSize x'
           in (i, readOp x' xs') Seq.<| go (i + j) (drop j xs)
+
+-- | Optimized mkCodeOps for concrete bytecode: works directly on ByteString
+-- without intermediate [Expr Byte] list allocation
+mkConcreteOps :: ByteString -> V.Vector (Int, Op)
+mkConcreteOps bs = V.fromList $ goBS 0
+  where
+    !len = BS.length bs
+    goBS !i
+      | i >= len = []
+      | otherwise =
+          let x = BS.index bs i
+              j = opSize x
+              pushData = [LitByte (BS.index bs k) | k <- [i+1..min (i+j-1) (len-1)]]
+          in (i, readOp x pushData) : goBS (i + j)
 
 -- * Gas cost calculation helpers
 
