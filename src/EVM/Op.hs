@@ -275,6 +275,7 @@ readOp :: Word8 -> [Expr Byte] -> Op
 readOp x xs =
   (\n -> Expr.readBytes (into n) (Lit 0) (Expr.fromList $ V.fromList xs)) <$> getOp x
 
+{-# INLINE getOp #-}
 getOp :: Word8 -> GenericOp Word8
 getOp x | x >= 0x80 && x <= 0x8f = OpDup (x - 0x80 + 1)
 getOp x | x >= 0x90 && x <= 0x9f = OpSwap (x - 0x90 + 1)
