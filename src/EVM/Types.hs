@@ -974,6 +974,7 @@ data TraceData
   | ErrorTrace EvmError
   | EntryTrace Text
   | ReturnTrace (Expr Buf) FrameContext
+  | ConsoleLog (Expr Buf)
   deriving (Eq, Ord, Show, Generic)
 
 -- | Wrapper type containing vm traces and the context needed to pretty print them properly

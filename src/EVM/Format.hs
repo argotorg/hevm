@@ -39,6 +39,7 @@ import Prelude hiding (LT, GT)
 
 import EVM (traceForest, traceForest', traceContext, cheatCode)
 import EVM.ABI (getAbiSeq, parseTypeName, AbiValue(..), AbiType(..), SolError(..), Indexed(..), Event(..))
+import EVM.ConsoleLog (formatConsoleLog)
 import EVM.Dapp (DappContext(..), DappInfo(..), findSrc, showTraceLocation)
 import EVM.Expr qualified as Expr
 import EVM.Solidity (SolcContract(..), Method(..))
@@ -328,6 +329,8 @@ showTrace trace =
     ReturnTrace out (CreationContext {}) ->
       let l = Expr.bufLength out
       in "← " <> formatExpr l <> " bytes of code"
+    ConsoleLog buf ->
+      "\x1b[36m" <> formatConsoleLog buf <> "\x1b[0m"
     EntryTrace t ->
       t
     FrameTrace (CreationContext { address }) ->

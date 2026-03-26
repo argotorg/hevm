@@ -1858,6 +1858,11 @@ accessStorageForGas addr key = do
 cheatCode :: Expr EAddr
 cheatCode = LitAddr $ unsafeInto (keccak' "hevm cheat code")
 
+-- | The address used by Foundry/Hardhat console.log
+-- 0x000000000000000000636F6e736F6c652e6c6f67 (ASCII "console.log")
+consoleAddr :: Expr EAddr
+consoleAddr = LitAddr 0x000000000000000000636F6e736F6c652e6c6f67
+
 cheat
   :: forall t . (?conf :: Config, ?op :: Word8, VMOps t, Typeable t)
   => Gas t -> (Expr EWord, Expr EWord) -> (Expr EWord, Expr EWord) -> [Expr EWord]
@@ -2249,6 +2254,12 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
             precompiledContract this gasGiven xTo' xContext' xValue xInOffset xInSize xOutOffset xOutSize xs
   | xTo == cheatCode = do
       cheat gasGiven (xInOffset, xInSize) (xOutOffset, xOutSize) xs
+  | xTo == consoleAddr = do
+      calldata <- readMemory xInOffset xInSize
+      pushTrace $ ConsoleLog calldata
+      assign' (#state % #stack) (Lit 1 : xs)
+      assign (#state % #returndata) mempty
+      next
   | otherwise =
       callChecks this gasGiven xContext xTo xValue xInOffset xInSize xOutOffset xOutSize xs $
         \xGas -> do
