@@ -161,7 +161,7 @@ assumeCheatCodeExample = [here|
 consoleLogExample :: Text
 consoleLogExample = [here|
   contract C {
-    function a(uint256 x) public pure returns (uint256) {
+    function a(uint256 x) public view returns (uint256) {
       address console = 0x000000000000000000636F6e736F6c652e6c6f67;
       bytes memory payload = abi.encodeWithSignature("log(string,uint256)", "value is", x);
       (bool s,) = console.staticcall(payload);
