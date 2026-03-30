@@ -33,3 +33,7 @@ mkdir -p build
 cd build
 CXXFLAGS="$CXXFLAGS" cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 "${ARGS[@]}" ..
 cmake --build . && cmake --install .
+
+# cmake install may not copy headers, so do it manually
+# ../libff/ is the source header directory (inside the libff repo)
+cp -r ../libff "$PREFIX/include/"

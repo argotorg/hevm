@@ -168,18 +168,6 @@ jobs:
           echo "::group::Installing libff"
           ./.github/scripts/install-libff.sh
           echo "::endgroup::"
-          # Verify libff headers are installed, then test directly
-          LOCAL_INCLUDE="$(cygpath -m "$HOME/.local/include")"
-          echo "=== Checking header file ==="
-          ls -la "$HOME/.local/include/libff/algebra/fields/bigint.hpp" || echo "HEADER NOT FOUND"
-          echo "=== Direct clang++ test ==="
-          echo '#include <libff/algebra/fields/bigint.hpp>' | "$HASKELL_MINGW_PATH/bin/clang++.exe" "-I$LOCAL_INCLUDE" -x c++ -E - > /dev/null 2>&1 && echo "Direct clang++ OK" || echo "Direct clang++ FAILED"
-          echo "=== Direct GHC test ==="
-          echo 'void test() {}' > /tmp/test.cc
-          ghc -c /tmp/test.cc -optcxx-I"$LOCAL_INCLUDE" -v 2>&1 | grep "clang\|Running\|error" || true
-          rm -f /tmp/test.cc /tmp/test.o
-          # Inject the include path via cxx-options in the cabal file
-          sed -i "s|cxx-options:|cxx-options: -I$LOCAL_INCLUDE|" hevm.cabal
       - name: Configure the build
         run: |
           export PATH="$HASKELL_PATHS:$PATH"
