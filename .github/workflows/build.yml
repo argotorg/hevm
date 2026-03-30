@@ -172,8 +172,12 @@ jobs:
           # so we patch GHC's settings to include the libff path in the
           # built-in C++ compiler flags
           LOCAL_INCLUDE="$(cygpath -m "$HOME/.local/include")"
-          GHC_SETTINGS="$(ghc --print-libdir)/settings"
-          sed -i "s|\"C++ compiler flags\",\"|\"C++ compiler flags\",\"-I$LOCAL_INCLUDE |" "$GHC_SETTINGS"
+          GHC_SETTINGS="$(cygpath -u "$(ghc --print-libdir)")/settings"
+          echo "Patching GHC settings: $GHC_SETTINGS"
+          grep "C++ compiler flags" "$GHC_SETTINGS"
+          sed -i "s|\"C++ compiler flags\",[ ]*\"|\"C++ compiler flags\", \"-I$LOCAL_INCLUDE |" "$GHC_SETTINGS"
+          echo "After patch:"
+          grep "C++ compiler flags" "$GHC_SETTINGS"
       - name: Configure the build
         run: |
           export PATH="$HASKELL_PATHS:$PATH"
