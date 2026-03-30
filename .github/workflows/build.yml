@@ -171,12 +171,13 @@ jobs:
       - name: Configure the build
         run: |
           export PATH="$HASKELL_PATHS:$PATH"
+          LOCAL_INCLUDE="$(cygpath -m "$HOME/.local/include")"
           cabal configure --disable-documentation --enable-executable-static --enable-executable-stripping \
             --extra-lib-dirs="$(cygpath -m "$HASKELL_MINGW_PATH/x86_64-w64-mingw32/lib")" \
             --extra-lib-dirs="$(cygpath -m "$HASKELL_MINGW_PATH/lib")" \
             --extra-lib-dirs="$SYSTEM_MINGW_PATH/lib" \
             --extra-include-dirs="$HOME/.local/include" --extra-lib-dirs="$HOME/.local/lib" \
-            --ghc-options=-pgml="$(cygpath -m "$HASKELL_MINGW_PATH/bin/clang.exe") -optc-idirafter -optc$SYSTEM_MINGW_PATH/include -optcxx-idirafter -optcxx$SYSTEM_MINGW_PATH/include" -fstatic-secp256k1 --constraint="zlib +bundled-c-zlib"
+            --ghc-options=-pgml="$(cygpath -m "$HASKELL_MINGW_PATH/bin/clang.exe") -optc-idirafter -optc$SYSTEM_MINGW_PATH/include -optcxx-idirafter -optcxx$SYSTEM_MINGW_PATH/include -optcxx-I -optcxx$LOCAL_INCLUDE" -fstatic-secp256k1 --constraint="zlib +bundled-c-zlib"
           cabal build --dry-run
           # The last step generates dist-newstyle/cache/plan.json for the cache key.
 
