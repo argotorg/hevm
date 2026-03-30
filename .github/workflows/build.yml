@@ -168,12 +168,14 @@ jobs:
           echo "::group::Installing libff"
           ./.github/scripts/install-libff.sh
           echo "::endgroup::"
+          # Copy headers and libs into GHC's mingw tree so the compiler finds
+          # them without extra -I flags (Cabal may not forward extra-include-dirs
+          # to the C++ compiler for cxx-sources)
+          cp -r "$HOME/.local/include/libff" "$HASKELL_MINGW_PATH/include/"
+          cp "$HOME/.local/lib/libff.a" "$HASKELL_MINGW_PATH/lib/"
       - name: Configure the build
         run: |
           export PATH="$HASKELL_PATHS:$PATH"
-          # Cabal's --extra-include-dirs may not be forwarded to the C++ compiler
-          # for cxx-sources, so we set the environment variable directly
-          echo "CPLUS_INCLUDE_PATH=$(cygpath -m "$HOME/.local/include")" >> "$GITHUB_ENV"
           cabal configure --disable-documentation --enable-executable-static --enable-executable-stripping \
             --extra-lib-dirs="$(cygpath -m "$HASKELL_MINGW_PATH/x86_64-w64-mingw32/lib")" \
             --extra-lib-dirs="$(cygpath -m "$HASKELL_MINGW_PATH/lib")" \
