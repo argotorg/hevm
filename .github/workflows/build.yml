@@ -168,16 +168,12 @@ jobs:
           echo "::group::Installing libff"
           ./.github/scripts/install-libff.sh
           echo "::endgroup::"
-          # GHC does not forward -I flags to the C++ compiler (only to C),
-          # so we patch GHC's settings to include the libff path in the
-          # built-in C++ compiler flags
+          # GHC does not forward Cabal's extra-include-dirs to the C++ compiler,
+          # so we inject the include path via cxx-options in the cabal file
           LOCAL_INCLUDE="$(cygpath -m "$HOME/.local/include")"
-          GHC_SETTINGS="$(cygpath -u "$(ghc --print-libdir)")/settings"
-          echo "Patching GHC settings: $GHC_SETTINGS"
-          grep "C++ compiler flags" "$GHC_SETTINGS"
-          sed -i "s|\"C++ compiler flags\",[ ]*\"|\"C++ compiler flags\", \"-I$LOCAL_INCLUDE |" "$GHC_SETTINGS"
-          echo "After patch:"
-          grep "C++ compiler flags" "$GHC_SETTINGS"
+          sed -i "s|cxx-options:|cxx-options: -I$LOCAL_INCLUDE|" hevm.cabal
+          echo "Patched cxx-options:"
+          grep "cxx-options" hevm.cabal
       - name: Configure the build
         run: |
           export PATH="$HASKELL_PATHS:$PATH"
