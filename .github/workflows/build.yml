@@ -176,12 +176,13 @@ jobs:
       - name: Configure the build
         run: |
           export PATH="$HASKELL_PATHS:$PATH"
+          LOCAL_INCLUDE="$(cygpath -m "$HOME/.local/include")"
           cabal configure --disable-documentation --enable-executable-static --enable-executable-stripping \
             --extra-lib-dirs="$(cygpath -m "$HASKELL_MINGW_PATH/x86_64-w64-mingw32/lib")" \
             --extra-lib-dirs="$(cygpath -m "$HASKELL_MINGW_PATH/lib")" \
             --extra-lib-dirs="$SYSTEM_MINGW_PATH/lib" \
             --extra-include-dirs="$HOME/.local/include" --extra-lib-dirs="$HOME/.local/lib" \
-            --ghc-options=-pgml="$(cygpath -m "$HASKELL_MINGW_PATH/bin/clang.exe") -optc-idirafter -optc$SYSTEM_MINGW_PATH/include -optcxx-idirafter -optcxx$SYSTEM_MINGW_PATH/include" -fstatic-secp256k1 --constraint="zlib +bundled-c-zlib"
+            --ghc-options=-pgml="$(cygpath -m "$HASKELL_MINGW_PATH/bin/clang.exe") -optc-idirafter -optc$SYSTEM_MINGW_PATH/include -optcxx-idirafter -optcxx$SYSTEM_MINGW_PATH/include -optcxx-I$LOCAL_INCLUDE" -fstatic-secp256k1 --constraint="zlib +bundled-c-zlib"
           cabal build --dry-run
           # The last step generates dist-newstyle/cache/plan.json for the cache key.
 
@@ -212,21 +213,7 @@ jobs:
       - name: build hevm
         run: |
           export PATH="$HASKELL_PATHS:$PATH"
-          echo "::group::Debug info"
-          echo "=== GHC C++ compiler ==="
-          ghc --info 2>/dev/null | grep -i "c++"
-          echo "=== HASKELL_MINGW_PATH contents ==="
-          ls "$HASKELL_MINGW_PATH/include/" | head -20
-          ls "$HASKELL_MINGW_PATH/include/libff/" 2>/dev/null || echo "libff NOT in HASKELL_MINGW_PATH/include"
-          echo "=== libff in HOME/.local ==="
-          ls "$HOME/.local/include/libff/" 2>/dev/null || echo "libff NOT in HOME/.local/include"
-          echo "=== clang++ default search paths ==="
-          echo "" | "$HASKELL_MINGW_PATH/bin/clang++.exe" -v -x c++ -E - 2>&1 | grep -A20 "#include.*search" || true
-          echo "::endgroup::"
-          cabal build -v 2>&1 | tee build.log | tail -200
-          echo "::group::C++ compilation command"
-          grep -i "ethjet-ff\|clang++" build.log || true
-          echo "::endgroup::"
+          cabal build
           mkdir result && cp "$(cabal list-bin hevm)" result/hevm.exe
           strip result/hevm.exe
 
