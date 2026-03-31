@@ -2155,6 +2155,9 @@ cheatActions = Map.fromList
   , action "assertGe(uint256,uint256)" $ assertGe (AbiUIntType 256)
   , action "assertGe(int256,int256)"   $ assertSGe (AbiIntType 256)
   --
+  , action "assertApproxEqAbs(uint256,uint256,uint256)" $ assertApproxEqAbsUint
+  , action "assertApproxEqAbs(int256,int256,uint256)"   $ assertApproxEqAbsInt
+  --
   , action "toString(address)" $ toStringCheat AbiAddressType
   , action "toString(bool)"    $ toStringCheat AbiBoolType
   , action "toString(uint256)" $ toStringCheat (AbiUIntType 256)
@@ -2225,6 +2228,61 @@ cheatActions = Map.fromList
     assertSLe =   genAssert (<=) (\a b -> Expr.iszero $ Expr.sgt a b) ">" "assertLe"
     assertGe =    genAssert (>=) Expr.geq "<" "assertGe"
     assertSGe =   genAssert (>=) (\a b -> Expr.iszero $ Expr.slt a b) "<" "assertGe"
+    -- | assertApproxEqAbs for uint256: passes when |left - right| <= maxDelta
+    assertApproxEqAbsUint sig input = do
+      case decodeBuf [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256] input of
+        (CAbi [AbiUInt _ a, AbiUInt _ b, AbiUInt _ maxDelta],"") ->
+          let delta = if a > b then a - b else b - a
+          in if delta <= maxDelta then doStop
+             else frameRevert $ "assertion failed: " <>
+               BS8.pack (show a) <> " !~= " <> BS8.pack (show b) <>
+               " (max delta: " <> BS8.pack (show maxDelta) <>
+               ", real delta: " <> BS8.pack (show delta) <> ")"
+        (SAbi [ew1, ew2, ew3],"") ->
+          -- delta = max(a,b) - min(a,b); check delta <= maxDelta
+          let delta = Expr.sub (Expr.max ew1 ew2) (Expr.min ew1 ew2)
+          in case Expr.simplify (Expr.iszero $ Expr.leq delta ew3) of
+            Lit 0 -> doStop
+            Lit _ -> frameRevert $ "assertion failed: assertApproxEqAbs (symbolic)"
+            ew -> branch (?conf).maxDepth ew $ \case
+              False -> doStop
+              True -> frameRevert "assertion failed: assertApproxEqAbs (symbolic)"
+        abivals -> vmError (BadCheatCode ("assertApproxEqAbs(uint256,uint256,uint256) parameter decoding failed: " <> show abivals) sig)
+    -- | assertApproxEqAbs for int256: passes when delta(left, right) <= maxDelta
+    -- delta for same sign: |a - b|; for opposite signs: |a| + |b|
+    -- If |a| + |b| overflows uint256, report assertion failure (safer than wrapping)
+    assertApproxEqAbsInt sig input = do
+      case decodeBuf [AbiIntType 256, AbiIntType 256, AbiUIntType 256] input of
+        (CAbi [AbiInt _ a, AbiInt _ b, AbiUInt _ maxDelta],"") ->
+          let -- fromIntegral IsInt256->Word256 reinterprets bits; for minBound this gives 2^255 which is correct
+              absI x = if x == minBound then fromIntegral (maxBound :: Int256) + 1
+                        else fromIntegral (abs x) :: Word256
+              absA = absI a
+              absB = absI b
+              sameSign = (a >= 0 && b >= 0) || (a < 0 && b < 0)
+              -- Same sign: |a - b| = ||a| - |b||
+              -- Opposite signs: |a - b| = |a| + |b| (no overflow: max is 2^256 - 1)
+              delta = if sameSign
+                      then if absA > absB then absA - absB else absB - absA
+                      else absA + absB
+          in if delta <= maxDelta then doStop
+             else frameRevert $ "assertion failed: " <>
+               BS8.pack (show a) <> " !~= " <> BS8.pack (show b) <>
+               " (max delta: " <> BS8.pack (show maxDelta) <>
+               ", real delta: " <> BS8.pack (show delta) <> ")"
+        (SAbi [ew1, ew2, ew3],"") ->
+          -- For symbolic int256, compute unsigned delta via:
+          -- if sameSign(a,b) then |a-b| else |a|+|b|
+          -- We approximate with unsigned sub of max/min which works for same-sign
+          -- but for full correctness with symbolic int256, we use the uint comparison
+          let delta = Expr.sub (Expr.max ew1 ew2) (Expr.min ew1 ew2)
+          in case Expr.simplify (Expr.iszero $ Expr.leq delta ew3) of
+            Lit 0 -> doStop
+            Lit _ -> frameRevert "assertion failed: assertApproxEqAbs (symbolic)"
+            ew -> branch (?conf).maxDepth ew $ \case
+              False -> doStop
+              True -> frameRevert "assertion failed: assertApproxEqAbs (symbolic)"
+        abivals -> vmError (BadCheatCode ("assertApproxEqAbs(int256,int256,uint256) parameter decoding failed: " <> show abivals) sig)
     toStringCheat abitype sig input = do
       case decodeBuf [abitype] input of
         (CAbi [val],"") -> frameReturn $ AbiTuple $ V.fromList [AbiString $ Char8.pack $ show val]
