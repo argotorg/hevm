@@ -598,6 +598,7 @@ data PartialExec
   | PrecompileMissing     { pc :: Int, addr :: Expr EAddr, preAddr :: Addr }
   | CheatCodeMissing      { pc :: Int, addr :: Expr EAddr, selector :: FunctionSelector }
   | BranchTooDeep         { pc :: Int, addr :: Expr EAddr}
+  | DynamicArgBounded     { maxSize :: Int }
   deriving (Show, Eq, Ord)
 
 -- | Effect types used by the vm implementation for side effects & control flow

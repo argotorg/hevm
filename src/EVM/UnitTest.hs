@@ -281,8 +281,13 @@ symRun opts@UnitTestOptions{..} vm sig@(Sig testName types) sourceCache = do
     -- check postconditions against vm
     let fetcherSym = Fetch.oracle solvers (Just sess) rpcInfo
     let symVm = symbolify vm' & set #srcLookup (Just $ makeSrcLookup dapp sourceCache)
-    (ends, results) <- verify solvers fetcherSym (makeVeriOpts opts) symVm postcondition (Just $ cexHandler cd fetcherConc)
+    (ends0, results) <- verify solvers fetcherSym (makeVeriOpts opts) symVm postcondition (Just $ cexHandler cd fetcherConc)
     conf <- readConfig
+    -- If the signature has dynamic types, exploration is bounded by maxDynSize.
+    -- Inject a Partial end state so the user knows the result may be incomplete.
+    let hasDynArgs = any (\t -> abiKind t == Dynamic) types
+        dynPartial = Partial [] (TraceContext mempty mempty mempty) (DynamicArgBounded conf.maxDynSize)
+        ends = if hasDynArgs then ends0 <> [dynPartial] else ends0
     when (conf.debug) $ liftIO $ do
       putStrLn $ "   \x1b[94m[EXPLORATION COMPLETE]\x1b[0m " <> Text.unpack testName <> " -- explored " <> show (length ends) <> " paths."
       when (conf.verb >= 2) $ do

@@ -741,10 +741,18 @@ verifyContract :: forall m . App m
   -> Postcondition
   -> m ([Expr End], [VerifyResult])
 verifyContract solvers theCode signature' concreteArgs opts maybepre post = do
+  conf <- readConfig
   calldata <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ abstractVM calldata theCode maybepre False
   let fetcher = Fetch.oracle solvers Nothing opts.rpcInfo
-  verify solvers fetcher opts preState post Nothing
+  (ends, results) <- verify solvers fetcher opts preState post Nothing
+  -- If the signature has dynamic types, the exploration is bounded by maxDynSize.
+  -- Inject a Partial end state so the user knows the result may be incomplete.
+  let hasDynArgs = case signature' of
+        Just (Sig _ types) -> any (\t -> abiKind t == Dynamic) types
+        Nothing -> False
+      dynPartial = [Partial [] (TraceContext mempty mempty mempty) (DynamicArgBounded conf.maxDynSize)]
+  pure (if hasDynArgs then ends <> dynPartial else ends, results)
 
 -- Used only in testing
 exploreContract :: forall m . App m

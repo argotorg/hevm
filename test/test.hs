@@ -547,7 +547,8 @@ tests = testGroup "hevm"
             } |]
         let sig = Just $ Sig "fun(bytes)" [AbiBytesDynamicType]
         (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        assertBoolM "The expression must not be partial" $ not (any isPartial e)
+        -- bytes args always produce a partial (bounded concretization)
+        assertBoolM "should be partial due to bounded bytes" $ any isPartial e
         let numCexes = sum $ map (fromEnum . isCex) ret
         assertEqualM "should find counterexample" 1 numCexes
     , test "bytes-content-cex" $ do
@@ -562,11 +563,11 @@ tests = testGroup "hevm"
             } |]
         let sig = Just $ Sig "fun(bytes)" [AbiBytesDynamicType]
         (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        assertBoolM "The expression must not be partial" $ not (any isPartial e)
+        assertBoolM "should be partial due to bounded bytes" $ any isPartial e
         let numCexes = sum $ map (fromEnum . isCex) ret
         assertEqualM "should find counterexample" 1 numCexes
     , test "bytes-no-cex" $ do
-        -- A trivially true assertion should have no counterexample
+        -- A trivially true assertion should have no counterexample (but still partial)
         Just c <- solcRuntime "C" [i|
             contract C {
               function fun(bytes calldata data) public pure {
@@ -575,7 +576,7 @@ tests = testGroup "hevm"
             } |]
         let sig = Just $ Sig "fun(bytes)" [AbiBytesDynamicType]
         (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        assertBoolM "The expression must not be partial" $ not (any isPartial e)
+        assertBoolM "should be partial due to bounded bytes" $ any isPartial e
         let numCexes = sum $ map (fromEnum . isCex) ret
         assertEqualM "should have no counterexample" 0 numCexes
     , test "bytes-with-uint-arg" $ do
@@ -590,9 +591,60 @@ tests = testGroup "hevm"
             } |]
         let sig = Just $ Sig "fun(uint256,bytes)" [AbiUIntType 256, AbiBytesDynamicType]
         (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        assertBoolM "The expression must not be partial" $ not (any isPartial e)
+        assertBoolM "should be partial due to bounded bytes" $ any isPartial e
         let numCexes = sum $ map (fromEnum . isCex) ret
         assertEqualM "should find counterexample" 1 numCexes
+    -- Tests that bugs beyond maxDynSize are reported as partial, not as false passes
+    , test "bytes-beyond-bound-length-check" $ do
+        -- Bug only triggers when bytes.length > 100; with default maxDynSize=64, should NOT find cex
+        -- but must report partial exploration
+        Just c <- solcRuntime "C" [i|
+            contract C {
+              function fun(bytes calldata data) public pure {
+                if (data.length > 100) {
+                  assert(false);
+                }
+              }
+            } |]
+        let sig = Just $ Sig "fun(bytes)" [AbiBytesDynamicType]
+        (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        assertBoolM "must report partial due to bounded bytes" $ any isPartial e
+        let numCexes = sum $ map (fromEnum . isCex) ret
+        assertEqualM "should not find cex (bug is beyond bound)" 0 numCexes
+    , test "bytes-beyond-bound-content-check" $ do
+        -- Bug triggers only when byte at index 80 has a specific value; beyond default maxDynSize=64
+        Just c <- solcRuntime "C" [i|
+            contract C {
+              function fun(bytes calldata data) public pure {
+                if (data.length > 80 && data[80] == 0xff) {
+                  assert(false);
+                }
+              }
+            } |]
+        let sig = Just $ Sig "fun(bytes)" [AbiBytesDynamicType]
+        (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        assertBoolM "must report partial due to bounded bytes" $ any isPartial e
+        let numCexes = sum $ map (fromEnum . isCex) ret
+        assertEqualM "should not find cex (bug is beyond bound)" 0 numCexes
+    , test "bytes-beyond-bound-sum-check" $ do
+        -- Bug triggers when sum of first 128 bytes overflows; requires > 64 bytes
+        Just c <- solcRuntime "C" [i|
+            contract C {
+              function fun(bytes calldata data) public pure {
+                if (data.length >= 128) {
+                  uint256 sum = 0;
+                  for (uint i = 0; i < 128; i++) {
+                    sum += uint8(data[i]);
+                  }
+                  assert(sum < 1000);
+                }
+              }
+            } |]
+        let sig = Just $ Sig "fun(bytes)" [AbiBytesDynamicType]
+        (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        assertBoolM "must report partial due to bounded bytes" $ any isPartial e
+        let numCexes = sum $ map (fromEnum . isCex) ret
+        assertEqualM "should not find cex (bug requires 128 bytes, bound is 64)" 0 numCexes
     ]
 
   , testGroup "Precompiled contracts"
