@@ -230,6 +230,15 @@ tests = testGroup "hevm"
         case readP_to_S (parseAbiValue (AbiBytesType 4)) threeBytes of
           [] -> pure ()  -- Expected: parsing should fail
           _ -> internalError "Should reject 3-byte value for bytes4"
+    , test "ABI-user-defined-enum-type" $ do
+        -- User-defined types like enums (e.g. "Order.OrderType") should parse as uint8
+        assertEqualM "qualified enum" (Just (AbiUIntType 8)) (parseTypeName mempty "Order.OrderType")
+        assertEqualM "simple enum" (Just (AbiUIntType 8)) (parseTypeName mempty "MyEnum")
+        -- Should also work with array suffixes
+        assertEqualM "enum array" (Just (AbiArrayDynamicType (AbiUIntType 8))) (parseTypeName mempty "Order.OrderType[]")
+        -- Standard types should still work
+        assertEqualM "uint256" (Just (AbiUIntType 256)) (parseTypeName mempty "uint256")
+        assertEqualM "address" (Just AbiAddressType) (parseTypeName mempty "address")
     ]
   , testGroup "Solidity-Expressions"
     [ test "Trivial" $
