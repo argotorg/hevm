@@ -118,6 +118,10 @@ tests = testGroup "Foundry tests"
     , test "Keccak" $ do
         let testFile = "test/contracts/pass/keccak.sol"
         executeSingleMethod testFile "prove_access" >>= assertEqualM "test result" (True, True)
+    , test "Panic-Source-Location" $ do
+        -- Regression test for #895: panic in a called contract should not show "<source not found>"
+        let testFile = "test/contracts/fail/assertPanic.sol"
+        executeSingleMethod testFile "prove_panic" >>= assertEqualM "prove_panic" (False, False)
     ]
 
 executeSingleMethod :: (App m, MonadMask m) => FilePath -> Text -> m (Bool, Bool)
