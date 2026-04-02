@@ -578,7 +578,7 @@ exec1 conf = do
                                Just b -> pushSym (bufLength b)
                                Nothing -> pushSym $ CodeSize x
               case x of
-                a@(LitAddr _) -> if a == cheatCode
+                a@(LitAddr _) -> if a == cheatCode || a == consoleAddr
                   then do
                     next
                     assign' (#state % #stack) xs

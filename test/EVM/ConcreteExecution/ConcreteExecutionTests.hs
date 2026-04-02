@@ -76,6 +76,41 @@ tests = testGroup "Concrete execution tests"
   , testCase "console-log-format-string-uint" $ do
       let encoded = ConcreteBuf $ abiMethod "log(string,uint256)" (AbiTuple $ V.fromList [AbiString "count", AbiUInt 256 7])
       assertEqual "console.log(string,uint256) format" "console::log(\"count\", 7)" (formatConsoleLog encoded)
+  , testCase "console-log-extcodesize-nonzero" $ do
+      res <- executeSingleCall consoleLogExtcodesizeExample "C" "a" []
+      val <- expectSuccess res
+      let obtained = decodeAbiValue (AbiUIntType 256) (BS.fromStrict val)
+      assertEqual "extcodesize of console addr should be nonzero" (AbiUInt 256 1) obtained
+  , testCase "console-log-format-bool" $ do
+      let encoded = ConcreteBuf $ abiMethod "log(bool)" (AbiTuple $ V.fromList [AbiBool True])
+      assertEqual "console.log(bool) format" "console::log(true)" (formatConsoleLog encoded)
+  , testCase "console-log-format-address" $ do
+      let encoded = ConcreteBuf $ abiMethod "log(address)" (AbiTuple $ V.fromList [AbiAddress 0xdeadbeef])
+      assertEqual "console.log(address) format" "console::log(0x00000000000000000000000000000000DeaDBeef)" (formatConsoleLog encoded)
+  , testCase "console-log-format-no-args" $ do
+      let encoded = ConcreteBuf $ abiMethod "log()" (AbiTuple $ V.fromList [])
+      assertEqual "console.log() format" "console::log()" (formatConsoleLog encoded)
+  , testCase "console-log-format-unknown-selector" $ do
+      -- A 4-byte selector that doesn't match any known console.log signature
+      let encoded = ConcreteBuf $ BS.pack [0xde, 0xad, 0xbe, 0xef, 0x01, 0x02]
+      let result = formatConsoleLog encoded
+      -- Should fall back to hex encoding
+      assertBool "unknown selector should produce hex fallback" (T.isPrefixOf "console::log(0x" result)
+  , testCase "console-log-format-short-input" $ do
+      -- Less than 4 bytes — no selector
+      let encoded = ConcreteBuf $ BS.pack [0x01, 0x02]
+      assertEqual "short input format" "console::log()" (formatConsoleLog encoded)
+  , testCase "console-log-returns-correct-value" $ do
+      -- console.log should not interfere with the return value
+      res <- executeSingleCall consoleLogExample "C" "a" [AbiUInt 256 99]
+      val <- expectSuccess res
+      let obtained = decodeAbiValue (AbiUIntType 256) (BS.fromStrict val)
+      assertEqual "return value should be x+1" (AbiUInt 256 100) obtained
+  , testCase "console-log-multiple-calls" $ do
+      vm <- executeSingleCallVM consoleLogMultipleExample "C" "a" [AbiUInt 256 5]
+      let traces = concatMap flatten (traceForest vm)
+          consoleLogs = filter (\t -> case t.tracedata of ConsoleLog _ -> True; _ -> False) traces
+      assertEqual "Should have 2 console.log traces" 2 (length consoleLogs)
   ]
 
 expectValue :: AbiValue -> ExecResult -> IO ()
@@ -154,6 +189,34 @@ assumeCheatCodeExample = [here|
       Hevm hevm = Hevm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
       hevm.assume(x > 10);
       b = x;
+    }
+  }
+|]
+
+consoleLogExtcodesizeExample :: Text
+consoleLogExtcodesizeExample = [here|
+  contract C {
+    function a() public view returns (uint256) {
+      address console = 0x000000000000000000636F6e736F6c652e6c6f67;
+      uint256 sz;
+      assembly { sz := extcodesize(console) }
+      return sz;
+    }
+  }
+|]
+
+consoleLogMultipleExample :: Text
+consoleLogMultipleExample = [here|
+  contract C {
+    function a(uint256 x) public view returns (uint256) {
+      address console = 0x000000000000000000636F6e736F6c652e6c6f67;
+      bytes memory p1 = abi.encodeWithSignature("log(string)", "before");
+      (bool s1,) = console.staticcall(p1);
+      require(s1);
+      bytes memory p2 = abi.encodeWithSignature("log(uint256)", x);
+      (bool s2,) = console.staticcall(p2);
+      require(s2);
+      return x;
     }
   }
 |]
