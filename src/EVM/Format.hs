@@ -521,6 +521,10 @@ formatPartial = \case
       , "contract addr: " <> pack (show addr)
       , "program counter: " <> pack (show pc)]
     ]
+  DynamicArgBounded maxSz -> T.unlines
+    ["Dynamic argument (bytes/string) concretized to max " <> pack (show maxSz) <> " bytes."
+    , indent 2 "Counterexamples beyond this bound may be missed."
+    ]
 
 
 formatPartialDetailed :: Maybe SrcLookup -> Map.Map (Expr EAddr) Contract -> PartialExec -> Text
