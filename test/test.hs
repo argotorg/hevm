@@ -477,7 +477,7 @@ tests = testGroup "hevm"
                 AbiTuple (V.toList -> [e]) -> e
                 _ -> internalError "AbiTuple expected"
           let
-              frag = [symAbiArg "y" (AbiTupleType $ V.fromList [abiValueType y])]
+              frag = [symAbiArg 64 "y" (AbiTupleType $ V.fromList [abiValueType y])]
               (hevmEncoded, _) = first (Expr.drop 4) $ combineFragments frag (ConcreteBuf "")
               expectedVals = expectedConcVals "y" (AbiTuple . V.fromList $ [y])
               hevmConcretePre = fromRight (error "cannot happen") $ subModel expectedVals hevmEncoded
@@ -534,6 +534,65 @@ tests = testGroup "hevm"
                 _ -> internalError "AbiTuple expected"
           let hevmEncoded = encodeAbiValue (AbiTuple $ V.fromList [y])
           assertEqualM "abi encoding mismatch" solidityEncoded (AbiBytesDynamic hevmEncoded)
+    ]
+
+  , testGroup "Dynamic-bytes-concretization"
+    [ test "bytes-length-cex" $ do
+        -- A function that asserts bytes.length == 0 should have a counterexample
+        Just c <- solcRuntime "C" [i|
+            contract C {
+              function fun(bytes calldata data) public pure {
+                assert(data.length == 0);
+              }
+            } |]
+        let sig = Just $ Sig "fun(bytes)" [AbiBytesDynamicType]
+        (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        assertBoolM "The expression must not be partial" $ not (any isPartial e)
+        let numCexes = sum $ map (fromEnum . isCex) ret
+        assertEqualM "should find counterexample" 1 numCexes
+    , test "bytes-content-cex" $ do
+        -- Should find bytes starting with 0xdead
+        Just c <- solcRuntime "C" [i|
+            contract C {
+              function fun(bytes calldata data) public pure {
+                if (data.length >= 2) {
+                  assert(data[0] != 0xde || data[1] != 0xad);
+                }
+              }
+            } |]
+        let sig = Just $ Sig "fun(bytes)" [AbiBytesDynamicType]
+        (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        assertBoolM "The expression must not be partial" $ not (any isPartial e)
+        let numCexes = sum $ map (fromEnum . isCex) ret
+        assertEqualM "should find counterexample" 1 numCexes
+    , test "bytes-no-cex" $ do
+        -- A trivially true assertion should have no counterexample
+        Just c <- solcRuntime "C" [i|
+            contract C {
+              function fun(bytes calldata data) public pure {
+                assert(data.length <= data.length);
+              }
+            } |]
+        let sig = Just $ Sig "fun(bytes)" [AbiBytesDynamicType]
+        (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        assertBoolM "The expression must not be partial" $ not (any isPartial e)
+        let numCexes = sum $ map (fromEnum . isCex) ret
+        assertEqualM "should have no counterexample" 0 numCexes
+    , test "bytes-with-uint-arg" $ do
+        -- bytes alongside a uint256 argument
+        Just c <- solcRuntime "C" [i|
+            contract C {
+              function fun(uint256 x, bytes calldata data) public pure {
+                if (data.length > 0 && x == 42) {
+                  assert(false);
+                }
+              }
+            } |]
+        let sig = Just $ Sig "fun(uint256,bytes)" [AbiUIntType 256, AbiBytesDynamicType]
+        (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        assertBoolM "The expression must not be partial" $ not (any isPartial e)
+        let numCexes = sum $ map (fromEnum . isCex) ret
+        assertEqualM "should find counterexample" 1 numCexes
     ]
 
   , testGroup "Precompiled contracts"
