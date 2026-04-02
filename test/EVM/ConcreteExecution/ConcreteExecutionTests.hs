@@ -37,8 +37,9 @@ compileOneContract sourceCode contractName =
   solcRuntime contractName sourceCode <&> fromMaybe (internalError $ "Contract " <> (show contractName) <> " not present in the given source code")
 
 
-executeSingleCall :: SourceCode -> ContractName -> FunctionName -> Args -> IO ExecResult
-executeSingleCall sourceCode contractName functionName abiArgs = do
+-- | Set up and run a single contract call, returning the final VM state.
+setupAndRunCall :: SourceCode -> ContractName -> FunctionName -> Args -> EVM.Stepper.Stepper Concrete a -> IO a
+setupAndRunCall sourceCode contractName functionName abiArgs stepper = do
   runtimeCode <- compileOneContract sourceCode contractName
   let functionSignature = functionName <> "(" <> T.intercalate "," (map (abiTypeSolidity . abiValueType) abiArgs) <> ")"
   let callData = abiMethod functionSignature (AbiTuple $ V.fromList abiArgs)
@@ -49,7 +50,13 @@ executeSingleCall sourceCode contractName functionName abiArgs = do
     }
   let withInitializedTransactionVM = EVM.Transaction.initTx initialVM
   let fetcher = Fetch.zero 0 Nothing defMemLimit
-  Effects.runApp $ EVM.Stepper.interpret fetcher withInitializedTransactionVM EVM.Stepper.execFully
+  Effects.runApp $ EVM.Stepper.interpret fetcher withInitializedTransactionVM stepper
+
+executeSingleCall :: SourceCode -> ContractName -> FunctionName -> Args -> IO ExecResult
+executeSingleCall src name func args = setupAndRunCall src name func args EVM.Stepper.execFully
+
+executeSingleCallVM :: SourceCode -> ContractName -> FunctionName -> Args -> IO (VM Concrete)
+executeSingleCallVM src name func args = setupAndRunCall src name func args EVM.Stepper.runFully
 
 tests :: TestTree
 tests = testGroup "Concrete execution tests"
@@ -67,41 +74,12 @@ tests = testGroup "Concrete execution tests"
       let traces = concatMap flatten (traceForest vm)
           hasConsoleLog = any (\t -> case t.tracedata of ConsoleLog _ -> True; _ -> False) traces
       assertBool "Expected a ConsoleLog trace" hasConsoleLog
-  , testCase "console-log-format-string" $ do
-      let encoded = ConcreteBuf $ abiMethod "log(string)" (AbiTuple $ V.fromList [AbiString "hello world"])
-      assertEqual "console.log(string) format" "console::log(\"hello world\")" (formatConsoleLog encoded)
-  , testCase "console-log-format-uint" $ do
-      let encoded = ConcreteBuf $ abiMethod "log(uint256)" (AbiTuple $ V.fromList [AbiUInt 256 42])
-      assertEqual "console.log(uint256) format" "console::log(42)" (formatConsoleLog encoded)
-  , testCase "console-log-format-string-uint" $ do
-      let encoded = ConcreteBuf $ abiMethod "log(string,uint256)" (AbiTuple $ V.fromList [AbiString "count", AbiUInt 256 7])
-      assertEqual "console.log(string,uint256) format" "console::log(\"count\", 7)" (formatConsoleLog encoded)
   , testCase "console-log-extcodesize-nonzero" $ do
       res <- executeSingleCall consoleLogExtcodesizeExample "C" "a" []
       val <- expectSuccess res
       let obtained = decodeAbiValue (AbiUIntType 256) (BS.fromStrict val)
       assertEqual "extcodesize of console addr should be nonzero" (AbiUInt 256 1) obtained
-  , testCase "console-log-format-bool" $ do
-      let encoded = ConcreteBuf $ abiMethod "log(bool)" (AbiTuple $ V.fromList [AbiBool True])
-      assertEqual "console.log(bool) format" "console::log(true)" (formatConsoleLog encoded)
-  , testCase "console-log-format-address" $ do
-      let encoded = ConcreteBuf $ abiMethod "log(address)" (AbiTuple $ V.fromList [AbiAddress 0xdeadbeef])
-      assertEqual "console.log(address) format" "console::log(0x00000000000000000000000000000000DeaDBeef)" (formatConsoleLog encoded)
-  , testCase "console-log-format-no-args" $ do
-      let encoded = ConcreteBuf $ abiMethod "log()" (AbiTuple $ V.fromList [])
-      assertEqual "console.log() format" "console::log()" (formatConsoleLog encoded)
-  , testCase "console-log-format-unknown-selector" $ do
-      -- A 4-byte selector that doesn't match any known console.log signature
-      let encoded = ConcreteBuf $ BS.pack [0xde, 0xad, 0xbe, 0xef, 0x01, 0x02]
-      let result = formatConsoleLog encoded
-      -- Should fall back to hex encoding
-      assertBool "unknown selector should produce hex fallback" (T.isPrefixOf "console::log(0x" result)
-  , testCase "console-log-format-short-input" $ do
-      -- Less than 4 bytes — no selector
-      let encoded = ConcreteBuf $ BS.pack [0x01, 0x02]
-      assertEqual "short input format" "console::log()" (formatConsoleLog encoded)
   , testCase "console-log-returns-correct-value" $ do
-      -- console.log should not interfere with the return value
       res <- executeSingleCall consoleLogExample "C" "a" [AbiUInt 256 99]
       val <- expectSuccess res
       let obtained = decodeAbiValue (AbiUIntType 256) (BS.fromStrict val)
@@ -111,6 +89,33 @@ tests = testGroup "Concrete execution tests"
       let traces = concatMap flatten (traceForest vm)
           consoleLogs = filter (\t -> case t.tracedata of ConsoleLog _ -> True; _ -> False) traces
       assertEqual "Should have 2 console.log traces" 2 (length consoleLogs)
+  , testGroup "Console log formatting"
+    [ testCase "format-string" $ do
+        let encoded = ConcreteBuf $ abiMethod "log(string)" (AbiTuple $ V.fromList [AbiString "hello world"])
+        assertEqual "console.log(string) format" "console::log(\"hello world\")" (formatConsoleLog encoded)
+    , testCase "format-uint" $ do
+        let encoded = ConcreteBuf $ abiMethod "log(uint256)" (AbiTuple $ V.fromList [AbiUInt 256 42])
+        assertEqual "console.log(uint256) format" "console::log(42)" (formatConsoleLog encoded)
+    , testCase "format-string-uint" $ do
+        let encoded = ConcreteBuf $ abiMethod "log(string,uint256)" (AbiTuple $ V.fromList [AbiString "count", AbiUInt 256 7])
+        assertEqual "console.log(string,uint256) format" "console::log(\"count\", 7)" (formatConsoleLog encoded)
+    , testCase "format-bool" $ do
+        let encoded = ConcreteBuf $ abiMethod "log(bool)" (AbiTuple $ V.fromList [AbiBool True])
+        assertEqual "console.log(bool) format" "console::log(true)" (formatConsoleLog encoded)
+    , testCase "format-address" $ do
+        let encoded = ConcreteBuf $ abiMethod "log(address)" (AbiTuple $ V.fromList [AbiAddress 0xdeadbeef])
+        assertEqual "console.log(address) format" "console::log(0x00000000000000000000000000000000DeaDBeef)" (formatConsoleLog encoded)
+    , testCase "format-no-args" $ do
+        let encoded = ConcreteBuf $ abiMethod "log()" (AbiTuple $ V.fromList [])
+        assertEqual "console.log() format" "console::log()" (formatConsoleLog encoded)
+    , testCase "format-unknown-selector" $ do
+        let encoded = ConcreteBuf $ BS.pack [0xde, 0xad, 0xbe, 0xef, 0x01, 0x02]
+        let result = formatConsoleLog encoded
+        assertBool "unknown selector should produce hex fallback" (T.isPrefixOf "console::log(0x" result)
+    , testCase "format-short-input" $ do
+        let encoded = ConcreteBuf $ BS.pack [0x01, 0x02]
+        assertEqual "short input format" "console::log()" (formatConsoleLog encoded)
+    ]
   ]
 
 expectValue :: AbiValue -> ExecResult -> IO ()
@@ -166,20 +171,6 @@ simpleCheckedArithmeticExample = [here|
     }
   }
 |]
-
-executeSingleCallVM :: SourceCode -> ContractName -> FunctionName -> Args -> IO (VM Concrete)
-executeSingleCallVM sourceCode contractName functionName abiArgs = do
-  runtimeCode <- compileOneContract sourceCode contractName
-  let functionSignature = functionName <> "(" <> T.intercalate "," (map (abiTypeSolidity . abiValueType) abiArgs) <> ")"
-  let callData = abiMethod functionSignature (AbiTuple $ V.fromList abiArgs)
-  let contractWithCode = initialContract (RuntimeCode $ ConcreteRuntimeCode runtimeCode)
-  initialVM <- stToIO $ makeVm $ defaultVMOpts
-    { contract = contractWithCode
-    , calldata = (ConcreteBuf callData, [])
-    }
-  let withInitializedTransactionVM = EVM.Transaction.initTx initialVM
-  let fetcher = Fetch.zero 0 Nothing defMemLimit
-  Effects.runApp $ EVM.Stepper.interpret fetcher withInitializedTransactionVM EVM.Stepper.runFully
 
 assumeCheatCodeExample :: Text
 assumeCheatCodeExample = [here|
