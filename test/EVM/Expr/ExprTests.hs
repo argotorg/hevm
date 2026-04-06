@@ -48,6 +48,7 @@ simplificationTests = testGroup "Expr-rewriting"
   , memoryTests
   , basicSimplificationTests
   , propSimplificationTests
+  , wrappingTests
   ]
 
 storageTests :: TestTree
@@ -1216,6 +1217,118 @@ concretizationTests = testGroup "Concretization tests"
   , testCase "conc-min-zero" $ do
       let simp = Expr.simplify $ Min (Lit 0) (Var "x")
       assertEqual "min(0, x) = 0" (Lit 0) simp
+  ]
+
+-- | Regression tests for W256 unsigned wrapping bugs in the expression simplifier.
+-- Each test constructs an expression that triggers a specific wrapping edge case where
+-- the simplifier previously produced a result that was not semantically equivalent to
+-- the original expression. See commit c4d33256 for the fix.
+wrappingTests :: TestTree
+wrappingTests = testGroup "W256 wrapping edge cases"
+  [ -- A1: readByte, CopySlice before-region, symbolic size
+    -- dstOffset near maxBound makes dstOffset+size potentially wrap to low addresses.
+    -- Old code only checked dstOffset > x, missing the wrapping case.
+    testCase "readByte-copySlice-before-symSize-wrap" $ do
+      let dstOff = maxBound - 5 :: W256
+          x = 3 :: W256
+          buf = CopySlice (Lit 0) (Lit dstOff) (Var "sz") (AbstractBuf "src") (AbstractBuf "dst")
+          full = ReadByte (Lit x) buf
+          simplified = Expr.readByte (Lit x) buf
+      result <- proveEquivExpr full simplified
+      assertBool "readByte with near-maxBound dstOffset and symbolic size" result
+
+  , -- A2: readByte, CopySlice before-region, concrete size, dstOffset+size wraps
+    -- dstOffset + size wraps past zero, overwriting low addresses.
+    testCase "readByte-copySlice-before-concSize-wrap" $ do
+      let dstOff = maxBound - 30 :: W256
+          size = 58 :: W256
+          x = 10 :: W256
+          buf = CopySlice (Lit 0) (Lit dstOff) (Lit size) (AbstractBuf "src") (AbstractBuf "dst")
+          full = ReadByte (Lit x) buf
+          simplified = Expr.readByte (Lit x) buf
+      result <- proveEquivExpr full simplified
+      assertBool "readByte with wrapping dstOffset+size" result
+
+  , -- B1: readWord, CopySlice before-region, symbolic size
+    -- Same wrapping issue as A1 but for 32-byte reads.
+    testCase "readWord-copySlice-before-symSize-wrap" $ do
+      let dstOff = maxBound - 5 :: W256
+          x = 3 :: W256
+          buf = CopySlice (Lit 0) (Lit dstOff) (Var "sz") (AbstractBuf "src") (AbstractBuf "dst")
+          full = ReadWord (Lit x) buf
+          simplified = Expr.readWord (Lit x) buf
+      result <- proveEquivExpr full simplified
+      assertBool "readWord with near-maxBound dstOffset and symbolic size" result
+
+  , -- B2: readWord, CopySlice before-region, concrete size, wrapping
+    -- Same as A2 but for word reads.
+    testCase "readWord-copySlice-before-concSize-wrap" $ do
+      let dstOff = maxBound - 30 :: W256
+          size = 100 :: W256
+          x = 3 :: W256
+          buf = CopySlice (Lit 0) (Lit dstOff) (Lit size) (AbstractBuf "src") (AbstractBuf "dst")
+          full = ReadWord (Lit x) buf
+          simplified = Expr.readWord (Lit x) buf
+      result <- proveEquivExpr full simplified
+      assertBool "readWord with wrapping dstOffset+size" result
+
+  , -- C1: readWord, CopySlice before-region, x+32 wraps past maxBound
+    -- When x is near maxBound, x+32 wraps to a small value, making
+    -- dstOffset >= x+32 true even though the 32-byte read wraps into the CopySlice region.
+    testCase "readWord-copySlice-before-x32-wrap" $ do
+      let dstOff = maxBound - 100 :: W256
+          x = maxBound - 10 :: W256  -- x+32 = 21, wraps!
+          buf = CopySlice (Lit 0) (Lit dstOff) (Var "sz") (AbstractBuf "src") (AbstractBuf "dst")
+          full = ReadWord (Lit x) buf
+          simplified = Expr.readWord (Lit x) buf
+      result <- proveEquivExpr full simplified
+      assertBool "readWord with x+32 wrapping" result
+
+  , -- C2: readWord, CopySlice after-region, concrete size, dstOffset+size wraps
+    -- x is inside the wrapped CopySlice region => the expression cannot be simplified
+    testCase "readWord-copySlice-after-concSize-wrap" $ do
+      let dstOff = maxBound - 100 :: W256
+          size = 200 :: W256
+          x = maxBound - 50 :: W256
+          buf = CopySlice (Lit 0) (Lit dstOff) (Lit size) (AbstractBuf "src") (AbstractBuf "dst")
+          full = ReadWord (Lit x) buf
+          simplified = Expr.readWord (Lit x) buf
+      result <- proveEquivExpr full simplified
+      assertBool "readWord after-region with wrapping dstOffset+size" result
+
+  , -- D1: readWord, ConcreteBuf, idx+31 wraps
+    -- readWord previously did not handle this case correctly due to overflow of idx+31
+    testCase "readWord-concreteBuf-wrap" $ do
+      let idx = maxBound - 19 :: W256
+          buf = ConcreteBuf (BS.pack [1..50])
+          full = ReadWord (Lit idx) buf
+          simplified = Expr.readWord (Lit idx) buf
+      result <- proveEquivExpr full simplified
+      assertBool "readWord with idx+31 wrapping on ConcreteBuf" result
+
+  , -- D2: readWord, non-concrete buf, idx+31 wraps
+    -- Same wrapping issue as D1 but with a non-concrete buffer (WriteByte over ConcreteBuf).
+    -- WriteByte at maxBound-5 is within the read range and won't be incorrectly skipped.
+    testCase "readWord-abstractBuf-wrap" $ do
+      let idx = maxBound - 10 :: W256
+          buf = WriteByte (Lit (maxBound - 5)) (LitByte 0xAB) (ConcreteBuf (BS.pack [1..50]))
+          full = ReadWord (Lit idx) buf
+          simplified = Expr.readWord (Lit idx) buf
+      result <- proveEquivExpr full simplified
+      assertBool "readWord with idx+31 wrapping on abstract buf" result
+
+  , -- E1: copySlice fully concrete, srcOffset near maxBound wraps
+    -- When srcOffset is near maxBound, srcOffset > BS.length triggers zero-fill,
+    -- but the wrapped indices actually read real source data.
+    testCase "copySlice-concrete-srcOffset-wrap" $ do
+      let srcOff = maxBound - 9 :: W256
+          size = 20 :: W256
+          srcBuf = ConcreteBuf (BS.pack [1..50])
+          dstBuf = ConcreteBuf (BS.pack (replicate 50 0))
+          full = CopySlice (Lit srcOff) (Lit 0) (Lit size) srcBuf dstBuf
+          simplified = Expr.copySlice (Lit srcOff) (Lit 0) (Lit size) srcBuf dstBuf
+      result <- proveEquivExpr full simplified
+      assertBool "copySlice with wrapping srcOffset" result
   ]
 
 fuzzTests :: TestTree

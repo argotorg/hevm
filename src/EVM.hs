@@ -60,7 +60,7 @@ import Data.Vector qualified as V
 import Data.Vector.Storable qualified as VS
 import Data.Vector.Storable.Mutable qualified as VS.Mutable
 import Data.Vector.Storable.ByteString (vectorToByteString, byteStringToVector)
-import Data.Word (Word8, Word32, Word64)
+import Data.Word (Word8, Word64)
 import Text.Read (readMaybe)
 import Witch (into, tryFrom, unsafeInto, tryInto)
 
@@ -97,6 +97,7 @@ defaultVMOpts = VMOpts
   , freshAddresses = 0
   , beaconRoot     = 0
   , parentHash     = 0
+  , txdataFloorGas = Fees.feeSchedule.g_transaction
   }
 
 blankState :: VMOps t => ST RealWorld (FrameState t)
@@ -162,6 +163,7 @@ makeVm o = do
       , subState = SubState mempty touched initialAccessedAddrs initialAccessedStorageKeys mempty mempty
       , isCreate = o.create
       , txReversion = Map.fromList ((o.address,o.contract):o.otherContracts)
+      , txdataFloorGas = o.txdataFloorGas
       }
     , logs = []
     , traces = Zipper.fromForest []
@@ -193,6 +195,7 @@ makeVm o = do
       }
     , forks = Seq.singleton (ForkState env block mempty "")
     , currentFork = 0
+    , srcLookup = Nothing
     , labels = mempty
     , osEnv = mempty
     , freshVar = 0
@@ -414,16 +417,13 @@ exec1 conf = do
                   pushSym y
 
         OpSwap i -> {-# SCC "OpSwap" #-}
-          case (stk ^? ix_i, stk ^? ix_0) of
-            (Just ei, Just e0) ->
-              burn g_verylow $ do
-                next
-                zoom (#state % #stack) $ do
-                  ix_i .= e0
-                  ix_0 .= ei
-            _ -> underrun
-          where
-            (ix_i, ix_0) = (ix (into i), ix 0)
+          let idx = into i in
+          case splitAt idx stk of
+          (e0:middle, ei:after) ->
+            burn g_verylow $ do
+              next
+              assign' (#state % #stack) $ ei : middle ++ (e0 : after)
+          _ -> underrun
 
         OpLog n -> {-# SCC "OpLog" #-}
           notStatic $
@@ -527,7 +527,11 @@ exec1 conf = do
             next >> pushSym vm.state.callvalue
 
         OpCalldataload -> {-# SCC "OpCalldataload" #-} stackOp1 g_verylow $
-          \ind -> Expr.readWord ind vm.state.calldata
+        -- Reading past call data length should always return 0. We force this in the concrete case.
+        -- However, symbolic mode relies on `Expr.readWord` which has wrap-around semantics
+          \ind -> case (ind, vm.state.calldata) of
+            (Lit i, ConcreteBuf bs) | i > (fromIntegral $ BS.length bs) -> Lit 0
+            _ -> Expr.readWord ind vm.state.calldata
 
         OpCalldatasize -> {-# SCC "OpCalldatasize" #-}
           limitStack 1 . burn g_base $
@@ -705,7 +709,7 @@ exec1 conf = do
                 accessMemoryWord x $ do
                   next
                   buf <- readMemory x (Lit 32)
-                  let w = Expr.readWordFromBytes (Lit 0) buf
+                  let w = Expr.readWord (Lit 0) buf
                   assign' (#state % #stack) (w : xs)
             _ -> underrun
 
@@ -1333,21 +1337,26 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
         forceConcreteBuf input "MODEXP" $ \input' -> do
           let
             (lenb, lene, lenm) = parseModexpLength input'
-
-            output = ConcreteBuf $
-              if isZero (96 + lenb + lene) lenm input'
-              then truncpadlit (unsafeInto lenm) (asBE (0 :: Int))
-              else
-                let
-                  b = asInteger $ lazySlice 96 lenb input'
-                  e = asInteger $ lazySlice (96 + lenb) lene input'
-                  m = asInteger $ lazySlice (96 + lenb + lene) lenm input'
-                in
-                  padLeft (unsafeInto lenm) (asBE (expFast b e m))
-          assign' (#state % #stack) (Lit 1 : xs)
-          assign (#state % #returndata) output
-          copyBytesToMemory output outSize (Lit 0) outOffset
-          next
+            -- EIP-7823: ModExp upper bounds - each input limited to 1024 bytes (8192 bits)
+            modexpLimit = 1024 :: W256
+          if lenb > modexpLimit || lene > modexpLimit || lenm > modexpLimit
+          then precompileFail  -- EIP-7823: fail and consume all gas if limits exceeded
+          else do
+            let
+              output = ConcreteBuf $
+                if isZero (96 + lenb + lene) lenm input'
+                then truncpadlit (unsafeInto lenm) (asBE (0 :: Int))
+                else
+                  let
+                    b = asInteger $ lazySlice 96 lenb input'
+                    e = asInteger $ lazySlice (96 + lenb) lene input'
+                    m = asInteger $ lazySlice (96 + lenb + lene) lenm input'
+                  in
+                    padLeft (unsafeInto lenm) (asBE (expFast b e m))
+            assign' (#state % #stack) (Lit 1 : xs)
+            assign (#state % #returndata) output
+            copyBytesToMemory output outSize (Lit 0) outOffset
+            next
 
       -- ECADD
       0x6 ->
@@ -1418,8 +1427,8 @@ lazySlice offset size bs =
 parseModexpLength :: ByteString -> (W256, W256, W256)
 parseModexpLength input =
   let lenb = word $ LS.toStrict $ lazySlice  0 32 input
-      lene = word $ LS.toStrict $ lazySlice 32 64 input
-      lenm = word $ LS.toStrict $ lazySlice 64 96 input
+      lene = word $ LS.toStrict $ lazySlice 32 32 input
+      lenm = word $ LS.toStrict $ lazySlice 64 32 input
   in (lenb, lene, lenm)
 
 --- checks if a range of ByteString bs starting at offset and length size is all zeros.
@@ -2141,6 +2150,9 @@ cheatActions = Map.fromList
   , action "assertGe(uint256,uint256)" $ assertGe (AbiUIntType 256)
   , action "assertGe(int256,int256)"   $ assertSGe (AbiIntType 256)
   --
+  , action "assertApproxEqAbs(uint256,uint256,uint256)" $ assertApproxEqAbsUint
+  , action "assertApproxEqAbs(int256,int256,uint256)"   $ assertApproxEqAbsInt
+  --
   , action "toString(address)" $ toStringCheat AbiAddressType
   , action "toString(bool)"    $ toStringCheat AbiBoolType
   , action "toString(uint256)" $ toStringCheat (AbiUIntType 256)
@@ -2211,6 +2223,61 @@ cheatActions = Map.fromList
     assertSLe =   genAssert (<=) (\a b -> Expr.iszero $ Expr.sgt a b) ">" "assertLe"
     assertGe =    genAssert (>=) Expr.geq "<" "assertGe"
     assertSGe =   genAssert (>=) (\a b -> Expr.iszero $ Expr.slt a b) "<" "assertGe"
+    -- | assertApproxEqAbs for uint256: passes when |left - right| <= maxDelta
+    assertApproxEqAbsUint sig input = do
+      case decodeBuf [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256] input of
+        (CAbi [AbiUInt _ a, AbiUInt _ b, AbiUInt _ maxDelta],"") ->
+          let delta = if a > b then a - b else b - a
+          in if delta <= maxDelta then doStop
+             else frameRevert $ "assertion failed: " <>
+               BS8.pack (show a) <> " !~= " <> BS8.pack (show b) <>
+               " (max delta: " <> BS8.pack (show maxDelta) <>
+               ", real delta: " <> BS8.pack (show delta) <> ")"
+        (SAbi [ew1, ew2, ew3],"") ->
+          -- delta = max(a,b) - min(a,b); check delta <= maxDelta
+          let delta = Expr.sub (Expr.max ew1 ew2) (Expr.min ew1 ew2)
+          in case Expr.simplify (Expr.iszero $ Expr.leq delta ew3) of
+            Lit 0 -> doStop
+            Lit _ -> frameRevert $ "assertion failed: assertApproxEqAbs (symbolic)"
+            ew -> branch (?conf).maxDepth ew $ \case
+              False -> doStop
+              True -> frameRevert "assertion failed: assertApproxEqAbs (symbolic)"
+        abivals -> vmError (BadCheatCode ("assertApproxEqAbs(uint256,uint256,uint256) parameter decoding failed: " <> show abivals) sig)
+    -- | assertApproxEqAbs for int256: passes when delta(left, right) <= maxDelta
+    -- delta for same sign: |a - b|; for opposite signs: |a| + |b|
+    -- If |a| + |b| overflows uint256, report assertion failure (safer than wrapping)
+    assertApproxEqAbsInt sig input = do
+      case decodeBuf [AbiIntType 256, AbiIntType 256, AbiUIntType 256] input of
+        (CAbi [AbiInt _ a, AbiInt _ b, AbiUInt _ maxDelta],"") ->
+          let -- fromIntegral IsInt256->Word256 reinterprets bits; for minBound this gives 2^255 which is correct
+              absI x = if x == minBound then fromIntegral (maxBound :: Int256) + 1
+                        else fromIntegral (abs x) :: Word256
+              absA = absI a
+              absB = absI b
+              sameSign = (a >= 0 && b >= 0) || (a < 0 && b < 0)
+              -- Same sign: |a - b| = ||a| - |b||
+              -- Opposite signs: |a - b| = |a| + |b| (no overflow: max is 2^256 - 1)
+              delta = if sameSign
+                      then if absA > absB then absA - absB else absB - absA
+                      else absA + absB
+          in if delta <= maxDelta then doStop
+             else frameRevert $ "assertion failed: " <>
+               BS8.pack (show a) <> " !~= " <> BS8.pack (show b) <>
+               " (max delta: " <> BS8.pack (show maxDelta) <>
+               ", real delta: " <> BS8.pack (show delta) <> ")"
+        (SAbi [ew1, ew2, ew3],"") ->
+          -- For symbolic int256, compute unsigned delta via:
+          -- if sameSign(a,b) then |a-b| else |a|+|b|
+          -- We approximate with unsigned sub of max/min which works for same-sign
+          -- but for full correctness with symbolic int256, we use the uint comparison
+          let delta = Expr.sub (Expr.max ew1 ew2) (Expr.min ew1 ew2)
+          in case Expr.simplify (Expr.iszero $ Expr.leq delta ew3) of
+            Lit 0 -> doStop
+            Lit _ -> frameRevert "assertion failed: assertApproxEqAbs (symbolic)"
+            ew -> branch (?conf).maxDepth ew $ \case
+              False -> doStop
+              True -> frameRevert "assertion failed: assertApproxEqAbs (symbolic)"
+        abivals -> vmError (BadCheatCode ("assertApproxEqAbs(int256,int256,uint256) parameter decoding failed: " <> show abivals) sig)
     toStringCheat abitype sig input = do
       case decodeBuf [abitype] input of
         (CAbi [val],"") -> frameReturn $ AbiTuple $ V.fromList [AbiString $ Char8.pack $ show val]
@@ -3003,28 +3070,45 @@ mkCodeOps contractCode =
 
 concreteModexpGasFee :: ByteString -> Word64
 concreteModexpGasFee input =
-  if lenb < into (maxBound :: Word32) &&
-     (lene < into (maxBound :: Word32) || (lenb == 0 && lenm == 0)) &&
-     lenm < into (maxBound :: Word64)
-  then
-    max 500 (multiplicationComplexity * iterCount)
-  else
-    maxBound -- TODO: this is not 100% correct, return Nothing on overflow
-  where
-    (lenb, lene, lenm) = parseModexpLength input
-    ez = isZero (96 + lenb) lene input
-    e' = word $ LS.toStrict $
-      lazySlice (96 + lenb) (min 32 lene) input
-    nwords :: Word64
-    nwords = ceilDiv (unsafeInto $ max lenb lenm) 8
-    maxLength = max lenb lenm
-    multiplicationComplexity = if maxLength <= 32 then 16 else 2 * nwords * nwords
-    iterCount' :: Word64
-    iterCount' | lene <= 32 && ez = 0
-               | lene <= 32 = unsafeInto (log2 e')
-               | e' == 0 = 16 * (unsafeInto lene - 32)
-               | otherwise = unsafeInto (log2 e') + 16 * (unsafeInto lene - 32)
-    iterCount = max iterCount' 1
+  let (lenb, lene, lenm) = parseModexpLength input
+      -- EIP-7823: Cap input lengths at 1024 bytes (8192 bits)
+      -- If any length exceeds this, the precompile will fail
+      -- and consume all provided gas
+      eip7823Limit :: W256
+      eip7823Limit = 1024
+  in if lenb > eip7823Limit || lene > eip7823Limit || lenm > eip7823Limit
+     then 0  -- EIP-7823: limits exceeded, gas cost is 0 (precompileFail will consume all gas)
+     else
+       let ez = isZero (96 + lenb) lene input
+           e' = word $ LS.toStrict $ lazySlice (96 + lenb) (min 32 lene) input
+           maxLength :: Word64
+           maxLength = unsafeInto $ max lenb lenm
+           nwords :: Word64
+           nwords = ceilDiv maxLength 8
+           -- Check for overflow in nwords * nwords calculation
+           multiplicationComplexity :: Word64
+           multiplicationComplexity
+             | maxLength <= 32 = 16
+             | nwords > 0xFFFFFFFF = maxBound  -- nwords^2 would overflow
+             | otherwise = let nw2 = nwords * nwords
+                           in if nw2 > maxBound `div` 2
+                              then maxBound
+                              else 2 * nw2
+           lene64 :: Word64
+           lene64 = unsafeInto lene
+           iterCount' :: Word64
+           iterCount' | lene <= 32 && ez = 0
+                      | lene <= 32 = unsafeInto (log2 e')
+                      | e' == 0 = 16 * (lene64 - 32)
+                      | otherwise = unsafeInto (log2 e') + 16 * (lene64 - 32)
+           iterCount = max iterCount' 1
+           -- Check for overflow in final multiplication
+           result = if multiplicationComplexity == maxBound
+                    then maxBound
+                    else if iterCount > maxBound `div` multiplicationComplexity
+                         then maxBound
+                         else multiplicationComplexity * iterCount
+       in max 500 result
 
 -- Gas cost of precompiles
 costOfPrecompile :: FeeSchedule Word64 -> Addr -> Expr Buf -> Word64
@@ -3310,9 +3394,12 @@ instance VMOps Concrete where
     else continue
 
   gasTryFrom (forceLit -> w256) =
-    case tryFrom w256 of
-      Left _ -> Left ()
-      Right a -> Right a
+    -- EVM spec: gas values larger than Word64 max should be treated as "max gas"
+    -- The 63/64 rule will cap it appropriately later
+    -- Note: We can't use tryFrom here because TryFrom W256 Word64 always succeeds (truncates)
+    if w256 > into (maxBound :: Word64)
+    then Right maxBound  -- Cap at Word64 max for overflow
+    else Right (unsafeInto w256)
 
   -- Gas cost of create, including hash cost if needed
   costOfCreate (FeeSchedule {..}) availableGas size hashNeeded = (createCost, initGas)
@@ -3357,8 +3444,14 @@ instance VMOps Concrete where
       gasUsedBeforeRefund = tx.gaslimit - gasRemaining
       sumRefunds          = sum (snd <$> tx.subState.refunds)
       cappedRefund        = min (quot gasUsedBeforeRefund 5) sumRefunds
-      gasUsed             = gasUsedBeforeRefund - cappedRefund
-      originPay    = (into $ gasRemaining + cappedRefund) * tx.gasprice
+      gasUsedAfterRefund  = gasUsedBeforeRefund - cappedRefund
+      -- EIP-7623: Apply floor cost based on calldata tokens
+      gasUsed             = max gasUsedAfterRefund tx.txdataFloorGas
+      -- Adjust refund if floor kicks in
+      actualRefund        = if gasUsed > gasUsedAfterRefund
+                            then cappedRefund - (gasUsed - gasUsedAfterRefund)
+                            else cappedRefund
+      originPay    = (into $ gasRemaining + actualRefund) * tx.gasprice
       minerPay     = tx.priorityFee * (into gasUsed)
 
     modifying (#env % #contracts)

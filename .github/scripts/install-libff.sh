@@ -25,6 +25,20 @@ sed -i 's/find_library(GMP_LIBRARY gmp)/find_library(GMP_LIBRARY NAMES libgmp.a)
 # thus they override the GHC mingw compiler ones. So this removes it
 # and re-adds the include with idirafter via the toolchain file
 sed -i '/INCLUDE_DIRECTORIES.*OPENSSL_INCLUDE_DIR/d' CMakeLists.txt
+
+# Fix libff header installation with CMake >= 4.3
+# CMake 4.3 commit 4e7e6928cb ("install: Fix bugs around empty
+#  directories") changed the behavior of install(DIRECTORY "" ...).
+# Previously, an empty string was silently expanded to the current source
+# directory. CMake 4.3 now treats it as a no-op that creates the
+# destination directory but installs nothing into it.
+# Replace the empty string with "./" to explicitly reference the current
+# source directory, restoring header installation. The trailing slash
+# ensures the directory *contents* are installed rather than the directory
+# itself.
+# See: https://gitlab.kitware.com/cmake/cmake/-/issues/27568
+sed -i 's#DIRECTORY "" DESTINATION "include/libff"#DIRECTORY "./" DESTINATION "include/libff"#' libff/CMakeLists.txt
+
 PREFIX="$HOME/.local"
 ARGS=("-DCMAKE_INSTALL_PREFIX=$PREFIX" "-DWITH_PROCPS=OFF" "-G" "Ninja" "-DCMAKE_TOOLCHAIN_FILE=$PWD/../.github/scripts/windows-ghc-toolchain.cmake")
 CXXFLAGS="-fPIC"

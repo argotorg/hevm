@@ -22,7 +22,7 @@ import EVM.Stepper qualified as Stepper
 import EVM.Tracing qualified as Tracing
 import EVM.Expr (maybeLitWordSimp)
 
-import Control.Monad (void, when, forM, forM_)
+import Control.Monad (void, when, unless, forM, forM_)
 import Control.Monad.ST (RealWorld, ST, stToIO)
 import Control.Monad.State.Strict (execState, get, put, liftIO, runStateT)
 import Optics.Core
@@ -47,6 +47,8 @@ import GHC.Natural
 import System.IO (hFlush, stdout)
 import Witch (unsafeInto, into)
 import Data.Vector qualified as V
+import Data.Vector.Storable qualified as VS
+import Data.Sequence qualified as Seq
 import Data.Char (ord)
 
 data UnitTestOptions = UnitTestOptions
@@ -56,8 +58,7 @@ data UnitTestOptions = UnitTestOptions
   , maxIter       :: Maybe Integer
   , askSmtIters   :: Integer
   , smtTimeout    :: Maybe Natural
-  , match         :: Text
-  , prefix        :: Text
+  , methodFilter  :: TestMethodFilter
   , dapp          :: DappInfo
   , testParams    :: TestVMParams
   , ffiAllowed    :: Bool
@@ -120,15 +121,14 @@ makeVeriOpts opts =
 -- | Returns tuple of (No Cex, No warnings)
 unitTest :: App m => UnitTestOptions -> BuildOutput -> m (Bool, Bool)
 unitTest opts bo@(BuildOutput (Contracts cs) _) = do
-  let unitTestContrs = findUnitTests opts.prefix opts.match $ Map.elems cs
+  let unitTestContrs = [(c, methods) | c <- Map.elems cs, let methods = findUnitTests opts.methodFilter c, not (null methods)]
   conf <- readConfig
   when conf.debug $ liftIO $ do
     putStrLn $ "Found " ++ show (length unitTestContrs) ++ " unit test contract(s) to test:"
-    let x = map (\(a,b) -> "  --> " <> a <> "  ---  functions: " <> (Text.pack $ show b)) unitTestContrs
+    let x = map (\(a,b) -> "  --> " <> a.contractName <> "  ---  functions: " <> (Text.pack $ show b)) unitTestContrs
     putStrLn $ unlines $ map Text.unpack x
-  results <- concatMapM (runUnitTestContract opts bo) unitTestContrs
-  when conf.debug $ liftIO $ putStrLn $ "unitTest individual results: " <> show results
-  let (firsts, seconds) = unzip results
+  results <- mapM (runUnitTestContract opts bo) unitTestContrs
+  let (firsts, seconds) = unzip $ concat results
   pure (and firsts, and seconds)
 
 -- | Assuming a constructor is loaded, this stepper will run the constructor
@@ -204,33 +204,29 @@ runUnitTestContract
   :: App m
   => UnitTestOptions
   -> BuildOutput
-  -> (Text, [Sig])
+  -> (SolcContract, [Sig])
   -> m [(Bool, Bool)]
 runUnitTestContract
-  opts@(UnitTestOptions {..}) buildOut (name, testSigs) = do
-  liftIO $ putStrLn $ "Checking " ++ show (length testSigs) ++ " function(s) in contract " ++ unpack name
+  opts@(UnitTestOptions {..}) buildOut (contract, testSigs) = do
+  unless (Map.member contract.contractName (getContractsMap buildOut.contracts)) $ internalError $ "Contract " ++ unpack contract.contractName ++ " not found"
+  liftIO $ putStrLn $ "Checking " ++ show (length testSigs) ++ " function(s) in contract " ++ unpack contract.contractName
+  -- Construct the initial VM and begin the contract's constructor
+  vm0 :: VM Concrete <- liftIO $ stToIO $ initialUnitTestVm opts contract
+  vm1 <- Stepper.interpret (Fetch.oracle solvers (Just sess) rpcInfo) vm0 $ do
+    Stepper.enter contract.contractName
+    initializeUnitTest opts contract
+    Stepper.evm get
 
-  -- Look for the wanted contract by name from the Solidity info
-  case Map.lookup name (getContractsMap buildOut.contracts) of
-    Nothing -> internalError $ "Contract " ++ unpack name ++ " not found"
-    Just solcContr -> do
-      -- Construct the initial VM and begin the contract's constructor
-      vm0 :: VM Concrete <- liftIO $ stToIO $ initialUnitTestVm opts solcContr
-      vm1 <- Stepper.interpret (Fetch.oracle solvers (Just sess) rpcInfo) vm0 $ do
-        Stepper.enter name
-        initializeUnitTest opts solcContr
-        Stepper.evm get
-
-      writeTraceDapp dapp vm1
-      failOut <- failOutput vm1 opts "setUp()"
-      case vm1.result of
-        Just (VMFailure _) -> liftIO $ do
-          Text.putStrLn "   \x1b[31m[BAIL]\x1b[0m setUp() "
-          tick $ indentLines 3 failOut
-          pure [(True, False)]
-        Just (VMSuccess _) -> do
-          forM testSigs $ \s -> symRun opts vm1 s solcContr buildOut.sources
-        _ -> internalError "setUp() did not end with a result"
+  writeTraceDapp dapp vm1
+  failOut <- failOutput vm1 opts "setUp()"
+  case vm1.result of
+    Just (VMFailure _) -> liftIO $ do
+      Text.putStrLn "   \x1b[31m[BAIL]\x1b[0m setUp() "
+      tick $ indentLines 3 failOut
+      pure [(True, False)]
+    Just (VMSuccess _) -> do
+      forM testSigs $ \s -> symRun opts vm1 s buildOut.sources
+    _ -> internalError "setUp() did not end with a result"
 
 dsTestFailedSym :: Map (Expr 'EAddr) (Expr EContract) -> VM t -> Prop
 dsTestFailedSym store vm =
@@ -246,8 +242,8 @@ dsTestFailedConc store = case Map.lookup cheatCode store of
 
 -- Define the thread spawner for symbolic tests
 -- Returns tuple of (No Cex, No warnings)
-symRun :: forall m . App m => UnitTestOptions -> VM Concrete -> Sig -> SolcContract -> SourceCache -> m (Bool, Bool)
-symRun opts@UnitTestOptions{..} vm sig@(Sig testName types) solcContr sourceCache = do
+symRun :: forall m . App m => UnitTestOptions -> VM Concrete -> Sig -> SourceCache -> m (Bool, Bool)
+symRun opts@UnitTestOptions{..} vm sig@(Sig testName types) sourceCache = do
     let cs = callSig sig
     liftIO $ putStrLn $ "\x1b[96m[RUNNING]\x1b[0m " <> Text.unpack cs
     cd <- symCalldata cs types [] (AbstractBuf "txdata")
@@ -284,7 +280,8 @@ symRun opts@UnitTestOptions{..} vm sig@(Sig testName types) solcContr sourceCach
 
     -- check postconditions against vm
     let fetcherSym = Fetch.oracle solvers (Just sess) rpcInfo
-    (ends, results) <- verify solvers fetcherSym (makeVeriOpts opts) (symbolify vm') postcondition (Just $ cexHandler cd fetcherConc)
+    let symVm = symbolify vm' & set #srcLookup (Just $ makeSrcLookup dapp sourceCache)
+    (ends, results) <- verify solvers fetcherSym (makeVeriOpts opts) symVm postcondition (Just $ cexHandler cd fetcherConc)
     conf <- readConfig
     when (conf.debug) $ liftIO $ do
       putStrLn $ "   \x1b[94m[EXPLORATION COMPLETE]\x1b[0m " <> Text.unpack testName <> " -- explored " <> show (length ends) <> " paths."
@@ -318,8 +315,8 @@ symRun opts@UnitTestOptions{..} vm sig@(Sig testName types) solcContr sourceCach
     when (unexpectedAllRevert && (warnings || (any isCex results))) $ do
       -- if we display a FAILED due to Cex/warnings, we should also mention everything reverted
       liftIO $ putStrLn $ "   \x1b[33m[WARNING]\x1b[0m " <> Text.unpack testName <> " all branches reverted\n"
-    let warnData = Just $ WarningData solcContr sourceCache vm'
-    liftIO $ printWarnings warnData ends results $ "the test " <> Text.unpack testName
+    let sl = Just $ makeSrcLookup dapp sourceCache
+    liftIO $ printWarnings sl vm'.env.contracts ends results $ "the test " <> Text.unpack testName
     pure (not (any isCex results), not (warnings || unexpectedAllRevert))
     where
       cexHandler :: (Expr 'Buf, [Prop])
@@ -363,13 +360,13 @@ symRun opts@UnitTestOptions{..} vm sig@(Sig testName types) solcContr sourceCach
               lhs = LitByte (c2w a)
               rhs = Expr.readByte (Lit (fromIntegral n)) b
 --
-printWarnings :: Maybe (WarningData t) -> GetUnknownStr b => [Expr 'End] -> [ProofResult a b] -> String -> IO ()
-printWarnings warnData e results testName = do
+printWarnings :: Maybe SrcLookup -> Map (Expr EAddr) Contract -> GetUnknownStr b => [Expr 'End] -> [ProofResult a b] -> String -> IO ()
+printWarnings srcLookupM contracts e results testName = do
   when (any isUnknown results || any isError results || any Expr.isPartial e) $ do
     putStrLn $ "   \x1b[33m[WARNING]\x1b[0m hevm was only able to partially explore " <> testName <> " due to: ";
     forM_ (groupIssues (filter isError results)) $ \(num, str) -> putStrLn $ "      " <> show num <> "x -> " <> str
     forM_ (groupIssues (filter isUnknown results)) $ \(num, str) -> putStrLn $ "      " <> show num <> "x -> " <> str
-    forM_ (groupPartials warnData e) $ \(num, str) -> putStrLn $ "      " <> show num <> "x -> " <> str
+    forM_ (groupPartials srcLookupM contracts e) $ \(num, str) -> putStrLn $ "      " <> show num <> "x -> " <> str
   putStrLn ""
 
 getReproFailure :: App m => Sig -> Expr Buf -> SMTCex -> m (Err ReproducibleCex)
@@ -550,6 +547,26 @@ initialUnitTestVm (UnitTestOptions {..}) theContract = do
           & set #nonce (Just 1)
           & set #balance (Lit testParams.balanceCreate)
   pure $ vm & set (#env % #contracts % at (LitAddr ethrunAddress)) (Just creator)
+
+-- | Build a SrcLookup callback that resolves (address, pc) to source location info
+makeSrcLookup :: DappInfo -> SourceCache -> SrcLookup
+makeSrcLookup dapp srcCache = SrcLookup $ \contracts addr pc ->
+  let fallback = " at addr: " <> show addr <> " at pc: " <> show pc
+  in fromMaybe fallback $ do
+    contr <- Map.lookup addr contracts
+    pcOp <- contr.opIxMap VS.!? pc
+    sol <- findSrc contr dapp
+    sMap <- case contr.code of
+      RuntimeCode _ -> Seq.lookup pcOp sol.runtimeSrcmap
+      InitCode _ _ -> Seq.lookup pcOp sol.creationSrcmap
+      UnknownCode _ -> Nothing
+    (fname, fcontent) <- Map.lookup sMap.file srcCache.files
+    let eols = BS.count '\n' $ BS.take sMap.offset fcontent
+    let str = " in file \"" <> fname <> "\" on line " <> show (eols+1)
+    case (BS.length fcontent > (sMap.offset + sMap.length)) of
+      False -> pure str
+      True  -> let relevant = BS.take sMap.length $ BS.drop sMap.offset fcontent
+        in pure $ str <> " : " <> show relevant
 
 paramsFromRpc :: forall m . App m => Fetch.RpcInfo -> Fetch.Session -> m TestVMParams
 paramsFromRpc rpcInfo sess = do

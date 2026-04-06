@@ -4,17 +4,146 @@
    Helper functions for working with Expr instances.
    All functions here will return a concrete result if given a concrete input.
 -}
-module EVM.Expr where
+module EVM.Expr
+  ( -- * Constants
+    maxLit
+  , maxLitSigned
+  , minLitSigned
 
-import Prelude hiding (LT, GT)
+    -- * Stack Ops
+  , op1
+  , op2
+  , op3
+  , normArgs
+
+    -- * Arithmetic
+  , add
+  , sub
+  , mul
+  , div
+  , sdiv
+  , mod
+  , smod
+  , addmod
+  , mulmod
+  , exp
+  , sex
+
+    -- * Comparisons / Booleans
+  , lt
+  , gt
+  , leq
+  , geq
+  , slt
+  , sgt
+  , eq
+  , iszero
+
+    -- * Bit operations
+  , and
+  , or
+  , xor
+  , not
+  , shl
+  , shr
+  , sar
+  , clz
+
+    -- * Props
+  , peq
+  , pleq
+
+    -- * Buffers
+  , readByte
+  , readBytes
+  , readWord
+  , maxBytes
+  , copySlice
+  , writeByte
+  , writeWord
+  , bufLength
+  , bufLengthEnv
+  , minLength
+  , concretePrefix
+  , take
+  , drop
+  , toList
+  , fromList
+  , simplifyReads
+
+    -- * Storage
+  , readStorage'
+  , readStorage
+  , writeStorage
+  , concStoreContains
+  , getAddr
+  , getLogicalIdx
+
+    -- * Storage patterns / helpers
+  , pattern MappingSlot
+  , pattern ArraySlotWithOffs
+  , pattern ArraySlotWithOffs2
+  , pattern ArraySlotZero
+  , idsDontMatch
+  , slotPos
+  , litToArrayPreimage
+  , litToKeccak
+
+    -- * Decomposition
+  , safeToDecomposeProp
+  , safeToDecompose
+  , decomposeStorage
+
+    -- * Simplification
+  , simplify
+  , simplifyProps
+  , simplifyProp
+
+    -- * Conversions
+  , litAddr
+  , litCode
+  , exprToAddr
+  , wordToAddr
+
+    -- * Other helpers
+  , isLitWord
+  , isSuccess
+  , isFailure
+  , isPartial
+  , isSymAddr
+  , indexWord
+  , padByte
+  , joinBytes
+  , eqByte
+  , min
+  , max
+  , containsNode
+  , inRange
+  , preImages
+  , constPropagate
+  , concKeccakSimpExpr
+  , concKeccakProps
+  , concKeccakSimpProps
+  , concKeccakOnePass
+  , checkLHSConstProp
+  , checkLHSConst
+  , maybeLitByteSimp
+  , maybeLitWordSimp
+  , maybeLitAddrSimp
+  , maybeConcStoreSimp
+  ) where
+
+import Prelude hiding (LT, GT, exp, drop, take, not, and, or, div, mod, min, max)
+import Prelude qualified (div, mod, not, take, min, max)
 import Control.Monad (unless, when)
 import Control.Monad.ST (ST)
 import Control.Monad.State (put, get, execState, State)
-import Data.Bits hiding (And, Xor)
+import Data.Bits hiding (And, Xor, xor)
+import Data.Bits qualified (xor)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.DoubleWord (Int256, Word256(Word256), Word128(Word128))
-import Data.List
+import Data.List (sort, find)
 import Data.Map qualified as LMap
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe, isJust, fromMaybe)
@@ -29,8 +158,6 @@ import Data.Vector.Storable.ByteString
 import Data.Word (Word8, Word32)
 import Witch (unsafeInto, into, tryInto)
 import Data.Containers.ListUtils (nubOrd)
-
-import Optics.Core
 
 import EVM.Traversals
 import EVM.Types
@@ -257,9 +384,17 @@ readByte i@(Lit x) (WriteWord (Lit idx) val src)
            (Lit _) -> indexWord (Lit $ x - idx) val
            _ -> IndexWord (Lit $ x - idx) val
     else readByte i src
--- reading a byte that is lower than the dstOffset of a CopySlice, so it's just reading from dst
-readByte i@(Lit x) (CopySlice _ (Lit dstOffset) _ _ dst) | dstOffset > x =
-  readByte i dst
+-- reading a byte that is before the CopySlice destination region, so just read from dst
+-- We must ensure dstOffset + size does not wrap past maxBound.
+-- When size is symbolic, we bound dstOffset to ensure no wrapping is possible.
+readByte i@(Lit x) (CopySlice _ (Lit dstOffset) _ _ dst)
+  | dstOffset > x
+  , dstOffset <= (maxBound :: W256) - maxBytes
+  = readByte i dst
+readByte i@(Lit x) (CopySlice _ (Lit dstOffset) (Lit size) _ dst)
+  | dstOffset > x
+  , dstOffset + size >= dstOffset
+  = readByte i dst
 readByte i@(Lit x) (CopySlice (Lit srcOffset) (Lit dstOffset) (Lit size) src dst)
   = if x - dstOffset < size
     then readByte (Lit $ x - (dstOffset - srcOffset)) src
@@ -299,9 +434,28 @@ readWord idx b@(WriteWord idx' val buf)
     _ -> readWordFromBytes idx b
 readWord i@(Lit idx) (WriteByte (Lit idx') _ buf)
   | idx' < idx || (idx' >= idx + 32 && idx <= (maxBound :: W256) - 32) = readWord i buf
--- reading a Word that is lower than the dstOffset-32 of a CopySlice, so it's just reading from dst
-readWord i@(Lit x) (CopySlice _ (Lit dstOffset) _ _ dst) | dstOffset >= x+32 = readWord i dst
-readWord i@(Lit x) (CopySlice _ (Lit dstOffset) (Lit size) _ dst) | x >= dstOffset + size = readWord i dst
+-- reading a Word that is before the CopySlice destination region, so just read from dst
+-- We must ensure x+32 and dstOffset+size do not wrap past maxBound.
+-- When size is symbolic, we bound dstOffset to ensure no wrapping is possible.
+readWord i@(Lit x) (CopySlice _ (Lit dstOffset) _ _ dst)
+  | dstOffset >= x + 32
+  , x + 32 >= x
+  , dstOffset <= (maxBound :: W256) - maxBytes
+  = readWord i dst
+readWord i@(Lit x) (CopySlice _ (Lit dstOffset) (Lit size) _ dst)
+  | dstOffset >= x + 32
+  , x + 32 >= x
+  , dstOffset + size >= dstOffset
+  = readWord i dst
+-- reading a Word that is past the end of the CopySlice destination region
+readWord i@(Lit x) (CopySlice _ (Lit dstOffset) _ _ dst)
+  | x >= dstOffset + maxBytes
+  , dstOffset + maxBytes >= dstOffset
+  = readWord i dst
+readWord i@(Lit x) (CopySlice _ (Lit dstOffset) (Lit size) _ dst)
+  | x >= dstOffset + size
+  , dstOffset + size >= dstOffset
+  = readWord i dst
 readWord (Lit idx) b@(CopySlice (Lit srcOff) (Lit dstOff) (Lit size) src dst)
   -- the region we are trying to read is enclosed in the sliced region
   | (idx - dstOff) < size && 32 <= size - (idx - dstOff) = readWord (Lit $ srcOff + (idx - dstOff)) src
@@ -314,12 +468,24 @@ readWord i b = readWordFromBytes i b
 -- Attempts to read a concrete word from a buffer by reading 32 individual bytes and joining them together
 -- returns an abstract ReadWord expression if a concrete word cannot be constructed
 readWordFromBytes :: Expr EWord -> Expr Buf -> Expr EWord
-readWordFromBytes (Lit idx) (ConcreteBuf bs) =
-  case tryInto idx of
-    Left _ -> Lit 0
-    Right i -> Lit $ word $ padRight 32 $ BS.take 32 $ BS.drop i bs
+readWordFromBytes (Lit idx) (ConcreteBuf bs)
+  =  case tryInto idx of
+      Right i -> Lit $ word $ padRight 32 $ BS.take 32 $ BS.drop i bs
+      Left _ -> if noOverflow then Lit 0 else Lit . word $ wrappedBytes
+        where
+          noOverflow = idx <= (maxBound :: W256) - 31
+          wrappedBytes = zeroes <> bytesFromBeginning
+          fromEnd :: Int = fromIntegral ((maxBound :: W256) - idx + 1)
+          fromBeginning = 32 - fromEnd
+          zeroes = BS.replicate fromEnd 0
+          bytesFromBeginning = padRight 32 $ BS.take fromBeginning bs
+
+
 readWordFromBytes idx buf@(AbstractBuf _) = ReadWord idx buf
-readWordFromBytes i@(Lit idx) buf = let
+readWordFromBytes i@(Lit idx) buf
+  -- idx+31 must not wrap past maxBound (would make [idx..idx+31] empty)
+  | idx + 31 < idx = ReadWord i buf
+  | otherwise = let
     bytes = [readByte (Lit i') buf | i' <- [idx .. idx + 31]]
   in if all isLitByte bytes
      then Lit (bytesToW256 . mapMaybe maybeLitByteSimp $ bytes)
@@ -360,13 +526,14 @@ copySlice srcOffset dstOffset (Lit 32) src dst = writeWord dstOffset (readWord s
 -- Fully concrete copy
 copySlice a@(Lit srcOffset) b@(Lit dstOffset) c@(Lit size) d@(ConcreteBuf src) e@(ConcreteBuf dst)
   | dstOffset < maxBytes
-  , size < maxBytes =
-      let hd = padRight (unsafeInto dstOffset) $ BS.take (unsafeInto dstOffset) dst
-          sl = if srcOffset > unsafeInto (BS.length src)
-            then BS.replicate (unsafeInto size) 0
-            else padRight (unsafeInto size) $ BS.take (unsafeInto size) (BS.drop (unsafeInto srcOffset) src)
-          tl = BS.drop (unsafeInto dstOffset + unsafeInto size) dst
-      in ConcreteBuf $ hd <> sl <> tl
+  , size < maxBytes
+  , srcOffset + size >= srcOffset -- srcOffset must not wrap
+  = let hd = padRight (unsafeInto dstOffset) $ BS.take (unsafeInto dstOffset) dst
+        sl = if srcOffset > unsafeInto (BS.length src)
+          then BS.replicate (unsafeInto size) 0
+          else padRight (unsafeInto size) $ BS.take (unsafeInto size) (BS.drop (unsafeInto srcOffset) src)
+        tl = BS.drop (unsafeInto dstOffset + unsafeInto size) dst
+    in ConcreteBuf $ hd <> sl <> tl
   | otherwise = CopySlice a b c d e
 
 -- concrete indices & abstract src (may produce a concrete result if we are
@@ -528,11 +695,6 @@ concretePrefix b = V.create $ do
             go (i+1) v
           _ -> pure (i, v)
 
-
-word256At :: Expr EWord -> Lens (Expr Buf) (Expr Buf) (Expr EWord) (Expr EWord)
-word256At i = lens getter setter where
-  getter = readWord i
-  setter m x = writeWord i x m
 
 -- | Returns the first n bytes of buf
 take :: W256 -> Expr Buf -> Expr Buf
@@ -1696,9 +1858,6 @@ max :: Expr EWord -> Expr EWord -> Expr EWord
 max (Lit 0) y = y
 max x (Lit 0) = x
 max x y = normArgs Max Prelude.max x y
-
-allLit :: [Expr Byte] -> Bool
-allLit = all isLitByte
 
 -- | True if the given expression contains any node that satisfies the
 -- input predicate

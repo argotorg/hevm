@@ -51,6 +51,7 @@ data FeeSchedule n = FeeSchedule
   , g_warm_storage_read :: n
   , g_access_list_address :: n
   , g_access_list_storage_key :: n
+  , g_txdatafloor :: n
   } deriving Show
 
 feeSchedule :: Num n => FeeSchedule n
@@ -105,4 +106,5 @@ feeSchedule = FeeSchedule
   , g_warm_storage_read = 100
   , g_access_list_address = 2400
   , g_access_list_storage_key = 1900
+  , g_txdatafloor = 10
   }

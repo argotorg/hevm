@@ -699,6 +699,7 @@ data VM (t :: VMType) = VM
   , config         :: RuntimeConfig
   , forks          :: Seq ForkState
   , currentFork    :: Int
+  , srcLookup      :: Maybe SrcLookup
   , labels         :: Map Addr Text
   , osEnv          :: Map String String
   , freshVar       :: Int
@@ -729,6 +730,19 @@ data BaseState
   = EmptyBase
   | AbstractBase
   deriving (Show)
+
+-- | A callback for looking up source location info given the contracts map,
+-- an address, and a PC
+newtype SrcLookup = SrcLookup (Map (Expr EAddr) Contract -> Expr EAddr -> Int -> String)
+
+instance Show SrcLookup where
+  show _ = "<SrcLookup Info>"
+
+-- | Run a SrcLookup to get source location info, with a fallback for when
+-- no SrcLookup is available.
+runSrcLookup :: Maybe SrcLookup -> Map (Expr EAddr) Contract -> Expr EAddr -> Int -> String
+runSrcLookup Nothing _ addr pc = " at addr: " <> show addr <> " at pc: " <> show pc
+runSrcLookup (Just (SrcLookup f)) contracts addr pc = f contracts addr pc
 
 -- | Configuration options that need to be consulted at runtime
 data RuntimeConfig = RuntimeConfig
@@ -823,6 +837,7 @@ data TxState = TxState
   , subState    :: SubState
   , isCreate    :: Bool
   , txReversion :: Map (Expr EAddr) Contract
+  , txdataFloorGas :: Word64
   }
   deriving (Show)
 
@@ -1007,6 +1022,7 @@ data VMOpts (t :: VMType) = VMOpts
   , freshAddresses :: Int
   , beaconRoot :: W256
   , parentHash :: W256      -- EIP-2935 parent block hash
+  , txdataFloorGas :: Word64
   }
 
 deriving instance Show (VMOpts Symbolic)
