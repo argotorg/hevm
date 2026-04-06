@@ -5,7 +5,7 @@ module EVM.SMT.DivModEncoding
   , divModAbstractDecls
   ) where
 
-import Data.Bits ((.&.), countTrailingZeros)
+import Data.Bits (countTrailingZeros)
 import Data.Containers.ListUtils (nubOrd)
 import Data.List (groupBy, sortBy)
 import Data.Ord (comparing)
