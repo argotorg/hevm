@@ -47,7 +47,7 @@ import System.Directory (createDirectoryIfMissing, doesFileExist)
 import Data.Aeson.Encode.Pretty (encodePretty)
 import qualified Data.ByteString.Lazy as BSL
 import Data.Bifunctor (first)
-import Control.Exception (try, SomeException)
+import Control.Exception (SomeException, SomeAsyncException(..), try, catches, Handler(..), throwIO)
 
 import Data.Aeson hiding (Error)
 import Data.Aeson.Optics
@@ -69,7 +69,11 @@ import Control.Monad.IO.Class
 import Control.Monad (when)
 import EVM.Effects
 import qualified EVM.Expr as Expr
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (MVar, newMVar, readMVar, modifyMVar_)
+import Data.IORef (IORef, newIORef, readIORef, atomicModifyIORef')
+import Data.Time.Clock (UTCTime, getCurrentTime, diffUTCTime, addUTCTime)
+import System.Random (randomRIO)
 
 type Fetcher t m = App m => Query t -> m (EVM t ())
 
@@ -91,6 +95,9 @@ data Session = Session
   -- These are NOT persisted to disk
   , failedContracts :: MVar (Set Addr)
   , failedSlots     :: MVar (Set (Addr, W256))
+  -- Shared rate limit cooldown across workers. When any worker hits a
+  -- rate limit, it sets a deadline; other workers wait before retrying.
+  , rpcThrottle     :: IORef (Maybe UTCTime)
   }
 
 data FetchCache = FetchCache
@@ -276,6 +283,64 @@ instance FromJSON Block where
       <*> v .: "maxCodeSize"
       <*> pure feeSchedule
 
+-- | Wait if there's an active cooldown from a recent rate limit.
+waitForCooldown :: IORef (Maybe UTCTime) -> IO ()
+waitForCooldown ref = do
+  deadline <- readIORef ref
+  case deadline of
+    Nothing -> pure ()
+    Just until -> do
+      now <- getCurrentTime
+      let diff = diffUTCTime until now
+      when (diff > 0) $
+        threadDelay (ceiling (realToFrac diff * 1_000_000 :: Double))
+
+-- | Set a cooldown deadline. Keeps the longer of existing vs new deadline.
+setCooldown :: IORef (Maybe UTCTime) -> Int -> IO ()
+setCooldown ref delayUs = do
+  now <- getCurrentTime
+  let newDeadline = addUTCTime (realToFrac delayUs / 1_000_000) now
+  atomicModifyIORef' ref $ \existing ->
+    let deadline = case existing of
+          Just d | d > newDeadline -> d
+          _ -> newDeadline
+    in (Just deadline, ())
+
+-- | Retry an IO action on exception with exponential backoff + jitter.
+-- Uses a shared cooldown so all workers back off together.
+-- Only retries synchronous exceptions (network errors, HTTP 429, etc.).
+-- Re-throws all async exceptions (Timeout, ThreadKilled).
+-- RPC-level errors (Left) are NOT retried — they pass through.
+withRetry :: Bool -> IORef (Maybe UTCTime) -> IO (Either Text a) -> IO (Either Text a)
+withRetry debug throttle action = go 1
+  where
+  maxRetries = 5
+  go attempt = do
+    waitForCooldown throttle
+    result <- catches (Right <$> action)
+      [ Handler $ \(SomeAsyncException e) -> throwIO e
+      , Handler $ \(e :: SomeException) -> pure $ Left e
+      ]
+    case result of
+      Right r -> pure r
+      Left e
+        | attempt <= maxRetries -> do
+            let baseDelayUs = 500_000 * (2 ^ (attempt - 1)) :: Int
+            jitter <- randomRIO (0, baseDelayUs)
+            let delayUs = baseDelayUs + jitter
+            setCooldown throttle delayUs
+            when debug $ putStrLn $
+              "RPC retry " <> show attempt <> "/" <> show maxRetries
+              <> " in " <> show (delayUs `div` 1000) <> "ms"
+            threadDelay delayUs
+            go (attempt + 1)
+        | otherwise ->
+            pure $ Left $ pack $ show e
+
+-- | Like fetchWithSession but with retry + shared cooldown from Session.
+fetchWithRetry :: Bool -> Text -> Session -> Value -> IO (Either Text Value)
+fetchWithRetry debug url session = withRetry debug session.rpcThrottle . fetchWithSession url session.sess
+
 fetchWithSession :: Text -> NetSession.Session -> Value -> IO (Either Text Value)
 fetchWithSession url sess x = do
   r <- asValue =<< NetSession.post sess (unpack url) x
@@ -306,7 +371,7 @@ fetchContractWithSession conf sess nPre url addr = do
         -- Attempt fetch
         when (conf.debug) $ putStrLn $ "-> Fetching contract at " ++ show addr
         let fetch :: Show a => RpcQuery a -> IO (Either Text a)
-            fetch = fetchQuery n (fetchWithSession url sess.sess)
+            fetch = fetchQuery n (fetchWithRetry conf.debug url sess)
 
         codeRes <- fetch (QueryCode addr)
         nonceRes <- fetch (QueryNonce addr)
@@ -373,7 +438,7 @@ fetchSlotWithCache conf sess nPre url addr slot = do
       else do
         -- Attempt fetch
         when (conf.debug) $ putStrLn $ "-> Fetching slot " <> show slot <> " at " <> show addr
-        ret <- fetchSlotWithSession sess.sess n url addr slot
+        ret <- fetchQuery n (fetchWithRetry conf.debug url sess) (QuerySlot addr slot)
         case ret of
           Right val -> do
             -- Success: cache it
@@ -436,7 +501,7 @@ fetchBlockWithSession conf sess nPre url = do
 internalBlockFetch :: Config -> Session -> BlockNumber -> Text -> IO (Maybe Block)
 internalBlockFetch conf sess n url = do
   when (conf.debug) $ putStrLn $ "Fetching block " ++ show n ++ " from " ++ unpack url
-  ret <- fetchQuery n (fetchWithSession url sess.sess) QueryBlock
+  ret <- fetchQuery n (fetchWithRetry conf.debug url sess) QueryBlock
   case ret of
     Left _ -> pure Nothing
     Right b -> do
@@ -489,7 +554,8 @@ mkSession cacheDir mblock = do
   -- Initialize ephemeral failure tracking
   failedContracts <- liftIO $ newMVar Set.empty
   failedSlots <- liftIO $ newMVar Set.empty
-  pure $ Session sess latestBlockNum cache cacheDir failedContracts failedSlots
+  rpcThrottle <- liftIO $ newIORef Nothing
+  pure $ Session sess latestBlockNum cache cacheDir failedContracts failedSlots rpcThrottle
 
 mkSessionWithoutCache :: App m => m Session
 mkSessionWithoutCache = mkSession Nothing Nothing
@@ -569,7 +635,7 @@ oracle solvers preSess rpcInfo q = do
             when (conf.debug) $ liftIO $ putStrLn $ "Fetching slot " <> (show slot) <> " at " <> (show addr)
             let (block, url) = fromJust rpcInfo.blockNumURL
             n <- liftIO $ getLatestBlockNum conf sess block url
-            ret <- liftIO $ fetchSlotWithSession sess.sess n url addr slot
+            ret <- liftIO $ fetchQuery n (fetchWithRetry conf.debug url sess) (QuerySlot addr slot)
             case ret of
               Right val -> do
                 liftIO $ modifyMVar_ sess.sharedCache $ \c ->
