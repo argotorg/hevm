@@ -4,7 +4,7 @@ import Control.Monad (forM_)
 import Control.Monad.Catch (MonadMask)
 import Control.Monad.IO.Class
 import Control.Monad.Reader (ReaderT)
-import Data.Text (Text, isPrefixOf)
+import Data.Text (Text, isPrefixOf, unpack)
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -118,6 +118,22 @@ tests = testGroup "Foundry tests"
     , test "Keccak" $ do
         let testFile = "test/contracts/pass/keccak.sol"
         executeSingleMethod testFile "prove_access" >>= assertEqualM "test result" (True, True)
+    , test "AssertApproxEqAbs-Pass" $ do
+        let testFile = "test/contracts/pass/assertApproxEqAbs.sol"
+        executeAllMethodsWithPrefix testFile "prove" >>= assertEqualM "test result" (True, True)
+    , test "AssertApproxEqAbs-Fail" $ do
+        let testFile = "test/contracts/fail/assertApproxEqAbs.sol"
+        let cases =
+              -- concrete-only tests: all branches revert, hence (False, False)
+              [ ("prove_approx_eq_abs_uint_exceeds_delta", (False, False))
+              , ("prove_approx_eq_abs_uint_zero_delta_neq", (False, False))
+              , ("prove_approx_eq_abs_int_exceeds_delta", (False, False))
+              , ("prove_approx_eq_abs_int_min_zero_tight", (False, False))
+              -- symbolic: not all branches revert
+              , ("prove_approx_eq_abs_uint_symbolic_fail", (False, True))
+              ]
+        forM_ cases $ \(method, expected) -> do
+          executeSingleMethod testFile method >>= assertEqualM (unpack method) expected
     , test "Panic-Source-Location" $ do
         -- Regression test for #895: panic in a called contract should not show "<source not found>"
         let testFile = "test/contracts/fail/assertPanic.sol"
