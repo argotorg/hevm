@@ -134,6 +134,10 @@ tests = testGroup "Foundry tests"
               ]
         forM_ cases $ \(method, expected) -> do
           executeSingleMethod testFile method >>= assertEqualM (unpack method) expected
+    , test "Panic-Source-Location" $ do
+        -- Regression test for #895: panic in a called contract should not show "<source not found>"
+        let testFile = "test/contracts/fail/assertPanic.sol"
+        executeSingleMethod testFile "prove_panic" >>= assertEqualM "prove_panic" (False, False)
     ]
 
 executeSingleMethod :: (App m, MonadMask m) => FilePath -> Text -> m (Bool, Bool)
