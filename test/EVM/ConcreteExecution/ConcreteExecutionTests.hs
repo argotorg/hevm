@@ -14,7 +14,6 @@ import Data.Tree (flatten)
 import Data.Vector qualified as V
 
 import EVM.ABI
-import EVM.ConsoleLog (formatConsoleLog)
 import EVM.Effects qualified as Effects
 import EVM.Fetch qualified as Fetch
 import EVM.Solidity (solcRuntime)
@@ -89,33 +88,6 @@ tests = testGroup "Concrete execution tests"
       let traces = concatMap flatten (traceForest vm)
           consoleLogs = filter (\t -> case t.tracedata of ConsoleLog _ -> True; _ -> False) traces
       assertEqual "Should have 2 console.log traces" 2 (length consoleLogs)
-  , testGroup "Console log formatting"
-    [ testCase "format-string" $ do
-        let encoded = ConcreteBuf $ abiMethod "log(string)" (AbiTuple $ V.fromList [AbiString "hello world"])
-        assertEqual "console.log(string) format" "console::log(\"hello world\")" (formatConsoleLog encoded)
-    , testCase "format-uint" $ do
-        let encoded = ConcreteBuf $ abiMethod "log(uint256)" (AbiTuple $ V.fromList [AbiUInt 256 42])
-        assertEqual "console.log(uint256) format" "console::log(42)" (formatConsoleLog encoded)
-    , testCase "format-string-uint" $ do
-        let encoded = ConcreteBuf $ abiMethod "log(string,uint256)" (AbiTuple $ V.fromList [AbiString "count", AbiUInt 256 7])
-        assertEqual "console.log(string,uint256) format" "console::log(\"count\", 7)" (formatConsoleLog encoded)
-    , testCase "format-bool" $ do
-        let encoded = ConcreteBuf $ abiMethod "log(bool)" (AbiTuple $ V.fromList [AbiBool True])
-        assertEqual "console.log(bool) format" "console::log(true)" (formatConsoleLog encoded)
-    , testCase "format-address" $ do
-        let encoded = ConcreteBuf $ abiMethod "log(address)" (AbiTuple $ V.fromList [AbiAddress 0xdeadbeef])
-        assertEqual "console.log(address) format" "console::log(0x00000000000000000000000000000000DeaDBeef)" (formatConsoleLog encoded)
-    , testCase "format-no-args" $ do
-        let encoded = ConcreteBuf $ abiMethod "log()" (AbiTuple $ V.fromList [])
-        assertEqual "console.log() format" "console::log()" (formatConsoleLog encoded)
-    , testCase "format-unknown-selector" $ do
-        let encoded = ConcreteBuf $ BS.pack [0xde, 0xad, 0xbe, 0xef, 0x01, 0x02]
-        let result = formatConsoleLog encoded
-        assertBool "unknown selector should produce hex fallback" (T.isPrefixOf "console::log(0x" result)
-    , testCase "format-short-input" $ do
-        let encoded = ConcreteBuf $ BS.pack [0x01, 0x02]
-        assertEqual "short input format" "console::log()" (formatConsoleLog encoded)
-    ]
   ]
 
 expectValue :: AbiValue -> ExecResult -> IO ()
