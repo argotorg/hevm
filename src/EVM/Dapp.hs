@@ -160,9 +160,35 @@ showTraceLocation dapp trace =
     Nothing -> Left "<no source map>"
     Just sm ->
       case srcMapCodePos dapp.sources sm of
-        Nothing -> Left "<source not found>"
         Just (fileName, lineIx) ->
           Right (pack fileName <> ":" <> pack (show lineIx))
+        -- srcmap points to a file not in the source cache (e.g. compiler-
+        -- generated panic handler).  Walk backwards through the contract's
+        -- srcmap to find the nearest entry with a valid source location —
+        -- this typically resolves to the assert/require that triggered the
+        -- error.
+        Nothing ->
+          case fallbackSrcPos dapp trace of
+            Just (fileName, lineIx) ->
+              Right (pack fileName <> ":" <> pack (show lineIx))
+            Nothing -> Left "<source not found>"
+
+-- | Walk backwards from the current opIx to find the nearest srcmap entry
+-- whose file index exists in the source cache.
+fallbackSrcPos :: DappInfo -> Trace -> Maybe (FilePath, Int)
+fallbackSrcPos dapp trace = do
+  sol <- findSrc trace.contract dapp
+  let srcmaps = case trace.contract.code of
+        InitCode _ _ -> sol.creationSrcmap
+        RuntimeCode _ -> sol.runtimeSrcmap
+        UnknownCode _ -> mempty
+  go (trace.opIx - 1) srcmaps
+  where
+    go i srcmaps
+      | i < 0     = Nothing
+      | otherwise = case Seq.lookup i srcmaps >>= srcMapCodePos dapp.sources of
+          Just pos -> Just pos
+          Nothing  -> go (i - 1) srcmaps
 
 srcMapCodePos :: SourceCache -> SrcMap -> Maybe (FilePath, Int)
 srcMapCodePos cache sm =
