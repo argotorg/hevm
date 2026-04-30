@@ -8,7 +8,10 @@ import Test.Tasty.HUnit
 import Data.Maybe
 import Data.Map qualified as Map
 import Data.Text (Text, isPrefixOf)
+import Data.Text qualified as T
 import Data.Vector qualified as V
+import System.Environment (lookupEnv)
+import System.IO.Unsafe (unsafePerformIO)
 
 import EVM (makeVm, symbolify, defaultVMOpts)
 import EVM.ABI
@@ -156,7 +159,14 @@ vmFromRpc sess blockNum calldata callvalue caller address = do
     })
 
 testRpc :: Text
-testRpc = "https://eth-mainnet.g.alchemy.com/v2/vpeKFsEF6PHifHzdtcwXSDbhV3ym5Ro4"
+testRpc = unsafePerformIO $ do
+  mKey <- lookupEnv "RPC_MAINNET_KEY"
+  case mKey of
+    Just key | not (null key) ->
+      pure $ "https://eth-mainnet.g.alchemy.com/v2/" <> T.pack key
+    _ ->
+      error "RPC_MAINNET_KEY environment variable is not set; required to run rpc tests"
+{-# NOINLINE testRpc #-}
 
 testBlockNumber :: BlockNumber
 testBlockNumber = BlockNumber 16198552
