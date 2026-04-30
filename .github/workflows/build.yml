@@ -78,6 +78,8 @@ jobs:
         run: nix develop --command bash -c "cabal update"
       # can't be run in nix build due to network usage
       - name: run rpc tests
+        env:
+          RPC_MAINNET_KEY: ${{ secrets.RPC_MAINNET_KEY }}
         run: nix develop --command bash -c "cabal --active-repositories=:none run rpc-tests"
       # if we run this in nix build we often get killed due to oom in ci
       - name: run ethereum tests
@@ -264,6 +266,8 @@ jobs:
           cabal run test
 
       - name: run rpc tests
+        env:
+          RPC_MAINNET_KEY: ${{ secrets.RPC_MAINNET_KEY }}
         run: |
           export PATH="$BITWUZLA_PATH:$FOUNDRY_PATH:$HASKELL_PATHS:$PATH"
           cabal run rpc-tests
