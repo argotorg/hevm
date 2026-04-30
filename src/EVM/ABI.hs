@@ -426,6 +426,11 @@ basicType v =
     , P.string "bytes" $> AbiBytesDynamicType
     , P.string "tuple" $> AbiTupleType v
     , P.string "function" $> AbiFunctionType
+
+    -- Fallback for user-defined types (e.g. enums like "Order.OrderType").
+    -- Solidity libraries emit qualified enum names in their ABI instead of
+    -- the underlying uint8. Treat any unrecognized identifier as uint8.
+    , P.try (P.some (P.alphaNumChar P.<|> P.char '.') $> AbiUIntType 8)
     ]
 
   where
