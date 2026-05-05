@@ -2785,6 +2785,13 @@ finishFrame how = do
             modifying (#state % #stack) (drop 1)
             pushAddr dummyCreateAddress
             assign (#state % #returndata) mempty
+      | length oldVm.frames < e.depth
+      , not (poppingCheatFrame oldVm.frames)
+      -> do
+          assign #expectedRevert Nothing
+          finishFrameNoExpectation $
+            FrameReverted (expectRevertFailureBuf
+              "call didn't revert at a lower depth than cheatcode call depth")
     _ -> finishFrameNoExpectation how
 
 -- | When a FrameReverted enters finishFrame and an expectation is active,

@@ -40,6 +40,23 @@ contract ConstructorReverter {
     }
 }
 
+contract DelegateLogic {
+    function doRevert(string memory m) external pure {
+        revert(m);
+    }
+}
+
+contract DelegateProxy {
+    address public logicAddr;
+    constructor(address _logic) { logicAddr = _logic; }
+    function relay(string memory m) external returns (bytes memory) {
+        (bool ok, bytes memory ret) = logicAddr.delegatecall(
+            abi.encodeWithSignature("doRevert(string)", m));
+        if (!ok) { assembly { revert(add(ret, 0x20), mload(ret)) } }
+        return ret;
+    }
+}
+
 struct LargeDummyStruct {
     address a;
     uint256 b;
@@ -155,6 +172,33 @@ contract ExpectRevertTest is Test {
 
         vm.expectRevert();
         reverter.revertWithoutReason();
+    }
+
+    function prove_expectRevertEmptyString() public {
+        Reverter reverter = new Reverter();
+        vm.expectRevert(abi.encodeWithSignature("Error(string)", ""));
+        reverter.revertWithMessage("");
+    }
+
+    function prove_expectRevertCreate2Sentinel() public {
+        vm.expectRevert("ctor revert");
+        ConstructorReverter r = new ConstructorReverter{salt: bytes32(uint256(1))}("ctor revert");
+        require(address(r) == address(0x0000000000000000000000000000000000000001),
+                "swallowed CREATE2 must return DUMMY_CREATE_ADDRESS");
+    }
+
+    function prove_expectRevertSurvivesIntermediateCheat() public {
+        Reverter reverter = new Reverter();
+        vm.expectRevert("delayed");
+        vm.label(address(reverter), "reverter");
+        reverter.revertWithMessage("delayed");
+    }
+
+    function prove_expectRevertThroughDelegatecall() public {
+        DelegateLogic logic = new DelegateLogic();
+        DelegateProxy proxy = new DelegateProxy(address(logic));
+        vm.expectRevert("logic revert", address(proxy));
+        proxy.relay("logic revert");
     }
 }
 
