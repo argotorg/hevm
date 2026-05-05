@@ -203,6 +203,7 @@ makeVm o = do
     , keccakPreImgs = fromList []
     , pathsVisited = mempty
     , mergeState = defaultMergeState
+    , expectedRevert = Nothing
     }
     where
     env = Env
@@ -2093,6 +2094,51 @@ cheatActions = Map.fromList
             doStop
         _ -> vmError (BadCheatCode "etch(address,bytes) address decoding failed" sig)
 
+  , action "expectRevert()" $
+      \_ _ -> setExpectedRevert Nothing False Nothing
+
+  , action "expectRevert(bytes)" $
+      \sig input -> case decodeBuf [AbiBytesDynamicType] input of
+        (CAbi [AbiBytesDynamic bs],"") ->
+          setExpectedRevert (Just (ConcreteBuf bs)) False Nothing
+        _ -> vmError (BadCheatCode "expectRevert(bytes) parameter decoding failed" sig)
+
+  , action "expectRevert(bytes4)" $
+      \sig input -> case decodeBuf [AbiBytesType 4] input of
+        (CAbi [AbiBytes 4 bs],"") ->
+          setExpectedRevert (Just (ConcreteBuf bs)) False Nothing
+        _ -> vmError (BadCheatCode "expectRevert(bytes4) parameter decoding failed" sig)
+
+  , action "expectRevert(address)" $
+      \sig input -> case decodeBuf [AbiAddressType] input of
+        (CAbi [AbiAddress addr],"") ->
+          setExpectedRevert Nothing False (Just (LitAddr addr))
+        _ -> vmError (BadCheatCode "expectRevert(address) parameter decoding failed" sig)
+
+  , action "expectRevert(bytes4,address)" $
+      \sig input -> case decodeBuf [AbiBytesType 4, AbiAddressType] input of
+        (CAbi [AbiBytes 4 bs, AbiAddress addr],"") ->
+          setExpectedRevert (Just (ConcreteBuf bs)) False (Just (LitAddr addr))
+        _ -> vmError (BadCheatCode "expectRevert(bytes4,address) parameter decoding failed" sig)
+
+  , action "expectRevert(bytes,address)" $
+      \sig input -> case decodeBuf [AbiBytesDynamicType, AbiAddressType] input of
+        (CAbi [AbiBytesDynamic bs, AbiAddress addr],"") ->
+          setExpectedRevert (Just (ConcreteBuf bs)) False (Just (LitAddr addr))
+        _ -> vmError (BadCheatCode "expectRevert(bytes,address) parameter decoding failed" sig)
+
+  , action "expectPartialRevert(bytes4)" $
+      \sig input -> case decodeBuf [AbiBytesType 4] input of
+        (CAbi [AbiBytes 4 bs],"") ->
+          setExpectedRevert (Just (ConcreteBuf bs)) True Nothing
+        _ -> vmError (BadCheatCode "expectPartialRevert(bytes4) parameter decoding failed" sig)
+
+  , action "expectPartialRevert(bytes4,address)" $
+      \sig input -> case decodeBuf [AbiBytesType 4, AbiAddressType] input of
+        (CAbi [AbiBytes 4 bs, AbiAddress addr],"") ->
+          setExpectedRevert (Just (ConcreteBuf bs)) True (Just (LitAddr addr))
+        _ -> vmError (BadCheatCode "expectPartialRevert(bytes4,address) parameter decoding failed" sig)
+
   -- Single-value environment read cheat actions
   , $(envReadSingleCheat "envBool(string)") AbiBool stringToBool
   , $(envReadSingleCheat "envUint(string)") (AbiUInt 256) stringToWord256
@@ -2287,6 +2333,122 @@ cheatActions = Map.fromList
       case decodeBuf [abitype] input of
         (CAbi [val],"") -> frameReturn $ AbiTuple $ V.fromList [AbiString $ Char8.pack $ show val]
         _ -> vmError (BadCheatCode ("toString parameter decoding failed for " <> show abitype) sig)
+
+-- * expectRevert support
+--
+-- The cheat captures the depth of the call stack so that when the immediately
+-- following sub-call returns/reverts at the same depth, finishFrame consumes
+-- the expectation and rewrites the result. See `consumeExpectedRevert`.
+
+setExpectedRevert
+  :: VMOps t => Maybe (Expr Buf) -> Bool -> Maybe (Expr EAddr) -> EVM t ()
+setExpectedRevert reasonExp isPartial reverterExp = do
+  vm <- get
+  case vm.expectedRevert of
+    Just _ ->
+      vmError (BadCheatCode "expectRevert: previous expectation not yet consumed" 0)
+    Nothing -> do
+      assign #expectedRevert $ Just ExpectedRevert
+        { reason         = reasonExp
+        , partialMatch   = isPartial
+        , reverter       = reverterExp
+        , depth          = length vm.frames
+        , actualReverter = Nothing
+        }
+      finishFrame (FrameReturned mempty)
+
+-- | Construct the synthesized assertion-failure revert buffer used when an
+-- expectRevert expectation is not satisfied. Encoded as Error(string) so the
+-- unit-test harness recognizes it as an assertion failure.
+expectRevertFailureBuf :: ByteString -> Expr Buf
+expectRevertFailureBuf msg =
+  ConcreteBuf $
+    selector "Error(string)" <>
+    encodeAbiValue (AbiTuple $ V.fromList [AbiString ("assertion failed: " <> msg)])
+
+-- | If a concrete buffer is an Error(string)-encoded revert, return the inner
+-- string bytes. Otherwise Nothing. The encoding is
+-- selector(4) ++ offset(32) ++ length(32) ++ data(padded). We skip the selector
+-- and the 32-byte offset, then decode AbiStringType which reads length+data.
+stripErrorPrefix :: ByteString -> Maybe ByteString
+stripErrorPrefix bs
+  | BS.length bs < 4 + 32 + 32 = Nothing
+  | BS.take 4 bs /= errSel = Nothing
+  | otherwise = case decodeAbiValue AbiStringType (LS.fromStrict (BS.drop (4 + 32) bs)) of
+      AbiString inner -> Just inner
+      _ -> Nothing
+  where errSel = selector "Error(string)"
+
+-- | True when the actual revert matches the expectation. Returns Nothing when
+-- the comparison cannot be decided concretely (e.g. symbolic actual buffer or
+-- symbolic reverter address); the caller should bail out as a partial result
+-- in that case.
+matchExpectedRevert
+  :: ExpectedRevert -> Expr Buf -> Expr EAddr -> Maybe Bool
+matchExpectedRevert e actual reverterAddr = do
+  reasonOk <- reasonMatches
+  reverterOk <- reverterMatches
+  pure (reasonOk && reverterOk)
+  where
+    reasonMatches = case e.reason of
+      Nothing -> Just True
+      Just expected -> case (Expr.simplify expected, Expr.simplify actual) of
+        (ConcreteBuf eBs, ConcreteBuf aBs)
+          | e.partialMatch -> Just (BS.take 4 aBs == BS.take 4 eBs)
+          | eBs == aBs     -> Just True
+          | otherwise      -> Just (Just eBs == stripErrorPrefix aBs)
+        _ -> Nothing
+    reverterMatches = case e.reverter of
+      Nothing -> Just True
+      Just want -> case (want, reverterAddr) of
+        (LitAddr a, LitAddr b) -> Just (a == b)
+        (SymAddr a, SymAddr b) -> Just (a == b)
+        _                      -> Nothing
+
+-- | Dummy success returndata used when swallowing a matched revert at a CALL
+-- boundary. 8192 zero bytes — large enough to satisfy Solidity's return-data
+-- decoders for any reasonable return type.
+dummySuccessReturn :: Expr Buf
+dummySuccessReturn = ConcreteBuf (BS.replicate 8192 0)
+
+-- | Sentinel address pushed on the stack when swallowing a matched CREATE
+-- revert. Matches forge's DUMMY_CREATE_ADDRESS so tests that inspect the LHS
+-- of `new C()` after expectRevert behave identically across both tools.
+dummyCreateAddress :: Expr EAddr
+dummyCreateAddress = LitAddr 1
+
+-- | Decide what to do at the boundary frame for an active expectation.
+-- Returns the FrameResult that finishFrame's normal path should run with, plus
+-- a flag telling the caller to apply the CREATE-swallow fixup afterwards
+-- (replace the pushed 0 with dummyCreateAddress and clear returndata).
+consumeExpectedRevert
+  :: VMOps t => ExpectedRevert -> FrameResult -> VM t -> EVM t (FrameResult, Bool)
+consumeExpectedRevert e how oldVm = do
+  let reverterAddr = fromMaybe oldVm.state.contract e.actualReverter
+      isCreate = currentFrameIsCreate oldVm
+  case how of
+    FrameReverted actual -> case matchExpectedRevert e actual reverterAddr of
+      Just True
+        | isCreate  -> pure (FrameReverted actual, True)
+        | otherwise -> pure (FrameReturned dummySuccessReturn, False)
+      Just False ->
+        pure (FrameReverted (expectRevertFailureBuf "expected revert did not match"), False)
+      Nothing -> do
+        unexpectedSymArg
+          "expectRevert: cannot decide match for symbolic revert data or reverter"
+          [actual]
+        pure (how, False)
+    FrameReturned _ ->
+      pure (FrameReverted (expectRevertFailureBuf "call did not revert as expected"), False)
+    FrameErrored _ -> pure (how, False)
+
+-- | True when the topmost frame on `frames` is a cheat-call frame (i.e. we
+-- are popping out of a cheatcode invocation). Such frames must be ignored by
+-- the expectRevert interception, since cheatcodes return between the
+-- expectRevert call and the target sub-call.
+poppingCheatFrame :: [Frame t] -> Bool
+poppingCheatFrame (Frame { context = CallContext { target } } : _) = target == cheatCode
+poppingCheatFrame _ = False
 
 -- * General call implementation ("delegateCall")
 -- note that the continuation is ignored in the precompile case
@@ -2602,8 +2764,56 @@ finishAllFramesAndStop = do
 --
 -- It also handles the case when the current stack frame is the only one;
 -- in this case, we set the final '_result' of the VM execution.
+--
+-- If an expectRevert expectation is active and we are about to pop the frame
+-- at the matching depth, the expectation is consumed and the FrameResult is
+-- rewritten before the rest of the function runs. CREATE-frame swallows of a
+-- matched revert require a stack/returndata fixup after the normal pop.
 finishFrame :: VMOps t => FrameResult -> EVM t ()
 finishFrame how = do
+  recordActualReverterIfFirst how
+  oldVm <- get
+  case oldVm.expectedRevert of
+    Just e
+      | length oldVm.frames == e.depth
+      , not (poppingCheatFrame oldVm.frames)
+      -> do
+          assign #expectedRevert Nothing
+          (newHow, swallowCreate) <- consumeExpectedRevert e how oldVm
+          finishFrameNoExpectation newHow
+          when swallowCreate $ do
+            modifying (#state % #stack) (drop 1)
+            pushAddr dummyCreateAddress
+            assign (#state % #returndata) mempty
+    _ -> finishFrameNoExpectation how
+
+-- | When a FrameReverted enters finishFrame and an expectation is active,
+-- capture the contract that just reverted as the actualReverter — but only the
+-- first time, and only when the reverting frame is a CALL frame (not a
+-- CREATE). CREATE-internal reverts are attributed to the parent CALL frame
+-- that owns the new-contract expression (matching foundry's behaviour).
+recordActualReverterIfFirst :: VMOps t => FrameResult -> EVM t ()
+recordActualReverterIfFirst (FrameReverted _) = do
+  vm <- get
+  case vm.expectedRevert of
+    Just e
+      | isNothing e.actualReverter
+      , not (currentFrameIsCreate vm)
+      , not (poppingCheatFrame vm.frames)
+      -> assign #expectedRevert (Just e { actualReverter = Just vm.state.contract })
+    _ -> pure ()
+recordActualReverterIfFirst _ = pure ()
+
+currentFrameIsCreate :: VM t -> Bool
+currentFrameIsCreate vm = case vm.frames of
+  Frame { context = CreationContext {} } : _ -> True
+  _ -> False
+
+-- | The non-interception body of finishFrame, factored out so the wrapper
+-- above can re-enter it with a rewritten FrameResult without re-triggering
+-- the expectRevert check.
+finishFrameNoExpectation :: VMOps t => FrameResult -> EVM t ()
+finishFrameNoExpectation how = do
   oldVm <- get
 
   case oldVm.frames of

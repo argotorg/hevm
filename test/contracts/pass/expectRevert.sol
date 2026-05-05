@@ -86,6 +86,13 @@ contract ExpectRevertTest is Test {
         new ConstructorReverter("constructor revert");
     }
 
+    function prove_expectRevertConstructorReturnsDummyAddress() public {
+        vm.expectRevert("constructor revert");
+        ConstructorReverter r = new ConstructorReverter("constructor revert");
+        require(address(r) == address(0x0000000000000000000000000000000000000001),
+                "swallowed CREATE must return DUMMY_CREATE_ADDRESS");
+    }
+
     function prove_expectRevertBuiltin() public {
         Reverter reverter = new Reverter();
         vm.expectRevert(abi.encodeWithSignature("Panic(uint256)", 0x11));
