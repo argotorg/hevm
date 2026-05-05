@@ -109,6 +109,12 @@ tests = testGroup "Foundry tests"
     , test "Cheat-Codes-Pass" $ do
         let testFile = "test/contracts/pass/cheatCodes.sol"
         executeAllMethodsWithPrefix testFile "prove" >>= assertEqualM "test result" (True, False)
+    , test "Expect-Revert-Pass" $ do
+        let testFile = "test/contracts/pass/expectRevert.sol"
+        executeAllMethodsWithPrefix testFile "prove" >>= assertEqualM "test result" (True, True)
+    , test "Expect-Revert-Fail" $ do
+        let testFile = "test/contracts/fail/expectRevert.sol"
+        executeAllMethodsWithPrefix testFile "prove" >>= assertEqualM "test result" (False, True)
     , test "Cheat-Codes-Fork-Pass" $ do
         let testFile = "test/contracts/pass/cheatCodesFork.sol"
         executeAllMethodsWithPrefix testFile "prove" >>= assertEqualM "test result" (True, True)
