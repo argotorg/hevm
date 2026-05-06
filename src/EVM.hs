@@ -2340,7 +2340,7 @@ cheatActions = Map.fromList
 --
 -- The cheat captures the depth of the call stack so that when the immediately
 -- following sub-call returns/reverts at the same depth, finishFrame consumes
--- the expectation and rewrites the result. See `consumeExpectedRevert`.
+-- the expectation and rewrites the result.
 
 setExpectedRevert
   :: VMOps t => Maybe (Expr Buf) -> Bool -> Maybe (Expr EAddr) -> EVM t ()
@@ -2452,51 +2452,6 @@ dummySuccessReturn = ConcreteBuf (BS.replicate 8192 0)
 -- https://github.com/foundry-rs/foundry/blob/master/crates/cheatcodes/src/test/revert_handlers.rs
 dummyCreateAddress :: Expr EAddr
 dummyCreateAddress = LitAddr 1
-
--- | What kind of swallow fixup the caller of consumeExpectedRevert needs to
--- apply after the FrameReverted body of finishFrameNoExpectation has run.
--- For SwallowCreate the FrameReverted path runs over the actual revert data
--- and the patch replaces the pushed 0 with dummyCreateAddress and clears
--- returndata. For SwallowCall the FrameReverted path is fed dummySuccessReturn
--- (so the rollback semantics are kept while the caller's memory and returndata
--- look like a successful call) and the patch flips the pushed 0 to 1.
-data SwallowKind = NoSwallow | SwallowCreate | SwallowCall
-  deriving (Eq, Show)
-
--- | Decide what to do at the boundary frame for an active expectation.
--- Returns the FrameResult that finishFrame's normal path should run with, plus
--- the SwallowKind telling the caller which post-pop fixup (if any) to apply.
--- Crucially we always return FrameReverted for matched cases so that the
--- normal FrameReverted body in finishFrameNoExpectation runs revertContracts
--- and revertSubstate — i.e. the reverted frame's state changes are rolled
--- back. The caller then reshapes the post-pop stack/returndata to make the
--- call look successful to the surrounding bytecode.
-consumeExpectedRevert
-  :: VMOps t => ExpectedRevert -> FrameResult -> VM t -> EVM t (FrameResult, SwallowKind)
-consumeExpectedRevert e how oldVm = do
-  let reverterAddr = fromMaybe oldVm.state.contract e.actualReverter
-      isCreate = currentFrameIsCreate oldVm
-  case how of
-    FrameReverted actual -> case matchExpectedRevert e actual reverterAddr of
-      Match
-        | isCreate  -> pure (FrameReverted actual, SwallowCreate)
-        | otherwise -> pure (FrameReverted dummySuccessReturn, SwallowCall)
-      Mismatch ->
-        pure (FrameReverted (assertionFailedBuf "expected revert did not match"), NoSwallow)
-      Indeterminate reason -> do
-        unexpectedSymArg ("expectRevert: " <> reason) [actual]
-        pure (how, NoSwallow)
-    FrameReturned _ ->
-      pure (FrameReverted (assertionFailedBuf "call did not revert as expected"), NoSwallow)
-    FrameErrored _ -> pure (how, NoSwallow)
-
--- | True when the topmost frame on `frames` is a cheat-call frame (i.e. we
--- are popping out of a cheatcode invocation). Such frames must be ignored by
--- the expectRevert interception, since cheatcodes return between the
--- expectRevert call and the target sub-call.
-poppingCheatFrame :: [Frame t] -> Bool
-poppingCheatFrame (Frame { context = CallContext { target } } : _) = target == cheatCode
-poppingCheatFrame _ = False
 
 -- * General call implementation ("delegateCall")
 -- note that the continuation is ignored in the precompile case
@@ -2826,17 +2781,32 @@ finishFrame how = do
       , not (poppingCheatFrame oldVm.frames)
       -> do
           assign #expectedRevert Nothing
-          (newHow, swallowKind) <- consumeExpectedRevert e how oldVm
-          finishFrameNoExpectation newHow
-          case swallowKind of
-            NoSwallow -> pure ()
-            SwallowCreate -> do
-              modifying (#state % #stack) (drop 1)
-              pushAddr dummyCreateAddress
-              assign (#state % #returndata) mempty
-            SwallowCall -> do
-              modifying (#state % #stack) (drop 1)
-              push 1
+          let reverterAddr = fromMaybe oldVm.state.contract e.actualReverter
+              isCreate = case oldVm.frames of
+                Frame { context = CreationContext {} } : _ -> True
+                _ -> False
+          case how of
+            FrameReverted actual -> case matchExpectedRevert e actual reverterAddr of
+              Match
+                | isCreate -> do
+                    finishFrameNoExpectation (FrameReverted actual)
+                    modifying (#state % #stack) (drop 1)
+                    pushAddr dummyCreateAddress
+                    assign (#state % #returndata) mempty
+                | otherwise -> do
+                    finishFrameNoExpectation (FrameReverted dummySuccessReturn)
+                    modifying (#state % #stack) (drop 1)
+                    push 1
+              Mismatch ->
+                finishFrameNoExpectation
+                  (FrameReverted (assertionFailedBuf "expected revert did not match"))
+              Indeterminate reason -> do
+                unexpectedSymArg ("expectRevert: " <> reason) [actual]
+                finishFrameNoExpectation how
+            FrameReturned _ ->
+              finishFrameNoExpectation
+                (FrameReverted (assertionFailedBuf "call did not revert as expected"))
+            FrameErrored _ -> finishFrameNoExpectation how
       | length oldVm.frames < e.depth
       , not (poppingCheatFrame oldVm.frames)
       -> do
@@ -2845,11 +2815,12 @@ finishFrame how = do
             FrameReverted (assertionFailedBuf
               "call didn't revert at a lower depth than cheatcode call depth")
     _ -> finishFrameNoExpectation how
-
-currentFrameIsCreate :: VM t -> Bool
-currentFrameIsCreate vm = case vm.frames of
-  Frame { context = CreationContext {} } : _ -> True
-  _ -> False
+  where
+    -- | True when the frame being popped is a cheat-call frame. Such frames
+    -- must be ignored by the expectRevert interception, since cheatcodes
+    -- return between the expectRevert call and the target sub-call.
+    poppingCheatFrame (Frame { context = CallContext { target } } : _) = target == cheatCode
+    poppingCheatFrame _ = False
 
 -- | The non-interception body of finishFrame, factored out so the wrapper
 -- above can re-enter it with a rewritten FrameResult without re-triggering
