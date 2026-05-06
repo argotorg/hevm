@@ -79,6 +79,26 @@ contract Dummy {
     }
 }
 
+contract MutatingReverter {
+    uint256 public x;
+    function setAndRevert(uint256 v, string memory m) external {
+        x = v;
+        revert(m);
+    }
+}
+
+contract StorageBox {
+    uint256 public x;
+    function set(uint256 v) external { x = v; }
+}
+
+contract CtorMutatingReverter {
+    constructor(StorageBox s, uint256 v) {
+        s.set(v);
+        revert("ctor revert");
+    }
+}
+
 contract ExpectRevertTest is Test {
     function prove_expectRevertString() public {
         Reverter reverter = new Reverter();
@@ -199,6 +219,22 @@ contract ExpectRevertTest is Test {
         DelegateProxy proxy = new DelegateProxy(address(logic));
         vm.expectRevert("logic revert", address(proxy));
         proxy.relay("logic revert");
+    }
+
+    function prove_expectRevertCallRollsBackState() public {
+        MutatingReverter r = new MutatingReverter();
+        require(r.x() == 0, "pre-state must be 0");
+        vm.expectRevert("call revert");
+        r.setAndRevert(42, "call revert");
+        require(r.x() == 0, "swallowed CALL revert must roll back state");
+    }
+
+    function prove_expectRevertCreateRollsBackState() public {
+        StorageBox s = new StorageBox();
+        require(s.x() == 0, "pre-state must be 0");
+        vm.expectRevert("ctor revert");
+        new CtorMutatingReverter(s, 42);
+        require(s.x() == 0, "swallowed CREATE revert must roll back state");
     }
 }
 

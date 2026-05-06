@@ -2417,30 +2417,44 @@ dummySuccessReturn = ConcreteBuf (BS.replicate 8192 0)
 dummyCreateAddress :: Expr EAddr
 dummyCreateAddress = LitAddr 1
 
+-- | What kind of swallow fixup the caller of consumeExpectedRevert needs to
+-- apply after the FrameReverted body of finishFrameNoExpectation has run.
+-- For SwallowCreate the FrameReverted path runs over the actual revert data
+-- and the patch replaces the pushed 0 with dummyCreateAddress and clears
+-- returndata. For SwallowCall the FrameReverted path is fed dummySuccessReturn
+-- (so the rollback semantics are kept while the caller's memory and returndata
+-- look like a successful call) and the patch flips the pushed 0 to 1.
+data SwallowKind = NoSwallow | SwallowCreate | SwallowCall
+  deriving (Eq, Show)
+
 -- | Decide what to do at the boundary frame for an active expectation.
 -- Returns the FrameResult that finishFrame's normal path should run with, plus
--- a flag telling the caller to apply the CREATE-swallow fixup afterwards
--- (replace the pushed 0 with dummyCreateAddress and clear returndata).
+-- the SwallowKind telling the caller which post-pop fixup (if any) to apply.
+-- Crucially we always return FrameReverted for matched cases so that the
+-- normal FrameReverted body in finishFrameNoExpectation runs revertContracts
+-- and revertSubstate — i.e. the reverted frame's state changes are rolled
+-- back. The caller then reshapes the post-pop stack/returndata to make the
+-- call look successful to the surrounding bytecode.
 consumeExpectedRevert
-  :: VMOps t => ExpectedRevert -> FrameResult -> VM t -> EVM t (FrameResult, Bool)
+  :: VMOps t => ExpectedRevert -> FrameResult -> VM t -> EVM t (FrameResult, SwallowKind)
 consumeExpectedRevert e how oldVm = do
   let reverterAddr = fromMaybe oldVm.state.contract e.actualReverter
       isCreate = currentFrameIsCreate oldVm
   case how of
     FrameReverted actual -> case matchExpectedRevert e actual reverterAddr of
       Just True
-        | isCreate  -> pure (FrameReverted actual, True)
-        | otherwise -> pure (FrameReturned dummySuccessReturn, False)
+        | isCreate  -> pure (FrameReverted actual, SwallowCreate)
+        | otherwise -> pure (FrameReverted dummySuccessReturn, SwallowCall)
       Just False ->
-        pure (FrameReverted (expectRevertFailureBuf "expected revert did not match"), False)
+        pure (FrameReverted (expectRevertFailureBuf "expected revert did not match"), NoSwallow)
       Nothing -> do
         unexpectedSymArg
           "expectRevert: cannot decide match for symbolic revert data or reverter"
           [actual]
-        pure (how, False)
+        pure (how, NoSwallow)
     FrameReturned _ ->
-      pure (FrameReverted (expectRevertFailureBuf "call did not revert as expected"), False)
-    FrameErrored _ -> pure (how, False)
+      pure (FrameReverted (expectRevertFailureBuf "call did not revert as expected"), NoSwallow)
+    FrameErrored _ -> pure (how, NoSwallow)
 
 -- | True when the topmost frame on `frames` is a cheat-call frame (i.e. we
 -- are popping out of a cheatcode invocation). Such frames must be ignored by
@@ -2779,12 +2793,17 @@ finishFrame how = do
       , not (poppingCheatFrame oldVm.frames)
       -> do
           assign #expectedRevert Nothing
-          (newHow, swallowCreate) <- consumeExpectedRevert e how oldVm
+          (newHow, swallowKind) <- consumeExpectedRevert e how oldVm
           finishFrameNoExpectation newHow
-          when swallowCreate $ do
-            modifying (#state % #stack) (drop 1)
-            pushAddr dummyCreateAddress
-            assign (#state % #returndata) mempty
+          case swallowKind of
+            NoSwallow -> pure ()
+            SwallowCreate -> do
+              modifying (#state % #stack) (drop 1)
+              pushAddr dummyCreateAddress
+              assign (#state % #returndata) mempty
+            SwallowCall -> do
+              modifying (#state % #stack) (drop 1)
+              push 1
       | length oldVm.frames < e.depth
       , not (poppingCheatFrame oldVm.frames)
       -> do
