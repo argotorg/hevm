@@ -1132,6 +1132,10 @@ exec1 conf = do
             xOffset:xSize:_ ->
               accessMemoryRange xOffset xSize $ do
                 output <- readMemory xOffset xSize
+                case vm.expectedRevert of
+                  Just e | isNothing e.actualReverter ->
+                    assign #expectedRevert (Just e { actualReverter = Just self })
+                  _ -> pure ()
                 finishFrame (FrameReverted output)
             _ -> underrun
 
@@ -2359,10 +2363,11 @@ setExpectedRevert reasonExp isPartial reverterExp = do
 errorMsg :: ByteString -> Expr Buf
 errorMsg err = ConcreteBuf $ selector "Error(string)" <> encodeAbiValue (AbiTuple $ V.fromList [AbiString err])
 
--- | The synthesized assertion-failure revert buffer used when an expectRevert
--- expectation is not satisfied.
-expectRevertFailureBuf :: ByteString -> Expr Buf
-expectRevertFailureBuf msg = errorMsg ("assertion failed: " <> msg)
+-- | Synthesize an Error(string) buffer with an "assertion failed: <msg>"
+-- payload — used to report unsatisfied expectRevert expectations and similar
+-- assertion failures.
+assertionFailedBuf :: ByteString -> Expr Buf
+assertionFailedBuf msg = errorMsg ("assertion failed: " <> msg)
 
 -- | If a concrete buffer is an Error(string)-encoded revert, return the inner
 -- string bytes. Otherwise Nothing.
@@ -2374,40 +2379,47 @@ stripErrorPrefix bs
       (CAbi [AbiString inner], _) -> Just inner
       _ -> Nothing
 
--- | Result of matching an expectation against an actual revert.
--- 'Right True'  = matches, 'Right False' = does not match,
--- 'Left reason' = cannot be decided concretely; the caller should bail.
--- The two axes (revert reason and reverter address) short-circuit on
--- 'Right False' so an indeterminate axis does not mask a known failure.
+-- | Outcome of matching an expectation against an actual revert.
+-- 'Indeterminate' carries the reason a concrete decision could not be made;
+-- the caller should bail with an unexpected-symbolic error. A definite
+-- 'Mismatch' takes precedence over an 'Indeterminate' on a different axis, so
+-- an indeterminate reason check cannot mask a known reverter mismatch (and
+-- vice versa).
+data RevertMatch
+  = Match
+  | Mismatch
+  | Indeterminate String
+  deriving (Eq, Show)
+
 matchExpectedRevert
-  :: ExpectedRevert -> Expr Buf -> Expr EAddr -> Either String Bool
+  :: ExpectedRevert -> Expr Buf -> Expr EAddr -> RevertMatch
 matchExpectedRevert e actual reverterAddr = combine reasonMatches reverterMatches
   where
-    combine (Right False) _              = Right False
-    combine _              (Right False) = Right False
-    combine (Right True)   (Right True)  = Right True
-    combine (Left s)       _             = Left s
-    combine _              (Left s)      = Left s
+    combine Mismatch     _            = Mismatch
+    combine _            Mismatch     = Mismatch
+    combine (Indeterminate s) _            = Indeterminate s
+    combine _            (Indeterminate s) = Indeterminate s
+    combine Match        Match        = Match
 
     reasonMatches = case e.reason of
-      Nothing -> Right True
+      Nothing -> Match
       Just expected
         | e.partialMatch -> matchPartialPrefix expected actual
         | otherwise      -> matchFullReason   expected actual
 
     reverterMatches = case e.reverter of
-      Nothing -> Right True
+      Nothing -> Match
       Just want -> case (want, reverterAddr) of
-        (LitAddr a, LitAddr b) -> Right (a == b)
-        _                      -> Left "reverter address is symbolic"
+        (LitAddr a, LitAddr b) -> if a == b then Match else Mismatch
+        _                      -> Indeterminate "reverter address is symbolic"
 
 -- | Compare only the first four bytes (selector). Succeeds when both sides have
 -- a concrete 4-byte prefix even if the rest of the buffer is symbolic.
-matchPartialPrefix :: Expr Buf -> Expr Buf -> Either String Bool
-matchPartialPrefix expected actual = do
-  expBs <- prefix4 (Expr.simplify expected)
-  actBs <- prefix4 (Expr.simplify actual)
-  pure (expBs == actBs)
+matchPartialPrefix :: Expr Buf -> Expr Buf -> RevertMatch
+matchPartialPrefix expected actual = case (prefix4 (Expr.simplify expected), prefix4 (Expr.simplify actual)) of
+  (Right e, Right a)   -> if e == a then Match else Mismatch
+  (Left s, _)          -> Indeterminate s
+  (_, Left s)          -> Indeterminate s
   where
     prefix4 :: Expr Buf -> Either String ByteString
     prefix4 buf = BS.pack <$> traverse (toLitByte . Expr.simplify . flip Expr.readByte buf . Lit) [0..3]
@@ -2418,22 +2430,26 @@ matchPartialPrefix expected actual = do
 -- | Full-buffer reason match. Both sides are normalized by stripping an
 -- Error(string) wrapper if present, so a wrapped expected matches a raw actual
 -- inner string and vice versa.
-matchFullReason :: Expr Buf -> Expr Buf -> Either String Bool
+matchFullReason :: Expr Buf -> Expr Buf -> RevertMatch
 matchFullReason expected actual = case (Expr.simplify expected, Expr.simplify actual) of
   (ConcreteBuf eBs, ConcreteBuf aBs) ->
     let normalize bs = fromMaybe bs (stripErrorPrefix bs)
-    in Right (normalize eBs == normalize aBs)
-  _ -> Left "revert data is symbolic"
+    in if normalize eBs == normalize aBs then Match else Mismatch
+  _ -> Indeterminate "revert data is symbolic"
 
 -- | Dummy success returndata used when swallowing a matched revert at a CALL
 -- boundary. 8192 zero bytes — large enough to satisfy Solidity's return-data
--- decoders for any reasonable return type.
+-- decoders for any reasonable return type. Matches foundry's
+-- @DUMMY_CALL_OUTPUT@ in @crates/cheatcodes/src/test/revert_handlers.rs@:
+-- https://github.com/foundry-rs/foundry/blob/master/crates/cheatcodes/src/test/revert_handlers.rs
 dummySuccessReturn :: Expr Buf
 dummySuccessReturn = ConcreteBuf (BS.replicate 8192 0)
 
 -- | Sentinel address pushed on the stack when swallowing a matched CREATE
--- revert. Matches forge's DUMMY_CREATE_ADDRESS so tests that inspect the LHS
--- of `new C()` after expectRevert behave identically across both tools.
+-- revert. Matches foundry's @DUMMY_CREATE_ADDRESS@ (= 0x01) in
+-- @crates/cheatcodes/src/test/revert_handlers.rs@ so tests that inspect the
+-- LHS of @new C()@ after expectRevert behave identically across both tools:
+-- https://github.com/foundry-rs/foundry/blob/master/crates/cheatcodes/src/test/revert_handlers.rs
 dummyCreateAddress :: Expr EAddr
 dummyCreateAddress = LitAddr 1
 
@@ -2462,16 +2478,16 @@ consumeExpectedRevert e how oldVm = do
       isCreate = currentFrameIsCreate oldVm
   case how of
     FrameReverted actual -> case matchExpectedRevert e actual reverterAddr of
-      Right True
+      Match
         | isCreate  -> pure (FrameReverted actual, SwallowCreate)
         | otherwise -> pure (FrameReverted dummySuccessReturn, SwallowCall)
-      Right False ->
-        pure (FrameReverted (expectRevertFailureBuf "expected revert did not match"), NoSwallow)
-      Left reason -> do
+      Mismatch ->
+        pure (FrameReverted (assertionFailedBuf "expected revert did not match"), NoSwallow)
+      Indeterminate reason -> do
         unexpectedSymArg ("expectRevert: " <> reason) [actual]
         pure (how, NoSwallow)
     FrameReturned _ ->
-      pure (FrameReverted (expectRevertFailureBuf "call did not revert as expected"), NoSwallow)
+      pure (FrameReverted (assertionFailedBuf "call did not revert as expected"), NoSwallow)
     FrameErrored _ -> pure (how, NoSwallow)
 
 -- | True when the topmost frame on `frames` is a cheat-call frame (i.e. we
@@ -2803,7 +2819,6 @@ finishAllFramesAndStop = do
 -- matched revert require a stack/returndata fixup after the normal pop.
 finishFrame :: VMOps t => FrameResult -> EVM t ()
 finishFrame how = do
-  recordActualReverterIfFirst how
   oldVm <- get
   case oldVm.expectedRevert of
     Just e
@@ -2827,26 +2842,9 @@ finishFrame how = do
       -> do
           assign #expectedRevert Nothing
           finishFrameNoExpectation $
-            FrameReverted (expectRevertFailureBuf
+            FrameReverted (assertionFailedBuf
               "call didn't revert at a lower depth than cheatcode call depth")
     _ -> finishFrameNoExpectation how
-
--- | When a FrameReverted enters finishFrame and an expectation is active,
--- capture the contract that just reverted as the actualReverter — but only the
--- first time, and only when the reverting frame is a CALL frame (not a
--- CREATE). CREATE-internal reverts are attributed to the parent CALL frame
--- that owns the new-contract expression (matching foundry's behaviour).
-recordActualReverterIfFirst :: VMOps t => FrameResult -> EVM t ()
-recordActualReverterIfFirst (FrameReverted _) = do
-  vm <- get
-  case vm.expectedRevert of
-    Just e
-      | isNothing e.actualReverter
-      , not (currentFrameIsCreate vm)
-      , not (poppingCheatFrame vm.frames)
-      -> assign #expectedRevert (Just e { actualReverter = Just vm.state.contract })
-    _ -> pure ()
-recordActualReverterIfFirst _ = pure ()
 
 currentFrameIsCreate :: VM t -> Bool
 currentFrameIsCreate vm = case vm.frames of

@@ -370,20 +370,17 @@ contract ExpectRevertWithReverterTest is Test {
         aContract.callAndRevertInCContract();
     }
 
-    function prove_expectRevertsWithReverterInConstructor() public {
-        vm.expectRevert(abi.encodePacked("Reverted by DContract"), address(cContract));
-        cContract.createDContract();
-
-        vm.expectRevert(address(bContract));
-        bContract.createDContract();
-        vm.expectRevert(address(cContract));
-        bContract.createDContractThroughCContract();
-
-        vm.expectRevert(address(aContract));
-        aContract.createDContract();
-        vm.expectRevert(address(bContract));
-        aContract.createDContractThroughBContract();
-        vm.expectRevert(address(cContract));
-        aContract.createDContractThroughCContract();
+    // Innermost reverter semantics: when a CREATE constructor reverts, the
+    // matched reverter is that constructor's would-be-deployed address — not
+    // the parent CALL frame that owns the `new` expression. CREATE2 gives us
+    // a deterministic address we can predict and assert against.
+    function prove_expectRevertsCreate2WithReverter() public {
+        bytes32 salt = bytes32(uint256(0xC0FFEE));
+        address expected = address(uint160(uint256(keccak256(abi.encodePacked(
+            bytes1(0xff), address(this), salt,
+            keccak256(type(DContract).creationCode)
+        )))));
+        vm.expectRevert(abi.encodePacked("Reverted by DContract"), expected);
+        new DContract{salt: salt}();
     }
 }

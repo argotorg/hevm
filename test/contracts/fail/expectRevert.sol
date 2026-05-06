@@ -113,4 +113,34 @@ contract SolidityTest is Test {
         vm.expectRevert("from body");
         require(false, "from body");
     }
+
+    // Innermost reverter semantics: a top-level CREATE whose constructor
+    // reverts records the would-be-deployed address as the reverter. Naming
+    // a different address must fail.
+    function prove_expectRevert_create_wrong_reverter(uint256 x) public {
+        if (x == 0) return;
+        vm.expectRevert(address(0xdead));
+        new CtorReverter();
+    }
+
+    // Innermost reverter semantics: in a CALL that wraps a CREATE whose
+    // constructor reverts directly, the matched reverter is the inner
+    // CREATE's would-be-deployed address — not the wrapping CALL contract.
+    // Naming the wrapping CALL contract must fail.
+    function prove_expectRevert_call_wrapping_create_wrong_reverter(uint256 x) public {
+        if (x == 0) return;
+        Wrapper w = new Wrapper();
+        vm.expectRevert(address(w));
+        w.createReverter();
+    }
+}
+
+contract CtorReverter {
+    constructor() { revert("ctor revert"); }
+}
+
+contract Wrapper {
+    function createReverter() external {
+        new CtorReverter();
+    }
 }
