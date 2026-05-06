@@ -2222,8 +2222,6 @@ cheatActions = Map.fromList
     frameReturnExpr e = finishFrame (FrameReturned e)
     frameRevert :: VMOps t => ByteString -> EVM t ()
     frameRevert err = finishFrame (FrameReverted $ errorMsg err)
-    errorMsg :: ByteString -> Expr Buf
-    errorMsg err = ConcreteBuf $ selector "Error(string)" <> encodeAbiValue (AbiTuple $ V.fromList [AbiString err])
     continueOnce cont = do
       assign #result Nothing
       cont
@@ -2357,53 +2355,75 @@ setExpectedRevert reasonExp isPartial reverterExp = do
         }
       finishFrame (FrameReturned mempty)
 
--- | Construct the synthesized assertion-failure revert buffer used when an
--- expectRevert expectation is not satisfied. Encoded as Error(string) so the
--- unit-test harness recognizes it as an assertion failure.
+-- | ABI-encode an Error(string) revert payload.
+errorMsg :: ByteString -> Expr Buf
+errorMsg err = ConcreteBuf $ selector "Error(string)" <> encodeAbiValue (AbiTuple $ V.fromList [AbiString err])
+
+-- | The synthesized assertion-failure revert buffer used when an expectRevert
+-- expectation is not satisfied.
 expectRevertFailureBuf :: ByteString -> Expr Buf
-expectRevertFailureBuf msg =
-  ConcreteBuf $
-    selector "Error(string)" <>
-    encodeAbiValue (AbiTuple $ V.fromList [AbiString ("assertion failed: " <> msg)])
+expectRevertFailureBuf msg = errorMsg ("assertion failed: " <> msg)
 
 -- | If a concrete buffer is an Error(string)-encoded revert, return the inner
--- string bytes. Otherwise Nothing. The encoding is
--- selector(4) ++ offset(32) ++ length(32) ++ data(padded). We skip the selector
--- and the 32-byte offset, then decode AbiStringType which reads length+data.
+-- string bytes. Otherwise Nothing.
 stripErrorPrefix :: ByteString -> Maybe ByteString
 stripErrorPrefix bs
-  | BS.length bs < 4 + 32 + 32 = Nothing
-  | BS.take 4 bs /= errSel = Nothing
-  | otherwise = case decodeAbiValue AbiStringType (LS.fromStrict (BS.drop (4 + 32) bs)) of
-      AbiString inner -> Just inner
+  | BS.length bs < 4 = Nothing
+  | BS.take 4 bs /= selector "Error(string)" = Nothing
+  | otherwise = case decodeBuf [AbiStringType] (ConcreteBuf (BS.drop 4 bs)) of
+      (CAbi [AbiString inner], _) -> Just inner
       _ -> Nothing
-  where errSel = selector "Error(string)"
 
--- | True when the actual revert matches the expectation. Returns Nothing when
--- the comparison cannot be decided concretely (e.g. symbolic actual buffer or
--- symbolic reverter address); the caller should bail out as a partial result
--- in that case.
+-- | Result of matching an expectation against an actual revert.
+-- 'Right True'  = matches, 'Right False' = does not match,
+-- 'Left reason' = cannot be decided concretely; the caller should bail.
+-- The two axes (revert reason and reverter address) short-circuit on
+-- 'Right False' so an indeterminate axis does not mask a known failure.
 matchExpectedRevert
-  :: ExpectedRevert -> Expr Buf -> Expr EAddr -> Maybe Bool
-matchExpectedRevert e actual reverterAddr = do
-  reasonOk <- reasonMatches
-  reverterOk <- reverterMatches
-  pure (reasonOk && reverterOk)
+  :: ExpectedRevert -> Expr Buf -> Expr EAddr -> Either String Bool
+matchExpectedRevert e actual reverterAddr = combine reasonMatches reverterMatches
   where
+    combine (Right False) _              = Right False
+    combine _              (Right False) = Right False
+    combine (Right True)   (Right True)  = Right True
+    combine (Left s)       _             = Left s
+    combine _              (Left s)      = Left s
+
     reasonMatches = case e.reason of
-      Nothing -> Just True
-      Just expected -> case (Expr.simplify expected, Expr.simplify actual) of
-        (ConcreteBuf eBs, ConcreteBuf aBs)
-          | e.partialMatch -> Just (BS.take 4 aBs == BS.take 4 eBs)
-          | eBs == aBs     -> Just True
-          | otherwise      -> Just (Just eBs == stripErrorPrefix aBs)
-        _ -> Nothing
+      Nothing -> Right True
+      Just expected
+        | e.partialMatch -> matchPartialPrefix expected actual
+        | otherwise      -> matchFullReason   expected actual
+
     reverterMatches = case e.reverter of
-      Nothing -> Just True
+      Nothing -> Right True
       Just want -> case (want, reverterAddr) of
-        (LitAddr a, LitAddr b) -> Just (a == b)
-        (SymAddr a, SymAddr b) -> Just (a == b)
-        _                      -> Nothing
+        (LitAddr a, LitAddr b) -> Right (a == b)
+        _                      -> Left "reverter address is symbolic"
+
+-- | Compare only the first four bytes (selector). Succeeds when both sides have
+-- a concrete 4-byte prefix even if the rest of the buffer is symbolic.
+matchPartialPrefix :: Expr Buf -> Expr Buf -> Either String Bool
+matchPartialPrefix expected actual = do
+  expBs <- prefix4 (Expr.simplify expected)
+  actBs <- prefix4 (Expr.simplify actual)
+  pure (expBs == actBs)
+  where
+    prefix4 :: Expr Buf -> Either String ByteString
+    prefix4 buf = BS.pack <$> traverse (toLitByte . Expr.simplify . flip Expr.readByte buf . Lit) [0..3]
+    toLitByte :: Expr Byte -> Either String Word8
+    toLitByte (LitByte w) = Right w
+    toLitByte _           = Left "first 4 bytes of revert data are symbolic"
+
+-- | Full-buffer reason match. Both sides are normalized by stripping an
+-- Error(string) wrapper if present, so a wrapped expected matches a raw actual
+-- inner string and vice versa.
+matchFullReason :: Expr Buf -> Expr Buf -> Either String Bool
+matchFullReason expected actual = case (Expr.simplify expected, Expr.simplify actual) of
+  (ConcreteBuf eBs, ConcreteBuf aBs) ->
+    let normalize bs = fromMaybe bs (stripErrorPrefix bs)
+    in Right (normalize eBs == normalize aBs)
+  _ -> Left "revert data is symbolic"
 
 -- | Dummy success returndata used when swallowing a matched revert at a CALL
 -- boundary. 8192 zero bytes — large enough to satisfy Solidity's return-data
@@ -2442,15 +2462,13 @@ consumeExpectedRevert e how oldVm = do
       isCreate = currentFrameIsCreate oldVm
   case how of
     FrameReverted actual -> case matchExpectedRevert e actual reverterAddr of
-      Just True
+      Right True
         | isCreate  -> pure (FrameReverted actual, SwallowCreate)
         | otherwise -> pure (FrameReverted dummySuccessReturn, SwallowCall)
-      Just False ->
+      Right False ->
         pure (FrameReverted (expectRevertFailureBuf "expected revert did not match"), NoSwallow)
-      Nothing -> do
-        unexpectedSymArg
-          "expectRevert: cannot decide match for symbolic revert data or reverter"
-          [actual]
+      Left reason -> do
+        unexpectedSymArg ("expectRevert: " <> reason) [actual]
         pure (how, NoSwallow)
     FrameReturned _ ->
       pure (FrameReverted (expectRevertFailureBuf "call did not revert as expected"), NoSwallow)

@@ -32,6 +32,10 @@ contract Reverter {
     function revertWithoutReason() public pure {
         revert();
     }
+
+    function rawRevert(bytes memory b) public pure {
+        assembly { revert(add(b, 0x20), mload(b)) }
+    }
 }
 
 contract ConstructorReverter {
@@ -235,6 +239,15 @@ contract ExpectRevertTest is Test {
         vm.expectRevert("ctor revert");
         new CtorMutatingReverter(s, 42);
         require(s.x() == 0, "swallowed CREATE revert must roll back state");
+    }
+
+    // Wrapped expected vs raw actual: matchFullReason normalizes both sides by
+    // stripping any Error(string) wrapper, so an expected encoded as Error(string)
+    // matches a raw inner-bytes revert.
+    function prove_expectRevertWrappedExpectedRawActual() public {
+        Reverter reverter = new Reverter();
+        vm.expectRevert(abi.encodeWithSignature("Error(string)", "msg"));
+        reverter.rawRevert(bytes("msg"));
     }
 }
 
