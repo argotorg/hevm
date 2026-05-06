@@ -2363,9 +2363,6 @@ setExpectedRevert reasonExp isPartial reverterExp = do
 errorMsg :: ByteString -> Expr Buf
 errorMsg err = ConcreteBuf $ selector "Error(string)" <> encodeAbiValue (AbiTuple $ V.fromList [AbiString err])
 
--- | Synthesize an Error(string) buffer with an "assertion failed: <msg>"
--- payload — used to report unsatisfied expectRevert expectations and similar
--- assertion failures.
 assertionFailedBuf :: ByteString -> Expr Buf
 assertionFailedBuf msg = errorMsg ("assertion failed: " <> msg)
 
@@ -2411,7 +2408,10 @@ matchExpectedRevert e actual reverterAddr = combine reasonMatches reverterMatche
       Nothing -> Match
       Just want -> case (want, reverterAddr) of
         (LitAddr a, LitAddr b) -> if a == b then Match else Mismatch
-        _                      -> Indeterminate "reverter address is symbolic"
+        (SymAddr a, SymAddr b) -> if a == b then Match else Mismatch
+        (SymAddr a, LitAddr b) -> Indeterminate $ "cannot compare concrete and symbolic addresses: " ++ (unpack a) ++ " and " ++ (show b)
+        (LitAddr a, SymAddr b) -> Indeterminate $ "cannot compare concrete and symbolic addresses: " ++ (show a) ++ " and " ++ (unpack b)
+        _ -> internalError "unexpected GVar"
 
 -- | Compare only the first four bytes (selector). Succeeds when both sides have
 -- a concrete 4-byte prefix even if the rest of the buffer is symbolic.
@@ -2767,16 +2767,12 @@ finishAllFramesAndStop = do
 --
 -- It also handles the case when the current stack frame is the only one;
 -- in this case, we set the final '_result' of the VM execution.
---
--- If an expectRevert expectation is active and we are about to pop the frame
--- at the matching depth, the expectation is consumed and the FrameResult is
--- rewritten before the rest of the function runs. CREATE-frame swallows of a
--- matched revert require a stack/returndata fixup after the normal pop.
 finishFrame :: VMOps t => FrameResult -> EVM t ()
 finishFrame how = do
   oldVm <- get
   case oldVm.expectedRevert of
     Just e
+      -- we are back at the start depth (ignoring calls to the cheat address)
       | length oldVm.frames == e.depth
       , not (poppingCheatFrame oldVm.frames)
       -> do
@@ -2788,14 +2784,23 @@ finishFrame how = do
           case how of
             FrameReverted actual -> case matchExpectedRevert e actual reverterAddr of
               Match
+                -- if the expected revert occured, then in order to match
+                -- foundry, we need to add some sentinel values to the stack
+                -- and pretend the actual call/create succeeded.
                 | isCreate -> do
                     finishFrameNoExpectation (FrameReverted actual)
+                    -- drop the prev return value
                     modifying (#state % #stack) (drop 1)
+                    -- add our sentinel
                     pushAddr dummyCreateAddress
+                    -- empty returndata
                     assign (#state % #returndata) mempty
                 | otherwise -> do
+                    -- process the revert with our dummy returndata
                     finishFrameNoExpectation (FrameReverted dummySuccessReturn)
+                    -- drop the prev return value
                     modifying (#state % #stack) (drop 1)
+                    -- pretend the call succeeded
                     push 1
               Mismatch ->
                 finishFrameNoExpectation
@@ -2805,26 +2810,25 @@ finishFrame how = do
                 finishFrameNoExpectation how
             FrameReturned _ ->
               finishFrameNoExpectation
-                (FrameReverted (assertionFailedBuf "call did not revert as expected"))
+                (FrameReverted (assertionFailedBuf "expected call did not revert"))
             FrameErrored _ -> finishFrameNoExpectation how
+
+      -- we have popped out past the start depth of the expected revert (i.e. returned without a revert occuring)
       | length oldVm.frames < e.depth
       , not (poppingCheatFrame oldVm.frames)
       -> do
           assign #expectedRevert Nothing
           finishFrameNoExpectation $
-            FrameReverted (assertionFailedBuf
-              "call didn't revert at a lower depth than cheatcode call depth")
+            FrameReverted (assertionFailedBuf "expected revert never occurred")
     _ -> finishFrameNoExpectation how
   where
     -- | True when the frame being popped is a cheat-call frame. Such frames
-    -- must be ignored by the expectRevert interception, since cheatcodes
-    -- return between the expectRevert call and the target sub-call.
+    -- must be ignored by the expectRevert interception, as cheatcode calls are
+    -- not checked by `expectRevert`
     poppingCheatFrame (Frame { context = CallContext { target } } : _) = target == cheatCode
     poppingCheatFrame _ = False
 
--- | The non-interception body of finishFrame, factored out so the wrapper
--- above can re-enter it with a rewritten FrameResult without re-triggering
--- the expectRevert check.
+-- | The non-interception body of finishFrame
 finishFrameNoExpectation :: VMOps t => FrameResult -> EVM t ()
 finishFrameNoExpectation how = do
   oldVm <- get
