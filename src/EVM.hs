@@ -2777,37 +2777,41 @@ finishFrame how = do
       , not (poppingCheatFrame oldVm.frames)
       -> do
           assign #expectedRevert Nothing
-          let reverterAddr = fromMaybe oldVm.state.contract e.actualReverter
-              isCreate = case oldVm.frames of
+          let isCreate = case oldVm.frames of
                 Frame { context = CreationContext {} } : _ -> True
                 _ -> False
           case how of
-            FrameReverted actual -> case matchExpectedRevert e actual reverterAddr of
-              Match
-                -- if the expected revert occured, then in order to match
-                -- foundry, we need to add some sentinel values to the stack
-                -- and pretend the actual call/create succeeded.
-                | isCreate -> do
-                    finishFrameNoExpectation (FrameReverted actual)
-                    -- drop the prev return value
-                    modifying (#state % #stack) (drop 1)
-                    -- add our sentinel
-                    pushAddr dummyCreateAddress
-                    -- empty returndata
-                    assign (#state % #returndata) mempty
-                | otherwise -> do
-                    -- process the revert with our dummy returndata
-                    finishFrameNoExpectation (FrameReverted dummySuccessReturn)
-                    -- drop the prev return value
-                    modifying (#state % #stack) (drop 1)
-                    -- pretend the call succeeded
-                    push 1
-              Mismatch ->
-                finishFrameNoExpectation
-                  (FrameReverted (assertionFailedBuf "expected revert did not match"))
-              Indeterminate reason -> do
-                unexpectedSymArg ("expectRevert: " <> reason) [actual]
-                finishFrameNoExpectation how
+            FrameReverted actual ->
+              let reverterAddr =
+                    fromMaybe
+                      (internalError "expectRevert: missing actualReverter for FrameReverted")
+                      e.actualReverter
+              in case matchExpectedRevert e actual reverterAddr of
+                Match
+                  -- if the expected revert occured, then in order to match
+                  -- foundry, we need to add some sentinel values to the stack
+                  -- and pretend the actual call/create succeeded.
+                  | isCreate -> do
+                      finishFrameNoExpectation (FrameReverted actual)
+                      -- drop the prev return value
+                      modifying (#state % #stack) (drop 1)
+                      -- add our sentinel
+                      pushAddr dummyCreateAddress
+                      -- empty returndata
+                      assign (#state % #returndata) mempty
+                  | otherwise -> do
+                      -- process the revert with our dummy returndata
+                      finishFrameNoExpectation (FrameReverted dummySuccessReturn)
+                      -- drop the prev return value
+                      modifying (#state % #stack) (drop 1)
+                      -- pretend the call succeeded
+                      push 1
+                Mismatch ->
+                  finishFrameNoExpectation
+                    (FrameReverted (assertionFailedBuf "expected revert did not match"))
+                Indeterminate reason -> do
+                  unexpectedSymArg ("expectRevert: " <> reason) [actual]
+                  finishFrameNoExpectation how
             FrameReturned _ ->
               finishFrameNoExpectation
                 (FrameReverted (assertionFailedBuf "expected call did not revert"))
