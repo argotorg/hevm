@@ -286,12 +286,12 @@ instance FromJSON Block where
 -- | Wait if there's an active cooldown from a recent rate limit.
 waitForCooldown :: IORef (Maybe UTCTime) -> IO ()
 waitForCooldown ref = do
-  deadline <- readIORef ref
-  case deadline of
+  mDeadline <- readIORef ref
+  case mDeadline of
     Nothing -> pure ()
-    Just until -> do
+    Just deadline -> do
       now <- getCurrentTime
-      let diff = diffUTCTime until now
+      let diff = diffUTCTime deadline now
       when (diff > 0) $
         threadDelay (ceiling (realToFrac diff * 1_000_000 :: Double))
 
@@ -314,7 +314,7 @@ setCooldown ref delayUs = do
 withRetry :: Bool -> IORef (Maybe UTCTime) -> IO (Either Text a) -> IO (Either Text a)
 withRetry debug throttle action = go 1
   where
-  maxRetries = 5
+  maxRetries = 5 :: Int
   go attempt = do
     waitForCooldown throttle
     result <- catches (Right <$> action)
