@@ -101,6 +101,7 @@ library
     EVM.Solvers,
     EVM.Exec,
     EVM.Format,
+    EVM.ConsoleLog,
     EVM.Fetch,
     EVM.FeeSchedule,
     EVM.Op,

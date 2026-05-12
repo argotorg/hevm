@@ -203,6 +203,7 @@ makeVm o = do
     , keccakPreImgs = fromList []
     , pathsVisited = mempty
     , mergeState = defaultMergeState
+    , expectedRevert = Nothing
     }
     where
     env = Env
@@ -578,7 +579,7 @@ exec1 conf = do
                                Just b -> pushSym (bufLength b)
                                Nothing -> pushSym $ CodeSize x
               case x of
-                a@(LitAddr _) -> if a == cheatCode
+                a@(LitAddr _) -> if a == cheatCode || a == consoleAddr
                   then do
                     next
                     assign' (#state % #stack) xs
@@ -1131,6 +1132,10 @@ exec1 conf = do
             xOffset:xSize:_ ->
               accessMemoryRange xOffset xSize $ do
                 output <- readMemory xOffset xSize
+                case vm.expectedRevert of
+                  Just e | isNothing e.actualReverter ->
+                    assign #expectedRevert (Just e { actualReverter = Just self })
+                  _ -> pure ()
                 finishFrame (FrameReverted output)
             _ -> underrun
 
@@ -1858,6 +1863,11 @@ accessStorageForGas addr key = do
 cheatCode :: Expr EAddr
 cheatCode = LitAddr $ unsafeInto (keccak' "hevm cheat code")
 
+-- | The address used by Foundry/Hardhat console.log
+-- 0x000000000000000000636F6e736F6c652e6c6f67 (ASCII "console.log")
+consoleAddr :: Expr EAddr
+consoleAddr = LitAddr 0x000000000000000000636F6e736F6c652e6c6f67
+
 cheat
   :: forall t . (?conf :: Config, ?op :: Word8, VMOps t, Typeable t)
   => Gas t -> (Expr EWord, Expr EWord) -> (Expr EWord, Expr EWord) -> [Expr EWord]
@@ -2088,6 +2098,51 @@ cheatActions = Map.fromList
             doStop
         _ -> vmError (BadCheatCode "etch(address,bytes) address decoding failed" sig)
 
+  , action "expectRevert()" $
+      \_ _ -> setExpectedRevert Nothing False Nothing
+
+  , action "expectRevert(bytes)" $
+      \sig input -> case decodeBuf [AbiBytesDynamicType] input of
+        (CAbi [AbiBytesDynamic bs],"") ->
+          setExpectedRevert (Just (ConcreteBuf bs)) False Nothing
+        _ -> vmError (BadCheatCode "expectRevert(bytes) parameter decoding failed" sig)
+
+  , action "expectRevert(bytes4)" $
+      \sig input -> case decodeBuf [AbiBytesType 4] input of
+        (CAbi [AbiBytes 4 bs],"") ->
+          setExpectedRevert (Just (ConcreteBuf bs)) False Nothing
+        _ -> vmError (BadCheatCode "expectRevert(bytes4) parameter decoding failed" sig)
+
+  , action "expectRevert(address)" $
+      \sig input -> case decodeBuf [AbiAddressType] input of
+        (CAbi [AbiAddress addr],"") ->
+          setExpectedRevert Nothing False (Just (LitAddr addr))
+        _ -> vmError (BadCheatCode "expectRevert(address) parameter decoding failed" sig)
+
+  , action "expectRevert(bytes4,address)" $
+      \sig input -> case decodeBuf [AbiBytesType 4, AbiAddressType] input of
+        (CAbi [AbiBytes 4 bs, AbiAddress addr],"") ->
+          setExpectedRevert (Just (ConcreteBuf bs)) False (Just (LitAddr addr))
+        _ -> vmError (BadCheatCode "expectRevert(bytes4,address) parameter decoding failed" sig)
+
+  , action "expectRevert(bytes,address)" $
+      \sig input -> case decodeBuf [AbiBytesDynamicType, AbiAddressType] input of
+        (CAbi [AbiBytesDynamic bs, AbiAddress addr],"") ->
+          setExpectedRevert (Just (ConcreteBuf bs)) False (Just (LitAddr addr))
+        _ -> vmError (BadCheatCode "expectRevert(bytes,address) parameter decoding failed" sig)
+
+  , action "expectPartialRevert(bytes4)" $
+      \sig input -> case decodeBuf [AbiBytesType 4] input of
+        (CAbi [AbiBytes 4 bs],"") ->
+          setExpectedRevert (Just (ConcreteBuf bs)) True Nothing
+        _ -> vmError (BadCheatCode "expectPartialRevert(bytes4) parameter decoding failed" sig)
+
+  , action "expectPartialRevert(bytes4,address)" $
+      \sig input -> case decodeBuf [AbiBytesType 4, AbiAddressType] input of
+        (CAbi [AbiBytes 4 bs, AbiAddress addr],"") ->
+          setExpectedRevert (Just (ConcreteBuf bs)) True (Just (LitAddr addr))
+        _ -> vmError (BadCheatCode "expectPartialRevert(bytes4,address) parameter decoding failed" sig)
+
   -- Single-value environment read cheat actions
   , $(envReadSingleCheat "envBool(string)") AbiBool stringToBool
   , $(envReadSingleCheat "envUint(string)") (AbiUInt 256) stringToWord256
@@ -2171,8 +2226,6 @@ cheatActions = Map.fromList
     frameReturnExpr e = finishFrame (FrameReturned e)
     frameRevert :: VMOps t => ByteString -> EVM t ()
     frameRevert err = finishFrame (FrameReverted $ errorMsg err)
-    errorMsg :: ByteString -> Expr Buf
-    errorMsg err = ConcreteBuf $ selector "Error(string)" <> encodeAbiValue (AbiTuple $ V.fromList [AbiString err])
     continueOnce cont = do
       assign #result Nothing
       cont
@@ -2283,6 +2336,123 @@ cheatActions = Map.fromList
         (CAbi [val],"") -> frameReturn $ AbiTuple $ V.fromList [AbiString $ Char8.pack $ show val]
         _ -> vmError (BadCheatCode ("toString parameter decoding failed for " <> show abitype) sig)
 
+-- * expectRevert support
+--
+-- The cheat captures the depth of the call stack so that when the immediately
+-- following sub-call returns/reverts at the same depth, finishFrame consumes
+-- the expectation and rewrites the result.
+
+setExpectedRevert
+  :: VMOps t => Maybe (Expr Buf) -> Bool -> Maybe (Expr EAddr) -> EVM t ()
+setExpectedRevert reasonExp isPartial reverterExp = do
+  vm <- get
+  case vm.expectedRevert of
+    Just _ ->
+      vmError (BadCheatCode "expectRevert: previous expectation not yet consumed" 0)
+    Nothing -> do
+      assign #expectedRevert $ Just ExpectedRevert
+        { reason         = reasonExp
+        , partialMatch   = isPartial
+        , reverter       = reverterExp
+        , depth          = length vm.frames
+        , actualReverter = Nothing
+        }
+      finishFrame (FrameReturned mempty)
+
+-- | ABI-encode an Error(string) revert payload.
+errorMsg :: ByteString -> Expr Buf
+errorMsg err = ConcreteBuf $ selector "Error(string)" <> encodeAbiValue (AbiTuple $ V.fromList [AbiString err])
+
+assertionFailedBuf :: ByteString -> Expr Buf
+assertionFailedBuf msg = errorMsg ("assertion failed: " <> msg)
+
+-- | If a concrete buffer is an Error(string)-encoded revert, return the inner
+-- string bytes. Otherwise Nothing.
+stripErrorPrefix :: ByteString -> Maybe ByteString
+stripErrorPrefix bs
+  | BS.length bs < 4 = Nothing
+  | BS.take 4 bs /= selector "Error(string)" = Nothing
+  | otherwise = case decodeBuf [AbiStringType] (ConcreteBuf (BS.drop 4 bs)) of
+      (CAbi [AbiString inner], _) -> Just inner
+      _ -> Nothing
+
+-- | Outcome of matching an expectation against an actual revert.
+-- 'Indeterminate' carries the reason a concrete decision could not be made;
+-- the caller should bail with an unexpected-symbolic error. A definite
+-- 'Mismatch' takes precedence over an 'Indeterminate' on a different axis, so
+-- an indeterminate reason check cannot mask a known reverter mismatch (and
+-- vice versa).
+data RevertMatch
+  = Match
+  | Mismatch
+  | Indeterminate String
+  deriving (Eq, Show)
+
+matchExpectedRevert
+  :: ExpectedRevert -> Expr Buf -> Expr EAddr -> RevertMatch
+matchExpectedRevert e actual reverterAddr = combine reasonMatches reverterMatches
+  where
+    combine Mismatch     _            = Mismatch
+    combine _            Mismatch     = Mismatch
+    combine (Indeterminate s) _            = Indeterminate s
+    combine _            (Indeterminate s) = Indeterminate s
+    combine Match        Match        = Match
+
+    reasonMatches = case e.reason of
+      Nothing -> Match
+      Just expected
+        | e.partialMatch -> matchPartialPrefix expected actual
+        | otherwise      -> matchFullReason   expected actual
+
+    reverterMatches = case e.reverter of
+      Nothing -> Match
+      Just want -> case (want, reverterAddr) of
+        (LitAddr a, LitAddr b) -> if a == b then Match else Mismatch
+        (SymAddr a, SymAddr b) -> if a == b then Match else Mismatch
+        (SymAddr a, LitAddr b) -> Indeterminate $ "cannot compare concrete and symbolic addresses: " ++ (unpack a) ++ " and " ++ (show b)
+        (LitAddr a, SymAddr b) -> Indeterminate $ "cannot compare concrete and symbolic addresses: " ++ (show a) ++ " and " ++ (unpack b)
+        _ -> internalError "unexpected GVar"
+
+-- | Compare only the first four bytes (selector). Succeeds when both sides have
+-- a concrete 4-byte prefix even if the rest of the buffer is symbolic.
+matchPartialPrefix :: Expr Buf -> Expr Buf -> RevertMatch
+matchPartialPrefix expected actual = case (prefix4 (Expr.simplify expected), prefix4 (Expr.simplify actual)) of
+  (Right e, Right a)   -> if e == a then Match else Mismatch
+  (Left s, _)          -> Indeterminate s
+  (_, Left s)          -> Indeterminate s
+  where
+    prefix4 :: Expr Buf -> Either String ByteString
+    prefix4 buf = BS.pack <$> traverse (toLitByte . Expr.simplify . flip Expr.readByte buf . Lit) [0..3]
+    toLitByte :: Expr Byte -> Either String Word8
+    toLitByte (LitByte w) = Right w
+    toLitByte _           = Left "first 4 bytes of revert data are symbolic"
+
+-- | Full-buffer reason match. Both sides are normalized by stripping an
+-- Error(string) wrapper if present, so a wrapped expected matches a raw actual
+-- inner string and vice versa.
+matchFullReason :: Expr Buf -> Expr Buf -> RevertMatch
+matchFullReason expected actual = case (Expr.simplify expected, Expr.simplify actual) of
+  (ConcreteBuf eBs, ConcreteBuf aBs) ->
+    let normalize bs = fromMaybe bs (stripErrorPrefix bs)
+    in if normalize eBs == normalize aBs then Match else Mismatch
+  _ -> Indeterminate "revert data is symbolic"
+
+-- | Dummy success returndata used when swallowing a matched revert at a CALL
+-- boundary. 8192 zero bytes — large enough to satisfy Solidity's return-data
+-- decoders for any reasonable return type. Matches foundry's
+-- @DUMMY_CALL_OUTPUT@ in @crates/cheatcodes/src/test/revert_handlers.rs@:
+-- https://github.com/foundry-rs/foundry/blob/master/crates/cheatcodes/src/test/revert_handlers.rs
+dummySuccessReturn :: Expr Buf
+dummySuccessReturn = ConcreteBuf (BS.replicate 8192 0)
+
+-- | Sentinel address pushed on the stack when swallowing a matched CREATE
+-- revert. Matches foundry's @DUMMY_CREATE_ADDRESS@ (= 0x01) in
+-- @crates/cheatcodes/src/test/revert_handlers.rs@ so tests that inspect the
+-- LHS of @new C()@ after expectRevert behave identically across both tools:
+-- https://github.com/foundry-rs/foundry/blob/master/crates/cheatcodes/src/test/revert_handlers.rs
+dummyCreateAddress :: Expr EAddr
+dummyCreateAddress = LitAddr 1
+
 -- * General call implementation ("delegateCall")
 -- note that the continuation is ignored in the precompile case
 delegateCall
@@ -2307,6 +2477,12 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
             precompiledContract this gasGiven xTo' xContext' xValue xInOffset xInSize xOutOffset xOutSize xs
   | xTo == cheatCode = do
       cheat gasGiven (xInOffset, xInSize) (xOutOffset, xOutSize) xs
+  | xTo == consoleAddr = do
+      calldata <- readMemory xInOffset xInSize
+      pushTrace $ ConsoleLog calldata
+      assign' (#state % #stack) (Lit 1 : xs)
+      assign (#state % #returndata) mempty
+      next
   | otherwise =
       callChecks this gasGiven xContext xTo xValue xInOffset xInSize xOutOffset xOutSize xs $
         \xGas -> do
@@ -2593,6 +2769,72 @@ finishAllFramesAndStop = do
 -- in this case, we set the final '_result' of the VM execution.
 finishFrame :: VMOps t => FrameResult -> EVM t ()
 finishFrame how = do
+  oldVm <- get
+  case oldVm.expectedRevert of
+    Just e
+      -- we are back at the start depth (ignoring calls to the cheat address)
+      | length oldVm.frames == e.depth
+      , not (poppingCheatFrame oldVm.frames)
+      -> do
+          assign #expectedRevert Nothing
+          let isCreate = case oldVm.frames of
+                Frame { context = CreationContext {} } : _ -> True
+                _ -> False
+          case how of
+            FrameReverted actual ->
+              let reverterAddr =
+                    fromMaybe
+                      (internalError "expectRevert: missing actualReverter for FrameReverted")
+                      e.actualReverter
+              in case matchExpectedRevert e actual reverterAddr of
+                Match
+                  -- if the expected revert occured, then in order to match
+                  -- foundry, we need to add some sentinel values to the stack
+                  -- and pretend the actual call/create succeeded.
+                  | isCreate -> do
+                      finishFrameNoExpectation (FrameReverted actual)
+                      -- drop the prev return value
+                      modifying (#state % #stack) (drop 1)
+                      -- add our sentinel
+                      pushAddr dummyCreateAddress
+                      -- empty returndata
+                      assign (#state % #returndata) mempty
+                  | otherwise -> do
+                      -- process the revert with our dummy returndata
+                      finishFrameNoExpectation (FrameReverted dummySuccessReturn)
+                      -- drop the prev return value
+                      modifying (#state % #stack) (drop 1)
+                      -- pretend the call succeeded
+                      push 1
+                Mismatch ->
+                  finishFrameNoExpectation
+                    (FrameReverted (assertionFailedBuf "expected revert did not match"))
+                Indeterminate reason -> do
+                  unexpectedSymArg ("expectRevert: " <> reason) [actual]
+                  finishFrameNoExpectation how
+            FrameReturned _ ->
+              finishFrameNoExpectation
+                (FrameReverted (assertionFailedBuf "expected call did not revert"))
+            FrameErrored _ -> finishFrameNoExpectation how
+
+      -- we have popped out past the start depth of the expected revert (i.e. returned without a revert occuring)
+      | length oldVm.frames < e.depth
+      , not (poppingCheatFrame oldVm.frames)
+      -> do
+          assign #expectedRevert Nothing
+          finishFrameNoExpectation $
+            FrameReverted (assertionFailedBuf "expected revert never occurred")
+    _ -> finishFrameNoExpectation how
+  where
+    -- | True when the frame being popped is a cheat-call frame. Such frames
+    -- must be ignored by the expectRevert interception, as cheatcode calls are
+    -- not checked by `expectRevert`
+    poppingCheatFrame (Frame { context = CallContext { target } } : _) = target == cheatCode
+    poppingCheatFrame _ = False
+
+-- | The non-interception body of finishFrame
+finishFrameNoExpectation :: VMOps t => FrameResult -> EVM t ()
+finishFrameNoExpectation how = do
   oldVm <- get
 
   case oldVm.frames of
