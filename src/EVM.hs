@@ -14,6 +14,7 @@ import EVM.ABI
 import EVM.Expr (readStorage, concStoreContains, writeStorage, readByte, readWord, writeWord,
   writeByte, bufLength, indexWord, readBytes, copySlice, wordToAddr, maybeLitByteSimp, maybeLitWordSimp, maybeLitAddrSimp)
 import EVM.Expr qualified as Expr
+import EVM.GetterDetection (detectCopyLoops)
 import EVM.FeeSchedule (FeeSchedule (..))
 import EVM.FeeSchedule qualified as Fees (feeSchedule)
 import EVM.Merge qualified as Merge
@@ -284,11 +285,12 @@ unknownContract addr = Contract
   , opIxMap     = mempty
   , codeOps     = mempty
   , external    = False
+  , getterLoops = Map.empty
   }
 
 -- | Initialize an abstract contract with known code
 abstractContract :: ContractCode -> Expr EAddr -> Contract
-abstractContract code addr = Contract
+abstractContract code addr = let ops = mkCodeOps code in Contract
   { code        = code
   , storage     = AbstractStore addr Nothing
   , tStorage    = AbstractStore addr Nothing
@@ -297,8 +299,9 @@ abstractContract code addr = Contract
   , nonce       = if isCreation code then Just 1 else Just 0
   , codehash    = hashcode code
   , opIxMap     = mkOpIxMap code
-  , codeOps     = mkCodeOps code
+  , codeOps     = ops
   , external    = False
+  , getterLoops = detectCopyLoops ops
   }
 
 -- | Initialize an empty contract without code
@@ -307,7 +310,7 @@ emptyContract = initialContract (RuntimeCode (ConcreteRuntimeCode ""))
 
 -- | Initialize empty contract with given code
 initialContract :: ContractCode -> Contract
-initialContract code = Contract
+initialContract code = let ops = mkCodeOps code in Contract
   { code        = code
   , storage     = ConcreteStore mempty
   , tStorage    = ConcreteStore mempty
@@ -316,8 +319,9 @@ initialContract code = Contract
   , nonce       = if isCreation code then Just 1 else Just 0
   , codehash    = hashcode code
   , opIxMap     = mkOpIxMap code
-  , codeOps     = mkCodeOps code
+  , codeOps     = ops
   , external    = False
+  , getterLoops = detectCopyLoops ops
   }
 
 isCreation :: ContractCode -> Bool

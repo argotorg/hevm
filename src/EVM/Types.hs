@@ -384,6 +384,15 @@ data Expr (a :: EType) where
                  -> Expr Buf           -- dst
                  -> Expr Buf
 
+  -- | Bulk copy from storage to buffer: for i in [0..numWords-1] writes
+  -- SLoad(baseSlot+i, store) as a 32-byte word at dstOffset+32*i in dst.
+  StorageCopySlice :: Expr EWord       -- base storage slot
+                   -> Expr EWord       -- dst offset in buffer
+                   -> Expr EWord       -- number of 32-byte words to copy
+                   -> Expr Storage     -- source storage
+                   -> Expr Buf         -- dst buffer
+                   -> Expr Buf
+
   BufLength      :: Expr Buf -> Expr EWord
 
 deriving instance Show (Expr a)
@@ -598,6 +607,7 @@ data PartialExec
   | PrecompileMissing     { pc :: Int, addr :: Expr EAddr, preAddr :: Addr }
   | CheatCodeMissing      { pc :: Int, addr :: Expr EAddr, selector :: FunctionSelector }
   | BranchTooDeep         { pc :: Int, addr :: Expr EAddr}
+  | SymbolicCopySliceSize { what :: String }
   deriving (Show, Eq, Ord)
 
 -- | Effect types used by the vm implementation for side effects & control flow
@@ -897,6 +907,7 @@ data Contract = Contract
   , opIxMap     :: VS.Vector Int -- ^ map from byte index to op index
   , codeOps     :: V.Vector (Int, Op)
   , external    :: Bool
+  , getterLoops :: Map Int CopyLoop -- ^ detected copy loops, keyed by condJumpiPC
   }
   deriving (Show, Eq, Ord)
 
@@ -1146,6 +1157,23 @@ data GenericOp a
   | OpUnknown Word8
   deriving (Show, Eq, Ord, Functor)
 
+
+-- Loop Detection Types -------------------------------------------------------------------------------
+
+-- | Storage-to-mem layout. Depths relative to stack[2] at the JUMPI.
+data StorageLoopStackInfo = StorageLoopStackInfo
+  { slotDepth    :: !Int  -- ^ current storage slot
+  , endSlotDepth :: !Int  -- ^ end slot (loop bound)
+  , dstOffDepth  :: !Int  -- ^ current dst offset
+  } deriving (Show, Eq, Ord, Generic)
+
+data CopyLoop = CopyLoop
+  { loopHeadPC           :: !Int
+  , condJumpiPC          :: !Int
+  , exitBranch           :: !Bool
+  , loopExitPC           :: !Int
+  , storageStackLayout   :: !StorageLoopStackInfo
+  } deriving (Show, Eq, Ord, Generic)
 
 -- | A model for a buffer, either in it's compressed form (for storing parsed
 -- models from a solver), or as a bytestring (for presentation to users)

@@ -199,6 +199,13 @@ foldExpr f acc expr = acc <> (go expr)
         <> (go c)
         <> (go d)
         <> (go g)
+      e@(StorageCopySlice a b c d g)
+        -> f e
+        <> (go a)
+        <> (go b)
+        <> (go c)
+        <> (go d)
+        <> (go g)
       e@(BufLength a) -> f e <> (go a)
 
 mapProp :: (forall a . Expr a -> Expr a) -> Prop -> Prop
@@ -583,6 +590,14 @@ mapExprM f expr = case expr of
     d' <- mapExprM f d
     e' <- mapExprM f e
     f (CopySlice a' b' c' d' e')
+
+  StorageCopySlice a b c d e -> do
+    a' <- mapExprM f a
+    b' <- mapExprM f b
+    c' <- mapExprM f c
+    d' <- mapExprM f d
+    e' <- mapExprM f e
+    f (StorageCopySlice a' b' c' d' e')
 
   BufLength a -> do
     a' <- mapExprM f a

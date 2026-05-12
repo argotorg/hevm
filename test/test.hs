@@ -66,6 +66,7 @@ import EVM.Effects
 import EVM.UnitTest (writeTrace, printWarnings)
 import EVM.Expr (maybeLitByteSimp)
 import EVM.Keccak (concreteKeccaks)
+import EVM.GetterDetection (detectCopyLoops)
 
 import EVM.Expr.ExprTests qualified as ExprTests
 import EVM.ConcreteExecution.ConcreteExecutionTests qualified as ConcreteExecutionTests
@@ -166,6 +167,284 @@ tests = testGroup "hevm"
     , testCase "format-short-input" $ do
         let encoded = ConcreteBuf $ BS.pack [0x01, 0x02]
         assertEqual "short input format" "console::log()" (formatConsoleLog encoded)
+    ]
+  , testGroup "GetterDetection"
+    [ testCase "detects storage-to-memory loop (SLOAD+MSTORE)" $ do
+        -- Loop bound = original stack[2]; stack-layout extractor identifies it.
+        let ops = V.fromList
+              [ (0,  OpJumpdest)
+              , (1,  OpDup 1)       -- dup slot
+              , (2,  OpSload)       -- load from storage
+              , (3,  OpDup 3)       -- dup dst offset
+              , (4,  OpMstore)      -- write to memory
+              , (5,  OpPush (Lit 1))
+              , (7,  OpAdd)         -- slot += 1
+              , (8,  OpSwap 1)
+              , (9,  OpPush (Lit 32))
+              , (11, OpAdd)         -- dst += 32
+              , (12, OpSwap 1)
+              , (13, OpDup 1)       -- dup current slot (computed)
+              , (14, OpDup 4)       -- dup loop bound (Orig 2)
+              , (15, OpLt)
+              , (16, OpPush (Lit 0))
+              , (18, OpJumpi)
+              ]
+        let result = detectCopyLoops ops
+        assertBool "should detect a storage-to-memory loop" (not $ Map.null result)
+        case Map.elems result of
+          [loop] -> do
+            assertEqual "condJumpiPC" 18 loop.condJumpiPC
+            assertEqual "exitBranch" False loop.exitBranch
+          _ -> assertFailure "expected exactly one loop"
+
+    , testCase "rejects loop with SSTORE side effect" $ do
+        let ops = V.fromList
+              [ (0, OpJumpdest)
+              , (1, OpSload)
+              , (2, OpSstore)
+              , (3, OpMstore)
+              , (4, OpPush (Lit 0))
+              , (6, OpJumpi)
+              ]
+        assertEqual "should detect no loops" Map.empty (detectCopyLoops ops)
+
+    , testCase "StorageCopySlice readByte inside region" $ do
+        let store = AbstractStore (LitAddr 42) Nothing
+            buf = StorageCopySlice (Lit 100) (Lit 64) (Lit 3) store (ConcreteBuf "")
+            -- byte 96 = second word, byte 0
+            result = Expr.readByte (Lit 96) buf
+        case result of
+          IndexWord (Lit 0) (SLoad (Lit 101) _) -> pure ()
+          _ -> assertFailure $ "unexpected result: " <> show result
+
+    , testCase "StorageCopySlice readByte outside region (before)" $ do
+        let store = AbstractStore (LitAddr 42) Nothing
+            inner = ConcreteBuf (BS.pack [0x42])
+            buf = StorageCopySlice (Lit 100) (Lit 64) (Lit 2) store inner
+            result = Expr.readByte (Lit 0) buf
+        assertEqual "should be 0x42" (LitByte 0x42) result
+
+    , testCase "StorageCopySlice readWord aligned" $ do
+        let store = AbstractStore (LitAddr 42) Nothing
+            buf = StorageCopySlice (Lit 100) (Lit 0) (Lit 3) store (ConcreteBuf "")
+            result = Expr.readWord (Lit 32) buf
+        case result of
+          SLoad (Lit 101) _ -> pure ()
+          _ -> assertFailure $ "unexpected result: " <> show result
+
+    , testCase "StorageCopySlice readWord past region" $ do
+        let store = AbstractStore (LitAddr 42) Nothing
+            buf = StorageCopySlice (Lit 100) (Lit 0) (Lit 1) store (ConcreteBuf "")
+            result = Expr.readWord (Lit 32) buf
+        assertEqual "should be Lit 0" (Lit 0) result
+
+    , testCase "StorageCopySlice single-word folds to WriteWord" $ do
+        -- numWords = 1 simplifies to a WriteWord of the loaded slot; sound for
+        -- symbolic baseSlot/dstOff and abstract store.
+        let store = AbstractStore (LitAddr 42) Nothing
+            buf = StorageCopySlice (Var "base") (Var "dst") (Lit 1) store (AbstractBuf "d")
+            result = Expr.simplify buf
+        case result of
+          WriteWord (Var "dst") (SLoad (Var "base") _) (AbstractBuf "d") -> pure ()
+          _ -> assertFailure $ "unexpected result: " <> show result
+
+    , testCase "bytes-getter-partial-without-detection" $ do
+        -- Without skipGetterLoops: hits maxIter -> Partial.
+        Just c <- solcRuntime "C"
+          [i|
+          pragma solidity ^0.8.0;
+          contract C {
+            bytes public myBytes;
+          }
+          |]
+        let sig  = Just (Sig "myBytes()" [])
+            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 } }
+            noSkipEnv = Env { config = testEnv.config { skipGetterLoops = False } }
+        (paths, _) <- runEnv noSkipEnv $ withDefaultSolver $ \s ->
+          checkAssert s defaultPanicCodes c sig [] opts
+        assertBool "should be partial without getter detection" (any isPartial paths)
+
+    , testCase "bytes-getter-no-partial-with-detection" $ do
+        -- With skipGetterLoops: loop short-circuits.
+        Just c <- solcRuntime "C"
+          [i|
+          pragma solidity ^0.8.0;
+          contract C {
+            bytes public myBytes;
+          }
+          |]
+        let sig  = Just (Sig "myBytes()" [])
+            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 } }
+            skipEnv = Env { config = testEnv.config { skipGetterLoops = True } }
+        (paths, _) <- runEnv skipEnv $ withDefaultSolver $ \s ->
+          checkAssert s defaultPanicCodes c sig [] opts
+        assertBool "should NOT be partial with getter detection enabled" (not $ any isPartial paths)
+
+    , testCase "string-getter-no-partial-with-detection" $ do
+        -- string getter uses the same SLOAD->MSTORE loop.
+        Just c <- solcRuntime "C"
+          [i|
+          pragma solidity ^0.8.0;
+          contract C {
+            string public myStr;
+          }
+          |]
+        let sig  = Just (Sig "myStr()" [])
+            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 } }
+            skipEnv = Env { config = testEnv.config { skipGetterLoops = True } }
+        (paths, _) <- runEnv skipEnv $ withDefaultSolver $ \s ->
+          checkAssert s defaultPanicCodes c sig [] opts
+        assertBool "should NOT be partial with getter detection enabled" (not $ any isPartial paths)
+
+    , testCase "uint256-array-getter-no-loop" $ do
+        -- arr(uint256 i) has no copy loop; detection must not mis-fire.
+        Just c <- solcRuntime "C"
+          [i|
+          pragma solidity ^0.8.0;
+          contract C {
+            uint256[] public arr;
+          }
+          |]
+        let sig  = Just (Sig "arr(uint256)" [AbiUIntType 256])
+            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 } }
+            noSkipEnv = Env { config = testEnv.config { skipGetterLoops = False } }
+        (paths, _) <- runEnv noSkipEnv $ withDefaultSolver $ \s ->
+          checkAssert s defaultPanicCodes c sig [] opts
+        assertBool "uint256[] getter should not be partial (no copy loop exists)"
+          (not $ any isPartial paths)
+
+    , testCase "uint8-fixed-array-getter-no-loop" $ do
+        -- uint8[10] getter returns a single packed element.
+        Just c <- solcRuntime "C"
+          [i|
+          pragma solidity ^0.8.0;
+          contract C {
+            uint8[10] public arr;
+          }
+          |]
+        let sig  = Just (Sig "arr(uint256)" [AbiUIntType 256])
+            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 } }
+            noSkipEnv = Env { config = testEnv.config { skipGetterLoops = False } }
+        (paths, _) <- runEnv noSkipEnv $ withDefaultSolver $ \s ->
+          checkAssert s defaultPanicCodes c sig [] opts
+        assertBool "uint8[10] getter should not be partial (no copy loop exists)"
+          (not $ any isPartial paths)
+
+    , testCase "string-array-getter-no-partial-with-detection" $ do
+        -- strs(i) hits the SLOAD->MSTORE loop on the long-string branch.
+        Just c <- solcRuntime "C"
+          [i|
+          pragma solidity ^0.8.0;
+          contract C {
+            string[] public strs;
+          }
+          |]
+        let sig  = Just (Sig "strs(uint256)" [AbiUIntType 256])
+            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 } }
+            skipEnv = Env { config = testEnv.config { skipGetterLoops = True } }
+        (paths, _) <- runEnv skipEnv $ withDefaultSolver $ \s ->
+          checkAssert s defaultPanicCodes c sig [] opts
+        assertBool "should NOT be partial with getter detection enabled" (not $ any isPartial paths)
+
+    , testCase "bytes-getter-summary-sound" $ do
+        -- Summary must be sound: no Partial, no false Cex, no SMT-encoder Error.
+        Just c <- solcRuntime "C"
+          [i|
+          pragma solidity ^0.8.0;
+          contract C {
+            bytes public myBytes;
+          }
+          |]
+        let sig  = Just (Sig "myBytes()" [])
+            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 } }
+            skipEnv = Env { config = testEnv.config { skipGetterLoops = True } }
+        (paths, results) <- runEnv skipEnv $ withDefaultSolver $ \s ->
+          checkAssert s defaultPanicCodes c sig [] opts
+        assertBool "no Partial paths" (not $ any isPartial paths)
+        assertBool "no Cex (false-positive panics)" (not $ any isCex results)
+        assertBool "no Error (SMT encoder failures)" (not $ any isError results)
+
+    , testCase "cross-contract-bytes-getter-with-detection" $ do
+        -- Symbolic-length cross-contract getter: summary fires, leaving a
+        -- symbolic-numWords StorageCopySlice that demotes to Partial via the
+        -- SMT fallback. Contract: no hard Error, no false Cex.
+        Just c <- solcRuntime "C"
+          [i|
+          pragma solidity ^0.8.0;
+          contract A {
+            bytes public myBytes;
+            function setLen(uint256 v) external { assembly { sstore(0, v) } }
+          }
+          contract C {
+            function f(uint256 lenWord) external {
+              // long-string encoding (low bit set), real length = lenWord >> 1
+              require(lenWord & 1 == 1);
+              require((lenWord >> 1) <= 64);
+              A a = new A();
+              a.setLen(lenWord);
+              bytes memory b = a.myBytes();
+              assert(b.length == lenWord >> 1);
+            }
+          }
+          |]
+        let sig  = Just (Sig "f(uint256)" [AbiUIntType 256])
+            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 } }
+            skipEnv = Env { config = testEnv.config { skipGetterLoops = True } }
+        (_, results) <- runEnv skipEnv $ withDefaultSolver $ \s ->
+          checkAssert s defaultPanicCodes c sig [] opts
+        assertBool "no Cex (false-positive panics)" (not $ any isCex results)
+        assertBool "no Error (SMT encoder failures)" (not $ any isError results)
+
+    , testCase "cross-contract-bytes-getter-without-detection" $ do
+        -- Negative: skipGetterLoops=False + small maxIter -> Partial.
+        Just c <- solcRuntime "C"
+          [i|
+          pragma solidity ^0.8.0;
+          contract A {
+            bytes public myBytes;
+            function setLen(uint256 v) external { assembly { sstore(0, v) } }
+          }
+          contract C {
+            function f(uint256 lenWord) external {
+              require(lenWord & 1 == 1);
+              require((lenWord >> 1) <= 64);
+              A a = new A();
+              a.setLen(lenWord);
+              bytes memory b = a.myBytes();
+              assert(b.length == lenWord >> 1);
+            }
+          }
+          |]
+        let sig  = Just (Sig "f(uint256)" [AbiUIntType 256])
+            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 } }
+            noSkipEnv = Env { config = testEnv.config { skipGetterLoops = False } }
+        (paths, _) <- runEnv noSkipEnv $ withDefaultSolver $ \s ->
+          checkAssert s defaultPanicCodes c sig [] opts
+        assertBool "should be partial without getter detection" (any isPartial paths)
+
+    , testCase "readWord-skip-write-bounded-offset-end-to-end" $ do
+        -- Read of below[0] should fold past a write at Add (Lit 0xa0) (Mul 32 (And 0xff X)).
+        Just c <- solcRuntime "C"
+          [i|
+          pragma solidity ^0.8.0;
+          contract C {
+            function f(uint8 idx) external {
+              uint256[1] memory below;
+              below[0] = 1;
+              uint256[10] memory arr;
+              arr[idx] = 42;
+              assert(below[0] == 1);
+            }
+          }
+          |]
+        let sig  = Just (Sig "f(uint8)" [AbiUIntType 8])
+            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 } }
+        (paths, results) <- runEnv testEnv $ withDefaultSolver $ \s ->
+          checkAssert s defaultPanicCodes c sig [] opts
+        assertBool "no Partial paths" (not $ any isPartial paths)
+        assertBool "no Cex (false-positive panics)" (not $ any isCex results)
+        assertBool "no Error (SMT encoder failures)" (not $ any isError results)
+
     ]
   , testGroup "StorageTests"
     [ test "accessStorage uses fetchedStorage" $ do
@@ -1697,8 +1976,11 @@ tests = testGroup "hevm"
       putStrLnM $ "successfully explored: " <> show (length res) <> " paths"
       let numCexes = sum $ map (fromEnum . isCex) ret
       let numErrs = sum $ map (fromEnum . isError) ret
+      -- Symbolic CopySlice size now demotes to Partial instead of Error.
       assertEqualM "number of counterexamples" 2 numCexes
-      assertEqualM "number of errors" 1 numErrs
+      assertEqualM "number of errors" 0 numErrs
+      let cpPartials = length [() | Partial _ _ (SymbolicCopySliceSize _) <- res]
+      assertEqualM "CopySlice symbolic-size Partial paths" 2 cpPartials
     , testCase "call-symbolic-noreent" $ do
       let conf = testEnv.config {promiseNoReent = True}
       let myTestEnv :: Env = (testEnv :: Env) {config = conf :: Config}

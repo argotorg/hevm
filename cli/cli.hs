@@ -102,6 +102,7 @@ data CommonOptions = CommonOptions
   , cacheDir      ::Maybe String
   , earlyAbort    ::Bool
   , mergeMaxBudget :: Int
+  , skipGetterLoops :: Bool
   }
 
 commonOptions :: Parser CommonOptions
@@ -133,6 +134,7 @@ commonOptions = CommonOptions
   <*> (optional $ strOption $ long "cache-dir" <> help "Directory to save and load RPC cache")
   <*> (switch $  long "early-abort" <> help "Stop exploration immediately upon finding the first counterexample")
   <*> (option auto $ long "merge-max-budget" <> showDefault <> value 100 <> help "Max instructions for speculative merge exploration during path merging")
+  <*> (flag True False $ long "no-skip-getter-loops" <> help "Disable short-circuit of detected storage-to-memory copy loops (e.g. bytes/string getters). On by default.")
 
 data CommonExecOptions = CommonExecOptions
   { address       ::Maybe Addr
@@ -377,6 +379,7 @@ main = do
         , onlyDeployed = cOpts.onlyDeployed
         , earlyAbort = cOpts.earlyAbort
         , mergeMaxBudget = cOpts.mergeMaxBudget
+        , skipGetterLoops = cOpts.skipGetterLoops
         } }
 
 

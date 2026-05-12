@@ -405,6 +405,18 @@ readByte i@(Lit x) buf@(CopySlice _ (Lit dstOffset) (Lit size) _ dst)
     then readByte i dst
     else ReadByte (Lit x) buf
 
+-- StorageCopySlice: byte before / after / inside the region
+readByte i@(Lit x) (StorageCopySlice _ (Lit dstOff) _ _ dst)
+  | x < dstOff = readByte i dst
+readByte i@(Lit x) (StorageCopySlice _ (Lit dstOff) (Lit numWords) _ dst)
+  | x >= dstOff + numWords * 32 = readByte i dst
+readByte (Lit x) (StorageCopySlice (Lit baseSlot) (Lit dstOff) (Lit numWords) store _dst)
+  | x >= dstOff, x < dstOff + numWords * 32
+  = let wordIdx  = Prelude.div (x - dstOff) 32
+        byteIdx  = Prelude.mod (x - dstOff) 32
+        slotVal  = SLoad (Lit (baseSlot + wordIdx)) store
+    in IndexWord (Lit byteIdx) slotVal
+
 -- fully abstract reads
 readByte i buf = ReadByte i buf
 
@@ -481,6 +493,7 @@ readWord idx b@(WriteWord idx' val buf)
     _ -> readWordFromBytes idx b
 readWord i@(Lit idx) (WriteByte (Lit idx') _ buf)
   | idx' < idx || (idx' >= idx + 32 && idx <= (maxBound :: W256) - 32) = readWord i buf
+
 -- reading a Word that is before the CopySlice destination region, so just read from dst
 -- We must ensure x+32 and dstOffset+size do not wrap past maxBound.
 -- When size is symbolic, we bound dstOffset to ensure no wrapping is possible.
@@ -510,6 +523,19 @@ readWord (Lit idx) b@(CopySlice (Lit srcOff) (Lit dstOff) (Lit size) src dst)
   | (idx - dstOff) >= size && (idx - dstOff) <= (maxBound :: W256) - 31 = readWord (Lit idx) dst
   -- the region we are trying to read partially overlaps the sliced region
   | otherwise = readWordFromBytes (Lit idx) b
+
+-- StorageCopySlice: aligned-inside / before / past / overlap fallback
+readWord (Lit x) (StorageCopySlice (Lit baseSlot) (Lit dstOff) (Lit numWords) store _dst)
+  | x >= dstOff
+  , x < dstOff + numWords * 32
+  , Prelude.mod (x - dstOff) 32 == 0
+  = SLoad (Lit (baseSlot + Prelude.div (x - dstOff) 32)) store
+readWord i@(Lit x) (StorageCopySlice _ (Lit dstOff) _ _ dst)
+  | x + 32 <= dstOff, x + 32 >= x = readWord i dst
+readWord i@(Lit x) (StorageCopySlice _ (Lit dstOff) (Lit numWords) _ dst)
+  | x >= dstOff + numWords * 32 = readWord i dst
+readWord i b@(StorageCopySlice {}) = readWordFromBytes i b
+
 readWord i b = readWordFromBytes i b
 
 -- Attempts to read a concrete word from a buffer by reading 32 individual bytes and joining them together
@@ -669,6 +695,8 @@ bufLengthEnv env useEnv buf = go (Lit 0) buf
     go l (WriteByte idx _ b) = go (EVM.Expr.max l (add idx (Lit 1))) b
     go l (CopySlice _ _ (Lit 0) _ dst) = go l dst
     go l (CopySlice _ dstOffset size _ dst) = go (EVM.Expr.max l (add dstOffset size)) dst
+    go l (StorageCopySlice _ dstOff numWords _ dst) =
+      go (EVM.Expr.max l (add dstOff (mul numWords (Lit 32)))) dst
 
     go l (GVar (BufVar a)) | useEnv =
       case Map.lookup a env of
@@ -694,6 +722,9 @@ minLength bufEnv = go 0
     go l (WriteWord _ _ b) = go l b
     go l (WriteByte _ _ b) = go l b
     go l (CopySlice _ _ _ _ b) = go l b
+    go l (StorageCopySlice _ (Lit dstOff) (Lit numWords) _ dst) =
+      go (Prelude.max (dstOff + numWords * 32) l) dst
+    go l (StorageCopySlice _ _ _ _ b) = go l b
     go l (GVar (BufVar a)) = do
       b <- Map.lookup a bufEnv
       go l b
@@ -1240,6 +1271,13 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
           | otherwise = orig
             where simplifiedBuf = BS.take (unsafeInto (n+sz)) buf
     go (CopySlice a b c d f) = copySlice a b c d f
+
+    -- zero-word StorageCopySlice is a no-op
+    go (StorageCopySlice _ _ (Lit 0) _ dst) = dst
+    -- single-word StorageCopySlice is just a WriteWord of the loaded slot
+    go (StorageCopySlice baseSlot dstOff (Lit 1) store dst)
+      = writeWord dstOff (SLoad baseSlot store) dst
+    go scs@(StorageCopySlice {}) = scs
 
     go (JoinBytes (LitByte a0)  (LitByte a1)  (LitByte a2)  (LitByte a3)
       (LitByte a4)  (LitByte a5)  (LitByte a6)  (LitByte a7)
