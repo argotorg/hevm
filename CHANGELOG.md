@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- RPC retry with exponential backoff and a shared cooldown across workers, so transient
+  network errors and rate limits (e.g. HTTP 429) no longer abort symbolic execution
 - Support for a subset of the [`expectRevert`](https://www.getfoundry.sh/reference/cheatcodes/expect-revert#expectrevert) family of foundry cheatcodes:
   - `expectRevert()`
   - `expectRevert(bytes)`
