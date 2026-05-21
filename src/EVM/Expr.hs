@@ -696,7 +696,7 @@ bufLengthEnv env useEnv buf = go (Lit 0) buf
     go l (CopySlice _ _ (Lit 0) _ dst) = go l dst
     go l (CopySlice _ dstOffset size _ dst) = go (EVM.Expr.max l (add dstOffset size)) dst
     go l (StorageCopySlice _ dstOff numWords _ dst) =
-      go (EVM.Expr.max l (add dstOff (mul numWords (Lit 32)))) dst
+      go (EVM.Expr.max l (add dstOff (mul (Lit 32) numWords))) dst
 
     go l (GVar (BufVar a)) | useEnv =
       case Map.lookup a env of
