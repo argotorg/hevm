@@ -418,10 +418,9 @@ readBytes (Prelude.min 32 -> n) idx buf
 
 -- | Static upper bound on a word expression (unsigned, no wrap), or Nothing.
 upperBound :: Expr EWord -> Maybe W256
-upperBound = \case
+upperBound a = \case
   Lit n         -> Just n
   And (Lit m) _ -> Just m
-  And _ (Lit m) -> Just m
   Mod _ (Lit b)
     | b == 0    -> Just 0
     | otherwise -> Just (b - 1)
@@ -429,9 +428,7 @@ upperBound = \case
     | b == 0    -> Just 0
     | otherwise -> upperBound a >>= \ua -> Just (ua `Prelude.div` b)
   Mul (Lit a) b -> mulBound a b
-  Mul a (Lit b) -> mulBound b a
   Add (Lit a) b -> addBound a b
-  Add a (Lit b) -> addBound b a
   SHR (Lit n) b
     | n >= 256  -> Just 0
     | otherwise -> upperBound b >>= \ub ->
