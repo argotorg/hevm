@@ -140,6 +140,22 @@ tests = testGroup "Foundry tests"
               ]
         forM_ cases $ \(method, expected) -> do
           executeSingleMethod testFile method >>= assertEqualM (unpack method) expected
+    , test "AssertApproxEqRel-Pass" $ do
+        let testFile = "test/contracts/pass/assertApproxEqRel.sol"
+        executeAllMethodsWithPrefix testFile "prove" >>= assertEqualM "test result" (True, True)
+    , test "AssertApproxEqRel-Fail" $ do
+        let testFile = "test/contracts/fail/assertApproxEqRel.sol"
+        let cases =
+              -- concrete-only tests: all branches revert, hence (False, False)
+              [ ("prove_approx_eq_rel_uint_exceeds_delta", (False, False))
+              , ("prove_approx_eq_rel_uint_b_zero_neq", (False, False))
+              , ("prove_approx_eq_rel_int_exceeds_delta", (False, False))
+              , ("prove_approx_eq_rel_int_b_zero_neq", (False, False))
+              -- symbolic: not all branches revert
+              , ("prove_approx_eq_rel_uint_symbolic_fail", (False, True))
+              ]
+        forM_ cases $ \(method, expected) -> do
+          executeSingleMethod testFile method >>= assertEqualM (unpack method) expected
     , test "Panic-Source-Location" $ do
         -- Regression test for #895: panic in a called contract should not show "<source not found>"
         let testFile = "test/contracts/fail/assertPanic.sol"

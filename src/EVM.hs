@@ -2208,6 +2208,9 @@ cheatActions = Map.fromList
   , action "assertApproxEqAbs(uint256,uint256,uint256)" $ assertApproxEqAbsUint
   , action "assertApproxEqAbs(int256,int256,uint256)"   $ assertApproxEqAbsInt
   --
+  , action "assertApproxEqRel(uint256,uint256,uint256)" $ assertApproxEqRelUint
+  , action "assertApproxEqRel(int256,int256,uint256)"   $ assertApproxEqRelInt
+  --
   , action "toString(address)" $ toStringCheat AbiAddressType
   , action "toString(bool)"    $ toStringCheat AbiBoolType
   , action "toString(uint256)" $ toStringCheat (AbiUIntType 256)
@@ -2255,6 +2258,18 @@ cheatActions = Map.fromList
       ")  parameter decoding failed. Error: " <> show abivals
     revertErr a b comp = frameRevert $ "assertion failed: " <>
       BS8.pack (show a) <> " " <> comp <> " " <> BS8.pack (show b)
+    -- 1e18 (100% in foundry's 18-decimal fixed point) as Integer and W256
+    scale1e18 :: Integer
+    scale1e18 = 1000000000000000000
+    scale1e18W :: W256
+    scale1e18W = 1000000000000000000
+    -- shared failure message for the relative-equality assertions; realDelta is
+    -- already rendered (a scaled integer, or the literal "undefined")
+    relFailMsg :: Show a => a -> a -> Word256 -> String -> ByteString
+    relFailMsg a b maxPercentDelta realDelta = "assertion failed: " <>
+      BS8.pack (show a) <> " !~= " <> BS8.pack (show b) <>
+      " (max delta: " <> BS8.pack (show maxPercentDelta) <>
+      ", real delta: " <> BS8.pack realDelta <> ")"
     genAssert comp exprComp invComp name abitype sig input = do
       case decodeBuf [abitype, abitype] input of
         (CAbi [a, b],"") | a `comp` b -> doStop
@@ -2331,6 +2346,76 @@ cheatActions = Map.fromList
               False -> doStop
               True -> frameRevert "assertion failed: assertApproxEqAbs (symbolic)"
         abivals -> vmError (BadCheatCode ("assertApproxEqAbs(int256,int256,uint256) parameter decoding failed: " <> show abivals) sig)
+    -- | assertApproxEqRel for uint256: passes when the relative difference in
+    -- percents is <= maxPercentDelta. maxPercentDelta is an 18-decimal fixed
+    -- point number where 1e18 == 100%. The denominator is the second argument
+    -- (the reference value), matching foundry/forge-std semantics:
+    --   percentDelta = |a - b| * 1e18 / b
+    -- Special cases (mirroring the native foundry cheatcode):
+    --   * b == 0 && a == 0 -> pass (treated as equal)
+    --   * b == 0 && a /= 0 -> fail with "real delta: undefined"
+    --   * if the U512 intermediate doesn't fit in uint256 -> "overflow in delta calculation"
+    assertApproxEqRelUint sig input = do
+      case decodeBuf [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256] input of
+        (CAbi [AbiUInt _ a, AbiUInt _ b, AbiUInt _ maxPercentDelta],"")
+          | b == 0 ->
+            if a == 0 then doStop
+            else frameRevert $ relFailMsg a b maxPercentDelta "undefined"
+          | otherwise ->
+            let absDelta = if a > b then a - b else b - a
+                -- compute in Integer to avoid the intermediate overflow that
+                -- foundry sidesteps by widening to U512
+                percentDelta = (toInteger absDelta * scale1e18) `Prelude.div` toInteger b
+            in if percentDelta > toInteger (maxBound :: Word256)
+               then frameRevert "assertion failed: overflow in delta calculation"
+               else if percentDelta <= toInteger maxPercentDelta then doStop
+               else frameRevert $ relFailMsg a b maxPercentDelta (show percentDelta)
+        (SAbi [ew1, ew2, ew3],"") ->
+          -- percentDelta = (max(a,b) - min(a,b)) * 1e18 / b; check <= maxPercentDelta
+          let absDelta = Expr.sub (Expr.max ew1 ew2) (Expr.min ew1 ew2)
+              percentDelta = Expr.div (Expr.mul absDelta (Lit scale1e18W)) ew2
+          in case Expr.simplify (Expr.iszero $ Expr.leq percentDelta ew3) of
+            Lit 0 -> doStop
+            Lit _ -> frameRevert "assertion failed: assertApproxEqRel (symbolic)"
+            ew -> branch (?conf).maxDepth ew $ \case
+              False -> doStop
+              True -> frameRevert "assertion failed: assertApproxEqRel (symbolic)"
+        abivals -> vmError (BadCheatCode ("assertApproxEqRel(uint256,uint256,uint256) parameter decoding failed: " <> show abivals) sig)
+    -- | assertApproxEqRel for int256. Same as the uint version but the absolute
+    -- delta accounts for signs (same sign: ||a|-|b||, opposite: |a|+|b|) and the
+    -- denominator is |b|.
+    assertApproxEqRelInt sig input = do
+      case decodeBuf [AbiIntType 256, AbiIntType 256, AbiUIntType 256] input of
+        (CAbi [AbiInt _ a, AbiInt _ b, AbiUInt _ maxPercentDelta],"") ->
+          let -- fromIntegral Int256->Word256 reinterprets bits; for minBound this gives 2^255 which is correct
+              absI x = if x == minBound then fromIntegral (maxBound :: Int256) + 1
+                        else fromIntegral (abs x) :: Word256
+              absA = absI a
+              absB = absI b
+              sameSign = (a >= 0 && b >= 0) || (a < 0 && b < 0)
+              absDelta = if sameSign
+                         then if absA > absB then absA - absB else absB - absA
+                         else absA + absB
+          in if b == 0
+             then if a == 0 then doStop
+                  else frameRevert $ relFailMsg a b maxPercentDelta "undefined"
+             else
+               let percentDelta = (toInteger absDelta * scale1e18) `Prelude.div` toInteger absB
+               in if percentDelta > toInteger (maxBound :: Word256)
+                  then frameRevert "assertion failed: overflow in delta calculation"
+                  else if percentDelta <= toInteger maxPercentDelta then doStop
+                  else frameRevert $ relFailMsg a b maxPercentDelta (show percentDelta)
+        (SAbi [ew1, ew2, ew3],"") ->
+          -- best-effort symbolic handling (same-sign approximation, see assertApproxEqAbs)
+          let absDelta = Expr.sub (Expr.max ew1 ew2) (Expr.min ew1 ew2)
+              percentDelta = Expr.div (Expr.mul absDelta (Lit scale1e18W)) ew2
+          in case Expr.simplify (Expr.iszero $ Expr.leq percentDelta ew3) of
+            Lit 0 -> doStop
+            Lit _ -> frameRevert "assertion failed: assertApproxEqRel (symbolic)"
+            ew -> branch (?conf).maxDepth ew $ \case
+              False -> doStop
+              True -> frameRevert "assertion failed: assertApproxEqRel (symbolic)"
+        abivals -> vmError (BadCheatCode ("assertApproxEqRel(int256,int256,uint256) parameter decoding failed: " <> show abivals) sig)
     toStringCheat abitype sig input = do
       case decodeBuf [abitype] input of
         (CAbi [val],"") -> frameReturn $ AbiTuple $ V.fromList [AbiString $ Char8.pack $ show val]
