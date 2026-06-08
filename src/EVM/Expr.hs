@@ -470,7 +470,7 @@ writeDisjointFromReadWord i = \case
             readMaxI  = iI + 31
         in readMaxI <= maxI
            && writeMaxI <= maxI
-           && (cI >= iI + 32 || writeMaxI < iI)
+           && (cI > readMaxI || writeMaxI < iI)
   _ -> False
 
 -- | Reads the word starting at idx from the given buf
