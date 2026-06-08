@@ -2188,6 +2188,7 @@ cheatActions = Map.fromList
   , action "assertEq(address,address)" $ assertEq AbiAddressType
   , action "assertEq(bytes32,bytes32)" $ assertEq (AbiBytesType 32)
   , action "assertEq(string,string)"   $ assertEq (AbiStringType)
+  , action "assertEq(bytes,bytes)"     $ assertEq AbiBytesDynamicType
   --
   , action "assertNotEq(bool,bool)"       $ assertNotEq AbiBoolType
   , action "assertNotEq(uint256,uint256)" $ assertNotEq (AbiUIntType 256)
@@ -2195,6 +2196,7 @@ cheatActions = Map.fromList
   , action "assertNotEq(address,address)" $ assertNotEq AbiAddressType
   , action "assertNotEq(bytes32,bytes32)" $ assertNotEq (AbiBytesType 32)
   , action "assertNotEq(string,string)"   $ assertNotEq (AbiStringType)
+  , action "assertNotEq(bytes,bytes)"      $ assertNotEq AbiBytesDynamicType
   --
   , action "assertLt(uint256,uint256)" $ assertLt (AbiUIntType 256)
   , action "assertLt(int256,int256)"   $ assertSLt (AbiIntType 256)
@@ -2210,6 +2212,39 @@ cheatActions = Map.fromList
   --
   , action "assertApproxEqRel(uint256,uint256,uint256)" $ assertApproxEqRelUint
   , action "assertApproxEqRel(int256,int256,uint256)"   $ assertApproxEqRelInt
+  --
+  -- Variants with a trailing `err` string. The string is decoded away and never
+  -- used; each behaves exactly like its non-message counterpart.
+  , action "assertEq(bool,bool,string)"       $ withMsg 2 (assertEq AbiBoolType)
+  , action "assertEq(uint256,uint256,string)" $ withMsg 2 (assertEq (AbiUIntType 256))
+  , action "assertEq(int256,int256,string)"   $ withMsg 2 (assertEq (AbiIntType 256))
+  , action "assertEq(address,address,string)" $ withMsg 2 (assertEq AbiAddressType)
+  , action "assertEq(bytes32,bytes32,string)" $ withMsg 2 (assertEq (AbiBytesType 32))
+  , action "assertEq(string,string,string)"   $ assertEqMsgDyn AbiStringType
+  , action "assertEq(bytes,bytes,string)"      $ assertEqMsgDyn AbiBytesDynamicType
+  --
+  , action "assertNotEq(bool,bool,string)"       $ withMsg 2 (assertNotEq AbiBoolType)
+  , action "assertNotEq(uint256,uint256,string)" $ withMsg 2 (assertNotEq (AbiUIntType 256))
+  , action "assertNotEq(int256,int256,string)"   $ withMsg 2 (assertNotEq (AbiIntType 256))
+  , action "assertNotEq(address,address,string)" $ withMsg 2 (assertNotEq AbiAddressType)
+  , action "assertNotEq(bytes32,bytes32,string)" $ withMsg 2 (assertNotEq (AbiBytesType 32))
+  , action "assertNotEq(string,string,string)"   $ assertNotEqMsgDyn AbiStringType
+  , action "assertNotEq(bytes,bytes,string)"      $ assertNotEqMsgDyn AbiBytesDynamicType
+  --
+  , action "assertLt(uint256,uint256,string)" $ withMsg 2 (assertLt (AbiUIntType 256))
+  , action "assertLt(int256,int256,string)"   $ withMsg 2 (assertSLt (AbiIntType 256))
+  , action "assertLe(uint256,uint256,string)" $ withMsg 2 (assertLe (AbiUIntType 256))
+  , action "assertLe(int256,int256,string)"   $ withMsg 2 (assertSLe (AbiIntType 256))
+  , action "assertGt(uint256,uint256,string)" $ withMsg 2 (assertGt (AbiUIntType 256))
+  , action "assertGt(int256,int256,string)"   $ withMsg 2 (assertSGt (AbiIntType 256))
+  , action "assertGe(uint256,uint256,string)" $ withMsg 2 (assertGe (AbiUIntType 256))
+  , action "assertGe(int256,int256,string)"   $ withMsg 2 (assertSGe (AbiIntType 256))
+  --
+  , action "assertApproxEqAbs(uint256,uint256,uint256,string)" $ withMsg 3 assertApproxEqAbsUint
+  , action "assertApproxEqAbs(int256,int256,uint256,string)"   $ withMsg 3 assertApproxEqAbsInt
+  --
+  , action "assertApproxEqRel(uint256,uint256,uint256,string)" $ withMsg 3 assertApproxEqRelUint
+  , action "assertApproxEqRel(int256,int256,uint256,string)"   $ withMsg 3 assertApproxEqRelInt
   --
   , action "toString(address)" $ toStringCheat AbiAddressType
   , action "toString(bool)"    $ toStringCheat AbiBoolType
@@ -2270,17 +2305,38 @@ cheatActions = Map.fromList
       BS8.pack (show a) <> " !~= " <> BS8.pack (show b) <>
       " (max delta: " <> BS8.pack (show maxPercentDelta) <>
       ", real delta: " <> BS8.pack realDelta <> ")"
-    genAssert comp exprComp invComp name abitype sig input = do
-      case decodeBuf [abitype, abitype] input of
-        (CAbi [a, b],"") | a `comp` b -> doStop
-        (CAbi [a, b],"")-> revertErr a b invComp
-        (SAbi [ew1, ew2],"") -> case (Expr.simplify (Expr.iszero $ exprComp ew1 ew2)) of
+    genAssert = genAssertN []
+    -- as genAssert, but ignores `extra` trailing ABI args (foundry's `err`-string
+    -- overloads). Used directly only for the string-operand variants; static
+    -- operands instead strip the trailing arg upstream via withMsg so they keep
+    -- the symbolic comparison path (decodeBuf yields no SAbi once a dynamic type
+    -- like the string is present in the signature).
+    genAssertN extra comp exprComp invComp name abitype sig input = do
+      case decodeBuf ([abitype, abitype] ++ extra) input of
+        (CAbi (a:b:_),"") | a `comp` b -> doStop
+        (CAbi (a:b:_),"")-> revertErr a b invComp
+        (SAbi (ew1:ew2:_),"") -> case (Expr.simplify (Expr.iszero $ exprComp ew1 ew2)) of
           Lit 0 -> doStop
           Lit _ -> revertErr ew1 ew2 invComp
           ew -> branch (?conf).maxDepth ew $ \case
             False -> doStop
             True -> revertErr ew1 ew2 invComp
         abivals -> vmError (BadCheatCode (paramDecodeErr abitype name abivals) sig)
+    -- Keep only the first n 32-byte head words of the calldata, dropping the
+    -- trailing (dynamic) `err` string so the operand-only handlers can decode
+    -- normally and still produce SAbi for symbolic operands.
+    keepHeadWords n input =
+      foldr (\i acc -> let off = Lit (fromIntegral (i * 32 :: Int))
+                       in writeWord off (readWord off input) acc)
+            mempty [0 .. n - 1]
+    -- Run a no-message handler after stripping the trailing `err` string.
+    withMsg n handler sig input = handler sig (keepHeadWords n input)
+    -- Message variants whose OPERANDS are dynamic (string, bytes): they can't be
+    -- sliced, so decode [op, op, string] and compare the first two operands
+    -- concretely (dynamic operands have no symbolic path), ignoring the trailing
+    -- `err` string. Matches the concrete-only behaviour of assertEq(string,string).
+    assertEqMsgDyn    op = genAssertN [AbiStringType] (==) Expr.eq "!=" "assertEq" op
+    assertNotEqMsgDyn op = genAssertN [AbiStringType] (/=) (\a b -> Expr.iszero $ Expr.eq a b) "==" "assertNotEq" op
     assertEq =    genAssert (==) Expr.eq "!=" "assertEq"
     assertNotEq = genAssert (/=) (\a b -> Expr.iszero $ Expr.eq a b) "==" "assertNotEq"
     assertLt =    genAssert (<)  Expr.lt ">=" "assertLt"
