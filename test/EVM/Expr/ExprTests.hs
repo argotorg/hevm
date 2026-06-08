@@ -182,6 +182,50 @@ memoryTests = testGroup "Memory tests"
   , testCase "stripbytes-concrete-bug" $ assertEqual ""
       (Expr.simplifyReads (ReadByte (Lit 0) (ConcreteBuf "5")))
       (LitByte 53)
+
+  -- Interval-bounds disjointness for readWord over WriteWord (Add (Lit c) X).
+
+  , testCase "readWord-skip-write-above-and-bounded" $ assertEqual
+      "write at Add (Lit 100) (And (Lit 0xff) X) must be skipped when reading at 0"
+      (Lit 0)
+      (Expr.readWord (Lit 0)
+        (WriteWord (Add (Lit 100) (And (Lit 0xff) (Var "x")))
+                   (Lit 0x42)
+                   mempty))
+
+  , testCase "readWord-skip-write-above-mul-and-bounded" $ assertEqual
+      "write at Add (Lit 100) (Mul 32 (And 0xff X)) must be skipped when reading at 0"
+      (Lit 0)
+      (Expr.readWord (Lit 0)
+        (WriteWord (Add (Lit 100) (Mul (Lit 32) (And (Lit 0xff) (Var "x"))))
+                   (Lit 0x42)
+                   mempty))
+
+  , testCase "readWord-no-skip-write-above-unbounded" $ do
+      -- Unbounded X: rule must NOT fire.
+      let r = Expr.readWord (Lit 0)
+                (WriteWord (Add (Lit 100) (Var "x")) (Lit 0x42) mempty)
+      assertBool ("rule fired on unbounded X (unsound): " <> show r)
+                 (r /= Lit 0)
+
+  , testCase "readWord-no-skip-write-wrap-risk" $ do
+      -- c near maxBound: write region can wrap, so rule must NOT fire.
+      let bigC = (maxBound :: W256) - 50
+          r = Expr.readWord (Lit 0)
+                (WriteWord (Add (Lit bigC) (And (Lit 0xff) (Var "x")))
+                           (Lit 0x42)
+                           mempty)
+      assertBool ("rule fired on wrap-risk write (unsound): " <> show r)
+                 (r /= Lit 0)
+
+  , testCase "readWord-no-skip-write-possible-overlap" $ do
+      -- Read [80,111] vs write [100,355] overlap; rule must NOT fire.
+      let r = Expr.readWord (Lit 80)
+                (WriteWord (Add (Lit 100) (And (Lit 0xff) (Var "x")))
+                           (Lit 0x42)
+                           mempty)
+      assertBool ("rule fired on possibly-overlapping write (unsound): " <> show r)
+                 (r /= Lit 0)
   ]
 
 basicSimplificationTests :: TestTree
