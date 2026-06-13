@@ -1070,7 +1070,7 @@ exec1 conf = do
                       touchAddress from'
 
                       let (cost, gas') = costOfCreate fees availableGas xSize True
-                      newAddr <- create2Address self xSalt initCode
+                      newAddr <- create2Address from' xSalt initCode
                       _ <- accessAccountForGas newAddr
                       burn' cost $
                         create from' this xSize gas' xValue xs newAddr (ConcreteBuf initCode)
