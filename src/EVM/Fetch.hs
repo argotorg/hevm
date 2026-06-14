@@ -626,22 +626,12 @@ oracle solvers preSess rpcInfo q = do
       | otherwise -> do
         let sess = fromMaybe (internalError $ "oracle: no session provided for fetch addr: " ++ show addr) preSess
         conf <- readConfig
-        cache <- liftIO $ readMVar sess.sharedCache
-        case Map.lookup (addr, slot) cache.slotCache of
-          Just s -> do
-            when (conf.debug) $ liftIO $ putStrLn $ "-> Using cached slot value for slot " <> show slot <> " at " <> show addr
-            pure $ continue s
-          Nothing -> do
-            when (conf.debug) $ liftIO $ putStrLn $ "Fetching slot " <> (show slot) <> " at " <> (show addr)
-            let (block, url) = fromJust rpcInfo.blockNumURL
-            n <- liftIO $ getLatestBlockNum conf sess block url
-            ret <- liftIO $ fetchQuery n (fetchWithRetry conf.debug url sess) (QuerySlot addr slot)
-            case ret of
-              Right val -> do
-                liftIO $ modifyMVar_ sess.sharedCache $ \c ->
-                  pure $ c { slotCache = Map.insert (addr, slot) val c.slotCache }
-                pure $ continue val
-              Left err -> internalError $ "oracle error: " ++ show err
+        let (block, url) = fromJust rpcInfo.blockNumURL
+        res <- liftIO $ fetchSlotWithCache conf sess block url addr slot
+        case res of
+          FetchSuccess val _ -> pure $ continue val
+          FetchFailure _ -> internalError $ "oracle error: " ++ show q
+          FetchError err -> internalError $ "oracle error: " ++ show err
 
     PleaseReadEnv variable continue -> do
       value <- liftIO $ lookupEnv variable
