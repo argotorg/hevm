@@ -19,9 +19,10 @@ module EVM.Fetch
   , saveCache
   , RPCContract (..)
   , makeContractFromRPC
-  -- Below 4 are needed for Echidna
+  -- Below 5 are needed for Echidna and deterministic fetch tests
   , fetchSlotWithSession
   , fetchSlotWithCache
+  , fetchSlotWithCacheUsing
   , fetchWithSession
   , getCacheState
   , FetchStatus(..)
@@ -47,7 +48,7 @@ import System.Directory (createDirectoryIfMissing, doesFileExist)
 import Data.Aeson.Encode.Pretty (encodePretty)
 import qualified Data.ByteString.Lazy as BSL
 import Data.Bifunctor (first)
-import Control.Exception (SomeException, SomeAsyncException(..), try, catches, Handler(..), throwIO)
+import Control.Exception (SomeException, SomeAsyncException(..), try, catches, Handler(..), throwIO, mask)
 
 import Data.Aeson hiding (Error)
 import Data.Aeson.Optics
@@ -70,7 +71,7 @@ import Control.Monad (when)
 import EVM.Effects
 import qualified EVM.Expr as Expr
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.MVar (MVar, newMVar, readMVar, modifyMVar_)
+import Control.Concurrent.MVar (MVar, newEmptyMVar, newMVar, putMVar, readMVar, modifyMVar, modifyMVar_)
 import Data.IORef (IORef, newIORef, readIORef, atomicModifyIORef')
 import Data.Time.Clock (UTCTime, getCurrentTime, diffUTCTime, addUTCTime)
 import System.Random (randomRIO)
@@ -98,7 +99,16 @@ data Session = Session
   -- Shared rate limit cooldown across workers. When any worker hits a
   -- rate limit, it sets a deadline; other workers wait before retrying.
   , rpcThrottle     :: IORef (Maybe UTCTime)
+  , inFlightSlots   :: MVar (Map.Map SlotFetchKey (MVar SlotFetchResult))
   }
+
+type SlotFetchKey = (BlockNumber, Addr, W256)
+
+type SlotFetchResult = Either SomeException (FetchResult W256)
+
+data InFlightFetch a
+  = InFlightOwner (MVar (Either SomeException a))
+  | InFlightWaiter (MVar (Either SomeException a))
 
 data FetchCache = FetchCache
   { contractCache :: Map.Map Addr RPCContract
@@ -146,7 +156,7 @@ data RpcQuery a where
   QueryChainId ::                 RpcQuery W256
 
 data BlockNumber = Latest | BlockNumber W256
-  deriving (Show, Eq)
+  deriving (Show, Eq, Ord)
 
 deriving instance Show (RpcQuery a)
 
@@ -420,33 +430,110 @@ makeContractFromRPC (RPCContract (ByteStringS code) nonce balance) =
 
 -- Needed for Echidna only
 fetchSlotWithCache :: Config -> Session -> BlockNumber -> Text -> Addr -> W256 -> IO (FetchResult W256)
-fetchSlotWithCache conf sess nPre url addr slot = do
+fetchSlotWithCache conf sess nPre url addr slot =
+  fetchSlotWithCacheUsing
+    (\n a s -> fetchQuery n (fetchWithRetry conf.debug url sess) (QuerySlot a s))
+    conf
+    sess
+    nPre
+    url
+    addr
+    slot
+
+fetchSlotWithCacheUsing
+  :: (BlockNumber -> Addr -> W256 -> IO (Either Text W256))
+  -> Config
+  -> Session
+  -> BlockNumber
+  -> Text
+  -> Addr
+  -> W256
+  -> IO (FetchResult W256)
+fetchSlotWithCacheUsing fetch conf sess nPre url addr slot = do
   n <- getLatestBlockNum conf sess nPre url
-  -- Check successful cache
+  cached <- lookupSlotCache conf sess addr slot
+  case cached of
+    Just res -> pure res
+    Nothing ->
+      withInFlight sess.inFlightSlots cachedSuccess (n, addr, slot) $
+        fetchFreshSlot fetch conf sess n addr slot
+
+lookupSlotCache :: Config -> Session -> Addr -> W256 -> IO (Maybe (FetchResult W256))
+lookupSlotCache conf sess addr slot = do
   cache <- readMVar sess.sharedCache
   case Map.lookup (addr, slot) cache.slotCache of
     Just s -> do
       when (conf.debug) $ putStrLn $ "-> Using cached slot value for slot " <> show slot <> " at " <> show addr
-      pure (FetchSuccess s Cached)
+      pure (Just (FetchSuccess s Cached))
     Nothing -> do
-      -- Check failure cache
       failures <- readMVar sess.failedSlots
       if Set.member (addr, slot) failures
       then do
         when (conf.debug) $ putStrLn $ "-> Skipping previously failed slot " <> show slot <> " at " <> show addr
-        pure (FetchFailure Cached)
-      else do
-        -- Attempt fetch
-        when (conf.debug) $ putStrLn $ "-> Fetching slot " <> show slot <> " at " <> show addr
-        ret <- fetchQuery n (fetchWithRetry conf.debug url sess) (QuerySlot addr slot)
-        case ret of
-          Right val -> do
-            -- Success: cache it
-            modifyMVar_ sess.sharedCache $ \c ->
-              pure $ c { slotCache = Map.insert (addr, slot) val c.slotCache }
-            pure (FetchSuccess val Fresh)
-          Left err -> do
-            pure (FetchError err)
+        pure (Just (FetchFailure Cached))
+      else
+        pure Nothing
+
+fetchFreshSlot
+  :: (BlockNumber -> Addr -> W256 -> IO (Either Text W256))
+  -> Config
+  -> Session
+  -> BlockNumber
+  -> Addr
+  -> W256
+  -> IO (FetchResult W256)
+fetchFreshSlot fetch conf sess n addr slot = do
+  cached <- lookupSlotCache conf sess addr slot
+  case cached of
+    Just res -> pure res
+    Nothing -> do
+      when (conf.debug) $ putStrLn $ "-> Fetching slot " <> show slot <> " at " <> show addr
+      ret <- fetch n addr slot
+      case ret of
+        Right val -> do
+          modifyMVar_ sess.sharedCache $ \c ->
+            pure $ c { slotCache = Map.insert (addr, slot) val c.slotCache }
+          pure (FetchSuccess val Fresh)
+        Left err ->
+          pure (FetchError err)
+
+cachedSuccess :: FetchResult W256 -> FetchResult W256
+cachedSuccess (FetchSuccess val _) = FetchSuccess val Cached
+cachedSuccess res = res
+
+claimInFlight
+  :: Ord key
+  => MVar (Map.Map key (MVar (Either SomeException a)))
+  -> key
+  -> IO (InFlightFetch a)
+claimInFlight inFlight fetchKey =
+  modifyMVar inFlight $ \entries ->
+    case Map.lookup fetchKey entries of
+      Just result ->
+        pure (entries, InFlightWaiter result)
+      Nothing -> do
+        result <- newEmptyMVar
+        pure (Map.insert fetchKey result entries, InFlightOwner result)
+
+withInFlight
+  :: Ord key
+  => MVar (Map.Map key (MVar (Either SomeException a)))
+  -> (a -> a)
+  -> key
+  -> IO a
+  -> IO a
+withInFlight inFlight waiterResult fetchKey action = mask $ \restore -> do
+  claimed <- claimInFlight inFlight fetchKey
+  case claimed of
+    InFlightWaiter result -> do
+      outcome <- restore $ readMVar result
+      either throwIO (pure . waiterResult) outcome
+    InFlightOwner result -> do
+      outcome <- try (restore action)
+      putMVar result outcome
+      modifyMVar_ inFlight $ \entries ->
+        pure $ Map.delete fetchKey entries
+      either throwIO pure outcome
 
 -- | Get the complete cache state including both successes and failures
 -- Returns in the format expected by Echidna's UI:
@@ -555,7 +642,8 @@ mkSession cacheDir mblock = do
   failedContracts <- liftIO $ newMVar Set.empty
   failedSlots <- liftIO $ newMVar Set.empty
   rpcThrottle <- liftIO $ newIORef Nothing
-  pure $ Session sess latestBlockNum cache cacheDir failedContracts failedSlots rpcThrottle
+  inFlightSlots <- liftIO $ newMVar Map.empty
+  pure $ Session sess latestBlockNum cache cacheDir failedContracts failedSlots rpcThrottle inFlightSlots
 
 mkSessionWithoutCache :: App m => m Session
 mkSessionWithoutCache = mkSession Nothing Nothing
