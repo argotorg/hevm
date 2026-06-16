@@ -71,7 +71,7 @@ run s s' codeType = do
   a <- compile s codeType
   b <- compile s' codeType
   Effects.runApp $ withSolvers Bitwuzla 3 Nothing defMemLimit $ \sg -> do
-    calldata <- mkCalldata Nothing []
+    (calldata, _) <- mkCalldata Nothing []
     equivalenceCheck sg Nothing a b defaultVeriOpts calldata (codeType == Solidity.Creation)
 
 runtimeSolidityEquivalenceTests :: TestTree
@@ -397,7 +397,7 @@ bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
     let a = fromJust (hexByteString "5f610100526020610100f3")
         b = fromJust (hexByteString "5f356101f40115610100526020610100f3")
     eq <- Effects.runApp $ withSolvers Z3 1 Nothing defMemLimit $ \s -> do
-      calldata <- mkCalldata Nothing []
+      (calldata, _) <- mkCalldata Nothing []
       equivalenceCheck s Nothing a b defaultVeriOpts calldata False
     assertBool "Must have a difference" (any (isCex . fst) eq.res)
     let cexs :: [SMTCex] = mapMaybe (getCex . fst) eq.res
@@ -425,7 +425,7 @@ yulEquivalenceTests = testGroup "Yul equivalence"
     Right aPrgm <- yul "" a
     Right bPrgm <- yul "" b
     eq <- Effects.runApp $ withSolvers Bitwuzla 1 Nothing defMemLimit $ \s -> do
-      calldata <- mkCalldata Nothing []
+      (calldata, _) <- mkCalldata Nothing []
       equivalenceCheck s Nothing aPrgm bPrgm defaultVeriOpts calldata False
     assertBool "Must have a difference" (any (isCex . fst) eq.res)
   , yulOptimizationsSolcTests
@@ -548,7 +548,7 @@ yulOptimizationsSolcTests = testCase "eq-all-yul-optimization-tests" $ do
           Right aPrgm <- yul contractName $ T.pack $ unlines filteredASym
           Right bPrgm <- yul contractName $ T.pack $ unlines filteredBSym
           eq <- Effects.runApp $ withSolvers Bitwuzla 1 (Just 100) defMemLimit $ \s -> do
-            calldata <- mkCalldata Nothing []
+            (calldata, _) <- mkCalldata Nothing []
             equivalenceCheck s Nothing aPrgm bPrgm opts calldata False
           let res = map fst eq.res
           end <- getCurrentTime

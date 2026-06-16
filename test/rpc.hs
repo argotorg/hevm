@@ -105,8 +105,9 @@ tests = testGroup "rpc"
     -- symbolically exec "transfer" on WETH9 using remote rpc
     -- https://etherscan.io/token/0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2#code
     , test "weth-sym" $ do
-        calldata' <- symCalldata "transfer(address,uint256)" [AbiAddressType, AbiUIntType 256] ["0xdead"] (AbstractBuf "txdata")
+        (cdBuf, cdProps, _) <- symCalldata "transfer(address,uint256)" [AbiAddressType, AbiUIntType 256] ["0xdead"] (AbstractBuf "txdata")
         let
+          calldata' = (cdBuf, cdProps)
           postc _ (Failure _ _ (Revert _)) = PBool False
           postc _ _ = PBool True
         sess <- mkSession Nothing Nothing

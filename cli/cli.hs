@@ -419,7 +419,7 @@ equivalence eqOpts cOpts = do
                             , loopHeuristic = cOpts.loopDetectionHeuristic
                             }
                           }
-  calldata <- buildCalldata cOpts eqOpts.sig eqOpts.arg
+  (calldata, _caveats) <- buildCalldata cOpts eqOpts.sig eqOpts.arg
   solver <- liftIO $ getSolver cOpts.solver
   cores <- liftIO $ unsafeInto <$> getNumProcessors
   let solverCount = fromMaybe cores cOpts.numSolvers
@@ -480,8 +480,9 @@ getRoot cmd = maybe getCurrentDirectory makeAbsolute cmd.root
 parseMaxIters :: Integer -> Maybe Integer
 parseMaxIters num = if num < 0 then Nothing else Just num
 
--- | Builds a buffer representing calldata based on the given cli arguments
-buildCalldata :: App m => CommonOptions -> Maybe Text -> [String] -> m (Expr Buf, [Prop])
+-- | Builds a buffer representing calldata based on the given cli arguments,
+-- together with any program-wide soundness caveats incurred (see 'Caveat').
+buildCalldata :: App m => CommonOptions -> Maybe Text -> [String] -> m ((Expr Buf, [Prop]), [Caveat])
 buildCalldata cOpts sig arg = case (cOpts.calldata, sig) of
   -- fully abstract calldata
   (Nothing, Nothing) -> mkCalldata Nothing []
@@ -491,7 +492,7 @@ buildCalldata cOpts sig arg = case (cOpts.calldata, sig) of
     if (isNothing val) then liftIO $ do
       putStrLn $ "Error, invalid calldata: " <>  show c
       exitFailure
-    else pure (ConcreteBuf (fromJust val), [])
+    else pure ((ConcreteBuf (fromJust val), []), [])
   -- calldata according to given abi with possible specializations from the `arg` list
   (Nothing, Just sig') -> do
     method' <- liftIO $ functionAbi sig'
@@ -508,7 +509,7 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = do
   let block' = maybe Fetch.Latest Fetch.BlockNumber cExecOpts.block
       blockUrlInfo = (,) block' <$> cExecOpts.rpc
   sess <- Fetch.mkSession cOpts.cacheDir cExecOpts.block
-  calldata <- buildCalldata cOpts sOpts.sig sOpts.arg
+  (calldata, caveats) <- buildCalldata cOpts sOpts.sig sOpts.arg
   preState <- symvmFromCommand cExecOpts sOpts cFileOpts sess calldata
   errCodes <- case sOpts.assertions of
     Nothing -> pure defaultPanicCodes
@@ -537,6 +538,7 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = do
     case res of
       [] -> do
         liftIO $ putStrLn "\nQED: No reachable property violations discovered\n"
+        liftIO $ printCaveats caveats
         showExtras solvers sOpts calldata expr
       _ -> do
         let cexs = snd <$> mapMaybe getCex res
@@ -549,6 +551,7 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = do
                  ] <> fmap (formatCex (fst calldata) Nothing) cexs
         liftIO $ T.putStrLn $ T.unlines counterexamples
         liftIO $ printWarnings Nothing mempty expr res "symbolically"
+        liftIO $ printCaveats caveats
         showExtras solvers sOpts calldata expr
         liftIO exitFailure
 

@@ -598,7 +598,15 @@ data PartialExec
   | PrecompileMissing     { pc :: Int, addr :: Expr EAddr, preAddr :: Addr }
   | CheatCodeMissing      { pc :: Int, addr :: Expr EAddr, selector :: FunctionSelector }
   | BranchTooDeep         { pc :: Int, addr :: Expr EAddr}
-  | DynamicArgBounded     { maxSize :: Int }
+  deriving (Show, Eq, Ord)
+
+-- | A program-wide soundness caveat. Unlike a 'PartialExec', a caveat does not
+-- mark an execution path that we failed to explore: every reachable path was
+-- explored fully. It records that the *space of inputs* was restricted, so the
+-- result is only valid within that restriction. It is therefore attached to the
+-- verification result as a whole, not to an individual 'Expr End' leaf.
+data Caveat
+  = DynArgBounded { maxSize :: Int }  -- ^ dynamic (bytes/string) calldata args were bounded to this many bytes
   deriving (Show, Eq, Ord)
 
 -- | Effect types used by the vm implementation for side effects & control flow

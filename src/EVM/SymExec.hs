@@ -163,7 +163,7 @@ data CalldataFragment
 -- with concrete arguments.
 -- Any argument given as "<symbolic>" or omitted at the tail of the list are
 -- kept symbolic.
-symCalldata :: App m => Text -> [AbiType] -> [String] -> Expr Buf -> m (Expr Buf, [Prop])
+symCalldata :: App m => Text -> [AbiType] -> [String] -> Expr Buf -> m (Expr Buf, [Prop], [Caveat])
 symCalldata sig typesignature concreteArgs base = do
   conf <- readConfig
   let
@@ -183,7 +183,13 @@ symCalldata sig typesignature concreteArgs base = do
     sizeConstraints
       = (Expr.bufLength withSelector .>= cdLen calldatas)
       .&& (Expr.bufLength withSelector .< (Lit (2 ^ conf.maxBufSize)))
-  pure (withSelector, sizeConstraints : props)
+    -- A dynamic (bytes/string) argument is turned into a 'Dy' fragment with its
+    -- length bounded to maxDynSize. That is a restriction of the input domain
+    -- (every path is still explored fully), so we record it as a program-wide
+    -- 'Caveat' rather than a per-path 'Partial'. Derived from the fragments we
+    -- actually built, so a concretely-supplied argument produces no caveat.
+    caveats = [DynArgBounded conf.maxDynSize | any isDy calldatas]
+  pure (withSelector, sizeConstraints : props, caveats)
 
 cdLen :: [CalldataFragment] -> Expr EWord
 cdLen frags = Expr.add (headLen frags) (tailLen frags)
@@ -266,6 +272,10 @@ isSt :: CalldataFragment -> Bool
 isSt (St {}) = True
 isSt (Comp fs) = all isSt fs
 isSt _ = False
+
+isDy :: CalldataFragment -> Bool
+isDy (Dy {}) = True
+isDy _ = False
 
 
 abstractVM
@@ -658,7 +668,7 @@ getExprEmptyStore
   -> m [Expr End]
 getExprEmptyStore solvers c signature' concreteArgs opts = do
   conf <- readConfig
-  calldata <- mkCalldata signature' concreteArgs
+  (calldata, _caveats) <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ loadEmptySymVM (RuntimeCode (ConcreteRuntimeCode c)) (Lit 0) calldata
   paths <- interpret (Fetch.oracle solvers Nothing opts.rpcInfo) opts.iterConf preState runExpr noopPathHandler
   if conf.simp then (pure $ map Expr.simplify paths) else pure paths
@@ -716,19 +726,23 @@ panicMsg :: Word256 -> ByteString
 panicMsg err = selector "Panic(uint256)" <> encodeAbiValue (AbiUInt 256 err)
 
 -- | Builds a buffer representing calldata from the provided method description
--- and concrete arguments
-mkCalldata :: App m => Maybe Sig -> [String] -> m (Expr Buf, [Prop])
+-- and concrete arguments, together with any program-wide soundness caveats
+-- incurred while building it (see 'Caveat').
+mkCalldata :: App m => Maybe Sig -> [String] -> m ((Expr Buf, [Prop]), [Caveat])
 mkCalldata Nothing _ = do
   conf <- readConfig
-  pure ( AbstractBuf "txdata"
-       -- assert that the length of the calldata is never more than 2^64
-       -- this is way larger than would ever be allowed by the gas limit
-       -- and avoids spurious counterexamples during abi decoding
-       -- TODO: can we encode calldata as an array with a smaller length?
-       , [Expr.bufLength (AbstractBuf "txdata") .< (Lit (2 ^ conf.maxBufSize))]
+  pure ( ( AbstractBuf "txdata"
+         -- assert that the length of the calldata is never more than 2^64
+         -- this is way larger than would ever be allowed by the gas limit
+         -- and avoids spurious counterexamples during abi decoding
+         -- TODO: can we encode calldata as an array with a smaller length?
+         , [Expr.bufLength (AbstractBuf "txdata") .< (Lit (2 ^ conf.maxBufSize))]
+         )
+       , []
        )
-mkCalldata (Just (Sig name types)) args =
-  symCalldata name types args (AbstractBuf "txdata")
+mkCalldata (Just (Sig name types)) args = do
+  (buf, props, caveats) <- symCalldata name types args (AbstractBuf "txdata")
+  pure ((buf, props), caveats)
 
 -- Used only in testing
 verifyContract :: forall m . App m
@@ -741,18 +755,10 @@ verifyContract :: forall m . App m
   -> Postcondition
   -> m ([Expr End], [VerifyResult])
 verifyContract solvers theCode signature' concreteArgs opts maybepre post = do
-  conf <- readConfig
-  calldata <- mkCalldata signature' concreteArgs
+  (calldata, _caveats) <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ abstractVM calldata theCode maybepre False
   let fetcher = Fetch.oracle solvers Nothing opts.rpcInfo
-  (ends, results) <- verify solvers fetcher opts preState post Nothing
-  -- If the signature has dynamic types, the exploration is bounded by maxDynSize.
-  -- Inject a Partial end state so the user knows the result may be incomplete.
-  let hasDynArgs = case signature' of
-        Just (Sig _ types) -> any (\t -> abiKind t == Dynamic) types
-        Nothing -> False
-      dynPartial = [Partial [] (TraceContext mempty mempty mempty) (DynamicArgBounded conf.maxDynSize)]
-  pure (if hasDynArgs then ends <> dynPartial else ends, results)
+  verify solvers fetcher opts preState post Nothing
 
 -- Used only in testing
 exploreContract :: forall m . App m
@@ -764,7 +770,7 @@ exploreContract :: forall m . App m
   -> Maybe Precondition
   -> m [Expr End]
 exploreContract solvers theCode signature' concreteArgs opts maybepre = do
-  calldata <- mkCalldata signature' concreteArgs
+  (calldata, _caveats) <- mkCalldata signature' concreteArgs
   preState <- liftIO $ stToIO $ abstractVM calldata theCode maybepre False
   let fetcher = Fetch.oracle solvers Nothing opts.rpcInfo
   executeVM fetcher opts.iterConf preState noopPathHandler
@@ -1138,7 +1144,7 @@ equivalenceCheck' solvers sess branchesA branchesB create = do
               <> " with constraints: " <> (T.unpack . T.unlines $ map formatProp aProps)
             liftIO $ putStrLn $ "create deployed code B: " <> bsToHex codeB
               <> " with constraints: " <> (T.unpack . T.unlines $ map formatProp bProps)
-          calldata <- mkCalldata Nothing []
+          (calldata, _) <- mkCalldata Nothing []
           equivalenceCheck solvers sess codeA codeB defaultVeriOpts calldata False
         _ -> internalError $ "Symbolic code returned from constructor." <> " A: " <> show simpA <> " B: " <> show simpB
 

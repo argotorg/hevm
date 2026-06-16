@@ -246,7 +246,8 @@ symRun :: forall m . App m => UnitTestOptions -> VM Concrete -> Sig -> SourceCac
 symRun opts@UnitTestOptions{..} vm sig@(Sig testName types) sourceCache = do
     let cs = callSig sig
     liftIO $ putStrLn $ "\x1b[96m[RUNNING]\x1b[0m " <> Text.unpack cs
-    cd <- symCalldata cs types [] (AbstractBuf "txdata")
+    (cdBuf, cdProps, caveats) <- symCalldata cs types [] (AbstractBuf "txdata")
+    let cd = (cdBuf, cdProps)
     let shouldFail = "proveFail" `isPrefixOf` cs
 
     -- define postcondition depending on `shouldFail`
@@ -281,13 +282,8 @@ symRun opts@UnitTestOptions{..} vm sig@(Sig testName types) sourceCache = do
     -- check postconditions against vm
     let fetcherSym = Fetch.oracle solvers (Just sess) rpcInfo
     let symVm = symbolify vm' & set #srcLookup (Just $ makeSrcLookup dapp sourceCache)
-    (ends0, results) <- verify solvers fetcherSym (makeVeriOpts opts) symVm postcondition (Just $ cexHandler cd fetcherConc)
+    (ends, results) <- verify solvers fetcherSym (makeVeriOpts opts) symVm postcondition (Just $ cexHandler cd fetcherConc)
     conf <- readConfig
-    -- If the signature has dynamic types, exploration is bounded by maxDynSize.
-    -- Inject a Partial end state so the user knows the result may be incomplete.
-    let hasDynArgs = any (\t -> abiKind t == Dynamic) types
-        dynPartial = Partial [] (TraceContext mempty mempty mempty) (DynamicArgBounded conf.maxDynSize)
-        ends = if hasDynArgs then ends0 <> [dynPartial] else ends0
     when (conf.debug) $ liftIO $ do
       putStrLn $ "   \x1b[94m[EXPLORATION COMPLETE]\x1b[0m " <> Text.unpack testName <> " -- explored " <> show (length ends) <> " paths."
       when (conf.verb >= 2) $ do
@@ -299,7 +295,11 @@ symRun opts@UnitTestOptions{..} vm sig@(Sig testName types) sourceCache = do
     when (conf.debug && conf.verb >=2) $ liftIO $ do
       putStrLn $ "Collected END-s:\n" <> prettyvmresults ends
       putStrLn $ "Collected verification results: " <> show results
-    let warnings = any Expr.isPartial ends || any isUnknown results || any isError results
+    -- Caveats (e.g. dynamic args bounded to maxDynSize) restrict the input
+    -- domain rather than leaving a path unexplored, so they are not Partials;
+    -- they still count as a warning so a bounded run is not reported as a clean
+    -- pass (avoids a false sense of security).
+    let warnings = any Expr.isPartial ends || any isUnknown results || any isError results || not (null caveats)
     let allReverts = not . (any Expr.isSuccess) $ ends
     let unexpectedAllRevert = allReverts && not shouldFail
     when conf.debug $ liftIO $ putStrLn $ "   symRun -- (cex,warnings,unexpectedAllRevert): " <> show (any isCex results, warnings, unexpectedAllRevert)
@@ -322,6 +322,7 @@ symRun opts@UnitTestOptions{..} vm sig@(Sig testName types) sourceCache = do
       liftIO $ putStrLn $ "   \x1b[33m[WARNING]\x1b[0m " <> Text.unpack testName <> " all branches reverted\n"
     let sl = Just $ makeSrcLookup dapp sourceCache
     liftIO $ printWarnings sl vm'.env.contracts ends results $ "the test " <> Text.unpack testName
+    liftIO $ printCaveats caveats
     pure (not (any isCex results), not (warnings || unexpectedAllRevert))
     where
       cexHandler :: (Expr 'Buf, [Prop])
@@ -373,6 +374,15 @@ printWarnings srcLookupM contracts e results testName = do
     forM_ (groupIssues (filter isUnknown results)) $ \(num, str) -> putStrLn $ "      " <> show num <> "x -> " <> str
     forM_ (groupPartials srcLookupM contracts e) $ \(num, str) -> putStrLn $ "      " <> show num <> "x -> " <> str
   putStrLn ""
+
+-- | Print any program-wide soundness caveats (see 'Caveat'). Unlike
+-- 'printWarnings' this is not about unexplored paths: it tells the user the
+-- input domain was restricted, so a "no counterexample" result is only valid
+-- within that restriction.
+printCaveats :: [Caveat] -> IO ()
+printCaveats caveats =
+  forM_ caveats $ \c ->
+    putStrLn $ "   \x1b[33m[CAVEAT]\x1b[0m " <> Text.unpack (formatCaveat c)
 
 getReproFailure :: App m => Sig -> Expr Buf -> SMTCex -> m (Err ReproducibleCex)
 getReproFailure sig@(Sig testName _) cd cex = do

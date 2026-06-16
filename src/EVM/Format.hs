@@ -5,6 +5,7 @@ module EVM.Format
   , formatSomeExpr
   , formatPartial
   , formatPartialDetailed
+  , formatCaveat
   , formatProp
   , formatState
   , formatError
@@ -521,11 +522,13 @@ formatPartial = \case
       , "contract addr: " <> pack (show addr)
       , "program counter: " <> pack (show pc)]
     ]
-  DynamicArgBounded maxSz -> T.unlines
-    ["Dynamic argument (bytes/string) concretized to max " <> pack (show maxSz) <> " bytes."
-    , indent 2 "Counterexamples beyond this bound may be missed."
-    ]
 
+-- | Render a program-wide soundness caveat (see 'Caveat').
+formatCaveat :: Caveat -> Text
+formatCaveat = \case
+  DynArgBounded maxSz ->
+    "Dynamic (bytes/string) arguments were bounded to " <> pack (show maxSz) <>
+    " bytes; counterexamples requiring longer inputs may be missed."
 
 formatPartialDetailed :: Maybe SrcLookup -> Map.Map (Expr EAddr) Contract -> PartialExec -> Text
 formatPartialDetailed srcLookupM contracts p =
@@ -537,7 +540,6 @@ formatPartialDetailed srcLookupM contracts p =
     CheatCodeMissing {..}      -> "Cheat code not recognized: " <> T.pack (show selector) <> toTxt addr pc
     PrecompileMissing {..}     -> "Precompile at address " <> pack (show preAddr) <> " does not exist, called from" <> toTxt addr pc
     BranchTooDeep {..}         -> "Branches too deep" <> toTxt addr pc
-    DynamicArgBounded {..}     -> "Dynamic argument (bytes/string) concretized to max " <> pack (show maxSize) <> " bytes; counterexamples beyond this bound may be missed"
 
 formatSomeExpr :: SomeExpr -> Text
 formatSomeExpr (SomeExpr e) = formatExpr $ Expr.simplify e
