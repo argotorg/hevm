@@ -15,6 +15,13 @@ contract AssertApproxEqRelFailTest is Test {
         assertApproxEqRel(uint256(1), uint256(0), 0);
     }
 
+    function prove_approx_eq_rel_uint_overflow_delta() public pure {
+        // huge difference: absDelta ~ 2^256, denom = 1, so percentDelta ~ 2^256 * 1e18
+        // does not fit in uint256 -> "overflow in delta calculation" -> should fail
+        // even with the maximum tolerance.
+        assertApproxEqRel(type(uint256).max, uint256(1), type(uint256).max);
+    }
+
     // --- int256 failures ---
 
     function prove_approx_eq_rel_int_exceeds_delta() public pure {

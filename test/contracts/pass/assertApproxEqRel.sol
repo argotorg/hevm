@@ -36,6 +36,19 @@ contract AssertApproxEqRelTest is Test {
         assertApproxEqRel(type(uint256).max, type(uint256).max, 0);
     }
 
+    function prove_approx_eq_rel_uint_intermediate_overflow_ok() public pure {
+        // absDelta = 2^200, so absDelta * 1e18 (~2^260) overflows uint256, but the
+        // true percentDelta = 2^200 * 1e18 / 2^200 = 1e18 (100%) still fits and is
+        // within tolerance. Exercises the wide-precision path on the pass side.
+        assertApproxEqRel(uint256(2)**201, uint256(2)**200, 1e18);
+    }
+
+    function prove_approx_eq_rel_uint_intermediate_overflow_within() public pure {
+        // absDelta = 2^200 (mul overflows uint256), denom = 2^205, so
+        // percentDelta = 2^200 * 1e18 / 2^205 = 1e18 / 32 = 3.125e16 (~3.125%) <= 10%.
+        assertApproxEqRel(uint256(2)**205 + uint256(2)**200, uint256(2)**205, 1e17);
+    }
+
     // --- int256 concrete tests ---
 
     function prove_approx_eq_rel_int_exact() public pure {

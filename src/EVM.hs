@@ -2295,9 +2295,14 @@ cheatActions = Map.fromList
       BS8.pack (show a) <> " " <> comp <> " " <> BS8.pack (show b)
     -- 1e18 (100% in foundry's 18-decimal fixed point) as Integer and W256
     scale1e18 :: Integer
-    scale1e18 = 1000000000000000000
+    scale1e18 = 10^(18::Int)
     scale1e18W :: W256
-    scale1e18W = 1000000000000000000
+    scale1e18W = 10^(18::Int)
+    -- largest absDelta for which (absDelta * 1e18) does not overflow 256 bits.
+    -- Used by the symbolic relative-equality path to detect when the truncating
+    -- Expr.mul would produce a wrong result.
+    maxSafeRelDelta :: W256
+    maxSafeRelDelta = (maxBound :: W256) `Prelude.div` scale1e18W
     -- shared failure message for the relative-equality assertions; realDelta is
     -- already rendered (a scaled integer, or the literal "undefined")
     relFailMsg :: Show a => a -> a -> Word256 -> String -> ByteString
@@ -2427,10 +2432,24 @@ cheatActions = Map.fromList
                else if percentDelta <= toInteger maxPercentDelta then doStop
                else frameRevert $ relFailMsg a b maxPercentDelta (show percentDelta)
         (SAbi [ew1, ew2, ew3],"") ->
-          -- percentDelta = (max(a,b) - min(a,b)) * 1e18 / b; check <= maxPercentDelta
-          let absDelta = Expr.sub (Expr.max ew1 ew2) (Expr.min ew1 ew2)
+          -- Sound symbolic encoding. percentDelta = |a-b| * 1e18 / b, and the
+          -- assertion passes iff percentDelta <= maxPercentDelta. hevm's Expr has
+          -- no full-precision div, so Expr.mul truncates mod 2^256 and the result
+          -- is only trustworthy when (absDelta * 1e18) cannot overflow, i.e.
+          -- absDelta <= maxSafeRelDelta. We therefore PASS only when we can prove
+          -- the assertion holds; in every other case (overflow possible, or
+          -- b == 0 && a /= 0) we fail. This can produce false positives but never
+          -- an unsound pass. b == 0 && a == 0 is treated as equal (pass).
+          let absDelta     = Expr.sub (Expr.max ew1 ew2) (Expr.min ew1 ew2)
               percentDelta = Expr.div (Expr.mul absDelta (Lit scale1e18W)) ew2
-          in case Expr.simplify (Expr.iszero $ Expr.leq percentDelta ew3) of
+              bZero        = Expr.iszero ew2
+              aNotZero     = Expr.iszero (Expr.iszero ew1)
+              overflow     = Expr.gt absDelta (Lit maxSafeRelDelta)
+              pdExceeds    = Expr.gt percentDelta ew3
+              -- fail iff (b == 0 && a /= 0) || (b /= 0 && (overflow || pd > max))
+              failCond     = Expr.or (Expr.and bZero aNotZero)
+                                     (Expr.and (Expr.iszero bZero) (Expr.or overflow pdExceeds))
+          in case Expr.simplify failCond of
             Lit 0 -> doStop
             Lit _ -> frameRevert "assertion failed: assertApproxEqRel (symbolic)"
             ew -> branch (?conf).maxDepth ew $ \case
@@ -2461,16 +2480,14 @@ cheatActions = Map.fromList
                   then frameRevert "assertion failed: overflow in delta calculation"
                   else if percentDelta <= toInteger maxPercentDelta then doStop
                   else frameRevert $ relFailMsg a b maxPercentDelta (show percentDelta)
-        (SAbi [ew1, ew2, ew3],"") ->
-          -- best-effort symbolic handling (same-sign approximation, see assertApproxEqAbs)
-          let absDelta = Expr.sub (Expr.max ew1 ew2) (Expr.min ew1 ew2)
-              percentDelta = Expr.div (Expr.mul absDelta (Lit scale1e18W)) ew2
-          in case Expr.simplify (Expr.iszero $ Expr.leq percentDelta ew3) of
-            Lit 0 -> doStop
-            Lit _ -> frameRevert "assertion failed: assertApproxEqRel (symbolic)"
-            ew -> branch (?conf).maxDepth ew $ \case
-              False -> doStop
-              True -> frameRevert "assertion failed: assertApproxEqRel (symbolic)"
+        (SAbi [_, _, _],"") ->
+          -- A sound symbolic encoding for signed operands would need full-precision
+          -- signed abs and a |b| denominator (||a|-|b|| / |a|+|b| over the reference
+          -- |b|), which hevm's Expr language cannot express without an unsound,
+          -- overflow-prone Expr.mul/Expr.div. Rather than risk a false pass we
+          -- conservatively report failure for symbolic int256 operands. This may
+          -- be a false positive but is never an unsound pass.
+          frameRevert "assertion failed: assertApproxEqRel (symbolic int256 operands not supported)"
         abivals -> vmError (BadCheatCode ("assertApproxEqRel(int256,int256,uint256) parameter decoding failed: " <> show abivals) sig)
     toStringCheat abitype sig input = do
       case decodeBuf [abitype] input of
