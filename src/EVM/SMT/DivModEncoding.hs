@@ -195,6 +195,8 @@ mulEncoding enc props = do
       -- products the div-link lemma introduces, e.g. (a/b)*b
       linkMuls = [ (T.Div a b, b) | (a, b) <- udivs ]
       allMuls  = nubOrd (muls <> linkMuls)
+      -- divisions whose dividend is an abstract product: (x*y)/z
+      mulDivs = [ (a, x, y, b) | (a, b) <- udivs, Just (x, y) <- [asMul a] ]
   if null udivs && null muls then pure []
   else do
     comm    <- mapM mkComm allMuls
@@ -202,8 +204,10 @@ mulEncoding enc props = do
     zeroOne <- concat <$> mapM mkMulIdentities allMuls
     mulMono <- concat <$> mapM mkMulMono (sharedPairs allMuls)
     divMono <- concat <$> mapM mkDivMono (sharedPairs udivs)
+    divDivisorMono <- concat <$> mapM mkDivisorMono (divisorPairs udivs)
+    mulDivB <- concat <$> mapM mkMulDivBound mulDivs
     pure $ (SMTComment "multiplication abstraction lemmas")
-           : (comm <> zeroOne <> links <> mulMono <> divMono)
+           : (comm <> zeroOne <> links <> mulMono <> divMono <> divDivisorMono <> mulDivB)
   where
     -- commutativity: abst_evm_bvmul(a,b) = abst_evm_bvmul(b,a). Needed so that
     -- lemma terms match the props regardless of the simplifier's operand order.
@@ -216,6 +220,21 @@ mulEncoding enc props = do
     sharedPairs :: [(Expr EWord, Expr EWord)] -> [(Expr EWord, Expr EWord, Expr EWord)]
     sharedPairs xs = [ (x, y, z) | (x, z) <- xs, (y, z') <- xs, z == z', x /= y ]
 
+    -- ordered pairs (y1, y2, x) where (x,y1) and (x,y2) both occur (shared 1st
+    -- operand): divisions of the same dividend by different divisors.
+    divisorPairs :: [(Expr EWord, Expr EWord)] -> [(Expr EWord, Expr EWord, Expr EWord)]
+    divisorPairs xs = [ (y1, y2, x) | (x, y1) <- xs, (x', y2) <- xs, x == x', y1 /= y2 ]
+
+    -- div anti-monotonicity in the divisor (sound for nonzero divisors): a
+    -- bigger divisor yields a smaller-or-equal quotient.
+    --   y1 <= y2 && y1 != 0  =>  x/y2 <= x/y1
+    mkDivisorMono (y1, y2, x) = do
+      y1e <- enc y1; y2e <- enc y2; xe <- enc x
+      let dxy1 = "(abst_evm_bvudiv" `sp` xe `sp` y1e <> ")"
+          dxy2 = "(abst_evm_bvudiv" `sp` xe `sp` y2e <> ")"
+      pure [ SMTCommand $ "(assert (=> (and (distinct" `sp` y1e `sp` zero <> ")"
+             <> " (bvule" `sp` y1e `sp` y2e <> ")) (bvule" `sp` dxy2 `sp` dxy1 <> ")))" ]
+
     -- mul monotonicity (guarded by no-overflow, hence sound): if neither x*z
     -- nor y*z overflows then x <= y  =>  x*z <= y*z. The guard is bound-free;
     -- bounding operands (e.g. a Solidity require) keeps it cheap to discharge.
@@ -223,6 +242,7 @@ mulEncoding enc props = do
       xenc <- enc x; yenc <- enc y; zenc <- enc z
       let mxz = "(abst_evm_bvmul" `sp` xenc `sp` zenc <> ")"
           myz = "(abst_evm_bvmul" `sp` yenc `sp` zenc <> ")"
+      -- forward: x <= y  =>  x*z <= y*z
       pure [ SMTCommand $ "(assert (=> (and" `sp` mulNoOverflow xenc zenc `sp` mulNoOverflow yenc zenc
              <> " (bvule" `sp` xenc `sp` yenc <> ")) (bvule" `sp` mxz `sp` myz <> ")))" ]
 
@@ -233,6 +253,24 @@ mulEncoding enc props = do
       let dxz = "(abst_evm_bvudiv" `sp` xenc `sp` zenc <> ")"
           dyz = "(abst_evm_bvudiv" `sp` yenc `sp` zenc <> ")"
       pure [ SMTCommand $ "(assert (=> (bvule" `sp` xenc `sp` yenc <> ") (bvule" `sp` dxz `sp` dyz <> ")))" ]
+    -- recognise an abstract symbolic*symbolic product
+    asMul :: Expr EWord -> Maybe (Expr EWord, Expr EWord)
+    asMul (T.Mul x y) | notLit x, notLit y = Just (x, y)
+    asMul _ = Nothing
+    notLit (Lit _) = False
+    notLit _       = True
+
+    -- mulDiv bound (sound under no-overflow of x*z): if one factor is <= the
+    -- divisor then dividing the product by it cannot exceed the other factor.
+    --   y <= z  =>  (x*y)/z <= x       x <= z  =>  (x*y)/z <= y
+    -- `a` is the original product expr, so the div term matches the prop exactly.
+    mkMulDivBound (a, x, y, z) = do
+      ae <- enc a; xe <- enc x; ye <- enc y; ze <- enc z
+      let dv = "(abst_evm_bvudiv" `sp` ae `sp` ze <> ")"
+      pure [ SMTCommand $ "(assert (=> (and (bvule" `sp` ye `sp` ze <> ")" `sp` mulNoOverflow xe ze
+               <> ") (bvule" `sp` dv `sp` xe <> ")))"
+           , SMTCommand $ "(assert (=> (and (bvule" `sp` xe `sp` ze <> ")" `sp` mulNoOverflow ye ze
+               <> ") (bvule" `sp` dv `sp` ye <> ")))" ]
     -- quotient*divisor <= dividend
     mkDivMulLink (a, b) = do
       aenc <- enc a

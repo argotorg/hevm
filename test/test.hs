@@ -1476,6 +1476,45 @@ tests = testGroup "hevm"
           } |]
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertBoolM "Expected counterexample" (any isCex res)
+    , testAbstractArith "div-divisor-monotone" $ do
+        -- a bigger divisor yields a smaller-or-equal quotient (div anti-monotonicity)
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_divisor_monotone(uint256 amt, uint256 p1, uint256 p2) external pure {
+              require(p1 != 0 && p2 != 0);
+              require(p1 <= p2);
+              uint256 q1; uint256 q2;
+              assembly { q1 := div(amt, p1)  q2 := div(amt, p2) }
+              assert(q2 <= q1);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "muldiv-fee-cap" $ do
+        -- a fee of feeBps/10000 never exceeds the principal (mulDiv bound)
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_fee_le(uint256 amount, uint256 feeBps) external pure {
+              require(amount < (1<<128) && feeBps <= 10000);
+              uint256 fee; assembly { fee := div(mul(amount, feeBps), 10000) }
+              assert(fee <= amount);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "muldiv-fee-uncapped-not-unsound" $ do
+        -- SOUNDNESS: without the feeBps <= 100% bound the property is false; the
+        -- mulDiv guard must not fire, so this must NOT be proved.
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_fee_uncapped(uint256 amount, uint256 feeBps) external pure {
+              require(amount < (1<<128));
+              uint256 fee; assembly { fee := div(mul(amount, feeBps), 10000) }
+              assert(fee <= amount);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertBoolM "Must be Unknown, never QED" (not (any isCex res) && any isUnknown res)
     ]
   , testGroup "max-iterations"
     [ test "concrete-loops-reached" $ do
