@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Added
 - RPC retry with exponential backoff and a shared cooldown across workers, so transient
   network errors and rate limits (e.g. HTTP 429) no longer abort symbolic execution
+- Single-flight for in-flight RPC storage-slot fetches: concurrent workers racing on the same
+  (block, address, slot) now share one `eth_getStorageAt` request instead of each issuing their
+  own, sharply reducing duplicate RPC traffic during fork fuzzing
 - Support for a subset of the [`expectRevert`](https://www.getfoundry.sh/reference/cheatcodes/expect-revert#expectrevert) family of foundry cheatcodes:
   - `expectRevert()`
   - `expectRevert(bytes)`
