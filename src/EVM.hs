@@ -2298,24 +2298,19 @@ cheatActions = Map.fromList
     scale1e18 = 10^(18::Int)
     scale1e18W :: W256
     scale1e18W = 10^(18::Int)
-    -- largest absDelta for which (absDelta * 1e18) does not overflow 256 bits.
-    -- Used by the symbolic relative-equality path to detect when the truncating
-    -- Expr.mul would produce a wrong result.
+    -- largest absDelta with absDelta*1e18 < 2^256 (symbolic overflow guard)
     maxSafeRelDelta :: W256
     maxSafeRelDelta = (maxBound :: W256) `Prelude.div` scale1e18W
-    -- shared failure message for the relative-equality assertions; realDelta is
-    -- already rendered (a scaled integer, or the literal "undefined")
+    -- shared rel-assertion failure message; realDelta is pre-rendered
     relFailMsg :: Show a => a -> a -> Word256 -> String -> ByteString
     relFailMsg a b maxPercentDelta realDelta = "assertion failed: " <>
       BS8.pack (show a) <> " !~= " <> BS8.pack (show b) <>
       " (max delta: " <> BS8.pack (show maxPercentDelta) <>
       ", real delta: " <> BS8.pack realDelta <> ")"
     genAssert = genAssertN []
-    -- as genAssert, but ignores `extra` trailing ABI args (foundry's `err`-string
-    -- overloads). Used directly only for the string-operand variants; static
-    -- operands instead strip the trailing arg upstream via withMsg so they keep
-    -- the symbolic comparison path (decodeBuf yields no SAbi once a dynamic type
-    -- like the string is present in the signature).
+    -- like genAssert but ignores `extra` trailing ABI args (the err-string
+    -- overloads). Only used directly for string operands; static operands strip
+    -- the err arg upstream via withMsg to keep the symbolic path.
     genAssertN extra comp exprComp invComp name abitype sig input = do
       case decodeBuf ([abitype, abitype] ++ extra) input of
         (CAbi (a:b:_),"") | a `comp` b -> doStop
@@ -2327,19 +2322,16 @@ cheatActions = Map.fromList
             False -> doStop
             True -> revertErr ew1 ew2 invComp
         abivals -> vmError (BadCheatCode (paramDecodeErr abitype name abivals) sig)
-    -- Keep only the first n 32-byte head words of the calldata, dropping the
-    -- trailing (dynamic) `err` string so the operand-only handlers can decode
-    -- normally and still produce SAbi for symbolic operands.
+    -- keep the first n 32-byte head words, dropping the trailing err string so
+    -- operand-only handlers decode normally (and keep SAbi for symbolic operands)
     keepHeadWords n input =
       foldr (\i acc -> let off = Lit (fromIntegral (i * 32 :: Int))
                        in writeWord off (readWord off input) acc)
             mempty [0 .. n - 1]
     -- Run a no-message handler after stripping the trailing `err` string.
     withMsg n handler sig input = handler sig (keepHeadWords n input)
-    -- Message variants whose OPERANDS are dynamic (string, bytes): they can't be
-    -- sliced, so decode [op, op, string] and compare the first two operands
-    -- concretely (dynamic operands have no symbolic path), ignoring the trailing
-    -- `err` string. Matches the concrete-only behaviour of assertEq(string,string).
+    -- dynamic operands (string/bytes) can't be sliced: decode [op,op,string] and
+    -- compare the first two concretely (no symbolic path), ignoring the err string
     assertEqMsgDyn    op = genAssertN [AbiStringType] (==) Expr.eq "!=" "assertEq" op
     assertNotEqMsgDyn op = genAssertN [AbiStringType] (/=) (\a b -> Expr.iszero $ Expr.eq a b) "==" "assertNotEq" op
     assertEq =    genAssert (==) Expr.eq "!=" "assertEq"
@@ -2407,15 +2399,9 @@ cheatActions = Map.fromList
               False -> doStop
               True -> frameRevert "assertion failed: assertApproxEqAbs (symbolic)"
         abivals -> vmError (BadCheatCode ("assertApproxEqAbs(int256,int256,uint256) parameter decoding failed: " <> show abivals) sig)
-    -- | assertApproxEqRel for uint256: passes when the relative difference in
-    -- percents is <= maxPercentDelta. maxPercentDelta is an 18-decimal fixed
-    -- point number where 1e18 == 100%. The denominator is the second argument
-    -- (the reference value), matching foundry/forge-std semantics:
-    --   percentDelta = |a - b| * 1e18 / b
-    -- Special cases (mirroring the native foundry cheatcode):
-    --   * b == 0 && a == 0 -> pass (treated as equal)
-    --   * b == 0 && a /= 0 -> fail with "real delta: undefined"
-    --   * if the U512 intermediate doesn't fit in uint256 -> "overflow in delta calculation"
+    -- | assertApproxEqRel(uint256): pass iff |a-b|*1e18/b <= maxPercentDelta
+    -- (1e18 == 100%, denominator is the reference b), per forge-std. Special cases:
+    -- b==0&&a==0 -> pass; b==0&&a/=0 -> "undefined"; result > uint256 -> overflow.
     assertApproxEqRelUint sig input = do
       case decodeBuf [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256] input of
         (CAbi [AbiUInt _ a, AbiUInt _ b, AbiUInt _ maxPercentDelta],"")
@@ -2424,22 +2410,17 @@ cheatActions = Map.fromList
             else frameRevert $ relFailMsg a b maxPercentDelta "undefined"
           | otherwise ->
             let absDelta = if a > b then a - b else b - a
-                -- compute in Integer to avoid the intermediate overflow that
-                -- foundry sidesteps by widening to U512
+                -- in Integer to avoid the intermediate overflow (foundry uses U512)
                 percentDelta = (toInteger absDelta * scale1e18) `Prelude.div` toInteger b
             in if percentDelta > toInteger (maxBound :: Word256)
                then frameRevert "assertion failed: overflow in delta calculation"
                else if percentDelta <= toInteger maxPercentDelta then doStop
                else frameRevert $ relFailMsg a b maxPercentDelta (show percentDelta)
         (SAbi [ew1, ew2, ew3],"") ->
-          -- Sound symbolic encoding. percentDelta = |a-b| * 1e18 / b, and the
-          -- assertion passes iff percentDelta <= maxPercentDelta. hevm's Expr has
-          -- no full-precision div, so Expr.mul truncates mod 2^256 and the result
-          -- is only trustworthy when (absDelta * 1e18) cannot overflow, i.e.
-          -- absDelta <= maxSafeRelDelta. We therefore PASS only when we can prove
-          -- the assertion holds; in every other case (overflow possible, or
-          -- b == 0 && a /= 0) we fail. This can produce false positives but never
-          -- an unsound pass. b == 0 && a == 0 is treated as equal (pass).
+          -- Sound encoding: Expr.mul truncates mod 2^256, so it's only trustworthy
+          -- when absDelta*1e18 can't overflow (absDelta <= maxSafeRelDelta). Pass
+          -- only when provably within bound; overflow-possible or b==0&&a/=0 fail
+          -- (b==0&&a==0 passes). May give false positives, never an unsound pass.
           let absDelta     = Expr.sub (Expr.max ew1 ew2) (Expr.min ew1 ew2)
               percentDelta = Expr.div (Expr.mul absDelta (Lit scale1e18W)) ew2
               bZero        = Expr.iszero ew2
@@ -2456,9 +2437,8 @@ cheatActions = Map.fromList
               False -> doStop
               True -> frameRevert "assertion failed: assertApproxEqRel (symbolic)"
         abivals -> vmError (BadCheatCode ("assertApproxEqRel(uint256,uint256,uint256) parameter decoding failed: " <> show abivals) sig)
-    -- | assertApproxEqRel for int256. Same as the uint version but the absolute
-    -- delta accounts for signs (same sign: ||a|-|b||, opposite: |a|+|b|) and the
-    -- denominator is |b|.
+    -- | assertApproxEqRel(int256): as uint, but signed absDelta (same sign
+    -- ||a|-|b||, opposite |a|+|b|) over denominator |b|.
     assertApproxEqRelInt sig input = do
       case decodeBuf [AbiIntType 256, AbiIntType 256, AbiUIntType 256] input of
         (CAbi [AbiInt _ a, AbiInt _ b, AbiUInt _ maxPercentDelta],"") ->
@@ -2481,12 +2461,9 @@ cheatActions = Map.fromList
                   else if percentDelta <= toInteger maxPercentDelta then doStop
                   else frameRevert $ relFailMsg a b maxPercentDelta (show percentDelta)
         (SAbi [_, _, _],"") ->
-          -- A sound symbolic encoding for signed operands would need full-precision
-          -- signed abs and a |b| denominator (||a|-|b|| / |a|+|b| over the reference
-          -- |b|), which hevm's Expr language cannot express without an unsound,
-          -- overflow-prone Expr.mul/Expr.div. Rather than risk a false pass we
-          -- conservatively report failure for symbolic int256 operands. This may
-          -- be a false positive but is never an unsound pass.
+          -- A sound signed encoding isn't expressible with hevm's Expr (would need
+          -- full-precision signed abs + |b| division), so we conservatively fail
+          -- rather than risk an unsound pass. May be a false positive.
           frameRevert "assertion failed: assertApproxEqRel (symbolic int256 operands not supported)"
         abivals -> vmError (BadCheatCode ("assertApproxEqRel(int256,int256,uint256) parameter decoding failed: " <> show abivals) sig)
     toStringCheat abitype sig input = do
