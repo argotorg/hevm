@@ -202,7 +202,7 @@ mulEncoding enc props = do
     comm    <- mapM mkComm allMuls
     links   <- mapM mkDivMulLink udivs
     zeroOne <- concat <$> mapM mkMulIdentities allMuls
-    mulMono <- concat <$> mapM mkMulMono (sharedPairs allMuls)
+    mulMono <- concat <$> mapM mkMulMono (sharedPairs (bothOrders allMuls))
     divMono <- concat <$> mapM mkDivMono (sharedPairs udivs)
     divDivisorMono <- concat <$> mapM mkDivisorMono (divisorPairs udivs)
     mulDivB <- concat <$> mapM mkMulDivBound mulDivs
@@ -216,6 +216,14 @@ mulEncoding enc props = do
       let m1 = "(abst_evm_bvmul" `sp` aenc `sp` benc <> ")"
           m2 = "(abst_evm_bvmul" `sp` benc `sp` aenc <> ")"
       pure $ SMTCommand $ "(assert (=" `sp` m1 `sp` m2 <> "))"
+    -- Include both operand orders of each product. Multiplication is
+    -- commutative (and we assert that), but the simplifier/solc may order a
+    -- product's operands either way; considering both ensures monotonicity is
+    -- found regardless of ordering. Only used for the (commutative) mul lemmas,
+    -- never for the order-sensitive division lemmas.
+    bothOrders :: [(Expr EWord, Expr EWord)] -> [(Expr EWord, Expr EWord)]
+    bothOrders xs = nubOrd (xs <> [ (b, a) | (a, b) <- xs ])
+
     -- ordered pairs (x, y, z) where (x,z) and (y,z) both occur (shared 2nd operand)
     sharedPairs :: [(Expr EWord, Expr EWord)] -> [(Expr EWord, Expr EWord, Expr EWord)]
     sharedPairs xs = [ (x, y, z) | (x, z) <- xs, (y, z') <- xs, z == z', x /= y ]
