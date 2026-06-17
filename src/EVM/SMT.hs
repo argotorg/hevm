@@ -145,7 +145,8 @@ assertPropsAbstract conf ps = do
   base <- if not conf.simp then mkBase False ps
           else mkBase True (decompose conf ps)
   shiftBounds <- divModEncoding (exprToSMTWith AbstractDivMod) ps
-  pure $ base <> SMT2 (SMTScript shiftBounds) mempty mempty
+  mulLemmas <- mulEncoding (exprToSMTWith AbstractDivMod) ps
+  pure $ base <> SMT2 (SMTScript (shiftBounds <> mulLemmas)) mempty mempty
 
 -- Note: we need a version that does NOT call simplify,
 -- because we make use of it to verify the correctness of our simplification
@@ -455,7 +456,12 @@ exprToSMTWith divEnc = \case
 
   Add a b -> op2 "bvadd" a b
   Sub a b -> op2 "bvsub" a b
-  Mul a b -> op2 "bvmul" a b
+  Mul a b -> case (a, b) of
+    -- only genuinely symbolic products are abstracted; a concrete factor
+    -- (0/1/power-of-two/constant) is handled natively / by the simplifier
+    (Lit _, _) -> op2 "bvmul" a b
+    (_, Lit _) -> op2 "bvmul" a b
+    _          -> mulOp a b
   Exp a b -> case a of
     Lit 0 -> do
       benc <- exprToSMT b
@@ -633,6 +639,12 @@ exprToSMTWith divEnc = \case
     divModOp concreteOp abstractOp a b = case divEnc of
       ConcreteDivMod -> op2CheckZero concreteOp a b
       AbstractDivMod -> op2 abstractOp a b
+    -- symbolic*symbolic multiplication: native under ConcreteDivMod, an
+    -- uninterpreted function under AbstractDivMod (no zero guard needed).
+    mulOp :: Expr x -> Expr y -> Err Builder
+    mulOp a b = case divEnc of
+      ConcreteDivMod -> op2 "bvmul" a b
+      AbstractDivMod -> op2 "abst_evm_bvmul" a b
 
 sp :: Builder -> Builder -> Builder
 a `sp` b = a <> " " <> b

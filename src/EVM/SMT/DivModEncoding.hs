@@ -3,6 +3,8 @@ module EVM.SMT.DivModEncoding
   ( divModGroundTruth
   , divModEncoding
   , divModAbstractDecls
+  , mulEncoding
+  , hasAbstractMul
   ) where
 
 import Data.Bits (countTrailingZeros)
@@ -24,6 +26,8 @@ divModAbstractDecls =
   , SMTCommand "(declare-fun abst_evm_bvsrem ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
   , SMTCommand "(declare-fun abst_evm_bvudiv ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
   , SMTCommand "(declare-fun abst_evm_bvurem ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
+  , SMTComment "abstract multiplication (kept fully uninterpreted: no ground truth)"
+  , SMTCommand "(declare-fun abst_evm_bvmul ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
   ]
 
 -- | Local helper for trivial SMT constructs
@@ -32,6 +36,17 @@ a `sp` b = a <> " " <> b
 
 zero :: Builder
 zero = "(_ bv0 256)"
+
+one :: Builder
+one = "(_ bv1 256)"
+
+-- | True iff x*y does not overflow 256 bits (high half of the 512-bit product
+-- is zero). This is bound-free: it does NOT bake in any particular width
+-- limit. Callers (e.g. a Solidity `require(x < 2**128)`) are responsible for
+-- bounding operands so that this predicate is cheap for the solver to discharge.
+mulNoOverflow :: Builder -> Builder -> Builder
+mulNoOverflow x y =
+  "(= ((_ extract 511 256) (bvmul ((_ zero_extend 256) " <> x <> ") ((_ zero_extend 256) " <> y <> "))) " <> zero <> ")"
 
 wordAsBV :: forall a. Integral a => a -> Builder
 wordAsBV w = "(_ bv" <> Data.Text.Lazy.Builder.Int.decimal w <> " 256)"
@@ -143,6 +158,99 @@ divModGroundTruth enc props = do
           -- signed reconstruction already applies the guard on its side.)
           concrete = if isSigned kind then native else smtZeroGuard benc native
       pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
+
+-- | Collect symbolic*symbolic multiplications (neither operand a literal).
+-- Concrete factors (incl. 0/1/power-of-two) are handled natively by the
+-- simplifier, so only genuinely symbolic products are abstracted.
+collectMuls :: Expr a -> [(Expr EWord, Expr EWord)]
+collectMuls = \case
+  T.Mul a b | notLit a, notLit b -> [(a, b)]
+  _ -> []
+  where
+    notLit (Lit _) = False
+    notLit _       = True
+
+-- | True if any prop contains a symbolic*symbolic multiplication, i.e. the
+-- multiplication abstraction is in play. Because abst_evm_bvmul is left
+-- uninterpreted (no ground truth), a satisfying model may assign it values
+-- inconsistent with real multiplication, so a counterexample cannot be
+-- trusted; callers must downgrade SAT results to Unknown to stay SOUND.
+hasAbstractMul :: [Prop] -> Bool
+hasAbstractMul props = not $ null $ concatMap (foldProp collectMuls []) props
+
+-- | Lemmas for abstract multiplication. Multiplication is kept fully
+-- uninterpreted (no ground truth, so the solver never bit-blasts a symbolic
+-- product); we add only sound algebraic facts. Commutativity is free because
+-- the simplifier canonically orders Mul operands, so abst_evm_bvmul(a,b) and
+-- abst_evm_bvmul(b,a) are the same term.
+--
+-- Step 1 lemma (sound unconditionally): quotient*divisor <= dividend, i.e.
+--   abst_evm_bvmul(abst_evm_bvudiv(X,Y), Y) <= X
+-- The product (X/Y)*Y <= X < 2^256 can never overflow, so no guard is needed.
+-- This is what links the div and mul abstractions and chains nested divisions.
+mulEncoding :: (Expr EWord -> Err Builder) -> [Prop] -> Err [SMTEntry]
+mulEncoding enc props = do
+  let udivs = [ (a, b) | (IsUDiv, a, b) <- nubOrd $ concatMap (foldProp collectDivMods []) props ]
+      muls  = nubOrd $ concatMap (foldProp collectMuls []) props
+      -- products the div-link lemma introduces, e.g. (a/b)*b
+      linkMuls = [ (T.Div a b, b) | (a, b) <- udivs ]
+      allMuls  = nubOrd (muls <> linkMuls)
+  if null udivs && null muls then pure []
+  else do
+    comm    <- mapM mkComm allMuls
+    links   <- mapM mkDivMulLink udivs
+    zeroOne <- concat <$> mapM mkMulIdentities allMuls
+    mulMono <- concat <$> mapM mkMulMono (sharedPairs allMuls)
+    divMono <- concat <$> mapM mkDivMono (sharedPairs udivs)
+    pure $ (SMTComment "multiplication abstraction lemmas")
+           : (comm <> zeroOne <> links <> mulMono <> divMono)
+  where
+    -- commutativity: abst_evm_bvmul(a,b) = abst_evm_bvmul(b,a). Needed so that
+    -- lemma terms match the props regardless of the simplifier's operand order.
+    mkComm (a, b) = do
+      aenc <- enc a; benc <- enc b
+      let m1 = "(abst_evm_bvmul" `sp` aenc `sp` benc <> ")"
+          m2 = "(abst_evm_bvmul" `sp` benc `sp` aenc <> ")"
+      pure $ SMTCommand $ "(assert (=" `sp` m1 `sp` m2 <> "))"
+    -- ordered pairs (x, y, z) where (x,z) and (y,z) both occur (shared 2nd operand)
+    sharedPairs :: [(Expr EWord, Expr EWord)] -> [(Expr EWord, Expr EWord, Expr EWord)]
+    sharedPairs xs = [ (x, y, z) | (x, z) <- xs, (y, z') <- xs, z == z', x /= y ]
+
+    -- mul monotonicity (guarded by no-overflow, hence sound): if neither x*z
+    -- nor y*z overflows then x <= y  =>  x*z <= y*z. The guard is bound-free;
+    -- bounding operands (e.g. a Solidity require) keeps it cheap to discharge.
+    mkMulMono (x, y, z) = do
+      xenc <- enc x; yenc <- enc y; zenc <- enc z
+      let mxz = "(abst_evm_bvmul" `sp` xenc `sp` zenc <> ")"
+          myz = "(abst_evm_bvmul" `sp` yenc `sp` zenc <> ")"
+      pure [ SMTCommand $ "(assert (=> (and" `sp` mulNoOverflow xenc zenc `sp` mulNoOverflow yenc zenc
+             <> " (bvule" `sp` xenc `sp` yenc <> ")) (bvule" `sp` mxz `sp` myz <> ")))" ]
+
+    -- div monotonicity in the dividend (sound unconditionally): for a common
+    -- divisor z, x <= y  =>  floor(x/z) <= floor(y/z).
+    mkDivMono (x, y, z) = do
+      xenc <- enc x; yenc <- enc y; zenc <- enc z
+      let dxz = "(abst_evm_bvudiv" `sp` xenc `sp` zenc <> ")"
+          dyz = "(abst_evm_bvudiv" `sp` yenc `sp` zenc <> ")"
+      pure [ SMTCommand $ "(assert (=> (bvule" `sp` xenc `sp` yenc <> ") (bvule" `sp` dxz `sp` dyz <> ")))" ]
+    -- quotient*divisor <= dividend
+    mkDivMulLink (a, b) = do
+      aenc <- enc a
+      benc <- enc b
+      let q  = "(abst_evm_bvudiv" `sp` aenc `sp` benc <> ")"
+          qb = "(abst_evm_bvmul" `sp` q `sp` benc <> ")"
+      pure $ SMTCommand $ "(assert (bvule" `sp` qb `sp` aenc <> "))"
+    -- sound identities pinning the otherwise-free UF on 0/1 operands:
+    --   x*0 = 0, 0*y = 0, x*1 = x, 1*y = y
+    mkMulIdentities (a, b) = do
+      aenc <- enc a
+      benc <- enc b
+      let m = "(abst_evm_bvmul" `sp` aenc `sp` benc <> ")"
+      pure [ SMTCommand $ "(assert (=> (=" `sp` aenc `sp` zero <> ") (=" `sp` m `sp` zero  <> ")))"
+           , SMTCommand $ "(assert (=> (=" `sp` benc `sp` zero <> ") (=" `sp` m `sp` zero  <> ")))"
+           , SMTCommand $ "(assert (=> (=" `sp` aenc `sp` one  <> ") (=" `sp` m `sp` benc  <> ")))"
+           , SMTCommand $ "(assert (=> (=" `sp` benc `sp` one  <> ") (=" `sp` m `sp` aenc  <> ")))"
+           ]
 
 -- | Encode div/mod operations using abs values, shift-bounds, and congruence (no bvudiv).
 divModEncoding :: (Expr EWord -> Err Builder) -> [Prop] -> Err [SMTEntry]

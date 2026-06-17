@@ -142,7 +142,17 @@ checkSatWithProps sg props = do
       else if isLeft refinement then pure $ Error $ getError refinement
       else do
         let x = (getNonError smt2Abstract) <> (SMT2 (SMTScript (getNonError refinement)) mempty mempty)
-        liftIO $ checkSat sg (Just props) (Right x)
+        res <- checkSat sg (Just props) (Right x)
+        -- SOUNDNESS: multiplication is abstracted as an uninterpreted function
+        -- with no ground truth, so a satisfying model may use product values
+        -- that do not match real multiplication. A QED stays sound (the lemmas
+        -- over-approximate real arithmetic), but a counterexample may be
+        -- spurious and must never be reported as a real violation; with nothing
+        -- to validate it against, the only sound output is Unknown.
+        pure $ case res of
+          Cex _ | hasAbstractMul allProps ->
+            Unknown "counterexample unsound under multiplication abstraction (abst_evm_bvmul is uninterpreted)"
+          _ -> res
 
 checkSat :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> IO SMTResult
 checkSat (SolverGroup taskq) props smt2 = do

@@ -1332,6 +1332,151 @@ tests = testGroup "hevm"
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertBoolM "Expected counterexample" (any isCex res)
     ]
+  , testGroup "Mul-Abstraction"
+    -- Symbolic*symbolic multiplication is abstracted as an uninterpreted
+    -- function (abst_evm_bvmul) with sound lemmas (commutativity, 0/1
+    -- identities, quotient*divisor<=dividend, no-overflow-guarded monotonicity)
+    -- and NO ground truth. This proves vault-style properties native solving
+    -- cannot, while staying SOUND: a QED is a real proof; spurious or
+    -- overflow-dependent results are never reported as bugs (downgraded to
+    -- Unknown). Bounding (e.g. require(x < 2**128)) is supplied in Solidity.
+    [ testAbstractArith "mul-monotone" $ do
+        -- a1 <= a2 => a1*c <= a2*c, under no-overflow (mul-monotonicity lemma)
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_mul_monotone(uint256 a1, uint256 a2, uint256 k) external pure {
+              require(a1 < (1<<128) && a2 < (1<<128) && k < (1<<128));
+              require(a1 <= a2);
+              uint256 p1; uint256 p2;
+              assembly { p1 := mul(a1, k)  p2 := mul(a2, k) }
+              assert(p1 <= p2);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "mul-by-zero" $ do
+        -- x*y == 0 when y == 0 (0-identity lemma; y is symbolic, not folded)
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_mul_zero(uint256 x, uint256 y) external pure {
+              require(y == 0);
+              uint256 p; assembly { p := mul(x, y) }
+              assert(p == 0);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "mul-by-one" $ do
+        -- x*y == x when y == 1 (1-identity lemma)
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_mul_one(uint256 x, uint256 y) external pure {
+              require(y == 1);
+              uint256 p; assembly { p := mul(x, y) }
+              assert(p == x);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "div-mul-link" $ do
+        -- (x/y)*y <= x for y != 0 (div x mul link lemma; needs commutativity)
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_div_mul_link(uint256 x, uint256 y) external pure {
+              require(y != 0);
+              uint256 q; uint256 p;
+              assembly { q := div(x, y)  p := mul(q, y) }
+              assert(p <= x);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testCase "vault-shares-monotonic" $ do
+        -- ERC-4626: more assets deposited => at least as many shares. Provable
+        -- WITH abstraction, native solving times out (unknown).
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            uint256 public totalAssets;
+            uint256 public totalShares;
+            function prove_shares_monotonic(uint256 a1, uint256 a2) external view {
+              require(totalAssets != 0);
+              require(a1 < (1<<128) && a2 < (1<<128) && totalShares < (1<<128));
+              require(a1 <= a2);
+              uint256 ts = totalShares; uint256 ta = totalAssets;
+              uint256 s1; uint256 s2;
+              assembly { s1 := div(mul(a1, ts), ta)  s2 := div(mul(a2, ts), ta) }
+              assert(s1 <= s2);
+            }
+          } |]
+        let testEnvAbstract = Env { config = testEnv.config { abstractArith = True } }
+        runEnv testEnvAbstract $ do
+          (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+          assertEqualM "Must be QED with abstraction" [] res
+        runEnv testEnv $ do
+          (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+          liftIO $ assertBool "Must be unknown natively" (all isUnknown res)
+    , testAbstractArith "mul-overflow-not-unsound" $ do
+        -- SOUNDNESS: unbounded monotonicity is FALSE (raw mul wraps); the
+        -- no-overflow guard must prevent a (bogus) QED -> Unknown, never QED.
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_mul_monotone_overflow(uint256 a1, uint256 a2, uint256 k) external pure {
+              require(a1 <= a2);
+              uint256 p1; uint256 p2;
+              assembly { p1 := mul(a1, k)  p2 := mul(a2, k) }
+              assert(p1 <= p2);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertBoolM "Must be Unknown, never QED (unsound proof avoided)"
+          (not (any isCex res) && any isUnknown res)
+    , testAbstractArith "roundtrip-spurious-cex-suppressed" $ do
+        -- SOUNDNESS: the cross-divisor round-trip cannot be discharged; the
+        -- uninterpreted mul yields a spurious model that must NOT be reported
+        -- as a counterexample -> Unknown.
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            uint256 public totalAssets;
+            uint256 public totalShares;
+            function prove_roundtrip(uint256 assets) external view {
+              require(totalAssets != 0 && totalShares != 0);
+              require(assets < (1<<128) && totalShares < (1<<128) && totalAssets < (1<<128));
+              uint256 ts = totalShares; uint256 ta = totalAssets;
+              uint256 shares; uint256 outv;
+              assembly { shares := div(mul(assets, ts), ta)  outv := div(mul(shares, ta), ts) }
+              assert(outv <= assets);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertBoolM "Must be Unknown, never a spurious counterexample"
+          (not (any isCex res) && any isUnknown res)
+    , testAbstractArith "div-cex-preserved" $ do
+        -- No symbolic*symbolic mul => div is exact => a real counterexample is
+        -- still reported (the Cex->Unknown downgrade must be precise).
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_div_cex(uint256 a, uint256 b) external pure {
+              require(b != 0);
+              uint256 q; assembly { q := div(a, b) }
+              assert(q != 0);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertBoolM "Expected counterexample" (any isCex res)
+    , testAbstractArith "constmul-cex-preserved" $ do
+        -- Multiplication by a constant is NOT abstracted, so a real
+        -- counterexample is still reported.
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_constmul_cex(uint256 x) external pure {
+              require(x < (1<<128));
+              uint256 p; assembly { p := mul(x, 3) }
+              assert(p != 6);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertBoolM "Expected counterexample" (any isCex res)
+    ]
   , testGroup "max-iterations"
     [ test "concrete-loops-reached" $ do
         Just c <- solcRuntime "C"
