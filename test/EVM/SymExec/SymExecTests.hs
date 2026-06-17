@@ -761,6 +761,40 @@ cheatCodeTests = testGroup "Cheatcode tests via symbolic execution"
           |]
       result <- verifyUserAsserts c (Just $ Sig "f()" [])
       expectNoCexNoPartial result
+  , testCase "vm.prank-create2" $ do
+      Just c <- solcRuntime "C"
+          [i|
+            interface Vm {
+              function prank(address) external;
+            }
+            contract Owned {
+              address public owner;
+              constructor() {
+                owner = msg.sender;
+              }
+            }
+            contract C {
+              function f() external {
+                Vm vm = Vm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
+
+                bytes32 salt = bytes32(uint256(1));
+                address usr = address(1312);
+                vm.prank(usr);
+                Owned target = new Owned{salt: salt}();
+                address expected = address(uint160(uint256(keccak256(abi.encodePacked(
+                  bytes1(0xff),
+                  usr,
+                  salt,
+                  keccak256(type(Owned).creationCode)
+                )))));
+
+                assert(target.owner() == usr);
+                assert(address(target) == expected);
+              }
+            }
+          |]
+      result <- verifyUserAsserts c (Just $ Sig "f()" [])
+      expectNoCexNoPartial result
   , testCase "vm.prank underflow" $ do
       Just c <- solcRuntime "C"
           [i|
