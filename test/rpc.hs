@@ -8,7 +8,9 @@ import Test.Tasty.HUnit
 import Data.Maybe
 import Data.Map qualified as Map
 import Data.Text (Text, isPrefixOf)
+import Data.Text qualified as T
 import Data.Vector qualified as V
+import System.Environment (lookupEnv)
 
 import EVM (makeVm, symbolify, defaultVMOpts)
 import EVM.ABI
@@ -42,7 +44,8 @@ tests = testGroup "rpc"
         conf <- readConfig
         sess <- mkSessionWithoutCache
         liftIO $ do
-          (cb, numb, basefee, prevRan) <- fetchBlockWithSession conf sess block testRpc >>= \case
+          rpc <- testRpc
+          (cb, numb, basefee, prevRan) <- fetchBlockWithSession conf sess block rpc >>= \case
                         Nothing -> internalError "Could not fetch block"
                         Just Block{..} -> pure ( coinbase
                                                      , number
@@ -59,7 +62,8 @@ tests = testGroup "rpc"
         sess <- mkSessionWithoutCache
         liftIO $ do
           let block = BlockNumber 16184420
-          (cb, numb, basefee, prevRan) <- fetchBlockWithSession conf sess block testRpc >>= \case
+          rpc <- testRpc
+          (cb, numb, basefee, prevRan) <- fetchBlockWithSession conf sess block rpc >>= \case
                         Nothing -> internalError "Could not fetch block"
                         Just Block{..} -> pure ( coinbase
                                                      , number
@@ -76,7 +80,8 @@ tests = testGroup "rpc"
     -- execute against remote state from a ds-test harness
     [ test "dapp-test" $ do
         let testFile = "test/contracts/pass/rpc.sol"
-        res <- runForgeTestCustom testFile (\(TestMethodInfo _ (Sig name _)) -> "prove" `isPrefixOf` name) Nothing Nothing False testRpcInfo
+        rpcInfo <- liftIO testRpcInfo
+        res <- runForgeTestCustom testFile (\(TestMethodInfo _ (Sig name _)) -> "prove" `isPrefixOf` name) Nothing Nothing False rpcInfo
         liftIO $ assertEqual "test result" (True, True) res
 
     -- concretely exec "transfer" on WETH9 using remote rpc
@@ -87,8 +92,9 @@ tests = testGroup "rpc"
           calldata' = ConcreteBuf $ abiMethod "transfer(address,uint256)" (AbiTuple (V.fromList [AbiAddress (Addr 0xdead), AbiUInt 256 wad]))
         sess <- mkSessionWithoutCache
         vm <- weth9VM sess testBlockNumber (calldata', [])
+        rpcInfo <- liftIO testRpcInfo
         postVm <- withSolvers Z3 1 Nothing defMemLimit $ \solvers ->
-          Stepper.interpret (oracle solvers (Just sess) testRpcInfo) vm Stepper.runFully
+          Stepper.interpret (oracle solvers (Just sess) rpcInfo) vm Stepper.runFully
         let
           wethStore = (fromJust $ Map.lookup (LitAddr 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2) postVm.env.contracts).storage
           wethStore' = case wethStore of
@@ -112,8 +118,9 @@ tests = testGroup "rpc"
           postc _ _ = PBool True
         sess <- mkSession Nothing Nothing
         vm <- weth9VM sess testBlockNumber calldata'
+        rpcInfo <- liftIO testRpcInfo
         (_, [Cex (_, model)]) <- withSolvers Z3 1 Nothing defMemLimit $ \s ->
-          verify s (oracle s (Just sess) testRpcInfo) (defaultVeriOpts {rpcInfo = testRpcInfo}) (symbolify vm) postc Nothing
+          verify s (oracle s (Just sess) rpcInfo) (defaultVeriOpts {rpcInfo = rpcInfo}) (symbolify vm) postc Nothing
         liftIO $ assertBool "model should exceed caller balance" (getVar model "arg2" >= 695836005599316055372648)
     ]
   ]
@@ -130,13 +137,14 @@ weth9VM sess blockNum calldata' = do
 vmFromRpc :: App m => Session -> BlockNumber -> (Expr Buf, [Prop]) -> Expr EWord -> Expr EAddr -> Addr -> m (VM Concrete)
 vmFromRpc sess blockNum calldata callvalue caller address = do
   conf <- readConfig
-  ctrct <- liftIO $ fetchContractWithSession conf sess blockNum testRpc address >>= \case
+  rpc <- liftIO testRpc
+  ctrct <- liftIO $ fetchContractWithSession conf sess blockNum rpc address >>= \case
         FetchFailure _ -> internalError $ "contract not found: " <> show address
         FetchError e -> internalError $ "rpc error: " <> show e
         FetchSuccess contract' _ -> pure contract'
 
   liftIO $ addFetchCache sess address ctrct
-  blk <- liftIO $ fetchBlockWithSession conf sess blockNum testRpc >>= \case
+  blk <- liftIO $ fetchBlockWithSession conf sess blockNum rpc >>= \case
     Nothing -> internalError "could not fetch block"
     Just b -> pure b
 
@@ -156,11 +164,19 @@ vmFromRpc sess blockNum calldata callvalue caller address = do
     , schedule       = blk.schedule
     })
 
-testRpc :: Text
-testRpc = "https://eth-mainnet.g.alchemy.com/v2/vpeKFsEF6PHifHzdtcwXSDbhV3ym5Ro4"
+testRpc :: IO Text
+testRpc = do
+  mKey <- lookupEnv "RPC_MAINNET_KEY"
+  case mKey of
+    Just key | not (null key) ->
+      pure $ "https://eth-mainnet.g.alchemy.com/v2/" <> T.pack key
+    _ ->
+      error "RPC_MAINNET_KEY environment variable is not set; required to run rpc tests"
 
 testBlockNumber :: BlockNumber
 testBlockNumber = BlockNumber 16198552
 
-testRpcInfo :: RpcInfo
-testRpcInfo = RpcInfo $ Just (testBlockNumber, testRpc)
+testRpcInfo :: IO RpcInfo
+testRpcInfo = do
+  rpc <- testRpc
+  pure $ RpcInfo $ Just (testBlockNumber, rpc)

@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- RPC retry with exponential backoff and a shared cooldown across workers, so transient
+  network errors and rate limits (e.g. HTTP 429) no longer abort symbolic execution
+- Support for a subset of the [`expectRevert`](https://www.getfoundry.sh/reference/cheatcodes/expect-revert#expectrevert) family of foundry cheatcodes:
+  - `expectRevert()`
+  - `expectRevert(bytes)`
+  - `expectRevert(bytes4)`
+  - `expectRevert(address)`
+  - `expectRevert(bytes4,address)`
+  - `expectRevert(bytes,address)`
+  - `expectPartialRevert(bytes4)`
+  - `expectPartialRevert(bytes4,address)`
+- Support for Foundry/Hardhat `console.log` — calls to the console address are intercepted and decoded in traces
 - Source location info (file, line, code snippet) is now shown in state merge debug messages
 - New opcode: CLZ
 - New POr/PAnd/PImpl/Or/And simplification rules
@@ -23,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is applied the result carries a program-wide `[CAVEAT]` noting that
   counterexamples requiring longer inputs may be missed (rather than a per-path
   `Partial`)
+- `readWord` disjointness rule for `WriteWord (Add (Lit c) X) …` with bounded `X`.
 
 ## Changed
 - Simplifier now rewrites `Mul(-1, x)` and `~x + 1` to `Sub(0, x)`

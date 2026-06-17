@@ -48,6 +48,7 @@ import Optics.State
 import EVM
 import EVM.ABI
 import EVM.Assembler
+import EVM.ConsoleLog (formatConsoleLog)
 import EVM.Exec
 import EVM.Expr qualified as Expr
 import EVM.Fetch qualified as Fetch
@@ -139,6 +140,33 @@ tests = testGroup "hevm"
   , SymExecTests.tests
   , EquivalenceTests.tests
   , FoundryTests.tests
+  , testGroup "Console log formatting"
+    [ testCase "format-string" $ do
+        let encoded = ConcreteBuf $ abiMethod "log(string)" (AbiTuple $ V.fromList [AbiString "hello world"])
+        assertEqual "console.log(string) format" "console::log(\"hello world\")" (formatConsoleLog encoded)
+    , testCase "format-uint" $ do
+        let encoded = ConcreteBuf $ abiMethod "log(uint256)" (AbiTuple $ V.fromList [AbiUInt 256 42])
+        assertEqual "console.log(uint256) format" "console::log(42)" (formatConsoleLog encoded)
+    , testCase "format-string-uint" $ do
+        let encoded = ConcreteBuf $ abiMethod "log(string,uint256)" (AbiTuple $ V.fromList [AbiString "count", AbiUInt 256 7])
+        assertEqual "console.log(string,uint256) format" "console::log(\"count\", 7)" (formatConsoleLog encoded)
+    , testCase "format-bool" $ do
+        let encoded = ConcreteBuf $ abiMethod "log(bool)" (AbiTuple $ V.fromList [AbiBool True])
+        assertEqual "console.log(bool) format" "console::log(true)" (formatConsoleLog encoded)
+    , testCase "format-address" $ do
+        let encoded = ConcreteBuf $ abiMethod "log(address)" (AbiTuple $ V.fromList [AbiAddress 0xdeadbeef])
+        assertEqual "console.log(address) format" "console::log(0x00000000000000000000000000000000DeaDBeef)" (formatConsoleLog encoded)
+    , testCase "format-no-args" $ do
+        let encoded = ConcreteBuf $ abiMethod "log()" (AbiTuple $ V.fromList [])
+        assertEqual "console.log() format" "console::log()" (formatConsoleLog encoded)
+    , testCase "format-unknown-selector" $ do
+        let encoded = ConcreteBuf $ BS.pack [0xde, 0xad, 0xbe, 0xef, 0x01, 0x02]
+        let result = formatConsoleLog encoded
+        assertBool "unknown selector should produce hex fallback" (T.isPrefixOf "console::log(0x" result)
+    , testCase "format-short-input" $ do
+        let encoded = ConcreteBuf $ BS.pack [0x01, 0x02]
+        assertEqual "short input format" "console::log()" (formatConsoleLog encoded)
+    ]
   , testGroup "StorageTests"
     [ test "accessStorage uses fetchedStorage" $ do
         let dummyContract =
@@ -230,6 +258,15 @@ tests = testGroup "hevm"
         case readP_to_S (parseAbiValue (AbiBytesType 4)) threeBytes of
           [] -> pure ()  -- Expected: parsing should fail
           _ -> internalError "Should reject 3-byte value for bytes4"
+    , test "ABI-user-defined-enum-type" $ do
+        -- User-defined types like enums (e.g. "Order.OrderType") should parse as uint8
+        assertEqualM "qualified enum" (Just (AbiUIntType 8)) (parseTypeName mempty "Order.OrderType")
+        assertEqualM "simple enum" (Just (AbiUIntType 8)) (parseTypeName mempty "MyEnum")
+        -- Should also work with array suffixes
+        assertEqualM "enum array" (Just (AbiArrayDynamicType (AbiUIntType 8))) (parseTypeName mempty "Order.OrderType[]")
+        -- Standard types should still work
+        assertEqualM "uint256" (Just (AbiUIntType 256)) (parseTypeName mempty "uint256")
+        assertEqualM "address" (Just AbiAddressType) (parseTypeName mempty "address")
     ]
   , testGroup "Solidity-Expressions"
     [ test "Trivial" $

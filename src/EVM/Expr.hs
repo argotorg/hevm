@@ -416,12 +416,59 @@ readBytes :: Int -> Expr EWord -> Expr Buf -> Expr EWord
 readBytes (Prelude.min 32 -> n) idx buf
   = joinBytes [readByte (add idx (Lit . unsafeInto $ i)) buf | i <- [0 .. n - 1]]
 
+-- | Static upper bound on a word expression (unsigned, no wrap), or Nothing.
+upperBound :: Expr EWord -> Maybe W256
+upperBound e = case (simplifyNoLitToKeccak e) of
+  Lit n         -> Just n
+  And (Lit m) _ -> Just m
+  Mod _ (Lit b)
+    | b == 0    -> Just 0
+    | otherwise -> Just (b - 1)
+  Div a (Lit b)
+    | b == 0    -> Just 0
+    | otherwise -> upperBound a >>= \ua -> Just (ua `Prelude.div` b)
+  Mul (Lit a) b -> mulBound a b
+  Add (Lit a) b -> addBound a b
+  SHR (Lit n) b
+    | n >= 256  -> Just 0
+    | otherwise -> upperBound b >>= \ub ->
+        Just (ub `shiftR` fromIntegral n)
+  _ -> Nothing
+  where
+    mulBound a b
+      | a == 0    = Just 0
+      | otherwise = upperBound b >>= \ub ->
+          if ub == 0 then Just 0
+          else if ub <= (maxBound :: W256) `Prelude.div` a then Just (a * ub)
+          else Nothing
+    addBound a b = upperBound b >>= \ub ->
+      if a <= (maxBound :: W256) - ub then Just (a + ub) else Nothing
+
+-- | True if the WriteWord at @wIdx@ is provably disjoint from the 32-byte
+--   read at @i@. Sound mod 2^256: requires both windows to fit below 2^256.
+writeDisjointFromReadWord :: W256 -> Expr EWord -> Bool
+writeDisjointFromReadWord i = \case
+  Add (Lit c) x
+    | Just ux <- upperBound x ->
+        let cI        = toInteger c
+            uxI       = toInteger ux
+            iI        = toInteger i
+            maxI      = toInteger (maxBound :: W256)
+            writeMaxI = cI + uxI + 31
+            readMaxI  = iI + 31
+        in readMaxI <= maxI
+           && writeMaxI <= maxI
+           && (cI > readMaxI || writeMaxI < iI)
+  _ -> False
+
 -- | Reads the word starting at idx from the given buf
 readWord :: Expr EWord -> Expr Buf -> Expr EWord
 readWord idx buf@(AbstractBuf _) = ReadWord idx buf
 readWord idx b@(WriteWord idx' val buf)
   -- the word we are trying to read exactly matches a WriteWord
   | idx == idx' = val
+  -- WriteWord provably disjoint via interval bounds (Add (Lit c) X, X bounded)
+  | Lit i <- idx, writeDisjointFromReadWord i idx' = readWord idx buf
   | otherwise = case (idx, idx') of
     (Lit i, Lit i') ->
       if i' - i >= 32 && i' - i <= (maxBound :: W256) - 31
