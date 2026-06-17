@@ -675,6 +675,27 @@ data MergeState = MergeState
 defaultMergeState :: MergeState
 defaultMergeState = MergeState False 0
 
+-- | An active vm.expectRevert / vm.expectPartialRevert expectation set by a
+-- cheat call. Consumed when the matching frame returns/reverts.
+data ExpectedRevert = ExpectedRevert
+  { reason         :: Maybe (Expr Buf)
+  -- ^ Nothing matches any revert data; Just expected matches concrete bytes.
+  , depth          :: Int
+  -- ^ length of vm.frames at the cheat call. The matching boundary is the
+  -- frame popping back down to this depth (i.e. the next outer subcall).
+  , partialMatch   :: Bool
+  -- ^ True for expectPartialRevert (compares only first 4 bytes of actual).
+  , reverter       :: Maybe (Expr EAddr)
+  -- ^ Nothing matches any reverter; Just want enforces actualReverter equals
+  -- this address.
+  , actualReverter :: Maybe (Expr EAddr)
+  -- ^ The first contract observed reverting in a non-CREATE frame after the
+  -- expectation was set. Captured on the first FrameReverted that arrives in a
+  -- CALL frame; subsequent reverts (bubble-ups) do not overwrite it. Used at
+  -- the matching boundary to compare against the expected reverter.
+  }
+  deriving (Show, Generic)
+
 data VMType = Symbolic | Concrete
 
 type family Gas (t :: VMType) = r | r -> t where
@@ -708,6 +729,8 @@ data VM (t :: VMType) = VM
   , exploreDepth   :: Int
   , keccakPreImgs  :: Set (ByteString, W256)
   , mergeState     :: MergeState
+  , expectedRevert :: Maybe ExpectedRevert
+  -- ^ Active expectRevert/expectPartialRevert expectation, if any.
   }
   deriving (Generic)
 
@@ -974,6 +997,7 @@ data TraceData
   | ErrorTrace EvmError
   | EntryTrace Text
   | ReturnTrace (Expr Buf) FrameContext
+  | ConsoleLog (Expr Buf)
   deriving (Eq, Ord, Show, Generic)
 
 -- | Wrapper type containing vm traces and the context needed to pretty print them properly
