@@ -277,6 +277,9 @@ getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r sem f
 
 getOneSol :: forall m . (MonadIO m, ReadConfig m) =>
   Solver -> Maybe Natural -> Natural -> SMT2 -> Maybe [Prop] -> Chan SMTResult -> TChan CacheEntry -> QSem -> Int -> m ()
+-- the empty solver answers every query "unknown" without spawning a process
+getOneSol EmptySolver _ _ _ _ r _ _ _ =
+  liftIO $ writeChan r (Unknown "Result unknown by SMT solver")
 getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) props r cacheq sem fileCounter = do
   conf <- readConfig
   liftIO $ bracket_
