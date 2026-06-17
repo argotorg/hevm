@@ -1430,10 +1430,14 @@ tests = testGroup "hevm"
         (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertBoolM "Must be Unknown, never QED (unsound proof avoided)"
           (not (any isCex res) && any isUnknown res)
-    , testAbstractArith "roundtrip-spurious-cex-suppressed" $ do
-        -- SOUNDNESS: the cross-divisor round-trip cannot be discharged; the
-        -- uninterpreted mul yields a spurious model that must NOT be reported
-        -- as a counterexample -> Unknown.
+    , testAbstractArith "roundtrip-no-inflation" $ do
+        -- The cross-divisor round-trip convertToAssetValue(convertToShares(x)),
+        -- i.e. ((x*ts)/ta)*ta/ts <= x, is the stateless core of inflation-attack
+        -- safety: converting a value to shares and back never yields more than
+        -- you started with. It needs two nested divisions to be related, which
+        -- the cancellation synthesis (the synthetic (x*ts)/ts term plus div
+        -- monotonicity) discharges. SOUND: shares*ta <= x*ts (div-mul-link), so
+        -- floor(shares*ta/ts) <= floor(x*ts/ts) = x.
         Just c <- solcRuntime "C" [i|
           contract C {
             uint256 public totalAssets;
@@ -1447,9 +1451,8 @@ tests = testGroup "hevm"
               assert(outv <= assets);
             }
           } |]
-        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-        assertBoolM "Must be Unknown, never a spurious counterexample"
-          (not (any isCex res) && any isUnknown res)
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
     , testAbstractArith "div-cex-preserved" $ do
         -- No symbolic*symbolic mul => div is exact => a real counterexample is
         -- still reported (the Cex->Unknown downgrade must be precise).

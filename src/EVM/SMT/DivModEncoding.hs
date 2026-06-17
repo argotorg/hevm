@@ -223,21 +223,33 @@ mulEncoding enc props = do
   let udivs = [ (a, b) | (IsUDiv, a, b) <- nubOrd $ concatMap (foldProp collectDivMods []) props ]
       muls  = nubOrd $ concatMap (foldProp collectMuls []) props
       constMuls = nubOrd $ concatMap (foldProp collectConstMuls []) props
+      -- Cancellation: when an abstract product a*b has a factor that is reused
+      -- as a divisor elsewhere, synthesize the exact division (a*b)/factor.
+      -- Adding it to the div set lets the existing lemmas bridge nested
+      -- divisions: mulDiv-bound gives (a*b)/b <= a, and div-monotonicity carries
+      -- that bound across a shared divisor. This is what proves cross-divisor
+      -- round-trips like convertToAssetValue(convertToShares(x)) <= x (the
+      -- stateless core of inflation-attack safety), which single-level lemmas
+      -- cannot. The synthetic terms are exact EVM divisions, so this is SOUND.
+      divisors  = nubOrd [ b | (_, b) <- udivs ]
+      synthDivs = nubOrd $ [ (T.Mul a b, b) | (a, b) <- muls, b `elem` divisors ]
+                        <> [ (T.Mul a b, a) | (a, b) <- muls, a `elem` divisors ]
+      udivsAll  = nubOrd (udivs <> synthDivs)
       -- products the div-link lemma introduces, e.g. (a/b)*b
-      linkMuls = [ (T.Div a b, b) | (a, b) <- udivs ]
+      linkMuls = [ (T.Div a b, b) | (a, b) <- udivsAll ]
       allMuls  = nubOrd (muls <> linkMuls)
       -- divisions whose dividend is an abstract product: (x*y)/z
-      mulDivs = [ (a, x, y, b) | (a, b) <- udivs, Just (x, y) <- [asMul a] ]
+      mulDivs = [ (a, x, y, b) | (a, b) <- udivsAll, Just (x, y) <- [asMul a] ]
       -- pairs of const-muls sharing the same constant: (c, x, y) for c*x, c*y
       constMulPairs = [ (c, x, y) | (c, x) <- constMuls, (c', y) <- constMuls, c == c', x /= y ]
   if null udivs && null muls && null constMuls then pure []
   else do
     comm    <- mapM mkComm allMuls
-    links   <- mapM mkDivMulLink udivs
+    links   <- mapM mkDivMulLink udivsAll
     zeroOne <- concat <$> mapM mkMulIdentities allMuls
     mulMono <- concat <$> mapM mkMulMono (sharedPairs (bothOrders allMuls))
-    divMono <- concat <$> mapM mkDivMono (sharedPairs udivs)
-    divDivisorMono <- concat <$> mapM mkDivisorMono (divisorPairs udivs)
+    divMono <- concat <$> mapM mkDivMono (sharedPairs udivsAll)
+    divDivisorMono <- concat <$> mapM mkDivisorMono (divisorPairs udivsAll)
     mulDivB <- concat <$> mapM mkMulDivBound mulDivs
     constMulMono <- mapM mkConstMulMono constMulPairs
     pure $ (SMTComment "multiplication abstraction lemmas")
