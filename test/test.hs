@@ -1451,7 +1451,8 @@ tests = testGroup "hevm"
               assert(outv <= assets);
             }
           } |]
-        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        -- z3 closes the nested cross-divisor round-trip reliably here.
+        (_, res) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertEqualM "Must be QED" [] res
     , testAbstractArith "div-cex-preserved" $ do
         -- No symbolic*symbolic mul => div is exact => a real counterexample is
@@ -1537,7 +1538,9 @@ tests = testGroup "hevm"
               assert(a1 <= a2);
             }
           } |]
-        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        -- z3 discharges the large-constant (1e27) multiply that bitwuzla
+        -- struggles with here; both are sound, this is purely a capability pick.
+        (_, res) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertEqualM "Must be QED" [] res
     ]
   , testGroup "max-iterations"
