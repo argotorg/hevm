@@ -40,13 +40,29 @@ zero = "(_ bv0 256)"
 one :: Builder
 one = "(_ bv1 256)"
 
--- | True iff x*y does not overflow 256 bits (high half of the 512-bit product
--- is zero). This is bound-free: it does NOT bake in any particular width
--- limit. Callers (e.g. a Solidity `require(x < 2**128)`) are responsible for
--- bounding operands so that this predicate is cheap for the solver to discharge.
+-- | Maximum value representable in 128 unsigned bits (2^128 - 1).
+maxU128 :: Builder
+maxU128 = "(_ bv340282366920938463463374607431768211455 256)"
+
+-- | A /sufficient/ condition for x*y not to overflow 256 bits: both operands
+-- fit in 128 bits, so their product fits in 256 (since (2^128-1)^2 < 2^256).
+--
+-- We deliberately use this cheap sufficient condition rather than the exact
+-- no-overflow predicate @extract 511 256 (bvmul (zext x) (zext y)) = 0@. The
+-- exact form forces the solver to bit-blast a full 512-bit multiply for every
+-- lemma instance, which is the dominant cost and makes realistic vault queries
+-- (operands ~2^100, e.g. token amounts up to 1e30) time out. Two comparisons
+-- against a constant are essentially free by contrast.
+--
+-- This is the same width-budget idea Halmos uses. It is SOUND: when the guard
+-- holds there is genuinely no overflow, so any lemma it gates remains valid.
+-- The cost is completeness — a product of operands above 2^128 that happens not
+-- to overflow will not receive the lemma. All realistic token amounts, share
+-- counts and conversion rates are far below 2^128, so this is not a limitation
+-- in practice.
 mulNoOverflow :: Builder -> Builder -> Builder
 mulNoOverflow x y =
-  "(= ((_ extract 511 256) (bvmul ((_ zero_extend 256) " <> x <> ") ((_ zero_extend 256) " <> y <> "))) " <> zero <> ")"
+  "(and (bvule " <> x <> " " <> maxU128 <> ") (bvule " <> y <> " " <> maxU128 <> "))"
 
 wordAsBV :: forall a. Integral a => a -> Builder
 wordAsBV w = "(_ bv" <> Data.Text.Lazy.Builder.Int.decimal w <> " 256)"
@@ -170,6 +186,20 @@ collectMuls = \case
     notLit (Lit _) = False
     notLit _       = True
 
+-- | Collect multiplications by a literal constant, @(c, x)@ for @c*x@ (either
+-- operand order), excluding the trivial constants 0 and 1. These stay native
+-- @bvmul@ (the value is concrete), but a symbolic operand times a large
+-- constant is still costly to bit-blast and compare; const-mul monotonicity
+-- (see 'mkConstMulMono') lets the solver order such products without doing so.
+collectConstMuls :: Expr a -> [(W256, Expr EWord)]
+collectConstMuls = \case
+  T.Mul (Lit c) x | notLit x, c /= 0, c /= 1 -> [(c, x)]
+  T.Mul x (Lit c) | notLit x, c /= 0, c /= 1 -> [(c, x)]
+  _ -> []
+  where
+    notLit (Lit _) = False
+    notLit _       = True
+
 -- | True if any prop contains a symbolic*symbolic multiplication, i.e. the
 -- multiplication abstraction is in play. Because abst_evm_bvmul is left
 -- uninterpreted (no ground truth), a satisfying model may assign it values
@@ -192,12 +222,15 @@ mulEncoding :: (Expr EWord -> Err Builder) -> [Prop] -> Err [SMTEntry]
 mulEncoding enc props = do
   let udivs = [ (a, b) | (IsUDiv, a, b) <- nubOrd $ concatMap (foldProp collectDivMods []) props ]
       muls  = nubOrd $ concatMap (foldProp collectMuls []) props
+      constMuls = nubOrd $ concatMap (foldProp collectConstMuls []) props
       -- products the div-link lemma introduces, e.g. (a/b)*b
       linkMuls = [ (T.Div a b, b) | (a, b) <- udivs ]
       allMuls  = nubOrd (muls <> linkMuls)
       -- divisions whose dividend is an abstract product: (x*y)/z
       mulDivs = [ (a, x, y, b) | (a, b) <- udivs, Just (x, y) <- [asMul a] ]
-  if null udivs && null muls then pure []
+      -- pairs of const-muls sharing the same constant: (c, x, y) for c*x, c*y
+      constMulPairs = [ (c, x, y) | (c, x) <- constMuls, (c', y) <- constMuls, c == c', x /= y ]
+  if null udivs && null muls && null constMuls then pure []
   else do
     comm    <- mapM mkComm allMuls
     links   <- mapM mkDivMulLink udivs
@@ -206,8 +239,9 @@ mulEncoding enc props = do
     divMono <- concat <$> mapM mkDivMono (sharedPairs udivs)
     divDivisorMono <- concat <$> mapM mkDivisorMono (divisorPairs udivs)
     mulDivB <- concat <$> mapM mkMulDivBound mulDivs
+    constMulMono <- mapM mkConstMulMono constMulPairs
     pure $ (SMTComment "multiplication abstraction lemmas")
-           : (comm <> zeroOne <> links <> mulMono <> divMono <> divDivisorMono <> mulDivB)
+           : (comm <> zeroOne <> links <> mulMono <> divMono <> divDivisorMono <> mulDivB <> constMulMono)
   where
     -- commutativity: abst_evm_bvmul(a,b) = abst_evm_bvmul(b,a). Needed so that
     -- lemma terms match the props regardless of the simplifier's operand order.
@@ -253,6 +287,21 @@ mulEncoding enc props = do
       -- forward: x <= y  =>  x*z <= y*z
       pure [ SMTCommand $ "(assert (=> (and" `sp` mulNoOverflow xenc zenc `sp` mulNoOverflow yenc zenc
              <> " (bvule" `sp` xenc `sp` yenc <> ")) (bvule" `sp` mxz `sp` myz <> ")))" ]
+
+    -- const-mul monotonicity (sound, no-overflow guarded): for a fixed literal
+    -- constant c, x <= y  =>  c*x <= c*y. Because c is concrete we compute the
+    -- exact no-overflow bound floor((2^256-1)/c) at encode time, so the guard is
+    -- a single comparison against a constant (cheap) rather than a 512-bit
+    -- multiply. c*x stays a native bvmul; this lemma simply lets the solver
+    -- order two such products without bit-blasting the multiply.
+    mkConstMulMono (c, x, y) = do
+      xe <- enc x; ye <- enc y
+      let cbv  = wordAsBV c
+          cx   = "(bvmul" `sp` cbv `sp` xe <> ")"
+          cy   = "(bvmul" `sp` cbv `sp` ye <> ")"
+          bnd  = wordAsBV ((maxBound :: W256) `div` c)  -- largest x with c*x < 2^256
+      pure $ SMTCommand $ "(assert (=> (and (bvule" `sp` xe `sp` bnd <> ") (bvule" `sp` ye `sp` bnd <> ")"
+             <> " (bvule" `sp` xe `sp` ye <> ")) (bvule" `sp` cx `sp` cy <> ")))"
 
     -- div monotonicity in the dividend (sound unconditionally): for a common
     -- divisor z, x <= y  =>  floor(x/z) <= floor(y/z).

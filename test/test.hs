@@ -1515,6 +1515,27 @@ tests = testGroup "hevm"
           } |]
         (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertBoolM "Must be Unknown, never QED" (not (any isCex res) && any isUnknown res)
+    , testAbstractArith "constmul-div-monotone" $ do
+        -- (v * 1e27) / rate is monotonic in v. The dividend is a multiplication
+        -- by a large literal (1e27), which stays a native bvmul; const-mul
+        -- monotonicity lets the solver order the two dividends without
+        -- bit-blasting that multiply, which is otherwise the bottleneck.
+        -- Mirrors spark-psm convertToAssets(sUSDS): value * 1e9 * 1e18 / rate.
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_constmul_div_monotone(uint256 v1, uint256 v2, uint256 rate) external pure {
+              require(rate != 0);
+              require(v1 <= v2 && v2 < (1<<80));
+              uint256 a1; uint256 a2;
+              assembly {
+                a1 := div(mul(v1, 1000000000000000000000000000), rate)
+                a2 := div(mul(v2, 1000000000000000000000000000), rate)
+              }
+              assert(a1 <= a2);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
     ]
   , testGroup "max-iterations"
     [ test "concrete-loops-reached" $ do
