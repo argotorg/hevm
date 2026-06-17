@@ -43,6 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   options.
 - We now abort VM run on a failed `assume`.
 - Removed SHA256 from the Expr since it was not being used
+- When doing CopySlice of exactly one concrete byte, we now correctly simplify
 
 ## [0.57.0] - 2026-01-08
 
