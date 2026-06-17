@@ -1215,6 +1215,110 @@ tests = testGroup "hevm"
           } |]
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertEqualM "Must be QED" [] res
+    -- Unsigned div/mod exercise the abst_evm_bvudiv / abst_evm_bvurem
+    -- uninterpreted functions and the two-phase refinement.
+    , testAbstractArith "udiv-by-one" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_udiv_by_one(uint256 a) external pure {
+              uint256 result = a / 1;
+              assert(result == a);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "udiv-by-zero" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_udiv_by_zero(uint256 a) external pure {
+              // EVM div-by-zero yields 0; Solidity's `/` reverts, so use raw DIV
+              uint256 result;
+              assembly { result := div(a, 0) }
+              assert(result == 0);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "udiv-self" $ do
+        -- symbolic divisor: a genuine abst_evm_bvudiv application
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_udiv_self(uint256 a) external pure {
+              require(a != 0);
+              uint256 result = a / a;
+              assert(result == 1);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "umod-by-one" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_umod_by_one(uint256 a) external pure {
+              uint256 result = a % 1;
+              assert(result == 0);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "umod-range" $ do
+        -- a % b < b for b != 0; needs the ground-truth refinement of bvurem
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_umod_range(uint256 a, uint256 b) external pure {
+              require(b != 0);
+              uint256 result = a % b;
+              assert(result < b);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "udiv-le-dividend" $ do
+        -- a / b <= a for b != 0; refines bvudiv (symbolic divisor)
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_udiv_le_dividend(uint256 a, uint256 b) external pure {
+              require(b != 0);
+              uint256 r = a / b;
+              assert(r <= a);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "udiv-cex" $ do
+        -- false property: div(a,b) can be 0 (e.g. a=0). The abstract path must
+        -- still find a real counterexample after refinement.
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_udiv_nonzero(uint256 a, uint256 b) external pure {
+              require(b != 0);
+              uint256 result = a / b;
+              assert(result != 0);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertBoolM "Expected counterexample" (any isCex res)
+    , testAbstractArith "vault-preview-shares" $ do
+        -- ERC-4626-style share pricing in 64.64 fixed point:
+        --   shares = (assets * 2^64) / price
+        -- When each share costs at least 1.0 (price >= 2^64), a deposit can
+        -- never mint more shares than assets. The power-of-two dividend
+        -- (assets << 64) lets the shift-bounds encoding discharge this without
+        -- the bvudiv theory; native bvudiv leaves the solver at "unknown".
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function previewShares(uint256 assets, uint256 price) internal pure returns (uint256 shares) {
+              shares = (assets << 64) / price;
+            }
+            function prove_vault_no_inflation(uint256 assets, uint256 price) external pure {
+              require(price >= (1 << 64));   // >= 1.0 per share
+              require(assets < (1 << 128));  // assets << 64 stays within 256 bits
+              uint256 shares = previewShares(assets, price);
+              assert(shares <= assets);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
     , ignoreTestBecause "Abstract arithmetic cannot find counterexample for this case" $ testAbstractArith "math-mint-fail" $ do
         Just c <- solcRuntime "C" [i|
           contract C {

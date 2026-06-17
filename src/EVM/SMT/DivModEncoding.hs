@@ -22,6 +22,8 @@ divModAbstractDecls =
   [ SMTComment "abstract division/modulo (uninterpreted functions)"
   , SMTCommand "(declare-fun abst_evm_bvsdiv ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
   , SMTCommand "(declare-fun abst_evm_bvsrem ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
+  , SMTCommand "(declare-fun abst_evm_bvudiv ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
+  , SMTCommand "(declare-fun abst_evm_bvurem ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
   ]
 
 -- | Local helper for trivial SMT constructs
@@ -34,7 +36,11 @@ zero = "(_ bv0 256)"
 wordAsBV :: forall a. Integral a => a -> Builder
 wordAsBV w = "(_ bv" <> Data.Text.Lazy.Builder.Int.decimal w <> " 256)"
 
-data DivModKind = IsDiv | IsMod
+-- | The four EVM division/modulo operations. The @S@-variants are signed
+-- (SDiv/SMod), the @U@-variants unsigned (Div/Mod). Signed and unsigned ops
+-- are kept in separate groups so the signed absolute-value/sign-reconstruction
+-- machinery is never applied to unsigned operands (and vice versa).
+data DivModKind = IsSDiv | IsSMod | IsUDiv | IsUMod
   deriving (Eq, Ord)
 
 type DivModOp = (DivModKind, Expr EWord, Expr EWord)
@@ -43,26 +49,52 @@ data AbstractKey = AbstractKey (Expr EWord) (Expr EWord) DivModKind
   deriving (Eq, Ord)
 
 isDiv :: DivModKind -> Bool
-isDiv IsDiv = True
-isDiv _     = False
+isDiv IsSDiv = True
+isDiv IsUDiv = True
+isDiv _      = False
+
+isSigned :: DivModKind -> Bool
+isSigned IsSDiv = True
+isSigned IsSMod = True
+isSigned _      = False
+
+-- | Name of the uninterpreted function standing in for this op.
+abstFnName :: DivModKind -> Builder
+abstFnName IsSDiv = "abst_evm_bvsdiv"
+abstFnName IsSMod = "abst_evm_bvsrem"
+abstFnName IsUDiv = "abst_evm_bvudiv"
+abstFnName IsUMod = "abst_evm_bvurem"
+
+-- | Name of the concrete SMT-LIB op refined against in phase two.
+concFnName :: DivModKind -> Builder
+concFnName IsSDiv = "bvsdiv"
+concFnName IsSMod = "bvsrem"
+concFnName IsUDiv = "bvudiv"
+concFnName IsUMod = "bvurem"
 
 -- | Collect all div/mod operations from an expression.
 collectDivMods :: Expr a -> [DivModOp]
 collectDivMods = \case
-  T.SDiv a b -> [(IsDiv, a, b)]
-  T.SMod a b -> [(IsMod, a, b)]
+  T.SDiv a b -> [(IsSDiv, a, b)]
+  T.SMod a b -> [(IsSMod, a, b)]
+  T.Div  a b -> [(IsUDiv, a, b)]
+  T.Mod  a b -> [(IsUMod, a, b)]
   _          -> []
 
 abstractKey :: DivModOp -> AbstractKey
 abstractKey (kind, a, b) = AbstractKey a b kind
 
--- | Declare abs_a, abs_b, and unsigned result variables for a signed group.
-declareAbsolute :: (Expr EWord -> Err Builder) -> Int -> Expr EWord -> Expr EWord -> Builder -> Err ([SMTEntry], (Builder, Builder))
-declareAbsolute enc groupIdx firstA firstB unsignedResult = do
+-- | Declare the magnitude variables and the unsigned result variable for a
+-- group. For signed ops the magnitudes are the absolute values |a|, |b|; for
+-- unsigned ops the operands are already non-negative, so the magnitude is the
+-- operand itself (|x| = x).
+declareAbsolute :: (Expr EWord -> Err Builder) -> DivModKind -> Int -> Expr EWord -> Expr EWord -> Builder -> Err ([SMTEntry], (Builder, Builder))
+declareAbsolute enc kind groupIdx firstA firstB unsignedResult = do
   aenc <- enc firstA
   benc <- enc firstB
-  let absoluteAEnc = smtAbsolute aenc
-      absoluteBEnc = smtAbsolute benc
+  let magnitude x = if isSigned kind then smtAbsolute x else x
+      absoluteAEnc = magnitude aenc
+      absoluteBEnc = magnitude benc
       absoluteAName = fromString $ "absolute_a" <> show groupIdx
       absoluteBName = fromString $ "absolute_b" <> show groupIdx
   let decls = [ SMTCommand $ "(declare-const" `sp` absoluteAName `sp` "(_ BitVec 256))"
@@ -73,16 +105,19 @@ declareAbsolute enc groupIdx firstA firstB unsignedResult = do
               ]
   pure (decls, (absoluteAName, absoluteBName))
 
--- | Assert "abstract sdiv/smod(a,b)" = signed result derived from unsigned result.
-assertAbstEqSignedResult :: (Expr EWord -> Err Builder) -> Builder -> DivModOp -> Err SMTEntry
-assertAbstEqSignedResult enc unsignedResult (kind, a, b) = do
+-- | Assert "abstract div/mod(a,b)" = result derived from the unsigned result
+-- variable. Signed ops reconstruct the sign from |a|/|b|; unsigned ops need
+-- only the EVM divide-by-zero guard, since the unsigned result is the answer.
+assertAbstEqResult :: (Expr EWord -> Err Builder) -> Builder -> DivModOp -> Err SMTEntry
+assertAbstEqResult enc unsignedResult (kind, a, b) = do
   aenc <- enc a
   benc <- enc b
-  let fname = if isDiv kind then "abst_evm_bvsdiv" else "abst_evm_bvsrem"
-      abstract = "(" <> fname `sp` aenc `sp` benc <> ")"
-      concrete = if isDiv kind
-                 then signedFromUnsignedDiv aenc benc unsignedResult
-                 else signedFromUnsignedMod aenc benc unsignedResult
+  let abstract = "(" <> abstFnName kind `sp` aenc `sp` benc <> ")"
+      concrete = case kind of
+        IsSDiv -> signedFromUnsignedDiv aenc benc unsignedResult
+        IsSMod -> signedFromUnsignedMod aenc benc unsignedResult
+        IsUDiv -> smtZeroGuard benc unsignedResult
+        IsUMod -> smtZeroGuard benc unsignedResult
   pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
 
 -- | Ground-truth axioms: for each sdiv/smod op, assert that the abstract
@@ -100,12 +135,14 @@ divModGroundTruth enc props = do
     mkGroundTruthAxiom (kind, a, b) = do
       aenc <- enc a
       benc <- enc b
-      let (abstFn, concFn) = if isDiv kind
-            then ("abst_evm_bvsdiv", "bvsdiv")
-            else ("abst_evm_bvsrem", "bvsrem")
-      pure $ SMTCommand $ "(assert (=" `sp`
-        "(" <> abstFn `sp` aenc `sp` benc <> ")" `sp`
-        "(" <> concFn `sp` aenc `sp` benc <> ")))"
+      let abstract = "(" <> abstFnName kind `sp` aenc `sp` benc <> ")"
+          native   = "(" <> concFnName kind `sp` aenc `sp` benc <> ")"
+          -- EVM defines x/0 = 0 and x%0 = 0, whereas SMT-LIB's native bvudiv/
+          -- bvurem return non-zero on a zero divisor; guard the unsigned ops so
+          -- the axiom matches op2CheckZero and the encoding's zero guard. (The
+          -- signed reconstruction already applies the guard on its side.)
+          concrete = if isSigned kind then native else smtZeroGuard benc native
+      pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
 
 -- | Encode div/mod operations using abs values, shift-bounds, and congruence (no bvudiv).
 divModEncoding :: (Expr EWord -> Err Builder) -> [Prop] -> Err [SMTEntry]
@@ -130,7 +167,7 @@ divModEncoding enc props = do
       let isDiv' = isDiv firstKind
           prefix = if isDiv' then "udiv" else "urem"
           unsignedResult = fromString $ prefix <> "_" <> show groupIdx
-      (decls, (absoluteA, absoluteB)) <- declareAbsolute enc groupIdx firstA firstB unsignedResult
+      (decls, (absoluteA, absoluteB)) <- declareAbsolute enc firstKind groupIdx firstA firstB unsignedResult
 
       -- When the dividend is a left-shift (a = x << k, i.e. a = x * 2^k),
       -- we can bound the unsigned division result using cheap bitshift
@@ -153,16 +190,19 @@ divModEncoding enc props = do
                    <> "(bvuge" `sp` unsignedResult `sp` shifted <> ")))"
                  ]
             _ -> []
-      axioms <- mapM (assertAbstEqSignedResult enc unsignedResult) lhs
+      axioms <- mapM (assertAbstEqResult enc unsignedResult) lhs
       pure $ decls <> shiftBounds <> axioms
 
--- | Congruence: if two signed groups have equal absolute inputs, their results are equal.
+-- | Congruence: if two groups of the same kind have equal magnitude inputs,
+-- their results are equal. Signed and unsigned groups are linked separately so
+-- a signed op is never tied to an unsigned op (and vice versa).
 mkCongruenceLinks :: [(Int, [DivModOp])] -> [SMTEntry]
 mkCongruenceLinks indexedGroups =
-  let signedDivGroups = [(i, ops) | (i, ops@((k,_,_):_)) <- indexedGroups , k == IsDiv]
-      signedModGroups = [(i, ops) | (i, ops@((k,_,_):_)) <- indexedGroups , k == IsMod]
-  in    concatMap (mkPairLinks "udiv") (allPairs signedDivGroups)
-     <> concatMap (mkPairLinks "urem") (allPairs signedModGroups)
+  let groupsOfKind want = [(i, ops) | (i, ops@((k,_,_):_)) <- indexedGroups , k == want]
+  in    concatMap (mkPairLinks "udiv") (allPairs (groupsOfKind IsSDiv))
+     <> concatMap (mkPairLinks "urem") (allPairs (groupsOfKind IsSMod))
+     <> concatMap (mkPairLinks "udiv") (allPairs (groupsOfKind IsUDiv))
+     <> concatMap (mkPairLinks "urem") (allPairs (groupsOfKind IsUMod))
   where
     allPairs xs = [(a, b) | a <- xs, b <- xs, fst a < fst b]
     mkPairLinks prefix' ((i, _), (j, _)) =
