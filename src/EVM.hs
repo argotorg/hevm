@@ -2188,6 +2188,7 @@ cheatActions = Map.fromList
   , action "assertEq(address,address)" $ assertEq AbiAddressType
   , action "assertEq(bytes32,bytes32)" $ assertEq (AbiBytesType 32)
   , action "assertEq(string,string)"   $ assertEq (AbiStringType)
+  , action "assertEq(bytes,bytes)"     $ assertEq AbiBytesDynamicType
   --
   , action "assertNotEq(bool,bool)"       $ assertNotEq AbiBoolType
   , action "assertNotEq(uint256,uint256)" $ assertNotEq (AbiUIntType 256)
@@ -2195,6 +2196,7 @@ cheatActions = Map.fromList
   , action "assertNotEq(address,address)" $ assertNotEq AbiAddressType
   , action "assertNotEq(bytes32,bytes32)" $ assertNotEq (AbiBytesType 32)
   , action "assertNotEq(string,string)"   $ assertNotEq (AbiStringType)
+  , action "assertNotEq(bytes,bytes)"      $ assertNotEq AbiBytesDynamicType
   --
   , action "assertLt(uint256,uint256)" $ assertLt (AbiUIntType 256)
   , action "assertLt(int256,int256)"   $ assertSLt (AbiIntType 256)
@@ -2207,6 +2209,42 @@ cheatActions = Map.fromList
   --
   , action "assertApproxEqAbs(uint256,uint256,uint256)" $ assertApproxEqAbsUint
   , action "assertApproxEqAbs(int256,int256,uint256)"   $ assertApproxEqAbsInt
+  --
+  , action "assertApproxEqRel(uint256,uint256,uint256)" $ assertApproxEqRelUint
+  , action "assertApproxEqRel(int256,int256,uint256)"   $ assertApproxEqRelInt
+  --
+  -- Variants with a trailing `err` string. The string is decoded away and never
+  -- used; each behaves exactly like its non-message counterpart.
+  , action "assertEq(bool,bool,string)"       $ withMsg 2 (assertEq AbiBoolType)
+  , action "assertEq(uint256,uint256,string)" $ withMsg 2 (assertEq (AbiUIntType 256))
+  , action "assertEq(int256,int256,string)"   $ withMsg 2 (assertEq (AbiIntType 256))
+  , action "assertEq(address,address,string)" $ withMsg 2 (assertEq AbiAddressType)
+  , action "assertEq(bytes32,bytes32,string)" $ withMsg 2 (assertEq (AbiBytesType 32))
+  , action "assertEq(string,string,string)"   $ assertEqMsgDyn AbiStringType
+  , action "assertEq(bytes,bytes,string)"      $ assertEqMsgDyn AbiBytesDynamicType
+  --
+  , action "assertNotEq(bool,bool,string)"       $ withMsg 2 (assertNotEq AbiBoolType)
+  , action "assertNotEq(uint256,uint256,string)" $ withMsg 2 (assertNotEq (AbiUIntType 256))
+  , action "assertNotEq(int256,int256,string)"   $ withMsg 2 (assertNotEq (AbiIntType 256))
+  , action "assertNotEq(address,address,string)" $ withMsg 2 (assertNotEq AbiAddressType)
+  , action "assertNotEq(bytes32,bytes32,string)" $ withMsg 2 (assertNotEq (AbiBytesType 32))
+  , action "assertNotEq(string,string,string)"   $ assertNotEqMsgDyn AbiStringType
+  , action "assertNotEq(bytes,bytes,string)"      $ assertNotEqMsgDyn AbiBytesDynamicType
+  --
+  , action "assertLt(uint256,uint256,string)" $ withMsg 2 (assertLt (AbiUIntType 256))
+  , action "assertLt(int256,int256,string)"   $ withMsg 2 (assertSLt (AbiIntType 256))
+  , action "assertLe(uint256,uint256,string)" $ withMsg 2 (assertLe (AbiUIntType 256))
+  , action "assertLe(int256,int256,string)"   $ withMsg 2 (assertSLe (AbiIntType 256))
+  , action "assertGt(uint256,uint256,string)" $ withMsg 2 (assertGt (AbiUIntType 256))
+  , action "assertGt(int256,int256,string)"   $ withMsg 2 (assertSGt (AbiIntType 256))
+  , action "assertGe(uint256,uint256,string)" $ withMsg 2 (assertGe (AbiUIntType 256))
+  , action "assertGe(int256,int256,string)"   $ withMsg 2 (assertSGe (AbiIntType 256))
+  --
+  , action "assertApproxEqAbs(uint256,uint256,uint256,string)" $ withMsg 3 assertApproxEqAbsUint
+  , action "assertApproxEqAbs(int256,int256,uint256,string)"   $ withMsg 3 assertApproxEqAbsInt
+  --
+  , action "assertApproxEqRel(uint256,uint256,uint256,string)" $ withMsg 3 assertApproxEqRelUint
+  , action "assertApproxEqRel(int256,int256,uint256,string)"   $ withMsg 3 assertApproxEqRelInt
   --
   , action "toString(address)" $ toStringCheat AbiAddressType
   , action "toString(bool)"    $ toStringCheat AbiBoolType
@@ -2255,17 +2293,47 @@ cheatActions = Map.fromList
       ")  parameter decoding failed. Error: " <> show abivals
     revertErr a b comp = frameRevert $ "assertion failed: " <>
       BS8.pack (show a) <> " " <> comp <> " " <> BS8.pack (show b)
-    genAssert comp exprComp invComp name abitype sig input = do
-      case decodeBuf [abitype, abitype] input of
-        (CAbi [a, b],"") | a `comp` b -> doStop
-        (CAbi [a, b],"")-> revertErr a b invComp
-        (SAbi [ew1, ew2],"") -> case (Expr.simplify (Expr.iszero $ exprComp ew1 ew2)) of
+    -- 1e18 (100% in foundry's 18-decimal fixed point) as Integer and W256
+    scale1e18 :: Integer
+    scale1e18 = 10^(18::Int)
+    scale1e18W :: W256
+    scale1e18W = 10^(18::Int)
+    -- largest absDelta with absDelta*1e18 < 2^256 (symbolic overflow guard)
+    maxSafeRelDelta :: W256
+    maxSafeRelDelta = (maxBound :: W256) `Prelude.div` scale1e18W
+    -- shared rel-assertion failure message; realDelta is pre-rendered
+    relFailMsg :: Show a => a -> a -> Word256 -> String -> ByteString
+    relFailMsg a b maxPercentDelta realDelta = "assertion failed: " <>
+      BS8.pack (show a) <> " !~= " <> BS8.pack (show b) <>
+      " (max delta: " <> BS8.pack (show maxPercentDelta) <>
+      ", real delta: " <> BS8.pack realDelta <> ")"
+    genAssert = genAssertN []
+    -- like genAssert but ignores `extra` trailing ABI args (the err-string
+    -- overloads). Only used directly for string operands; static operands strip
+    -- the err arg upstream via withMsg to keep the symbolic path.
+    genAssertN extra comp exprComp invComp name abitype sig input = do
+      case decodeBuf ([abitype, abitype] ++ extra) input of
+        (CAbi (a:b:_),"") | a `comp` b -> doStop
+        (CAbi (a:b:_),"")-> revertErr a b invComp
+        (SAbi (ew1:ew2:_),"") -> case (Expr.simplify (Expr.iszero $ exprComp ew1 ew2)) of
           Lit 0 -> doStop
           Lit _ -> revertErr ew1 ew2 invComp
           ew -> branch (?conf).maxDepth ew $ \case
             False -> doStop
             True -> revertErr ew1 ew2 invComp
         abivals -> vmError (BadCheatCode (paramDecodeErr abitype name abivals) sig)
+    -- keep the first n 32-byte head words, dropping the trailing err string so
+    -- operand-only handlers decode normally (and keep SAbi for symbolic operands)
+    keepHeadWords n input =
+      foldr (\i acc -> let off = Lit (fromIntegral (i * 32 :: Int))
+                       in writeWord off (readWord off input) acc)
+            mempty [0 .. n - 1]
+    -- Run a no-message handler after stripping the trailing `err` string.
+    withMsg n handler sig input = handler sig (keepHeadWords n input)
+    -- dynamic operands (string/bytes) can't be sliced: decode [op,op,string] and
+    -- compare the first two concretely (no symbolic path), ignoring the err string
+    assertEqMsgDyn    op = genAssertN [AbiStringType] (==) Expr.eq "!=" "assertEq" op
+    assertNotEqMsgDyn op = genAssertN [AbiStringType] (/=) (\a b -> Expr.iszero $ Expr.eq a b) "==" "assertNotEq" op
     assertEq =    genAssert (==) Expr.eq "!=" "assertEq"
     assertNotEq = genAssert (/=) (\a b -> Expr.iszero $ Expr.eq a b) "==" "assertNotEq"
     assertLt =    genAssert (<)  Expr.lt ">=" "assertLt"
@@ -2331,6 +2399,73 @@ cheatActions = Map.fromList
               False -> doStop
               True -> frameRevert "assertion failed: assertApproxEqAbs (symbolic)"
         abivals -> vmError (BadCheatCode ("assertApproxEqAbs(int256,int256,uint256) parameter decoding failed: " <> show abivals) sig)
+    -- | assertApproxEqRel(uint256): pass iff |a-b|*1e18/b <= maxPercentDelta
+    -- (1e18 == 100%, denominator is the reference b), per forge-std. Special cases:
+    -- b==0&&a==0 -> pass; b==0&&a/=0 -> "undefined"; result > uint256 -> overflow.
+    assertApproxEqRelUint sig input = do
+      case decodeBuf [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256] input of
+        (CAbi [AbiUInt _ a, AbiUInt _ b, AbiUInt _ maxPercentDelta],"")
+          | b == 0 ->
+            if a == 0 then doStop
+            else frameRevert $ relFailMsg a b maxPercentDelta "undefined"
+          | otherwise ->
+            let absDelta = if a > b then a - b else b - a
+                -- in Integer to avoid the intermediate overflow (foundry uses U512)
+                percentDelta = (toInteger absDelta * scale1e18) `Prelude.div` toInteger b
+            in if percentDelta > toInteger (maxBound :: Word256)
+               then frameRevert "assertion failed: overflow in delta calculation"
+               else if percentDelta <= toInteger maxPercentDelta then doStop
+               else frameRevert $ relFailMsg a b maxPercentDelta (show percentDelta)
+        (SAbi [ew1, ew2, ew3],"") ->
+          -- Sound encoding: Expr.mul truncates mod 2^256, so it's only trustworthy
+          -- when absDelta*1e18 can't overflow (absDelta <= maxSafeRelDelta). Pass
+          -- only when provably within bound; overflow-possible or b==0&&a/=0 fail
+          -- (b==0&&a==0 passes). May give false positives, never an unsound pass.
+          let absDelta     = Expr.sub (Expr.max ew1 ew2) (Expr.min ew1 ew2)
+              percentDelta = Expr.div (Expr.mul absDelta (Lit scale1e18W)) ew2
+              bZero        = Expr.iszero ew2
+              aNotZero     = Expr.iszero (Expr.iszero ew1)
+              overflow     = Expr.gt absDelta (Lit maxSafeRelDelta)
+              pdExceeds    = Expr.gt percentDelta ew3
+              -- fail iff (b == 0 && a /= 0) || (b /= 0 && (overflow || pd > max))
+              failCond     = Expr.or (Expr.and bZero aNotZero)
+                                     (Expr.and (Expr.iszero bZero) (Expr.or overflow pdExceeds))
+          in case Expr.simplify failCond of
+            Lit 0 -> doStop
+            Lit _ -> frameRevert "assertion failed: assertApproxEqRel (symbolic)"
+            ew -> branch (?conf).maxDepth ew $ \case
+              False -> doStop
+              True -> frameRevert "assertion failed: assertApproxEqRel (symbolic)"
+        abivals -> vmError (BadCheatCode ("assertApproxEqRel(uint256,uint256,uint256) parameter decoding failed: " <> show abivals) sig)
+    -- | assertApproxEqRel(int256): as uint, but signed absDelta (same sign
+    -- ||a|-|b||, opposite |a|+|b|) over denominator |b|.
+    assertApproxEqRelInt sig input = do
+      case decodeBuf [AbiIntType 256, AbiIntType 256, AbiUIntType 256] input of
+        (CAbi [AbiInt _ a, AbiInt _ b, AbiUInt _ maxPercentDelta],"") ->
+          let -- fromIntegral Int256->Word256 reinterprets bits; for minBound this gives 2^255 which is correct
+              absI x = if x == minBound then fromIntegral (maxBound :: Int256) + 1
+                        else fromIntegral (abs x) :: Word256
+              absA = absI a
+              absB = absI b
+              sameSign = (a >= 0 && b >= 0) || (a < 0 && b < 0)
+              absDelta = if sameSign
+                         then if absA > absB then absA - absB else absB - absA
+                         else absA + absB
+          in if b == 0
+             then if a == 0 then doStop
+                  else frameRevert $ relFailMsg a b maxPercentDelta "undefined"
+             else
+               let percentDelta = (toInteger absDelta * scale1e18) `Prelude.div` toInteger absB
+               in if percentDelta > toInteger (maxBound :: Word256)
+                  then frameRevert "assertion failed: overflow in delta calculation"
+                  else if percentDelta <= toInteger maxPercentDelta then doStop
+                  else frameRevert $ relFailMsg a b maxPercentDelta (show percentDelta)
+        (SAbi [_, _, _],"") ->
+          -- A sound signed encoding isn't expressible with hevm's Expr (would need
+          -- full-precision signed abs + |b| division), so we conservatively fail
+          -- rather than risk an unsound pass. May be a false positive.
+          frameRevert "assertion failed: assertApproxEqRel (symbolic int256 operands not supported)"
+        abivals -> vmError (BadCheatCode ("assertApproxEqRel(int256,int256,uint256) parameter decoding failed: " <> show abivals) sig)
     toStringCheat abitype sig input = do
       case decodeBuf [abitype] input of
         (CAbi [val],"") -> frameReturn $ AbiTuple $ V.fromList [AbiString $ Char8.pack $ show val]
