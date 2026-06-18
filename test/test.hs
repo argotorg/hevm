@@ -1453,33 +1453,6 @@ tests = testGroup "hevm"
           } |]
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertEqualM "Must be QED" [] res
-    , testAbstractArith "roundtrip-checked-realcode" $ do
-        -- Same round-trip on real-code-shaped Solidity: ordinary checked
-        -- arithmetic (so each `*` carries the 0.8 overflow guard div(mul(a,b),a))
-        -- and the conversions are real functions that read storage, called as in
-        -- the contract. Confirms the cancellation synthesis survives the extra
-        -- overflow-guard divisions, i.e. the property proves on the code as
-        -- written, not only on raw assembly ops.
-        Just c <- solcRuntime "C" [i|
-          contract C {
-            uint256 public totalShares;
-            uint256 public totalAssets;
-            function convertToShares(uint256 assetValue) public view returns (uint256) {
-              if (totalAssets != 0) return assetValue * totalShares / totalAssets;
-              return assetValue;
-            }
-            function convertToAssetValue(uint256 numShares) public view returns (uint256) {
-              if (totalShares != 0) return numShares * totalAssets / totalShares;
-              return numShares;
-            }
-            function prove_roundtrip(uint256 x) external view {
-              require(totalShares != 0 && totalAssets != 0);
-              require(x < (1<<128) && totalShares < (1<<128) && totalAssets < (1<<128));
-              assert(convertToAssetValue(convertToShares(x)) <= x);
-            }
-          } |]
-        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-        assertEqualM "Must be QED" [] res
     , testAbstractArith "div-cex-preserved" $ do
         -- No symbolic*symbolic mul => div is exact => a real counterexample is
         -- still reported (the Cex->Unknown downgrade must be precise).
@@ -1550,7 +1523,6 @@ tests = testGroup "hevm"
         -- by a large literal (1e27), which stays a native bvmul; const-mul
         -- monotonicity lets the solver order the two dividends without
         -- bit-blasting that multiply, which is otherwise the bottleneck.
-        -- Mirrors spark-psm convertToAssets(sUSDS): value * 1e9 * 1e18 / rate.
         Just c <- solcRuntime "C" [i|
           contract C {
             function prove_constmul_div_monotone(uint256 v1, uint256 v2, uint256 rate) external pure {

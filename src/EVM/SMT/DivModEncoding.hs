@@ -50,16 +50,15 @@ maxU128 = "(_ bv340282366920938463463374607431768211455 256)"
 -- We deliberately use this cheap sufficient condition rather than the exact
 -- no-overflow predicate @extract 511 256 (bvmul (zext x) (zext y)) = 0@. The
 -- exact form forces the solver to bit-blast a full 512-bit multiply for every
--- lemma instance, which is the dominant cost and makes realistic vault queries
--- (operands ~2^100, e.g. token amounts up to 1e30) time out. Two comparisons
--- against a constant are essentially free by contrast.
+-- lemma instance, which is the dominant cost and makes queries with large
+-- operands (~2^100) time out. Two comparisons against a constant are
+-- essentially free by contrast.
 --
 -- This is the same width-budget idea Halmos uses. It is SOUND: when the guard
 -- holds there is genuinely no overflow, so any lemma it gates remains valid.
 -- The cost is completeness — a product of operands above 2^128 that happens not
--- to overflow will not receive the lemma. All realistic token amounts, share
--- counts and conversion rates are far below 2^128, so this is not a limitation
--- in practice.
+-- to overflow will not receive the lemma. Callers bound operands (e.g. a
+-- Solidity @require(x < 2**128)@) so the guard discharges cheaply.
 mulNoOverflow :: Builder -> Builder -> Builder
 mulNoOverflow x y =
   "(and (bvule " <> x <> " " <> maxU128 <> ") (bvule " <> y <> " " <> maxU128 <> "))"
