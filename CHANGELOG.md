@@ -42,6 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counterexamples requiring longer inputs may be missed (rather than a per-path
   `Partial`)
 - `readWord` disjointness rule for `WriteWord (Add (Lit c) X) …` with bounded `X`.
+- New `symbolic-test` suite checking hevm finds validated counterexamples for
+  the 22 DeFi exploits in
+  [`grandizzy/symbolic-bug-suite`](https://github.com/grandizzy/symbolic-bug-suite)
 
 ## Changed
 - Simplifier now rewrites `Mul(-1, x)` and `~x + 1` to `Sub(0, x)`
