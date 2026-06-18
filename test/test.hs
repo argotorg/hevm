@@ -1616,6 +1616,41 @@ tests = testGroup "hevm"
           } |]
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertBoolM "Wrong closed form must not be QED" (not (null res))
+    , testAbstractArith "ceildiv-cancel" $ do
+        -- ceilDiv-cancel: Math.ceilDiv(c1*x, c2) == (c1/c2)*x when c2 | c1 (the
+        -- product is always divisible, so round-up equals round-down). The divide is
+        -- abstracted over the (c1*x - 1) dividend, so the lemma pins it. Discharges
+        -- the round-up multiply-up in previewSwapExactOut (e.g. usds->usdc == x*1e12).
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function ceilDiv(uint256 a, uint256 b) internal pure returns (uint256) {
+              return a == 0 ? 0 : (a - 1) / b + 1;
+            }
+            function prove_ceildiv_cancel(uint256 x) external pure {
+              require(x < (1<<128));
+              uint256 y = ceilDiv(x * 1000000000000000000, 1000000);
+              uint256 z; unchecked { z = x * 1000000000000; }
+              assert(y == z);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "ceildiv-cancel-cex" $ do
+        -- soundness guard: a wrong closed form (off by one) must NOT be QED.
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function ceilDiv(uint256 a, uint256 b) internal pure returns (uint256) {
+              return a == 0 ? 0 : (a - 1) / b + 1;
+            }
+            function prove_ceildiv_cancel_wrong(uint256 x) external pure {
+              require(x < (1<<128));
+              uint256 y = ceilDiv(x * 1000000000000000000, 1000000);
+              uint256 z; unchecked { z = x * 1000000000000 + 1; }
+              assert(y == z);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertBoolM "Wrong closed form must not be QED" (not (null res))
     ]
   , testGroup "max-iterations"
     [ test "concrete-loops-reached" $ do

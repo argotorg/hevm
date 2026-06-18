@@ -264,6 +264,15 @@ mulEncoding enc props = do
                     | (a, b) <- udivsAll, Just (c1, x) <- [asConstMul a]
                     , Lit c2 <- [b], c2 /= 0, c1 /= 0
                     , c2 `mod` c1 == 0, c2 /= c1 ]
+      -- ceilDiv-cancel: OpenZeppelin Math.ceilDiv(c1*x, c2) is
+      -- (c1*x == 0) ? 0 : (c1*x - 1)/c2 + 1, so the abstracted divide is over the
+      -- (c1*x - 1) dividend. When c2 | c1 the product c1*x is always a multiple of
+      -- c2, hence ceil == floor and the whole ceilDiv collapses to (c1/c2)*x. We
+      -- pin the inner divide: (a, c1, c2, x) with a == (c1*x) - 1.
+      ceilDivCancels = [ (a, c1, c2, x)
+                       | (a, b) <- udivsAll, T.Sub inner (Lit 1) <- [a]
+                       , Just (c1, x) <- [asConstMul inner]
+                       , Lit c2 <- [b], c2 /= 0, c1 `mod` c2 == 0 ]
   if null udivs && null muls && null constMuls then pure []
   else do
     comm    <- mapM mkComm allMuls
@@ -277,8 +286,9 @@ mulEncoding enc props = do
     constCancel <- mapM mkConstCancel constCancels
     nestedDiv <- mapM mkNestedDiv nestedDivs
     fracReduce <- mapM mkFracReduce fracReduces
+    ceilDivCancel <- mapM mkCeilDivCancel ceilDivCancels
     pure $ (SMTComment "multiplication abstraction lemmas")
-           : (comm <> zeroOne <> links <> mulMono <> divMono <> divDivisorMono <> mulDivB <> constMulMono <> constCancel <> nestedDiv <> fracReduce)
+           : (comm <> zeroOne <> links <> mulMono <> divMono <> divDivisorMono <> mulDivB <> constMulMono <> constCancel <> nestedDiv <> fracReduce <> ceilDivCancel)
   where
     -- commutativity: abst_evm_bvmul(a,b) = abst_evm_bvmul(b,a). Needed so that
     -- lemma terms match the props regardless of the simplifier's operand order.
@@ -383,6 +393,25 @@ mulEncoding enc props = do
           rhs  = "(abst_evm_bvudiv" `sp` xe `sp` wordAsBV k <> ")"    -- x/(c2/c1)
           bnd  = wordAsBV ((maxBound :: W256) `div` c1)  -- largest x with c1*x < 2^256
       pure $ SMTCommand $ "(assert (=> (bvule" `sp` xe `sp` bnd <> ") (=" `sp` dv `sp` rhs <> ")))"
+
+    -- ceilDiv-cancel (sound, guarded): pins the abstracted divide inside
+    -- OpenZeppelin's Math.ceilDiv(c1*x, c2) = (c1*x - 1)/c2 + 1 (the c1*x != 0
+    -- branch). `a` is the (c1*x - 1) dividend. When c2 | c1, write c1 = c2*m: then
+    -- c1*x = c2*(m*x), so floor((c2*m*x - 1)/c2) = m*x - 1 (for m*x >= 1). Adding
+    -- the ceilDiv's +1 gives m*x = (c1/c2)*x exactly. Guarded by x >= 1 (the ceilDiv
+    -- ITE handles x==0 on its own branch) and the encode-time no-overflow bound
+    -- floor((2^256-1)/c1). This is the ceilDiv sibling of const-cancel; it
+    -- discharges the round-up swap-out closed forms (e.g. previewSwapExactOut
+    -- usds->usdc == amountOut*1e12).
+    mkCeilDivCancel (a, c1, c2, x) = do
+      ae <- enc a; xe <- enc x
+      let m    = c1 `div` c2                 -- exact, since c2 | c1
+          mx   = if m == 1 then xe else "(bvmul" `sp` wordAsBV m `sp` xe <> ")"
+          dv   = "(abst_evm_bvudiv" `sp` ae `sp` wordAsBV c2 <> ")"   -- (c1*x - 1)/c2
+          rhs  = "(bvsub" `sp` mx `sp` one <> ")"                     -- (c1/c2)*x - 1
+          bnd  = wordAsBV ((maxBound :: W256) `div` c1)  -- largest x with c1*x < 2^256
+      pure $ SMTCommand $ "(assert (=> (and (bvuge" `sp` xe `sp` one <> ")"
+             <> " (bvule" `sp` xe `sp` bnd <> ")) (=" `sp` dv `sp` rhs <> ")))"
 
     -- recognise multiplication by a non-trivial literal constant: c*x or x*c.
     asConstMul :: Expr EWord -> Maybe (W256, Expr EWord)
