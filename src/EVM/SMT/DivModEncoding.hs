@@ -241,9 +241,20 @@ mulEncoding enc props = do
       mulDivs = [ (a, x, y, b) | (a, b) <- udivsAll, Just (x, y) <- [asMul a] ]
       -- pairs of const-muls sharing the same constant: (c, x, y) for c*x, c*y
       constMulPairs = [ (c, x, y) | (c, x) <- constMuls, (c', y) <- constMuls, c == c', x /= y ]
-      -- const cancellation: divisions (c*x)/c by the SAME literal constant c.
-      -- (a, c, x): a is the division's dividend (c*x), divided by Lit c.
-      constCancels = [ (a, c, x) | (a, b) <- udivsAll, Just (c, x) <- [asConstMul a], b == Lit c ]
+      -- const cancellation: a product c1*x divided by a literal c2 that divides
+      -- c1 collapses to (c1/c2)*x. (a, c1, c2, x): a is the dividend (c1*x). The
+      -- same-constant case (c1==c2) gives just x; the general case (c2 | c1)
+      -- covers lossless precision scaling like x*1e18/1e6 == x*1e12.
+      constCancels = [ (a, c1, c2, x)
+                     | (a, b) <- udivsAll, Just (c1, x) <- [asConstMul a]
+                     , Lit c2 <- [b], c2 /= 0, c1 `mod` c2 == 0 ]
+      -- nested-division collapse: (A/c1)/c2 == A/(c1*c2) for literals c1,c2 whose
+      -- product fits in 256 bits. A floor identity (sound unconditionally). E.g.
+      -- x*rate/1e9/1e18 == x*rate/1e27.
+      nestedDivs = [ (innerA, c1, c2)
+                   | (a, b) <- udivsAll, Lit c2 <- [b]
+                   , T.Div innerA (Lit c1) <- [a]
+                   , c1 /= 0, c2 /= 0, toInteger c1 * toInteger c2 < 2 ^ (256 :: Int) ]
   if null udivs && null muls && null constMuls then pure []
   else do
     comm    <- mapM mkComm allMuls
@@ -255,8 +266,9 @@ mulEncoding enc props = do
     mulDivB <- concat <$> mapM mkMulDivBound mulDivs
     constMulMono <- mapM mkConstMulMono constMulPairs
     constCancel <- mapM mkConstCancel constCancels
+    nestedDiv <- mapM mkNestedDiv nestedDivs
     pure $ (SMTComment "multiplication abstraction lemmas")
-           : (comm <> zeroOne <> links <> mulMono <> divMono <> divDivisorMono <> mulDivB <> constMulMono <> constCancel)
+           : (comm <> zeroOne <> links <> mulMono <> divMono <> divDivisorMono <> mulDivB <> constMulMono <> constCancel <> nestedDiv)
   where
     -- commutativity: abst_evm_bvmul(a,b) = abst_evm_bvmul(b,a). Needed so that
     -- lemma terms match the props regardless of the simplifier's operand order.
@@ -318,20 +330,32 @@ mulEncoding enc props = do
       pure $ SMTCommand $ "(assert (=> (and (bvule" `sp` xe `sp` bnd <> ") (bvule" `sp` ye `sp` bnd <> ")"
              <> " (bvule" `sp` xe `sp` ye <> ")) (bvule" `sp` cx `sp` cy <> ")))"
 
-    -- const cancellation (sound, no-overflow guarded): dividing a product by the
-    -- same literal constant it was multiplied by is the identity, (c*x)/c == x.
-    -- The multiply by a constant stays a native bvmul but the divide is
-    -- abstracted (uninterpreted), so without this the wrapper c*x/c that appears
-    -- in precision scaling (e.g. amount * 1e18 / 1e18 in _getUsdsValue) is not
-    -- provably the identity. `a` is the dividend expr (c*x) so the abst_evm_bvudiv
-    -- term matches the prop exactly; the exact no-overflow bound floor((2^256-1)/c)
-    -- is computed at encode time, so the guard is a single constant comparison.
-    mkConstCancel (a, c, x) = do
+    -- const cancellation (sound, no-overflow guarded): a product c1*x divided by
+    -- a literal c2 that divides c1 collapses to (c1/c2)*x. The multiply by a
+    -- constant stays a native bvmul but the divide is abstracted (uninterpreted),
+    -- so without this the precision-scaling wrapper c1*x/c2 (e.g. amount*1e18/1e18
+    -- in _getUsdsValue, or amount*1e18/1e6 in _getUsdcValue) is not provably its
+    -- closed form. `a` is the dividend expr (c1*x) so the abst_evm_bvudiv term
+    -- matches the prop exactly; c2 | c1 makes c1/c2 exact, and the no-overflow
+    -- bound floor((2^256-1)/c1) is computed at encode time (one comparison).
+    mkConstCancel (a, c1, c2, x) = do
       ae <- enc a; xe <- enc x
-      let cbv = wordAsBV c
-          dv  = "(abst_evm_bvudiv" `sp` ae `sp` cbv <> ")"
-          bnd = wordAsBV ((maxBound :: W256) `div` c)  -- largest x with c*x < 2^256
-      pure $ SMTCommand $ "(assert (=> (bvule" `sp` xe `sp` bnd <> ") (=" `sp` dv `sp` xe <> ")))"
+      let c2bv = wordAsBV c2
+          k    = c1 `div` c2                 -- exact, since c2 | c1
+          rhs  = if k == 1 then xe else "(bvmul" `sp` wordAsBV k `sp` xe <> ")"
+          dv   = "(abst_evm_bvudiv" `sp` ae `sp` c2bv <> ")"
+          bnd  = wordAsBV ((maxBound :: W256) `div` c1)  -- largest x with c1*x < 2^256
+      pure $ SMTCommand $ "(assert (=> (bvule" `sp` xe `sp` bnd <> ") (=" `sp` dv `sp` rhs <> ")))"
+
+    -- nested-division collapse (sound, floor identity): (A/c1)/c2 == A/(c1*c2) for
+    -- literal c1,c2 with c1*c2 < 2^256. Lets the solver simplify chained constant
+    -- divisions such as x*rate/1e9/1e18 to x*rate/1e27. No operand bound needed.
+    mkNestedDiv (innerA, c1, c2) = do
+      ae <- enc innerA
+      let inner    = "(abst_evm_bvudiv" `sp` ae `sp` wordAsBV c1 <> ")"
+          outer    = "(abst_evm_bvudiv" `sp` inner `sp` wordAsBV c2 <> ")"
+          collapsed = "(abst_evm_bvudiv" `sp` ae `sp` wordAsBV (c1 * c2) <> ")"
+      pure $ SMTCommand $ "(assert (=" `sp` outer `sp` collapsed <> "))"
 
     -- recognise multiplication by a non-trivial literal constant: c*x or x*c.
     asConstMul :: Expr EWord -> Maybe (W256, Expr EWord)

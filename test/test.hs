@@ -1554,6 +1554,37 @@ tests = testGroup "hevm"
           } |]
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertEqualM "Must be QED" [] res
+    , testAbstractArith "const-cancel-scaled" $ do
+        -- generalized const-cancel: (c1*x)/c2 == (c1/c2)*x when c2 | c1.
+        -- (x*1e18)/1e6 == x*1e12 — discharges lossless precision scaling between
+        -- different decimals (e.g. _getUsdcValue).
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_const_cancel_scaled(uint256 x) external pure {
+              require(x < (1<<80));
+              uint256 y; uint256 z;
+              assembly { y := div(mul(x, 1000000000000000000), 1000000)  z := mul(x, 1000000000000) }
+              assert(y == z);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "nested-div-collapse" $ do
+        -- (A/c1)/c2 == A/(c1*c2) for literals c1,c2 (floor identity). With A a
+        -- symbolic product the divisions are abstracted, so the lemma is what
+        -- collapses chained constant divisions like x*rate/1e9/1e18 to x*rate/1e27.
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_nested_div_collapse(uint256 a, uint256 b) external pure {
+              uint256 lhs; uint256 rhs;
+              assembly { let p := mul(a, b)
+                lhs := div(div(p, 1000000000), 1000000000000000000)
+                rhs := div(p, 1000000000000000000000000000) }
+              assert(lhs == rhs);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
     ]
   , testGroup "max-iterations"
     [ test "concrete-loops-reached" $ do
