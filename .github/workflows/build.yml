@@ -59,6 +59,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          submodules: recursive
       - uses: ./.github/actions/free-disk-space
 
       - name: Install Nix
@@ -87,6 +88,9 @@ jobs:
       # if we run this in nix build, it complains about running in a sandbox
       - name: run cli tests
         run: nix develop --command bash -c "cabal --active-repositories=:none run cli-test"
+      # runs hevm against the vendored forge-symbolic-tests bug suite (needs forge)
+      - name: run symbolic bug-suite tests
+        run: nix develop --command bash -c "cabal --active-repositories=:none run symbolic-test"
 
   build-windows:
     name: build (windows-latest)
