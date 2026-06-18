@@ -346,6 +346,25 @@ test-suite cli-test
     filepath,
     split,
 
+test-suite symbolic-test
+  import: test-common
+  type:
+    exitcode-stdio-1.0
+  default-language: GHC2021
+  hs-source-dirs:
+    test
+  main-is:
+    SymbolicTestSuite.hs
+  build-depends:
+    base,
+    hevm,
+    directory,
+    filepath,
+    process,
+    tasty,
+    tasty-hunit,
+    temporary,
+
 --- Benchmarks ---
 
 benchmark bench
