@@ -1451,8 +1451,34 @@ tests = testGroup "hevm"
               assert(outv <= assets);
             }
           } |]
-        -- z3 closes the nested cross-divisor round-trip reliably here.
-        (_, res) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "roundtrip-checked-realcode" $ do
+        -- Same round-trip on real-code-shaped Solidity: ordinary checked
+        -- arithmetic (so each `*` carries the 0.8 overflow guard div(mul(a,b),a))
+        -- and the conversions are real functions that read storage, called as in
+        -- the contract. Confirms the cancellation synthesis survives the extra
+        -- overflow-guard divisions, i.e. the property proves on the code as
+        -- written, not only on raw assembly ops.
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            uint256 public totalShares;
+            uint256 public totalAssets;
+            function convertToShares(uint256 assetValue) public view returns (uint256) {
+              if (totalAssets != 0) return assetValue * totalShares / totalAssets;
+              return assetValue;
+            }
+            function convertToAssetValue(uint256 numShares) public view returns (uint256) {
+              if (totalShares != 0) return numShares * totalAssets / totalShares;
+              return numShares;
+            }
+            function prove_roundtrip(uint256 x) external view {
+              require(totalShares != 0 && totalAssets != 0);
+              require(x < (1<<128) && totalShares < (1<<128) && totalAssets < (1<<128));
+              assert(convertToAssetValue(convertToShares(x)) <= x);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertEqualM "Must be QED" [] res
     , testAbstractArith "div-cex-preserved" $ do
         -- No symbolic*symbolic mul => div is exact => a real counterexample is
@@ -1538,9 +1564,7 @@ tests = testGroup "hevm"
               assert(a1 <= a2);
             }
           } |]
-        -- z3 discharges the large-constant (1e27) multiply that bitwuzla
-        -- struggles with here; both are sound, this is purely a capability pick.
-        (_, res) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertEqualM "Must be QED" [] res
     ]
   , testGroup "max-iterations"
