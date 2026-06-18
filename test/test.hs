@@ -1538,6 +1538,22 @@ tests = testGroup "hevm"
           } |]
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertEqualM "Must be QED" [] res
+    , testAbstractArith "const-cancel" $ do
+        -- (x * c) / c == x for a literal c (const-cancellation lemma). The
+        -- multiply by c stays a native bvmul but the divide is abstracted
+        -- (uninterpreted), so without the lemma this identity is not provable.
+        -- This is what discharges precision-scaling wrappers like
+        -- `amount * 1e18 / 1e18` that otherwise block round-trip properties.
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_const_cancel(uint256 x) external pure {
+              require(x < (1<<128));
+              uint256 y; assembly { y := div(mul(x, 1000000000000000000), 1000000000000000000) }
+              assert(y == x);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
     ]
   , testGroup "max-iterations"
     [ test "concrete-loops-reached" $ do

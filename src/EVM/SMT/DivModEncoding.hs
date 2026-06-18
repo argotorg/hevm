@@ -241,6 +241,9 @@ mulEncoding enc props = do
       mulDivs = [ (a, x, y, b) | (a, b) <- udivsAll, Just (x, y) <- [asMul a] ]
       -- pairs of const-muls sharing the same constant: (c, x, y) for c*x, c*y
       constMulPairs = [ (c, x, y) | (c, x) <- constMuls, (c', y) <- constMuls, c == c', x /= y ]
+      -- const cancellation: divisions (c*x)/c by the SAME literal constant c.
+      -- (a, c, x): a is the division's dividend (c*x), divided by Lit c.
+      constCancels = [ (a, c, x) | (a, b) <- udivsAll, Just (c, x) <- [asConstMul a], b == Lit c ]
   if null udivs && null muls && null constMuls then pure []
   else do
     comm    <- mapM mkComm allMuls
@@ -251,8 +254,9 @@ mulEncoding enc props = do
     divDivisorMono <- concat <$> mapM mkDivisorMono (divisorPairs udivsAll)
     mulDivB <- concat <$> mapM mkMulDivBound mulDivs
     constMulMono <- mapM mkConstMulMono constMulPairs
+    constCancel <- mapM mkConstCancel constCancels
     pure $ (SMTComment "multiplication abstraction lemmas")
-           : (comm <> zeroOne <> links <> mulMono <> divMono <> divDivisorMono <> mulDivB <> constMulMono)
+           : (comm <> zeroOne <> links <> mulMono <> divMono <> divDivisorMono <> mulDivB <> constMulMono <> constCancel)
   where
     -- commutativity: abst_evm_bvmul(a,b) = abst_evm_bvmul(b,a). Needed so that
     -- lemma terms match the props regardless of the simplifier's operand order.
@@ -313,6 +317,27 @@ mulEncoding enc props = do
           bnd  = wordAsBV ((maxBound :: W256) `div` c)  -- largest x with c*x < 2^256
       pure $ SMTCommand $ "(assert (=> (and (bvule" `sp` xe `sp` bnd <> ") (bvule" `sp` ye `sp` bnd <> ")"
              <> " (bvule" `sp` xe `sp` ye <> ")) (bvule" `sp` cx `sp` cy <> ")))"
+
+    -- const cancellation (sound, no-overflow guarded): dividing a product by the
+    -- same literal constant it was multiplied by is the identity, (c*x)/c == x.
+    -- The multiply by a constant stays a native bvmul but the divide is
+    -- abstracted (uninterpreted), so without this the wrapper c*x/c that appears
+    -- in precision scaling (e.g. amount * 1e18 / 1e18 in _getUsdsValue) is not
+    -- provably the identity. `a` is the dividend expr (c*x) so the abst_evm_bvudiv
+    -- term matches the prop exactly; the exact no-overflow bound floor((2^256-1)/c)
+    -- is computed at encode time, so the guard is a single constant comparison.
+    mkConstCancel (a, c, x) = do
+      ae <- enc a; xe <- enc x
+      let cbv = wordAsBV c
+          dv  = "(abst_evm_bvudiv" `sp` ae `sp` cbv <> ")"
+          bnd = wordAsBV ((maxBound :: W256) `div` c)  -- largest x with c*x < 2^256
+      pure $ SMTCommand $ "(assert (=> (bvule" `sp` xe `sp` bnd <> ") (=" `sp` dv `sp` xe <> ")))"
+
+    -- recognise multiplication by a non-trivial literal constant: c*x or x*c.
+    asConstMul :: Expr EWord -> Maybe (W256, Expr EWord)
+    asConstMul (T.Mul (Lit c) x) | notLit x, c /= 0, c /= 1 = Just (c, x)
+    asConstMul (T.Mul x (Lit c)) | notLit x, c /= 0, c /= 1 = Just (c, x)
+    asConstMul _ = Nothing
 
     -- div monotonicity in the dividend (sound unconditionally): for a common
     -- divisor z, x <= y  =>  floor(x/z) <= floor(y/z).
