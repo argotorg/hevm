@@ -35,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Missing simplifications for Eq, Mod, SMod, XOR, SHL, SHR, and Or
 - A few more simplification rules around Eq, SHL/SHR, Sub+Add combos, and Xor
 - `readWord` disjointness rule for `WriteWord (Add (Lit c) X) …` with bounded `X`.
+- New `symbolic-test` suite checking hevm finds validated counterexamples for
+  the 22 DeFi exploits in
+  [`grandizzy/symbolic-bug-suite`](https://github.com/grandizzy/symbolic-bug-suite)
 
 ## Changed
 - Simplifier now rewrites `Mul(-1, x)` and `~x + 1` to `Sub(0, x)`
