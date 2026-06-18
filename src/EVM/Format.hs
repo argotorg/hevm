@@ -525,6 +525,10 @@ formatPartial = \case
       , "program counter: " <> pack (show pc)]
     ]
 
+  SymbolicCopySliceSize what -> T.unlines
+    [ T.pack what <> " with a symbolically sized region survived to the SMT layer; encoding fell back to Partial."
+    ]
+
 
 formatPartialDetailed :: Maybe SrcLookup -> Map.Map (Expr EAddr) Contract -> PartialExec -> Text
 formatPartialDetailed srcLookupM contracts p =
@@ -536,6 +540,7 @@ formatPartialDetailed srcLookupM contracts p =
     CheatCodeMissing {..}      -> "Cheat code not recognized: " <> T.pack (show selector) <> toTxt addr pc
     PrecompileMissing {..}     -> "Precompile at address " <> pack (show preAddr) <> " does not exist, called from" <> toTxt addr pc
     BranchTooDeep {..}         -> "Branches too deep" <> toTxt addr pc
+    SymbolicCopySliceSize what -> T.pack what <> " with symbolic size cannot be SMT-encoded; surfaced as Partial."
 
 formatSomeExpr :: SomeExpr -> Text
 formatSomeExpr (SomeExpr e) = formatExpr $ Expr.simplify e
@@ -790,6 +795,19 @@ formatExpr = go
           , "size:      " <> formatExpr size
           , "src:"
           , indent 2 $ formatExpr src
+          , "dst:"
+          , indent 2 $ formatExpr dst
+          ]
+        , ")"
+        ]
+      StorageCopySlice baseSlot dstOff numWords store dst -> T.unlines
+        [ "(StorageCopySlice"
+        , indent 2 $ T.unlines
+          [ "baseSlot: " <> formatExpr baseSlot
+          , "dstOff:   " <> formatExpr dstOff
+          , "numWords: " <> formatExpr numWords
+          , "store:"
+          , indent 2 $ formatExpr store
           , "dst:"
           , indent 2 $ formatExpr dst
           ]

@@ -64,6 +64,16 @@ go = \case
           bs' = Map.insert e next s.bufs
         put $ s{count=next+1, bufs=bs'}
         pure $ GVar (BufVar next)
+  e@(StorageCopySlice {}) -> do
+    s <- get
+    case Map.lookup e s.bufs of
+      Just v -> pure $ GVar (BufVar v)
+      Nothing -> do
+        let
+          next = s.count
+          bs' = Map.insert e next s.bufs
+        put $ s{count=next+1, bufs=bs'}
+        pure $ GVar (BufVar next)
   -- storage
   e@(SStore {}) -> do
     s <- get

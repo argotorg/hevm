@@ -328,6 +328,7 @@ discoverMaxReads props benv senv = bufMap
     baseBuf (WriteByte _ _ b) = baseBuf b
     baseBuf (WriteWord _ _ b) = baseBuf b
     baseBuf (CopySlice _ _ _ _ dst)= baseBuf dst
+    baseBuf (StorageCopySlice _ _ _ _ dst) = baseBuf dst
 
 -- | Returns an SMT2 object with all buffers referenced from the input props declared, and with the appropriate cex extraction metadata attached
 declareBufs :: [Prop] -> BufEnv -> StoreEnv -> SMT2
@@ -574,6 +575,24 @@ exprToSMT = \case
     dstSMT <- exprToSMT dst
     copySlice srcIdx dstIdx size srcSMT dstSMT
 
+  -- Unroll StorageCopySlice to WriteWord(SLoad …) chain. Rare in practice —
+  -- readByte/readWord usually fold first. Mirrors the (Lit size) /
+  -- symbolic-size split in CopySlice above.
+  StorageCopySlice _ _ (Lit numWords) _ _
+    | numWords > storageCopySliceUnrollLimit ->
+        Left $ "StorageCopySlice with " <> show numWords
+            <> " words exceeds unroll limit ("
+            <> show storageCopySliceUnrollLimit <> ")"
+  StorageCopySlice baseSlot dstOff (Lit numWords) store dst -> do
+    let expanded = foldr (\i buf ->
+          WriteWord (Expr.add dstOff (Lit (i * 32)))
+                    (SLoad (Expr.add baseSlot (Lit i)) store)
+                    buf
+          ) dst [0 .. numWords - 1]
+    exprToSMT expanded
+  StorageCopySlice {} ->
+    Left "StorageCopySlice with a symbolically sized region not currently implemented, cannot execute SMT solver on this query"
+
   -- we need to do a bit of processing here.
   ConcreteStore s -> encodeConcreteStore s
   AbstractStore a idx -> pure $ storeName a idx
@@ -643,6 +662,10 @@ propToSMT = \case
 
 -- ** Helpers ** ---------------------------------------------------------------------------------
 
+
+-- | Cap on words unrolled per StorageCopySlice; beyond this we refuse the query.
+storageCopySliceUnrollLimit :: W256
+storageCopySliceUnrollLimit = 32
 
 -- | Stores a region of src into dst
 copySlice :: Expr EWord -> Expr EWord -> Expr EWord -> Builder -> Builder -> Err Builder

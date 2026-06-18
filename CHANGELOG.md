@@ -31,8 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Missing simplifications for Eq, Mod, SMod, XOR, SHL, SHR, and Or
 - A few more simplification rules around Eq, SHL/SHR, Sub+Add combos, and Xor
 - `readWord` disjointness rule for `WriteWord (Add (Lit c) X) …` with bounded `X`.
+- Summarize Solidity public-getter copy loops (`bytes`/`string`/dynamic
+  arrays) via a new `StorageCopySlice` IR node; disable with
+  `--no-skip-getter-loops`.
 
 ## Changed
+- Symbolic-size `CopySlice` / `StorageCopySlice` at the SMT layer now
+  demote to `Partial (SymbolicCopySliceSize …)` instead of `Error`.
 - Simplifier now rewrites `Mul(-1, x)` and `~x + 1` to `Sub(0, x)`
 - `AbiFunction` and `AbiBytes` parser is now more strict
 - We now check length of AbiArrayDynamic and don't crash in case it's too large

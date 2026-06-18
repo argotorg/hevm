@@ -9,8 +9,7 @@ import Test.Tasty.ExpectedFailure
 import Control.Monad.IO.Unlift (MonadUnliftIO)
 import Control.Monad.Reader (ReaderT)
 import Data.ByteString (ByteString)
-import Data.List qualified as List (isInfixOf)
-import Data.Maybe (isJust, mapMaybe)
+import Data.Maybe (isJust)
 import Data.Monoid (Any(..))
 import Data.String.Here
 
@@ -170,11 +169,11 @@ copySliceTests = testGroup "Copyslice tests"
             }
           |]
       let sig = Just (Sig "fun(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])
-      (_, k) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-      let numErrs = sum $ map (fromEnum . isError) k
-      assertEqual "number of errors (i.e. copySlice issues) is 1" 1 numErrs
-      let errStrings = mapMaybe getResError k
-      assertEqual "All errors are from copyslice" True $ all ("CopySlice" `List.isInfixOf`) errStrings
+      -- Symbolic-size CopySlice now demotes to Partial instead of Error.
+      (paths, k) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+      assertEqual "no Error results" 0 (sum $ map (fromEnum . isError) k)
+      let cpPartials = length [() | Partial _ _ (SymbolicCopySliceSize "CopySlice") <- paths]
+      assertEqual "two CopySlice symbolic-size Partials" 2 cpPartials
   , testCase "symbolic-copyslice" $ do
       Just c <- solcRuntime "MyContract"
           [i|
@@ -198,11 +197,10 @@ copySliceTests = testGroup "Copyslice tests"
             }
           |]
       let sig = Just (Sig "fun(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])
-      (_, k) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-      let numErrs = sum $ map (fromEnum . isError) k
-      assertEqual "number of errors (i.e. copySlice issues) is 1" 1 numErrs
-      let errStrings = mapMaybe getResError k
-      assertEqual "All errors are from copyslice" True $ all ("CopySlice" `List.isInfixOf`) errStrings
+      (paths, k) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+      assertEqual "no Error results" 0 (sum $ map (fromEnum . isError) k)
+      let cpPartials = length [() | Partial _ _ (SymbolicCopySliceSize "CopySlice") <- paths]
+      assertEqual "two CopySlice symbolic-size Partials" 2 cpPartials
 
   ]
 

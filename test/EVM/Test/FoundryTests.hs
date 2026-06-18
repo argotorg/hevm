@@ -169,6 +169,24 @@ tests = testGroup "Foundry tests"
         -- Regression test for #895: panic in a called contract should not show "<source not found>"
         let testFile = "test/contracts/fail/assertPanic.sol"
         executeSingleMethod testFile "prove_panic" >>= assertEqualM "prove_panic" (False, False)
+    , testGroup "BytesArrayGetters"
+        -- Forge-style tests for `bytes[] public` auto-generated getters.
+        -- setUp() runs concretely (constructor + Solidity-level .push()); the
+        -- prove_* methods take a symbolic index so the getter is exercised
+        -- through the consumer/test-harness boundary.
+        [ test "baseline-single-contract" $ do
+            let testFile = "test/contracts/pass/getterLoopBytesArray.t.sol"
+            executeSingleMethod testFile "prove_arr_read" >>= assertEqualM "single-contract bytes[] getter" (True, True)
+        , test "cross-contract-consumer" $ do
+            let testFile = "test/contracts/pass/getterLoopBytesArray.t.sol"
+            executeSingleMethod testFile "prove_consumer_reads" >>= assertEqualM "cross-contract consumer" (True, True)
+        , test "nft-registry-style" $ do
+            let testFile = "test/contracts/pass/getterLoopBytesArray.t.sol"
+            executeSingleMethod testFile "prove_uri_length" >>= assertEqualM "NFT registry / URI verifier" (True, True)
+        , test "merkle-proofs-style" $ do
+            let testFile = "test/contracts/pass/getterLoopBytesArray.t.sol"
+            executeSingleMethod testFile "prove_proof_shape" >>= assertEqualM "Merkle-proof reader" (True, True)
+        ]
     ]
 
 executeSingleMethod :: (App m, MonadMask m) => FilePath -> Text -> m (Bool, Bool)

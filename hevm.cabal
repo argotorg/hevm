@@ -102,6 +102,7 @@ library
     EVM.Exec,
     EVM.Format,
     EVM.ConsoleLog,
+    EVM.GetterDetection,
     EVM.Fetch,
     EVM.FeeSchedule,
     EVM.Op,

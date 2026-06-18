@@ -22,10 +22,11 @@ import Control.Monad.State.Strict (liftIO, runStateT)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.DoubleWord (Word256)
-import Data.Foldable (length, foldl', foldr)
+import Data.Foldable (length, foldl', foldr, foldMap)
 import Data.List (sortBy, sort)
 import Data.List.NonEmpty qualified as NE
 import Data.Maybe (fromMaybe, listToMaybe, mapMaybe, catMaybes)
+import Data.Monoid (First(..))
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Map.Merge.Strict qualified as Map
@@ -513,29 +514,37 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
                     interpretInternal t { vm = vm', stepper = (k r) }
 
               -- the condition is symbolic
-              _ ->
-                -- are in we a loop, have we hit maxIters, have we hit askSmtIters?
-                case (isLoopHead iterConf.loopHeuristic vm, askSmtItersReached vm iterConf.askSmtIters, maxIterationsReached vm iterConf.maxIter) of
-                  -- we're in a loop and maxIters has been reached
-                  (Just True, _, Just n) -> do
-                    -- continue execution down the opposite branch than the one that
-                    -- got us to this point and queue a task to return a partial leaf for the other side
-                    let partialLeaf = Partial [] (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) (MaxIterationsReached vm.state.pc vm.state.contract)
-                    liftIO $ atomically $ modifyTVar numTasks (+1)
-                    liftIO $ writeChan taskQ $ t { vm = vm, stepper = pure partialLeaf }
-                    (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case $ not n)) vm
+              _ -> do
+                conf <- readConfig
+                -- Short-circuit detected copy loops (bytes/string getters).
+                case lookupCopyLoop conf vm of
+                  Just loop -> do
+                    let vm0 = applyCopyLoopSummary loop vm
+                    (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case loop.exitBranch)) vm0
                     interpretInternal t { vm = vm', stepper = (k r) }
-                  -- we're in a loop and askSmtIters has been reached
-                  (Just True, True, _) ->
-                    -- ask the smt solver about the loop condition
-                    performQuery
-                  _ -> do
-                    let simpProps = Expr.concKeccakSimpProps ((cond ./= Lit 0):preconds)
-                    (r, vm') <- case simpProps of
-                      [PBool False] -> liftIO $ stToIO $ runStateT (continue (Case False)) vm
-                      [] -> liftIO $ stToIO $ runStateT (continue (Case True)) vm
-                      _ -> liftIO $ stToIO $ runStateT (continue UnknownBranch) vm
-                    interpretInternal t { vm = vm', stepper = (k r) }
+                  Nothing ->
+                    -- are in we a loop, have we hit maxIters, have we hit askSmtIters?
+                    case (isLoopHead iterConf.loopHeuristic vm, askSmtItersReached vm iterConf.askSmtIters, maxIterationsReached vm iterConf.maxIter) of
+                      -- we're in a loop and maxIters has been reached
+                      (Just True, _, Just n) -> do
+                        -- continue execution down the opposite branch than the one that
+                        -- got us to this point and queue a task to return a partial leaf for the other side
+                        let partialLeaf = Partial [] (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) (MaxIterationsReached vm.state.pc vm.state.contract)
+                        liftIO $ atomically $ modifyTVar numTasks (+1)
+                        liftIO $ writeChan taskQ $ t { vm = vm, stepper = pure partialLeaf }
+                        (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case $ not n)) vm
+                        interpretInternal t { vm = vm', stepper = (k r) }
+                      -- we're in a loop and askSmtIters has been reached
+                      (Just True, True, _) ->
+                        -- ask the smt solver about the loop condition
+                        performQuery
+                      _ -> do
+                        let simpProps = Expr.concKeccakSimpProps ((cond ./= Lit 0):preconds)
+                        (r, vm') <- case simpProps of
+                          [PBool False] -> liftIO $ stToIO $ runStateT (continue (Case False)) vm
+                          [] -> liftIO $ stToIO $ runStateT (continue (Case True)) vm
+                          _ -> liftIO $ stToIO $ runStateT (continue UnknownBranch) vm
+                        interpretInternal t { vm = vm', stepper = (k r) }
           _ -> performQuery
 
 maxIterationsReached :: VM Symbolic -> Maybe Integer -> Maybe Bool
@@ -571,6 +580,38 @@ isLoopHead StackBased vm = let
   in case oldIters of
        Just (_, oldStack) -> Just $ filter isValid oldStack == filter isValid vm.state.stack
        Nothing -> Nothing
+
+-- | CopyLoop at the current JUMPI PC, if 'skipGetterLoops' is enabled.
+lookupCopyLoop :: Config -> VM Symbolic -> Maybe CopyLoop
+lookupCopyLoop conf vm
+  | not conf.skipGetterLoops = Nothing
+  | otherwise =
+      let pc = vm.state.pc
+      in case Map.lookup vm.state.contract vm.env.contracts of
+           Just c  -> Map.lookup pc c.getterLoops
+           Nothing -> Nothing
+
+-- | Summarise a storage-to-mem copy loop before taking the exit branch.
+-- Stack at the JUMPI: [loopHead, condition, loopVar_0, loopVar_1, …].
+applyCopyLoopSummary :: CopyLoop -> VM Symbolic -> VM Symbolic
+applyCopyLoopSummary loop vm =
+  let layout   = loop.storageStackLayout
+      stk      = vm.state.stack
+      baseSlot = stk !! (2 + layout.slotDepth)
+      endSlot  = stk !! (2 + layout.endSlotDepth)
+      dstOff   = stk !! (2 + layout.dstOffDepth)
+      numWords = Expr.sub endSlot baseSlot
+      -- Executing contract must be in env.contracts; missing => corrupt state.
+      storage  = case Map.lookup vm.state.contract vm.env.contracts of
+                   Just c  -> c.storage
+                   Nothing -> internalError $
+                     "applyCopyLoopSummary: executing contract not in env.contracts: "
+                     <> show vm.state.contract
+  in case vm.state.memory of
+       SymbolicMemory baseMem ->
+         let newMem = StorageCopySlice baseSlot dstOff numWords storage baseMem
+         in vm & #state % #memory .~ SymbolicMemory newMem
+       ConcreteMemory _ -> vm
 
 type Precondition = VM Symbolic -> Prop
 type Postcondition = VM Symbolic -> Expr End -> Prop
@@ -748,6 +789,26 @@ isPartial :: Expr a -> Bool
 isPartial (Partial _ _ _) = True
 isPartial _ = False
 
+-- | Find a symbolic-size (Storage)CopySlice in props; used to demote the
+-- leaf to Partial instead of hitting a hard Error in exprToSMT.
+findSymbolicCopySliceSize :: [Prop] -> Maybe String
+findSymbolicCopySliceSize = getFirst . foldMap (foldTerm go (First Nothing))
+  where
+    go :: Expr b -> First String
+    go (CopySlice _ _ (Lit _) _ _) = First Nothing
+    go (CopySlice {})              = First (Just "CopySlice")
+    go (StorageCopySlice _ _ (Lit _) _ _) = First Nothing
+    go (StorageCopySlice {})              = First (Just "StorageCopySlice")
+    go _ = First Nothing
+
+-- | Trace context of an end leaf.
+leafTraces :: Expr End -> TraceContext
+leafTraces = \case
+  Success _ t _ _ -> t
+  Failure _ t _   -> t
+  Partial _ t _   -> t
+  GVar _ -> internalError "leafTraces on GVar"
+
 printPartialIssues :: [Expr End] -> String -> IO ()
 printPartialIssues flattened call =
   when (any isPartial flattened) $ do
@@ -810,7 +871,15 @@ verifyInputsWithHandler solvers opts fetcher preState post cexHandler = do
     putStrLn $ "   Keccak preimages in state: " <> (show $ length preState.keccakPreImgs)
     putStrLn $ "   Exploring call " <> call
 
-  results <- executeVM fetcher opts.iterConf preState $ \leaf shouldAbort -> do
+  results <- executeVM fetcher opts.iterConf preState $ \leaf0 shouldAbort -> do
+    -- Symbolic-size (Storage)CopySlice can't be SMT-encoded; simplify, then
+    -- if it still appears in props demote to Partial instead of erroring.
+    let leafSimp = Expr.simplify leaf0
+        propsSimp = Expr.simplifyProps (toProps leafSimp preState.keccakPreImgs post)
+    let leaf = case findSymbolicCopySliceSize propsSimp of
+                 Just what -> Partial (extractProps leafSimp) (leafTraces leafSimp) (SymbolicCopySliceSize what)
+                 Nothing -> leafSimp
+
     -- Extract partial if applicable
     let mPartial = case leaf of
           Partial _ _ p -> Just (p, leaf)

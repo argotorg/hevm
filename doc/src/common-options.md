@@ -70,3 +70,24 @@ This is helpful to prevent the exploration from running for too long. Useful in
 scenarios where you use e.g. both symbolic execution and fuzzing, and don't
 want the symbolic execution to run for too long. It will often read to
 WARNING-s related to `Branches too deep at program counter`.
+
+## Short-circuit Solidity getter loops, ``--no-skip-getter-loops``
+
+Solidity compiles `bytes public foo` / `string public foo` (and similar
+dynamic-element public getters) into bytecode that iterates over storage
+slots one word at a time, copying each into memory.  Under symbolic
+execution with symbolic storage, this loop has no statically known bound
+and would unroll forever — capped only by `--max-iterations`, producing
+`Partial` paths.
+
+By default, hevm statically detects these SLOAD→MSTORE copy loops in
+the contract's bytecode and replaces them at runtime with a single
+`StorageCopySlice` summary node.  The loop is skipped entirely, and
+reads from the summarized buffer are resolved directly to the underlying
+`SLoad` expressions.  This eliminates the spurious `Partial` paths and
+lets exploration continue past the getter.
+
+The detection is conservative — only loops whose body is exactly a
+copy (no side effects, statically-known jumps, stack-neutral) are
+summarized.  Pass `--no-skip-getter-loops` to turn the optimization off
+(e.g. to compare results with and without the summary).
