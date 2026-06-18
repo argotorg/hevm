@@ -1585,6 +1585,37 @@ tests = testGroup "hevm"
           } |]
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertEqualM "Must be QED" [] res
+    , testAbstractArith "fraction-reduce" $ do
+        -- fraction-reduce: (c1*x)/c2 == x/(c2/c1) when c1 | c2 (mirror of
+        -- const-cancel, which needs c2 | c1). (x*1e6)/1e18 == x/1e12 — discharges
+        -- the precision step that scales DOWN to fewer decimals (convert-to-usdc).
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_fraction_reduce(uint256 x) external pure {
+              require(x < (1<<128));
+              uint256 y; uint256 z;
+              assembly { y := div(mul(x, 1000000), 1000000000000000000)  z := div(x, 1000000000000) }
+              assert(y == z);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "fraction-reduce-cex" $ do
+        -- soundness guard: the fraction-reduce lemma must not over-prove. A wrong
+        -- closed form ((x*1e6)/1e18 == x/1e12 + 1) is false for every x, so it
+        -- must NOT come back QED (the lemma pins the LHS to x/1e12, exposing the
+        -- off-by-one as a real counterexample rather than a spurious proof).
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_fraction_reduce_wrong(uint256 x) external pure {
+              require(x < (1<<128));
+              uint256 y; uint256 z;
+              assembly { y := div(mul(x, 1000000), 1000000000000000000)  z := add(div(x, 1000000000000), 1) }
+              assert(y == z);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertBoolM "Wrong closed form must not be QED" (not (null res))
     ]
   , testGroup "max-iterations"
     [ test "concrete-loops-reached" $ do

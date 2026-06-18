@@ -255,6 +255,15 @@ mulEncoding enc props = do
                    | (a, b) <- udivsAll, Lit c2 <- [b]
                    , T.Div innerA (Lit c1) <- [a]
                    , c1 /= 0, c2 /= 0, toInteger c1 * toInteger c2 < 2 ^ (256 :: Int) ]
+      -- fraction-reduce: a product c1*x divided by a literal c2 that c1 divides
+      -- collapses to x/(c2/c1). The mirror of const-cancel (c2 | c1); this is the
+      -- c1 | c2 case (multiply by small, divide by large) such as x*1e6/1e18 ==
+      -- x/1e12 (precision scaling DOWN, the convert-to-usdc direction). Excludes
+      -- c1==c2, which const-cancel already covers (collapsing to x).
+      fracReduces = [ (a, c1, c2, x)
+                    | (a, b) <- udivsAll, Just (c1, x) <- [asConstMul a]
+                    , Lit c2 <- [b], c2 /= 0, c1 /= 0
+                    , c2 `mod` c1 == 0, c2 /= c1 ]
   if null udivs && null muls && null constMuls then pure []
   else do
     comm    <- mapM mkComm allMuls
@@ -267,8 +276,9 @@ mulEncoding enc props = do
     constMulMono <- mapM mkConstMulMono constMulPairs
     constCancel <- mapM mkConstCancel constCancels
     nestedDiv <- mapM mkNestedDiv nestedDivs
+    fracReduce <- mapM mkFracReduce fracReduces
     pure $ (SMTComment "multiplication abstraction lemmas")
-           : (comm <> zeroOne <> links <> mulMono <> divMono <> divDivisorMono <> mulDivB <> constMulMono <> constCancel <> nestedDiv)
+           : (comm <> zeroOne <> links <> mulMono <> divMono <> divDivisorMono <> mulDivB <> constMulMono <> constCancel <> nestedDiv <> fracReduce)
   where
     -- commutativity: abst_evm_bvmul(a,b) = abst_evm_bvmul(b,a). Needed so that
     -- lemma terms match the props regardless of the simplifier's operand order.
@@ -356,6 +366,23 @@ mulEncoding enc props = do
           outer    = "(abst_evm_bvudiv" `sp` inner `sp` wordAsBV c2 <> ")"
           collapsed = "(abst_evm_bvudiv" `sp` ae `sp` wordAsBV (c1 * c2) <> ")"
       pure $ SMTCommand $ "(assert (=" `sp` outer `sp` collapsed <> "))"
+
+    -- fraction-reduce (sound, no-overflow guarded): a product c1*x divided by a
+    -- literal c2 that c1 divides collapses to x/(c2/c1). The mirror of const
+    -- cancellation: const-cancel needs c2 | c1 (multiply by large, divide by
+    -- small, e.g. x*1e18/1e6 == x*1e12); this needs c1 | c2 (multiply by small,
+    -- divide by large, e.g. x*1e6/1e18 == x/1e12 — the convert-to-usdc precision
+    -- step). Sound because, under the no-overflow guard, c1*x is exact and
+    -- floor(c1*x / (c1*k)) = floor(x/k). `a` is the dividend (c1*x) so the
+    -- abst_evm_bvudiv term matches the prop; c1 | c2 makes c2/c1 exact and the
+    -- bound floor((2^256-1)/c1) is computed at encode time (one comparison).
+    mkFracReduce (a, c1, c2, x) = do
+      ae <- enc a; xe <- enc x
+      let k    = c2 `div` c1                 -- exact and >= 2, since c1 | c2 and c2 /= c1
+          dv   = "(abst_evm_bvudiv" `sp` ae `sp` wordAsBV c2 <> ")"   -- (c1*x)/c2
+          rhs  = "(abst_evm_bvudiv" `sp` xe `sp` wordAsBV k <> ")"    -- x/(c2/c1)
+          bnd  = wordAsBV ((maxBound :: W256) `div` c1)  -- largest x with c1*x < 2^256
+      pure $ SMTCommand $ "(assert (=> (bvule" `sp` xe `sp` bnd <> ") (=" `sp` dv `sp` rhs <> ")))"
 
     -- recognise multiplication by a non-trivial literal constant: c*x or x*c.
     asConstMul :: Expr EWord -> Maybe (W256, Expr EWord)
