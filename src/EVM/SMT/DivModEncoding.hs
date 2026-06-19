@@ -233,7 +233,18 @@ mulEncoding enc props = do
       divisors  = nubOrd [ b | (_, b) <- udivs ]
       synthDivs = nubOrd $ [ (T.Mul a b, b) | (a, b) <- muls, b `elem` divisors ]
                         <> [ (T.Mul a b, a) | (a, b) <- muls, a `elem` divisors ]
-      udivsAll  = nubOrd (udivs <> synthDivs)
+      -- Collapse a nested constant division (A/c1)/c2 into a synthetic single divide
+      -- A/(c1*c2), and add it to the div set. Sound because nested-div-collapse below
+      -- asserts the two forms equal, so the synthetic divide is exact. This lets the
+      -- single-divide lemmas (telescoping, const-cancel, fraction-reduce) match code
+      -- that splits precision across two divides — e.g. _getSUsdsValue's x*rate/1e9/1e18,
+      -- whose collapsed x*rate/1e27 is what those lemmas key on.
+      collapsedDivs = nubOrd
+        [ (innerA, Lit (c1 * c2))
+        | (a, b) <- udivs <> synthDivs, Lit c2 <- [b]
+        , T.Div innerA (Lit c1) <- [a]
+        , c1 /= 0, c2 /= 0, toInteger c1 * toInteger c2 < 2 ^ (256 :: Int) ]
+      udivsAll  = nubOrd (udivs <> synthDivs <> collapsedDivs)
       -- products the div-link lemma introduces, e.g. (a/b)*b
       linkMuls = [ (T.Div a b, b) | (a, b) <- udivsAll ]
       allMuls  = nubOrd (muls <> linkMuls)
@@ -273,6 +284,21 @@ mulEncoding enc props = do
                        | (a, b) <- udivsAll, T.Sub inner (Lit 1) <- [a]
                        , Just (c1, x) <- [asConstMul inner]
                        , Lit c2 <- [b], c2 /= 0, c1 `mod` c2 == 0 ]
+      -- scaled-product telescoping (sound, no-overflow guarded): two abstract
+      -- products sharing a factor a, whose other factors differ by a literal k that
+      -- the common divisor c divides, have an EXACT quotient difference:
+      -- (a*b)/c - (a*(b-k))/c == a*(k/c). This is the only lemma that relates two
+      -- DISTINCT abstract products, so it discharges value-change accounting
+      -- identities such as susds*rate/1e27 - susds == susds*(rate-1e27)/1e27 (rate
+      -- and rate-1e27 give unrelated abst_evm_bvmul terms otherwise). (a, b, k, c):
+      -- full product a*b, stepped product a*(b-k), divisor c, with c | k.
+      telescopes = nubOrd
+        [ (a, b, k, c)
+        | (sd, Lit c) <- udivsAll, c /= 0
+        , Just (f1, f2) <- [asMul sd]
+        , (a, T.Sub b (Lit k)) <- [(f1, f2), (f2, f1)]
+        , k /= 0, k `mod` c == 0
+        , any (`elem` udivsAll) [ (T.Mul a b, Lit c), (T.Mul b a, Lit c) ] ]
   if null udivs && null muls && null constMuls then pure []
   else do
     comm    <- mapM mkComm allMuls
@@ -287,8 +313,9 @@ mulEncoding enc props = do
     nestedDiv <- mapM mkNestedDiv nestedDivs
     fracReduce <- mapM mkFracReduce fracReduces
     ceilDivCancel <- mapM mkCeilDivCancel ceilDivCancels
+    telescope <- mapM mkTelescope telescopes
     pure $ (SMTComment "multiplication abstraction lemmas")
-           : (comm <> zeroOne <> links <> mulMono <> divMono <> divDivisorMono <> mulDivB <> constMulMono <> constCancel <> nestedDiv <> fracReduce <> ceilDivCancel)
+           : (comm <> zeroOne <> links <> mulMono <> divMono <> divDivisorMono <> mulDivB <> constMulMono <> constCancel <> nestedDiv <> fracReduce <> ceilDivCancel <> telescope)
   where
     -- commutativity: abst_evm_bvmul(a,b) = abst_evm_bvmul(b,a). Needed so that
     -- lemma terms match the props regardless of the simplifier's operand order.
@@ -412,6 +439,28 @@ mulEncoding enc props = do
           bnd  = wordAsBV ((maxBound :: W256) `div` c1)  -- largest x with c1*x < 2^256
       pure $ SMTCommand $ "(assert (=> (and (bvuge" `sp` xe `sp` one <> ")"
              <> " (bvule" `sp` xe `sp` bnd <> ")) (=" `sp` dv `sp` rhs <> ")))"
+
+    -- scaled-product telescoping (sound, no-overflow guarded). For products sharing
+    -- factor a whose other factors differ by a literal k with c | k:
+    --   floor(a*b/c) == floor(a*(b-k)/c) + a*(k/c).
+    -- Sound because a*b = a*(b-k) + a*k and a*k is an exact multiple of c (c | k), so
+    -- removing it shifts the floor by exactly a*(k/c). This is the only lemma pinning
+    -- the EXACT difference of two distinct abstract products; it discharges
+    -- value-change accounting like susds*rate/1e27 - susds == susds*(rate-1e27)/1e27.
+    -- Guarded by no-overflow on a*b (so a*(b-k), a*k all fit) and b >= k (so b-k is a
+    -- true difference, no wraparound).
+    mkTelescope (a, b, k, c) = do
+      ae <- enc a; be <- enc b
+      let m       = k `div` c                       -- exact, since c | k
+          cbv     = wordAsBV c
+          full    = "(abst_evm_bvmul" `sp` ae `sp` be <> ")"
+          stepped = "(abst_evm_bvmul" `sp` ae `sp` ("(bvsub" `sp` be `sp` wordAsBV k <> ")") <> ")"
+          dFull   = "(abst_evm_bvudiv" `sp` full `sp` cbv <> ")"
+          dStep   = "(abst_evm_bvudiv" `sp` stepped `sp` cbv <> ")"
+          coeff   = if m == 1 then ae else "(bvmul" `sp` wordAsBV m `sp` ae <> ")"
+          rhs     = "(bvadd" `sp` dStep `sp` coeff <> ")"
+      pure $ SMTCommand $ "(assert (=> (and" `sp` mulNoOverflow ae be
+             <> " (bvuge" `sp` be `sp` wordAsBV k <> ")) (=" `sp` dFull `sp` rhs <> ")))"
 
     -- recognise multiplication by a non-trivial literal constant: c*x or x*c.
     asConstMul :: Expr EWord -> Maybe (W256, Expr EWord)

@@ -1651,6 +1651,41 @@ tests = testGroup "hevm"
           } |]
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertBoolM "Wrong closed form must not be QED" (not (null res))
+    , testAbstractArith "scaled-product-telescope" $ do
+        -- scaled-product telescoping: a*b/c - a*(b-k)/c == a*(k/c) when c | k (here
+        -- c == k == 1e27, so the coefficient is a). This is the ONLY lemma that
+        -- relates two DISTINCT abstract products (a*b and a*(b-1e27), both
+        -- symbolic*symbolic), so it discharges value-change accounting identities
+        -- like s*rate/1e27 - s == s*(rate-1e27)/1e27 (the third assertion of an
+        -- ERC4626 conversionRate test).
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_telescope(uint256 s, uint256 q) external pure {
+              require(s <= 1000000000000000000000000000000);   // 1e30
+              require(q >= 1000000000000000000000000000);      // 1e27
+              require(q <= 1000000000000000000000000000000);   // 1e30
+              assert(s * q / 1000000000000000000000000000 - s
+                  == s * (q - 1000000000000000000000000000) / 1000000000000000000000000000);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "scaled-product-telescope-not-unsound" $ do
+        -- soundness guard: a wrong difference (+1) must stay Unknown, never QED.
+        -- Both products are abstract, so a violation downgrades SAT->Unknown rather
+        -- than producing a trusted Cex; the lemma must not over-prove the off-by-one.
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_telescope_wrong(uint256 s, uint256 q) external pure {
+              require(s <= 1000000000000000000000000000000);
+              require(q >= 1000000000000000000000000000);
+              require(q <= 1000000000000000000000000000000);
+              assert(s * q / 1000000000000000000000000000 - s
+                  == s * (q - 1000000000000000000000000000) / 1000000000000000000000000000 + 1);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertBoolM "Wrong difference must be Unknown, never QED" (not (any isCex res) && any isUnknown res)
     ]
   , testGroup "max-iterations"
     [ test "concrete-loops-reached" $ do
