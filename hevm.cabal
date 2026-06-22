@@ -252,7 +252,6 @@ common test-base
     tasty-hunit,
     tasty-expected-failure,
     temporary,
-    text,
     witherable,
     optics-core,
     witch,
@@ -307,6 +306,7 @@ test-suite test
     quickcheck-instances,
     regex,
     tasty-quickcheck,
+    text,
 
 -- these tests require network access so we split them into a separate test
 -- suite to make it easy to skip them when running nix-build
@@ -317,6 +317,8 @@ test-suite rpc-tests
     exitcode-stdio-1.0
   main-is:
     rpc.hs
+  build-depends:
+    text,
 
 test-suite ethereum-tests
   import: test-common
@@ -346,7 +348,7 @@ test-suite cli-test
     split,
 
 test-suite forge-symbolic-tests
-  import: test-common
+  import: shared
   type:
     exitcode-stdio-1.0
   default-language: GHC2021
