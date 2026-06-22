@@ -3,18 +3,19 @@ module Main where
 {-|
 Description : Runs hevm against the @grandizzy/symbolic-bug-suite@ project
 
-Each @check*@ invariant in the suite is violated by a modelled DeFi exploit, so
-hevm must find a validated counterexample (@[FAIL]@ + @[validated]@). The suite is
+hevm must find a validated counterexample ([FAIL] + [validated]) for each exploit. The suite is
 vendored as a submodule under @forge-symbolic-tests/symbolic-bug-suite@; we compile
-it once with @forge build@ (forge-std from @$HEVM_FORGE_STD_REPO@) and run each
-function via @hevm test@.
+it once with @forge build@ and run each function via @hevm test@.
 -}
 
 import Test.Tasty
 import Test.Tasty.HUnit
 import Test.Tasty.Runners (NumThreads(..))
+import EVM.Types (internalError)
 
+import Control.Monad (void)
 import Data.List (isInfixOf)
+import Data.Maybe (listToMaybe, fromMaybe)
 import System.Directory (getCurrentDirectory, createDirectoryIfMissing, removeDirectoryRecursive)
 import System.Environment (getEnv)
 import System.FilePath ((</>))
@@ -52,19 +53,21 @@ cases =
 setup :: IO FilePath
 setup = do
   forgeStd <- getEnv "HEVM_FORGE_STD_REPO"  -- set by the nix dev shell
-  solc <- head . lines <$> readProcess "which" ["solc"] ""
+  solc <- fromMaybe (internalError "solc not found in PATH") .
+    listToMaybe <$> lines <$> readProcess "which" ["solc"] ""
   suite <- (</> "forge-symbolic-tests" </> "symbolic-bug-suite") <$> getCurrentDirectory
   root <- (`createTempDirectory` "symbolic-suite") =<< getCanonicalTemporaryDirectory
-  cp (suite </> "src") (root </> "src")
-  cp (suite </> "test") (root </> "test")
+  void $ cp (suite </> "src") (root </> "src")
+  void $ cp (suite </> "test") (root </> "test")
   writeFile (root </> "foundry.toml") $ unlines
     [ "[profile.default]", "solc = \"" <> solc <> "\"", "evm_version = \"cancun\"", "ast = true" ]
   createDirectoryIfMissing True (root </> "lib" </> "forge-std")
   -- nix-store sources are read-only; --no-preserve=mode keeps the copy removable
-  () <$ readProcess "cp" ["-r", "--no-preserve=mode", forgeStd </> "src", root </> "lib" </> "forge-std" </> "src"] ""
-  () <$ readProcess "forge" ["build", "--root", root] ""
+  void $ readProcess "cp" ["-r", "--no-preserve=mode", forgeStd </> "src", root </> "lib" </> "forge-std" </> "src"] ""
+  void $ readProcess "forge" ["build", "--root", root] ""
   pure root
-  where cp from to = () <$ readProcess "cp" ["-r", from, to] ""
+  where
+    cp from to = void $ readProcess "cp" ["-r", from, to] ""
 
 -- | Run hevm on one @check*@ function and assert it found a validated counterexample.
 runCase :: IO FilePath -> String -> Assertion
