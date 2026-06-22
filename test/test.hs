@@ -1430,6 +1430,23 @@ tests = testGroup "hevm"
         (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertBoolM "Must be Unknown, never QED (unsound proof avoided)"
           (not (any isCex res) && any isUnknown res)
+    , testAbstractArith "mul-uint256-monotone-not-unsound" $ do
+        -- Same lemma shape as the uint128-bounded proof, but with full-width
+        -- uint256 inputs. The 128-bit no-overflow guard must not be assumed from
+        -- the type alone, so this can only be Unknown under abstract mul: never a
+        -- bogus QED and never a trusted counterexample from the uninterpreted UF.
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function prove_mul_uint256_monotone(uint256 a1, uint256 a2, uint256 k) external pure {
+              require(a1 <= a2);
+              uint256 p1; uint256 p2;
+              assembly { p1 := mul(a1, k)  p2 := mul(a2, k) }
+              assert(p1 <= p2);
+            }
+          } |]
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertBoolM "uint256 abstract mul must be Unknown, never QED or Cex"
+          (not (null res) && all isUnknown res)
     , testAbstractArith "roundtrip-no-inflation" $ do
         -- The cross-divisor round-trip convertToAssetValue(convertToShares(x)),
         -- i.e. ((x*ts)/ta)*ta/ts <= x, is the stateless core of inflation-attack
@@ -4597,4 +4614,3 @@ expectedConcVals nm val = case val of
   _ -> internalError $ "unsupported Abi type " <> show nm <> " val: " <> show val <> " val type: " <> showAlter val
   where
     mkWord = word . encodeAbiValue
-
