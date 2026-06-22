@@ -125,6 +125,8 @@ library
     EVM.CheatsTH,
     EVM.SMT.Types,
     EVM.SMT.SMTLIB,
+    EVM.SMT.AbstractBase,
+    EVM.SMT.AbstractLemmas,
     Paths_hevm
   autogen-modules:
     Paths_hevm
