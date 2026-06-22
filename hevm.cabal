@@ -341,7 +341,6 @@ test-suite cli-test
     hevm,
     hspec,
     process,
-    text,
     bytestring,
     filepath,
     split,
