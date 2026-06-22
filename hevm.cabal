@@ -353,7 +353,7 @@ test-suite forge-symbolic-tests
   hs-source-dirs:
     test
   main-is:
-    SymbolicTestSuite.hs
+    ForgeSymbolicTestSuite.hs
   build-depends:
     base,
     hevm,

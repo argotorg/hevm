@@ -10,7 +10,7 @@ We check that hevm finds the `[FAIL]` and then validates it via `[validated]`.
 
 - `symbolic-bug-suite/` — the vendored submodule (`src/NN_*.sol` reproducers and
   `test/NN_*.t.sol` symbolic invariants).
-- The Haskell runner lives at [`../test/SymbolicTestSuite.hs`](../test/SymbolicTestSuite.hs)
+- The Haskell runner lives at [`../test/ForgeSymbolicTestSuite.hs`](../test/ForgeSymbolicTestSuite.hs)
   and is registered as the `forge-symbolic-tests` cabal test suite.
 
 ## Running
