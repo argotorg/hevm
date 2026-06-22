@@ -345,7 +345,7 @@ test-suite cli-test
     filepath,
     split,
 
-test-suite symbolic-test
+test-suite forge-symbolic-tests
   import: test-common
   type:
     exitcode-stdio-1.0
