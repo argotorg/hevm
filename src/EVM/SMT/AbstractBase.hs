@@ -28,7 +28,6 @@ module EVM.SMT.AbstractBase
   , sp
   , zero
   , one
-  , maxU128
   , mulNoOverflow
   , wordAsBV
     -- * Div/mod taxonomy
@@ -50,9 +49,6 @@ module EVM.SMT.AbstractBase
     -- * Signed reconstruction helpers
   , smtZeroGuard
   , smtAbsolute
-  , smtNeg
-  , smtSameSign
-  , smtIsNonNeg
   , signedFromUnsignedDiv
   , signedFromUnsignedMod
     -- * Abstract-term saturation
