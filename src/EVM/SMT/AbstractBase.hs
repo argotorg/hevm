@@ -165,23 +165,12 @@ collectDivMods = \case
   _          -> []
 
 -- | Collect symbolic*symbolic multiplications (neither operand a literal).
--- Concrete factors (incl. 0/1/power-of-two) are handled natively by the
--- simplifier, so only genuinely symbolic products are abstracted.
 collectMuls :: Expr a -> [(Expr EWord, Expr EWord)]
-collectMuls = \case
-  T.Mul a b | notLit a, notLit b -> [(a, b)]
-  _ -> []
+collectMuls = maybe [] pure . asMul
 
--- | Collect multiplications by a literal constant, @(c, x)@ for @c*x@ (either
--- operand order), excluding the trivial constants 0 and 1. These stay native
--- @bvmul@ (the value is concrete), but a symbolic operand times a large
--- constant is still costly to bit-blast and compare; const-mul monotonicity
--- lets the solver order such products without doing so.
+-- | Collect multiplications by a non-trivial literal constant @(c, x)@.
 collectConstMuls :: Expr a -> [(W256, Expr EWord)]
-collectConstMuls = \case
-  T.Mul (Lit c) x | notLit x, c /= 0, c /= 1 -> [(c, x)]
-  T.Mul x (Lit c) | notLit x, c /= 0, c /= 1 -> [(c, x)]
-  _ -> []
+collectConstMuls = maybe [] pure . asConstMul
 
 -- | True if any prop contains a symbolic*symbolic multiplication, i.e. the
 -- multiplication abstraction is in play. Because abst_evm_bvmul is left
@@ -191,13 +180,17 @@ collectConstMuls = \case
 hasAbstractMul :: [Prop] -> Bool
 hasAbstractMul props = not $ null $ concatMap (foldProp collectMuls []) props
 
--- | Recognise an abstract symbolic*symbolic product.
-asMul :: Expr EWord -> Maybe (Expr EWord, Expr EWord)
+-- | Recognise an abstract symbolic*symbolic product (neither operand a literal).
+-- Concrete factors (incl. 0/1/power-of-two) are handled natively by the
+-- simplifier, so only genuinely symbolic products are abstracted.
+asMul :: Expr a -> Maybe (Expr EWord, Expr EWord)
 asMul (T.Mul x y) | notLit x, notLit y = Just (x, y)
 asMul _ = Nothing
 
--- | Recognise multiplication by a non-trivial literal constant: c*x or x*c.
-asConstMul :: Expr EWord -> Maybe (W256, Expr EWord)
+-- | Recognise multiplication by a non-trivial literal constant: c*x or x*c
+-- (excluding 0 and 1). These stay native @bvmul@, but const-mul monotonicity
+-- lets the solver order such products without bit-blasting the multiply.
+asConstMul :: Expr a -> Maybe (W256, Expr EWord)
 asConstMul (T.Mul (Lit c) x) | notLit x, c /= 0, c /= 1 = Just (c, x)
 asConstMul (T.Mul x (Lit c)) | notLit x, c /= 0, c /= 1 = Just (c, x)
 asConstMul _ = Nothing
