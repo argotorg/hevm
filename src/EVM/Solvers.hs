@@ -128,9 +128,30 @@ checkSatWithProps sg props = do
   if psSimp == [PBool False] then pure Qed
   else do
     let concreteKeccaks = fmap (\(buf,val) -> PEq (Lit val) (Keccak buf)) (toList $ Keccak.concreteKeccaks props)
-    let smt2 = assertProps conf (if conf.simp then psSimp <> concreteKeccaks else psSimp)
-    if isLeft smt2 then pure $ Error $ getError smt2
-    else liftIO $ checkSat sg (Just props) smt2
+    let allProps = if conf.simp then psSimp <> concreteKeccaks else psSimp
+    if not conf.abstractArith then do
+      let smt2 = assertProps conf allProps
+      if isLeft smt2 then pure $ Error $ getError smt2
+      else liftIO $ checkSat sg (Just props) smt2
+    else liftIO $ do
+      -- Two-phase solving: assert the abstract (uninterpreted) div/mod/mul plus
+      -- the sound lemmas, then append the div/mod ground truth as refinement.
+      let smt2Abstract = assertPropsAbstract conf allProps
+      let refinement = divModGroundTruth (exprToSMTWith AbstractDivMod) allProps
+      if isLeft smt2Abstract then pure $ Error $ getError smt2Abstract
+      else if isLeft refinement then pure $ Error $ getError refinement
+      else do
+        let x = getNonError smt2Abstract <> SMT2 (SMTScript (getNonError refinement)) mempty mempty
+        res <- checkSat sg (Just props) (Right x)
+        -- SOUNDNESS: multiplication is abstracted as an uninterpreted function
+        -- with no ground truth, so a satisfying model may use product values
+        -- inconsistent with real multiplication. A QED stays sound (the lemmas
+        -- over-approximate), but a counterexample may be spurious, so downgrade
+        -- it to Unknown.
+        pure $ case res of
+          Cex _ | hasAbstractMul allProps ->
+            Unknown "counterexample unsound under multiplication abstraction (abst_evm_bvmul is uninterpreted)"
+          _ -> res
 
 -- When props is Nothing, the cache will not be filled or used
 checkSat :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> IO SMTResult
@@ -264,6 +285,9 @@ getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r sem f
     )
 
 getOneSol :: (MonadIO m, ReadConfig m) => Solver -> Maybe Natural -> Natural -> SMT2 -> Maybe [Prop] -> Chan SMTResult -> TChan CacheEntry -> QSem -> Int -> m ()
+-- the empty solver answers every query "unknown" without spawning a process
+getOneSol EmptySolver _ _ _ _ r _ _ _ =
+  liftIO $ writeChan r (Unknown "Result unknown by SMT solver")
 getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) props r cacheq sem fileCounter = do
   conf <- readConfig
   liftIO $ bracket_
