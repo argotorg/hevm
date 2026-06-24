@@ -514,7 +514,7 @@ tests = testGroup "hevm"
                 AbiTuple (V.toList -> [e]) -> e
                 _ -> internalError "AbiTuple expected"
           let
-              frag = [symAbiArg "y" (AbiTupleType $ V.fromList [abiValueType y])]
+              frag = [symAbiArg 64 "y" (AbiTupleType $ V.fromList [abiValueType y])]
               (hevmEncoded, _) = first (Expr.drop 4) $ combineFragments frag (ConcreteBuf "")
               expectedVals = expectedConcVals "y" (AbiTuple . V.fromList $ [y])
               hevmConcretePre = fromRight (error "cannot happen") $ subModel expectedVals hevmEncoded
@@ -571,6 +571,131 @@ tests = testGroup "hevm"
                 _ -> internalError "AbiTuple expected"
           let hevmEncoded = encodeAbiValue (AbiTuple $ V.fromList [y])
           assertEqualM "abi encoding mismatch" solidityEncoded (AbiBytesDynamic hevmEncoded)
+    ]
+
+  , testGroup "Dynamic-bytes-concretization"
+    [ test "bytes-length-cex" $ do
+        -- A function that asserts bytes.length == 0 should have a counterexample
+        Just c <- solcRuntime "C" [i|
+            contract C {
+              function fun(bytes calldata data) public pure {
+                assert(data.length == 0);
+              }
+            } |]
+        let sig = Just $ Sig "fun(bytes)" [AbiBytesDynamicType]
+        (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        -- bytes args don't produce a per-path Partial; they attach a program-wide Caveat
+        (_, caveats) <- mkCalldata sig []
+        assertBoolM "bounded dyn arg must not produce a synthetic partial" $ not (any isPartial e)
+        assertBoolM "bounded dyn arg must produce a caveat" $ not (null caveats)
+        let numCexes = sum $ map (fromEnum . isCex) ret
+        assertEqualM "should find counterexample" 1 numCexes
+    , test "bytes-content-cex" $ do
+        -- Should find bytes starting with 0xdead
+        Just c <- solcRuntime "C" [i|
+            contract C {
+              function fun(bytes calldata data) public pure {
+                if (data.length >= 2) {
+                  assert(data[0] != 0xde || data[1] != 0xad);
+                }
+              }
+            } |]
+        let sig = Just $ Sig "fun(bytes)" [AbiBytesDynamicType]
+        (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        (_, caveats) <- mkCalldata sig []
+        assertBoolM "bounded dyn arg must not produce a synthetic partial" $ not (any isPartial e)
+        assertBoolM "bounded dyn arg must produce a caveat" $ not (null caveats)
+        let numCexes = sum $ map (fromEnum . isCex) ret
+        assertEqualM "should find counterexample" 1 numCexes
+    , test "bytes-no-cex" $ do
+        -- A trivially true assertion should have no counterexample (but still partial)
+        Just c <- solcRuntime "C" [i|
+            contract C {
+              function fun(bytes calldata data) public pure {
+                assert(data.length <= data.length);
+              }
+            } |]
+        let sig = Just $ Sig "fun(bytes)" [AbiBytesDynamicType]
+        (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        (_, caveats) <- mkCalldata sig []
+        assertBoolM "bounded dyn arg must not produce a synthetic partial" $ not (any isPartial e)
+        assertBoolM "bounded dyn arg must produce a caveat" $ not (null caveats)
+        let numCexes = sum $ map (fromEnum . isCex) ret
+        assertEqualM "should have no counterexample" 0 numCexes
+    , test "bytes-with-uint-arg" $ do
+        -- bytes alongside a uint256 argument
+        Just c <- solcRuntime "C" [i|
+            contract C {
+              function fun(uint256 x, bytes calldata data) public pure {
+                if (data.length > 0 && x == 42) {
+                  assert(false);
+                }
+              }
+            } |]
+        let sig = Just $ Sig "fun(uint256,bytes)" [AbiUIntType 256, AbiBytesDynamicType]
+        (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        (_, caveats) <- mkCalldata sig []
+        assertBoolM "bounded dyn arg must not produce a synthetic partial" $ not (any isPartial e)
+        assertBoolM "bounded dyn arg must produce a caveat" $ not (null caveats)
+        let numCexes = sum $ map (fromEnum . isCex) ret
+        assertEqualM "should find counterexample" 1 numCexes
+    -- Tests that bugs beyond maxDynSize are reported via a caveat, not as false passes
+    , test "bytes-beyond-bound-length-check" $ do
+        -- Bug only triggers when bytes.length > 100; with default maxDynSize=64, should NOT find cex
+        -- but must report a caveat (input domain was bounded)
+        Just c <- solcRuntime "C" [i|
+            contract C {
+              function fun(bytes calldata data) public pure {
+                if (data.length > 100) {
+                  assert(false);
+                }
+              }
+            } |]
+        let sig = Just $ Sig "fun(bytes)" [AbiBytesDynamicType]
+        (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        (_, caveats) <- mkCalldata sig []
+        assertBoolM "bounded dyn arg must not produce a synthetic partial" $ not (any isPartial e)
+        assertBoolM "bounded dyn arg must produce a caveat" $ not (null caveats)
+        let numCexes = sum $ map (fromEnum . isCex) ret
+        assertEqualM "should not find cex (bug is beyond bound)" 0 numCexes
+    , test "bytes-beyond-bound-content-check" $ do
+        -- Bug triggers only when byte at index 80 has a specific value; beyond default maxDynSize=64
+        Just c <- solcRuntime "C" [i|
+            contract C {
+              function fun(bytes calldata data) public pure {
+                if (data.length > 80 && data[80] == 0xff) {
+                  assert(false);
+                }
+              }
+            } |]
+        let sig = Just $ Sig "fun(bytes)" [AbiBytesDynamicType]
+        (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        (_, caveats) <- mkCalldata sig []
+        assertBoolM "bounded dyn arg must not produce a synthetic partial" $ not (any isPartial e)
+        assertBoolM "bounded dyn arg must produce a caveat" $ not (null caveats)
+        let numCexes = sum $ map (fromEnum . isCex) ret
+        assertEqualM "should not find cex (bug is beyond bound)" 0 numCexes
+    , test "bytes-beyond-bound-sum-check" $ do
+        -- Bug triggers when sum of first 128 bytes overflows; requires > 64 bytes
+        Just c <- solcRuntime "C" [i|
+            contract C {
+              function fun(bytes calldata data) public pure {
+                if (data.length >= 128) {
+                  uint256 sum = 0;
+                  for (uint i = 0; i < 128; i++) {
+                    sum += uint8(data[i]);
+                  }
+                  assert(sum < 1000);
+                }
+              }
+            } |]
+        let sig = Just $ Sig "fun(bytes)" [AbiBytesDynamicType]
+        (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        (_, caveats) <- mkCalldata sig []
+        assertBoolM "bounded dyn arg must not produce a synthetic partial" $ not (any isPartial e)
+        assertBoolM "bounded dyn arg must produce a caveat" $ not (null caveats)
+        let numCexes = sum $ map (fromEnum . isCex) ret
+        assertEqualM "should not find cex (bug requires 128 bytes, bound is 64)" 0 numCexes
     ]
 
   , testGroup "Precompiled contracts"
@@ -2970,7 +3095,7 @@ tests = testGroup "hevm"
           Just c <- solcRuntime "C" code
           Just a <- solcRuntime "A" code
           (_, [Cex (_, cex)]) <- withDefaultSolver $ \s -> do
-            calldata <- mkCalldata (Just (Sig "call_A()" [])) []
+            (calldata, _) <- mkCalldata (Just (Sig "call_A()" [])) []
             vm <- liftIO $ stToIO $ abstractVM calldata c Nothing False
                     <&> set (#state % #callvalue) (Lit 0)
                     <&> over (#env % #contracts)
@@ -3049,7 +3174,7 @@ tests = testGroup "hevm"
         ,
         test "safemath-distributivity-yul" $ do
           let yulsafeDistributivity = hex "6355a79a6260003560e01c14156016576015601f565b5b60006000fd60a1565b603d602d604435600435607c565b6039602435600435607c565b605d565b6052604b604435602435605d565b600435607c565b141515605a57fe5b5b565b6000828201821115151560705760006000fd5b82820190505b92915050565b6000818384048302146000841417151560955760006000fd5b82820290505b92915050565b"
-          calldata <- mkCalldata (Just (Sig "distributivity(uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256])) []
+          (calldata, _) <- mkCalldata (Just (Sig "distributivity(uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256])) []
           vm <- liftIO $ stToIO $ abstractVM calldata yulsafeDistributivity Nothing False
           (_, []) <-  withDefaultSolver $ \s -> verify s (Fetch.noRpcFetcher s) defaultVeriOpts vm (checkAssertions defaultPanicCodes) Nothing
           putStrLnM "Proven"
