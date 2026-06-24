@@ -584,8 +584,10 @@ tests = testGroup "hevm"
             } |]
         let sig = Just $ Sig "fun(bytes)" [AbiBytesDynamicType]
         (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        -- bytes args always produce a partial (bounded concretization)
-        assertBoolM "should be partial due to bounded bytes" $ any isPartial e
+        -- bytes args don't produce a per-path Partial; they attach a program-wide Caveat
+        (_, caveats) <- mkCalldata sig []
+        assertBoolM "bounded dyn arg must not produce a synthetic partial" $ not (any isPartial e)
+        assertBoolM "bounded dyn arg must produce a caveat" $ not (null caveats)
         let numCexes = sum $ map (fromEnum . isCex) ret
         assertEqualM "should find counterexample" 1 numCexes
     , test "bytes-content-cex" $ do
@@ -600,7 +602,9 @@ tests = testGroup "hevm"
             } |]
         let sig = Just $ Sig "fun(bytes)" [AbiBytesDynamicType]
         (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        assertBoolM "should be partial due to bounded bytes" $ any isPartial e
+        (_, caveats) <- mkCalldata sig []
+        assertBoolM "bounded dyn arg must not produce a synthetic partial" $ not (any isPartial e)
+        assertBoolM "bounded dyn arg must produce a caveat" $ not (null caveats)
         let numCexes = sum $ map (fromEnum . isCex) ret
         assertEqualM "should find counterexample" 1 numCexes
     , test "bytes-no-cex" $ do
@@ -613,7 +617,9 @@ tests = testGroup "hevm"
             } |]
         let sig = Just $ Sig "fun(bytes)" [AbiBytesDynamicType]
         (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        assertBoolM "should be partial due to bounded bytes" $ any isPartial e
+        (_, caveats) <- mkCalldata sig []
+        assertBoolM "bounded dyn arg must not produce a synthetic partial" $ not (any isPartial e)
+        assertBoolM "bounded dyn arg must produce a caveat" $ not (null caveats)
         let numCexes = sum $ map (fromEnum . isCex) ret
         assertEqualM "should have no counterexample" 0 numCexes
     , test "bytes-with-uint-arg" $ do
@@ -628,7 +634,9 @@ tests = testGroup "hevm"
             } |]
         let sig = Just $ Sig "fun(uint256,bytes)" [AbiUIntType 256, AbiBytesDynamicType]
         (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        assertBoolM "should be partial due to bounded bytes" $ any isPartial e
+        (_, caveats) <- mkCalldata sig []
+        assertBoolM "bounded dyn arg must not produce a synthetic partial" $ not (any isPartial e)
+        assertBoolM "bounded dyn arg must produce a caveat" $ not (null caveats)
         let numCexes = sum $ map (fromEnum . isCex) ret
         assertEqualM "should find counterexample" 1 numCexes
     -- Tests that bugs beyond maxDynSize are reported via a caveat, not as false passes
