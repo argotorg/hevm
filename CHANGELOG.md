@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.58.0] - 2026-06-26
 
 ## Added
+- New `forge-symbolic-tests` test suite that runs hevm against the vendored
+  [`grandizzy/symbolic-bug-suite`](https://github.com/grandizzy/symbolic-bug-suite)
+  (git submodule under `forge-symbolic-tests/`), a set of 22 real-world DeFi exploit
+  reproducers, asserting hevm finds a validated counterexample for each
 - RPC retry with exponential backoff and a shared cooldown across workers, so transient
   network errors and rate limits (e.g. HTTP 429) no longer abort symbolic execution
 - Support for a subset of the [`expectRevert`](https://www.getfoundry.sh/reference/cheatcodes/expect-revert#expectrevert) family of foundry cheatcodes:
