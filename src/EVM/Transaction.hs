@@ -12,7 +12,6 @@ import Optics.Core hiding (cons)
 
 import Data.Aeson (FromJSON (..))
 import Data.Aeson qualified as JSON
-import Data.Function (applyWhen)
 import Data.Aeson.Types qualified as JSON
 import Data.ByteString (ByteString, cons)
 import Data.ByteString qualified as BS
@@ -332,6 +331,7 @@ initTx vm =
             then Map.insert toAddr (toContract & (set #balance oldBalance))
             else touchAccount toAddr)
          $ preState
+    applyWhen p f x = if p then f x else x
   in
     vm & #env % #contracts .~ initState
        & #tx % #txReversion .~ preState

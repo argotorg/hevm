@@ -31,7 +31,7 @@ module EVM.SMT
 import Prelude hiding (LT, GT, Foldable(..))
 
 import Control.Monad
-import Control.Monad.Trans.Maybe (hoistMaybe)
+import Control.Monad.Trans.Maybe (MaybeT(..))
 import Data.Containers.ListUtils (nubOrd, nubInt)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -937,3 +937,7 @@ interpret1DArray = interpretNDArray interpretW256
         Just t -> interpretW256 env t
         Nothing -> internalError "unknown identifier, cannot parse array"
     interpretW256 _ t = internalError $ "cannot parse array value. Unexpected term: " <> (show t)
+
+
+hoistMaybe :: Monad m => Maybe a -> MaybeT m a
+hoistMaybe = MaybeT . pure
