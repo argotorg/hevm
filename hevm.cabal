@@ -346,6 +346,7 @@ test-suite cli-test
     bytestring,
     filepath,
     split,
+    text,
 
 test-suite forge-symbolic-tests
   import: shared
