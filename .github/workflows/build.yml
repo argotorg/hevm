@@ -90,7 +90,7 @@ jobs:
         run: nix develop --command bash -c "cabal --active-repositories=:none run cli-test"
       # runs hevm against the vendored forge-symbolic-tests bug suite (needs forge)
       - name: run symbolic bug-suite tests
-        run: nix develop --command bash -c "cabal --active-repositories=:none run symbolic-test"
+        run: nix develop --command bash -c "cabal --active-repositories=:none run forge-symbolic-tests"
 
   build-windows:
     name: build (windows-latest)
