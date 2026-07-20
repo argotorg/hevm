@@ -23,6 +23,7 @@ import Data.Text.Lazy.Builder (Builder, fromString)
 
 import EVM.SMT.AbstractBase
 import EVM.SMT.AbstractLemmas (collectLemmas, emitLemma)
+import EVM.SMT.SMTLIB (sp, zero, wordAsBV)
 import EVM.SMT.Types
 import EVM.Traversals (foldProp)
 import EVM.Types (Prop, EType(EWord), Err, W256, Expr, Expr(Lit), Expr(SHL))

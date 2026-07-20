@@ -18,9 +18,6 @@ module EVM.SMT
   decompose,
   exprToSMTWith,
   encodeConcreteStore,
-  sp,
-  zero,
-  one,
   propToSMTWith,
   parseVar,
   parseEAddr,
@@ -30,8 +27,7 @@ module EVM.SMT
   getVars,
   queryMaxReads,
   getBufs,
-  getStore,
-  wordAsBV
+  getStore
 ) where
 
 import Prelude hiding (LT, GT, Foldable(..))
@@ -431,9 +427,6 @@ assertSMTWith enc p = do
   p' <- propToSMTWith enc p
   pure $ SMTCommand ("(assert " <> p' <> ")")
 
-wordAsBV :: forall a. Integral a => a -> Builder
-wordAsBV w = "(_ bv" <> Data.Text.Lazy.Builder.Int.decimal w <> " 256)"
-
 byteAsBV :: Word8 -> Builder
 byteAsBV b = "(_ bv" <> Data.Text.Lazy.Builder.Int.decimal b <> " 8)"
 
@@ -645,15 +638,6 @@ exprToSMTWith divEnc = \case
     mulOp a b = case divEnc of
       ConcreteDivMod -> op2 "bvmul" a b
       AbstractDivMod -> op2 "abst_evm_bvmul" a b
-
-sp :: Builder -> Builder -> Builder
-a `sp` b = a <> " " <> b
-
-zero :: Builder
-zero = "(_ bv0 256)"
-
-one :: Builder
-one = "(_ bv1 256)"
 
 propToSMTWith :: DivModEncoding -> Prop -> Err Builder
 propToSMTWith divEnc = \case

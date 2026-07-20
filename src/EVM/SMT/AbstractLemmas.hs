@@ -2,23 +2,14 @@
    Module: EVM.SMT.AbstractLemmas
    Description: The catalogue of sound algebraic lemmas for abstract arithmetic.
 
-   This is the review surface. Multiplication is kept fully uninterpreted (no
-   ground truth, so the solver never bit-blasts a symbolic product); we add only
-   /sound/ algebraic facts about @abst_evm_bvmul@/@abst_evm_bvudiv@. Each lemma
-   appears in three aligned places, under a shared banner:
-
-   1. a 'LemmaInst' constructor (its arguments),
-   2. a clause in 'collectLemmas' (when it fires — the trigger), and
-   3. a clause in 'emitLemma' (the SMT it emits + why it is sound).
-
-   To audit soundness, read 'emitLemma': every emitted assertion is true of
-   ordinary multiplication/division, so anything the solver derives from them
-   holds for the real operations too. To add a lemma, add a constructor, a
-   'collectLemmas' clause, and an 'emitLemma' clause — GHC's exhaustiveness
-   checker forces the third once you add the first.
-
-   The emission order in 'collectLemmas' is family-by-family and is preserved
-   from the original monolithic encoder, so the generated query is unchanged.
+   Multiplication is kept fully uninterpreted (no ground truth, so the solver
+   never bit-blasts a symbolic product); we add only /sound/ algebraic facts
+   about @abst_evm_bvmul@/@abst_evm_bvudiv@. Each lemma is a 'LemmaInst'
+   constructor, a 'collectLemmas' clause (its trigger) and an 'emitLemma'
+   clause (the SMT it emits + why it is sound); GHC's exhaustiveness checker
+   ties the three together. To audit soundness, read 'emitLemma': every
+   emitted assertion is true of ordinary arithmetic, so anything derived from
+   them holds for the real operations too.
 -}
 module EVM.SMT.AbstractLemmas
   ( LemmaInst(..)
@@ -29,12 +20,12 @@ module EVM.SMT.AbstractLemmas
 import Data.Containers.ListUtils (nubOrd)
 
 import EVM.SMT.AbstractBase
+import EVM.SMT.SMTLIB (sp, zero, one, wordAsBV)
 import EVM.SMT.Types (SMTEntry(..))
 import EVM.Types (EType(EWord), Err, W256, Expr, Expr(Lit))
 import EVM.Types qualified as T
 
 -- | A single firing of a lemma family, carrying the sub-terms it matched.
--- Field meanings are documented at the corresponding 'emitLemma' clause.
 data LemmaInst
   = Comm          (Expr EWord) (Expr EWord)                            -- ^ a*b = b*a
   | Identity      (Expr EWord) (Expr EWord)                            -- ^ x*0, 0*y, x*1, 1*y
@@ -51,8 +42,8 @@ data LemmaInst
   | Telescope     (Expr EWord) (Expr EWord) W256 W256                  -- ^ (a*b)/c - (a*(b-k))/c == a*(k/c)
   deriving (Eq, Ord)
 
--- | Every lemma instance triggered by the saturated term set, in the order the
--- assertions are emitted. One clause per family; see 'emitLemma' for the math.
+-- | Every lemma instance triggered by the saturated term set, in emission
+-- order. One clause per family; see 'emitLemma' for the math.
 collectLemmas :: AbstractCtx -> [LemmaInst]
 collectLemmas ctx =
      -- commutativity + 0/1 identities over every product
@@ -98,16 +89,15 @@ collectLemmas ctx =
 -- sound fact, with its no-overflow / divisor guard where one is required.
 emitLemma :: Enc -> LemmaInst -> Err [SMTEntry]
 
--- commutativity: abst_evm_bvmul(a,b) = abst_evm_bvmul(b,a). Needed so lemma
--- terms match the props regardless of the simplifier's operand order.
+-- commutativity: abst_evm_bvmul(a,b) = abst_evm_bvmul(b,a), so lemma terms
+-- match the props regardless of operand order.
 emitLemma enc (Comm a b) = do
   aenc <- enc a; benc <- enc b
   let m1 = "(abst_evm_bvmul" `sp` aenc `sp` benc <> ")"
       m2 = "(abst_evm_bvmul" `sp` benc `sp` aenc <> ")"
   pure [ SMTCommand $ "(assert (=" `sp` m1 `sp` m2 <> "))" ]
 
--- sound identities pinning the otherwise-free UF on 0/1 operands:
---   x*0 = 0, 0*y = 0, x*1 = x, 1*y = y
+-- 0/1 identities pinning the otherwise-free UF: x*0 = 0*y = 0, x*1 = x, 1*y = y
 emitLemma enc (Identity a b) = do
   aenc <- enc a; benc <- enc b
   let m = "(abst_evm_bvmul" `sp` aenc `sp` benc <> ")"
@@ -117,19 +107,17 @@ emitLemma enc (Identity a b) = do
        , SMTCommand $ "(assert (=> (=" `sp` benc `sp` one  <> ") (=" `sp` m `sp` aenc  <> ")))"
        ]
 
--- div<->mul link (sound unconditionally): quotient*divisor <= dividend, i.e.
---   abst_evm_bvmul(abst_evm_bvudiv(a,b), b) <= a.
--- (a/b)*b <= a < 2^256 can never overflow, so no guard. This links the div and
--- mul abstractions and chains nested divisions.
+-- div<->mul link (sound unconditionally, (a/b)*b <= a < 2^256 cannot
+-- overflow): quotient*divisor <= dividend. Links the div and mul abstractions
+-- and chains nested divisions.
 emitLemma enc (DivMulLink a b) = do
   aenc <- enc a; benc <- enc b
   let q  = "(abst_evm_bvudiv" `sp` aenc `sp` benc <> ")"
       qb = "(abst_evm_bvmul" `sp` q `sp` benc <> ")"
   pure [ SMTCommand $ "(assert (bvule" `sp` qb `sp` aenc <> "))" ]
 
--- mul monotonicity (guarded by no-overflow, hence sound): if neither x*z nor
--- y*z overflows then x <= y => x*z <= y*z. The guard is bound-free; bounding
--- operands (e.g. a Solidity require) keeps it cheap to discharge.
+-- mul monotonicity (no-overflow guarded, hence sound):
+--   x <= y => x*z <= y*z
 emitLemma enc (MulMono x y z) = do
   xenc <- enc x; yenc <- enc y; zenc <- enc z
   let mxz = "(abst_evm_bvmul" `sp` xenc `sp` zenc <> ")"
@@ -137,8 +125,8 @@ emitLemma enc (MulMono x y z) = do
   pure [ SMTCommand $ "(assert (=> (and" `sp` mulNoOverflow xenc zenc `sp` mulNoOverflow yenc zenc
          <> " (bvule" `sp` xenc `sp` yenc <> ")) (bvule" `sp` mxz `sp` myz <> ")))" ]
 
--- div monotonicity in the dividend (sound unconditionally): for a common
--- divisor z, x <= y => floor(x/z) <= floor(y/z).
+-- div monotonicity in the dividend (sound unconditionally):
+--   x <= y => floor(x/z) <= floor(y/z)
 emitLemma enc (DivMono x y z) = do
   xenc <- enc x; yenc <- enc y; zenc <- enc z
   let dxz = "(abst_evm_bvudiv" `sp` xenc `sp` zenc <> ")"
@@ -167,11 +155,10 @@ emitLemma enc (MulDivBound a x y z) = do
        , SMTCommand $ "(assert (=> (and (bvule" `sp` xe `sp` ze <> ")" `sp` mulNoOverflow ye ze
            <> ") (bvule" `sp` dv `sp` ye <> ")))" ]
 
--- const-mul monotonicity (sound, no-overflow guarded): for a fixed literal
--- constant c, x <= y => c*x <= c*y. Because c is concrete we compute the exact
--- no-overflow bound floor((2^256-1)/c) at encode time, so the guard is a single
--- comparison against a constant. c*x stays a native bvmul; this lemma just lets
--- the solver order two such products without bit-blasting the multiply.
+-- const-mul monotonicity (sound, no-overflow guarded): x <= y => c*x <= c*y.
+-- c is concrete, so the exact bound floor((2^256-1)/c) is computed at encode
+-- time and the guard is one comparison. c*x stays a native bvmul; the lemma
+-- lets the solver order two such products without bit-blasting the multiply.
 emitLemma enc (ConstMulMono c x y) = do
   xe <- enc x; ye <- enc y
   let cbv  = wordAsBV c
@@ -181,12 +168,9 @@ emitLemma enc (ConstMulMono c x y) = do
   pure [ SMTCommand $ "(assert (=> (and (bvule" `sp` xe `sp` bnd <> ") (bvule" `sp` ye `sp` bnd <> ")"
          <> " (bvule" `sp` xe `sp` ye <> ")) (bvule" `sp` cx `sp` cy <> ")))" ]
 
--- const cancellation (sound, no-overflow guarded): a product c1*x divided by a
--- literal c2 that divides c1 collapses to (c1/c2)*x. The multiply by a constant
--- stays a native bvmul but the divide is abstracted, so without this the
--- precision-scaling wrapper c1*x/c2 (e.g. amount*1e18/1e6 in _getUsdcValue) is
--- not provably its closed form. `a` is the dividend (c1*x); c2 | c1 makes c1/c2
--- exact, and the bound floor((2^256-1)/c1) is computed at encode time.
+-- const cancellation (sound, no-overflow guarded): (c1*x)/c2 == (c1/c2)*x
+-- when c2 | c1 — the precision-scaling wrapper, e.g. amount*1e18/1e6.
+-- `a` is the dividend expr (c1*x), kept so the div term matches the prop.
 emitLemma enc (ConstCancel a c1 c2 x) = do
   ae <- enc a; xe <- enc x
   let c2bv = wordAsBV c2
@@ -196,9 +180,9 @@ emitLemma enc (ConstCancel a c1 c2 x) = do
       bnd  = wordAsBV ((maxBound :: W256) `div` c1)  -- largest x with c1*x < 2^256
   pure [ SMTCommand $ "(assert (=> (bvule" `sp` xe `sp` bnd <> ") (=" `sp` dv `sp` rhs <> ")))" ]
 
--- nested-division collapse (sound, floor identity): (A/c1)/c2 == A/(c1*c2) for
--- literal c1,c2 with c1*c2 < 2^256. Lets the solver simplify chained constant
--- divisions such as x*rate/1e9/1e18 to x*rate/1e27. No operand bound needed.
+-- nested-division collapse (sound floor identity, no guard needed):
+-- (A/c1)/c2 == A/(c1*c2) for literal c1,c2 with c1*c2 < 2^256,
+-- e.g. x*rate/1e9/1e18 == x*rate/1e27.
 emitLemma enc (NestedDiv innerA c1 c2) = do
   ae <- enc innerA
   let inner     = "(abst_evm_bvudiv" `sp` ae `sp` wordAsBV c1 <> ")"
@@ -206,12 +190,10 @@ emitLemma enc (NestedDiv innerA c1 c2) = do
       collapsed = "(abst_evm_bvudiv" `sp` ae `sp` wordAsBV (c1 * c2) <> ")"
   pure [ SMTCommand $ "(assert (=" `sp` outer `sp` collapsed <> "))" ]
 
--- fraction-reduce (sound, no-overflow guarded): a product c1*x divided by a
--- literal c2 that c1 divides collapses to x/(c2/c1). The mirror of const-cancel:
--- const-cancel needs c2 | c1 (multiply by large, divide by small); this needs
--- c1 | c2 (multiply by small, divide by large, e.g. x*1e6/1e18 == x/1e12 — the
--- convert-to-usdc precision step). Under the guard c1*x is exact and
--- floor(c1*x / (c1*k)) = floor(x/k). `a` is the dividend (c1*x).
+-- fraction-reduce (sound, no-overflow guarded): (c1*x)/c2 == x/(c2/c1) when
+-- c1 | c2 — the mirror of const-cancel (multiply by small, divide by large,
+-- e.g. x*1e6/1e18 == x/1e12). Under the guard c1*x is exact, and
+-- floor(c1*x / (c1*k)) = floor(x/k).
 emitLemma enc (FracReduce a c1 c2 x) = do
   ae <- enc a; xe <- enc x
   let k    = c2 `div` c1                 -- exact and >= 2, since c1 | c2 and c2 /= c1
@@ -221,11 +203,10 @@ emitLemma enc (FracReduce a c1 c2 x) = do
   pure [ SMTCommand $ "(assert (=> (bvule" `sp` xe `sp` bnd <> ") (=" `sp` dv `sp` rhs <> ")))" ]
 
 -- ceilDiv-cancel (sound, guarded): pins the abstracted divide inside
--- OpenZeppelin's Math.ceilDiv(c1*x, c2) = (c1*x - 1)/c2 + 1 (the c1*x != 0
--- branch). `a` is the (c1*x - 1) dividend. When c2 | c1, write c1 = c2*m: then
--- c1*x = c2*(m*x), so floor((c2*m*x - 1)/c2) = m*x - 1 (for m*x >= 1). Adding the
--- ceilDiv's +1 gives m*x = (c1/c2)*x exactly. Guarded by x >= 1 (the ceilDiv ITE
--- handles x==0) and the encode-time no-overflow bound floor((2^256-1)/c1).
+-- OpenZeppelin's Math.ceilDiv(c1*x, c2) = (c1*x - 1)/c2 + 1. When c2 | c1,
+-- write c1 = c2*m: floor((c2*m*x - 1)/c2) = m*x - 1 for m*x >= 1, so with the
+-- ceilDiv's +1 the quote is exactly (c1/c2)*x. Guarded by x >= 1 (the ceilDiv
+-- ITE handles x==0) and no-overflow. `a` is the (c1*x - 1) dividend expr.
 emitLemma enc (CeilDivCancel a c1 c2 x) = do
   ae <- enc a; xe <- enc x
   let m    = c1 `div` c2                 -- exact, since c2 | c1
@@ -236,14 +217,13 @@ emitLemma enc (CeilDivCancel a c1 c2 x) = do
   pure [ SMTCommand $ "(assert (=> (and (bvuge" `sp` xe `sp` one <> ")"
          <> " (bvule" `sp` xe `sp` bnd <> ")) (=" `sp` dv `sp` rhs <> ")))" ]
 
--- scaled-product telescoping (sound, no-overflow guarded). For products sharing
--- factor a whose other factors differ by a literal k with c | k:
---   floor(a*b/c) == floor(a*(b-k)/c) + a*(k/c).
--- Sound because a*b = a*(b-k) + a*k and a*k is an exact multiple of c, so
--- removing it shifts the floor by exactly a*(k/c). The only lemma pinning the
--- EXACT difference of two distinct abstract products; discharges value-change
--- accounting like susds*rate/1e27 - susds == susds*(rate-1e27)/1e27. Guarded by
--- no-overflow on a*b and b >= k (so b-k is a true difference, no wraparound).
+-- scaled-product telescoping (sound, no-overflow guarded). For products
+-- sharing factor a whose other factors differ by a literal k with c | k:
+--   floor(a*b/c) == floor(a*(b-k)/c) + a*(k/c)
+-- Sound: a*b = a*(b-k) + a*k and a*k is an exact multiple of c, so removing it
+-- shifts the floor by exactly a*(k/c). The only lemma pinning the EXACT
+-- difference of two abstract products (value-change accounting, e.g.
+-- susds*rate/1e27 - susds). b >= k in the guard rules out wraparound in b-k.
 emitLemma enc (Telescope a b k c) = do
   ae <- enc a; be <- enc b
   let m       = k `div` c                       -- exact, since c | k
@@ -257,10 +237,8 @@ emitLemma enc (Telescope a b k c) = do
   pure [ SMTCommand $ "(assert (=> (and" `sp` mulNoOverflow ae be
          <> " (bvuge" `sp` be `sp` wordAsBV k <> ")) (=" `sp` dFull `sp` rhs <> ")))" ]
 
--- | Include both operand orders of each product. Multiplication is commutative
--- (and we assert that), but the simplifier/solc may order a product's operands
--- either way; considering both ensures monotonicity is found regardless of
--- ordering. Only used for the (commutative) mul lemmas.
+-- | Both operand orders of each product, so monotonicity fires regardless of
+-- how the simplifier ordered the operands.
 bothOrders :: [(Expr EWord, Expr EWord)] -> [(Expr EWord, Expr EWord)]
 bothOrders xs = nubOrd (xs <> [ (b, a) | (a, b) <- xs ])
 
