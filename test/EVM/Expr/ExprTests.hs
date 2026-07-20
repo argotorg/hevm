@@ -105,6 +105,22 @@ copySliceTests = testGroup "CopySlice tests"
         let simpl = Expr.simplify e
         let expected = ConcreteBuf $ BS.pack [0x00, 0xff, 0x00, 0xff]
         assertEqual "" expected simpl
+  , testCase "copyslice-single-byte-concretizes" $ do
+        -- Regression for issue #1066. A size-1 CopySlice whose read range is
+        -- fully covered by a concrete WriteWord must concretize, even when an
+        -- unrelated (out-of-range) symbolic write sits underneath it.
+        let w = Lit 0xabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
+            src = WriteWord (Lit 0x20) w (WriteWord (Lit 0x80) (Var "x") (ConcreteBuf ""))
+            e = CopySlice (Lit 0x20) (Lit 0x0) (Lit 0x1) src (ConcreteBuf "")
+        assertEqual "size-1 copy must concretize to the 1st byte, dropping the out-of-range symbolic write"
+          (ConcreteBuf (BS.pack [0xab])) (Expr.simplify e)
+  , testCase "copyslice-single-byte-value" $ do
+        -- Same as above, but no symbolic write this time
+        let w = Lit 0xabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
+            src = WriteWord (Lit 0x20) w (ConcreteBuf "")
+            e = CopySlice (Lit 0x3f) (Lit 0x0) (Lit 0x1) src (ConcreteBuf "")
+        assertEqual "size-1 copy must read the correct (last) byte"
+          (ConcreteBuf (BS.pack [0x89])) (Expr.simplify e)
   ]
 
 memoryTests :: TestTree

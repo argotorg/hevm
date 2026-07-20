@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.58.0] - 2026-06-26
+
 ## Added
+- New `forge-symbolic-tests` test suite that runs hevm against the vendored
+  [`grandizzy/symbolic-bug-suite`](https://github.com/grandizzy/symbolic-bug-suite)
+  (git submodule under `forge-symbolic-tests/`), a set of 22 real-world DeFi exploit
+  reproducers, asserting hevm finds a validated counterexample for each
 - RPC retry with exponential backoff and a shared cooldown across workers, so transient
   network errors and rate limits (e.g. HTTP 429) no longer abort symbolic execution
 - Support for a subset of the [`expectRevert`](https://www.getfoundry.sh/reference/cheatcodes/expect-revert#expectrevert) family of foundry cheatcodes:
@@ -30,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   controlled via `merge-max-budget`
 - Missing simplifications for Eq, Mod, SMod, XOR, SHL, SHR, and Or
 - A few more simplification rules around Eq, SHL/SHR, Sub+Add combos, and Xor
+- Symbolic execution now supports dynamic `bytes`/`string` calldata arguments,
+  with their length bounded by `--max-dyn-size` (default 64). When such a bound
+  is applied the result carries a program-wide `[CAVEAT]` noting that
+  counterexamples requiring longer inputs may be missed (rather than a per-path
+  `Partial`)
 - `readWord` disjointness rule for `WriteWord (Add (Lit c) X) …` with bounded `X`.
 
 ## Changed
@@ -43,6 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   options.
 - We now abort VM run on a failed `assume`.
 - Removed SHA256 from the Expr since it was not being used
+- When doing CopySlice of exactly one concrete byte, we now correctly simplify
 
 ## [0.57.0] - 2026-01-08
 

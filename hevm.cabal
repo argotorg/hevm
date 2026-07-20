@@ -2,7 +2,7 @@ cabal-version: 3.0
 name:
   hevm
 version:
-  0.57.0
+  0.58.0
 synopsis:
   Symbolic EVM Evaluator
 description:
@@ -255,7 +255,6 @@ common test-base
     tasty-hunit,
     tasty-expected-failure,
     temporary,
-    text,
     witherable,
     optics-core,
     witch,
@@ -309,6 +308,7 @@ test-suite test
     quickcheck-instances,
     regex,
     tasty-quickcheck,
+    text,
     vector,
 
 -- these tests require network access so we split them into a separate test
@@ -321,6 +321,7 @@ test-suite rpc-tests
   main-is:
     rpc.hs
   build-depends:
+    text,
     vector,
 
 test-suite ethereum-tests
@@ -346,10 +347,29 @@ test-suite cli-test
     hevm,
     hspec,
     process,
-    text,
     bytestring,
     filepath,
     split,
+    text,
+
+test-suite forge-symbolic-tests
+  import: shared
+  type:
+    exitcode-stdio-1.0
+  default-language: GHC2021
+  hs-source-dirs:
+    test
+  main-is:
+    ForgeSymbolicTestSuite.hs
+  build-depends:
+    base,
+    hevm,
+    directory,
+    filepath,
+    process,
+    tasty,
+    tasty-hunit,
+    temporary,
 
 --- Benchmarks ---
 

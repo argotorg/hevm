@@ -48,6 +48,7 @@ data Config = Config
   , onlyDeployed     :: Bool
   , earlyAbort       :: Bool
   , mergeMaxBudget   :: Int        -- ^ Max instructions for speculative merge exploration
+  , maxDynSize       :: Int        -- ^ Max byte length for concretized dynamic types (bytes, string)
   , abstractArith    :: Bool
   }
   deriving (Show, Eq)
@@ -70,6 +71,7 @@ defaultConfig = Config
   , onlyDeployed = False
   , earlyAbort = False
   , mergeMaxBudget = 100
+  , maxDynSize = 64
   , abstractArith = False
   }
 

@@ -5,6 +5,7 @@ module EVM.Format
   , formatSomeExpr
   , formatPartial
   , formatPartialDetailed
+  , formatCaveat
   , formatProp
   , formatState
   , formatError
@@ -525,6 +526,12 @@ formatPartial = \case
       , "program counter: " <> pack (show pc)]
     ]
 
+-- | Render a program-wide soundness caveat (see 'Caveat').
+formatCaveat :: Caveat -> Text
+formatCaveat = \case
+  DynArgBounded maxSz ->
+    "Dynamic (bytes/string) arguments were bounded to " <> pack (show maxSz) <>
+    " bytes; counterexamples requiring longer inputs may be missed."
 
 formatPartialDetailed :: Maybe SrcLookup -> Map.Map (Expr EAddr) Contract -> PartialExec -> Text
 formatPartialDetailed srcLookupM contracts p =
