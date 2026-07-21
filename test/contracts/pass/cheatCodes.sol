@@ -311,6 +311,17 @@ contract CheatCodes is Test {
         assertEq(result[3], "0xffff");
     }
 
+    function prove_invalidUTF8() public {
+        // ABI strings are raw bytes and need not be valid UTF-8: byte 0xbf
+        // must not crash cheatcode string handling (issue #1076)
+        string memory invalid = string(abi.encodePacked(hex"bf"));
+
+        hevm.setEnv(invalid, "hello, world!");
+        assertEq(hevm.envString(invalid), "hello, world!");
+
+        hevm.label(address(this), invalid);
+    }
+
     function prove_envBytes() public {
         bytes memory varname = "ENV_BYTES_TEST";
 
