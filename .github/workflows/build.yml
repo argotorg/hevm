@@ -129,7 +129,6 @@ jobs:
             autotools:p
             gmp:p
             openssl:p
-            z3:p
             go:p
       - uses: haskell-actions/setup@v2.7.7
         id: setup
@@ -247,6 +246,11 @@ jobs:
           curl --retry 5 -fsSL https://github.com/bitwuzla/bitwuzla/releases/download/0.8.2/Bitwuzla-Win64-x86_64-static.zip -o bitwuzla.zip
           unzip bitwuzla.zip && rm bitwuzla.zip
           echo BITWUZLA_PATH="$PWD/Bitwuzla-Win64-x86_64-static/bin" >> "$GITHUB_ENV"
+          # z3, pinned: msys2's rolling z3 package broke 3 tests when it moved
+          # from 4.15.2 to 4.16.0 (upstream 4.16.0 is fine on other platforms)
+          curl --retry 5 -fsSL https://github.com/Z3Prover/z3/releases/download/z3-4.15.2/z3-4.15.2-x64-win.zip -o z3.zip
+          unzip z3.zip && rm z3.zip
+          echo Z3_PATH="$PWD/z3-4.15.2-x64-win/bin" >> "$GITHUB_ENV"
           # evm
           go install github.com/ethereum/go-ethereum/cmd/evm@v1.16.1
           echo EVM_PATH="$(cygpath -u "$(go env GOPATH)/bin")" >> "$GITHUB_ENV"
@@ -266,14 +270,14 @@ jobs:
 
       - name: run tests
         run: |
-          export PATH="$EVM_PATH:$CVC5_PATH:$BITWUZLA_PATH:$DAPP_SOLC_PATH:$FOUNDRY_PATH:$HASKELL_PATHS:$PATH"
+          export PATH="$EVM_PATH:$CVC5_PATH:$BITWUZLA_PATH:$Z3_PATH:$DAPP_SOLC_PATH:$FOUNDRY_PATH:$HASKELL_PATHS:$PATH"
           cabal run test
 
       - name: run rpc tests
         env:
           RPC_MAINNET_KEY: ${{ secrets.RPC_MAINNET_KEY }}
         run: |
-          export PATH="$BITWUZLA_PATH:$FOUNDRY_PATH:$HASKELL_PATHS:$PATH"
+          export PATH="$BITWUZLA_PATH:$Z3_PATH:$FOUNDRY_PATH:$HASKELL_PATHS:$PATH"
           cabal run rpc-tests
 
       - name: run ethereum tests
