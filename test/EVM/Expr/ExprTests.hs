@@ -63,6 +63,36 @@ storageTests = testGroup "Storage tests"
     , testCase "read-past-write" $ assertEqual errorMsg
         (Lit 0xab)
         (Expr.readStorage' (Lit 0x0) (SStore (Lit 0x1) (Var "b") (ConcreteStore $ Map.fromList [(0x0, 0xab)])))
+    -- #1082: an empty ConcreteStore is total, so a symbolic slot reads 0
+    , testCase "read-symbolic-slot-empty-concrete-store" $ assertEqual errorMsg
+        (Lit 0)
+        (Expr.readStorage' (Var "x") (ConcreteStore mempty))
+    -- accessStorage relies on Nothing here to drive lazy RPC slot fetching;
+    -- the empty-store => 0 rule lives in readStorage' only
+    , testCase "readStorage-keeps-nothing-on-concrete-miss" $ assertEqual errorMsg
+        Nothing
+        (Expr.readStorage (Lit 0x5) (ConcreteStore mempty))
+    -- a concrete-valued write would instead be folded into the store
+    , testCase "read-symbolic-slot-stripped-to-empty-concrete-store" $ assertEqual errorMsg
+        (Lit 0)
+        (Expr.readStorage' (mappingRead 1 "k") (SStore (Lit 0x5) (Var "b") (ConcreteStore mempty)))
+    , testCase "filter-store-drops-other-mapping-entries" $ assertEqual errorMsg
+        (ConcreteStore $ Map.fromList [(0x5, 0x222)])
+        (Expr.filterStoreByReadSlot preImgs (mappingRead 1 "k")
+          (ConcreteStore $ Map.fromList [(preImgHash, 0x111), (0x5, 0x222)]))
+    , testCase "filter-store-keeps-same-mapping-entries" $ assertEqual errorMsg
+        (ConcreteStore $ Map.fromList [(preImgHash, 0x111), (0x5, 0x222)])
+        (Expr.filterStoreByReadSlot preImgs (mappingRead 0 "k")
+          (ConcreteStore $ Map.fromList [(preImgHash, 0x111), (0x5, 0x222)]))
+    , testCase "filter-store-ignores-non-mapping-reads" $ assertEqual errorMsg
+        (ConcreteStore $ Map.fromList [(preImgHash, 0x111)])
+        (Expr.filterStoreByReadSlot preImgs (Var "x")
+          (ConcreteStore $ Map.fromList [(preImgHash, 0x111)]))
+    , testCase "read-unrelated-mapping-filters-to-zero" $ assertEqual errorMsg
+        (Lit 0)
+        (Expr.readStorage' (mappingRead 1 "k")
+          (Expr.filterStoreByReadSlot preImgs (mappingRead 1 "k")
+            (ConcreteStore $ Map.fromList [(preImgHash, 0x111)])))
     , testCase "simplify-storage-wordToAddr" $ do
        let a = "0x000000000000000000000000d95322745865822719164b1fc167930754c248de000000000000000000000000000000000000000000000000000000000000004a"
            store = ConcreteStore (Map.fromList[(W256 0xebd33f63ba5dda53a45af725baed5628cdad261db5319da5f5d921521fe1161d,W256 0x5842cf)])
@@ -82,7 +112,15 @@ storageTests = testGroup "Storage tests"
            simp = Expr.concKeccakSimpExpr outer
        assertEqual "Expression should simplify to value." simp (Lit 0xacab)
   ]
-  where errorMsg = "Storage read expression not simplified correctly"
+  where
+    errorMsg = "Storage read expression not simplified correctly"
+    -- a symbolic read of the mapping at storage slot n: keccak(key . n)
+    mappingRead n key = Keccak (WriteWord (Lit 0) (Var key) (ConcreteBuf (mapSlotBuf n)))
+    mapSlotBuf n = BS.pack (replicate 63 0 ++ [n])
+    -- recorded preimage of a write to the mapping at slot 0 with key 0xaa
+    preImgBytes = BS.pack (replicate 31 0 ++ [0xaa] ++ replicate 32 0)
+    preImgHash = keccak' preImgBytes
+    preImgs = Map.fromList [(preImgHash, preImgBytes)]
 
 copySliceTests :: TestTree
 copySliceTests = testGroup "CopySlice tests"
@@ -353,7 +391,8 @@ basicSimplificationTests = testGroup "Basic simplification tests"
       -- near-collision in the keccak hash
       let x = (SLoad (Keccak (AbstractBuf "es")) (SStore (Add (Keccak (ConcreteBuf "")) (Lit 0x1)) (Lit 0xacab) (ConcreteStore (Map.empty))))
       let simplified = Expr.simplify x
-      let expected = (SLoad (Keccak (AbstractBuf "es")) (ConcreteStore (Map.empty))) -- TODO: This should be simplified to (Lit 0)
+      -- the write is stripped and the residual read over an empty ConcreteStore is 0 (#1082)
+      let expected = Lit 0
       assertEqual "Must be equal, given keccak distance axiom" expected simplified
   , testCase "expr-simp-and-commut-assoc" $ do
       let

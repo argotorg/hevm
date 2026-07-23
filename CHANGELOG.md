@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Fixed
+- A symbolic-key `SLOAD` over a `ConcreteStore` is now resolved during execution
+  instead of being carried into a fork as an unresolved read: an empty store
+  reads 0 at every slot, and a symbolic mapping read filters out concrete
+  entries whose recorded keccak preimage identifies a different mapping
+  (keccak injectivity). Fixes non-termination/blowup on symbolic mapping reads
+  over concretely-initialized storage ([#1082](https://github.com/argotorg/hevm/issues/1082))
 - Cheatcode string arguments are now decoded leniently instead of crashing on
   invalid UTF-8: ABI `string` values are raw bytes, so e.g. `vm.setEnv`,
   `vm.envString` and `vm.label` no longer abort the whole run when handed a
