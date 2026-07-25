@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (identical semantics to the derived ones), and the repeatedly-applied simplifier
   passes memoize per-node fixpoints when hash-consing is on. Addresses storage-heavy
   targets where a 914-node DAG materialized as a 601,664-node tree (22 GB peak).
+  Enabled from the CLI with `--hash-cons`; the test suites run with it enabled so the
+  sharing machinery is exercised everywhere.
 
 ## Fixed
 - Cheatcode string arguments are now decoded leniently instead of crashing on

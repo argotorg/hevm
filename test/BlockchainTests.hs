@@ -5,7 +5,7 @@ import EVM.Effects
 import EVM.Test.BlockchainTests qualified as BlockchainTests
 
 testEnv :: Env
-testEnv = Env { config = defaultConfig }
+testEnv = Env { config = defaultConfig { hashConsExplore = True } }
 
 main :: IO ()
 main = do

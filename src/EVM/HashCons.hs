@@ -107,7 +107,10 @@ setHashConsEnabled = writeIORef hcEnabled
 
 resetHashCons :: IO ()
 resetHashCons = do
-  writeIORef hcState emptyHC
+  -- The id counter survives the reset: ids are never reused, so if another exploration is
+  -- still running (parallel test suites), its stale memo entries reference ids that no new
+  -- node can be assigned — a mid-run reset can only lose sharing, never correctness.
+  atomicModifyIORef' hcState $ \st -> (emptyHC { hcNext = st.hcNext }, ())
   writeIORef passMemos IM.empty
 
 -- | Per-pass memo of simplification results, keyed by canonical node id, with one table per

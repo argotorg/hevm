@@ -28,7 +28,7 @@ import Control.Monad.IO.Unlift
 import EVM.Effects
 
 rpcEnv :: Env
-rpcEnv = Env { config = defaultConfig }
+rpcEnv = Env { config = defaultConfig { hashConsExplore = True } }
 
 test :: TestName -> ReaderT Env IO () -> TestTree
 test a b = testCase a $ runEnv rpcEnv b
