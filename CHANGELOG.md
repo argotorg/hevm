@@ -25,7 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shared terms stay DAGs instead of materializing as trees during exploration. The
   `Expr` `Eq`/`Ord` instances gained a pointer-equality fast path (same semantics as
   the derived ones), and the repeatedly-applied simplifier passes memoize per-node
-  fixpoints when hash-consing is on.
+  fixpoints when hash-consing is on. Enabled from the CLI with `--hash-cons`; the
+  test suites run with it enabled.
 
 ## Fixed
 - Storage decomposition no longer swaps key and slot for concrete mapping
