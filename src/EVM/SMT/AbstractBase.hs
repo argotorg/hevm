@@ -63,6 +63,7 @@ divModAbstractDecls =
   , SMTCommand "(declare-fun abst_evm_bvudiv ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
   , SMTCommand "(declare-fun abst_evm_bvurem ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
   , SMTCommand "(declare-fun abst_evm_bvmul ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
+  , SMTCommand "(declare-fun abst_evm_mulmod ((_ BitVec 256) (_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
   ]
 
 -- | A /sufficient/ condition for x*y not to overflow 256 bits: both operands
@@ -127,12 +128,26 @@ collectMuls = maybe [] pure . asMul
 collectConstMuls :: Expr a -> [(W256, Expr EWord)]
 collectConstMuls = maybe [] pure . asConstMul
 
--- | True if any prop contains a symbolic*symbolic multiplication. Because
--- abst_evm_bvmul has no ground truth, a satisfying model may assign it values
--- inconsistent with real multiplication; callers must downgrade SAT to Unknown
--- to stay sound. (UNSAT — the proof direction — is unaffected.)
+-- | Collect mulmod(a,b,c) terms. OpenZeppelin's Math.mulDiv probes for overflow
+-- with mulmod(x, y, not(0)) and branches on the result; encoded exactly that is a
+-- 512-bit bvmul+bvurem, invisible to every lemma here, so the Newton-Raphson
+-- branch can never be pruned and mulDiv-based properties stall.
+collectMulMods :: Expr a -> [(Expr EWord, Expr EWord, Expr EWord)]
+collectMulMods = \case
+  T.MulMod a b c -> [(a, b, c)]
+  _              -> []
+
+-- | True if any prop contains a symbolic*symbolic multiplication or a mulmod,
+-- i.e. an uninterpreted arithmetic abstraction is in play. Because
+-- abst_evm_bvmul / abst_evm_mulmod have no ground truth, a satisfying model may
+-- assign them values inconsistent with real arithmetic; callers must downgrade
+-- SAT to Unknown to stay sound. (UNSAT — the proof direction — is unaffected: a
+-- free UF admits MORE models, so proving unsatisfiability under it implies the
+-- concrete case.)
 hasAbstractMul :: [Prop] -> Bool
-hasAbstractMul props = not $ null $ concatMap (foldProp collectMuls []) props
+hasAbstractMul props =
+  not (null (concatMap (foldProp collectMuls []) props))
+    || not (null (concatMap (foldProp collectMulMods []) props))
 
 -- | An abstracted symbolic*symbolic product. Products with a concrete factor
 -- are handled natively, so only genuinely symbolic products are abstracted.
@@ -195,6 +210,10 @@ data AbstractCtx = AbstractCtx
     -- ^ Symbolic*symbolic products, including the div-mul link products.
   , acConstMuls :: [(W256, Expr EWord)]
     -- ^ Products @c*x@ by a non-trivial literal constant.
+  , acUMods     :: [(Expr EWord, Expr EWord)]
+    -- ^ Unsigned remainders, as mentioned by the props (no synthesis).
+  , acMulMods   :: [(Expr EWord, Expr EWord, Expr EWord)]
+    -- ^ mulmod(a,b,c) terms, as mentioned by the props.
   }
 
 -- | Close the set of div/mul terms the lemmas range over. Beyond the raw terms
@@ -204,7 +223,8 @@ data AbstractCtx = AbstractCtx
 --
 --   * /synthetic divisions/: when a product @a*b@ reuses a factor that is a
 --     divisor elsewhere, add @(a*b)/factor@ — lets mulDiv-bound and
---     div-monotonicity bridge cross-divisor round-trips.
+--     div-monotonicity bridge cross-divisor round-trips. Const products get
+--     the same bridge against literal divisors ('synthConstDivs').
 --   * /nested-division collapse/: @(A/c1)/c2@ also contributes @A/(c1*c2)@, so
 --     single-divide lemmas match code that splits precision across two divides.
 --   * /div-mul link products/: every division @a/b@ contributes the product
@@ -212,17 +232,28 @@ data AbstractCtx = AbstractCtx
 saturate :: [Prop] -> AbstractCtx
 saturate props =
   let udivs = [ (a, b) | (IsUDiv, a, b) <- nubOrd $ concatMap (foldProp collectDivMods []) props ]
+      umods = [ (a, b) | (IsUMod, a, b) <- nubOrd $ concatMap (foldProp collectDivMods []) props ]
       muls  = nubOrd $ concatMap (foldProp collectMuls []) props
       constMuls = nubOrd $ concatMap (foldProp collectConstMuls []) props
+      mulMods = nubOrd $ concatMap (foldProp collectMulMods []) props
       divisors  = nubOrd [ b | (_, b) <- udivs ]
       synthDivs = nubOrd $ [ (T.Mul a b, b) | (a, b) <- muls, b `elem` divisors ]
                         <> [ (T.Mul a b, a) | (a, b) <- muls, a `elem` divisors ]
+      -- Same bridge for CONST products. collectMuls requires BOTH operands
+      -- symbolic, so a product scaled by a precision literal (1e18 etc.) never
+      -- reached synthDivs -- and then div-monotonicity had nothing to compare
+      -- (c*x)/d against. That is why round trips whose scaling factor is a
+      -- constant (the performance-fee math: mulDiv(mulDiv(ta,1e18,ts),ts,1e18))
+      -- never closed. Both operand orders, since the literal may sit either side.
+      synthConstDivs = nubOrd $ [ (T.Mul (Lit c) x, d) | (c, x) <- constMuls, d@(Lit _) <- divisors ]
+                            <> [ (T.Mul x (Lit c), d) | (c, x) <- constMuls, d@(Lit _) <- divisors ]
       collapsedDivs = nubOrd
         [ (innerA, Lit (c1 * c2))
         | (a, b) <- udivs <> synthDivs, Lit c2 <- [b]
         , T.Div innerA (Lit c1) <- [a]
         , c1 /= 0, c2 /= 0, toInteger c1 * toInteger c2 < 2 ^ (256 :: Int) ]
-      udivsAll  = nubOrd (udivs <> synthDivs <> collapsedDivs)
+      udivsAll  = nubOrd (udivs <> synthDivs <> synthConstDivs <> collapsedDivs)
       linkMuls  = [ (T.Div a b, b) | (a, b) <- udivsAll ]
       allMuls   = nubOrd (muls <> linkMuls)
-  in AbstractCtx { acUDivs = udivsAll, acMuls = allMuls, acConstMuls = constMuls }
+  in AbstractCtx { acUDivs = udivsAll, acMuls = allMuls, acConstMuls = constMuls
+                 , acUMods = umods, acMulMods = mulMods }

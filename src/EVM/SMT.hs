@@ -517,15 +517,27 @@ exprToSMTWith divEnc = \case
   SDiv a b -> divModOp "bvsdiv" "abst_evm_bvsdiv" a b
   Mod a b -> divModOp "bvurem" "abst_evm_bvurem" a b
   SMod a b -> divModOp "bvsrem" "abst_evm_bvsrem" a b
-  -- NOTE: this needs to do the MUL at a higher precision, then MOD, then downcast
-  MulMod a b c -> do
-    aExp <- exprToSMT a
-    bExp <- exprToSMT b
-    cExp <- exprToSMT c
-    let aLift = "((_ zero_extend 256) " <> aExp <> ")"
-        bLift = "((_ zero_extend 256) " <> bExp <> ")"
-        cLift = "((_ zero_extend 256) " <> cExp <> ")"
-    pure $ "(ite (= " <> cExp <> " (_ bv0 256)) (_ bv0 256) ((_ extract 255 0) (bvurem (bvmul " <> aLift `sp` bLift <> ")" <> cLift <> ")))"
+  -- NOTE: this needs to do the MUL at a higher precision, then MOD, then downcast.
+  -- The exact 512-bit form is what makes OpenZeppelin's Math.mulDiv unprovable:
+  -- reaching its fast path means discharging `prod1 == 0`, derived from
+  -- mulmod(x, y, not(0)), and a 512-bit bvmul+bvurem is invisible to the
+  -- arithmetic lemmas, so the Newton-Raphson branch can never be pruned. Under
+  -- AbstractDivMod route it through a UF instead; the collapse lemma keeping it
+  -- sound lives in EVM.SMT.AbstractLemmas.
+  MulMod a b c -> case divEnc of
+    AbstractDivMod -> do
+      aExp <- exprToSMT a
+      bExp <- exprToSMT b
+      cExp <- exprToSMT c
+      pure $ "(abst_evm_mulmod" `sp` aExp `sp` bExp `sp` cExp <> ")"
+    ConcreteDivMod -> do
+      aExp <- exprToSMT a
+      bExp <- exprToSMT b
+      cExp <- exprToSMT c
+      let aLift = "((_ zero_extend 256) " <> aExp <> ")"
+          bLift = "((_ zero_extend 256) " <> bExp <> ")"
+          cLift = "((_ zero_extend 256) " <> cExp <> ")"
+      pure $ "(ite (= " <> cExp <> " (_ bv0 256)) (_ bv0 256) ((_ extract 255 0) (bvurem (bvmul " <> aLift `sp` bLift <> ")" <> cLift <> ")))"
   AddMod a b c -> do
     aExp <- exprToSMT a
     bExp <- exprToSMT b

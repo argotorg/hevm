@@ -36,7 +36,7 @@ import EVM.Types (Prop, EType(EWord), Err, W256, Expr, Expr(Lit), Expr(SHL))
 mulEncoding :: Enc -> [Prop] -> Err [SMTEntry]
 mulEncoding enc props = do
   let ctx = saturate props
-  if null ctx.acUDivs && null ctx.acMuls && null ctx.acConstMuls then pure []
+  if null ctx.acUDivs && null ctx.acMuls && null ctx.acConstMuls && null ctx.acMulMods then pure []
   else do
     lemmas <- concat <$> mapM (emitLemma enc) (collectLemmas ctx)
     pure $ (SMTComment "multiplication abstraction lemmas") : lemmas

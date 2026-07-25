@@ -34,6 +34,10 @@ data LemmaInst
   | DivMono       (Expr EWord) (Expr EWord) (Expr EWord)               -- ^ x<=y => x/z<=y/z
   | DivisorMono   (Expr EWord) (Expr EWord) (Expr EWord)               -- ^ y1<=y2 => x/y2<=x/y1
   | MulDivBound   (Expr EWord) (Expr EWord) (Expr EWord) (Expr EWord)  -- ^ (x*y)/z <= x or y
+  | MulDivExact   (Expr EWord) (Expr EWord) (Expr EWord) (Expr EWord)  -- ^ (x*y)/y == x (own-factor divisor)
+  | DivModEuclid  (Expr EWord) (Expr EWord)                            -- ^ (a/b)*b + a%b == a
+  | MulModCollapse (Expr EWord) (Expr EWord) (Expr EWord)              -- ^ mulmod(a,b,c) ground truth
+  | RoundTrip     (Expr EWord) (Expr EWord) (Expr EWord)               -- ^ ((x*A)/B * B)/A <= x
   | ConstMulMono  W256 (Expr EWord) (Expr EWord)                       -- ^ x<=y => c*x<=c*y
   | ConstCancel   (Expr EWord) W256 W256 (Expr EWord)                  -- ^ (c1*x)/c2 == (c1/c2)*x
   | NestedDiv     (Expr EWord) W256 W256                               -- ^ (A/c1)/c2 == A/(c1*c2)
@@ -57,6 +61,16 @@ collectLemmas ctx =
   <> [ DivisorMono y1 y2 x | (y1, y2, x) <- divisorPairs (ctx.acUDivs) ]
      -- product-over-divisor bound, for divisions whose dividend is a product
   <> [ MulDivBound a x y b | (a, b) <- ctx.acUDivs, Just (x, y) <- [asMul a] ]
+     -- exact cancellation when the divisor is one of the product's own factors
+  <> [ MulDivExact a x y b | (a, b) <- ctx.acUDivs, Just (x, y) <- [asMul a], y == b || x == b ]
+     -- the Euclidean div/mod link, for (a,b) pairs carrying BOTH a division and
+     -- a remainder (only then is it useful, and only then does it introduce
+     -- terms already present)
+  <> [ DivModEuclid a b | (a, b) <- ctx.acUDivs, (a', b') <- ctx.acUMods, a == a', b == b' ]
+     -- mulmod ground truth, one per mulmod term
+  <> [ MulModCollapse a b c | (a, b, c) <- ctx.acMulMods ]
+     -- direct cross-divisor round trips matched on the nested shape
+  <> [ RoundTrip outerNum aA x | (outerNum, aA, x) <- roundTrips ]
      -- const-mul monotonicity over const-products sharing the same constant
   <> [ ConstMulMono c x y  | (c, x) <- ctx.acConstMuls, (c', y) <- ctx.acConstMuls, c == c', x /= y ]
      -- constant cancellation / fraction reduction over constant divisions
@@ -84,6 +98,19 @@ collectLemmas ctx =
       , (a, T.Sub b (Lit k)) <- [(f1, f2), (f2, f1)]
       , k /= 0, k `mod` c == 0
       , any (`elem` ctx.acUDivs) [ (T.Mul a b, Lit c), (T.Mul b a, Lit c) ] ]
+    -- Direct cross-divisor round trip: ((x*A)/B)*B/A <= x. The multi-step chain
+    -- (div-mul link -> div-monotonicity -> cancellation) only closes when every
+    -- intermediate term happens to have been synthesized; matching the nested
+    -- shape outright is robust to that. This is the shape BOTH the ERC4626
+    -- inflation-attack round trip and the performance-fee core step reduce to.
+    roundTrips = nubOrd
+      [ (outerNum, aA, x)
+      | (outerNum, aA) <- ctx.acUDivs
+      , (q0, bB) <- mulPairs outerNum
+      , q <- unIte q0
+      , T.Div innerNum0 bB' <- [q], bB == bB'
+      , innerNum <- unIte innerNum0
+      , (x, aA') <- mulPairs innerNum, aA == aA' ]
 
 -- | Emit the SMT assertion(s) for a single lemma instance. Each clause is the
 -- sound fact, with its no-overflow / divisor guard where one is required.
@@ -154,6 +181,74 @@ emitLemma enc (MulDivBound a x y z) = do
            <> ") (bvule" `sp` dv `sp` xe <> ")))"
        , SMTCommand $ "(assert (=> (and (bvule" `sp` xe `sp` ze <> ")" `sp` mulNoOverflow ye ze
            <> ") (bvule" `sp` dv `sp` ye <> ")))" ]
+
+-- exact mul-then-div cancellation (sound under no-overflow of the product):
+-- dividing an abstract product by ONE OF ITS OWN FACTORS recovers the other
+-- factor exactly. MulDivBound only supplies <=; the equality is what
+-- round-trip properties (ERC4626 convert/preview, mulDiv) actually need --
+-- without it (x*y)/y == x comes back `unknown` even with both operands
+-- bounded below 2^128, because abst_evm_bvmul is deliberately ground-truth
+-- free and nothing else pins the quotient from below.
+--   z == y  /\  z != 0  /\  noOverflow(x,y)  =>  (x*y)/z == x
+emitLemma enc (MulDivExact a x y z) = do
+  ae <- enc a; xe <- enc x; ye <- enc y; ze <- enc z
+  let dv = "(abst_evm_bvudiv" `sp` ae `sp` ze <> ")"
+      nz = "(distinct" `sp` ze `sp` zero <> ")"
+      lemma other = SMTCommand $ "(assert (=> (and" `sp` nz `sp` mulNoOverflow xe ye
+                      <> ") (=" `sp` dv `sp` other <> ")))"
+  pure $ [ lemma xe | y == z ] <> [ lemma ye | x == z ]
+
+-- Euclidean div/mod link (sound unconditionally: the product (a/b)*b is
+-- <= a < 2^256, so it can never overflow). This is the only lemma relating
+-- the div and mod abstractions to each other; without it a remainder can be
+-- discharged only by bit-blasting, and a == (a/b)*b + a%b stalls at `passed`.
+--   b != 0  =>  (a/b)*b + (a%b) == a
+emitLemma enc (DivModEuclid a b) = do
+  ae <- enc a; be <- enc b
+  let q  = "(abst_evm_bvudiv" `sp` ae `sp` be <> ")"
+      qb = "(abst_evm_bvmul" `sp` q `sp` be <> ")"
+      r  = "(abst_evm_bvurem" `sp` ae `sp` be <> ")"
+  pure [ SMTCommand $ "(assert (=> (distinct" `sp` be `sp` zero <> ") (= (bvadd"
+         `sp` qb `sp` r <> ")" `sp` ae <> ")))" ]
+
+-- mulmod collapse. Both forms are sound:
+--  * general: when a*b cannot exceed 256 bits, the full-precision product
+--    equals the truncated one, so mulmod(a,b,c) == (a*b) % c.
+--  * max-literal modulus: with c == 2^256-1 and a,b < 2^128 the product is at
+--    most 2^256-2^129+1, strictly below the modulus, so the remainder IS the
+--    product. OpenZeppelin's Math.mulDiv probes overflow with exactly
+--    mulmod(x, y, not(0)), so this is the lemma that lets `prod1 == 0`
+--    discharge -- pruning the 512-bit Newton-Raphson branch instead of
+--    exploring it, which is what stalls every mulDiv-based property today.
+emitLemma enc (MulModCollapse a b c) = do
+  ae <- enc a; be <- enc b; ce <- enc c
+  let mm   = "(abst_evm_mulmod" `sp` ae `sp` be `sp` ce <> ")"
+      prod = "(abst_evm_bvmul" `sp` ae `sp` be <> ")"
+      nzc  = "(distinct" `sp` ce `sp` zero <> ")"
+      gen  = SMTCommand $ "(assert (=> (and" `sp` nzc `sp` mulNoOverflow ae be
+               <> ") (=" `sp` mm `sp` "(abst_evm_bvurem" `sp` prod `sp` ce <> ")" <> ")))"
+      big  = [ SMTCommand $ "(assert (=>" `sp` mulNoOverflow ae be
+                 `sp` "(=" `sp` mm `sp` prod <> ")))"
+             | Lit m <- [c], m == maxBound ]
+      -- Fundamental remainder bound, unconditionally true. The exact 512-bit
+      -- encoding gave this away for free (bvurem(X,c) < c is readable off the
+      -- term); an uninterpreted mulmod does not, so without this lemma
+      -- abstracting MULMOD REGRESSES anything relying on the bound, and
+      -- leaves a remainder unpinned from above.
+      bnd  = SMTCommand $ "(assert (=>" `sp` nzc `sp` "(bvult" `sp` mm `sp` ce <> ")))"
+  pure (gen : bnd : big)
+
+-- Cross-divisor round trip (sound): with q = floor(x*A/B) we have q <= x*A/B,
+-- hence q*B <= x*A, hence floor(q*B/A) <= floor(x*A/A) = x. The final equality
+-- needs x*A not to overflow, so the no-overflow guard is required; A != 0 is
+-- kept for conservatism (EVM x/0 = 0 would satisfy the bound trivially anyway).
+--   A != 0 /\ noOverflow(x,A)  =>  ((x*A)/B * B)/A <= x
+emitLemma enc (RoundTrip outerNum aA x) = do
+  oe <- enc outerNum; ae <- enc aA; xe <- enc x
+  let dv = "(abst_evm_bvudiv" `sp` oe `sp` ae <> ")"
+      nz = "(distinct" `sp` ae `sp` zero <> ")"
+  pure [ SMTCommand $ "(assert (=> (and" `sp` nz `sp` mulNoOverflow xe ae
+         <> ") (bvule" `sp` dv `sp` xe <> ")))" ]
 
 -- const-mul monotonicity (sound, no-overflow guarded): x <= y => c*x <= c*y.
 -- c is concrete, so the exact bound floor((2^256-1)/c) is computed at encode
@@ -241,6 +336,24 @@ emitLemma enc (Telescope a b k c) = do
 -- how the simplifier ordered the operands.
 bothOrders :: [(Expr EWord, Expr EWord)] -> [(Expr EWord, Expr EWord)]
 bothOrders xs = nubOrd (xs <> [ (b, a) | (a, b) <- xs ])
+
+-- | Any product, literal factors included, in BOTH operand orders. 'asMul' is
+-- symbolic-only, which is right for the mul abstraction but wrong for shape
+-- matching: a round trip scaled by a precision constant is still a round trip.
+mulPairs :: Expr EWord -> [(Expr EWord, Expr EWord)]
+mulPairs (T.Mul u v) = nubOrd [(u, v), (v, u)]
+mulPairs _           = []
+
+-- | See through the ITE that OpenZeppelin's mulDiv leaves behind. Its result is
+-- `prod1 == 0 ? prod0/denominator : <512-bit newton>`, and that condition is
+-- SYMBOLIC, so the simplifier keeps the ITE (it collapses only literal
+-- conditions, Expr.hs). A single cancellation still verifies because the solver
+-- reasons semantically, but a lemma matched SYNTACTICALLY against Div(...) never
+-- fires on the nested shape. Consider both branches: the lemma is guarded and
+-- sound whichever branch the quotient actually came from.
+unIte :: Expr EWord -> [Expr EWord]
+unIte (T.ITE _ t f) = concatMap unIte [t, f]
+unIte e             = [e]
 
 -- | Ordered pairs (x, y, z) where (x,z) and (y,z) both occur (shared 2nd
 -- operand): products by a common factor, or divisions by a common divisor.
