@@ -36,6 +36,10 @@ data LemmaInst
   | DivMono       (Expr EWord) (Expr EWord) (Expr EWord)               -- ^ x<=y => x/z<=y/z
   | DivisorMono   (Expr EWord) (Expr EWord) (Expr EWord)               -- ^ y1<=y2 => x/y2<=x/y1
   | MulDivBound   (Expr EWord) (Expr EWord) (Expr EWord) (Expr EWord)  -- ^ (x*y)/z <= x or y
+  | MulDivExact   (Expr EWord) (Expr EWord) (Expr EWord) (Expr EWord)  -- ^ (x*y)/y == x (own-factor divisor)
+  | DivModEuclid  (Expr EWord) (Expr EWord)                            -- ^ (a/b)*b + a%b == a
+  | MulModCollapse (Expr EWord) (Expr EWord) (Expr EWord)              -- ^ mulmod(a,b,c) bounds and collapse
+  | RoundTrip     (Expr EWord) (Expr EWord) (Expr EWord) [(Expr EWord, Expr EWord)] -- ^ guarded ((x*A)/B * B)/A <= x
   | ConstMulMono  W256 (Expr EWord) (Expr EWord)                       -- ^ x<=y => c*x<=c*y
   | ConstCancel   (Expr EWord) W256 W256 (Expr EWord)                  -- ^ (c1*x)/c2 == (c1/c2)*x
   | NestedDiv     (Expr EWord) W256 W256                               -- ^ (A/c1)/c2 == A/(c1*c2)
@@ -54,6 +58,10 @@ lemmaFamily = \case
   DivMono{} -> "dividend monotonicity"
   DivisorMono{} -> "divisor monotonicity"
   MulDivBound{} -> "mulDiv bound"
+  MulDivExact{} -> "mulDiv cancellation"
+  DivModEuclid{} -> "div-mod identity"
+  MulModCollapse{} -> "mulmod collapse"
+  RoundTrip{} -> "round-trip bound"
   ConstMulMono{} -> "const-mul monotonicity"
   ConstCancel{} -> "const cancellation"
   NestedDiv{} -> "nested-division collapse"
@@ -83,6 +91,14 @@ collectLemmas ctx =
   <> [ DivisorMono y1 y2 x | (y1, y2, x) <- divisorPairs (ctx.acUDivs) ]
      -- product-over-divisor bound, for divisions whose dividend is a product
   <> [ MulDivBound a x y b | (a, b) <- ctx.acUDivs, Just (x, y) <- [asMul a] ]
+     -- exact cancellation when the divisor is one of the product's own factors
+  <> [ MulDivExact a x y b | (a, b) <- ctx.acUDivs, Just (x, y) <- [asMul a], y == b || x == b ]
+     -- link matching quotient and remainder terms
+  <> [ DivModEuclid a b | (a, b) <- ctx.acUDivs, (a', b') <- ctx.acUMods, a == a', b == b' ]
+     -- mulmod bounds and collapse, one per mulmod term
+  <> [ MulModCollapse a b c | (a, b, c) <- ctx.acMulMods ]
+     -- direct cross-divisor round trips matched on the nested shape
+  <> [ RoundTrip outerNum aA x guards | (outerNum, aA, x, guards) <- roundTrips ]
      -- const-mul monotonicity over const-products sharing the same constant
   <> [ ConstMulMono c x y  | (c, x) <- ctx.acConstMuls, (c', y) <- ctx.acConstMuls, c == c', x /= y ]
      -- constant cancellation / fraction reduction over constant divisions
@@ -110,6 +126,15 @@ collectLemmas ctx =
       , (a, T.Sub b (Lit k)) <- [(f1, f2), (f2, f1)]
       , k /= 0, k `mod` c == 0
       , any (`elem` ctx.acUDivs) [ (T.Mul a b, Lit c), (T.Mul b a, Lit c) ] ]
+    -- Conditional matches require the expression to equal the matched branch.
+    roundTrips = nubOrd
+      [ (outerNum, aA, x, [(q0, q) | q0 /= q] <> [(innerNum0, innerNum) | innerNum0 /= innerNum])
+      | (outerNum, aA) <- ctx.acUDivs
+      , (q0, bB) <- mulPairs outerNum
+      , q <- unIte q0
+      , T.Div innerNum0 bB' <- [q], bB == bB'
+      , innerNum <- unIte innerNum0
+      , (x, aA') <- mulPairs innerNum, aA == aA' ]
 
 -- | Emit the SMT assertion(s) for a single lemma instance. Each clause is the
 -- sound fact, with its no-overflow / divisor guard where one is required.
@@ -180,6 +205,51 @@ emitLemma enc (MulDivBound a x y z) = do
            <> ") (bvule" `sp` dv `sp` xe <> ")))"
        , SMTCommand $ "(assert (=> (and (bvule" `sp` xe `sp` ze <> ")" `sp` mulNoOverflow ye ze
            <> ") (bvule" `sp` dv `sp` ye <> ")))" ]
+
+-- Cancelling a nonzero factor is exact when the product cannot overflow.
+emitLemma enc (MulDivExact a x y z) = do
+  ae <- enc a; xe <- enc x; ye <- enc y; ze <- enc z
+  let dv = udivSMT ae ze
+      nz = "(distinct" `sp` ze `sp` zero <> ")"
+      lemma other = SMTCommand $ "(assert (=> (and" `sp` nz `sp` mulNoOverflow xe ye
+                      <> ") (=" `sp` dv `sp` other <> ")))"
+  pure $ [ lemma xe | y == z ] <> [ lemma ye | x == z ]
+
+-- b != 0 => (a/b)*b + a%b == a; the quotient product cannot overflow.
+emitLemma enc (DivModEuclid a b) = do
+  ae <- enc a; be <- enc b
+  let q  = udivSMT ae be
+      qb = mulSMT (T.Div a b, q) (b, be)
+      r  = "(" <> abstFnName IsUMod `sp` ae `sp` be <> ")"
+  pure [ SMTCommand $ "(assert (=> (distinct" `sp` be `sp` zero <> ") (= (bvadd"
+         `sp` qb `sp` r <> ")" `sp` ae <> ")))" ]
+
+-- Without overflow, MULMOD equals the ordinary product's remainder.
+-- For modulus 2^256-1, two 128-bit factors give a product below the modulus.
+emitLemma enc (MulModCollapse a b c) = do
+  ae <- enc a; be <- enc b; ce <- enc c
+  let mm   = mulModSMT ae be ce
+      prod = mulSMT (a, ae) (b, be)
+      nzc  = "(distinct" `sp` ce `sp` zero <> ")"
+      gen  = SMTCommand $ "(assert (=> (and" `sp` nzc `sp` mulNoOverflow ae be
+               <> ") (=" `sp` mm `sp` "(" <> abstFnName IsUMod `sp` prod `sp` ce <> ")" <> ")))"
+      big  = [ SMTCommand $ "(assert (=>" `sp` mulNoOverflow ae be
+                 `sp` "(=" `sp` mm `sp` prod <> ")))"
+             | Lit m <- [c], m == maxBound ]
+      bnd  = SMTCommand $ "(assert (=>" `sp` nzc `sp` "(bvult" `sp` mm `sp` ce <> ")))"
+      zeroMod = SMTCommand $ "(assert (=> (= " <> ce `sp` zero <> ") (= " <> mm `sp` zero <> ")))"
+  pure (gen : bnd : zeroMod : big)
+
+-- floor(x*A/B)*B <= x*A, so dividing back by A cannot increase x.
+emitLemma enc (RoundTrip outerNum aA x guards) = do
+  oe <- enc outerNum; ae <- enc aA; xe <- enc x
+  matches <- mapM (\(whole, branch) -> do
+    we <- enc whole; be <- enc branch
+    pure $ "(=" `sp` we `sp` be <> ")") guards
+  let dv = udivSMT oe ae
+      nz = "(distinct" `sp` ae `sp` zero <> ")"
+  pure [ SMTCommand $ "(assert (=> (and" `sp` nz `sp` mulNoOverflow xe ae
+         <> foldMap (" " <>) matches <> ") (bvule" `sp` dv `sp` xe <> ")))" ]
 
 -- const-mul monotonicity (sound, no-overflow guarded): x <= y => c*x <= c*y.
 -- c is concrete, so the exact bound floor((2^256-1)/c) is computed at encode
@@ -267,6 +337,16 @@ emitLemma enc (Telescope a b k c) = do
 -- how the simplifier ordered the operands.
 bothOrders :: [(Expr EWord, Expr EWord)] -> [(Expr EWord, Expr EWord)]
 bothOrders xs = nubOrd (xs <> [ (b, a) | (a, b) <- xs ])
+
+-- | Both operand orders, including literal factors.
+mulPairs :: Expr EWord -> [(Expr EWord, Expr EWord)]
+mulPairs (T.Mul u v) = nubOrd [(u, v), (v, u)]
+mulPairs _           = []
+
+-- | Candidate branches; callers must guard matches against the original ITE.
+unIte :: Expr EWord -> [Expr EWord]
+unIte (T.ITE _ t f) = concatMap unIte [t, f]
+unIte e             = [e]
 
 -- | Ordered pairs (x, y, z) where (x,z) and (y,z) both occur (shared 2nd
 -- operand): products by a common factor, or divisions by a common divisor.
