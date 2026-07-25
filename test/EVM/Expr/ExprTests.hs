@@ -1,4 +1,3 @@
-{-# LANGUAGE TypeAbstractions #-}
 {-# OPTIONS_GHC -Wno-incomplete-uni-patterns #-} -- It's OK to crash in tests if the pattern does not match
 
 module EVM.Expr.ExprTests (tests) where

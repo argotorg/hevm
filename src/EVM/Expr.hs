@@ -159,7 +159,6 @@ import Data.Word (Word8, Word32)
 import Witch (unsafeInto, into, tryInto)
 import Data.Containers.ListUtils (nubOrd)
 
-import EVM.HashCons qualified as HC
 import EVM.Traversals
 import EVM.Types
 
@@ -1192,12 +1191,12 @@ decomposeStorage = go
 -- | Simple recursive match based AST simplification
 -- Note: may not terminate!
 simplify :: Expr a -> Expr a
-simplify e = untilFixpoint (simplifyNoLitToKeccak . litToKeccak) (HC.internExpr e)
+simplify e = untilFixpoint (simplifyNoLitToKeccak . litToKeccak) e
 
 simplifyNoLitToKeccak :: Expr a -> Expr a
 simplifyNoLitToKeccak l@(Lit _) = l
 simplifyNoLitToKeccak s@(ConcreteStore _) = s
-simplifyNoLitToKeccak e = untilFixpoint (mapExprShared 1 go) (HC.internExpr e)
+simplifyNoLitToKeccak e = untilFixpoint (mapExprShared 1 go) e
   where
     go :: Expr a -> Expr a
 

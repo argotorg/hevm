@@ -386,9 +386,13 @@ interpret :: forall m a . App m
 interpret fetcher iterConf vm stepper handler = do
   shouldAbort <- liftIO $ newTVarIO False
   conf <- readConfig
-  -- Construction-time hash-consing (EVM.HashCons): share structurally-identical subterms as they
-  -- are built, so deeply-reused symbolic terms stay DAGs instead of materializing as exponential
-  -- trees. Enabled per exploration; tables start clean.
+  -- Construction-time hash-consing shares structurally identical subterms as they are built, so
+  -- deeply reused symbolic terms stay DAGs instead of materializing as exponential trees.
+  --
+  -- The flag is set here for library users who never go through the CLI, but doing it at this
+  -- point is already late: the VM handed to us was built earlier, so its nodes carry ident 0 and
+  -- nothing above them can be keyed. The hevm executable sets it in makeEnv instead, before any
+  -- Expr exists. Callers embedding hevm as a library should do the same.
   liftIO $ do HashCons.setHashConsEnabled conf.hashConsExplore
               HashCons.resetHashCons
   taskQ <- liftIO newChan

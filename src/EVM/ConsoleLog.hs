@@ -1,3 +1,7 @@
+-- POC: naming a pattern synonym in an import list requires PatternSynonyms in the *importing*
+-- module, not just the defining one.
+{-# LANGUAGE PatternSynonyms #-}
+
 module EVM.ConsoleLog
   ( formatConsoleLog
   ) where
@@ -14,7 +18,10 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as T
 
 import EVM.ABI (AbiType(..), AbiValue(..), decodeBuf, AbiVals(..))
-import EVM.Types (Expr(..), EType(..), FunctionSelector(..), abiKeccak, word32)
+-- POC: pattern synonyms are not covered by `Expr(..)` and must be named with the `pattern`
+-- keyword in an explicit import list. Only 2 modules in the tree import Expr(..) explicitly.
+import EVM.Types (Expr(..), EType(..), FunctionSelector(..), abiKeccak, word32,
+                  pattern ConcreteBuf)
 
 -- | Try to decode and format a console.log calldata buffer.
 -- Returns a human-readable representation of the log message.

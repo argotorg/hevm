@@ -364,6 +364,12 @@ main = do
       when (cOpts.maxBufSize < 0) $ do
         putStrLn "Error: maxBufSize must be at least 0. Negative values do not make sense. A value of zero means at most 1 byte long buffers"
         exitFailure
+      -- Set here, before anything constructs an Expr. Nodes built while hash-consing is off
+      -- carry ident 0, and the smart constructor refuses to key any node above a 0-ident child
+      -- (otherwise structurally different uninterned children would collide on the same key and
+      -- unrelated terms would be merged). Enabling the flag late would therefore leave the whole
+      -- VM setup unshared and silently buy almost nothing.
+      EVM.Types.setHashConsEnabled cOpts.hashCons
       pure Env { config = defaultConfig
         { dumpQueries = cOpts.smtDebug
         , dumpUnsolved = cOpts.dumpUnsolved

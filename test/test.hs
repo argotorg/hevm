@@ -1,7 +1,6 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE ImplicitParams #-}
-{-# LANGUAGE TypeAbstractions #-}
 
 module Main where
 

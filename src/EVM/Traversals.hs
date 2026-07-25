@@ -10,9 +10,9 @@ import Control.Monad (forM, void)
 import Control.Monad.Identity (Identity(Identity), runIdentity)
 import Data.Foldable (Foldable(..))
 import Data.Map.Strict qualified as Map
+import System.IO.Unsafe (unsafePerformIO)
 
 import EVM.Types
-import EVM.HashCons (internExpr, memoFixTraverse, hashConsEnabled)
 
 foldProp :: forall b . Monoid b => (forall a . Expr a -> b) -> b -> Prop -> b
 foldProp f acc p = acc <> (go p)
@@ -48,159 +48,28 @@ foldCode f = \case
 
 -- | Recursively folds a given function over a given expression
 -- Recursion schemes do this & a lot more, but defining them over GADT's isn't worth the hassle
+-- | Fold f over every Expr node reachable from the given term.
+--
+-- The generic case is @f e <> children@, which 'hfoldMap' produces in constructor declaration
+-- order -- the same order the previous ~150-line hand-written version used. Only constructors
+-- reaching into non-child payloads are spelled out, with behaviour identical to before: C nodes
+-- go to foldEContract (which re-includes acc and never applies f to the C node itself), and a
+-- Failure carrying a Revert descends into the reverted buffer.
 foldExpr :: forall b c . Monoid b => (forall a . Expr a -> b) -> b -> Expr c -> b
 foldExpr f acc expr = acc <> (go expr)
   where
     go :: forall a . Expr a -> b
-    go = \case
-
-      -- literals & variables
-
-      e@(Lit _) -> f e
-      e@(LitByte _) -> f e
-      e@(Var _) -> f e
-      e@(GVar _) -> f e
-
-      -- contracts
-
-      e@(C {}) -> foldEContract f acc e
-
-      -- bytes
-
-      e@(IndexWord a b) -> f e <> (go a) <> (go b)
-      e@(EqByte a b) -> f e <> (go a) <> (go b)
-
-      e@(JoinBytes
-        zero one two three four five six seven
-        eight nine ten eleven twelve thirteen fourteen fifteen
-        sixteen seventeen eighteen nineteen twenty twentyone twentytwo twentythree
-        twentyfour twentyfive twentysix twentyseven twentyeight twentynine thirty thirtyone)
-        -> f e
-        <> (go zero) <> (go one) <> (go two) <> (go three)
-        <> (go four) <> (go five) <> (go six) <> (go seven)
-        <> (go eight) <> (go nine) <> (go ten) <> (go eleven)
-        <> (go twelve) <> (go thirteen) <> (go fourteen)
-        <> (go fifteen) <> (go sixteen) <> (go seventeen)
-        <> (go eighteen) <> (go nineteen) <> (go twenty)
-        <> (go twentyone) <> (go twentytwo) <> (go twentythree)
-        <> (go twentyfour) <> (go twentyfive) <> (go twentysix)
-        <> (go twentyseven) <> (go twentyeight) <> (go twentynine)
-        <> (go thirty) <> (go thirtyone)
-
-      -- control flow
-
-      e@(Success a _ c d) -> f e
-                          <> foldl' (foldProp f) mempty a
-                          <> go c
-                          <> foldl' (foldExpr f) mempty (Map.keys d)
-                          <> foldl' (foldEContract f) mempty d
-      e@(Failure a _ (Revert c)) -> f e <> (foldl' (foldProp f) mempty a) <> go c
-      e@(Failure a _ _) -> f e <> (foldl' (foldProp f) mempty a)
-      e@(Partial a _ _) -> f e <> (foldl' (foldProp f) mempty a)
-
-      -- integers
-
-      e@(Add a b) -> f e <> (go a) <> (go b)
-      e@(Sub a b) -> f e <> (go a) <> (go b)
-      e@(Mul a b) -> f e <> (go a) <> (go b)
-      e@(Div a b) -> f e <> (go a) <> (go b)
-      e@(SDiv a b) -> f e <> (go a) <> (go b)
-      e@(Mod a b) -> f e <> (go a) <> (go b)
-      e@(SMod a b) -> f e <> (go a) <> (go b)
-      e@(AddMod a b c) -> f e <> (go a) <> (go b) <> (go c)
-      e@(MulMod a b c) -> f e <> (go a) <> (go b) <> (go c)
-      e@(Exp a b) -> f e <> (go a) <> (go b)
-      e@(SEx a b) -> f e <> (go a) <> (go b)
-      e@(Min a b) -> f e <> (go a) <> (go b)
-      e@(Max a b) -> f e <> (go a) <> (go b)
-
-      -- booleans
-
-      e@(LT a b) -> f e <> (go a) <> (go b)
-      e@(GT a b) -> f e <> (go a) <> (go b)
-      e@(LEq a b) -> f e <> (go a) <> (go b)
-      e@(GEq a b) -> f e <> (go a) <> (go b)
-      e@(SLT a b) -> f e <> (go a) <> (go b)
-      e@(SGT a b) -> f e <> (go a) <> (go b)
-      e@(Eq a b) -> f e <> (go a) <> (go b)
-      e@(IsZero a) -> f e <> (go a)
-      e@(ITE c t el) -> f e <> (go c) <> (go t) <> (go el)
-
-      -- bits
-
-      e@(And a b) -> f e <> (go a) <> (go b)
-      e@(Or a b) -> f e <> (go a) <> (go b)
-      e@(Xor a b) -> f e <> (go a) <> (go b)
-      e@(Not a) -> f e <> (go a)
-      e@(SHL a b) -> f e <> (go a) <> (go b)
-      e@(SHR a b) -> f e <> (go a) <> (go b)
-      e@(SAR a b) -> f e <> (go a) <> (go b)
-      e@(CLZ a) -> f e <> (go a)
-
-      -- Hashes
-
-      e@(Keccak a) -> f e <> (go a)
-
-      -- block context
-
-      e@(Origin) -> f e
-      e@(Coinbase) -> f e
-      e@(Timestamp) -> f e
-      e@(BlockNumber) -> f e
-      e@(PrevRandao) -> f e
-      e@(GasLimit) -> f e
-      e@(ChainId) -> f e
-      e@(BaseFee) -> f e
-      e@(BlockHash a) -> f e <> (go a)
-
-      -- tx context
-
-      e@(TxValue) -> f e
-
-      -- frame context
-
-      e@(Gas _ _) -> f e
-      e@(Balance {}) -> f e
-
-      -- code
-
-      e@(CodeSize a) -> f e <> (go a)
-      e@(CodeHash a) -> f e <> (go a)
-
-      -- logs
-
-      e@(LogEntry a b c) -> f e <> (go a) <> (go b) <> (foldl' (<>) mempty (fmap f c))
-
-      -- storage
-
-      e@(LitAddr _) -> f e
-      e@(WAddr a) -> f e <> go a
-      e@(SymAddr _) -> f e
-
-      -- storage
-
-      e@(ConcreteStore _) -> f e
-      e@(AbstractStore _ _) -> f e
-      e@(SLoad a b) -> f e <> (go a) <> (go b)
-      e@(SStore a b c) -> f e <> (go a) <> (go b) <> (go c)
-
-      -- buffers
-
-      e@(ConcreteBuf _) -> f e
-      e@(AbstractBuf _) -> f e
-      e@(ReadWord a b) -> f e <> (go a) <> (go b)
-      e@(ReadByte a b) -> f e <> (go a) <> (go b)
-      e@(WriteWord a b c) -> f e <> (go a) <> (go b) <> (go c)
-      e@(WriteByte a b c) -> f e <> (go a) <> (go b) <> (go c)
-
-      e@(CopySlice a b c d g)
-        -> f e
-        <> (go a)
-        <> (go b)
-        <> (go c)
-        <> (go d)
-        <> (go g)
-      e@(BufLength a) -> f e <> (go a)
+    go e = case e.node of
+      CF {} -> foldEContract f acc e
+      SuccessF a _ c d -> f e
+                       <> foldl' (foldProp f) mempty a
+                       <> go c
+                       <> foldl' (foldExpr f) mempty (Map.keys d)
+                       <> foldl' (foldEContract f) mempty d
+      FailureF a _ (Revert c) -> f e <> (foldl' (foldProp f) mempty a) <> go c
+      FailureF a _ _ -> f e <> (foldl' (foldProp f) mempty a)
+      PartialF a _ _ -> f e <> (foldl' (foldProp f) mempty a)
+      n -> f e <> hfoldMap go n
 
 mapProp :: (forall a . Expr a -> Expr a) -> Prop -> Prop
 mapProp f = \case
@@ -253,20 +122,20 @@ mapPropM' f = \case
     y <- mapPropM' f b
     f $ PImpl x y
 
--- | internExpr shares each rebuilt node as it is produced (bottom-up, O(1) per node since children
--- are already canonical), so passes built on mapExpr (notably Expr.simplify) never materialize the
--- unshared exponential tree. It is a no-op unless hash-consing is enabled (EVM.HashCons).
+-- | Apply f at every Expr node, bottom-up.
+--
+-- Interning happens inside the Expr pattern synonyms now, so every node this rebuilds is shared
+-- automatically; there is no separate internExpr step.
 mapExpr :: (forall a . Expr a -> Expr a) -> Expr b -> Expr b
-mapExpr f expr = runIdentity (mapExprM (Identity . internExpr . f) expr)
+mapExpr f expr = runIdentity (mapExprM (Identity . f) expr)
 
--- | Like 'mapExpr', for the repeatedly-applied simplification passes: when hash-consing is
--- enabled, each distinct subterm is visited once and subterms already known to be fixpoints of
--- this pass (identified by slot) are skipped in O(1). Falls back to plain mapExpr otherwise.
+-- | Like 'mapExpr', for repeatedly-applied simplification passes: when hash-consing is enabled
+-- each distinct subterm is visited once per pass (identified by slot), so the cost is O(distinct
+-- nodes) rather than O(logical size). Falls back to plain mapExpr otherwise.
 mapExprShared :: Int -> (forall a . Expr a -> Expr a) -> Expr b -> Expr b
 mapExprShared slot f expr
   | hashConsEnabled expr = memoFixTraverse slot f expr
-  | otherwise = runIdentity (mapExprM (Identity . f) expr)
-
+  | otherwise = mapExpr f expr
 
 -- Like mapExprM but allows a function of type `Expr a -> m ()` to be passed
 mapExprM_ ::  Monad m => (forall a . Expr a -> m ()) -> Expr b -> m ()
@@ -278,328 +147,77 @@ mapExprM_ f expr = void ret
       action e
       pure e
 
-mapExprM :: Monad m => (forall a . Expr a -> m (Expr a)) -> Expr b -> m (Expr b)
-mapExprM f expr = case expr of
+-- | The one structural map, with the recursive call left open so a caller can wrap it.
+-- 'mapExprM' ties the knot directly; 'memoFixTraverse' ties it through a memo table. This is
+-- what used to be ~320 lines re-listing all 72 constructors, plus a second 200-line copy of the
+-- same thing in EVM.HashCons.
+--
+-- Only constructors whose payloads are not children need spelling out. Their behaviour is
+-- deliberately identical to the previous version, quirks included: no f is applied at a C node;
+-- Success's map keys get f directly rather than recursively; and, unlike foldExpr, a Failure's
+-- Revert buffer is not descended into.
+mapExprMWith
+  :: forall m . Monad m
+  => (forall y . Expr y -> m (Expr y))   -- ^ how to recurse into a child
+  -> (forall y . Expr y -> m (Expr y))   -- ^ what to apply at this node
+  -> (forall x . Expr x -> m (Expr x))
+mapExprMWith rec f = step
+  where
+    step :: forall x . Expr x -> m (Expr x)
+    step e = case e.node of
+      CF {} -> mapEContractMWith rec f e
+      PartialF a b c -> do
+        a' <- mapM (mapPropMWith rec) a
+        f (remake e (PartialF a' b c))
+      FailureF a b c -> do
+        a' <- mapM (mapPropMWith rec) a
+        f (remake e (FailureF a' b c))
+      SuccessF a b c d -> do
+        a' <- mapM (mapPropMWith rec) a
+        c' <- rec c
+        d' <- fmap Map.fromList $ forM (Map.toList d) $ \(k, v) -> do
+                k' <- f k
+                v' <- mapEContractMWith rec f v
+                pure (k', v')
+        f (remake e (SuccessF a' b c' d'))
+      n -> do
+        n' <- htraverse rec n
+        f (remake e n')
 
-  -- literals & variables
+mapExprM :: forall m b . Monad m => (forall a . Expr a -> m (Expr a)) -> Expr b -> m (Expr b)
+mapExprM f = go
+  where
+    go :: forall x . Expr x -> m (Expr x)
+    go = mapExprMWith go f
 
-  Lit a -> f (Lit a)
-  LitByte a -> f (LitByte a)
-  Var a -> f (Var a)
-  GVar s -> f (GVar s)
+-- | Memoized structural map for a repeatedly-applied simplification pass.
+--
+-- Identical to 'mapExpr' except that results are cached per (pass slot, node id), so a shared
+-- DAG is not re-walked as a tree. Sound for an f that is a pure function of node structure,
+-- which every simplifier pass is. Nodes with @ident == 0@ (built while hash-consing was off)
+-- have no cache key and are simply recomputed.
+memoFixTraverse :: forall b . Int -> (forall x . Expr x -> Expr x) -> Expr b -> Expr b
+memoFixTraverse slot f root = unsafePerformIO (go root)
+  where
+    go :: forall x . Expr x -> IO (Expr x)
+    go e
+      | e.ident == 0 = step e
+      | otherwise = do
+          hit <- lookupMemo slot e
+          case hit of
+            Just r -> pure r
+            Nothing -> do
+              r <- step e
+              insertMemo slot e r
+              pure r
 
-  -- addresses
+    step :: forall x . Expr x -> IO (Expr x)
+    step = mapExprMWith go applyF
 
-  c@(C {}) -> mapEContractM f c
-
-  -- addresses
-
-  LitAddr a -> f (LitAddr a)
-  SymAddr a -> f (SymAddr a)
-  WAddr a -> do
-    a' <- mapExprM f a
-    f (WAddr a')
-
-  -- bytes
-
-  IndexWord a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (IndexWord a' b')
-  EqByte a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (EqByte a' b')
-
-  JoinBytes zero one two three four five six seven eight nine
-    ten eleven twelve thirteen fourteen fifteen sixteen seventeen
-    eighteen nineteen twenty twentyone twentytwo twentythree twentyfour
-    twentyfive twentysix twentyseven twentyeight twentynine thirty thirtyone -> do
-    zero' <- mapExprM f zero
-    one' <- mapExprM f one
-    two' <- mapExprM f two
-    three' <- mapExprM f three
-    four' <- mapExprM f four
-    five' <- mapExprM f five
-    six' <- mapExprM f six
-    seven' <- mapExprM f seven
-    eight' <- mapExprM f eight
-    nine' <- mapExprM f nine
-    ten' <- mapExprM f ten
-    eleven' <- mapExprM f eleven
-    twelve' <- mapExprM f twelve
-    thirteen' <- mapExprM f thirteen
-    fourteen' <- mapExprM f fourteen
-    fifteen' <- mapExprM f fifteen
-    sixteen' <- mapExprM f sixteen
-    seventeen' <- mapExprM f seventeen
-    eighteen' <- mapExprM f eighteen
-    nineteen' <- mapExprM f nineteen
-    twenty' <- mapExprM f twenty
-    twentyone' <- mapExprM f twentyone
-    twentytwo' <- mapExprM f twentytwo
-    twentythree' <- mapExprM f twentythree
-    twentyfour' <- mapExprM f twentyfour
-    twentyfive' <- mapExprM f twentyfive
-    twentysix' <- mapExprM f twentysix
-    twentyseven' <- mapExprM f twentyseven
-    twentyeight' <- mapExprM f twentyeight
-    twentynine' <- mapExprM f twentynine
-    thirty' <- mapExprM f thirty
-    thirtyone' <- mapExprM f thirtyone
-    f (JoinBytes zero' one' two' three' four' five' six' seven' eight' nine'
-         ten' eleven' twelve' thirteen' fourteen' fifteen' sixteen' seventeen'
-         eighteen' nineteen' twenty' twentyone' twentytwo' twentythree' twentyfour'
-         twentyfive' twentysix' twentyseven' twentyeight' twentynine' thirty' thirtyone')
-
-  -- control flow
-
-  Failure a b c -> do
-    a' <- mapM (mapPropM f) a
-    f (Failure a' b c)
-  Partial a b c -> do
-    a' <- mapM (mapPropM f) a
-    f (Partial a' b c)
-  Success a b c d -> do
-    a' <- mapM (mapPropM f) a
-    c' <- mapExprM f c
-    d' <- do
-      let x = Map.toList d
-      x' <- forM x $ \(k,v) -> do
-        k' <- f k
-        v' <- mapEContractM f v
-        pure (k',v')
-      pure $ Map.fromList x'
-    f (Success a' b c' d')
-
-  -- integers
-
-  Add a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (Add a' b')
-  Sub a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (Sub a' b')
-  Mul a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (Mul a' b')
-  Div a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (Div a' b')
-  SDiv a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (SDiv a' b')
-  Mod a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (Mod a' b')
-  SMod a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (SMod a' b')
-  AddMod a b c -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    c' <- mapExprM f c
-    f (AddMod a' b' c')
-  MulMod a b c -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    c' <- mapExprM f c
-    f (MulMod a' b' c')
-  Exp a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (Exp a' b')
-  SEx a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (SEx a' b')
-  Min a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (Min a' b')
-  Max a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (Max a' b')
-
-  -- booleans
-
-  LT a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (LT a' b')
-  GT a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (GT a' b')
-  LEq a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (LEq a' b')
-  GEq a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (GEq a' b')
-  SLT a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (SLT a' b')
-  SGT a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (SGT a' b')
-  Eq a b ->  do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (Eq a' b')
-  IsZero a -> do
-    a' <- mapExprM f a
-    f (IsZero a')
-  ITE c t el -> do
-    c' <- mapExprM f c
-    t' <- mapExprM f t
-    el' <- mapExprM f el
-    f (ITE c' t' el')
-
-  -- bits
-
-  And a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (And a' b')
-  Or a b ->  do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (Or a' b')
-  Xor a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (Xor a' b')
-  Not a -> do
-    a' <- mapExprM f a
-    f (Not a')
-  SHL a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (SHL a' b')
-  SHR a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (SHR a' b')
-  SAR a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (SAR a' b')
-  CLZ a -> do
-    a' <- mapExprM f a
-    f (CLZ a')
-
-
-  -- Hashes
-
-  Keccak a -> do
-    a' <- mapExprM f a
-    f (Keccak a')
-
-  -- block context
-
-  Origin -> f Origin
-  Coinbase -> f Coinbase
-  Timestamp -> f Timestamp
-  BlockNumber -> f BlockNumber
-  PrevRandao -> f PrevRandao
-  GasLimit -> f GasLimit
-  ChainId -> f ChainId
-  BaseFee -> f BaseFee
-  BlockHash a -> do
-    a' <- mapExprM f a
-    f (BlockHash a')
-
-  -- tx context
-
-  TxValue -> f TxValue
-
-  -- frame context
-
-  Gas a b -> f (Gas a b)
-  Balance a -> do
-    a' <- mapExprM f a
-    f (Balance a')
-
-  -- code
-
-  CodeSize a -> do
-    a' <- mapExprM f a
-    f (CodeSize a')
-  CodeHash a -> do
-    a' <- mapExprM f a
-    f (CodeHash a')
-
-  -- logs
-
-  LogEntry a b c -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    c' <- mapM (mapExprM f) c
-    f (LogEntry a' b' c')
-
-  -- storage
-
-  ConcreteStore b -> f (ConcreteStore b)
-  AbstractStore a b -> f (AbstractStore a b)
-  SLoad a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (SLoad a' b')
-  SStore a b c -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    c' <- mapExprM f c
-    f (SStore a' b' c')
-
-  -- buffers
-
-  ConcreteBuf a -> do
-    f (ConcreteBuf a)
-  AbstractBuf a -> do
-    f (AbstractBuf a)
-  ReadWord a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (ReadWord a' b')
-  ReadByte a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    f (ReadByte a' b')
-  WriteWord a b c -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    c' <- mapExprM f c
-    f (WriteWord a' b' c')
-  WriteByte a b c -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    c' <- mapExprM f c
-    f (WriteByte a' b' c')
-
-  CopySlice a b c d e -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    c' <- mapExprM f c
-    d' <- mapExprM f d
-    e' <- mapExprM f e
-    f (CopySlice a' b' c' d' e')
-
-  BufLength a -> do
-    a' <- mapExprM f a
-    f (BufLength a')
+    -- forced before it is stored: an unevaluated thunk in the memo would defeat the point
+    applyF :: forall x . Expr x -> IO (Expr x)
+    applyF x = let !r = f x in pure r
+{-# NOINLINE memoFixTraverse #-}
 
 -- Like mapPropM but allows a function of type `Expr a -> m ()` to be passed
 mapPropM_ :: Monad m => (forall a . Expr a -> m ()) -> Prop -> m ()
@@ -611,54 +229,38 @@ mapPropM_ f expr = void ret
       action e
       pure e
 
-mapPropM :: Monad m => (forall a . Expr a -> m (Expr a)) -> Prop -> m Prop
-mapPropM f = \case
+mapPropMWith :: forall m . Monad m => (forall a . Expr a -> m (Expr a)) -> Prop -> m Prop
+mapPropMWith rec = \case
   PBool b -> pure $ PBool b
-  PEq a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    pure $ PEq a' b'
-  PLT a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    pure $ PLT a' b'
-  PGT a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    pure $ PGT a' b'
-  PLEq a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    pure $ PLEq a' b'
-  PGEq a b -> do
-    a' <- mapExprM f a
-    b' <- mapExprM f b
-    pure $ PGEq a' b'
-  PNeg a -> do
-    a' <- mapPropM f a
-    pure $ PNeg a'
-  PAnd a b -> do
-    a' <- mapPropM f a
-    b' <- mapPropM f b
-    pure $ PAnd a' b'
-  POr a b -> do
-    a' <- mapPropM f a
-    b' <- mapPropM f b
-    pure $ POr a' b'
-  PImpl a b -> do
-    a' <- mapPropM f a
-    b' <- mapPropM f b
-    pure $ PImpl a' b'
+  PEq a b -> PEq <$> rec a <*> rec b
+  PLT a b -> PLT <$> rec a <*> rec b
+  PGT a b -> PGT <$> rec a <*> rec b
+  PLEq a b -> PLEq <$> rec a <*> rec b
+  PGEq a b -> PGEq <$> rec a <*> rec b
+  PNeg a -> PNeg <$> mapPropMWith rec a
+  PAnd a b -> PAnd <$> mapPropMWith rec a <*> mapPropMWith rec b
+  POr a b -> POr <$> mapPropMWith rec a <*> mapPropMWith rec b
+  PImpl a b -> PImpl <$> mapPropMWith rec a <*> mapPropMWith rec b
 
+mapPropM :: Monad m => (forall a . Expr a -> m (Expr a)) -> Prop -> m Prop
+mapPropM f = mapPropMWith (mapExprM f)
+
+mapEContractMWith
+  :: forall m . Monad m
+  => (forall a . Expr a -> m (Expr a))
+  -> (forall a . Expr a -> m (Expr a))
+  -> Expr EContract -> m (Expr EContract)
+mapEContractMWith rec f e = case e.node of
+  GVarF _ -> pure e
+  CF code storage tStorage balance nonce -> do
+    code' <- mapCodeMWith rec f code
+    storage' <- rec storage
+    tStorage' <- rec tStorage
+    balance' <- rec balance
+    pure $ remake e (CF code' storage' tStorage' balance' nonce)
 
 mapEContractM :: Monad m => (forall a . Expr a -> m (Expr a)) -> Expr EContract -> m (Expr EContract)
-mapEContractM _ g@(GVar _) = pure g
-mapEContractM f (C code storage tStorage balance nonce) = do
-  code' <- mapCodeM f code
-  storage' <- mapExprM f storage
-  tStorage' <- mapExprM f tStorage
-  balance' <- mapExprM f balance
-  pure $ C code' storage' tStorage' balance' nonce
+mapEContractM f = mapEContractMWith (mapExprM f) f
 
 mapContractM :: Monad m => (forall a . Expr a -> m (Expr a)) -> Contract -> m (Contract)
 mapContractM f c = do
@@ -668,16 +270,23 @@ mapContractM f c = do
   balance' <- mapExprM f c.balance
   pure $ c { code = code', storage = storage', origStorage = origStorage', balance = balance' }
 
-mapCodeM :: Monad m => (forall a . Expr a -> m (Expr a)) -> ContractCode -> m (ContractCode)
-mapCodeM f = \case
+mapCodeMWith
+  :: forall m . Monad m
+  => (forall a . Expr a -> m (Expr a))
+  -> (forall a . Expr a -> m (Expr a))
+  -> ContractCode -> m (ContractCode)
+mapCodeMWith rec f = \case
   UnknownCode a -> fmap UnknownCode (f a)
   c@(RuntimeCode (ConcreteRuntimeCode _)) -> pure c
   RuntimeCode (SymbolicRuntimeCode c) -> do
-    c' <- mapM (mapExprM f) c
+    c' <- mapM rec c
     pure . RuntimeCode $ SymbolicRuntimeCode c'
   InitCode bs buf -> do
-    buf' <- mapExprM f buf
+    buf' <- rec buf
     pure $ InitCode bs buf'
+
+mapCodeM :: Monad m => (forall a . Expr a -> m (Expr a)) -> ContractCode -> m (ContractCode)
+mapCodeM f = mapCodeMWith (mapExprM f) f
 
 -- | Generic operations over AST terms
 class TraversableTerm a where

@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 module EVM.Expr.Generator where
 
 import Prelude hiding (LT, GT)
@@ -18,7 +20,23 @@ import Test.QuickCheck.Arbitrary
 import Test.QuickCheck.Gen
 import Test.QuickCheck.Instances.ByteString()
 
-import EVM.Types (Expr(..), EType(..), W256(..), W64(..), internalError, Addr(..), Prop(..), ContractCode(..), RuntimeCode(..), EvmError(..))
+import EVM.Types (Expr, EType(..), W256(..), W64(..), internalError, Addr(..), Prop(..), ContractCode(..), RuntimeCode(..), EvmError(..),
+                  pattern Lit, pattern Var, pattern GVar, pattern LitByte, pattern IndexWord,
+                  pattern EqByte, pattern JoinBytes, pattern Partial, pattern Failure,
+                  pattern Success, pattern Add, pattern Sub, pattern Mul, pattern Div,
+                  pattern SDiv, pattern Mod, pattern SMod, pattern AddMod, pattern MulMod,
+                  pattern Exp, pattern SEx, pattern Min, pattern Max, pattern LT, pattern GT,
+                  pattern LEq, pattern GEq, pattern SLT, pattern SGT, pattern Eq, pattern IsZero,
+                  pattern ITE, pattern And, pattern Or, pattern Xor, pattern Not, pattern SHL,
+                  pattern SHR, pattern SAR, pattern CLZ, pattern Keccak, pattern Origin,
+                  pattern BlockHash, pattern Coinbase, pattern Timestamp, pattern BlockNumber,
+                  pattern PrevRandao, pattern GasLimit, pattern ChainId, pattern BaseFee,
+                  pattern TxValue, pattern Balance, pattern Gas, pattern CodeSize,
+                  pattern CodeHash, pattern LogEntry, pattern C, pattern SymAddr,
+                  pattern LitAddr, pattern WAddr, pattern ConcreteStore, pattern AbstractStore,
+                  pattern SLoad, pattern SStore, pattern ConcreteBuf, pattern AbstractBuf,
+                  pattern ReadWord, pattern ReadByte, pattern WriteWord, pattern WriteByte,
+                  pattern CopySlice, pattern BufLength)
 import EVM.Expr qualified as Expr
 
 -- GenWriteStorageLoad
@@ -310,7 +328,8 @@ genEContract sz = do
   n <- arbitrary
   s <- genStorage sz
   ts <- genStorage sz
-  pure $ C {code=c, storage=s, tStorage=ts, balance=b, nonce=n}
+  -- positional: C is a prefix pattern synonym, so record-construction syntax is unavailable
+  pure $ C c s ts b n
 
 instance Arbitrary (Expr End) where
   arbitrary = sized genEnd

@@ -1,4 +1,5 @@
 {-# LANGUAGE ImplicitParams #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TemplateHaskell #-}
 
 module EVM where
@@ -14,7 +15,6 @@ import EVM.ABI
 import EVM.Expr (readStorage, concStoreContains, writeStorage, readByte, readWord, writeWord,
   writeByte, bufLength, indexWord, readBytes, copySlice, wordToAddr, maybeLitByteSimp, maybeLitWordSimp, maybeLitAddrSimp)
 import EVM.Expr qualified as Expr
-import EVM.HashCons qualified as HashCons
 import EVM.FeeSchedule (FeeSchedule (..))
 import EVM.FeeSchedule qualified as Fees (feeSchedule)
 import EVM.Merge qualified as Merge
@@ -22,7 +22,7 @@ import EVM.Op
 import EVM.Precompiled qualified
 import EVM.Solidity
 import EVM.Types
-import EVM.Types qualified as Expr (Expr(Gas))
+import EVM.Types qualified as Expr (pattern Gas)
 import EVM.Sign qualified
 import EVM.Concrete qualified as Concrete
 import EVM.CheatsTH
@@ -498,7 +498,7 @@ exec1 conf = do
                           modifying #keccakPreImgs (insert (bs, kc))
                           pure $ Lit kc
                         )
-                    buf -> pure $ HashCons.internExpr (Keccak buf)
+                    buf -> pure $ Keccak buf
                   next
                   assign' (#state % #stack) (hash : xs)
             _ -> underrun
@@ -796,8 +796,7 @@ exec1 conf = do
 
                 symbolicRead :: EVM t () = if this.external
                   then accessStorage self x finalizeLoad
-                  else let slot = HashCons.internExpr (Expr.concKeccakOnePass x)
-                       in finalizeLoad $ HashCons.internExpr (Expr.readStorage' slot this.storage)
+                  else finalizeLoad $ Expr.readStorage' (Expr.concKeccakOnePass x) this.storage
 
                 concreteRead :: EVM t () = do
                   acc <- accessStorageForGas self (forceLit x)
@@ -3279,7 +3278,7 @@ stackOp1 cost f =
     x:xs ->
       burn cost $ do
         next
-        let !y = HashCons.internExpr (f x)
+        let !y = f x
         assign' (#state % #stack) $ y : xs
     _ ->
       underrun
@@ -3294,7 +3293,7 @@ stackOp2 cost f =
     x:y:xs ->
       burn cost $ do
         next
-        assign' (#state % #stack) $ HashCons.internExpr (f x y) : xs
+        assign' (#state % #stack) $ f x y : xs
     _ ->
       underrun
 
@@ -3308,7 +3307,7 @@ stackOp3 cost f =
     x:y:z:xs ->
       burn cost $ do
       next
-      assign' (#state % #stack) $ HashCons.internExpr (f x y z) : xs
+      assign' (#state % #stack) $ f x y z : xs
     _ ->
       underrun
 

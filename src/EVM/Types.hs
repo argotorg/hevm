@@ -1,5 +1,6 @@
 {-# LANGUAGE CPP #-}
-{-# LANGUAGE MagicHash #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilyDependencies #-}
 {-# LANGUAGE UndecidableInstances #-}
@@ -15,7 +16,6 @@ module EVM.Types where
 import Prelude hiding (Foldable(..))
 
 import GHC.Stack (HasCallStack, prettyCallStack, callStack)
-import GHC.Exts (reallyUnsafePtrEquality#, isTrue#)
 import GHC.ByteOrder (targetByteOrder, ByteOrder(..))
 import Control.Arrow ((>>>))
 import Control.Monad (mzero)
@@ -43,6 +43,13 @@ import Data.DoubleWord
 import Data.DoubleWord.TH
 import Data.Foldable (Foldable(..))
 import Data.Map (Map)
+import Data.Map qualified as Map
+import Data.Functor.Const (Const(..))
+import Data.Functor.Identity (Identity(..), runIdentity)
+import Data.IntMap.Strict qualified as IM
+import Data.IORef (IORef, newIORef, readIORef, writeIORef, atomicModifyIORef')
+import GHC.Records (HasField(..))
+import System.IO.Unsafe (unsafePerformIO)
 import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import Data.Sequence (Seq)
@@ -201,438 +208,935 @@ deriving instance Ord (GVar a)
   type level shenanigans tends to complicate implementation, we skip this for
   now.
 -}
-data Expr (a :: EType) where
+-- Two-level Expr representation -------------------------------------------------------------------
+--
+-- 'Expr' is a fixpoint of the shallow functor 'ExprF', with a hash-consing id attached to every
+-- node. Compared with the flat GADT this buys three things:
+--
+--   * the structural key used for hash-consing is just @ExprF (Const Int) a@ with a DERIVED
+--     Eq/Ord, so there are no hand-assigned constructor tag numbers that must be kept unique,
+--     and no Payload type enumerating the scalar fields;
+--   * Eq/Ord on Expr become an O(1) id comparison with a structural fallback, replacing ~150
+--     lines of hand-written instances, the exprRank table, and the reallyUnsafePtrEquality#
+--     fast paths;
+--   * every structural traversal is derived from a single 'htraverse' rather than each pass
+--     re-listing all 72 constructors.
+--
+-- Only ExprF is parameterized over the child carrier. Prop, ContractCode, TraceContext, EvmError
+-- and PartialExec stay concrete: End / EContract / Log nodes are never structurally interned
+-- (they are unique by construction), so their payloads never end up in a hash-consing key.
+-- Traversals reach the Exprs nested inside them explicitly, exactly as they did before.
+
+-- | Singleton for the Expr index. Lets a node pick its intern table, and lets a traversal rebuild
+-- a node at a statically unknown index, both without unsafeCoerce.
+data SEType (a :: EType) where
+  SEWord     :: SEType EWord
+  SByte      :: SEType Byte
+  SBuf       :: SEType Buf
+  SStorage   :: SEType Storage
+  SEAddr     :: SEType EAddr
+  SEContract :: SEType EContract
+  SEnd       :: SEType End
+  SLog       :: SEType Log
+
+deriving instance Show (SEType a)
+deriving instance Eq (SEType a)
+deriving instance Ord (SEType a)
+
+-- | A GVar's index is fixed by its own constructor, so the GVar pattern synonym needs no extra
+-- constraint on its builder.
+gvarEType :: GVar a -> SEType a
+gvarEType = \case
+  BufVar _   -> SBuf
+  StoreVar _ -> SStorage
+
+-- | The shallow functor: one layer of Expr, with children at an arbitrary carrier @r@.
+-- Instantiated at @Expr@ for real terms and at @Const Int@ for hash-consing keys.
+data ExprF (r :: EType -> Type) (a :: EType) where
 
   -- identifiers
 
   -- | Literal words
-  Lit            :: {-# UNPACK #-} !W256 -> Expr EWord
+  LitF            :: {-# UNPACK #-} !W256 -> ExprF r EWord
   -- | Variables
-  Var            :: Text -> Expr EWord
+  VarF            :: Text -> ExprF r EWord
   -- | variables introduced during the CSE pass
-  GVar           :: GVar a -> Expr a
+  GVarF           :: GVar a -> ExprF r a
 
   -- bytes
 
-  LitByte        :: {-# UNPACK #-} !Word8 -> Expr Byte
-  IndexWord      :: Expr EWord -> Expr EWord -> Expr Byte
-  EqByte         :: Expr Byte  -> Expr Byte  -> Expr EWord
+  LitByteF        :: {-# UNPACK #-} !Word8 -> ExprF r Byte
+  IndexWordF      :: r EWord -> r EWord -> ExprF r Byte
+  EqByteF         :: r Byte  -> r Byte  -> ExprF r EWord
 
-  JoinBytes      :: Expr Byte -> Expr Byte -> Expr Byte -> Expr Byte
-                 -> Expr Byte -> Expr Byte -> Expr Byte -> Expr Byte
-                 -> Expr Byte -> Expr Byte -> Expr Byte -> Expr Byte
-                 -> Expr Byte -> Expr Byte -> Expr Byte -> Expr Byte
-                 -> Expr Byte -> Expr Byte -> Expr Byte -> Expr Byte
-                 -> Expr Byte -> Expr Byte -> Expr Byte -> Expr Byte
-                 -> Expr Byte -> Expr Byte -> Expr Byte -> Expr Byte
-                 -> Expr Byte -> Expr Byte -> Expr Byte -> Expr Byte
-                 -> Expr EWord
+  JoinBytesF      :: r Byte -> r Byte -> r Byte -> r Byte
+                  -> r Byte -> r Byte -> r Byte -> r Byte
+                  -> r Byte -> r Byte -> r Byte -> r Byte
+                  -> r Byte -> r Byte -> r Byte -> r Byte
+                  -> r Byte -> r Byte -> r Byte -> r Byte
+                  -> r Byte -> r Byte -> r Byte -> r Byte
+                  -> r Byte -> r Byte -> r Byte -> r Byte
+                  -> r Byte -> r Byte -> r Byte -> r Byte
+                  -> ExprF r EWord
 
   -- control flow
+  -- [Prop] / TraceContext / PartialExec / EvmError stay concrete: End nodes are never interned,
+  -- and traversals descend into them explicitly (see EVM.Traversals).
 
-  Partial        :: [Prop] -> TraceContext -> PartialExec -> Expr End
-  Failure        :: [Prop] -> TraceContext -> EvmError -> Expr End
-  Success        :: [Prop] -> TraceContext -> Expr Buf -> Map (Expr EAddr) (Expr EContract) -> Expr End
+  PartialF        :: [Prop] -> TraceContext -> PartialExec -> ExprF r End
+  FailureF        :: [Prop] -> TraceContext -> EvmError -> ExprF r End
+  SuccessF        :: [Prop] -> TraceContext -> r Buf -> Map (r EAddr) (r EContract) -> ExprF r End
 
   -- integers
 
-  Add            :: Expr EWord -> Expr EWord -> Expr EWord
-  Sub            :: Expr EWord -> Expr EWord -> Expr EWord
-  Mul            :: Expr EWord -> Expr EWord -> Expr EWord
-  Div            :: Expr EWord -> Expr EWord -> Expr EWord
-  SDiv           :: Expr EWord -> Expr EWord -> Expr EWord
-  Mod            :: Expr EWord -> Expr EWord -> Expr EWord
-  SMod           :: Expr EWord -> Expr EWord -> Expr EWord
-  AddMod         :: Expr EWord -> Expr EWord -> Expr EWord -> Expr EWord
-  MulMod         :: Expr EWord -> Expr EWord -> Expr EWord -> Expr EWord
-  Exp            :: Expr EWord -> Expr EWord -> Expr EWord
-  SEx            :: Expr EWord -> Expr EWord -> Expr EWord
-  Min            :: Expr EWord -> Expr EWord -> Expr EWord
-  Max            :: Expr EWord -> Expr EWord -> Expr EWord
+  AddF            :: r EWord -> r EWord -> ExprF r EWord
+  SubF            :: r EWord -> r EWord -> ExprF r EWord
+  MulF            :: r EWord -> r EWord -> ExprF r EWord
+  DivF            :: r EWord -> r EWord -> ExprF r EWord
+  SDivF           :: r EWord -> r EWord -> ExprF r EWord
+  ModF            :: r EWord -> r EWord -> ExprF r EWord
+  SModF           :: r EWord -> r EWord -> ExprF r EWord
+  AddModF         :: r EWord -> r EWord -> r EWord -> ExprF r EWord
+  MulModF         :: r EWord -> r EWord -> r EWord -> ExprF r EWord
+  ExpF            :: r EWord -> r EWord -> ExprF r EWord
+  SExF            :: r EWord -> r EWord -> ExprF r EWord
+  MinF            :: r EWord -> r EWord -> ExprF r EWord
+  MaxF            :: r EWord -> r EWord -> ExprF r EWord
 
   -- booleans
 
-  LT             :: Expr EWord -> Expr EWord -> Expr EWord
-  GT             :: Expr EWord -> Expr EWord -> Expr EWord
-  LEq            :: Expr EWord -> Expr EWord -> Expr EWord
-  GEq            :: Expr EWord -> Expr EWord -> Expr EWord
-  SLT            :: Expr EWord -> Expr EWord -> Expr EWord
-  SGT            :: Expr EWord -> Expr EWord -> Expr EWord
-  Eq             :: Expr EWord -> Expr EWord -> Expr EWord
-  IsZero         :: Expr EWord -> Expr EWord
+  LTF             :: r EWord -> r EWord -> ExprF r EWord
+  GTF             :: r EWord -> r EWord -> ExprF r EWord
+  LEqF            :: r EWord -> r EWord -> ExprF r EWord
+  GEqF            :: r EWord -> r EWord -> ExprF r EWord
+  SLTF            :: r EWord -> r EWord -> ExprF r EWord
+  SGTF            :: r EWord -> r EWord -> ExprF r EWord
+  EqF             :: r EWord -> r EWord -> ExprF r EWord
+  IsZeroF         :: r EWord -> ExprF r EWord
 
   -- conditional (if-then-else for path merging)
-  ITE            :: Expr EWord -> Expr EWord -> Expr EWord -> Expr EWord
+  ITEF            :: r EWord -> r EWord -> r EWord -> ExprF r EWord
 
   -- bits
 
-  And            :: Expr EWord -> Expr EWord -> Expr EWord
-  Or             :: Expr EWord -> Expr EWord -> Expr EWord
-  Xor            :: Expr EWord -> Expr EWord -> Expr EWord
-  Not            :: Expr EWord -> Expr EWord
-  SHL            :: Expr EWord -> Expr EWord -> Expr EWord
-  SHR            :: Expr EWord -> Expr EWord -> Expr EWord
-  SAR            :: Expr EWord -> Expr EWord -> Expr EWord
-  CLZ            :: Expr EWord -> Expr EWord
+  AndF            :: r EWord -> r EWord -> ExprF r EWord
+  OrF             :: r EWord -> r EWord -> ExprF r EWord
+  XorF            :: r EWord -> r EWord -> ExprF r EWord
+  NotF            :: r EWord -> ExprF r EWord
+  SHLF            :: r EWord -> r EWord -> ExprF r EWord
+  SHRF            :: r EWord -> r EWord -> ExprF r EWord
+  SARF            :: r EWord -> r EWord -> ExprF r EWord
+  CLZF            :: r EWord -> ExprF r EWord
 
   -- Hashes
 
-  Keccak         :: Expr Buf -> Expr EWord
+  KeccakF         :: r Buf -> ExprF r EWord
 
   -- block context
 
-  Origin         :: Expr EWord
-  BlockHash      :: Expr EWord -> Expr EWord
-  Coinbase       :: Expr EWord
-  Timestamp      :: Expr EWord
-  BlockNumber    :: Expr EWord
-  PrevRandao     :: Expr EWord
-  GasLimit       :: Expr EWord
-  ChainId        :: Expr EWord
-  BaseFee        :: Expr EWord
+  OriginF         :: ExprF r EWord
+  BlockHashF      :: r EWord -> ExprF r EWord
+  CoinbaseF       :: ExprF r EWord
+  TimestampF      :: ExprF r EWord
+  BlockNumberF    :: ExprF r EWord
+  PrevRandaoF     :: ExprF r EWord
+  GasLimitF       :: ExprF r EWord
+  ChainIdF        :: ExprF r EWord
+  BaseFeeF        :: ExprF r EWord
 
   -- tx context
 
-  TxValue        :: Expr EWord
+  TxValueF        :: ExprF r EWord
 
   -- frame context
 
-  Balance        :: Expr EAddr -> Expr EWord
+  BalanceF        :: r EAddr -> ExprF r EWord
 
-  Gas            :: Text               -- prefix needed to distinguish during equivalence checking
-                 -> Int                -- fresh gas variable
-                 -> Expr EWord
+  GasF            :: Text               -- prefix needed to distinguish during equivalence checking
+                  -> Int                -- fresh gas variable
+                  -> ExprF r EWord
 
   -- code
 
-  CodeSize       :: Expr EAddr         -- address
-                 -> Expr EWord         -- size
-
-  CodeHash       :: Expr EAddr         -- address
-                 -> Expr EWord         -- size
+  CodeSizeF       :: r EAddr -> ExprF r EWord
+  CodeHashF       :: r EAddr -> ExprF r EWord
 
   -- logs
 
-  LogEntry       :: Expr EWord         -- address
-                 -> Expr Buf           -- data
-                 -> [Expr EWord]       -- topics
-                 -> Expr Log
-
+  LogEntryF       :: r EWord            -- address
+                  -> r Buf              -- data
+                  -> [r EWord]          -- topics
+                  -> ExprF r Log
 
   -- Contract
+  -- ContractCode stays concrete for the same reason as [Prop]: EContract nodes are not interned.
+  -- Positional rather than a record, so no field selectors are generated here; the record API is
+  -- restored by the 'C' pattern synonym plus the HasField instances below.
 
-  -- A restricted view of a contract that does not include extraneous metadata
-  -- from the full constructor defined in the VM state
-  C ::
-    { code     :: ContractCode
-    , storage  :: Expr Storage
-    , tStorage :: Expr Storage
-    , balance  :: Expr EWord
-    , nonce    :: Maybe W64
-    } -> Expr EContract
+  CF              :: ContractCode
+                  -> r Storage          -- storage
+                  -> r Storage          -- tStorage
+                  -> r EWord            -- balance
+                  -> Maybe W64          -- nonce
+                  -> ExprF r EContract
 
   -- addresses
 
-  -- Symbolic addresses are identified with an int. It is important that
-  -- semantic equality is the same as syntactic equality here. Additionally all
-  -- SAddr's in a given expression should be constrained to differ from any LitAddr's
-  SymAddr        :: Text -> Expr EAddr
-  LitAddr        :: Addr -> Expr EAddr
-  WAddr          :: Expr EAddr -> Expr EWord
+  SymAddrF        :: Text -> ExprF r EAddr
+  LitAddrF        :: Addr -> ExprF r EAddr
+  WAddrF          :: r EAddr -> ExprF r EWord
 
   -- storage
 
-  ConcreteStore  :: (Map W256 W256) -> Expr Storage
-  AbstractStore  :: Expr EAddr -- which contract is this store for?
-                 -> Maybe W256 -- which logical store does this refer to? (e.g. solidity mappings / arrays)
-                 -> Expr Storage
+  ConcreteStoreF  :: (Map W256 W256) -> ExprF r Storage
+  AbstractStoreF  :: r EAddr -> Maybe W256 -> ExprF r Storage
 
-  SLoad          :: Expr EWord         -- key
-                 -> Expr Storage       -- storage
-                 -> Expr EWord         -- result
-
-  SStore         :: Expr EWord         -- key
-                 -> Expr EWord         -- value
-                 -> Expr Storage       -- old storage
-                 -> Expr Storage       -- new storae
+  SLoadF          :: r EWord -> r Storage -> ExprF r EWord
+  SStoreF         :: r EWord -> r EWord -> r Storage -> ExprF r Storage
 
   -- buffers
 
-  ConcreteBuf    :: ByteString -> Expr Buf
-  AbstractBuf    :: Text -> Expr Buf
+  ConcreteBufF    :: ByteString -> ExprF r Buf
+  AbstractBufF    :: Text -> ExprF r Buf
 
-  ReadWord       :: Expr EWord         -- index
-                 -> Expr Buf           -- src
-                 -> Expr EWord
+  ReadWordF       :: r EWord -> r Buf -> ExprF r EWord
+  ReadByteF       :: r EWord -> r Buf -> ExprF r Byte
+  WriteWordF      :: r EWord -> r EWord -> r Buf -> ExprF r Buf
+  WriteByteF      :: r EWord -> r Byte  -> r Buf -> ExprF r Buf
 
-  ReadByte       :: Expr EWord         -- index
-                 -> Expr Buf           -- src
-                 -> Expr Byte
+  CopySliceF      :: r EWord            -- src offset
+                  -> r EWord            -- dst offset
+                  -> r EWord            -- size
+                  -> r Buf              -- src
+                  -> r Buf              -- dst
+                  -> ExprF r Buf
 
-  WriteWord      :: Expr EWord         -- dst offset
-                 -> Expr EWord         -- value
-                 -> Expr Buf           -- prev
-                 -> Expr Buf
+  BufLengthF      :: r Buf -> ExprF r EWord
 
-  WriteByte      :: Expr EWord         -- dst offset
-                 -> Expr Byte          -- value
-                 -> Expr Buf           -- prev
-                 -> Expr Buf
+-- The point of the whole exercise: these are derived, so adding a constructor to ExprF cannot
+-- silently produce a wrong key, a wrong ordering, or a comparison that says a term differs from
+-- itself. Contrast the previous hand-written Eq, whose `go _ _ = False` catch-all would have
+-- answered False for a new constructor compared with itself, with no warning.
+-- Show is written out rather than derived so that it prints the ORIGINAL constructor names,
+-- without the F suffix that distinguishes ExprF's constructors from the pattern synonyms. This
+-- output is user-facing: counterexample dumps show symbolic addresses via show.
+instance (forall b. Show (r b)) => Show (ExprF r a) where
+  showsPrec d = \case
+    LitF x1 ->
+      showParen (d > 10) $ showString "Lit " . showsPrec 11 x1
+    VarF x1 ->
+      showParen (d > 10) $ showString "Var " . showsPrec 11 x1
+    GVarF x1 ->
+      showParen (d > 10) $ showString "GVar " . showsPrec 11 x1
+    LitByteF x1 ->
+      showParen (d > 10) $ showString "LitByte " . showsPrec 11 x1
+    IndexWordF x1 x2 ->
+      showParen (d > 10) $ showString "IndexWord " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    EqByteF x1 x2 ->
+      showParen (d > 10) $ showString "EqByte " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    JoinBytesF x1 x2 x3 x4 x5 x6 x7 x8 x9 x10 x11 x12 x13 x14 x15 x16 x17 x18 x19 x20 x21 x22 x23 x24 x25 x26 x27 x28 x29 x30 x31 x32 ->
+      showParen (d > 10) $ showString "JoinBytes " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2 . showChar ' ' . showsPrec 11 x3 . showChar ' ' . showsPrec 11 x4 . showChar ' ' . showsPrec 11 x5 . showChar ' ' . showsPrec 11 x6 . showChar ' ' . showsPrec 11 x7 . showChar ' ' . showsPrec 11 x8 . showChar ' ' . showsPrec 11 x9 . showChar ' ' . showsPrec 11 x10 . showChar ' ' . showsPrec 11 x11 . showChar ' ' . showsPrec 11 x12 . showChar ' ' . showsPrec 11 x13 . showChar ' ' . showsPrec 11 x14 . showChar ' ' . showsPrec 11 x15 . showChar ' ' . showsPrec 11 x16 . showChar ' ' . showsPrec 11 x17 . showChar ' ' . showsPrec 11 x18 . showChar ' ' . showsPrec 11 x19 . showChar ' ' . showsPrec 11 x20 . showChar ' ' . showsPrec 11 x21 . showChar ' ' . showsPrec 11 x22 . showChar ' ' . showsPrec 11 x23 . showChar ' ' . showsPrec 11 x24 . showChar ' ' . showsPrec 11 x25 . showChar ' ' . showsPrec 11 x26 . showChar ' ' . showsPrec 11 x27 . showChar ' ' . showsPrec 11 x28 . showChar ' ' . showsPrec 11 x29 . showChar ' ' . showsPrec 11 x30 . showChar ' ' . showsPrec 11 x31 . showChar ' ' . showsPrec 11 x32
+    PartialF x1 x2 x3 ->
+      showParen (d > 10) $ showString "Partial " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2 . showChar ' ' . showsPrec 11 x3
+    FailureF x1 x2 x3 ->
+      showParen (d > 10) $ showString "Failure " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2 . showChar ' ' . showsPrec 11 x3
+    SuccessF x1 x2 x3 x4 ->
+      showParen (d > 10) $ showString "Success " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2 . showChar ' ' . showsPrec 11 x3 . showChar ' ' . showsPrec 11 x4
+    AddF x1 x2 ->
+      showParen (d > 10) $ showString "Add " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    SubF x1 x2 ->
+      showParen (d > 10) $ showString "Sub " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    MulF x1 x2 ->
+      showParen (d > 10) $ showString "Mul " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    DivF x1 x2 ->
+      showParen (d > 10) $ showString "Div " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    SDivF x1 x2 ->
+      showParen (d > 10) $ showString "SDiv " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    ModF x1 x2 ->
+      showParen (d > 10) $ showString "Mod " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    SModF x1 x2 ->
+      showParen (d > 10) $ showString "SMod " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    AddModF x1 x2 x3 ->
+      showParen (d > 10) $ showString "AddMod " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2 . showChar ' ' . showsPrec 11 x3
+    MulModF x1 x2 x3 ->
+      showParen (d > 10) $ showString "MulMod " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2 . showChar ' ' . showsPrec 11 x3
+    ExpF x1 x2 ->
+      showParen (d > 10) $ showString "Exp " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    SExF x1 x2 ->
+      showParen (d > 10) $ showString "SEx " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    MinF x1 x2 ->
+      showParen (d > 10) $ showString "Min " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    MaxF x1 x2 ->
+      showParen (d > 10) $ showString "Max " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    LTF x1 x2 ->
+      showParen (d > 10) $ showString "LT " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    GTF x1 x2 ->
+      showParen (d > 10) $ showString "GT " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    LEqF x1 x2 ->
+      showParen (d > 10) $ showString "LEq " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    GEqF x1 x2 ->
+      showParen (d > 10) $ showString "GEq " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    SLTF x1 x2 ->
+      showParen (d > 10) $ showString "SLT " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    SGTF x1 x2 ->
+      showParen (d > 10) $ showString "SGT " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    EqF x1 x2 ->
+      showParen (d > 10) $ showString "Eq " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    IsZeroF x1 ->
+      showParen (d > 10) $ showString "IsZero " . showsPrec 11 x1
+    ITEF x1 x2 x3 ->
+      showParen (d > 10) $ showString "ITE " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2 . showChar ' ' . showsPrec 11 x3
+    AndF x1 x2 ->
+      showParen (d > 10) $ showString "And " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    OrF x1 x2 ->
+      showParen (d > 10) $ showString "Or " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    XorF x1 x2 ->
+      showParen (d > 10) $ showString "Xor " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    NotF x1 ->
+      showParen (d > 10) $ showString "Not " . showsPrec 11 x1
+    SHLF x1 x2 ->
+      showParen (d > 10) $ showString "SHL " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    SHRF x1 x2 ->
+      showParen (d > 10) $ showString "SHR " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    SARF x1 x2 ->
+      showParen (d > 10) $ showString "SAR " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    CLZF x1 ->
+      showParen (d > 10) $ showString "CLZ " . showsPrec 11 x1
+    KeccakF x1 ->
+      showParen (d > 10) $ showString "Keccak " . showsPrec 11 x1
+    OriginF          -> showString "Origin"        
+    BlockHashF x1 ->
+      showParen (d > 10) $ showString "BlockHash " . showsPrec 11 x1
+    CoinbaseF        -> showString "Coinbase"      
+    TimestampF       -> showString "Timestamp"     
+    BlockNumberF     -> showString "BlockNumber"   
+    PrevRandaoF      -> showString "PrevRandao"    
+    GasLimitF        -> showString "GasLimit"      
+    ChainIdF         -> showString "ChainId"       
+    BaseFeeF         -> showString "BaseFee"       
+    TxValueF         -> showString "TxValue"       
+    BalanceF x1 ->
+      showParen (d > 10) $ showString "Balance " . showsPrec 11 x1
+    GasF x1 x2 ->
+      showParen (d > 10) $ showString "Gas " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    CodeSizeF x1 ->
+      showParen (d > 10) $ showString "CodeSize " . showsPrec 11 x1
+    CodeHashF x1 ->
+      showParen (d > 10) $ showString "CodeHash " . showsPrec 11 x1
+    LogEntryF x1 x2 x3 ->
+      showParen (d > 10) $ showString "LogEntry " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2 . showChar ' ' . showsPrec 11 x3
+    CF x1 x2 x3 x4 x5 ->
+      showParen (d > 10) $ showString "C " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2 . showChar ' ' . showsPrec 11 x3 . showChar ' ' . showsPrec 11 x4 . showChar ' ' . showsPrec 11 x5
+    SymAddrF x1 ->
+      showParen (d > 10) $ showString "SymAddr " . showsPrec 11 x1
+    LitAddrF x1 ->
+      showParen (d > 10) $ showString "LitAddr " . showsPrec 11 x1
+    WAddrF x1 ->
+      showParen (d > 10) $ showString "WAddr " . showsPrec 11 x1
+    ConcreteStoreF x1 ->
+      showParen (d > 10) $ showString "ConcreteStore " . showsPrec 11 x1
+    AbstractStoreF x1 x2 ->
+      showParen (d > 10) $ showString "AbstractStore " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    SLoadF x1 x2 ->
+      showParen (d > 10) $ showString "SLoad " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    SStoreF x1 x2 x3 ->
+      showParen (d > 10) $ showString "SStore " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2 . showChar ' ' . showsPrec 11 x3
+    ConcreteBufF x1 ->
+      showParen (d > 10) $ showString "ConcreteBuf " . showsPrec 11 x1
+    AbstractBufF x1 ->
+      showParen (d > 10) $ showString "AbstractBuf " . showsPrec 11 x1
+    ReadWordF x1 x2 ->
+      showParen (d > 10) $ showString "ReadWord " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    ReadByteF x1 x2 ->
+      showParen (d > 10) $ showString "ReadByte " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2
+    WriteWordF x1 x2 x3 ->
+      showParen (d > 10) $ showString "WriteWord " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2 . showChar ' ' . showsPrec 11 x3
+    WriteByteF x1 x2 x3 ->
+      showParen (d > 10) $ showString "WriteByte " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2 . showChar ' ' . showsPrec 11 x3
+    CopySliceF x1 x2 x3 x4 x5 ->
+      showParen (d > 10) $ showString "CopySlice " . showsPrec 11 x1 . showChar ' ' . showsPrec 11 x2 . showChar ' ' . showsPrec 11 x3 . showChar ' ' . showsPrec 11 x4 . showChar ' ' . showsPrec 11 x5
+    BufLengthF x1 ->
+      showParen (d > 10) $ showString "BufLength " . showsPrec 11 x1
+deriving instance (forall b. Eq (r b)) => Eq (ExprF r a)
+deriving instance (forall b. Ord (r b)) => Ord (ExprF r a)
 
-  CopySlice      :: Expr EWord         -- src offset
-                 -> Expr EWord         -- dst offset
-                 -> Expr EWord         -- size
-                 -> Expr Buf           -- src
-                 -> Expr Buf           -- dst
-                 -> Expr Buf
+-- | An Expr node: its hash-consing identity, its index singleton, and one layer of structure.
+--
+-- @ident == 0@ means "no identity assigned" (hash-consing disabled, or the node predates the
+-- flag being switched on). Ids are globally unique and never reused, including across
+-- 'resetHashCons', so a non-zero id is a sound witness of term identity forever.
+data Expr (a :: EType) = Expr
+  { ident :: {-# UNPACK #-} !Int
+  , ety   :: !(SEType a)
+  , node  :: !(ExprF Expr a)
+  }
 
-  BufLength      :: Expr Buf -> Expr EWord
+-- | Structural key: one layer, children replaced by their ids. Shallow by construction, so a
+-- lookup never compares whole subterms.
+type ExprKey = ExprF (Const Int)
 
-deriving instance Show (Expr a)
-
--- The hand-written Eq/Ord instances below have semantics identical to the previously-derived
--- ones (constructor declaration order, fields compared left-to-right), but every recursive
--- comparison first checks physical identity. On hash-consed / shared terms (EVM.HashCons) this
--- makes comparisons O(size of the differing part) instead of O(logical tree size), which removes
--- the dominant cost of simplifier guards (a == b) and normalization compares on deeply-shared
--- symbolic terms.
-
--- | Constructor rank, mirroring declaration order so the hand-written Ord orders different
--- constructors exactly as the derived instance did.
-exprRank :: Expr a -> Int
-exprRank = \case
-  Lit {} -> 0
-  Var {} -> 1
-  GVar {} -> 2
-  LitByte {} -> 3
-  IndexWord {} -> 4
-  EqByte {} -> 5
-  JoinBytes {} -> 6
-  Partial {} -> 7
-  Failure {} -> 8
-  Success {} -> 9
-  Add {} -> 10
-  Sub {} -> 11
-  Mul {} -> 12
-  Div {} -> 13
-  SDiv {} -> 14
-  Mod {} -> 15
-  SMod {} -> 16
-  AddMod {} -> 17
-  MulMod {} -> 18
-  Exp {} -> 19
-  SEx {} -> 20
-  Min {} -> 21
-  Max {} -> 22
-  EVM.Types.LT {} -> 23
-  EVM.Types.GT {} -> 24
-  LEq {} -> 25
-  GEq {} -> 26
-  SLT {} -> 27
-  SGT {} -> 28
-  Eq {} -> 29
-  IsZero {} -> 30
-  ITE {} -> 31
-  And {} -> 32
-  Or {} -> 33
-  Xor {} -> 34
-  Not {} -> 35
-  SHL {} -> 36
-  SHR {} -> 37
-  SAR {} -> 38
-  CLZ {} -> 39
-  Keccak {} -> 40
-  Origin -> 41
-  BlockHash {} -> 42
-  Coinbase -> 43
-  Timestamp -> 44
-  BlockNumber -> 45
-  PrevRandao -> 46
-  GasLimit -> 47
-  ChainId -> 48
-  BaseFee -> 49
-  TxValue -> 50
-  Balance {} -> 51
-  Gas {} -> 52
-  CodeSize {} -> 53
-  CodeHash {} -> 54
-  LogEntry {} -> 55
-  C {} -> 56
-  SymAddr {} -> 57
-  LitAddr {} -> 58
-  WAddr {} -> 59
-  ConcreteStore {} -> 60
-  AbstractStore {} -> 61
-  SLoad {} -> 62
-  SStore {} -> 63
-  ConcreteBuf {} -> 64
-  AbstractBuf {} -> 65
-  ReadWord {} -> 66
-  ReadByte {} -> 67
-  WriteWord {} -> 68
-  WriteByte {} -> 69
-  CopySlice {} -> 70
-  BufLength {} -> 71
-
+-- Eq/Ord in two lines each. The id check is only a fast path -- it fires when both nodes are
+-- interned and identical -- and everything else falls through to the derived structural
+-- comparison on ExprF, which recurses back through these instances.
 instance Eq (Expr a) where
-  x == y = ptrEq x y || go x y
-    where
-      eqSC :: Eq c => c -> c -> Bool
-      eqSC u v = ptrEq u v || u Prelude.== v
-      go :: Expr b -> Expr b -> Bool
-      go (Lit x0a) (Lit x0b) = eqSC x0a x0b
-      go (Var x0a) (Var x0b) = eqSC x0a x0b
-      go (GVar x0a) (GVar x0b) = eqSC x0a x0b
-      go (LitByte x0a) (LitByte x0b) = eqSC x0a x0b
-      go (IndexWord x0a x1a) (IndexWord x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (EqByte x0a x1a) (EqByte x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (JoinBytes x0a x1a x2a x3a x4a x5a x6a x7a x8a x9a x10a x11a x12a x13a x14a x15a x16a x17a x18a x19a x20a x21a x22a x23a x24a x25a x26a x27a x28a x29a x30a x31a) (JoinBytes x0b x1b x2b x3b x4b x5b x6b x7b x8b x9b x10b x11b x12b x13b x14b x15b x16b x17b x18b x19b x20b x21b x22b x23b x24b x25b x26b x27b x28b x29b x30b x31b) = eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b && eqSC x3a x3b && eqSC x4a x4b && eqSC x5a x5b && eqSC x6a x6b && eqSC x7a x7b && eqSC x8a x8b && eqSC x9a x9b && eqSC x10a x10b && eqSC x11a x11b && eqSC x12a x12b && eqSC x13a x13b && eqSC x14a x14b && eqSC x15a x15b && eqSC x16a x16b && eqSC x17a x17b && eqSC x18a x18b && eqSC x19a x19b && eqSC x20a x20b && eqSC x21a x21b && eqSC x22a x22b && eqSC x23a x23b && eqSC x24a x24b && eqSC x25a x25b && eqSC x26a x26b && eqSC x27a x27b && eqSC x28a x28b && eqSC x29a x29b && eqSC x30a x30b && eqSC x31a x31b
-      go (Partial x0a x1a x2a) (Partial x0b x1b x2b) = eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b
-      go (Failure x0a x1a x2a) (Failure x0b x1b x2b) = eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b
-      go (Success x0a x1a x2a x3a) (Success x0b x1b x2b x3b) = eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b && eqSC x3a x3b
-      go (Add x0a x1a) (Add x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (Sub x0a x1a) (Sub x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (Mul x0a x1a) (Mul x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (Div x0a x1a) (Div x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (SDiv x0a x1a) (SDiv x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (Mod x0a x1a) (Mod x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (SMod x0a x1a) (SMod x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (AddMod x0a x1a x2a) (AddMod x0b x1b x2b) = eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b
-      go (MulMod x0a x1a x2a) (MulMod x0b x1b x2b) = eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b
-      go (Exp x0a x1a) (Exp x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (SEx x0a x1a) (SEx x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (Min x0a x1a) (Min x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (Max x0a x1a) (Max x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (EVM.Types.LT x0a x1a) (EVM.Types.LT x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (EVM.Types.GT x0a x1a) (EVM.Types.GT x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (LEq x0a x1a) (LEq x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (GEq x0a x1a) (GEq x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (SLT x0a x1a) (SLT x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (SGT x0a x1a) (SGT x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (Eq x0a x1a) (Eq x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (IsZero x0a) (IsZero x0b) = eqSC x0a x0b
-      go (ITE x0a x1a x2a) (ITE x0b x1b x2b) = eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b
-      go (And x0a x1a) (And x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (Or x0a x1a) (Or x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (Xor x0a x1a) (Xor x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (Not x0a) (Not x0b) = eqSC x0a x0b
-      go (SHL x0a x1a) (SHL x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (SHR x0a x1a) (SHR x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (SAR x0a x1a) (SAR x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (CLZ x0a) (CLZ x0b) = eqSC x0a x0b
-      go (Keccak x0a) (Keccak x0b) = eqSC x0a x0b
-      go Origin Origin = True
-      go (BlockHash x0a) (BlockHash x0b) = eqSC x0a x0b
-      go Coinbase Coinbase = True
-      go Timestamp Timestamp = True
-      go BlockNumber BlockNumber = True
-      go PrevRandao PrevRandao = True
-      go GasLimit GasLimit = True
-      go ChainId ChainId = True
-      go BaseFee BaseFee = True
-      go TxValue TxValue = True
-      go (Balance x0a) (Balance x0b) = eqSC x0a x0b
-      go (Gas x0a x1a) (Gas x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (CodeSize x0a) (CodeSize x0b) = eqSC x0a x0b
-      go (CodeHash x0a) (CodeHash x0b) = eqSC x0a x0b
-      go (LogEntry x0a x1a x2a) (LogEntry x0b x1b x2b) = eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b
-      go (C x0a x1a x2a x3a x4a) (C x0b x1b x2b x3b x4b) = eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b && eqSC x3a x3b && eqSC x4a x4b
-      go (SymAddr x0a) (SymAddr x0b) = eqSC x0a x0b
-      go (LitAddr x0a) (LitAddr x0b) = eqSC x0a x0b
-      go (WAddr x0a) (WAddr x0b) = eqSC x0a x0b
-      go (ConcreteStore x0a) (ConcreteStore x0b) = eqSC x0a x0b
-      go (AbstractStore x0a x1a) (AbstractStore x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (SLoad x0a x1a) (SLoad x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (SStore x0a x1a x2a) (SStore x0b x1b x2b) = eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b
-      go (ConcreteBuf x0a) (ConcreteBuf x0b) = eqSC x0a x0b
-      go (AbstractBuf x0a) (AbstractBuf x0b) = eqSC x0a x0b
-      go (ReadWord x0a x1a) (ReadWord x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (ReadByte x0a x1a) (ReadByte x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
-      go (WriteWord x0a x1a x2a) (WriteWord x0b x1b x2b) = eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b
-      go (WriteByte x0a x1a x2a) (WriteByte x0b x1b x2b) = eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b
-      go (CopySlice x0a x1a x2a x3a x4a) (CopySlice x0b x1b x2b x3b x4b) = eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b && eqSC x3a x3b && eqSC x4a x4b
-      go (BufLength x0a) (BufLength x0b) = eqSC x0a x0b
-      go _ _ = False
+  x == y = (x.ident /= 0 && x.ident == y.ident) || x.node == y.node
+  {-# INLINE (==) #-}
 
 instance Ord (Expr a) where
-  compare x y = if ptrEq x y then Prelude.EQ else go x y
-    where
-      cmpSC :: Ord c => c -> c -> Ordering
-      cmpSC u v = if ptrEq u v then Prelude.EQ else Prelude.compare u v
-      go :: Expr b -> Expr b -> Ordering
-      go (Lit x0a) (Lit x0b) = cmpSC x0a x0b
-      go (Var x0a) (Var x0b) = cmpSC x0a x0b
-      go (GVar x0a) (GVar x0b) = cmpSC x0a x0b
-      go (LitByte x0a) (LitByte x0b) = cmpSC x0a x0b
-      go (IndexWord x0a x1a) (IndexWord x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (EqByte x0a x1a) (EqByte x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (JoinBytes x0a x1a x2a x3a x4a x5a x6a x7a x8a x9a x10a x11a x12a x13a x14a x15a x16a x17a x18a x19a x20a x21a x22a x23a x24a x25a x26a x27a x28a x29a x30a x31a) (JoinBytes x0b x1b x2b x3b x4b x5b x6b x7b x8b x9b x10b x11b x12b x13b x14b x15b x16b x17b x18b x19b x20b x21b x22b x23b x24b x25b x26b x27b x28b x29b x30b x31b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b Prelude.<> cmpSC x3a x3b Prelude.<> cmpSC x4a x4b Prelude.<> cmpSC x5a x5b Prelude.<> cmpSC x6a x6b Prelude.<> cmpSC x7a x7b Prelude.<> cmpSC x8a x8b Prelude.<> cmpSC x9a x9b Prelude.<> cmpSC x10a x10b Prelude.<> cmpSC x11a x11b Prelude.<> cmpSC x12a x12b Prelude.<> cmpSC x13a x13b Prelude.<> cmpSC x14a x14b Prelude.<> cmpSC x15a x15b Prelude.<> cmpSC x16a x16b Prelude.<> cmpSC x17a x17b Prelude.<> cmpSC x18a x18b Prelude.<> cmpSC x19a x19b Prelude.<> cmpSC x20a x20b Prelude.<> cmpSC x21a x21b Prelude.<> cmpSC x22a x22b Prelude.<> cmpSC x23a x23b Prelude.<> cmpSC x24a x24b Prelude.<> cmpSC x25a x25b Prelude.<> cmpSC x26a x26b Prelude.<> cmpSC x27a x27b Prelude.<> cmpSC x28a x28b Prelude.<> cmpSC x29a x29b Prelude.<> cmpSC x30a x30b Prelude.<> cmpSC x31a x31b
-      go (Partial x0a x1a x2a) (Partial x0b x1b x2b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b
-      go (Failure x0a x1a x2a) (Failure x0b x1b x2b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b
-      go (Success x0a x1a x2a x3a) (Success x0b x1b x2b x3b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b Prelude.<> cmpSC x3a x3b
-      go (Add x0a x1a) (Add x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (Sub x0a x1a) (Sub x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (Mul x0a x1a) (Mul x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (Div x0a x1a) (Div x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (SDiv x0a x1a) (SDiv x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (Mod x0a x1a) (Mod x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (SMod x0a x1a) (SMod x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (AddMod x0a x1a x2a) (AddMod x0b x1b x2b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b
-      go (MulMod x0a x1a x2a) (MulMod x0b x1b x2b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b
-      go (Exp x0a x1a) (Exp x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (SEx x0a x1a) (SEx x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (Min x0a x1a) (Min x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (Max x0a x1a) (Max x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (EVM.Types.LT x0a x1a) (EVM.Types.LT x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (EVM.Types.GT x0a x1a) (EVM.Types.GT x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (LEq x0a x1a) (LEq x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (GEq x0a x1a) (GEq x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (SLT x0a x1a) (SLT x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (SGT x0a x1a) (SGT x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (Eq x0a x1a) (Eq x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (IsZero x0a) (IsZero x0b) = cmpSC x0a x0b
-      go (ITE x0a x1a x2a) (ITE x0b x1b x2b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b
-      go (And x0a x1a) (And x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (Or x0a x1a) (Or x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (Xor x0a x1a) (Xor x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (Not x0a) (Not x0b) = cmpSC x0a x0b
-      go (SHL x0a x1a) (SHL x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (SHR x0a x1a) (SHR x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (SAR x0a x1a) (SAR x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (CLZ x0a) (CLZ x0b) = cmpSC x0a x0b
-      go (Keccak x0a) (Keccak x0b) = cmpSC x0a x0b
-      go Origin Origin = Prelude.EQ
-      go (BlockHash x0a) (BlockHash x0b) = cmpSC x0a x0b
-      go Coinbase Coinbase = Prelude.EQ
-      go Timestamp Timestamp = Prelude.EQ
-      go BlockNumber BlockNumber = Prelude.EQ
-      go PrevRandao PrevRandao = Prelude.EQ
-      go GasLimit GasLimit = Prelude.EQ
-      go ChainId ChainId = Prelude.EQ
-      go BaseFee BaseFee = Prelude.EQ
-      go TxValue TxValue = Prelude.EQ
-      go (Balance x0a) (Balance x0b) = cmpSC x0a x0b
-      go (Gas x0a x1a) (Gas x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (CodeSize x0a) (CodeSize x0b) = cmpSC x0a x0b
-      go (CodeHash x0a) (CodeHash x0b) = cmpSC x0a x0b
-      go (LogEntry x0a x1a x2a) (LogEntry x0b x1b x2b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b
-      go (C x0a x1a x2a x3a x4a) (C x0b x1b x2b x3b x4b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b Prelude.<> cmpSC x3a x3b Prelude.<> cmpSC x4a x4b
-      go (SymAddr x0a) (SymAddr x0b) = cmpSC x0a x0b
-      go (LitAddr x0a) (LitAddr x0b) = cmpSC x0a x0b
-      go (WAddr x0a) (WAddr x0b) = cmpSC x0a x0b
-      go (ConcreteStore x0a) (ConcreteStore x0b) = cmpSC x0a x0b
-      go (AbstractStore x0a x1a) (AbstractStore x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (SLoad x0a x1a) (SLoad x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (SStore x0a x1a x2a) (SStore x0b x1b x2b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b
-      go (ConcreteBuf x0a) (ConcreteBuf x0b) = cmpSC x0a x0b
-      go (AbstractBuf x0a) (AbstractBuf x0b) = cmpSC x0a x0b
-      go (ReadWord x0a x1a) (ReadWord x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (ReadByte x0a x1a) (ReadByte x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
-      go (WriteWord x0a x1a x2a) (WriteWord x0b x1b x2b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b
-      go (WriteByte x0a x1a x2a) (WriteByte x0b x1b x2b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b
-      go (CopySlice x0a x1a x2a x3a x4a) (CopySlice x0b x1b x2b x3b x4b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b Prelude.<> cmpSC x3a x3b Prelude.<> cmpSC x4a x4b
-      go (BufLength x0a) (BufLength x0b) = cmpSC x0a x0b
-      go l r = Prelude.compare (exprRank l) (exprRank r)
+  compare x y
+    | x.ident /= 0 && x.ident == y.ident = Prelude.EQ
+    | otherwise = Prelude.compare x.node y.node
+  {-# INLINE compare #-}
+
+-- NOTE: this prints the ExprF constructor names, which carry an F suffix (@AddF@ rather than
+-- @Add@). Show output is cosmetic here -- it is not used to build SMT or as a map key -- but it
+-- is a visible change in error messages, and a hand-written instance restoring the old names is
+-- a worthwhile follow-up.
+instance Show (Expr a) where
+  showsPrec d x = showsPrec d x.node
+
+-- | The single generic traversal over a node's children. Everything structural in EVM.Traversals
+-- is derived from this.
+--
+-- The @forall x. Ord (s x)@ constraint exists only because SuccessF carries a Map keyed by an
+-- Expr, and rebuilding a Map needs Ord on its keys.
+htraverse
+  :: forall f r s a
+   . (Applicative f, forall x. Ord (s x))
+  => (forall x. r x -> f (s x)) -> ExprF r a -> f (ExprF s a)
+htraverse f = \case
+  LitF w             -> pure (LitF w)
+  VarF t             -> pure (VarF t)
+  GVarF g            -> pure (GVarF g)
+  LitByteF w         -> pure (LitByteF w)
+  IndexWordF a b     -> IndexWordF <$> f a <*> f b
+  EqByteF a b        -> EqByteF <$> f a <*> f b
+  JoinBytesF b0 b1 b2 b3 b4 b5 b6 b7 b8 b9 b10 b11 b12 b13 b14 b15
+             b16 b17 b18 b19 b20 b21 b22 b23 b24 b25 b26 b27 b28 b29 b30 b31 ->
+    JoinBytesF <$> f b0 <*> f b1 <*> f b2 <*> f b3 <*> f b4 <*> f b5 <*> f b6 <*> f b7
+               <*> f b8 <*> f b9 <*> f b10 <*> f b11 <*> f b12 <*> f b13 <*> f b14 <*> f b15
+               <*> f b16 <*> f b17 <*> f b18 <*> f b19 <*> f b20 <*> f b21 <*> f b22 <*> f b23
+               <*> f b24 <*> f b25 <*> f b26 <*> f b27 <*> f b28 <*> f b29 <*> f b30 <*> f b31
+  PartialF ps tc pe  -> pure (PartialF ps tc pe)
+  FailureF ps tc e   -> pure (FailureF ps tc e)
+  SuccessF ps tc b m -> SuccessF ps tc <$> f b <*> traverseMap m
+  AddF a b           -> AddF <$> f a <*> f b
+  SubF a b           -> SubF <$> f a <*> f b
+  MulF a b           -> MulF <$> f a <*> f b
+  DivF a b           -> DivF <$> f a <*> f b
+  SDivF a b          -> SDivF <$> f a <*> f b
+  ModF a b           -> ModF <$> f a <*> f b
+  SModF a b          -> SModF <$> f a <*> f b
+  AddModF a b c      -> AddModF <$> f a <*> f b <*> f c
+  MulModF a b c      -> MulModF <$> f a <*> f b <*> f c
+  ExpF a b           -> ExpF <$> f a <*> f b
+  SExF a b           -> SExF <$> f a <*> f b
+  MinF a b           -> MinF <$> f a <*> f b
+  MaxF a b           -> MaxF <$> f a <*> f b
+  LTF a b            -> LTF <$> f a <*> f b
+  GTF a b            -> GTF <$> f a <*> f b
+  LEqF a b           -> LEqF <$> f a <*> f b
+  GEqF a b           -> GEqF <$> f a <*> f b
+  SLTF a b           -> SLTF <$> f a <*> f b
+  SGTF a b           -> SGTF <$> f a <*> f b
+  EqF a b            -> EqF <$> f a <*> f b
+  IsZeroF a          -> IsZeroF <$> f a
+  ITEF a b c         -> ITEF <$> f a <*> f b <*> f c
+  AndF a b           -> AndF <$> f a <*> f b
+  OrF a b            -> OrF <$> f a <*> f b
+  XorF a b           -> XorF <$> f a <*> f b
+  NotF a             -> NotF <$> f a
+  SHLF a b           -> SHLF <$> f a <*> f b
+  SHRF a b           -> SHRF <$> f a <*> f b
+  SARF a b           -> SARF <$> f a <*> f b
+  CLZF a             -> CLZF <$> f a
+  KeccakF a          -> KeccakF <$> f a
+  OriginF            -> pure OriginF
+  BlockHashF a       -> BlockHashF <$> f a
+  CoinbaseF          -> pure CoinbaseF
+  TimestampF         -> pure TimestampF
+  BlockNumberF       -> pure BlockNumberF
+  PrevRandaoF        -> pure PrevRandaoF
+  GasLimitF          -> pure GasLimitF
+  ChainIdF           -> pure ChainIdF
+  BaseFeeF           -> pure BaseFeeF
+  TxValueF           -> pure TxValueF
+  BalanceF a         -> BalanceF <$> f a
+  GasF p i           -> pure (GasF p i)
+  CodeSizeF a        -> CodeSizeF <$> f a
+  CodeHashF a        -> CodeHashF <$> f a
+  LogEntryF a b ts   -> LogEntryF <$> f a <*> f b <*> traverse f ts
+  CF co st ts bal n  -> (\st' ts' bal' -> CF co st' ts' bal' n) <$> f st <*> f ts <*> f bal
+  SymAddrF t         -> pure (SymAddrF t)
+  LitAddrF a         -> pure (LitAddrF a)
+  WAddrF a           -> WAddrF <$> f a
+  ConcreteStoreF m   -> pure (ConcreteStoreF m)
+  AbstractStoreF a m -> AbstractStoreF <$> f a <*> pure m
+  SLoadF a b         -> SLoadF <$> f a <*> f b
+  SStoreF a b c      -> SStoreF <$> f a <*> f b <*> f c
+  ConcreteBufF b     -> pure (ConcreteBufF b)
+  AbstractBufF t     -> pure (AbstractBufF t)
+  ReadWordF a b      -> ReadWordF <$> f a <*> f b
+  ReadByteF a b      -> ReadByteF <$> f a <*> f b
+  WriteWordF a b c   -> WriteWordF <$> f a <*> f b <*> f c
+  WriteByteF a b c   -> WriteByteF <$> f a <*> f b <*> f c
+  CopySliceF a b c d e -> CopySliceF <$> f a <*> f b <*> f c <*> f d <*> f e
+  BufLengthF a       -> BufLengthF <$> f a
+  where
+    traverseMap :: Map (r EAddr) (r EContract) -> f (Map (s EAddr) (s EContract))
+    traverseMap m =
+      Map.fromList <$> traverse (\(k, v) -> (,) <$> f k <*> f v) (Map.toList m)
+
+-- | Applicative used to fold over children without building a new node.
+newtype AccF m b = AccF m
+
+instance Functor (AccF m) where
+  fmap _ (AccF m) = AccF m
+instance Monoid m => Applicative (AccF m) where
+  pure _ = AccF mempty
+  AccF a <*> AccF b = AccF (a <> b)
+
+-- | Dummy carrier for folds: htraverse's target only needs an Ord instance, never inspected.
+data NoInfo (x :: EType) = NoInfo
+instance Eq (NoInfo x) where _ == _ = True
+instance Ord (NoInfo x) where compare _ _ = Prelude.EQ
+
+-- | Fold over a node's immediate children.
+hfoldMap :: forall m r a. Monoid m => (forall x. r x -> m) -> ExprF r a -> m
+hfoldMap f n = case htraverse @(AccF m) @r @NoInfo (\c -> AccF (f c)) n of AccF m -> m
+
+hmap :: (forall x. Ord (s x)) => (forall x. r x -> s x) -> ExprF r a -> ExprF s a
+hmap f = runIdentity . htraverse (Identity . f)
+
+-- | Immediate children of a node, type-erased.
+childrenOf :: ExprF Expr a -> [SomeChild]
+childrenOf = hfoldMap (\c -> [SomeChild c])
+
+-- | A node's child with its index hidden, for folds over children.
+data SomeChild = forall x. SomeChild (Expr x)
+
+-- Hash-consing ------------------------------------------------------------------------------------
+--
+-- The tables live here rather than in EVM.HashCons because the pattern synonyms below construct
+-- through 'mkWith', and EVM.HashCons imports EVM.Types.
+
+-- | One table per interned index. EContract / End / Log are absent: those nodes are unique by
+-- construction and are only given a fresh id.
+data HCTables = HCTables
+  { hcW    :: !(Map (ExprKey EWord) (Expr EWord))
+  , hcBy   :: !(Map (ExprKey Byte) (Expr Byte))
+  , hcBu   :: !(Map (ExprKey Buf) (Expr Buf))
+  , hcSt   :: !(Map (ExprKey Storage) (Expr Storage))
+  , hcAd   :: !(Map (ExprKey EAddr) (Expr EAddr))
+  , hcNext :: !Int
+  }
+
+emptyHCTables :: HCTables
+emptyHCTables = HCTables Map.empty Map.empty Map.empty Map.empty Map.empty 1  -- 0 is reserved
+
+{-# NOINLINE hcTables #-}
+hcTables :: IORef HCTables
+hcTables = unsafePerformIO (newIORef emptyHCTables)
+
+{-# NOINLINE hcEnabled #-}
+hcEnabled :: IORef Bool
+hcEnabled = unsafePerformIO (newIORef False)
+
+-- | Turn construction-time hash-consing on or off.
+--
+-- IMPORTANT: this must be set before any Expr is constructed and not toggled afterwards. Nodes
+-- built while it was off carry @ident == 0@, and 'mkWith' then refuses to key anything above
+-- them (see the guard below), so flipping it on mid-run silently buys nothing.
+setHashConsEnabled :: Bool -> IO ()
+setHashConsEnabled = writeIORef hcEnabled
+
+-- | Drop the tables between explorations. hcNext deliberately survives: ids are never reused, so
+-- a node that outlives the reset can never collide with a newly built one.
+resetHashCons :: IO ()
+resetHashCons = do
+  atomicModifyIORef' hcTables $ \t -> (emptyHCTables { hcNext = t.hcNext }, ())
+  writeIORef hcMemos IM.empty
+
+-- | Whether hash-consing is on. Takes the term so the read carries a data dependency and cannot
+-- be floated out and shared across calls; the flag can change between explorations.
+--
+-- Only ever used to choose between two equivalent traversals, so a stale read costs performance
+-- and never correctness.
+hashConsEnabled :: Expr b -> Bool
+hashConsEnabled x = unsafePerformIO (x `seq` readIORef hcEnabled)
+{-# NOINLINE hashConsEnabled #-}
+
+-- | Decidable equality on the index singleton. Used to recover a memoized result at the node's
+-- own index; no unsafeCoerce required.
+sameEType :: SEType a -> SEType b -> Maybe (a :~: b)
+sameEType SEWord SEWord         = Just Refl
+sameEType SByte SByte           = Just Refl
+sameEType SBuf SBuf             = Just Refl
+sameEType SStorage SStorage     = Just Refl
+sameEType SEAddr SEAddr         = Just Refl
+sameEType SEContract SEContract = Just Refl
+sameEType SEnd SEnd             = Just Refl
+sameEType SLog SLog             = Just Refl
+sameEType _ _                   = Nothing
+
+-- | Per-pass memo of simplification results: pass slot -> node id -> result. A node's result has
+-- the same index as the node, and the stored singleton recovers it at that index.
+data MemoVal = forall x. MemoVal !(SEType x) !(Expr x)
+
+{-# NOINLINE hcMemos #-}
+hcMemos :: IORef (IM.IntMap (IM.IntMap MemoVal))
+hcMemos = unsafePerformIO (newIORef IM.empty)
+
+lookupMemo :: Int -> Expr a -> IO (Maybe (Expr a))
+lookupMemo slot e = do
+  ms <- readIORef hcMemos
+  pure $ case IM.lookup slot ms >>= IM.lookup e.ident of
+    Nothing -> Nothing
+    -- the index can only differ if two nodes shared an id, which cannot happen: ids are unique
+    -- and never reused, including across resetHashCons
+    Just (MemoVal s v) -> case sameEType s e.ety of
+      Just Refl -> Just v
+      Nothing   -> Nothing
+
+insertMemo :: Int -> Expr a -> Expr a -> IO ()
+insertMemo slot e r =
+  atomicModifyIORef' hcMemos $ \ms ->
+    (IM.insertWith IM.union slot (IM.singleton e.ident (MemoVal e.ety r)) ms, ())
+
+-- | Which table a node of this index belongs in, if any.
+data HCSlot a = HCSlot
+  { slotGet :: HCTables -> Map (ExprKey a) (Expr a)
+  , slotSet :: HCTables -> Map (ExprKey a) (Expr a) -> HCTables
+  }
+
+hcSlotFor :: SEType a -> Maybe (HCSlot a)
+hcSlotFor = \case
+  SEWord   -> Just (HCSlot (.hcW)  (\t m -> t { hcW  = m }))
+  SByte    -> Just (HCSlot (.hcBy) (\t m -> t { hcBy = m }))
+  SBuf     -> Just (HCSlot (.hcBu) (\t m -> t { hcBu = m }))
+  SStorage -> Just (HCSlot (.hcSt) (\t m -> t { hcSt = m }))
+  SEAddr   -> Just (HCSlot (.hcAd) (\t m -> t { hcAd = m }))
+  _        -> Nothing
+
+-- | The one smart constructor. Every pattern synonym below builds through it, so every
+-- construction site in the codebase hash-conses without any call-site change.
+mkWith :: SEType a -> ExprF Expr a -> Expr a
+mkWith s n = unsafePerformIO $ do
+  en <- readIORef hcEnabled
+  if not en
+    then pure (Expr 0 s n)
+    else do
+      let cs = childrenOf n
+      -- Force every child to WHNF BEFORE the atomic section. Computing the structural key reads
+      -- each child's ident; a child still held as an unevaluated mkWith thunk would re-enter
+      -- atomicModifyIORef' on hcTables while the outer modify is in flight, and the RTS reports
+      -- <<loop>> on the blackhole.
+      mapM_ (\(SomeChild c) -> c `seq` pure ()) cs
+      -- Soundness guard: ident 0 means "no identity", so two structurally DIFFERENT uninterned
+      -- children both key as Const 0 and the nodes above them would be merged. Give any node
+      -- with a 0-ident child a fresh unique id and keep it out of the table: we lose sharing
+      -- above uninterned terms, never soundness.
+      let keyable = all (\(SomeChild c) -> c.ident /= 0) cs
+      case if keyable then hcSlotFor s else Nothing of
+        Nothing -> do
+          i <- atomicModifyIORef' hcTables $ \t -> (t { hcNext = t.hcNext + 1 }, t.hcNext)
+          pure (Expr i s n)
+        Just sl -> do
+          let !k = hmap (Const . (.ident)) n
+          atomicModifyIORef' hcTables $ \t ->
+            case Map.lookup k (sl.slotGet t) of
+              Just c -> (t, c)
+              Nothing ->
+                let i = t.hcNext
+                    e = Expr i s n
+                in ((sl.slotSet t (Map.insert k e (sl.slotGet t))) { hcNext = i + 1 }, e)
+{-# NOINLINE mkWith #-}
+
+-- | Rebuild a node at the same index as an existing one. Used by traversals, which always have
+-- the original node in hand and so never need a KnownEType-style constraint.
+remake :: Expr a -> ExprF Expr a -> Expr a
+remake old n = mkWith old.ety n
+{-# INLINE remake #-}
+
+-- Pattern synonyms ---------------------------------------------------------------------------------
+--
+-- These restore the original constructor API, so no call site in the codebase changes.
+--
+-- Every signature is GADT-style: @() => (a ~ Idx) => ... -> Expr a@. The naive monomorphic form
+-- @... -> Expr Idx@ also compiles, but matching it against a polymorphic @Expr a@ provides no
+-- type refinement, which breaks every rule in EVM.Expr.simplify. In expression position a
+-- pattern synonym has type @(CReq, CProv) => ...@, so the builder still works at the fixed index.
+
+pattern Lit :: () => (a ~ EWord) => W256 -> Expr a
+pattern Lit w <- Expr _ _ (LitF w) where Lit w = mkWith SEWord (LitF w)
+
+pattern Var :: () => (a ~ EWord) => Text -> Expr a
+pattern Var t <- Expr _ _ (VarF t) where Var t = mkWith SEWord (VarF t)
+
+-- index-polymorphic, so no provided equality: matches at any index, like the original
+pattern GVar :: GVar a -> Expr a
+pattern GVar g <- Expr _ _ (GVarF g) where GVar g = mkWith (gvarEType g) (GVarF g)
+
+pattern LitByte :: () => (a ~ Byte) => Word8 -> Expr a
+pattern LitByte w <- Expr _ _ (LitByteF w) where LitByte w = mkWith SByte (LitByteF w)
+
+pattern IndexWord :: () => (a ~ Byte) => Expr EWord -> Expr EWord -> Expr a
+pattern IndexWord x y <- Expr _ _ (IndexWordF x y) where IndexWord x y = mkWith SByte (IndexWordF x y)
+
+pattern EqByte :: () => (a ~ EWord) => Expr Byte -> Expr Byte -> Expr a
+pattern EqByte x y <- Expr _ _ (EqByteF x y) where EqByte x y = mkWith SEWord (EqByteF x y)
+
+pattern JoinBytes :: () => (a ~ EWord)
+                  => Expr Byte -> Expr Byte -> Expr Byte -> Expr Byte
+                  -> Expr Byte -> Expr Byte -> Expr Byte -> Expr Byte
+                  -> Expr Byte -> Expr Byte -> Expr Byte -> Expr Byte
+                  -> Expr Byte -> Expr Byte -> Expr Byte -> Expr Byte
+                  -> Expr Byte -> Expr Byte -> Expr Byte -> Expr Byte
+                  -> Expr Byte -> Expr Byte -> Expr Byte -> Expr Byte
+                  -> Expr Byte -> Expr Byte -> Expr Byte -> Expr Byte
+                  -> Expr Byte -> Expr Byte -> Expr Byte -> Expr Byte
+                  -> Expr a
+pattern JoinBytes b0 b1 b2 b3 b4 b5 b6 b7 b8 b9 b10 b11 b12 b13 b14 b15
+                  b16 b17 b18 b19 b20 b21 b22 b23 b24 b25 b26 b27 b28 b29 b30 b31
+  <- Expr _ _ (JoinBytesF b0 b1 b2 b3 b4 b5 b6 b7 b8 b9 b10 b11 b12 b13 b14 b15
+                          b16 b17 b18 b19 b20 b21 b22 b23 b24 b25 b26 b27 b28 b29 b30 b31)
+  where JoinBytes b0 b1 b2 b3 b4 b5 b6 b7 b8 b9 b10 b11 b12 b13 b14 b15
+                  b16 b17 b18 b19 b20 b21 b22 b23 b24 b25 b26 b27 b28 b29 b30 b31
+          = mkWith SEWord (JoinBytesF b0 b1 b2 b3 b4 b5 b6 b7 b8 b9 b10 b11 b12 b13 b14 b15
+                                      b16 b17 b18 b19 b20 b21 b22 b23 b24 b25 b26 b27 b28 b29 b30 b31)
+
+pattern Partial :: () => (a ~ End) => [Prop] -> TraceContext -> PartialExec -> Expr a
+pattern Partial ps tc pe <- Expr _ _ (PartialF ps tc pe)
+  where Partial ps tc pe = mkWith SEnd (PartialF ps tc pe)
+
+pattern Failure :: () => (a ~ End) => [Prop] -> TraceContext -> EvmError -> Expr a
+pattern Failure ps tc e <- Expr _ _ (FailureF ps tc e)
+  where Failure ps tc e = mkWith SEnd (FailureF ps tc e)
+
+pattern Success :: () => (a ~ End)
+                => [Prop] -> TraceContext -> Expr Buf -> Map (Expr EAddr) (Expr EContract) -> Expr a
+pattern Success ps tc b m <- Expr _ _ (SuccessF ps tc b m)
+  where Success ps tc b m = mkWith SEnd (SuccessF ps tc b m)
+
+pattern Add :: () => (a ~ EWord) => Expr EWord -> Expr EWord -> Expr a
+pattern Add x y <- Expr _ _ (AddF x y) where Add x y = mkWith SEWord (AddF x y)
+
+pattern Sub :: () => (a ~ EWord) => Expr EWord -> Expr EWord -> Expr a
+pattern Sub x y <- Expr _ _ (SubF x y) where Sub x y = mkWith SEWord (SubF x y)
+
+pattern Mul :: () => (a ~ EWord) => Expr EWord -> Expr EWord -> Expr a
+pattern Mul x y <- Expr _ _ (MulF x y) where Mul x y = mkWith SEWord (MulF x y)
+
+pattern Div :: () => (a ~ EWord) => Expr EWord -> Expr EWord -> Expr a
+pattern Div x y <- Expr _ _ (DivF x y) where Div x y = mkWith SEWord (DivF x y)
+
+pattern SDiv :: () => (a ~ EWord) => Expr EWord -> Expr EWord -> Expr a
+pattern SDiv x y <- Expr _ _ (SDivF x y) where SDiv x y = mkWith SEWord (SDivF x y)
+
+pattern Mod :: () => (a ~ EWord) => Expr EWord -> Expr EWord -> Expr a
+pattern Mod x y <- Expr _ _ (ModF x y) where Mod x y = mkWith SEWord (ModF x y)
+
+pattern SMod :: () => (a ~ EWord) => Expr EWord -> Expr EWord -> Expr a
+pattern SMod x y <- Expr _ _ (SModF x y) where SMod x y = mkWith SEWord (SModF x y)
+
+pattern AddMod :: () => (a ~ EWord) => Expr EWord -> Expr EWord -> Expr EWord -> Expr a
+pattern AddMod x y z <- Expr _ _ (AddModF x y z) where AddMod x y z = mkWith SEWord (AddModF x y z)
+
+pattern MulMod :: () => (a ~ EWord) => Expr EWord -> Expr EWord -> Expr EWord -> Expr a
+pattern MulMod x y z <- Expr _ _ (MulModF x y z) where MulMod x y z = mkWith SEWord (MulModF x y z)
+
+pattern Exp :: () => (a ~ EWord) => Expr EWord -> Expr EWord -> Expr a
+pattern Exp x y <- Expr _ _ (ExpF x y) where Exp x y = mkWith SEWord (ExpF x y)
+
+pattern SEx :: () => (a ~ EWord) => Expr EWord -> Expr EWord -> Expr a
+pattern SEx x y <- Expr _ _ (SExF x y) where SEx x y = mkWith SEWord (SExF x y)
+
+pattern Min :: () => (a ~ EWord) => Expr EWord -> Expr EWord -> Expr a
+pattern Min x y <- Expr _ _ (MinF x y) where Min x y = mkWith SEWord (MinF x y)
+
+pattern Max :: () => (a ~ EWord) => Expr EWord -> Expr EWord -> Expr a
+pattern Max x y <- Expr _ _ (MaxF x y) where Max x y = mkWith SEWord (MaxF x y)
+
+pattern LT :: () => (a ~ EWord) => Expr EWord -> Expr EWord -> Expr a
+pattern LT x y <- Expr _ _ (LTF x y) where LT x y = mkWith SEWord (LTF x y)
+
+pattern GT :: () => (a ~ EWord) => Expr EWord -> Expr EWord -> Expr a
+pattern GT x y <- Expr _ _ (GTF x y) where GT x y = mkWith SEWord (GTF x y)
+
+pattern LEq :: () => (a ~ EWord) => Expr EWord -> Expr EWord -> Expr a
+pattern LEq x y <- Expr _ _ (LEqF x y) where LEq x y = mkWith SEWord (LEqF x y)
+
+pattern GEq :: () => (a ~ EWord) => Expr EWord -> Expr EWord -> Expr a
+pattern GEq x y <- Expr _ _ (GEqF x y) where GEq x y = mkWith SEWord (GEqF x y)
+
+pattern SLT :: () => (a ~ EWord) => Expr EWord -> Expr EWord -> Expr a
+pattern SLT x y <- Expr _ _ (SLTF x y) where SLT x y = mkWith SEWord (SLTF x y)
+
+pattern SGT :: () => (a ~ EWord) => Expr EWord -> Expr EWord -> Expr a
+pattern SGT x y <- Expr _ _ (SGTF x y) where SGT x y = mkWith SEWord (SGTF x y)
+
+pattern Eq :: () => (a ~ EWord) => Expr EWord -> Expr EWord -> Expr a
+pattern Eq x y <- Expr _ _ (EqF x y) where Eq x y = mkWith SEWord (EqF x y)
+
+pattern IsZero :: () => (a ~ EWord) => Expr EWord -> Expr a
+pattern IsZero x <- Expr _ _ (IsZeroF x) where IsZero x = mkWith SEWord (IsZeroF x)
+
+pattern ITE :: () => (a ~ EWord) => Expr EWord -> Expr EWord -> Expr EWord -> Expr a
+pattern ITE x y z <- Expr _ _ (ITEF x y z) where ITE x y z = mkWith SEWord (ITEF x y z)
+
+pattern And :: () => (a ~ EWord) => Expr EWord -> Expr EWord -> Expr a
+pattern And x y <- Expr _ _ (AndF x y) where And x y = mkWith SEWord (AndF x y)
+
+pattern Or :: () => (a ~ EWord) => Expr EWord -> Expr EWord -> Expr a
+pattern Or x y <- Expr _ _ (OrF x y) where Or x y = mkWith SEWord (OrF x y)
+
+pattern Xor :: () => (a ~ EWord) => Expr EWord -> Expr EWord -> Expr a
+pattern Xor x y <- Expr _ _ (XorF x y) where Xor x y = mkWith SEWord (XorF x y)
+
+pattern Not :: () => (a ~ EWord) => Expr EWord -> Expr a
+pattern Not x <- Expr _ _ (NotF x) where Not x = mkWith SEWord (NotF x)
+
+pattern SHL :: () => (a ~ EWord) => Expr EWord -> Expr EWord -> Expr a
+pattern SHL x y <- Expr _ _ (SHLF x y) where SHL x y = mkWith SEWord (SHLF x y)
+
+pattern SHR :: () => (a ~ EWord) => Expr EWord -> Expr EWord -> Expr a
+pattern SHR x y <- Expr _ _ (SHRF x y) where SHR x y = mkWith SEWord (SHRF x y)
+
+pattern SAR :: () => (a ~ EWord) => Expr EWord -> Expr EWord -> Expr a
+pattern SAR x y <- Expr _ _ (SARF x y) where SAR x y = mkWith SEWord (SARF x y)
+
+pattern CLZ :: () => (a ~ EWord) => Expr EWord -> Expr a
+pattern CLZ x <- Expr _ _ (CLZF x) where CLZ x = mkWith SEWord (CLZF x)
+
+pattern Keccak :: () => (a ~ EWord) => Expr Buf -> Expr a
+pattern Keccak x <- Expr _ _ (KeccakF x) where Keccak x = mkWith SEWord (KeccakF x)
+
+pattern Origin :: () => (a ~ EWord) => Expr a
+pattern Origin <- Expr _ _ OriginF where Origin = mkWith SEWord OriginF
+
+pattern BlockHash :: () => (a ~ EWord) => Expr EWord -> Expr a
+pattern BlockHash x <- Expr _ _ (BlockHashF x) where BlockHash x = mkWith SEWord (BlockHashF x)
+
+pattern Coinbase :: () => (a ~ EWord) => Expr a
+pattern Coinbase <- Expr _ _ CoinbaseF where Coinbase = mkWith SEWord CoinbaseF
+
+pattern Timestamp :: () => (a ~ EWord) => Expr a
+pattern Timestamp <- Expr _ _ TimestampF where Timestamp = mkWith SEWord TimestampF
+
+pattern BlockNumber :: () => (a ~ EWord) => Expr a
+pattern BlockNumber <- Expr _ _ BlockNumberF where BlockNumber = mkWith SEWord BlockNumberF
+
+pattern PrevRandao :: () => (a ~ EWord) => Expr a
+pattern PrevRandao <- Expr _ _ PrevRandaoF where PrevRandao = mkWith SEWord PrevRandaoF
+
+pattern GasLimit :: () => (a ~ EWord) => Expr a
+pattern GasLimit <- Expr _ _ GasLimitF where GasLimit = mkWith SEWord GasLimitF
+
+pattern ChainId :: () => (a ~ EWord) => Expr a
+pattern ChainId <- Expr _ _ ChainIdF where ChainId = mkWith SEWord ChainIdF
+
+pattern BaseFee :: () => (a ~ EWord) => Expr a
+pattern BaseFee <- Expr _ _ BaseFeeF where BaseFee = mkWith SEWord BaseFeeF
+
+pattern TxValue :: () => (a ~ EWord) => Expr a
+pattern TxValue <- Expr _ _ TxValueF where TxValue = mkWith SEWord TxValueF
+
+pattern Balance :: () => (a ~ EWord) => Expr EAddr -> Expr a
+pattern Balance x <- Expr _ _ (BalanceF x) where Balance x = mkWith SEWord (BalanceF x)
+
+pattern Gas :: () => (a ~ EWord) => Text -> Int -> Expr a
+pattern Gas p i <- Expr _ _ (GasF p i) where Gas p i = mkWith SEWord (GasF p i)
+
+pattern CodeSize :: () => (a ~ EWord) => Expr EAddr -> Expr a
+pattern CodeSize x <- Expr _ _ (CodeSizeF x) where CodeSize x = mkWith SEWord (CodeSizeF x)
+
+pattern CodeHash :: () => (a ~ EWord) => Expr EAddr -> Expr a
+pattern CodeHash x <- Expr _ _ (CodeHashF x) where CodeHash x = mkWith SEWord (CodeHashF x)
+
+pattern LogEntry :: () => (a ~ Log) => Expr EWord -> Expr Buf -> [Expr EWord] -> Expr a
+pattern LogEntry x y ts <- Expr _ _ (LogEntryF x y ts)
+  where LogEntry x y ts = mkWith SLog (LogEntryF x y ts)
+
+pattern C :: () => (a ~ EContract)
+          => ContractCode -> Expr Storage -> Expr Storage -> Expr EWord -> Maybe W64 -> Expr a
+pattern C co st ts bal n <- Expr _ _ (CF co st ts bal n)
+  where C co st ts bal n = mkWith SEContract (CF co st ts bal n)
+
+pattern SymAddr :: () => (a ~ EAddr) => Text -> Expr a
+pattern SymAddr t <- Expr _ _ (SymAddrF t) where SymAddr t = mkWith SEAddr (SymAddrF t)
+
+pattern LitAddr :: () => (a ~ EAddr) => Addr -> Expr a
+pattern LitAddr x <- Expr _ _ (LitAddrF x) where LitAddr x = mkWith SEAddr (LitAddrF x)
+
+pattern WAddr :: () => (a ~ EWord) => Expr EAddr -> Expr a
+pattern WAddr x <- Expr _ _ (WAddrF x) where WAddr x = mkWith SEWord (WAddrF x)
+
+pattern ConcreteStore :: () => (a ~ Storage) => Map W256 W256 -> Expr a
+pattern ConcreteStore m <- Expr _ _ (ConcreteStoreF m)
+  where ConcreteStore m = mkWith SStorage (ConcreteStoreF m)
+
+pattern AbstractStore :: () => (a ~ Storage) => Expr EAddr -> Maybe W256 -> Expr a
+pattern AbstractStore x m <- Expr _ _ (AbstractStoreF x m)
+  where AbstractStore x m = mkWith SStorage (AbstractStoreF x m)
+
+pattern SLoad :: () => (a ~ EWord) => Expr EWord -> Expr Storage -> Expr a
+pattern SLoad x y <- Expr _ _ (SLoadF x y) where SLoad x y = mkWith SEWord (SLoadF x y)
+
+pattern SStore :: () => (a ~ Storage) => Expr EWord -> Expr EWord -> Expr Storage -> Expr a
+pattern SStore x y z <- Expr _ _ (SStoreF x y z) where SStore x y z = mkWith SStorage (SStoreF x y z)
+
+pattern ConcreteBuf :: () => (a ~ Buf) => ByteString -> Expr a
+pattern ConcreteBuf b <- Expr _ _ (ConcreteBufF b) where ConcreteBuf b = mkWith SBuf (ConcreteBufF b)
+
+pattern AbstractBuf :: () => (a ~ Buf) => Text -> Expr a
+pattern AbstractBuf t <- Expr _ _ (AbstractBufF t) where AbstractBuf t = mkWith SBuf (AbstractBufF t)
+
+pattern ReadWord :: () => (a ~ EWord) => Expr EWord -> Expr Buf -> Expr a
+pattern ReadWord x y <- Expr _ _ (ReadWordF x y) where ReadWord x y = mkWith SEWord (ReadWordF x y)
+
+pattern ReadByte :: () => (a ~ Byte) => Expr EWord -> Expr Buf -> Expr a
+pattern ReadByte x y <- Expr _ _ (ReadByteF x y) where ReadByte x y = mkWith SByte (ReadByteF x y)
+
+pattern WriteWord :: () => (a ~ Buf) => Expr EWord -> Expr EWord -> Expr Buf -> Expr a
+pattern WriteWord x y z <- Expr _ _ (WriteWordF x y z)
+  where WriteWord x y z = mkWith SBuf (WriteWordF x y z)
+
+pattern WriteByte :: () => (a ~ Buf) => Expr EWord -> Expr Byte -> Expr Buf -> Expr a
+pattern WriteByte x y z <- Expr _ _ (WriteByteF x y z)
+  where WriteByte x y z = mkWith SBuf (WriteByteF x y z)
+
+pattern CopySlice :: () => (a ~ Buf)
+                  => Expr EWord -> Expr EWord -> Expr EWord -> Expr Buf -> Expr Buf -> Expr a
+pattern CopySlice s d n src dst <- Expr _ _ (CopySliceF s d n src dst)
+  where CopySlice s d n src dst = mkWith SBuf (CopySliceF s d n src dst)
+
+pattern BufLength :: () => (a ~ EWord) => Expr Buf -> Expr a
+pattern BufLength x <- Expr _ _ (BufLengthF x) where BufLength x = mkWith SEWord (BufLengthF x)
+
+-- All 72 alternatives, so exhaustiveness checking keeps working. LT/GT/Eq are qualified to
+-- disambiguate them from Prelude's Ordering constructors and Eq class.
+{-# COMPLETE Lit, Var, GVar, LitByte, IndexWord, EqByte, JoinBytes, Partial, Failure, Success,
+             Add, Sub, Mul, Div, SDiv, Mod, SMod, AddMod, MulMod, Exp, SEx, Min, Max,
+             EVM.Types.LT, EVM.Types.GT, LEq, GEq, SLT, SGT, EVM.Types.Eq, IsZero, ITE,
+             And, Or, Xor, Not, SHL, SHR, SAR, CLZ, Keccak, Origin, BlockHash, Coinbase,
+             Timestamp, BlockNumber, PrevRandao, GasLimit, ChainId, BaseFee, TxValue, Balance,
+             Gas, CodeSize, CodeHash, LogEntry, C, SymAddr, LitAddr, WAddr, ConcreteStore,
+             AbstractStore, SLoad, SStore, ConcreteBuf, AbstractBuf, ReadWord, ReadByte,
+             WriteWord, WriteByte, CopySlice, BufLength #-}
+
+-- CF is positional, so the HasField instances the old record constructor generated have to be
+-- written out. `GVar EContract` is uninhabited (GVar only has BufVar/StoreVar), so the empty
+-- case is accepted and these stay total.
+instance HasField "code" (Expr EContract) ContractCode where
+  getField e = case e.node of CF c _ _ _ _ -> c; GVarF g -> case g of {}
+instance HasField "storage" (Expr EContract) (Expr Storage) where
+  getField e = case e.node of CF _ s _ _ _ -> s; GVarF g -> case g of {}
+instance HasField "tStorage" (Expr EContract) (Expr Storage) where
+  getField e = case e.node of CF _ _ t _ _ -> t; GVarF g -> case g of {}
+instance HasField "balance" (Expr EContract) (Expr EWord) where
+  getField e = case e.node of CF _ _ _ b _ -> b; GVarF g -> case g of {}
+instance HasField "nonce" (Expr EContract) (Maybe W64) where
+  getField e = case e.node of CF _ _ _ _ n -> n; GVarF g -> case g of {}
 
 
 
@@ -1896,22 +2400,12 @@ paddedShowHex w n = pad ++ str
      pad = replicate (w - length str) '0'
 
 
--- | Pointer equality. Sound as a fast-path before structural (==): a True result means the two
--- values are the same heap object (hence equal); a False result falls through to structural ==.
-ptrEq :: a -> a -> Bool
-ptrEq x y = isTrue# (reallyUnsafePtrEquality# x y)
-
 untilFixpoint :: Eq a => (a -> a) -> a -> a
-untilFixpoint f a0 = go a0
-  where
-    -- ptrEq short-circuits the common "f made no change" case: an identity-preserving f (see
-    -- EVM.HashCons.memoFixTraverse) returns the *same object* on convergence, detected in O(1)
-    -- instead of an O(term-size) structural comparison.
-    -- a' must be forced before ptrEq: comparing an unevaluated thunk against the input is always
-    -- False even when the thunk evaluates to the very same object, silently defeating the fast path.
-    go a =
-      let !a' = f a
-      in if ptrEq a' a || a' == a then a else go a'
+untilFixpoint f a =
+  let a' = f a in
+    if a' == a
+    then a
+    else untilFixpoint f a'
 
 bsToHex :: ByteString -> String
 bsToHex bs = concatMap (paddedShowHex 2) (BS.unpack bs)
