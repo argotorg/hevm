@@ -60,6 +60,7 @@ import EVM.Solvers (SolverGroup, checkSatWithProps)
 import EVM.Stepper (Stepper)
 import EVM.Stepper qualified as Stepper
 import EVM.Traversals (mapExpr, mapExprM, foldTerm)
+import EVM.HashCons qualified as HashCons
 import EVM.Types hiding (Comp)
 import EVM.Types qualified
 data LoopHeuristic
@@ -385,6 +386,11 @@ interpret :: forall m a . App m
 interpret fetcher iterConf vm stepper handler = do
   shouldAbort <- liftIO $ newTVarIO False
   conf <- readConfig
+  -- Construction-time hash-consing (EVM.HashCons): share structurally-identical subterms as they
+  -- are built, so deeply-reused symbolic terms stay DAGs instead of materializing as exponential
+  -- trees. Enabled per exploration; tables start clean.
+  liftIO $ do HashCons.setHashConsEnabled conf.hashConsExplore
+              HashCons.resetHashCons
   taskQ <- liftIO newChan
   processQ <- liftIO newChan
 

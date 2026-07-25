@@ -159,6 +159,7 @@ import Data.Word (Word8, Word32)
 import Witch (unsafeInto, into, tryInto)
 import Data.Containers.ListUtils (nubOrd)
 
+import EVM.HashCons qualified as HC
 import EVM.Traversals
 import EVM.Types
 
@@ -837,6 +838,12 @@ readStorage w st = go (simplifyNoLitToKeccak w) (simplifyNoLitToKeccak st)
     go slot s@(SStore prevSlot val prev) = case (prevSlot, slot) of
       -- if address and slot match then we return the val in this write
       _ | prevSlot == slot -> Just val
+      -- Fast path for concrete keys: two distinct literal slots (equality already handled above)
+      -- can never alias, so skip straight down the write chain without invoking surelyEqual/
+      -- surelyNotEqual (which each run the simplifier). This makes reading through a long chain of
+      -- concrete SStores — e.g. a symbolic contract whose setup did many concrete writes over an
+      -- AbstractStore base — O(chain) cheap compares instead of O(chain) simplifier calls.
+      (Lit _, Lit _) -> go slot prev
       (a, b) | surelyEqual a b -> Just val
       (a, b) | surelyNotEqual a b -> go slot prev
 
@@ -970,7 +977,7 @@ litToArrayPreimage val =
       Nothing
 
 litToKeccak :: Expr a -> Expr a
-litToKeccak e = mapExpr go e
+litToKeccak e = mapExprShared 0 go e
   where
     go :: Expr a -> Expr a
     go orig@(Lit key) = case litToArrayPreimage key of
@@ -1185,12 +1192,12 @@ decomposeStorage = go
 -- | Simple recursive match based AST simplification
 -- Note: may not terminate!
 simplify :: Expr a -> Expr a
-simplify e = untilFixpoint (simplifyNoLitToKeccak . litToKeccak) e
+simplify e = untilFixpoint (simplifyNoLitToKeccak . litToKeccak) (HC.internExpr e)
 
 simplifyNoLitToKeccak :: Expr a -> Expr a
 simplifyNoLitToKeccak l@(Lit _) = l
 simplifyNoLitToKeccak s@(ConcreteStore _) = s
-simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
+simplifyNoLitToKeccak e = untilFixpoint (mapExprShared 1 go) (HC.internExpr e)
   where
     go :: Expr a -> Expr a
 
@@ -2063,7 +2070,7 @@ constPropagate ps =
 
 -- Concretize & simplify Keccak expressions until fixed-point.
 concKeccakSimpExpr :: Expr a -> Expr a
-concKeccakSimpExpr orig = untilFixpoint (simplifyNoLitToKeccak . (mapExpr concKeccakOnePass)) (simplify orig)
+concKeccakSimpExpr orig = untilFixpoint (simplifyNoLitToKeccak . (mapExprShared 2 concKeccakOnePass)) (simplify orig)
 
 -- Concretize Keccak in Props, but don't simplify
 -- Needed because if it also simplified, we may not find some simplification errors, as
