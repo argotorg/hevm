@@ -1,4 +1,5 @@
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE MagicHash #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilyDependencies #-}
 {-# LANGUAGE UndecidableInstances #-}
@@ -14,6 +15,7 @@ module EVM.Types where
 import Prelude hiding (Foldable(..))
 
 import GHC.Stack (HasCallStack, prettyCallStack, callStack)
+import GHC.Exts (reallyUnsafePtrEquality#, isTrue#)
 import GHC.ByteOrder (targetByteOrder, ByteOrder(..))
 import Control.Arrow ((>>>))
 import Control.Monad (mzero)
@@ -387,8 +389,251 @@ data Expr (a :: EType) where
   BufLength      :: Expr Buf -> Expr EWord
 
 deriving instance Show (Expr a)
-deriving instance Eq (Expr a)
-deriving instance Ord (Expr a)
+
+-- The hand-written Eq/Ord instances below have semantics identical to the previously-derived
+-- ones (constructor declaration order, fields compared left-to-right), but every recursive
+-- comparison first checks physical identity. On hash-consed / shared terms (EVM.HashCons) this
+-- makes comparisons O(size of the differing part) instead of O(logical tree size), which removes
+-- the dominant cost of simplifier guards (a == b) and normalization compares on deeply-shared
+-- symbolic terms.
+
+-- | Constructor rank, mirroring declaration order so the hand-written Ord orders different
+-- constructors exactly as the derived instance did.
+exprRank :: Expr a -> Int
+exprRank = \case
+  Lit {} -> 0
+  Var {} -> 1
+  GVar {} -> 2
+  LitByte {} -> 3
+  IndexWord {} -> 4
+  EqByte {} -> 5
+  JoinBytes {} -> 6
+  Partial {} -> 7
+  Failure {} -> 8
+  Success {} -> 9
+  Add {} -> 10
+  Sub {} -> 11
+  Mul {} -> 12
+  Div {} -> 13
+  SDiv {} -> 14
+  Mod {} -> 15
+  SMod {} -> 16
+  AddMod {} -> 17
+  MulMod {} -> 18
+  Exp {} -> 19
+  SEx {} -> 20
+  Min {} -> 21
+  Max {} -> 22
+  EVM.Types.LT {} -> 23
+  EVM.Types.GT {} -> 24
+  LEq {} -> 25
+  GEq {} -> 26
+  SLT {} -> 27
+  SGT {} -> 28
+  Eq {} -> 29
+  IsZero {} -> 30
+  ITE {} -> 31
+  And {} -> 32
+  Or {} -> 33
+  Xor {} -> 34
+  Not {} -> 35
+  SHL {} -> 36
+  SHR {} -> 37
+  SAR {} -> 38
+  CLZ {} -> 39
+  Keccak {} -> 40
+  Origin -> 41
+  BlockHash {} -> 42
+  Coinbase -> 43
+  Timestamp -> 44
+  BlockNumber -> 45
+  PrevRandao -> 46
+  GasLimit -> 47
+  ChainId -> 48
+  BaseFee -> 49
+  TxValue -> 50
+  Balance {} -> 51
+  Gas {} -> 52
+  CodeSize {} -> 53
+  CodeHash {} -> 54
+  LogEntry {} -> 55
+  C {} -> 56
+  SymAddr {} -> 57
+  LitAddr {} -> 58
+  WAddr {} -> 59
+  ConcreteStore {} -> 60
+  AbstractStore {} -> 61
+  SLoad {} -> 62
+  SStore {} -> 63
+  ConcreteBuf {} -> 64
+  AbstractBuf {} -> 65
+  ReadWord {} -> 66
+  ReadByte {} -> 67
+  WriteWord {} -> 68
+  WriteByte {} -> 69
+  CopySlice {} -> 70
+  BufLength {} -> 71
+
+instance Eq (Expr a) where
+  x == y = ptrEq x y || go x y
+    where
+      eqSC :: Eq c => c -> c -> Bool
+      eqSC u v = ptrEq u v || u Prelude.== v
+      go :: Expr b -> Expr b -> Bool
+      go (Lit x0a) (Lit x0b) = eqSC x0a x0b
+      go (Var x0a) (Var x0b) = eqSC x0a x0b
+      go (GVar x0a) (GVar x0b) = eqSC x0a x0b
+      go (LitByte x0a) (LitByte x0b) = eqSC x0a x0b
+      go (IndexWord x0a x1a) (IndexWord x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (EqByte x0a x1a) (EqByte x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (JoinBytes x0a x1a x2a x3a x4a x5a x6a x7a x8a x9a x10a x11a x12a x13a x14a x15a x16a x17a x18a x19a x20a x21a x22a x23a x24a x25a x26a x27a x28a x29a x30a x31a) (JoinBytes x0b x1b x2b x3b x4b x5b x6b x7b x8b x9b x10b x11b x12b x13b x14b x15b x16b x17b x18b x19b x20b x21b x22b x23b x24b x25b x26b x27b x28b x29b x30b x31b) = eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b && eqSC x3a x3b && eqSC x4a x4b && eqSC x5a x5b && eqSC x6a x6b && eqSC x7a x7b && eqSC x8a x8b && eqSC x9a x9b && eqSC x10a x10b && eqSC x11a x11b && eqSC x12a x12b && eqSC x13a x13b && eqSC x14a x14b && eqSC x15a x15b && eqSC x16a x16b && eqSC x17a x17b && eqSC x18a x18b && eqSC x19a x19b && eqSC x20a x20b && eqSC x21a x21b && eqSC x22a x22b && eqSC x23a x23b && eqSC x24a x24b && eqSC x25a x25b && eqSC x26a x26b && eqSC x27a x27b && eqSC x28a x28b && eqSC x29a x29b && eqSC x30a x30b && eqSC x31a x31b
+      go (Partial x0a x1a x2a) (Partial x0b x1b x2b) = eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b
+      go (Failure x0a x1a x2a) (Failure x0b x1b x2b) = eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b
+      go (Success x0a x1a x2a x3a) (Success x0b x1b x2b x3b) = eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b && eqSC x3a x3b
+      go (Add x0a x1a) (Add x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (Sub x0a x1a) (Sub x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (Mul x0a x1a) (Mul x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (Div x0a x1a) (Div x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (SDiv x0a x1a) (SDiv x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (Mod x0a x1a) (Mod x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (SMod x0a x1a) (SMod x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (AddMod x0a x1a x2a) (AddMod x0b x1b x2b) = eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b
+      go (MulMod x0a x1a x2a) (MulMod x0b x1b x2b) = eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b
+      go (Exp x0a x1a) (Exp x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (SEx x0a x1a) (SEx x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (Min x0a x1a) (Min x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (Max x0a x1a) (Max x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (EVM.Types.LT x0a x1a) (EVM.Types.LT x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (EVM.Types.GT x0a x1a) (EVM.Types.GT x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (LEq x0a x1a) (LEq x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (GEq x0a x1a) (GEq x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (SLT x0a x1a) (SLT x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (SGT x0a x1a) (SGT x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (Eq x0a x1a) (Eq x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (IsZero x0a) (IsZero x0b) = eqSC x0a x0b
+      go (ITE x0a x1a x2a) (ITE x0b x1b x2b) = eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b
+      go (And x0a x1a) (And x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (Or x0a x1a) (Or x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (Xor x0a x1a) (Xor x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (Not x0a) (Not x0b) = eqSC x0a x0b
+      go (SHL x0a x1a) (SHL x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (SHR x0a x1a) (SHR x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (SAR x0a x1a) (SAR x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (CLZ x0a) (CLZ x0b) = eqSC x0a x0b
+      go (Keccak x0a) (Keccak x0b) = eqSC x0a x0b
+      go Origin Origin = True
+      go (BlockHash x0a) (BlockHash x0b) = eqSC x0a x0b
+      go Coinbase Coinbase = True
+      go Timestamp Timestamp = True
+      go BlockNumber BlockNumber = True
+      go PrevRandao PrevRandao = True
+      go GasLimit GasLimit = True
+      go ChainId ChainId = True
+      go BaseFee BaseFee = True
+      go TxValue TxValue = True
+      go (Balance x0a) (Balance x0b) = eqSC x0a x0b
+      go (Gas x0a x1a) (Gas x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (CodeSize x0a) (CodeSize x0b) = eqSC x0a x0b
+      go (CodeHash x0a) (CodeHash x0b) = eqSC x0a x0b
+      go (LogEntry x0a x1a x2a) (LogEntry x0b x1b x2b) = eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b
+      go (C x0a x1a x2a x3a x4a) (C x0b x1b x2b x3b x4b) = eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b && eqSC x3a x3b && eqSC x4a x4b
+      go (SymAddr x0a) (SymAddr x0b) = eqSC x0a x0b
+      go (LitAddr x0a) (LitAddr x0b) = eqSC x0a x0b
+      go (WAddr x0a) (WAddr x0b) = eqSC x0a x0b
+      go (ConcreteStore x0a) (ConcreteStore x0b) = eqSC x0a x0b
+      go (AbstractStore x0a x1a) (AbstractStore x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (SLoad x0a x1a) (SLoad x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (SStore x0a x1a x2a) (SStore x0b x1b x2b) = eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b
+      go (ConcreteBuf x0a) (ConcreteBuf x0b) = eqSC x0a x0b
+      go (AbstractBuf x0a) (AbstractBuf x0b) = eqSC x0a x0b
+      go (ReadWord x0a x1a) (ReadWord x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (ReadByte x0a x1a) (ReadByte x0b x1b) = eqSC x0a x0b && eqSC x1a x1b
+      go (WriteWord x0a x1a x2a) (WriteWord x0b x1b x2b) = eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b
+      go (WriteByte x0a x1a x2a) (WriteByte x0b x1b x2b) = eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b
+      go (CopySlice x0a x1a x2a x3a x4a) (CopySlice x0b x1b x2b x3b x4b) = eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b && eqSC x3a x3b && eqSC x4a x4b
+      go (BufLength x0a) (BufLength x0b) = eqSC x0a x0b
+      go _ _ = False
+
+instance Ord (Expr a) where
+  compare x y = if ptrEq x y then Prelude.EQ else go x y
+    where
+      cmpSC :: Ord c => c -> c -> Ordering
+      cmpSC u v = if ptrEq u v then Prelude.EQ else Prelude.compare u v
+      go :: Expr b -> Expr b -> Ordering
+      go (Lit x0a) (Lit x0b) = cmpSC x0a x0b
+      go (Var x0a) (Var x0b) = cmpSC x0a x0b
+      go (GVar x0a) (GVar x0b) = cmpSC x0a x0b
+      go (LitByte x0a) (LitByte x0b) = cmpSC x0a x0b
+      go (IndexWord x0a x1a) (IndexWord x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (EqByte x0a x1a) (EqByte x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (JoinBytes x0a x1a x2a x3a x4a x5a x6a x7a x8a x9a x10a x11a x12a x13a x14a x15a x16a x17a x18a x19a x20a x21a x22a x23a x24a x25a x26a x27a x28a x29a x30a x31a) (JoinBytes x0b x1b x2b x3b x4b x5b x6b x7b x8b x9b x10b x11b x12b x13b x14b x15b x16b x17b x18b x19b x20b x21b x22b x23b x24b x25b x26b x27b x28b x29b x30b x31b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b Prelude.<> cmpSC x3a x3b Prelude.<> cmpSC x4a x4b Prelude.<> cmpSC x5a x5b Prelude.<> cmpSC x6a x6b Prelude.<> cmpSC x7a x7b Prelude.<> cmpSC x8a x8b Prelude.<> cmpSC x9a x9b Prelude.<> cmpSC x10a x10b Prelude.<> cmpSC x11a x11b Prelude.<> cmpSC x12a x12b Prelude.<> cmpSC x13a x13b Prelude.<> cmpSC x14a x14b Prelude.<> cmpSC x15a x15b Prelude.<> cmpSC x16a x16b Prelude.<> cmpSC x17a x17b Prelude.<> cmpSC x18a x18b Prelude.<> cmpSC x19a x19b Prelude.<> cmpSC x20a x20b Prelude.<> cmpSC x21a x21b Prelude.<> cmpSC x22a x22b Prelude.<> cmpSC x23a x23b Prelude.<> cmpSC x24a x24b Prelude.<> cmpSC x25a x25b Prelude.<> cmpSC x26a x26b Prelude.<> cmpSC x27a x27b Prelude.<> cmpSC x28a x28b Prelude.<> cmpSC x29a x29b Prelude.<> cmpSC x30a x30b Prelude.<> cmpSC x31a x31b
+      go (Partial x0a x1a x2a) (Partial x0b x1b x2b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b
+      go (Failure x0a x1a x2a) (Failure x0b x1b x2b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b
+      go (Success x0a x1a x2a x3a) (Success x0b x1b x2b x3b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b Prelude.<> cmpSC x3a x3b
+      go (Add x0a x1a) (Add x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (Sub x0a x1a) (Sub x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (Mul x0a x1a) (Mul x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (Div x0a x1a) (Div x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (SDiv x0a x1a) (SDiv x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (Mod x0a x1a) (Mod x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (SMod x0a x1a) (SMod x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (AddMod x0a x1a x2a) (AddMod x0b x1b x2b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b
+      go (MulMod x0a x1a x2a) (MulMod x0b x1b x2b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b
+      go (Exp x0a x1a) (Exp x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (SEx x0a x1a) (SEx x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (Min x0a x1a) (Min x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (Max x0a x1a) (Max x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (EVM.Types.LT x0a x1a) (EVM.Types.LT x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (EVM.Types.GT x0a x1a) (EVM.Types.GT x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (LEq x0a x1a) (LEq x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (GEq x0a x1a) (GEq x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (SLT x0a x1a) (SLT x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (SGT x0a x1a) (SGT x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (Eq x0a x1a) (Eq x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (IsZero x0a) (IsZero x0b) = cmpSC x0a x0b
+      go (ITE x0a x1a x2a) (ITE x0b x1b x2b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b
+      go (And x0a x1a) (And x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (Or x0a x1a) (Or x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (Xor x0a x1a) (Xor x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (Not x0a) (Not x0b) = cmpSC x0a x0b
+      go (SHL x0a x1a) (SHL x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (SHR x0a x1a) (SHR x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (SAR x0a x1a) (SAR x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (CLZ x0a) (CLZ x0b) = cmpSC x0a x0b
+      go (Keccak x0a) (Keccak x0b) = cmpSC x0a x0b
+      go Origin Origin = Prelude.EQ
+      go (BlockHash x0a) (BlockHash x0b) = cmpSC x0a x0b
+      go Coinbase Coinbase = Prelude.EQ
+      go Timestamp Timestamp = Prelude.EQ
+      go BlockNumber BlockNumber = Prelude.EQ
+      go PrevRandao PrevRandao = Prelude.EQ
+      go GasLimit GasLimit = Prelude.EQ
+      go ChainId ChainId = Prelude.EQ
+      go BaseFee BaseFee = Prelude.EQ
+      go TxValue TxValue = Prelude.EQ
+      go (Balance x0a) (Balance x0b) = cmpSC x0a x0b
+      go (Gas x0a x1a) (Gas x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (CodeSize x0a) (CodeSize x0b) = cmpSC x0a x0b
+      go (CodeHash x0a) (CodeHash x0b) = cmpSC x0a x0b
+      go (LogEntry x0a x1a x2a) (LogEntry x0b x1b x2b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b
+      go (C x0a x1a x2a x3a x4a) (C x0b x1b x2b x3b x4b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b Prelude.<> cmpSC x3a x3b Prelude.<> cmpSC x4a x4b
+      go (SymAddr x0a) (SymAddr x0b) = cmpSC x0a x0b
+      go (LitAddr x0a) (LitAddr x0b) = cmpSC x0a x0b
+      go (WAddr x0a) (WAddr x0b) = cmpSC x0a x0b
+      go (ConcreteStore x0a) (ConcreteStore x0b) = cmpSC x0a x0b
+      go (AbstractStore x0a x1a) (AbstractStore x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (SLoad x0a x1a) (SLoad x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (SStore x0a x1a x2a) (SStore x0b x1b x2b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b
+      go (ConcreteBuf x0a) (ConcreteBuf x0b) = cmpSC x0a x0b
+      go (AbstractBuf x0a) (AbstractBuf x0b) = cmpSC x0a x0b
+      go (ReadWord x0a x1a) (ReadWord x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (ReadByte x0a x1a) (ReadByte x0b x1b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b
+      go (WriteWord x0a x1a x2a) (WriteWord x0b x1b x2b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b
+      go (WriteByte x0a x1a x2a) (WriteByte x0b x1b x2b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b
+      go (CopySlice x0a x1a x2a x3a x4a) (CopySlice x0b x1b x2b x3b x4b) = cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b Prelude.<> cmpSC x3a x3b Prelude.<> cmpSC x4a x4b
+      go (BufLength x0a) (BufLength x0b) = cmpSC x0a x0b
+      go l r = Prelude.compare (exprRank l) (exprRank r)
+
 
 
 -- Existential Wrapper -----------------------------------------------------------------------------
@@ -1650,12 +1895,23 @@ paddedShowHex w n = pad ++ str
      str = showHex n ""
      pad = replicate (w - length str) '0'
 
+
+-- | Pointer equality. Sound as a fast-path before structural (==): a True result means the two
+-- values are the same heap object (hence equal); a False result falls through to structural ==.
+ptrEq :: a -> a -> Bool
+ptrEq x y = isTrue# (reallyUnsafePtrEquality# x y)
+
 untilFixpoint :: Eq a => (a -> a) -> a -> a
-untilFixpoint f a =
-  let a' = f a in
-    if a' == a
-    then a
-    else untilFixpoint f a'
+untilFixpoint f a0 = go a0
+  where
+    -- ptrEq short-circuits the common "f made no change" case: an identity-preserving f (see
+    -- EVM.HashCons.memoFixTraverse) returns the *same object* on convergence, detected in O(1)
+    -- instead of an O(term-size) structural comparison.
+    -- a' must be forced before ptrEq: comparing an unevaluated thunk against the input is always
+    -- False even when the thunk evaluates to the very same object, silently defeating the fast path.
+    go a =
+      let !a' = f a
+      in if ptrEq a' a || a' == a then a else go a'
 
 bsToHex :: ByteString -> String
 bsToHex bs = concatMap (paddedShowHex 2) (BS.unpack bs)

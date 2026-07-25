@@ -33,6 +33,9 @@ testEnv = Env { config = defaultConfig {
   , dumpTrace = False
   , decomposeStorage = True
   , verb = 1
+  -- run the whole suite with hash-consing on so the sharing machinery is
+  -- exercised everywhere; it stays off by default outside the tests
+  , hashConsExplore = True
   } }
 
 runForge :: FilePath -> [String] -> IO (ExitCode, String, String)

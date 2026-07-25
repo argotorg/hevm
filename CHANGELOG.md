@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## Added
+- New experimental `hashConsExplore` config option (off by default): construction-time
+  hash-consing of the symbolic VM state (new `EVM.HashCons` module), so structurally
+  shared terms stay DAGs instead of materializing as exponential trees during
+  exploration. The `Expr` `Eq`/`Ord` instances gained a pointer-equality fast path
+  (identical semantics to the derived ones), and the repeatedly-applied simplifier
+  passes memoize per-node fixpoints when hash-consing is on. Addresses storage-heavy
+  targets where a 914-node DAG materialized as a 601,664-node tree (22 GB peak).
+  Enabled from the CLI with `--hash-cons`; the test suites run with it enabled so the
+  sharing machinery is exercised everywhere.
+
 ## Fixed
 - Cheatcode string arguments are now decoded leniently instead of crashing on
   invalid UTF-8: ABI `string` values are raw bytes, so e.g. `vm.setEnv`,
