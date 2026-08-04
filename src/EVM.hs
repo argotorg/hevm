@@ -795,7 +795,9 @@ exec1 conf = do
 
                 symbolicRead :: EVM t () = if this.external
                   then accessStorage self x finalizeLoad
-                  else finalizeLoad $ Expr.readStorage' (Expr.concKeccakOnePass x) this.storage
+                  else let slot = Expr.concKeccakOnePass x
+                           preMap = Map.fromList [ (h, bs) | (bs, h) <- toList vm.keccakPreImgs ]
+                       in finalizeLoad $ Expr.readStorage' slot (Expr.filterStoreByReadSlot preMap slot this.storage)
 
                 concreteRead :: EVM t () = do
                   acc <- accessStorageForGas self (forceLit x)

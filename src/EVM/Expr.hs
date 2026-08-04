@@ -74,6 +74,7 @@ module EVM.Expr
     -- * Storage
   , readStorage'
   , readStorage
+  , filterStoreByReadSlot
   , writeStorage
   , concStoreContains
   , getAddr
@@ -809,8 +810,32 @@ simplifyReads = \case
 
 readStorage' :: Expr EWord -> Expr Storage -> Expr EWord
 readStorage' loc store = case readStorage loc store of
+                           -- an empty ConcreteStore is total: every slot, even a symbolic one,
+                           -- reads 0. Not in readStorage: accessStorage needs the Nothing/SLoad
+                           -- results there to drive lazy RPC slot fetching (partial caches).
+                           Just (SLoad _ (ConcreteStore m)) | Map.null m -> Lit 0
                            Just v -> v
                            Nothing -> Lit 0
+
+-- | The mapping slot (idx) of a symbolic mapping read keccak(key . idx), for both shapes hevm produces
+readMappingIdx :: Expr EWord -> Maybe W256
+readMappingIdx (MappingSlot idx _)
+  | BS.length idx == 64 = Just (W256 (word256 (BS.takeEnd 32 idx)))
+readMappingIdx (Keccak (CopySlice (Lit 0) (Lit 0) (Lit 0x40) (WriteWord (Lit 0) _ (ConcreteBuf idx)) _))
+  | BS.length idx >= 64 = Just (W256 (word256 (BS.take 32 (BS.drop 32 idx))))
+readMappingIdx _ = Nothing
+
+-- | Drop ConcreteStore entries that cannot alias a symbolic mapping read: a concrete key whose
+-- recorded keccak preimage identifies a different mapping slot cannot equal keccak(key . idx),
+-- by injectivity. Keys with unknown preimage are kept. `preMap` maps hash -> preimage.
+filterStoreByReadSlot :: Map.Map W256 ByteString -> Expr EWord -> Expr Storage -> Expr Storage
+filterStoreByReadSlot preMap slot (ConcreteStore m)
+  | Just readSlot <- readMappingIdx slot =
+      let keep k = case Map.lookup k preMap of
+                     Just bs | BS.length bs == 64 -> W256 (word256 (BS.takeEnd 32 bs)) == readSlot
+                     _ -> True
+      in ConcreteStore (Map.filterWithKey (\k _ -> keep k) m)
+filterStoreByReadSlot _ _ st = st
 
 -- | Reads the word at the given slot from the given storage expression.
 --
