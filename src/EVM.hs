@@ -52,7 +52,8 @@ import Data.Set (insert, member, fromList)
 import Data.Sequence (Seq)
 import Data.Sequence qualified as Seq
 import Data.Text (unpack, pack)
-import Data.Text.Encoding (decodeUtf8)
+import Data.Text.Encoding (decodeUtf8With)
+import Data.Text.Encoding.Error (lenientDecode)
 import Data.Tree
 import Data.Tree.Zipper qualified as Zipper
 import Data.Typeable
@@ -794,7 +795,9 @@ exec1 conf = do
 
                 symbolicRead :: EVM t () = if this.external
                   then accessStorage self x finalizeLoad
-                  else finalizeLoad $ Expr.readStorage' (Expr.concKeccakOnePass x) this.storage
+                  else let slot = Expr.concKeccakOnePass x
+                           preMap = Map.fromList [ (h, bs) | (bs, h) <- toList vm.keccakPreImgs ]
+                       in finalizeLoad $ Expr.readStorage' slot (Expr.filterStoreByReadSlot preMap slot this.storage)
 
                 concreteRead :: EVM t () = do
                   acc <- accessStorageForGas self (forceLit x)
@@ -2076,7 +2079,7 @@ cheatActions = Map.fromList
       \sig input -> case decodeBuf [AbiAddressType, AbiStringType] input of
         (CAbi valsArr,"") -> case valsArr of
           [AbiAddress addr, AbiString label] -> do
-            #labels %= Map.insert addr (decodeUtf8 label)
+            #labels %= Map.insert addr (decodeUtf8With lenientDecode label)
             doStop
           _ -> vmError (BadCheatCode "label(address,string) address decoding failed" sig)
         _ -> vmError (BadCheatCode "label(address,string) parameter decoding failed" sig)
@@ -2268,7 +2271,9 @@ cheatActions = Map.fromList
       assign #result Nothing
       cont
     doStop = finishFrame (FrameReturned mempty)
-    toString = unpack . decodeUtf8
+    -- ABI strings are raw bytes with no enforced encoding, so decode
+    -- leniently: invalid UTF-8 must not crash cheatcode handling (#1076)
+    toString = unpack . decodeUtf8With lenientDecode
     strip0x s = if "0x" `isPrefixOf` s then drop 2 s else s
     stringToBool :: String -> Either ByteString Bool
     stringToBool s = case s of

@@ -124,6 +124,15 @@ tests = testGroup "Foundry tests"
     , test "Keccak" $ do
         let testFile = "test/contracts/pass/keccak.sol"
         executeSingleMethod testFile "prove_access" >>= assertEqualM "test result" (True, True)
+    , test "Symbolic-Key-SLoad" $ do
+        -- #1082: without the fix the untouched-mapping read does not complete
+        let testFile = "test/contracts/pass/symbolicKeySload.sol"
+        executeSingleMethod testFile "prove_symbolic_key_empty_store" >>= assertEqualM "empty store reads zero" (True, True)
+        executeSingleMethod testFile "prove_symbolic_key_untouched_mapping" >>= assertEqualM "untouched mapping reads zero" (True, True)
+    , test "Symbolic-Key-SLoad-Fail" $ do
+        -- #1082 soundness: same-mapping entries must be kept, so this falsifies
+        let testFile = "test/contracts/fail/symbolicKeySload.sol"
+        executeSingleMethod testFile "prove_same_mapping_falsifiable" >>= assertEqualM "same-mapping read must falsify" (False, True)
     , test "AssertApproxEqAbs-Pass" $ do
         let testFile = "test/contracts/pass/assertApproxEqAbs.sol"
         executeAllMethodsWithPrefix testFile "prove" >>= assertEqualM "test result" (True, True)
