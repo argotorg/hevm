@@ -557,6 +557,121 @@ genWordArith litFreq sz = frequency
  where
    subWord = genWordArith (litFreq `div` 2) (sz `div` 2)
 
+-- | An arithmetic expression shaped to trigger one of the abstraction lemmas,
+-- together with concrete values for all of its symbolic variables.  The
+-- generic expression generator almost never produces these related terms.
+data AbstractArithCase = AbstractArithCase String (Expr EWord) [(Text, W256)]
+  deriving Show
+
+instance Arbitrary AbstractArithCase where
+  arbitrary = genAbstractArithCase
+
+genAbstractArithCase :: Gen AbstractArithCase
+genAbstractArithCase = oneof
+  [ withBindings "commutativity" (Expr.mul arithA arithB)
+  , identityCase
+  , let q = Div arithA arithB
+    in withBindings "division-multiplication link" (Expr.add q (Expr.mul q arithB))
+  , withBindings "multiplication monotonicity"
+      (Expr.add (Expr.mul arithA arithC) (Expr.mul arithB arithC))
+  , withBindings "dividend monotonicity"
+      (Expr.add (Div arithA arithC) (Div arithB arithC))
+  , withBindings "divisor monotonicity"
+      (Expr.add (Div arithA arithB) (Div arithA arithC))
+  , withBindings "product division bound" (Div (Expr.mul arithA arithB) arithC)
+  , constMulMonoCase
+  , constCancelCase
+  , nestedDivCase
+  , fracReduceCase
+  , ceilDivCase
+  , telescopeCase
+  , withBindings "signed division and modulo"
+      (Expr.add (SDiv arithA arithB) (SMod arithA arithB))
+  , withBindings "unsigned modulo" (Mod (Expr.mul arithA arithB) arithC)
+  ]
+  where
+    withBindings shape expr = AbstractArithCase shape expr <$> genArithBindings
+
+    identityCase = do
+      bindings <- genArithBindings
+      identity <- elements [0, 1]
+      pure $ AbstractArithCase "zero/one identity" (Expr.mul arithA arithB)
+        (replaceBinding arithBName identity bindings)
+
+    constMulMonoCase = do
+      coeff <- genSmallNonZero
+      withBindings "constant multiplication monotonicity" $
+        Expr.add (Expr.mul (Lit coeff) arithA) (Expr.mul (Lit coeff) arithB)
+
+    constCancelCase = do
+      divisor <- genSmallNonZero
+      factor <- genSmallFactor
+      let coeff = divisor * factor
+      withBindings "constant cancellation" $ Div (Expr.mul (Lit coeff) arithA) (Lit divisor)
+
+    nestedDivCase = do
+      divisor1 <- genSmallNonZero
+      divisor2 <- genSmallNonZero
+      withBindings "nested division" $
+        Div (Div (Expr.mul arithA arithB) (Lit divisor1)) (Lit divisor2)
+
+    fracReduceCase = do
+      coeff <- genSmallNonZero
+      factor <- genSmallFactor
+      let divisor = coeff * factor
+      withBindings "fraction reduction" $ Div (Expr.mul (Lit coeff) arithA) (Lit divisor)
+
+    ceilDivCase = do
+      divisor <- genSmallNonZero
+      factor <- genSmallFactor
+      let coeff = divisor * factor
+      withBindings "ceil-div cancellation" $
+        Expr.add (Lit 1) (Div (Sub (Expr.mul (Lit coeff) arithA) (Lit 1)) (Lit divisor))
+
+    telescopeCase = do
+      divisor <- genSmallNonZero
+      factor <- genSmallFactor
+      let step = divisor * factor
+          full = Div (Expr.mul arithA arithB) (Lit divisor)
+          stepped = Div (Expr.mul arithA (Sub arithB (Lit step))) (Lit divisor)
+      withBindings "scaled-product telescope" (Sub full stepped)
+
+arithAName, arithBName, arithCName :: Text
+arithAName = T.pack "abstract_arith_a"
+arithBName = T.pack "abstract_arith_b"
+arithCName = T.pack "abstract_arith_c"
+
+arithA, arithB, arithC :: Expr EWord
+arithA = Var arithAName
+arithB = Var arithBName
+arithC = Var arithCName
+
+genArithBindings :: Gen [(Text, W256)]
+genArithBindings = mapM genBinding [arithAName, arithBName, arithCName]
+  where
+    genBinding name = do
+      value <- genArithValue
+      pure (name, value)
+
+-- Small values exercise active lemma guards often; full-width and boundary
+-- values exercise their overflow and zero-divisor guards.
+genArithValue :: Gen W256
+genArithValue = frequency
+  [ (8, fromInteger <$> chooseInteger (0, 0xffff))
+  , (2, elements [0, 1, maxBound - 1, maxBound])
+  , (1, arbitrary)
+  ]
+
+genSmallNonZero :: Gen W256
+genSmallNonZero = fromInteger <$> chooseInteger (1, 1000)
+
+genSmallFactor :: Gen W256
+genSmallFactor = fromInteger <$> chooseInteger (2, 1000)
+
+replaceBinding :: Text -> W256 -> [(Text, W256)] -> [(Text, W256)]
+replaceBinding name value = fmap $ \(key, oldValue) ->
+  if key == name then (key, value) else (key, oldValue)
+
 genEnd :: Int -> Gen (Expr End)
 genEnd 0 = oneof
   [ fmap (Failure mempty mempty . UnrecognizedOpcode) arbitrary
