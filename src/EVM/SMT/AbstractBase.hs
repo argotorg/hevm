@@ -45,7 +45,7 @@ import Data.Text.Lazy.Builder
 import EVM.SMT.SMTLIB (sp, zero)
 import EVM.SMT.Types
 import EVM.Traversals
-import EVM.Types (Prop(..), EType(EWord), Err, W256, Expr, Expr(Lit))
+import EVM.Types (Prop(..), EType(EWord), Err, W256, Expr, Expr(Lit), internalError)
 import EVM.Types qualified as T
 
 -- | The expression-to-SMT encoder threaded through every emitter.
@@ -138,13 +138,14 @@ hasAbstractMul props = not $ null $ concatMap (foldProp collectMuls []) props
 -- are handled natively, so only genuinely symbolic products are abstracted.
 asMul :: Expr a -> Maybe (Expr EWord, Expr EWord)
 asMul (T.Mul x y) | notLit x, notLit y = Just (x, y)
+asMul (T.Mul _ (Lit _)) = internalError "non-normalized multiplication: literal must be the first operand"
 asMul _ = Nothing
 
--- | A product by a non-trivial literal constant: c*x or x*c (excluding 0, 1).
+-- | A product by a non-trivial literal constant: c*x (excluding 0, 1).
 -- These stay native @bvmul@; the const-mul lemmas range over them.
 asConstMul :: Expr a -> Maybe (W256, Expr EWord)
 asConstMul (T.Mul (Lit c) x) | notLit x, c /= 0, c /= 1 = Just (c, x)
-asConstMul (T.Mul x (Lit c)) | notLit x, c /= 0, c /= 1 = Just (c, x)
+asConstMul (T.Mul _ (Lit _)) = internalError "non-normalized multiplication: literal must be the first operand"
 asConstMul _ = Nothing
 
 notLit :: Expr a -> Bool
