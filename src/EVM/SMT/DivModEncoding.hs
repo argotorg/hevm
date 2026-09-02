@@ -93,11 +93,9 @@ divModGroundTruth enc props = do
       benc <- enc b
       let abstract = "(" <> abstFnName kind `sp` aenc `sp` benc <> ")"
           native   = "(" <> concFnName kind `sp` aenc `sp` benc <> ")"
-          -- EVM defines x/0 = 0 and x%0 = 0, whereas SMT-LIB's native bvudiv/
-          -- bvurem return non-zero on a zero divisor; guard the unsigned ops so
-          -- the axiom matches op2CheckZero and the encoding's zero guard. (The
-          -- signed reconstruction already applies the guard on its side.)
-          concrete = if isSigned kind then native else smtZeroGuard benc native
+          -- EVM defines every division/modulo by zero as zero, whereas the
+          -- corresponding native SMT-LIB operations return other values.
+          concrete = smtZeroGuard benc native
       pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
 
 -- | Equate every abstract multiplication in the properties with native

@@ -1519,6 +1519,16 @@ tests = testGroup "hevm"
         runEnv env $ do
           res <- withShortBitwuzlaSolver $ \s -> checkSatWithProps s (PNeg (productIs 7) : inputs)
           liftIO $ assertBool "Expected a refined counterexample" (isCex res)
+    , testCase "signed-zero-divisor-refinement-preserves-cex" $ do
+        let env = Env { config = testEnv.config { abstractArith = True, simp = False } }
+            x = Var "x"
+            divisor = Var "divisor"
+            expression = Add (SDiv x divisor) (SMod x divisor)
+            inputs = [PEq x (Lit 0xe392), PEq divisor (Lit 0)]
+        runEnv env $ do
+          res <- withShortBitwuzlaSolver $ \s ->
+            checkSatWithProps s (PNeg (PEq expression (Lit 1)) : inputs)
+          liftIO $ assertBool "Expected a signed zero-divisor counterexample" (isCex res)
     , testAbstractArith "div-mul-link" $ do
         -- (x/y)*y <= x for y != 0 (div x mul link lemma; needs commutativity)
         Just c <- solcRuntime "C" [i|
