@@ -31,7 +31,12 @@ vmFromRawByteString bs = liftIO $
     & initialContract
     & vm0
     & stToIO
-    & fmap EVM.Transaction.initTx
+    & fmap (noKeccakPreImgs . EVM.Transaction.initTx)
+
+-- keccak preimages are only consumed when symbolic execution follows from the
+-- state; these benchmarks are purely concrete, so skip the bookkeeping
+noKeccakPreImgs :: VM Concrete -> VM Concrete
+noKeccakPreImgs vm = vm { config = vm.config { recordKeccakPreImgs = False } }
 
 vm0 :: Contract -> ST RealWorld (VM Concrete)
 vm0 c = makeVm $ vm0Opts c
