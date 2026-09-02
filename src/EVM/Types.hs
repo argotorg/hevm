@@ -33,6 +33,7 @@ import Data.ByteString.Base16 qualified as BS16
 import Data.ByteString.Builder (byteStringHex, toLazyByteString)
 import Data.ByteString.Char8 qualified as Char8
 import Data.ByteString.Internal (unsafeCreate)
+import Data.ByteString.Unsafe qualified as BSUnsafe
 import Data.ByteString.Lazy (toStrict)
 import Data.Data
 import Data.Int (Int64)
@@ -1470,9 +1471,26 @@ word256 :: ByteString -> Word256
 word256 xs | BS.length xs == 1 =
   -- optimize one byte pushes
   Word256 (Word128 0 0) (Word128 0 (into $ BS.head xs))
-word256 xs = case Cereal.runGet m (padLeft 32 xs) of
-               Left _ -> internalError "should not happen"
-               Right x -> x
+word256 xs = Word256 (Word128 (limb 0) (limb 1)) (Word128 (limb 2) (limb 3))
+  where
+    !pad = 32 - min 32 (BS.length xs)
+    byteAt :: Int -> Word64
+    byteAt i = let j = i - pad
+               in if j < 0 then 0 else fromIntegral (BSUnsafe.unsafeIndex xs j)
+    limb :: Int -> Word64
+    limb k =
+      let o = 8 * k in
+          byteAt o       `shiftL` 56 .|. byteAt (o + 1) `shiftL` 48
+      .|. byteAt (o + 2) `shiftL` 40 .|. byteAt (o + 3) `shiftL` 32
+      .|. byteAt (o + 4) `shiftL` 24 .|. byteAt (o + 5) `shiftL` 16
+      .|. byteAt (o + 6) `shiftL` 8  .|. byteAt (o + 7)
+
+-- old, slower word256 implementation, kept for differential fuzzing
+slow_word256 :: ByteString -> Word256
+slow_word256 xs =
+  case Cereal.runGet m (padLeft 32 xs) of
+    Left _ -> internalError "should not happen"
+    Right x -> x
   where
     m = do a <- Cereal.getWord64be
            b <- Cereal.getWord64be
