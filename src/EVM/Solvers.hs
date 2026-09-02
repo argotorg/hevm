@@ -143,11 +143,7 @@ checkSatWithProps sg props = do
       else do
         let x = getNonError smt2Abstract <> SMT2 (SMTScript (getNonError refinement)) mempty mempty
         res <- checkSat sg (Just props) (Right x)
-        -- SOUNDNESS: multiplication is abstracted as an uninterpreted function
-        -- with no ground truth, so a satisfying model may use product values
-        -- inconsistent with real multiplication. A QED stays sound (the lemmas
-        -- over-approximate), but a counterexample may be spurious, so downgrade
-        -- it to Unknown.
+        -- Abstract multiplication can produce spurious counterexamples.
         pure $ case res of
           Cex _ | hasAbstractMul allProps ->
             Unknown "counterexample unsound under multiplication abstraction (abst_evm_bvmul is uninterpreted)"
