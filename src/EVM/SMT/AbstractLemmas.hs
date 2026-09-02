@@ -2,8 +2,8 @@
    Module: EVM.SMT.AbstractLemmas
    Description: The catalogue of sound algebraic lemmas for abstract arithmetic.
 
-   Multiplication is kept fully uninterpreted (no ground truth, so the solver
-   never bit-blasts a symbolic product); we add only /sound/ algebraic facts
+   Multiplication starts uninterpreted, so the solver does not bit-blast a
+   symbolic product during the proof phase; we add only /sound/ algebraic facts
    about @abst_evm_bvmul@/@abst_evm_bvudiv@. Each lemma is a 'LemmaInst'
    constructor, a 'collectLemmas' clause (its trigger) and an 'emitLemma'
    clause (the SMT it emits + why it is sound); GHC's exhaustiveness checker

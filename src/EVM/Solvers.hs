@@ -134,20 +134,21 @@ checkSatWithProps sg props = do
       if isLeft smt2 then pure $ Error $ getError smt2
       else liftIO $ checkSat sg (Just props) smt2
     else liftIO $ do
-      -- Two-phase solving: assert the abstract (uninterpreted) div/mod/mul plus
-      -- the sound lemmas, then append the div/mod ground truth as refinement.
+      -- Prove abstractly first; refine multiplication only after an abstract SAT.
       let smt2Abstract = assertPropsAbstract conf allProps
-      let refinement = divModGroundTruth (exprToSMTWith AbstractDivMod) allProps
+      let divRefinement = divModGroundTruth (exprToSMTWith AbstractDivMod) allProps
       if isLeft smt2Abstract then pure $ Error $ getError smt2Abstract
-      else if isLeft refinement then pure $ Error $ getError refinement
+      else if isLeft divRefinement then pure $ Error $ getError divRefinement
       else do
-        let x = getNonError smt2Abstract <> SMT2 (SMTScript (getNonError refinement)) mempty mempty
-        res <- checkSat sg (Just props) (Right x)
-        -- Abstract multiplication can produce spurious counterexamples.
-        pure $ case res of
+        let query = getNonError smt2Abstract <> SMT2 (SMTScript (getNonError divRefinement)) mempty mempty
+        res <- checkSat sg (Just props) (Right query)
+        case res of
           Cex _ | hasAbstractMul allProps ->
-            Unknown "counterexample unsound under multiplication abstraction (abst_evm_bvmul is uninterpreted)"
-          _ -> res
+            case mulGroundTruth (exprToSMTWith AbstractDivMod) allProps of
+              Left err -> pure $ Error err
+              Right refinement ->
+                checkSat sg (Just props) (Right $ query <> SMT2 (SMTScript refinement) mempty mempty)
+          _ -> pure res
 
 -- When props is Nothing, the cache will not be filled or used
 checkSat :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> IO SMTResult

@@ -1444,7 +1444,7 @@ tests = testGroup "hevm"
           } |]
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertEqualM "Must be QED" [] res
-    , ignoreTestBecause "Abstract arithmetic cannot find counterexample for this case" $ testAbstractArith "math-mint-fail" $ do
+    , testAbstractArith "math-mint-fail" $ do
         Just c <- solcRuntime "C" [i|
           contract C {
             function prove_mint(uint s, uint A1, uint S1) external pure {
@@ -1461,10 +1461,8 @@ tests = testGroup "hevm"
     -- Symbolic*symbolic multiplication is abstracted as an uninterpreted
     -- function (abst_evm_bvmul) with sound lemmas (commutativity, 0/1
     -- identities, quotient*divisor<=dividend, no-overflow-guarded monotonicity)
-    -- and NO ground truth. This proves vault-style properties native solving
-    -- cannot, while staying SOUND: a QED is a real proof; spurious or
-    -- overflow-dependent results are never reported as bugs (downgraded to
-    -- Unknown). Bounding (e.g. require(x < 2**128)) is supplied in Solidity.
+    -- during the proof phase. An abstract counterexample is checked again with
+    -- exact multiplication before it is returned.
     [ testAbstractArith "mul-monotone" $ do
         -- a1 <= a2 => a1*c <= a2*c, under no-overflow (mul-monotonicity lemma)
         Just c <- solcRuntime "C" [i|
@@ -1503,6 +1501,24 @@ tests = testGroup "hevm"
           } |]
         (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertEqualM "Must be QED" [] res
+    , testCase "mul-refinement-rejects-spurious-cex" $ do
+        let env = Env { config = testEnv.config { abstractArith = True, simp = False } }
+            x = Var "x"
+            y = Var "y"
+            productIs n = PEq (Mul x y) (Lit n)
+            inputs = [PEq x (Lit 2), PEq y (Lit 3)]
+        runEnv env $ do
+          res <- withShortBitwuzlaSolver $ \s -> checkSatWithProps s (PNeg (productIs 6) : inputs)
+          assertEqualM "Must be QED after multiplication refinement" Qed res
+    , testCase "mul-refinement-returns-real-cex" $ do
+        let env = Env { config = testEnv.config { abstractArith = True, simp = False } }
+            x = Var "x"
+            y = Var "y"
+            productIs n = PEq (Mul x y) (Lit n)
+            inputs = [PEq x (Lit 2), PEq y (Lit 3)]
+        runEnv env $ do
+          res <- withShortBitwuzlaSolver $ \s -> checkSatWithProps s (PNeg (productIs 7) : inputs)
+          liftIO $ assertBool "Expected a refined counterexample" (isCex res)
     , testAbstractArith "div-mul-link" $ do
         -- (x/y)*y <= x for y != 0 (div x mul link lemma; needs commutativity)
         Just c <- solcRuntime "C" [i|
@@ -1540,9 +1556,8 @@ tests = testGroup "hevm"
         runEnv testEnv $ do
           (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
           liftIO $ assertBool "Must be unknown natively" (all isUnknown res)
-    , testAbstractArith "mul-overflow-not-unsound" $ do
-        -- SOUNDNESS: unbounded monotonicity is FALSE (raw mul wraps); the
-        -- no-overflow guard must prevent a (bogus) QED -> Unknown, never QED.
+    , testAbstractArith "mul-overflow-cex" $ do
+        -- Unbounded monotonicity is false because raw multiplication wraps.
         Just c <- solcRuntime "C" [i|
           contract C {
             function prove_mul_monotone_overflow(uint256 a1, uint256 a2, uint256 k) external pure {
@@ -1552,14 +1567,12 @@ tests = testGroup "hevm"
               assert(p1 <= p2);
             }
           } |]
-        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-        assertBoolM "Must be Unknown, never QED (unsound proof avoided)"
-          (not (any isCex res) && any isUnknown res)
-    , testAbstractArith "mul-uint256-monotone-not-unsound" $ do
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertBoolM "Expected an overflow counterexample" (any isCex res)
+    , testAbstractArith "mul-uint256-monotone-cex" $ do
         -- Same lemma shape as the uint128-bounded proof, but with full-width
         -- uint256 inputs. The 128-bit no-overflow guard must not be assumed from
-        -- the type alone, so this can only be Unknown under abstract mul: never a
-        -- bogus QED and never a trusted counterexample from the uninterpreted UF.
+        -- the type alone; exact refinement exposes the overflow counterexample.
         Just c <- solcRuntime "C" [i|
           contract C {
             function prove_mul_uint256_monotone(uint256 a1, uint256 a2, uint256 k) external pure {
@@ -1569,9 +1582,8 @@ tests = testGroup "hevm"
               assert(p1 <= p2);
             }
           } |]
-        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-        assertBoolM "uint256 abstract mul must be Unknown, never QED or Cex"
-          (not (null res) && all isUnknown res)
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertBoolM "Expected a uint256 overflow counterexample" (any isCex res)
     , testAbstractArith "roundtrip-no-inflation" $ do
         -- The cross-divisor round-trip convertToAssetValue(convertToShares(x)),
         -- i.e. ((x*ts)/ta)*ta/ts <= x, is the stateless core of inflation-attack
@@ -1596,8 +1608,8 @@ tests = testGroup "hevm"
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertEqualM "Must be QED" [] res
     , testAbstractArith "div-cex-preserved" $ do
-        -- No symbolic*symbolic mul => div is exact => a real counterexample is
-        -- still reported (the Cex->Unknown downgrade must be precise).
+        -- No symbolic*symbolic mul is present, so no multiplication refinement
+        -- is needed to return the real counterexample.
         Just c <- solcRuntime "C" [i|
           contract C {
             function prove_div_cex(uint256 a, uint256 b) external pure {
@@ -1647,9 +1659,8 @@ tests = testGroup "hevm"
           } |]
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertEqualM "Must be QED" [] res
-    , testAbstractArith "muldiv-fee-uncapped-not-unsound" $ do
-        -- SOUNDNESS: without the feeBps <= 100% bound the property is false; the
-        -- mulDiv guard must not fire, so this must NOT be proved.
+    , testAbstractArith "muldiv-fee-uncapped-cex" $ do
+        -- Without the feeBps <= 100% bound the property is false.
         Just c <- solcRuntime "C" [i|
           contract C {
             function prove_fee_uncapped(uint256 amount, uint256 feeBps) external pure {
@@ -1658,8 +1669,8 @@ tests = testGroup "hevm"
               assert(fee <= amount);
             }
           } |]
-        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-        assertBoolM "Must be Unknown, never QED" (not (any isCex res) && any isUnknown res)
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertBoolM "Expected an uncapped fee counterexample" (any isCex res)
     , testAbstractArith "constmul-div-monotone" $ do
         -- (v * 1e27) / rate is monotonic in v. The dividend is a multiplication
         -- by a large literal (1e27), which stays a native bvmul; const-mul
@@ -1812,10 +1823,8 @@ tests = testGroup "hevm"
           } |]
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertEqualM "Must be QED" [] res
-    , testAbstractArith "scaled-product-telescope-not-unsound" $ do
-        -- soundness guard: a wrong difference (+1) must stay Unknown, never QED.
-        -- Both products are abstract, so a violation downgrades SAT->Unknown rather
-        -- than producing a trusted Cex; the lemma must not over-prove the off-by-one.
+    , testAbstractArith "scaled-product-telescope-cex" $ do
+        -- A wrong difference (+1) is exposed after exact multiplication refinement.
         Just c <- solcRuntime "C" [i|
           contract C {
             function prove_telescope_wrong(uint256 s, uint256 q) external pure {
@@ -1827,7 +1836,7 @@ tests = testGroup "hevm"
             }
           } |]
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-        assertBoolM "Wrong difference must be Unknown, never QED" (not (any isCex res) && any isUnknown res)
+        assertBoolM "Expected an off-by-one counterexample" (any isCex res)
     ]
   , testGroup "max-iterations"
     [ test "concrete-loops-reached" $ do

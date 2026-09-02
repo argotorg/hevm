@@ -52,12 +52,11 @@ import EVM.Types qualified as T
 type Enc = Expr EWord -> Err Builder
 
 -- | Uninterpreted-function declarations standing in for div/mod/mul. The
--- div/mod UFs are refined against the native ops in phase two; abst_evm_bvmul
--- is kept fully uninterpreted (no ground truth), constrained only by the
--- lemmas in "EVM.SMT.AbstractLemmas".
+-- abstract functions are refined against the native ops before a
+-- counterexample is returned.
 divModAbstractDecls :: [SMTEntry]
 divModAbstractDecls =
-  [ SMTComment "abstract division/modulo/multiplication (uninterpreted functions; mul has no ground truth)"
+  [ SMTComment "abstract division/modulo/multiplication (uninterpreted functions)"
   , SMTCommand "(declare-fun abst_evm_bvsdiv ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
   , SMTCommand "(declare-fun abst_evm_bvsrem ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
   , SMTCommand "(declare-fun abst_evm_bvudiv ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
@@ -127,10 +126,7 @@ collectMuls = maybe [] pure . asMul
 collectConstMuls :: Expr a -> [(W256, Expr EWord)]
 collectConstMuls = maybe [] pure . asConstMul
 
--- | True if any prop contains a symbolic*symbolic multiplication. Because
--- abst_evm_bvmul has no ground truth, a satisfying model may assign it values
--- inconsistent with real multiplication; callers must downgrade SAT to Unknown
--- to stay sound. (UNSAT — the proof direction — is unaffected.)
+-- | True if any prop contains a symbolic*symbolic multiplication.
 hasAbstractMul :: [Prop] -> Bool
 hasAbstractMul props = not $ null $ concatMap (foldProp collectMuls []) props
 

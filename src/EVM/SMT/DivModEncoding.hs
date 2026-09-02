@@ -3,12 +3,12 @@
    Orchestration layer. The shared vocabulary (primitives, collectors,
    'saturate') lives in "EVM.SMT.AbstractBase"; the multiplication lemma
    catalogue lives in "EVM.SMT.AbstractLemmas". This module wires them together
-   ('mulEncoding') and holds the div/mod /ground-truth/ encoding — the phase that
-   refines the abstract uninterpreted functions against real bvudiv/bvsdiv using
-   absolute values, shift bounds, and congruence.
+   ('mulEncoding') and holds the /ground-truth/ encodings that refine the
+   abstract functions before a counterexample is returned.
 -}
 module EVM.SMT.DivModEncoding
   ( divModGroundTruth
+  , mulGroundTruth
   , divModEncoding
   , divModAbstractDecls
   , mulEncoding
@@ -28,9 +28,8 @@ import EVM.SMT.Types
 import EVM.Traversals (foldProp)
 import EVM.Types (Prop, EType(EWord), Err, W256, Expr, Expr(Lit), Expr(SHL))
 
--- | Lemmas for abstract multiplication. Multiplication is kept fully
--- uninterpreted (no ground truth, so the solver never bit-blasts a symbolic
--- product); we add only the sound algebraic facts catalogued in
+-- | Lemmas for the initial abstract-multiplication phase. We add only the sound
+-- algebraic facts catalogued in
 -- "EVM.SMT.AbstractLemmas". 'saturate' closes the term set the lemmas range
 -- over; 'collectLemmas' picks the instances; 'emitLemma' renders each to SMT.
 mulEncoding :: Enc -> [Prop] -> Err [SMTEntry]
@@ -100,6 +99,24 @@ divModGroundTruth enc props = do
           -- signed reconstruction already applies the guard on its side.)
           concrete = if isSigned kind then native else smtZeroGuard benc native
       pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
+
+-- | Equate every abstract multiplication in the properties with native
+-- bit-vector multiplication.
+mulGroundTruth :: Enc -> [Prop] -> Err [SMTEntry]
+mulGroundTruth enc props = do
+  let allMuls = nubOrd $ concatMap (foldProp collectMuls []) props
+  if null allMuls then pure []
+  else do
+    axioms <- mapM mkGroundTruthAxiom allMuls
+    pure $ SMTComment "multiplication ground-truth refinement" : axioms
+  where
+    mkGroundTruthAxiom :: (Expr EWord, Expr EWord) -> Err SMTEntry
+    mkGroundTruthAxiom (a, b) = do
+      aenc <- enc a
+      benc <- enc b
+      let abstract = "(abst_evm_bvmul" `sp` aenc `sp` benc <> ")"
+          concrete = "(bvmul" `sp` aenc `sp` benc <> ")"
+      pure $ SMTCommand $ "(assert (= " <> abstract <> " " <> concrete <> "))"
 
 -- | Encode div/mod operations using abs values, shift-bounds, and congruence (no bvudiv).
 divModEncoding :: Enc -> [Prop] -> Err [SMTEntry]
