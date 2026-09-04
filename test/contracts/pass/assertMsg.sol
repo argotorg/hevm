@@ -3,9 +3,17 @@ import "forge-std/Test.sol";
 // Passing counterparts of the new message-bearing and bytes assert overloads.
 // For most overloads forge-std short-circuits on the passing branch and never
 // reaches the cheatcode, so these mainly guard against compile/behaviour
-// regressions; the assertApproxEq{Abs,Rel}(...,string) overloads forward to the
-// cheatcode unconditionally and therefore exercise hevm's handler here too.
+// regressions. The direct boolean calls below and the
+// assertApproxEq{Abs,Rel}(...,string) overloads exercise hevm's handlers here.
 contract AssertMsgPassTest is Test {
+    function prove_true_msg() public pure {
+        vm.assertTrue(true, "bool true");
+    }
+
+    function prove_false_msg() public pure {
+        vm.assertFalse(false, "bool false");
+    }
+
     function prove_eq_bool_msg() public pure {
         assertEq(true, true, "bool eq");
     }
