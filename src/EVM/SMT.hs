@@ -137,12 +137,18 @@ assertProps conf ps =
 -- | Assert props with abstract div/mod (uninterpreted functions + encoding constraints).
 assertPropsAbstract :: Config -> [Prop] -> Err SMT2
 assertPropsAbstract conf ps = do
-  let mkBase s = assertPropsHelperWith AbstractDivMod s divModAbstractDecls
-  base <- if not conf.simp then mkBase False ps
-          else mkBase True (decompose conf ps)
-  shiftBounds <- divModEncoding (exprToSMTWith AbstractDivMod) ps
-  mulLemmas <- mulEncoding (exprToSMTWith AbstractDivMod) ps
+  base <- assertPropsHelperWith AbstractDivMod conf.simp divModAbstractDecls psDecomp
+  shiftBounds <- divModEncoding (exprToSMTWith AbstractDivMod) psConc
+  mulLemmas <- mulEncoding (exprToSMTWith AbstractDivMod) psConc
   pure $ base <> SMT2 (SMTScript (shiftBounds <> mulLemmas)) mempty mempty
+  where
+    -- Generate lemmas from the same decomposed and concretized terms as the
+    -- goal. Raw props can retain storage reads that simplify away in the goal,
+    -- preventing lemma matches. Stop before 'eliminateProps': its 'GVar'
+    -- placeholders are opaque to the lemma matchers.
+    psDecomp = if conf.simp then decompose conf ps else ps
+    psConc   = if conf.simp then Expr.concKeccakSimpProps psDecomp
+                            else Expr.concKeccakProps psDecomp
 
 -- Note: we need a version that does NOT call simplify,
 -- because we make use of it to verify the correctness of our simplification

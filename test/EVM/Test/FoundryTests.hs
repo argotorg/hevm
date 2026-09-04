@@ -22,6 +22,10 @@ foundryTestConfig = defaultConfig
 test :: TestName -> ReaderT Env IO () -> TestTree
 test a b = testCase a $ runEnv (Env foundryTestConfig) b
 
+testAbstractArith :: TestName -> ReaderT Env IO () -> TestTree
+testAbstractArith a b =
+  testCase a $ runEnv (Env (foundryTestConfig { abstractArith = True })) b
+
 assertEqualM :: (MonadIO m, Eq a, Show a, HasCallStack) => String -> a -> a -> m ()
 assertEqualM a b c = liftIO $ assertEqual a b c
 
@@ -133,6 +137,12 @@ tests = testGroup "Foundry tests"
         -- #1082 soundness: same-mapping entries must be kept, so this falsifies
         let testFile = "test/contracts/fail/symbolicKeySload.sol"
         executeSingleMethod testFile "prove_same_mapping_falsifiable" >>= assertEqualM "same-mapping read must falsify" (False, True)
+    , testAbstractArith "Abstract-Arithmetic-Storage-Reads" $ do
+        let testFile = "test/contracts/pass/abstractArithStorage.sol"
+        runForgeTestCustom testFile
+          (\(TestMethodInfo _ (Sig name _)) -> "check_constCancel" `isPrefixOf` name)
+          (Just 10) Nothing False Fetch.noRpc
+          >>= assertEqualM "test result" (True, True)
     , test "AssertApproxEqAbs-Pass" $ do
         let testFile = "test/contracts/pass/assertApproxEqAbs.sol"
         executeAllMethodsWithPrefix testFile "prove" >>= assertEqualM "test result" (True, True)
