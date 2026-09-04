@@ -6,6 +6,14 @@ import "forge-std/Test.sol";
 // hevm's handler (withMsg / keepHeadWords / assertEqMsgDyn). A broken decode
 // would surface as a BadCheatCode error instead of a clean assertion failure.
 contract AssertMsgFailTest is Test {
+    function prove_true_msg() public pure {
+        vm.assertTrue(false, "bool true");
+    }
+
+    function prove_false_msg() public pure {
+        vm.assertFalse(true, "bool false");
+    }
+
     // --- assertEq(...,string): static operands (withMsg) ---
 
     function prove_eq_bool_msg() public pure {

@@ -2163,28 +2163,8 @@ cheatActions = Map.fromList
   , $(envReadMultipleCheat "envBytes32(string,string)" $ AbiBytesType 32) stringToBytes32
   , $(envReadMultipleCheat "envString(string,string)" AbiStringType) stringToByteString
   , $(envReadMultipleCheat "envBytes(bytes,bytes)" AbiBytesDynamicType) stringHexToByteString
-  , action "assertTrue(bool)" $ \sig input ->
-      case decodeBuf [AbiBoolType] input of
-        (CAbi [AbiBool True],"") -> doStop
-        (CAbi [AbiBool False],"") -> frameRevert "assertion failed"
-        (SAbi [eword],"") -> case (Expr.simplify (Expr.iszero eword)) of
-          Lit 1 -> frameRevert "assertion failed"
-          Lit 0 -> doStop
-          ew -> branch (?conf).maxDepth ew $ \case
-            True -> frameRevert "assertion failed"
-            False -> doStop
-        k -> vmError $ BadCheatCode ("assertTrue(bool) parameter decoding failed: " <> show k) sig
-  , action "assertFalse(bool)" $ \sig input ->
-      case decodeBuf [AbiBoolType] input of
-        (CAbi [AbiBool False],"") -> doStop
-        (CAbi [AbiBool True],"") -> frameRevert "assertion failed"
-        (SAbi [eword],"") -> case (Expr.simplify (Expr.iszero eword)) of
-          Lit 0 -> frameRevert "assertion failed"
-          Lit 1 -> doStop
-          ew -> branch (?conf).maxDepth ew $ \case
-            False -> frameRevert "assertion failed"
-            True -> doStop
-        k -> vmError $ BadCheatCode ("assertFalse(bool) parameter decoding failed: " <> show k) sig
+  , action "assertTrue(bool)" $ assertTrue
+  , action "assertFalse(bool)" $ assertFalse
   , action "assertEq(bool,bool)"       $ assertEq AbiBoolType
   , action "assertEq(uint256,uint256)" $ assertEq (AbiUIntType 256)
   , action "assertEq(int256,int256)"   $ assertEq (AbiIntType 256)
@@ -2218,6 +2198,9 @@ cheatActions = Map.fromList
   --
   -- Variants with a trailing `err` string. The string is decoded away and never
   -- used; each behaves exactly like its non-message counterpart.
+  , action "assertTrue(bool,string)" $ withMsg 1 assertTrue
+  , action "assertFalse(bool,string)" $ withMsg 1 assertFalse
+  --
   , action "assertEq(bool,bool,string)"       $ withMsg 2 (assertEq AbiBoolType)
   , action "assertEq(uint256,uint256,string)" $ withMsg 2 (assertEq (AbiUIntType 256))
   , action "assertEq(int256,int256,string)"   $ withMsg 2 (assertEq (AbiIntType 256))
@@ -2271,6 +2254,28 @@ cheatActions = Map.fromList
       assign #result Nothing
       cont
     doStop = finishFrame (FrameReturned mempty)
+    assertTrue sig input =
+      case decodeBuf [AbiBoolType] input of
+        (CAbi [AbiBool True],"") -> doStop
+        (CAbi [AbiBool False],"") -> frameRevert "assertion failed"
+        (SAbi [eword],"") -> case (Expr.simplify (Expr.iszero eword)) of
+          Lit 1 -> frameRevert "assertion failed"
+          Lit 0 -> doStop
+          ew -> branch (?conf).maxDepth ew $ \case
+            True -> frameRevert "assertion failed"
+            False -> doStop
+        k -> vmError $ BadCheatCode ("assertTrue(bool) parameter decoding failed: " <> show k) sig
+    assertFalse sig input =
+      case decodeBuf [AbiBoolType] input of
+        (CAbi [AbiBool False],"") -> doStop
+        (CAbi [AbiBool True],"") -> frameRevert "assertion failed"
+        (SAbi [eword],"") -> case (Expr.simplify (Expr.iszero eword)) of
+          Lit 0 -> frameRevert "assertion failed"
+          Lit 1 -> doStop
+          ew -> branch (?conf).maxDepth ew $ \case
+            False -> frameRevert "assertion failed"
+            True -> doStop
+        k -> vmError $ BadCheatCode ("assertFalse(bool) parameter decoding failed: " <> show k) sig
     -- ABI strings are raw bytes with no enforced encoding, so decode
     -- leniently: invalid UTF-8 must not crash cheatcode handling (#1076)
     toString = unpack . decodeUtf8With lenientDecode
