@@ -193,6 +193,7 @@ makeVm o = do
     , config = RuntimeConfig
       { allowFFI = o.allowFFI
       , baseState = o.baseState
+      , recordKeccakPreImgs = True
       }
     , forks = Seq.singleton (ForkState env block mempty "")
     , currentFork = 0
@@ -494,7 +495,8 @@ exec1 conf = do
                         (pure $ Keccak orig)
                         (do
                           let kc = keccak' bs
-                          modifying #keccakPreImgs (insert (bs, kc))
+                          when vm.config.recordKeccakPreImgs $
+                            modifying' #keccakPreImgs (insert (bs, kc))
                           pure $ Lit kc
                         )
                     buf -> pure $ Keccak buf

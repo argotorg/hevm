@@ -780,6 +780,7 @@ runSrcLookup (Just (SrcLookup f)) contracts addr pc = f contracts addr pc
 data RuntimeConfig = RuntimeConfig
   { allowFFI :: Bool
   , baseState :: BaseState
+  , recordKeccakPreImgs :: Bool
   }
   deriving (Show)
 
