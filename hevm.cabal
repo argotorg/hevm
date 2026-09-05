@@ -98,6 +98,7 @@ library
     EVM.Dapp,
     EVM.Expr,
     EVM.SMT,
+    EVM.SMT.DivModEncoding,
     EVM.Solvers,
     EVM.Exec,
     EVM.Format,
@@ -124,6 +125,8 @@ library
     EVM.CheatsTH,
     EVM.SMT.Types,
     EVM.SMT.SMTLIB,
+    EVM.SMT.AbstractBase,
+    EVM.SMT.AbstractLemmas,
     Paths_hevm
   autogen-modules:
     Paths_hevm
@@ -272,7 +275,6 @@ common test-common
     ghc-options: -threaded "-with-rtsopts=-N -A32m"
   build-depends:
     test-utils,
-    vector,
   other-modules:
     EVM.Test.Utils
     EVM.Test.BlockchainTests
@@ -307,6 +309,7 @@ test-suite test
     regex,
     tasty-quickcheck,
     text,
+    vector,
 
 -- these tests require network access so we split them into a separate test
 -- suite to make it easy to skip them when running nix-build
@@ -319,6 +322,7 @@ test-suite rpc-tests
     rpc.hs
   build-depends:
     text,
+    vector,
 
 test-suite ethereum-tests
   import: test-common

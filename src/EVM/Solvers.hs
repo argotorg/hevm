@@ -128,9 +128,27 @@ checkSatWithProps sg props = do
   if psSimp == [PBool False] then pure Qed
   else do
     let concreteKeccaks = fmap (\(buf,val) -> PEq (Lit val) (Keccak buf)) (toList $ Keccak.concreteKeccaks props)
-    let smt2 = assertProps conf (if conf.simp then psSimp <> concreteKeccaks else psSimp)
-    if isLeft smt2 then pure $ Error $ getError smt2
-    else liftIO $ checkSat sg (Just props) smt2
+    let allProps = if conf.simp then psSimp <> concreteKeccaks else psSimp
+    if not conf.abstractArith then do
+      let smt2 = assertProps conf allProps
+      if isLeft smt2 then pure $ Error $ getError smt2
+      else liftIO $ checkSat sg (Just props) smt2
+    else liftIO $ do
+      -- Prove abstractly first; refine multiplication only after an abstract SAT.
+      let smt2Abstract = assertPropsAbstract conf allProps
+      let divRefinement = divModGroundTruth (exprToSMTWith AbstractDivMod) allProps
+      if isLeft smt2Abstract then pure $ Error $ getError smt2Abstract
+      else if isLeft divRefinement then pure $ Error $ getError divRefinement
+      else do
+        let query = getNonError smt2Abstract <> SMT2 (SMTScript (getNonError divRefinement)) mempty mempty
+        res <- checkSat sg (Just props) (Right query)
+        case res of
+          Cex _ | hasAbstractMul allProps ->
+            case mulGroundTruth (exprToSMTWith AbstractDivMod) allProps of
+              Left err -> pure $ Error err
+              Right refinement ->
+                checkSat sg (Just props) (Right $ query <> SMT2 (SMTScript refinement) mempty mempty)
+          _ -> pure res
 
 -- When props is Nothing, the cache will not be filled or used
 checkSat :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> IO SMTResult
@@ -264,6 +282,9 @@ getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r sem f
     )
 
 getOneSol :: (MonadIO m, ReadConfig m) => Solver -> Maybe Natural -> Natural -> SMT2 -> Maybe [Prop] -> Chan SMTResult -> TChan CacheEntry -> QSem -> Int -> m ()
+-- the empty solver answers every query "unknown" without spawning a process
+getOneSol EmptySolver _ _ _ _ r _ _ _ =
+  liftIO $ writeChan r (Unknown "Result unknown by SMT solver")
 getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) props r cacheq sem fileCounter = do
   conf <- readConfig
   liftIO $ bracket_

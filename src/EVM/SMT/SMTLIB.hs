@@ -2,14 +2,32 @@
 module EVM.SMT.SMTLIB (
   prelude,
   toText,
-  hasDuplicateCommands
+  hasDuplicateCommands,
+  -- * Builder primitives
+  sp,
+  zero,
+  one,
+  wordAsBV
 ) where
 
 import Data.Containers.ListUtils (nubOrd)
 import Data.Text.Lazy (Text)
 import Data.Text.Lazy.Builder
+import qualified Data.Text.Lazy.Builder.Int
 
 import EVM.SMT.Types
+
+sp :: Builder -> Builder -> Builder
+a `sp` b = a <> " " <> b
+
+zero :: Builder
+zero = "(_ bv0 256)"
+
+one :: Builder
+one = "(_ bv1 256)"
+
+wordAsBV :: forall a. Integral a => a -> Builder
+wordAsBV w = "(_ bv" <> Data.Text.Lazy.Builder.Int.decimal w <> " 256)"
 
 prelude :: SMT2
 prelude =  SMT2 src mempty mempty

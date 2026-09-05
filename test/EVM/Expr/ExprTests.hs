@@ -15,6 +15,7 @@ import Data.Containers.ListUtils (nubOrd)
 import Data.List qualified as List (nub)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
+import Data.Text (Text)
 import Data.Typeable
 
 import EVM.Effects
@@ -23,7 +24,7 @@ import EVM.Expr.Generator
 import EVM.Format (hexText)
 import EVM.Solvers hiding (checkSat)
 import EVM.SymExec (subModel)
-import EVM.Traversals (mapExprM)
+import EVM.Traversals (mapExpr, mapExprM)
 import EVM.Types hiding (Env)
 
 
@@ -1431,8 +1432,14 @@ wrappingTests = testGroup "W256 wrapping edge cases"
   ]
 
 fuzzTests :: TestTree
-fuzzTests = adjustOption (\(Test.Tasty.QuickCheck.QuickCheckTests n) -> Test.Tasty.QuickCheck.QuickCheckTests (div n 2)) $
-  testGroup "ExprFuzzTests" [equivalenceSanityChecks, simplifierFuzzTests]
+fuzzTests = testGroup "ExprFuzzTests"
+  [ halfQuickCheckTests equivalenceSanityChecks
+  , halfQuickCheckTests simplifierFuzzTests
+  , abstractArithmeticFuzzTests
+  ]
+  where
+    halfQuickCheckTests = adjustOption $ \(Test.Tasty.QuickCheck.QuickCheckTests n) ->
+      Test.Tasty.QuickCheck.QuickCheckTests (div n 2)
 
 equivalenceSanityChecks :: TestTree
 equivalenceSanityChecks = testGroup "Expr equivalence sanity checks"
@@ -1624,6 +1631,47 @@ simplifierFuzzTests = testGroup "SimplifierPropertyTests"
         assertEqualM "Must be equal" True equal
   ]
   -}
+
+abstractArithmeticFuzzTests :: TestTree
+abstractArithmeticFuzzTests = testGroup "AbstractArithmeticPropertyTests"
+  [ testProperty "targeted arithmetic shapes agree with concrete evaluation" $
+      \(AbstractArithCase shape expr bindings) ->
+        tabulate "arithmetic shape" [shape] $ ioProperty $ do
+          let expected = evalWithBindings bindings expr
+              assignments = fmap (\(name, value) -> PEq (Var name) (Lit value)) bindings
+              counterexampleQuery rhs = PNeg (PEq expr (Lit rhs)) : assignments
+          (exactResult, nearbyResult) <- checkAbstractArith
+            (counterexampleQuery expected)
+            (counterexampleQuery (expected + 1))
+          pure $ counterexample (unlines
+            [ "shape: " <> shape
+            , "expression: " <> show expr
+            , "bindings: " <> show bindings
+            , "concrete value: " <> show expected
+            , "exact result: " <> show exactResult
+            , "nearby result: " <> show nearbyResult
+            ]) (isQed exactResult && isCex nearbyResult)
+  ]
+
+evalWithBindings :: [(Text, W256)] -> Expr EWord -> W256
+evalWithBindings bindings expr =
+  case Expr.simplify (mapExpr substitute expr) of
+    Lit value -> value
+    other -> internalError $ "targeted arithmetic expression did not concretize: " <> show other
+  where
+    substitute :: Expr a -> Expr a
+    substitute (Var name) = case lookup name bindings of
+      Just value -> Lit value
+      Nothing -> internalError $ "missing targeted arithmetic binding: " <> show name
+    substitute other = other
+
+checkAbstractArith :: [Prop] -> [Prop] -> IO (SMTResult, SMTResult)
+checkAbstractArith exactQuery nearbyQuery =
+  runEnv (Env {config = equivConfig {abstractArith = True}}) $
+    withSolvers Bitwuzla 1 (Just 5) defMemLimit $ \solvers -> do
+      exactResult <- checkSatWithProps solvers exactQuery
+      nearbyResult <- checkSatWithProps solvers nearbyQuery
+      pure (exactResult, nearbyResult)
 
 
 proveEquivProp :: Prop -> Prop -> IO Bool
