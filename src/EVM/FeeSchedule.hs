@@ -52,6 +52,20 @@ data FeeSchedule n = FeeSchedule
   , g_access_list_address :: n
   , g_access_list_storage_key :: n
   , g_txdatafloor :: n
+  , g_auth_base :: n              -- EIP-7702: base cost per authorization
+  -- EIP-2537: BLS12-381 precompile gas costs
+  , g_bls_g1add :: n
+  , g_bls_g2add :: n
+  , g_bls_g1msm_base :: n
+  , g_bls_g2msm_base :: n
+  , g_bls_pairing_base :: n
+  , g_bls_pairing_point :: n
+  , g_bls_map_fp_to_g1 :: n
+  , g_bls_map_fp2_to_g2 :: n
+  -- EIP-4844
+  , g_point_evaluation :: n
+  -- EIP-7951 (P256VERIFY)
+  , g_p256_verify :: n
   } deriving Show
 
 feeSchedule :: Num n => FeeSchedule n
@@ -107,4 +121,18 @@ feeSchedule = FeeSchedule
   , g_access_list_address = 2400
   , g_access_list_storage_key = 1900
   , g_txdatafloor = 10
+  , g_auth_base = 12500           -- EIP-7702: PER_AUTH_BASE_COST
+  -- EIP-2537: BLS12-381 precompile gas costs
+  , g_bls_g1add = 375
+  , g_bls_g2add = 600
+  , g_bls_g1msm_base = 12000
+  , g_bls_g2msm_base = 22500
+  , g_bls_pairing_base = 37700
+  , g_bls_pairing_point = 32600
+  , g_bls_map_fp_to_g1 = 5500
+  , g_bls_map_fp2_to_g2 = 23800
+  -- EIP-4844
+  , g_point_evaluation = 50000
+  -- EIP-7951 (P256VERIFY)
+  , g_p256_verify = 6900
   }
