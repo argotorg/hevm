@@ -30,6 +30,14 @@ runForgeTestCustom
   :: (MonadMask m, App m)
   => FilePath -> TestMethodFilter -> Maybe Natural -> Maybe Integer -> Bool -> RpcInfo -> m (Bool, Bool)
 runForgeTestCustom testFile methodFilter timeout maxIter ffiAllowed rpcinfo = do
+  results <- runForgeTestResultsCustom testFile methodFilter timeout maxIter ffiAllowed rpcinfo
+  let (firsts, seconds) = unzip results
+  pure (and firsts, and seconds)
+
+runForgeTestResultsCustom
+  :: (MonadMask m, App m)
+  => FilePath -> TestMethodFilter -> Maybe Natural -> Maybe Integer -> Bool -> RpcInfo -> m [(Bool, Bool)]
+runForgeTestResultsCustom testFile methodFilter timeout maxIter ffiAllowed rpcinfo = do
   withSystemTempDirectory "dapp-test" $ \root -> do
     compileWithForge root testFile >>= \case
       Left e -> liftIO $ do
@@ -39,13 +47,18 @@ runForgeTestCustom testFile methodFilter timeout maxIter ffiAllowed rpcinfo = do
       Right buildOut -> do
         withSolvers Bitwuzla 3 timeout defMemLimit $ \solvers -> do
           opts <- testOpts solvers root (Just buildOut) methodFilter maxIter ffiAllowed rpcinfo
-          unitTest opts buildOut
+          unitTestResults opts buildOut
 
 -- Returns tuple of (No cex, No warnings)
 runForgeTest
   :: (MonadMask m, App m)
   => FilePath -> TestMethodFilter -> m (Bool, Bool)
 runForgeTest testFile methodFilter = runForgeTestCustom testFile methodFilter Nothing Nothing False noRpc
+
+runForgeTestResults
+  :: (MonadMask m, App m)
+  => FilePath -> TestMethodFilter -> m [(Bool, Bool)]
+runForgeTestResults testFile methodFilter = runForgeTestResultsCustom testFile methodFilter Nothing Nothing False noRpc
 
 testOpts :: forall m . App m => SolverGroup -> FilePath -> Maybe BuildOutput -> TestMethodFilter -> Maybe Integer -> Bool -> RpcInfo -> m (UnitTestOptions)
 testOpts solvers root buildOutput methodFilter maxIter allowFFI rpcinfo = do
