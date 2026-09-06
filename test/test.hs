@@ -750,6 +750,8 @@ tests = testGroup "hevm"
         word256Bytes w == slow_word256Bytes w
     , testProperty "word160Bytes" $ \a ->
         word160Bytes a == slow_word160Bytes a
+    , testProperty "word256" $ \a ->
+        word256 a == slow_word256 a
     ]
 
   , testGroup "Unresolved link detection"
