@@ -120,7 +120,13 @@ makeVeriOpts opts =
 -- | Top level CLI endpoint for hevm test
 -- | Returns tuple of (No Cex, No warnings)
 unitTest :: App m => UnitTestOptions -> BuildOutput -> m (Bool, Bool)
-unitTest opts bo@(BuildOutput (Contracts cs) _) = do
+unitTest opts bo = do
+  results <- unitTestResults opts bo
+  let (firsts, seconds) = unzip results
+  pure (and firsts, and seconds)
+
+unitTestResults :: App m => UnitTestOptions -> BuildOutput -> m [(Bool, Bool)]
+unitTestResults opts bo@(BuildOutput (Contracts cs) _) = do
   let unitTestContrs = [(c, methods) | c <- Map.elems cs, let methods = findUnitTests opts.methodFilter c, not (null methods)]
   conf <- readConfig
   when conf.debug $ liftIO $ do
@@ -128,8 +134,7 @@ unitTest opts bo@(BuildOutput (Contracts cs) _) = do
     let x = map (\(a,b) -> "  --> " <> a.contractName <> "  ---  functions: " <> (Text.pack $ show b)) unitTestContrs
     putStrLn $ unlines $ map Text.unpack x
   results <- mapM (runUnitTestContract opts bo) unitTestContrs
-  let (firsts, seconds) = unzip $ concat results
-  pure (and firsts, and seconds)
+  pure $ concat results
 
 -- | Assuming a constructor is loaded, this stepper will run the constructor
 -- to create the test contract, give it an initial balance, and run `setUp()'.

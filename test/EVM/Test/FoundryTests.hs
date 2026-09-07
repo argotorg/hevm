@@ -9,10 +9,10 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 import EVM.ABI (Sig(..))
-import EVM.Dapp (TestMethodInfo(..))
+import EVM.Dapp (TestMethodFilter, TestMethodInfo(..))
 import EVM.Effects
 import EVM.Fetch qualified as Fetch
-import EVM.Test.Utils (runForgeTest, runForgeTestCustom)
+import EVM.Test.Utils (runForgeTest, runForgeTestResults, runForgeTestResultsCustom)
 import EVM.Types (regexMatches)
 
 foundryTestConfig :: Config
@@ -66,23 +66,22 @@ tests = testGroup "Foundry tests"
               , ("test/contracts/fail/etchFail.sol",      "prove_etch_fail.*", (False, True))
               ]
         forM_ cases $ \(testFile, match, expected) -> do
-          actual <- executeTestMethodsMatching testFile match
-          assertEqualM "Must match" expected actual
+          assertAllTestMethodsMatching testFile match expected
     , test "Trivial-Fail" $ do
         let testFile = "test/contracts/fail/trivial.sol"
         executeSingleMethod testFile "prove_false" >>= assertEqualM "test result" (False, False)
     , test "Abstract" $ do
         let testFile = "test/contracts/pass/abstract.sol"
-        executeAllMethodsWithPrefix testFile "test" >>= assertEqualM "test result" (True, True)
+        assertAllMethodsWithPrefix testFile "test" (True, True)
     , test "Constantinople" $ do
         let testFile = "test/contracts/pass/constantinople.sol"
-        executeAllMethodsWithPrefix testFile "check_" >>= assertEqualM "test result" (True, True)
+        assertAllMethodsWithPrefix testFile "check_" (True, True)
     , test "Fusaka" $ do
         let testFile = "test/contracts/pass/fusaka.sol"
-        executeAllMethodsWithPrefix testFile "check_" >>= assertEqualM "test result" (True, True)
+        assertAllMethodsWithPrefix testFile "check_" (True, True)
     , test "Prove-Tests-Pass" $ do
         let testFile = "test/contracts/pass/dsProvePass.sol"
-        executeAllMethodsWithPrefix testFile "prove" >>= assertEqualM "test result" (True, True)
+        assertAllMethodsWithPrefix testFile "prove" (True, True)
     , test "prefix-check" $ do
         let testFile = "test/contracts/fail/check-prefix.sol"
         executeSingleMethod testFile "check_trivial" >>= assertEqualM "test result" (False, False)
@@ -98,29 +97,31 @@ tests = testGroup "Foundry tests"
         executeSingleMethod testFile "prove_trivial" >>= assertEqualM "prove_trivial" (False, False)
         executeSingleMethod testFile "prove_trivial_dstest" >>= assertEqualM "prove_trivial_dstest" (False, False)
         executeSingleMethod testFile "prove_add" >>= assertEqualM "prove_add" (False, True)
-        runForgeTestCustom testFile (\(TestMethodInfo _ (Sig name _)) -> regexMatches "prove_smtTimeout" name) (Just 1) Nothing False Fetch.noRpc
-          >>= assertEqualM "prove_smtTimeout" (True, False)
+        runForgeTestResultsCustom testFile (\(TestMethodInfo _ (Sig name _)) -> name == "prove_smtTimeout") (Just 1) Nothing False Fetch.noRpc
+          >>= assertEqualM "prove_smtTimeout" [(True, False)]
         executeSingleMethod testFile "prove_multi" >>= assertEqualM "prove_multi" (False, True)
         executeSingleMethod testFile "prove_distributivity" >>= assertEqualM "prove_distributivity" (False, True)
     , test "Loop-Tests" $ do
         let testFile = "test/contracts/pass/loops.sol"
-        runForgeTestCustom testFile (\(TestMethodInfo _ (Sig name _)) -> regexMatches "prove_loop" name) Nothing (Just 10) False Fetch.noRpc  >>= assertEqualM "test result" (True, False)
-        runForgeTestCustom testFile (\(TestMethodInfo _ (Sig name _)) -> regexMatches "prove_loop" name) Nothing (Just 100) False Fetch.noRpc >>= assertEqualM "test result" (False, False)
+        runForgeTestResultsCustom testFile (\(TestMethodInfo _ (Sig name _)) -> name == "prove_loop") Nothing (Just 10) False Fetch.noRpc
+          >>= assertEqualM "test result" [(True, False)]
+        runForgeTestResultsCustom testFile (\(TestMethodInfo _ (Sig name _)) -> name == "prove_loop") Nothing (Just 100) False Fetch.noRpc
+          >>= assertEqualM "test result" [(False, False)]
     , test "Cheat-Codes-Pass" $ do
         let testFile = "test/contracts/pass/cheatCodes.sol"
         executeAllMethodsWithPrefix testFile "prove" >>= assertEqualM "test result" (True, False)
     , test "Expect-Revert-Pass" $ do
         let testFile = "test/contracts/pass/expectRevert.sol"
-        executeAllMethodsWithPrefix testFile "prove" >>= assertEqualM "test result" (True, True)
+        assertAllMethodsWithPrefix testFile "prove" (True, True)
     , test "Expect-Revert-Fail" $ do
         let testFile = "test/contracts/fail/expectRevert.sol"
-        executeAllMethodsWithPrefix testFile "prove" >>= assertEqualM "test result" (False, True)
+        assertAllMethodsWithPrefix testFile "prove" (False, True)
     , test "Cheat-Codes-Fork-Pass" $ do
         let testFile = "test/contracts/pass/cheatCodesFork.sol"
-        executeAllMethodsWithPrefix testFile "prove" >>= assertEqualM "test result" (True, True)
+        assertAllMethodsWithPrefix testFile "prove" (True, True)
     , test "Unwind" $ do
         let testFile = "test/contracts/pass/unwind.sol"
-        executeAllMethodsWithPrefix testFile "prove" >>= assertEqualM "test result" (True, True)
+        assertAllMethodsWithPrefix testFile "prove" (True, True)
     , test "Keccak" $ do
         let testFile = "test/contracts/pass/keccak.sol"
         executeSingleMethod testFile "prove_access" >>= assertEqualM "test result" (True, True)
@@ -135,7 +136,7 @@ tests = testGroup "Foundry tests"
         executeSingleMethod testFile "prove_same_mapping_falsifiable" >>= assertEqualM "same-mapping read must falsify" (False, True)
     , test "AssertApproxEqAbs-Pass" $ do
         let testFile = "test/contracts/pass/assertApproxEqAbs.sol"
-        executeAllMethodsWithPrefix testFile "prove" >>= assertEqualM "test result" (True, True)
+        assertAllMethodsWithPrefix testFile "prove" (True, True)
     , test "AssertApproxEqAbs-Fail" $ do
         let testFile = "test/contracts/fail/assertApproxEqAbs.sol"
         let cases =
@@ -151,7 +152,7 @@ tests = testGroup "Foundry tests"
           executeSingleMethod testFile method >>= assertEqualM (unpack method) expected
     , test "AssertApproxEqRel-Pass" $ do
         let testFile = "test/contracts/pass/assertApproxEqRel.sol"
-        executeAllMethodsWithPrefix testFile "prove" >>= assertEqualM "test result" (True, True)
+        assertAllMethodsWithPrefix testFile "prove" (True, True)
     , test "AssertApproxEqRel-Fail" $ do
         let testFile = "test/contracts/fail/assertApproxEqRel.sol"
         let cases =
@@ -168,12 +169,12 @@ tests = testGroup "Foundry tests"
           executeSingleMethod testFile method >>= assertEqualM (unpack method) expected
     , test "AssertMsg-Pass" $ do
         let testFile = "test/contracts/pass/assertMsg.sol"
-        executeAllMethodsWithPrefix testFile "prove" >>= assertEqualM "test result" (True, True)
+        assertAllMethodsWithPrefix testFile "prove" (True, True)
     , test "AssertMsg-Fail" $ do
         -- every message/bytes overload is violated; all concrete, so all branches
         -- revert -> (False, False)
         let testFile = "test/contracts/fail/assertMsg.sol"
-        executeAllMethodsWithPrefix testFile "prove" >>= assertEqualM "test result" (False, False)
+        assertAllMethodsWithPrefix testFile "prove" (False, False)
     , test "Panic-Source-Location" $ do
         -- Regression test for #895: panic in a called contract should not show "<source not found>"
         let testFile = "test/contracts/fail/assertPanic.sol"
@@ -181,10 +182,27 @@ tests = testGroup "Foundry tests"
     ]
 
 executeSingleMethod :: (App m, MonadMask m) => FilePath -> Text -> m (Bool, Bool)
-executeSingleMethod file methodName = runForgeTest file (\(TestMethodInfo _ (Sig name _)) -> regexMatches methodName name)
+executeSingleMethod file methodName = do
+  results <- runForgeTestResults file (\(TestMethodInfo _ (Sig name _)) -> name == methodName)
+  case results of
+    [result] -> pure result
+    _ -> do
+      _ <- liftIO $ assertFailure ("expected exactly one method named " <> unpack methodName <> ", got " <> show (length results))
+      pure (True, True)
 
 executeAllMethodsWithPrefix :: (App m, MonadMask m) => FilePath -> Text -> m (Bool, Bool)
 executeAllMethodsWithPrefix file prefix = runForgeTest file (\(TestMethodInfo _ (Sig name _)) -> prefix `isPrefixOf` name)
 
-executeTestMethodsMatching :: (App m, MonadMask m) => FilePath -> Text -> m (Bool, Bool)
-executeTestMethodsMatching file matcher = runForgeTest file (\(TestMethodInfo _ (Sig name _)) -> regexMatches matcher name && "prove" `isPrefixOf` name)
+assertAllMethodsWithPrefix :: (App m, MonadMask m) => FilePath -> Text -> (Bool, Bool) -> m ()
+assertAllMethodsWithPrefix file prefix =
+  assertAllMethods file ("prefix: " <> unpack prefix) (\(TestMethodInfo _ (Sig name _)) -> prefix `isPrefixOf` name)
+
+assertAllTestMethodsMatching :: (App m, MonadMask m) => FilePath -> Text -> (Bool, Bool) -> m ()
+assertAllTestMethodsMatching file matcher =
+  assertAllMethods file ("regex: " <> unpack matcher) (\(TestMethodInfo _ (Sig name _)) -> regexMatches matcher name && "prove" `isPrefixOf` name)
+
+assertAllMethods :: (App m, MonadMask m) => FilePath -> String -> TestMethodFilter -> (Bool, Bool) -> m ()
+assertAllMethods file description methodFilter expected = do
+  results <- runForgeTestResults file methodFilter
+  liftIO $ assertBool ("no methods matching " <> description) (not $ null results)
+  assertEqualM "test results" (replicate (length results) expected) results
