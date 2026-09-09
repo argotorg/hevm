@@ -284,7 +284,6 @@ unknownContract addr = Contract
   , nonce       = Nothing
   , codehash    = hashcode (UnknownCode addr)
   , opIxMap     = mempty
-  , codeOps     = mempty
   , external    = False
   }
 
@@ -299,7 +298,6 @@ abstractContract code addr = Contract
   , nonce       = if isCreation code then Just 1 else Just 0
   , codehash    = hashcode code
   , opIxMap     = mkOpIxMap code
-  , codeOps     = mkCodeOps code
   , external    = False
   }
 
@@ -318,7 +316,6 @@ initialContract code = Contract
   , nonce       = if isCreation code then Just 1 else Just 0
   , codehash    = hashcode code
   , opIxMap     = mkOpIxMap code
-  , codeOps     = mkCodeOps code
   , external    = False
   }
 
@@ -2858,7 +2855,6 @@ replaceCodeEtch target newCode =
               { code = newCode
               , codehash = hashcode newCode
               , opIxMap = mkOpIxMap newCode
-              , codeOps = mkCodeOps newCode
               })
         UnknownCode _ -> internalError "Can't etch unknown code"
       Nothing -> put . Just $ initialContract newCode
@@ -3360,9 +3356,14 @@ isValidJumpDest vm x = let
       RuntimeCode (SymbolicRuntimeCode ops) -> ops V.!? x >>= maybeLitByteSimp
   in case op of
        Nothing -> False
-       Just b -> 0x5b == b && (isJust $ contract.opIxMap VS.!? x)
-         && (isJust $ contract.codeOps V.!? (contract.opIxMap VS.! x))
-         && OpJumpdest == snd (contract.codeOps V.! (contract.opIxMap VS.! x))
+       Just b -> 0x5b == b && isOpStart contract.opIxMap x
+
+-- | Is byte i the start of an op, rather than PUSH data? Push data shares the
+-- op index of its PUSH, so an op starts wherever the op index changes.
+isOpStart :: VS.Vector Int -> Int -> Bool
+isOpStart opIxMap i = case opIxMap VS.!? i of
+  Nothing -> False
+  Just opIx -> i == 0 || VS.unsafeIndex opIxMap (i - 1) /= opIx
 
 opSize :: Word8 -> Int
 opSize x | x >= 0x60 && x <= 0x7f = into x - 0x60 + 2
@@ -3412,48 +3413,10 @@ mkOpIxMap (RuntimeCode (SymbolicRuntimeCode ops))
           {- PUSH data. -}        (n - 1,        i + 1, j,     m >> VS.Mutable.write v i j)
 
 
-vmOp :: VM t -> Maybe Op
-vmOp vm =
-  let i  = vm ^. #state % #pc
-      code' = vm ^. #state % #code
-      (op, pushdata) = case code' of
-        UnknownCode _ -> internalError "cannot get op from unknown code"
-        InitCode xs' _ ->
-          (BS.index xs' i, fmap LitByte $ BS.unpack $ BS.drop i xs')
-        RuntimeCode (ConcreteRuntimeCode xs') ->
-          (BS.index xs' i, fmap LitByte $ BS.unpack $ BS.drop i xs')
-        RuntimeCode (SymbolicRuntimeCode xs') ->
-          ( fromMaybe (internalError "unexpected symbolic code") . maybeLitByteSimp $ xs' V.! i , V.toList $ V.drop i xs')
-  in if (opslen code' < i)
-     then Nothing
-     else Just (readOp op pushdata)
-
 vmOpIx :: VM t -> Maybe Int
 vmOpIx vm =
   do self <- currentContract vm
      self.opIxMap VS.!? vm.state.pc
-
--- Maps operation indices into a pair of (bytecode index, operation)
-mkCodeOps :: ContractCode -> V.Vector (Int, Op)
-mkCodeOps contractCode =
-  let l = case contractCode of
-            UnknownCode _ -> internalError "Cannot make codeOps for unknown code"
-            InitCode bytes _ ->
-              LitByte <$> (BS.unpack bytes)
-            RuntimeCode (ConcreteRuntimeCode ops) ->
-              LitByte <$> (BS.unpack $ stripBytecodeMetadata ops)
-            RuntimeCode (SymbolicRuntimeCode ops) ->
-              stripBytecodeMetadataSym $ V.toList ops
-  in V.fromList . toList $ go 0 l
-  where
-    go !i !xs =
-      case uncons xs of
-        Nothing ->
-          mempty
-        Just (x, xs') ->
-          let x' = fromMaybe (internalError "unexpected symbolic code argument") $ maybeLitByteSimp x
-              j = opSize x'
-          in (i, readOp x' xs') Seq.<| go (i + j) (drop j xs)
 
 -- * Gas cost calculation helpers
 

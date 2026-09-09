@@ -906,7 +906,6 @@ data Contract = Contract
   , nonce       :: Maybe W64
   , codehash    :: Expr EWord
   , opIxMap     :: VS.Vector Int -- ^ map from byte index to op index
-  , codeOps     :: V.Vector (Int, Op)
   , external    :: Bool
   }
   deriving (Show, Eq, Ord)
