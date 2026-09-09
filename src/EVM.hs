@@ -3356,12 +3356,14 @@ isValidJumpDest vm x = let
       RuntimeCode (SymbolicRuntimeCode ops) -> ops V.!? x >>= maybeLitByteSimp
   in case op of
        Nothing -> False
-       Just b -> 0x5b == b && case contract.opIxMap VS.!? x of
-         Nothing -> False
-         -- PUSH data bytes share the op index of their PUSH, so byte x begins
-         -- an op (and is thus a real JUMPDEST) iff its op index differs from
-         -- the previous byte's
-         Just opIdx -> x == 0 || VS.unsafeIndex contract.opIxMap (x - 1) /= opIdx
+       Just b -> 0x5b == b && isOpStart contract.opIxMap x
+
+-- | Is byte i the start of an op, rather than PUSH data? Push data shares the
+-- op index of its PUSH, so an op starts wherever the op index changes.
+isOpStart :: VS.Vector Int -> Int -> Bool
+isOpStart opIxMap i = case opIxMap VS.!? i of
+  Nothing -> False
+  Just opIx -> i == 0 || VS.unsafeIndex opIxMap (i - 1) /= opIx
 
 opSize :: Word8 -> Int
 opSize x | x >= 0x60 && x <= 0x7f = into x - 0x60 + 2
