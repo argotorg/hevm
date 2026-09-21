@@ -111,9 +111,44 @@ storageTests = testGroup "Storage tests"
            outer = And (Lit 1461501637330902918203684832716283019655932542975) (SLoad (keccAnd) (ConcreteStore (Map.fromList[(W256 1184450375068808042203882151692185743185288360635, W256 0xacab)])))
            simp = Expr.concKeccakSimpExpr outer
        assertEqual "Expression should simplify to value." simp (Lit 0xacab)
+    -- decomposition: keys of the read array become offsets, writes to other stores are dropped
+    , testCase "decompose-array-read-rebases-keys" $ assertEqual errorMsg
+        (Just $ SLoad (Var "i") (SStore (Lit 0) (Lit 1) emptyStore))
+        (Expr.decomposeStorage $ SLoad (arrElem 2 (Var "i"))
+          (SStore (arrZero 2) (Lit 1) emptyStore))
+    , testCase "decompose-array-read-drops-small-slot-write" $ assertEqual errorMsg
+        (Just $ SLoad (Var "i") emptyStore)
+        (Expr.decomposeStorage $ SLoad (arrElem 2 (Var "i"))
+          (SStore (Lit 0) (Var "a") emptyStore))
+    , testCase "decompose-array-read-drops-other-array-write" $ assertEqual errorMsg
+        (Just $ SLoad (Var "i") emptyStore)
+        (Expr.decomposeStorage $ SLoad (arrElem 2 (Var "i"))
+          (SStore (arrZero 1) (Lit 5) emptyStore))
+    , testCase "decompose-small-slot-read-drops-array-write" $ assertEqual errorMsg
+        (Just $ SLoad (Lit 0) (SStore (Lit 0) (Var "a") emptyStore))
+        (Expr.decomposeStorage $ SLoad (Lit 0)
+          (SStore (arrZero 2) (Lit 1) (SStore (Lit 0) (Var "a") emptyStore)))
+    -- #1086: a skipped write must not cause the already-rebased writes below it to be rebased again
+    , testCase "decompose-keeps-array-write-below-other-array-write" $ assertEqual errorMsg
+        (Just $ SLoad (Var "i") (SStore (Lit 0) (Lit 1) emptyStore))
+        (Expr.decomposeStorage $ SLoad (arrElem 2 (Var "i"))
+          (SStore (arrZero 1) (Lit 5) (SStore (arrZero 2) (Lit 1) emptyStore)))
+    , testCase "decompose-keeps-symbolic-array-write-below-small-slot" $ assertEqual errorMsg
+        (Just $ SLoad (Var "i") (SStore (Var "j") (Lit 1) emptyStore))
+        (Expr.decomposeStorage $ SLoad (arrElem 2 (Var "i"))
+          (SStore (Lit 0) (Var "a") (SStore (arrElem 2 (Var "j")) (Lit 1) emptyStore)))
+    , testCase "decompose-keeps-array-write-below-small-slot" $ assertEqual errorMsg
+        (Just $ SLoad (Var "i") (SStore (Lit 0) (Lit 1) emptyStore))
+        (Expr.decomposeStorage $ SLoad (arrElem 2 (Var "i"))
+          (SStore (Lit 0) (Var "a") (SStore (arrZero 2) (Lit 1) emptyStore)))
   ]
   where
     errorMsg = "Storage read expression not simplified correctly"
+    emptyStore = ConcreteStore mempty
+    -- element `off` of the dynamic array at storage slot n: keccak(n) + off
+    arrElem n off = Expr.ArraySlotWithOffs (arrId n) off
+    arrZero n = Expr.ArraySlotZero (arrId n)
+    arrId n = BS.pack (replicate 31 0 ++ [n])
     -- a symbolic read of the mapping at storage slot n: keccak(key . n)
     mappingRead n key = Keccak (WriteWord (Lit 0) (Var key) (ConcreteBuf (mapSlotBuf n)))
     mapSlotBuf n = BS.pack (replicate 63 0 ++ [n])
