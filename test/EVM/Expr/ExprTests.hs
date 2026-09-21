@@ -10,11 +10,11 @@ import Test.Tasty.HUnit
 import Test.Tasty.QuickCheck hiding (Failure, Success)
 
 import Data.Bits (shiftL)
+import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS (pack)
 import Data.Containers.ListUtils (nubOrd)
-import Data.List qualified as List (nub)
+import Data.List qualified as List (nub, tails)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe)
 import Data.Typeable
 
 import EVM.Effects
@@ -1496,10 +1496,18 @@ simplifierFuzzTests = testGroup "SimplifierPropertyTests"
         proveEquivExpr buflen (Expr.simplify buflen)
     , testProperty "store-simplification" $ \(expr :: Expr Storage) -> ioProperty $ proveEquivExpr expr (Expr.simplify expr)
     , testProperty "load-simplification" $ \(GenWriteStorageLoad expr) -> ioProperty $ proveEquivExpr expr (Expr.simplify expr)
-    , ignoreTest $ testProperty "load-decompose" $ \(GenWriteStorageLoad expr) -> ioProperty $ do
-        let simp = Expr.simplify expr
-        let decomposed = fromMaybe simp $ mapExprM Expr.decomposeStorage simp
-        proveEquivExpr expr decomposed
+    -- over a concrete base, decomposition must not change the loaded value, given its assumption
+    -- that keys of different stores never alias (keccak is uninterpreted in SMT, so assert it)
+    , testProperty "load-decompose" $ \(GenDecomposableLoad expr) -> ioProperty $
+        case Expr.decomposeStorage expr of
+          Nothing -> pure $ counterexample "decomposition failed" False
+          Just decomposed -> do
+            let keys = storeKeys expr
+                noAlias = [PNeg (PEq a b) | (a:rest) <- List.tails keys, b <- rest, storeId a /= storeId b]
+            res <- checkSat $ foldr PAnd (expr ./= decomposed) noAlias
+            -- a timeout proves nothing either way: discard it rather than count it as a pass
+            pure $ counterexample ("decomposed: " <> show decomposed <> "\nresult: " <> show res) $
+              not (isUnknown res) ==> isQed res
     , testProperty "byte-simplification" $ \(expr :: Expr Byte) -> ioProperty $ proveEquivExpr expr (Expr.simplify expr)
     , askOption $ \(QuickCheckTests n) -> testProperty "word-simplification" $ withMaxSuccess (min n 20) $ \(ZeroDepthWord expr) ->
         ioProperty $ proveEquivExpr expr (Expr.simplify expr)
@@ -1684,6 +1692,22 @@ equivConfig = defaultConfig {simp = False, dumpQueries = False}
 
 withOneBitwuzla :: App m => (SolverGroup -> m a) -> m a
 withOneBitwuzla = withSolvers Bitwuzla 1 (Just 1) defMemLimit
+
+storeKeys :: Expr EWord -> [Expr EWord]
+storeKeys (SLoad k s) = k : go s
+  where
+    go :: Expr Storage -> [Expr EWord]
+    go (SStore k' _ s') = k' : go s'
+    go _ = []
+storeKeys _ = []
+
+-- the logical store a key belongs to: Nothing for small slots
+storeId :: Expr EWord -> Maybe ByteString
+storeId = \case
+  Expr.MappingSlot idx _ -> Just idx
+  Expr.ArraySlotWithOffs idx _ -> Just idx
+  Expr.ArraySlotZero idx -> Just idx
+  _ -> Nothing
 
 isSat :: SMTResult -> Bool
 isSat = isCex
