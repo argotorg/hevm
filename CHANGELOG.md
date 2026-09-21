@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   invalid UTF-8: ABI `string` values are raw bytes, so e.g. `vm.setEnv`,
   `vm.envString` and `vm.label` no longer abort the whole run when handed a
   byte sequence that is not valid UTF-8 ([#1076](https://github.com/argotorg/hevm/issues/1076))
+- Calling a recognized but unimplemented precompile (`0x0a`–`0x11`, `0x100`)
+  no longer crashes with an internal error during gas calculation; it now
+  fails with `NonexistentPrecompile` (concrete) or a `PrecompileMissing`
+  partial (symbolic) ([#1084](https://github.com/argotorg/hevm/issues/1084))
 
 ## [0.58.0] - 2026-06-26
 
