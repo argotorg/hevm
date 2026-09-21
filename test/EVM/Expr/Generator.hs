@@ -5,6 +5,7 @@ import Prelude hiding (LT, GT)
 import Control.Monad (replicateM)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.Map.Strict qualified as Map
 import Data.DoubleWord (Word128, Word256, Word160, fromHiAndLo)
 import Data.Proxy
 import Data.Text (Text)
@@ -68,13 +69,13 @@ instance Arbitrary GenDecomposableLoad where
     n <- chooseInt (1, 6)
     keys <- vectorOf n genDecomposableKey
     vals <- vectorOf n (oneof [Lit . fromIntegral <$> chooseInt (1, 9), Var <$> elements ["v0", "v1"]])
-    base <- oneof
-      [ pure $ ConcreteStore mempty
-      -- TODO: enable once decomposition keeps a small-slot base for small-slot reads
-      -- , ConcreteStore . Map.fromList <$> listOf ((,) <$> (fromIntegral <$> chooseInt (0, 3)) <*> (fromIntegral <$> chooseInt (1, 9)))
+    baseSlots <- frequency
+      [ (1, pure mempty)
+      , (2, Map.fromList <$> listOf1 ((,) <$> (fromIntegral <$> chooseInt (0, 3)) <*> (fromIntegral <$> chooseInt (1, 9))))
       ]
-    -- reading a written key makes it likely that the read hits a write deep in the chain
-    key <- oneof [genDecomposableKey, elements keys]
+    -- reading a written key, or a slot of the base, makes it likely that the read reaches deep
+    key <- oneof $ [genDecomposableKey, elements keys] <> [elements (Lit <$> Map.keys baseSlots) | not (Map.null baseSlots)]
+    let base = ConcreteStore baseSlots
     pure $ GenDecomposableLoad $ SLoad key (foldr (uncurry SStore) base (zip keys vals))
 
 genDecomposableKey :: Gen (Expr EWord)
