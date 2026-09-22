@@ -658,7 +658,7 @@ genBaseArithCase = oneof
   , ceilDivCase
   , telescopeCase
   , withBindings "signed division and modulo"
-      (Expr.add (SDiv arithA arithB) (SMod arithA arithB)) []
+      (Expr.add (SDiv arithA arithB) (SMod arithA arithB)) signedEdges
   , withBindings "unsigned modulo" (Mod (Expr.mul arithA arithB) arithC) []
   , shiftDividendCase
   , pow2DividendCase
@@ -734,10 +734,14 @@ genBaseArithCase = oneof
 
     -- two ops of one kind whose operands can have equal magnitudes: congruence links
     congruenceCase shape op =
-      withBindings shape (Expr.add (op arithA arithB) (op arithC arithB))
-        [ \bs -> do
+      withBindings shape (Expr.add (op arithA arithB) (op arithC arithB)) $
+        (\bs -> do
             sameMagnitude <- elements [id, negate]
-            pure $ replaceBinding arithCName (sameMagnitude (lookupBinding arithAName bs)) bs ]
+            pure $ replaceBinding arithCName (sameMagnitude (lookupBinding arithAName bs)) bs)
+        : signedEdges
+
+    -- |2^255| wraps to 2^255, and 2^255 / -1 overflows
+    signedEdges = [nearValue arithAName (2 ^ (255 :: Int)), nearValue arithBName maxBound]
 
 arithAName, arithBName, arithCName :: Text
 arithAName = T.pack "abstract_arith_a"
