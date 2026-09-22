@@ -139,22 +139,14 @@ checkSatWithPropsAbortable sg shouldAbort props = do
       let smt2 = assertProps conf allProps
       if isLeft smt2 then pure $ Error $ getError smt2
       else liftIO $ checkSat' sg (Just props) shouldAbort smt2
-    else liftIO $ do
-      -- Prove abstractly first; refine multiplication only after an abstract SAT.
-      let smt2Abstract = assertPropsAbstract conf allProps
-          goalProps = concretizedGoalProps conf allProps
-          divRefinement = divModGroundTruth (exprToSMTWith AbstractDivMod) goalProps
-      if isLeft smt2Abstract then pure $ Error $ getError smt2Abstract
-      else if isLeft divRefinement then pure $ Error $ getError divRefinement
-      else do
-        let query = getNonError smt2Abstract <> SMT2 (SMTScript (getNonError divRefinement)) mempty mempty
+    else case assertPropsAbstract conf allProps of
+      Left err -> pure $ Error err
+      Right (query, mulRefinement) -> liftIO $ do
+        -- Prove abstractly first; refine multiplication only after an abstract SAT.
         res <- checkSat' sg (Just props) shouldAbort (Right query)
         case res of
-          Cex _ | hasAbstractMul goalProps ->
-            case mulGroundTruth (exprToSMTWith AbstractDivMod) goalProps of
-              Left err -> pure $ Error err
-              Right refinement ->
-                checkSat' sg (Just props) shouldAbort (Right $ query <> SMT2 (SMTScript refinement) mempty mempty)
+          Cex _ | not (null mulRefinement) ->
+            checkSat' sg (Just props) shouldAbort (Right $ query <> SMT2 (SMTScript mulRefinement) mempty mempty)
           _ -> pure res
 
 -- When props is Nothing, the cache will not be filled or used

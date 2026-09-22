@@ -12,7 +12,6 @@ module EVM.SMT.DivModEncoding
   , divModEncoding
   , divModAbstractDecls
   , mulEncoding
-  , hasAbstractMul
   ) where
 
 import Data.Bits (countTrailingZeros)

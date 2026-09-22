@@ -14,7 +14,6 @@ module EVM.SMT
   declareIntermediates,
   assertProps,
   assertPropsAbstract,
-  concretizedGoalProps,
   assertPropsHelperWith,
   decompose,
   exprToSMTWith,
@@ -135,25 +134,23 @@ assertProps conf ps =
   if not conf.simp then assertPropsHelperWith ConcreteDivMod False [] ps
   else assertPropsHelperWith ConcreteDivMod True [] (decompose conf ps)
 
--- | Assert props with abstract div/mod (uninterpreted functions + encoding constraints).
-assertPropsAbstract :: Config -> [Prop] -> Err SMT2
+-- | Assert props with abstract div/mod/mul (uninterpreted functions + lemmas).
+-- The query includes the div/mod ground truth. Also returns the mul ground
+-- truth, empty if there is no abstract product, to re-check a SAT result with.
+assertPropsAbstract :: Config -> [Prop] -> Err (SMT2, [SMTEntry])
 assertPropsAbstract conf ps = do
-  base <- assertPropsHelperWith AbstractDivMod conf.simp divModAbstractDecls psDecomp
-  shiftBounds <- divModEncoding (exprToSMTWith AbstractDivMod) psConc
-  mulLemmas <- mulEncoding (exprToSMTWith AbstractDivMod) psConc
-  pure $ base <> SMT2 (SMTScript (shiftBounds <> mulLemmas)) mempty mempty
+  base@(SMT2 _ _ goalPs) <- assertPropsHelperWith AbstractDivMod conf.simp divModAbstractDecls psDecomp
+  -- Lemmas and ground truth come from the helper's concretized props, the ones
+  -- the goal is encoded from: raw props can keep storage reads that simplify
+  -- away in the goal, so their terms would not match.
+  shiftBounds <- divModEncoding enc goalPs
+  mulLemmas <- mulEncoding enc goalPs
+  divTruth <- divModGroundTruth enc goalPs
+  mulTruth <- mulGroundTruth enc goalPs
+  pure (base <> SMT2 (SMTScript (shiftBounds <> mulLemmas <> divTruth)) mempty mempty, mulTruth)
   where
+    enc = exprToSMTWith AbstractDivMod
     psDecomp = if conf.simp then decompose conf ps else ps
-    psConc   = concretizedGoalProps conf ps
-
--- | The decomposed, keccak-concretized props the goal is encoded from. Lemmas
--- and ground truth must come from these: raw props can keep storage reads that
--- simplify away in the goal, so their terms would not match. Stops before
--- 'eliminateProps': its 'GVar' placeholders are opaque to the matchers.
-concretizedGoalProps :: Config -> [Prop] -> [Prop]
-concretizedGoalProps conf ps =
-  if conf.simp then Expr.concKeccakSimpProps (decompose conf ps)
-  else Expr.concKeccakProps ps
 
 -- Note: we need a version that does NOT call simplify,
 -- because we make use of it to verify the correctness of our simplification
