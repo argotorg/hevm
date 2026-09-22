@@ -272,7 +272,19 @@ getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r sem f
         )
     )
 
-getOneSol :: (MonadIO m, ReadConfig m) => Solver -> Maybe Natural -> Natural -> SMT2 -> Maybe [Prop] -> Maybe (TVar Bool) -> Chan SMTResult -> TChan CacheEntry -> QSem -> Int -> m ()
+getOneSol
+  :: (MonadIO m, ReadConfig m)
+  => Solver
+  -> Maybe Natural      -- ^ timeout (seconds)
+  -> Natural            -- ^ memory limit (MB)
+  -> SMT2               -- ^ query
+  -> Maybe [Prop]       -- ^ props for the UNSAT cache
+  -> Maybe (TVar Bool)  -- ^ shared abort flag
+  -> Chan SMTResult     -- ^ result channel
+  -> TChan CacheEntry   -- ^ UNSAT cache channel
+  -> QSem               -- ^ limits concurrent solvers
+  -> Int                -- ^ query counter, for dump file names
+  -> m ()
 getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) props shouldAbort r cacheq sem fileCounter = do
   conf <- readConfig
   res <- liftIO $ abortable shouldAbort (Unknown "Query aborted") $ bracket_
