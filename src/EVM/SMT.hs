@@ -14,6 +14,7 @@ module EVM.SMT
   declareIntermediates,
   assertProps,
   assertPropsAbstract,
+  concretizedGoalProps,
   assertPropsHelperWith,
   decompose,
   exprToSMTWith,
@@ -142,13 +143,17 @@ assertPropsAbstract conf ps = do
   mulLemmas <- mulEncoding (exprToSMTWith AbstractDivMod) psConc
   pure $ base <> SMT2 (SMTScript (shiftBounds <> mulLemmas)) mempty mempty
   where
-    -- Generate lemmas from the same decomposed and concretized terms as the
-    -- goal. Raw props can retain storage reads that simplify away in the goal,
-    -- preventing lemma matches. Stop before 'eliminateProps': its 'GVar'
-    -- placeholders are opaque to the lemma matchers.
     psDecomp = if conf.simp then decompose conf ps else ps
-    psConc   = if conf.simp then Expr.concKeccakSimpProps psDecomp
-                            else Expr.concKeccakProps psDecomp
+    psConc   = concretizedGoalProps conf ps
+
+-- | The decomposed, keccak-concretized props the goal is encoded from. Lemmas
+-- and ground truth must come from these: raw props can keep storage reads that
+-- simplify away in the goal, so their terms would not match. Stops before
+-- 'eliminateProps': its 'GVar' placeholders are opaque to the matchers.
+concretizedGoalProps :: Config -> [Prop] -> [Prop]
+concretizedGoalProps conf ps =
+  if conf.simp then Expr.concKeccakSimpProps (decompose conf ps)
+  else Expr.concKeccakProps ps
 
 -- Note: we need a version that does NOT call simplify,
 -- because we make use of it to verify the correctness of our simplification

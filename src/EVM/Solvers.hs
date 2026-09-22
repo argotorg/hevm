@@ -142,15 +142,16 @@ checkSatWithPropsAbortable sg shouldAbort props = do
     else liftIO $ do
       -- Prove abstractly first; refine multiplication only after an abstract SAT.
       let smt2Abstract = assertPropsAbstract conf allProps
-      let divRefinement = divModGroundTruth (exprToSMTWith AbstractDivMod) allProps
+          goalProps = concretizedGoalProps conf allProps
+          divRefinement = divModGroundTruth (exprToSMTWith AbstractDivMod) goalProps
       if isLeft smt2Abstract then pure $ Error $ getError smt2Abstract
       else if isLeft divRefinement then pure $ Error $ getError divRefinement
       else do
         let query = getNonError smt2Abstract <> SMT2 (SMTScript (getNonError divRefinement)) mempty mempty
         res <- checkSat' sg (Just props) shouldAbort (Right query)
         case res of
-          Cex _ | hasAbstractMul allProps ->
-            case mulGroundTruth (exprToSMTWith AbstractDivMod) allProps of
+          Cex _ | hasAbstractMul goalProps ->
+            case mulGroundTruth (exprToSMTWith AbstractDivMod) goalProps of
               Left err -> pure $ Error err
               Right refinement ->
                 checkSat' sg (Just props) shouldAbort (Right $ query <> SMT2 (SMTScript refinement) mempty mempty)
