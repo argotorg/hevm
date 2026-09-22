@@ -16,8 +16,6 @@ module EVM.SMT.DivModEncoding
 
 import Data.Bits (countTrailingZeros)
 import Data.Containers.ListUtils (nubOrd)
-import Data.List (groupBy, sortBy)
-import Data.Ord (comparing)
 import Data.Text.Lazy.Builder (Builder, fromString)
 
 import EVM.SMT.AbstractBase
@@ -39,19 +37,19 @@ mulEncoding enc props = do
     lemmas <- concat <$> mapM (emitLemma enc) (collectLemmas ctx)
     pure $ (SMTComment "multiplication abstraction lemmas") : lemmas
 
--- | Declare the magnitude variables and the unsigned result variable for a
--- group. For signed ops the magnitudes are the absolute values |a|, |b|; for
+-- | Declare the magnitude variables and the unsigned result variable for an
+-- op. For signed ops the magnitudes are the absolute values |a|, |b|; for
 -- unsigned ops the operands are already non-negative, so the magnitude is the
 -- operand itself (|x| = x).
 declareAbsolute :: Enc -> DivModKind -> Int -> Expr EWord -> Expr EWord -> Builder -> Err ([SMTEntry], (Builder, Builder))
-declareAbsolute enc kind groupIdx firstA firstB unsignedResult = do
-  aenc <- enc firstA
-  benc <- enc firstB
+declareAbsolute enc kind idx a b unsignedResult = do
+  aenc <- enc a
+  benc <- enc b
   let magnitude x = if isSigned kind then smtAbsolute x else x
       absoluteAEnc = magnitude aenc
       absoluteBEnc = magnitude benc
-      absoluteAName = fromString $ "absolute_a" <> show groupIdx
-      absoluteBName = fromString $ "absolute_b" <> show groupIdx
+      absoluteAName = fromString $ "absolute_a" <> show idx
+      absoluteBName = fromString $ "absolute_b" <> show idx
   let decls = [ SMTCommand $ "(declare-const" `sp` absoluteAName `sp` "(_ BitVec 256))"
               , SMTCommand $ "(declare-const" `sp` absoluteBName `sp` "(_ BitVec 256))"
               , SMTCommand $ "(declare-const" `sp` unsignedResult `sp` "(_ BitVec 256))"
@@ -121,10 +119,9 @@ divModEncoding enc props = do
   let allDivMods = nubOrd $ concatMap (foldProp collectDivMods []) props
   if null allDivMods then pure []
   else do
-    let groups = groupBy (\a b -> abstractKey a == abstractKey b) $ sortBy (comparing abstractKey) allDivMods
-        indexedGroups = zip [0..] groups
-    let links = mkCongruenceLinks indexedGroups
-    entries <- concat <$> mapM (uncurry mkGroupEncoding) indexedGroups
+    let indexedOps = zip [0..] allDivMods
+    entries <- concat <$> mapM (uncurry mkOpEncoding) indexedOps
+    let links = mkCongruenceLinks indexedOps
     pure $ (SMTComment "division/modulo encoding (abs + shift-bounds + congruence, no bvudiv)") : entries <> links
   where
     knownPow2Bound :: Expr EWord -> Maybe W256
@@ -132,13 +129,12 @@ divModEncoding enc props = do
     knownPow2Bound (Lit n) | n > 0 = Just (fromIntegral $ countTrailingZeros n)
     knownPow2Bound _ = Nothing
 
-    mkGroupEncoding :: Int -> [DivModOp] -> Err [SMTEntry]
-    mkGroupEncoding _ [] = pure []
-    mkGroupEncoding groupIdx lhs@((firstKind, firstA, firstB) : _) = do
-      let isDiv' = isDiv firstKind
+    mkOpEncoding :: Int -> DivModOp -> Err [SMTEntry]
+    mkOpEncoding idx op@(kind, a, b) = do
+      let isDiv' = isDiv kind
           prefix = if isDiv' then "udiv" else "urem"
-          unsignedResult = fromString $ prefix <> "_" <> show groupIdx
-      (decls, (absoluteA, absoluteB)) <- declareAbsolute enc firstKind groupIdx firstA firstB unsignedResult
+          unsignedResult = fromString $ prefix <> "_" <> show idx
+      (decls, (absoluteA, absoluteB)) <- declareAbsolute enc kind idx a b unsignedResult
 
       -- When the dividend is a left-shift (a = x << k, i.e. a = x * 2^k),
       -- we can bound the unsigned division result using cheap bitshift
@@ -146,7 +142,7 @@ divModEncoding enc props = do
       -- The pivot point is |a| >> k (= |a| / 2^k):
       --   - If |b| >= 2^k: result <= |a| >> k  (upper bound)
       --   - If |b| <  2^k and b != 0: result >= |a| >> k  (lower bound)
-      let shiftBounds = case (isDiv', knownPow2Bound firstA) of
+      let shiftBounds = case (isDiv', knownPow2Bound a) of
             (True, Just k) ->
               let kLit = wordAsBV k
                   -- twoPowK = 2^k
@@ -161,28 +157,28 @@ divModEncoding enc props = do
                    <> "(bvuge" `sp` unsignedResult `sp` shifted <> ")))"
                  ]
             _ -> []
-      axioms <- mapM (assertAbstEqResult enc unsignedResult) lhs
-      pure $ decls <> shiftBounds <> axioms
+      axiom <- assertAbstEqResult enc unsignedResult op
+      pure $ decls <> shiftBounds <> [axiom]
 
--- | Congruence: if two groups of the same kind have equal magnitude inputs,
--- their results are equal. Signed and unsigned groups are linked separately so
+-- | Congruence: if two ops of the same kind have equal magnitude inputs,
+-- their results are equal. Signed and unsigned ops are linked separately so
 -- a signed op is never tied to an unsigned op (and vice versa).
-mkCongruenceLinks :: [(Int, [DivModOp])] -> [SMTEntry]
-mkCongruenceLinks indexedGroups =
-  let groupsOfKind want = [(i, ops) | (i, ops@((k,_,_):_)) <- indexedGroups , k == want]
-  in    concatMap (mkPairLinks "udiv") (allPairs (groupsOfKind IsSDiv))
-     <> concatMap (mkPairLinks "urem") (allPairs (groupsOfKind IsSMod))
-     <> concatMap (mkPairLinks "udiv") (allPairs (groupsOfKind IsUDiv))
-     <> concatMap (mkPairLinks "urem") (allPairs (groupsOfKind IsUMod))
+mkCongruenceLinks :: [(Int, DivModOp)] -> [SMTEntry]
+mkCongruenceLinks indexedOps =
+  let opsOfKind want = [i | (i, (k, _, _)) <- indexedOps, k == want]
+  in    concatMap (mkPairLinks "udiv") (allPairs (opsOfKind IsSDiv))
+     <> concatMap (mkPairLinks "urem") (allPairs (opsOfKind IsSMod))
+     <> concatMap (mkPairLinks "udiv") (allPairs (opsOfKind IsUDiv))
+     <> concatMap (mkPairLinks "urem") (allPairs (opsOfKind IsUMod))
   where
-    allPairs xs = [(a, b) | a <- xs, b <- xs, fst a < fst b]
-    mkPairLinks prefix' ((i, _), (j, _)) =
+    allPairs xs = [(i, j) | i <- xs, j <- xs, i < j]
+    mkPairLinks prefix' (i, j) =
       let absoluteAi = fromString $ "absolute_a" <> show i
-          abosluteBi = fromString $ "absolute_b" <> show i
+          absoluteBi = fromString $ "absolute_b" <> show i
           absoluteAj = fromString $ "absolute_a" <> show j
           absoluteBj = fromString $ "absolute_b" <> show j
-          absoluteResI = fromString $ prefix' <> "_" <> show i
-          absoluteRedJ = fromString $ prefix' <> "_" <> show j
+          resultI = fromString $ prefix' <> "_" <> show i
+          resultJ = fromString $ prefix' <> "_" <> show j
       in [ SMTCommand $ "(assert (=> "
-            <> "(and (=" `sp` absoluteAi `sp` absoluteAj <> ") (=" `sp` abosluteBi `sp` absoluteBj <> "))"
-            <> "(=" `sp` absoluteResI `sp` absoluteRedJ <> ")))" ]
+            <> "(and (=" `sp` absoluteAi `sp` absoluteAj <> ") (=" `sp` absoluteBi `sp` absoluteBj <> "))"
+            <> "(=" `sp` resultI `sp` resultJ <> ")))" ]

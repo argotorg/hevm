@@ -4529,7 +4529,7 @@ tests = testGroup "hevm"
   [ testCase "encodeConcreteStore-overwrite" $
     assertEqual ""
       (pure "(store (store ((as const Storage) #x0000000000000000000000000000000000000000000000000000000000000000) (_ bv1 256) (_ bv2 256)) (_ bv3 256) (_ bv4 256))")
-      (EVM.SMT.encodeConcreteStore ConcreteDivMod $ Map.fromList [(W256 1, W256 2), (W256 3, W256 4)])
+      (EVM.SMT.encodeConcreteStore ConcreteArith $ Map.fromList [(W256 1, W256 2), (W256 3, W256 4)])
   ]
   -- these test the abort itself: if it breaks, the fake solver never answers, so fail on a timeout instead of hanging
   , localOption (mkTimeout 20_000_000) $ testGroup "early-abort"

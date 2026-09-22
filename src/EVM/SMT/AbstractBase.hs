@@ -16,12 +16,10 @@ module EVM.SMT.AbstractBase
     -- * Div/mod taxonomy
   , DivModKind(..)
   , DivModOp
-  , AbstractKey(..)
   , isDiv
   , isSigned
   , abstFnName
   , concFnName
-  , abstractKey
     -- * Collectors and shape matchers
   , collectDivMods
   , collectMuls
@@ -82,9 +80,6 @@ data DivModKind = IsSDiv | IsSMod | IsUDiv | IsUMod
 
 type DivModOp = (DivModKind, Expr EWord, Expr EWord)
 
-data AbstractKey = AbstractKey (Expr EWord) (Expr EWord) DivModKind
-  deriving (Eq, Ord)
-
 isDiv :: DivModKind -> Bool
 isDiv IsSDiv = True
 isDiv IsUDiv = True
@@ -108,9 +103,6 @@ concFnName IsSDiv = "bvsdiv"
 concFnName IsSMod = "bvsrem"
 concFnName IsUDiv = "bvudiv"
 concFnName IsUMod = "bvurem"
-
-abstractKey :: DivModOp -> AbstractKey
-abstractKey (kind, a, b) = AbstractKey a b kind
 
 collectDivMods :: Expr a -> [DivModOp]
 collectDivMods = \case
