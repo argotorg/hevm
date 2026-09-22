@@ -1693,8 +1693,8 @@ abstractArithmeticFuzzTests = testGroup "AbstractArithmeticPropertyTests"
   -- timeouts are discarded, but if over ~half the cases time out, QuickCheck gives up and the test fails
   [ localOption (QuickCheckMaxRatio 1) $
     testProperty "targeted arithmetic shapes agree with concrete evaluation" $
-      \(AbstractArithCase shape expr bindings) ->
-        tabulate "arithmetic shape" [shape] $ ioProperty $ do
+      \(AbstractArithCase kind parts expr bindings) ->
+        tabulate "arithmetic shape" [kind] $ tabulate "component shape" parts $ ioProperty $ do
           let expected = evalWithBindings bindings expr
               assignments = fmap (\(name, value) -> PEq (Var name) (Lit value)) bindings
               counterexampleQuery rhs = PNeg (PEq expr (Lit rhs)) : assignments
@@ -1702,7 +1702,7 @@ abstractArithmeticFuzzTests = testGroup "AbstractArithmeticPropertyTests"
             (counterexampleQuery expected)
             (counterexampleQuery (expected + 1))
           pure $ counterexample (unlines
-            [ "shape: " <> shape
+            [ "shape: " <> kind <> " " <> show parts
             , "expression: " <> show expr
             , "bindings: " <> show bindings
             , "concrete value: " <> show expected

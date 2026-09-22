@@ -2,7 +2,7 @@ module EVM.Expr.Generator where
 
 import Prelude hiding (LT, GT)
 
-import Control.Monad (replicateM)
+import Control.Monad (foldM, replicateM)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.Map.Strict qualified as Map
@@ -21,6 +21,7 @@ import Test.QuickCheck.Instances.ByteString()
 
 import EVM.Types (Expr(..), EType(..), W256(..), W64(..), internalError, Addr(..), Prop(..), ContractCode(..), RuntimeCode(..), EvmError(..))
 import EVM.Expr qualified as Expr
+import EVM.Traversals (mapExpr)
 
 -- GenWriteStorageLoad
 newtype GenWriteStorageLoad = GenWriteStorageLoad (Expr EWord)
@@ -591,28 +592,65 @@ genWordArith litFreq sz = frequency
  where
    subWord = genWordArith (litFreq `div` 2) (sz `div` 2)
 
--- | An arithmetic expression shaped to trigger one of the abstraction lemmas,
--- together with concrete values for all of its symbolic variables.  The
--- generic expression generator almost never produces these related terms.
-data AbstractArithCase = AbstractArithCase String (Expr EWord) [(Text, W256)]
+-- | An arithmetic expression shaped to trigger the abstraction lemmas and the
+-- div/mod encoding, together with concrete values for all of its symbolic
+-- variables. The generic expression generator almost never produces these
+-- related terms. @kind@ is the shape family (or "combined"/"nested"), @parts@
+-- the base shapes it was built from.
+data AbstractArithCase = AbstractArithCase
+  { kind     :: String
+  , parts    :: [String]
+  , expr     :: Expr EWord
+  , bindings :: [(Text, W256)]
+  }
   deriving Show
 
 instance Arbitrary AbstractArithCase where
   arbitrary = genAbstractArithCase
 
 genAbstractArithCase :: Gen AbstractArithCase
-genAbstractArithCase = oneof
-  [ withBindings "commutativity" (Expr.mul arithA arithB)
+genAbstractArithCase = frequency
+  [ (6, genBaseArithCase)
+  , (2, combinedCase)
+  , (2, nestedCase)
+  ]
+  where
+    -- sums/differences of several shapes over the same variables, so their
+    -- lemmas and saturated terms meet in one query
+    combinedCase = do
+      first <- genBaseArithCase
+      rest <- chooseInt (1, 2) >>= flip vectorOf genBaseArithCase
+      combined <- foldM combine first.expr (fmap (.expr) rest)
+      bs <- elements (fmap (.bindings) (first : rest))
+      pure $ AbstractArithCase "combined" (concatMap (.parts) (first : rest)) combined bs
+    combine x y = elements [Expr.add x y, Expr.sub x y, Sub x y]
+
+    -- one shape substituted for a variable of another, e.g. a telescope whose
+    -- factor is itself a division
+    nestedCase = do
+      outer <- genBaseArithCase
+      inner <- genBaseArithCase
+      name <- elements [arithAName, arithBName, arithCName]
+      bs <- elements [outer.bindings, inner.bindings]
+      pure $ AbstractArithCase "nested" (outer.parts <> inner.parts)
+        (substVar name inner.expr outer.expr) bs
+
+genBaseArithCase :: Gen AbstractArithCase
+genBaseArithCase = oneof
+  [ withBindings "commutativity" (Expr.mul arithA arithB) []
   , identityCase
   , let q = Div arithA arithB
-    in withBindings "division-multiplication link" (Expr.add q (Expr.mul q arithB))
+    in withBindings "division-multiplication link" (Expr.add q (Expr.mul q arithB)) []
   , withBindings "multiplication monotonicity"
-      (Expr.add (Expr.mul arithA arithC) (Expr.mul arithB arithC))
+      (Expr.add (Expr.mul arithA arithC) (Expr.mul arithB arithC)) [nearVar arithBName arithAName]
   , withBindings "dividend monotonicity"
-      (Expr.add (Div arithA arithC) (Div arithB arithC))
+      (Expr.add (Div arithA arithC) (Div arithB arithC)) [nearVar arithBName arithAName]
   , withBindings "divisor monotonicity"
-      (Expr.add (Div arithA arithB) (Div arithA arithC))
+      (Expr.add (Div arithA arithB) (Div arithA arithC)) [nearVar arithCName arithBName]
   , withBindings "product division bound" (Div (Expr.mul arithA arithB) arithC)
+      [nearVar arithBName arithCName, nearVar arithAName arithCName]
+  , withBindings "divisor reused as factor"
+      (Expr.add (Div arithA arithB) (Div (Expr.mul arithB arithC) (Lit 7))) []
   , constMulMonoCase
   , constCancelCase
   , nestedDivCase
@@ -620,55 +658,86 @@ genAbstractArithCase = oneof
   , ceilDivCase
   , telescopeCase
   , withBindings "signed division and modulo"
-      (Expr.add (SDiv arithA arithB) (SMod arithA arithB))
-  , withBindings "unsigned modulo" (Mod (Expr.mul arithA arithB) arithC)
+      (Expr.add (SDiv arithA arithB) (SMod arithA arithB)) []
+  , withBindings "unsigned modulo" (Mod (Expr.mul arithA arithB) arithC) []
+  , shiftDividendCase
+  , pow2DividendCase
+  , congruenceCase "signed division congruence" SDiv
+  , congruenceCase "signed modulo congruence" SMod
+  , congruenceCase "unsigned modulo congruence" Mod
   ]
   where
-    withBindings shape expr = AbstractArithCase shape expr <$> genArithBindings
+    withBindings shape e adjust = do
+      bs <- genArithBindings
+      bs' <- foldr (=<<) (pure bs) adjust
+      pure $ AbstractArithCase shape [shape] e bs'
 
     identityCase = do
-      bindings <- genArithBindings
       identity <- elements [0, 1]
-      pure $ AbstractArithCase "zero/one identity" (Expr.mul arithA arithB)
-        (replaceBinding arithBName identity bindings)
+      withBindings "zero/one identity" (Expr.mul arithA arithB)
+        [pure . replaceBinding arithBName identity]
 
     constMulMonoCase = do
-      coeff <- genSmallNonZero
-      withBindings "constant multiplication monotonicity" $
-        Expr.add (Expr.mul (Lit coeff) arithA) (Expr.mul (Lit coeff) arithB)
+      coeff <- genArithConst
+      withBindings "constant multiplication monotonicity"
+        (Expr.add (Expr.mul (Lit coeff) arithA) (Expr.mul (Lit coeff) arithB))
+        [nearValue arithAName (maxBound `div` coeff), nearVar arithBName arithAName]
 
     constCancelCase = do
-      divisor <- genSmallNonZero
+      divisor <- genArithConst
       factor <- genSmallFactor
       let coeff = divisor * factor
-      withBindings "constant cancellation" $ Div (Expr.mul (Lit coeff) arithA) (Lit divisor)
+      withBindings "constant cancellation" (Div (Expr.mul (Lit coeff) arithA) (Lit divisor))
+        [nearValue arithAName (maxBound `div` coeff)]
 
     nestedDivCase = do
-      divisor1 <- genSmallNonZero
-      divisor2 <- genSmallNonZero
-      withBindings "nested division" $
-        Div (Div (Expr.mul arithA arithB) (Lit divisor1)) (Lit divisor2)
+      divisor1 <- genArithConst
+      divisor2 <- genArithConst
+      withBindings "nested division"
+        (Div (Div (Expr.mul arithA arithB) (Lit divisor1)) (Lit divisor2)) []
 
     fracReduceCase = do
-      coeff <- genSmallNonZero
+      coeff <- genArithConst
       factor <- genSmallFactor
       let divisor = coeff * factor
-      withBindings "fraction reduction" $ Div (Expr.mul (Lit coeff) arithA) (Lit divisor)
+      withBindings "fraction reduction" (Div (Expr.mul (Lit coeff) arithA) (Lit divisor))
+        [nearValue arithAName (maxBound `div` coeff)]
 
     ceilDivCase = do
-      divisor <- genSmallNonZero
+      divisor <- genArithConst
       factor <- genSmallFactor
       let coeff = divisor * factor
-      withBindings "ceil-div cancellation" $
-        Expr.add (Lit 1) (Div (Sub (Expr.mul (Lit coeff) arithA) (Lit 1)) (Lit divisor))
+      withBindings "ceil-div cancellation"
+        (Expr.add (Lit 1) (Div (Sub (Expr.mul (Lit coeff) arithA) (Lit 1)) (Lit divisor)))
+        [nearValue arithAName (maxBound `div` coeff), nearValue arithAName 1]
 
     telescopeCase = do
-      divisor <- genSmallNonZero
+      divisor <- genArithConst
       factor <- genSmallFactor
       let step = divisor * factor
           full = Div (Expr.mul arithA arithB) (Lit divisor)
           stepped = Div (Expr.mul arithA (Sub arithB (Lit step))) (Lit divisor)
-      withBindings "scaled-product telescope" (Sub full stepped)
+      withBindings "scaled-product telescope" (Sub full stepped) [nearValue arithBName step]
+
+    -- dividend a left shift, divisor around 2^k: the div/mod shift bounds
+    shiftDividendCase = do
+      k <- frequency [(3, chooseInteger (0, 16)), (1, chooseInteger (0, 255))]
+      op <- elements [Div, SDiv]
+      withBindings "shift-dividend division" (op (SHL (Lit (fromInteger k)) arithA) arithB)
+        [nearValue arithBName (2 ^ k)]
+
+    pow2DividendCase = do
+      k <- chooseInteger (1, 255)
+      m <- genSmallNonZero
+      withBindings "power-of-two dividend" (Div (Lit (m * 2 ^ k)) arithA)
+        [nearValue arithAName (2 ^ k)]
+
+    -- two ops of one kind whose operands can have equal magnitudes: congruence links
+    congruenceCase shape op =
+      withBindings shape (Expr.add (op arithA arithB) (op arithC arithB))
+        [ \bs -> do
+            sameMagnitude <- elements [id, negate]
+            pure $ replaceBinding arithCName (sameMagnitude (lookupBinding arithAName bs)) bs ]
 
 arithAName, arithBName, arithCName :: Text
 arithAName = T.pack "abstract_arith_a"
@@ -687,13 +756,23 @@ genArithBindings = mapM genBinding [arithAName, arithBName, arithCName]
       value <- genArithValue
       pure (name, value)
 
--- Small values exercise active lemma guards often; full-width and boundary
--- values exercise their overflow and zero-divisor guards.
+-- Small values exercise active lemma guards often; boundary values exercise
+-- the overflow (2^128), sign (2^255) and zero-divisor guards.
 genArithValue :: Gen W256
 genArithValue = frequency
   [ (8, fromInteger <$> chooseInteger (0, 0xffff))
-  , (2, elements [0, 1, maxBound - 1, maxBound])
+  , (3, elements [0, 1, 2, 2 ^ (128 :: Int) - 1, 2 ^ (128 :: Int), 2 ^ (128 :: Int) + 1
+                 , 2 ^ (255 :: Int) - 1, 2 ^ (255 :: Int), 2 ^ (255 :: Int) + 1, maxBound - 1, maxBound])
   , (1, arbitrary)
+  ]
+
+-- Constants for the constant-lemma shapes: small, decimal scaling factors, or
+-- near a power of two, so products of two constants can reach 2^256.
+genArithConst :: Gen W256
+genArithConst = frequency
+  [ (6, genSmallNonZero)
+  , (2, (10 ^) <$> chooseInteger (1, 27))
+  , (1, chooseInteger (1, 255) >>= \k -> elements [2 ^ k - 1, 2 ^ k, 2 ^ k + 1])
   ]
 
 genSmallNonZero :: Gen W256
@@ -702,9 +781,31 @@ genSmallNonZero = fromInteger <$> chooseInteger (1, 1000)
 genSmallFactor :: Gen W256
 genSmallFactor = fromInteger <$> chooseInteger (2, 1000)
 
+-- Half the time, move a binding to within one of a guard bound.
+nearValue :: Text -> W256 -> [(Text, W256)] -> Gen [(Text, W256)]
+nearValue name bound bs = do
+  delta <- elements [Nothing, Just (-1), Just 0, Just 1]
+  pure $ maybe bs (\d -> replaceBinding name (bound + d) bs) delta
+
+-- Half the time, move a binding to within one of another binding.
+nearVar :: Text -> Text -> [(Text, W256)] -> Gen [(Text, W256)]
+nearVar name other bs = nearValue name (lookupBinding other bs) bs
+
+lookupBinding :: Text -> [(Text, W256)] -> W256
+lookupBinding name bs = case lookup name bs of
+  Just value -> value
+  Nothing -> internalError $ "missing arithmetic binding: " <> show name
+
 replaceBinding :: Text -> W256 -> [(Text, W256)] -> [(Text, W256)]
 replaceBinding name value = fmap $ \(key, oldValue) ->
   if key == name then (key, value) else (key, oldValue)
+
+substVar :: Text -> Expr EWord -> Expr EWord -> Expr EWord
+substVar name replacement = mapExpr go
+  where
+    go :: Expr a -> Expr a
+    go (Var n) | n == name = replacement
+    go e = e
 
 genEnd :: Int -> Gen (Expr End)
 genEnd 0 = oneof
