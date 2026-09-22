@@ -325,7 +325,7 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) props shouldAbort 
     )
   liftIO $ writeChan r res
 
--- Cancelling the action runs its bracket finalizers, which kill the solver process
+-- Cancelling act still runs its cleanup (stopSolver kills the solver, signalQSem frees the slot)
 abortable :: Maybe (TVar Bool) -> a -> IO a -> IO a
 abortable Nothing _ act = act
 abortable (Just shouldAbort) onAbort act =
