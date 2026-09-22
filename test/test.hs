@@ -11,6 +11,8 @@ import GHC.TypeLits
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.STM (atomically, newTVarIO, writeTVar)
 import Control.Monad
+import System.Environment (getExecutablePath, lookupEnv, setEnv)
+import System.IO (hSetBuffering, stdout, BufferMode(..), isEOF)
 import Control.Monad.ST (stToIO)
 import Control.Monad.State.Strict
 import Control.Monad.IO.Unlift
@@ -24,6 +26,7 @@ import Data.Binary.Put (runPut)
 import Data.Binary.Get (runGetOrFail)
 import Data.Either
 import Data.List qualified as List
+import Data.Text.Lazy qualified as TL
 import Data.Map.Strict qualified as Map
 import Data.Maybe
 import Data.Set qualified as Set
@@ -126,14 +129,40 @@ withBitwuzlaSolver :: App m => (SolverGroup -> m a) -> m a
 withBitwuzlaSolver = withSolvers Bitwuzla 3 Nothing defMemLimit
 
 withHangingSolver :: App m => (SolverGroup -> m a) -> m a
-withHangingSolver = withSolvers (Custom "test/scripts/hanging-solver.sh") 1 Nothing defMemLimit
+withHangingSolver cont = do
+  self <- liftIO getExecutablePath
+  withSolvers (Custom (TL.pack self)) 1 Nothing defMemLimit cont
 
 hangingProps :: [Prop]
 hangingProps = [PEq (Var "x") (Lit 1)]
 
 
 main :: IO ()
-main = defaultMain tests
+main = lookupEnv hangingSolverEnv >>= \case
+  Just _ -> hangingSolverMain
+  Nothing -> do
+    setEnv hangingSolverEnv "1"
+    defaultMain tests
+
+-- The test binary doubles as a fake SMT solver, so the fixture works on every OS and is never installed
+hangingSolverEnv :: String
+hangingSolverEnv = "HEVM_TEST_FAKE_SOLVER"
+
+-- Acks every command and never answers (check-sat), unless the query set :status unsat
+hangingSolverMain :: IO ()
+hangingSolverMain = hSetBuffering stdout LineBuffering >> go False (0 :: Int)
+  where
+    go unsat depth = do
+      eof <- isEOF
+      unless eof $ do
+        line <- getLine
+        let count c = length (filter (== c) line)
+        step line (unsat || "(set-info :status unsat)" `List.isInfixOf` line) (depth + count '(' - count ')')
+    step line unsat depth
+      | depth /= 0 = go unsat depth
+      | not ("(check-sat)" `List.isInfixOf` line) = putStrLn "success" >> go unsat 0
+      | unsat = putStrLn "unsat" >> go unsat 0
+      | otherwise = forever $ threadDelay 1_000_000
 
 -- | run a subset of tests in the repl. p is a tasty pattern:
 -- https://github.com/UnkindPartition/tasty/tree/ee6fe7136fbcc6312da51d7f1b396e1a2d16b98a#patterns

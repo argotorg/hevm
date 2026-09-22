@@ -22,7 +22,6 @@ build-type:
 extra-source-files:
   bench/contracts/*.sol
   test/scripts/convert_trace_to_json.sh
-  test/scripts/hanging-solver.sh
 extra-doc-files:
   CHANGELOG.md
 
