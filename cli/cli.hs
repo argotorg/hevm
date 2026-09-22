@@ -103,6 +103,7 @@ data CommonOptions = CommonOptions
   , earlyAbort    ::Bool
   , mergeMaxBudget :: Int
   , maxDynSize    ::Int
+  , abstractArith ::Bool
   }
 
 commonOptions :: Parser CommonOptions
@@ -135,6 +136,7 @@ commonOptions = CommonOptions
   <*> (switch $  long "early-abort" <> help "Stop exploration immediately upon finding the first counterexample")
   <*> (option auto $ long "merge-max-budget" <> showDefault <> value 100 <> help "Max instructions for speculative merge exploration during path merging")
   <*> (option auto $ long "max-dyn-size" <> showDefault <> value 64 <> help "Max byte length for concretized dynamic types (bytes, string) in symbolic arguments")
+  <*> (switch $  long "abstract-arith" <> help "Use uninterpreted functions for div/mod in SMT queries (Halmos-style two-phase solving)")
 
 data CommonExecOptions = CommonExecOptions
   { address       ::Maybe Addr
@@ -380,6 +382,7 @@ main = do
         , earlyAbort = cOpts.earlyAbort
         , mergeMaxBudget = cOpts.mergeMaxBudget
         , maxDynSize = cOpts.maxDynSize
+        , abstractArith = cOpts.abstractArith
         } }
 
 
