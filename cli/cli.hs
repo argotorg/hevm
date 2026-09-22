@@ -136,7 +136,7 @@ commonOptions = CommonOptions
   <*> (switch $  long "early-abort" <> help "Stop exploration immediately upon finding the first counterexample")
   <*> (option auto $ long "merge-max-budget" <> showDefault <> value 100 <> help "Max instructions for speculative merge exploration during path merging")
   <*> (option auto $ long "max-dyn-size" <> showDefault <> value 64 <> help "Max byte length for concretized dynamic types (bytes, string) in symbolic arguments")
-  <*> (switch $  long "abstract-arith" <> help "Use uninterpreted functions for div/mod in SMT queries (Halmos-style two-phase solving)")
+  <*> (switch $  long "abstract-arith" <> help "Abstract symbolic multiplication as an uninterpreted function with sound lemmas, refining it only if the query is satisfiable")
 
 data CommonExecOptions = CommonExecOptions
   { address       ::Maybe Addr

@@ -1,10 +1,10 @@
-{- | Abstract div/mod encoding for two-phase SMT solving.
+{- | Abstract arithmetic encoding for two-phase SMT solving.
 
    Orchestration layer. The shared vocabulary (primitives, collectors,
    'saturate') lives in "EVM.SMT.AbstractBase"; the multiplication lemma
    catalogue lives in "EVM.SMT.AbstractLemmas". This module wires them together
-   ('mulEncoding') and holds the /ground-truth/ encodings that refine the
-   abstract functions before a counterexample is returned.
+   ('mulEncoding') and holds the /ground-truth/ encodings that equate the
+   abstract functions with the native ops.
 -}
 module EVM.SMT.DivModEncoding
   ( divModGroundTruth
@@ -113,7 +113,7 @@ mulGroundTruth enc props = do
           concrete = "(bvmul" `sp` aenc `sp` benc <> ")"
       pure $ SMTCommand $ "(assert (= " <> abstract <> " " <> concrete <> "))"
 
--- | Encode div/mod operations using abs values, shift-bounds, and congruence (no bvudiv).
+-- | Encode div/mod operations using abs values, shift-bounds, and congruence.
 divModEncoding :: Enc -> [Prop] -> Err [SMTEntry]
 divModEncoding enc props = do
   let allDivMods = nubOrd $ concatMap (foldProp collectDivMods []) props
@@ -122,7 +122,7 @@ divModEncoding enc props = do
     let indexedOps = zip [0..] allDivMods
     entries <- concat <$> mapM (uncurry mkOpEncoding) indexedOps
     let links = mkCongruenceLinks indexedOps
-    pure $ (SMTComment "division/modulo encoding (abs + shift-bounds + congruence, no bvudiv)") : entries <> links
+    pure $ (SMTComment "division/modulo encoding (abs + shift-bounds + congruence)") : entries <> links
   where
     knownPow2Bound :: Expr EWord -> Maybe W256
     knownPow2Bound (SHL (Lit k) _) = Just k

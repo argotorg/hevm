@@ -49,9 +49,9 @@ import EVM.Types qualified as T
 -- | The expression-to-SMT encoder threaded through every emitter.
 type Enc = Expr EWord -> Err Builder
 
--- | Uninterpreted-function declarations standing in for div/mod/mul. The
--- abstract functions are refined against the native ops before a
--- counterexample is returned.
+-- | Uninterpreted-function declarations standing in for div/mod/mul. Div/mod
+-- are equated to the native ops in the same query; mul only when re-checking
+-- a satisfiable query.
 divModAbstractDecls :: [SMTEntry]
 divModAbstractDecls =
   [ SMTComment "abstract division/modulo/multiplication (uninterpreted functions)"
