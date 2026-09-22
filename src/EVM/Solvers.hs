@@ -318,8 +318,8 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props s
   liftIO $ writeChan r res
   where
     checkSatIn conf inst query pending = do
-      sat <- sendCommand inst $ SMTCommand "(check-sat)"
-      case sat of
+      result <- sendCommand inst $ SMTCommand "(check-sat)"
+      case result of
         "unsat" -> do
           when (isJust props) $ liftIO . atomically $ writeTChan cacheq (CacheEntry (fromJust props))
           pure Qed
@@ -338,12 +338,12 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props s
             Just model -> pure $ Cex model
             Nothing -> pure $ Unknown "Solver died while extracting model"
         _ -> let  supportIssue =
-                      ("does not yet support" `T.isInfixOf` sat)
-                      || ("unsupported" `T.isInfixOf` sat)
-                      || ("not support" `T.isInfixOf` sat)
+                      ("does not yet support" `T.isInfixOf` result)
+                      || ("unsupported" `T.isInfixOf` result)
+                      || ("not support" `T.isInfixOf` result)
           in case supportIssue of
-           True -> pure . Error $ "SMT solver reported unsupported operation: " <> T.unpack sat
-           False -> pure . Unknown $ "Unable to parse SMT solver output (maybe it got killed?): " <> T.unpack sat
+           True -> pure . Error $ "SMT solver reported unsupported operation: " <> T.unpack result
+           False -> pure . Unknown $ "Unable to parse SMT solver output (maybe it got killed?): " <> T.unpack result
 
 -- Cancelling act still runs its cleanup (stopSolver kills the solver, signalQSem frees the slot)
 abortable :: Maybe (TVar Bool) -> a -> IO a -> IO a
