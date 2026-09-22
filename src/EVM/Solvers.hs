@@ -164,8 +164,8 @@ withSolvers solver count timeout maxMemory cont = do
     -- spawn orchestration thread
     taskq <- liftIO newChan
     cacheq <- liftIO . atomically $ newTChan
-    sem <- liftIO $ newQSem (fromIntegral count)
-    orchestrate' <- toIO $ orchestrate taskq cacheq sem [] 0
+    solverSlots <- liftIO $ newQSem (fromIntegral count)
+    orchestrate' <- toIO $ orchestrate taskq cacheq solverSlots [] 0
     orchestrateId <- liftIO $ forkIO orchestrate'
 
     -- run continuation with task queue
@@ -176,30 +176,30 @@ withSolvers solver count timeout maxMemory cont = do
     pure res
   where
     orchestrate :: App m => Chan Task -> TChan CacheEntry -> QSem -> [Set Prop] -> Int -> m b
-    orchestrate taskq cacheq sem knownUnsat fileCounter = do
+    orchestrate taskq cacheq solverSlots knownUnsat fileCounter = do
       conf <- readConfig
       mx <- liftIO . atomically $ tryReadTChan cacheq
       case mx of
         Just (CacheEntry props)  -> do
           let knownUnsat' = (fromList props):knownUnsat
           when conf.debug $ liftIO $ putStrLn "   adding UNSAT cache"
-          orchestrate taskq cacheq sem knownUnsat' fileCounter
+          orchestrate taskq cacheq solverSlots knownUnsat' fileCounter
         Nothing -> do
           task <- liftIO $ readChan taskq
           case task of
             TaskSingle (SingleData _ props _ r) | isJust props && supersetAny (fromList (fromJust props)) knownUnsat -> do
               liftIO $ writeChan r Qed
               when conf.debug $ liftIO $ putStrLn "   Qed found via cache!"
-              orchestrate taskq cacheq sem knownUnsat fileCounter
+              orchestrate taskq cacheq solverSlots knownUnsat fileCounter
             _ -> do
               runTask' <- case task of
-                TaskSingle (SingleData smt2 props shouldAbort r) -> toIO $ getOneSol solver timeout maxMemory smt2 props shouldAbort r cacheq sem fileCounter
-                TaskMulti (MultiData smt2 multiSol r) -> toIO $ getMultiSol solver timeout maxMemory smt2 multiSol r sem fileCounter
+                TaskSingle (SingleData smt2 props shouldAbort r) -> toIO $ getOneSol solver timeout maxMemory smt2 props shouldAbort r cacheq solverSlots fileCounter
+                TaskMulti (MultiData smt2 multiSol r) -> toIO $ getMultiSol solver timeout maxMemory smt2 multiSol r solverSlots fileCounter
               _ <- liftIO $ forkIO runTask'
-              orchestrate taskq cacheq sem knownUnsat (fileCounter + 1)
+              orchestrate taskq cacheq solverSlots knownUnsat (fileCounter + 1)
 
 getMultiSol :: forall m. (MonadIO m, ReadConfig m) => Solver -> Maybe Natural -> Natural -> SMT2 -> MultiSol -> Chan (Maybe [W256]) -> QSem -> Int -> m ()
-getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r sem fileCounter = do
+getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r solverSlots fileCounter = do
   conf <- readConfig
   let
     maskFromBytesCount k
@@ -252,8 +252,8 @@ getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r sem f
           when conf.debug $ putStrLn $ "Error while writing SMT to solver: " <> (T.unpack err)
           writeChan r Nothing
   liftIO $ bracket_
-    (waitQSem sem)
-    (signalQSem sem)
+    (waitQSem solverSlots)
+    (signalQSem solverSlots)
     (do
       when conf.dumpQueries $ writeSMT2File smt2 "." (show fileCounter)
       bracket
@@ -285,11 +285,11 @@ getOneSol
   -> QSem               -- ^ limits concurrent solvers
   -> Int                -- ^ query counter, for dump file names
   -> m ()
-getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) props shouldAbort r cacheq sem fileCounter = do
+getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) props shouldAbort r cacheq solverSlots fileCounter = do
   conf <- readConfig
   res <- liftIO $ abortable shouldAbort (Unknown "Query aborted") $ bracket_
-    (waitQSem sem)
-    (signalQSem sem)
+    (waitQSem solverSlots)
+    (signalQSem solverSlots)
     (do
       when (conf.dumpQueries) $ writeSMT2File smt2 "." (show fileCounter)
       bracket
