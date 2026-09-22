@@ -1577,6 +1577,18 @@ tests = testGroup "hevm"
         runEnv env $ do
           res <- withShortBitwuzlaSolver $ \s -> checkSatWithProps s (PNeg (productIs 6) : inputs)
           assertEqualM "Must be QED after multiplication refinement" Qed res
+    -- storage decomposition rewrites the mapping read in the goal, so ground
+    -- truth built from the raw props would not cover the goal's product
+    , testCase "mul-refinement-covers-decomposed-storage" $ do
+        let env = Env { config = testEnv.config { abstractArith = True } }
+            x = Var "x"
+            v = SLoad (Expr.MappingSlot (BS.replicate 64 0) (Var "k")) (AbstractStore (SymAddr "c") Nothing)
+            -- v, x in [2,3]: not single values, so the simplifier cannot fold the
+            -- product into a constant multiplication, and it can never be 5
+            inputs = [PGT v (Lit 1), PLT v (Lit 4), PGT x (Lit 1), PLT x (Lit 4)]
+        runEnv env $ do
+          res <- withShortBitwuzlaSolver $ \s -> checkSatWithProps s (PEq (Mul v x) (Lit 5) : inputs)
+          assertEqualM "Must be QED after multiplication refinement" Qed res
     , testCase "mul-refinement-returns-real-cex" $ do
         let env = Env { config = testEnv.config { abstractArith = True, simp = False } }
             x = Var "x"
