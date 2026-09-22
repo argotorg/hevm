@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a different store, which caused spurious counterexamples ([#1086](https://github.com/argotorg/hevm/issues/1086))
 - Storage decomposition no longer empties a concrete base store when reading a
   small slot, which made such reads return 0 instead of the stored value
+- `--early-abort` now kills SMT solver processes that are still running when a
+  counterexample is found, instead of waiting for them to finish ([#938](https://github.com/argotorg/hevm/issues/938))
+- `--early-abort` no longer deadlocks ("thread blocked indefinitely in an STM
+  transaction") when paths are still queued at the time of the abort, and no
+  longer reports a spurious "all branches reverted" warning
 
 ## [0.58.0] - 2026-06-26
 
