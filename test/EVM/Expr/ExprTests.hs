@@ -128,6 +128,13 @@ storageTests = testGroup "Storage tests"
         (Just $ SLoad (Lit 0) (SStore (Lit 0) (Var "a") emptyStore))
         (Expr.decomposeStorage $ SLoad (Lit 0)
           (SStore (arrZero 2) (Lit 1) (SStore (Lit 0) (Var "a") emptyStore)))
+    , testCase "decompose-small-slot-read-keeps-concrete-base" $ assertEqual errorMsg
+        (Just $ SLoad (Lit 3) (ConcreteStore $ Map.fromList [(3, 7)]))
+        (Expr.decomposeStorage $ SLoad (Lit 3)
+          (SStore (arrElem 1 (Var "i")) (Var "v") (ConcreteStore $ Map.fromList [(3, 7)])))
+    , testCase "decompose-array-read-empties-small-slot-base" $ assertEqual errorMsg
+        (Just $ SLoad (Var "i") emptyStore)
+        (Expr.decomposeStorage $ SLoad (arrElem 1 (Var "i")) (ConcreteStore $ Map.fromList [(3, 7)]))
     -- #1086: a skipped write must not cause the already-rebased writes below it to be rebased again
     , testCase "decompose-keeps-array-write-below-other-array-write" $ assertEqual errorMsg
         (Just $ SLoad (Var "i") (SStore (Lit 0) (Lit 1) emptyStore))
@@ -1698,6 +1705,7 @@ storeKeys (SLoad k s) = k : go s
   where
     go :: Expr Storage -> [Expr EWord]
     go (SStore k' _ s') = k' : go s'
+    go (ConcreteStore m) = Lit <$> Map.keys m
     go _ = []
 storeKeys _ = []
 
