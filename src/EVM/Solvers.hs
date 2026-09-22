@@ -106,7 +106,7 @@ data MultiData = MultiData
 data SingleData = SingleData
   SMT2
   (Maybe [Prop])
-  (Maybe (TVar Bool)) -- abort flag: when set, the query is cancelled and its solver killed
+  (Maybe (TVar Bool)) -- shared abort flag; if another thread sets it, the query is cancelled and its solver killed
   (Chan SMTResult) -- result channel
 
 -- returns True if a is a superset of any of the sets in bs
