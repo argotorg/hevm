@@ -22,6 +22,7 @@ build-type:
 extra-source-files:
   bench/contracts/*.sol
   test/scripts/convert_trace_to_json.sh
+  test/scripts/hanging-solver.sh
 extra-doc-files:
   CHANGELOG.md
 
@@ -305,6 +306,7 @@ test-suite test
     QuickCheck,
     quickcheck-instances,
     regex,
+    stm,
     tasty-quickcheck,
     text,
 

@@ -8,6 +8,8 @@ module Main where
 import Prelude hiding (LT, GT)
 
 import GHC.TypeLits
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent.STM (atomically, newTVarIO, writeTVar)
 import Control.Monad
 import Control.Monad.ST (stToIO)
 import Control.Monad.State.Strict
@@ -122,6 +124,12 @@ withCVC5Solver = withSolvers CVC5 3 Nothing defMemLimit
 
 withBitwuzlaSolver :: App m => (SolverGroup -> m a) -> m a
 withBitwuzlaSolver = withSolvers Bitwuzla 3 Nothing defMemLimit
+
+withHangingSolver :: App m => (SolverGroup -> m a) -> m a
+withHangingSolver = withSolvers (Custom "test/scripts/hanging-solver.sh") 1 Nothing defMemLimit
+
+hangingProps :: [Prop]
+hangingProps = [PEq (Var "x") (Lit 1)]
 
 
 main :: IO ()
@@ -3531,6 +3539,39 @@ tests = testGroup "hevm"
     assertEqual ""
       (pure "(store (store ((as const Storage) #x0000000000000000000000000000000000000000000000000000000000000000) (_ bv1 256) (_ bv2 256)) (_ bv3 256) (_ bv4 256))")
       (EVM.SMT.encodeConcreteStore $ Map.fromList [(W256 1, W256 2), (W256 3, W256 4)])
+  ]
+  -- these test the abort itself: if it breaks, the fake solver never answers, so fail on a timeout instead of hanging
+  , localOption (mkTimeout 20_000_000) $ testGroup "early-abort"
+  [ test "abort-running-query" $ withHangingSolver $ \s -> do
+      shouldAbort <- liftIO $ newTVarIO False
+      _ <- liftIO $ forkIO $ threadDelay 300_000 >> atomically (writeTVar shouldAbort True)
+      res <- checkSatWithPropsAbortable s (Just shouldAbort) hangingProps
+      assertEqualM "Expected an aborted query" "Unknown \"Query aborted\"" (show res)
+    , test "abort-before-query" $ withHangingSolver $ \s -> do
+      shouldAbort <- liftIO $ newTVarIO True
+      res <- checkSatWithPropsAbortable s (Just shouldAbort) hangingProps
+      assertEqualM "Expected an aborted query" "Unknown \"Query aborted\"" (show res)
+    , test "abort-frees-solver-slot" $ withHangingSolver $ \s -> do
+      shouldAbort <- liftIO $ newTVarIO False
+      _ <- liftIO $ forkIO $ threadDelay 300_000 >> atomically (writeTVar shouldAbort True)
+      _ <- checkSatWithPropsAbortable s (Just shouldAbort) hangingProps
+      let unsatQuery = SMT2 (SMTScript [SMTCommand "(set-info :status unsat)"]) mempty []
+      res <- liftIO $ checkSat s Nothing (Right unsatQuery)
+      assertBoolM ("Expected Qed from the only solver slot, got: " <> show res) (isQed res)
+    , test "early-abort-verify" $ do
+      Just c <- solcRuntime "C" [i|
+          contract C {
+            function stuff(uint a) public {
+              for (uint i = 0; i < 10; i++) {
+                unchecked { assert(i * a < 100); }
+              }
+            }
+          } |]
+      let abortEnv = Env { config = testEnv.config { earlyAbort = True } }
+      (_, res) <- liftIO $ runEnv abortEnv $ withBitwuzlaSolver $ \s ->
+        checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+      assertBoolM "Expected a counterexample" (any isCex res)
+      assertBoolM ("Expected only counterexamples, got: " <> show res) (all isCex res)
   ]
   , testGroup "calling-solvers"
   [ test "no-error-on-large-buf" $ do

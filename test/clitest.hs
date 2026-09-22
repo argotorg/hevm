@@ -232,13 +232,12 @@ main = do
         stderr `shouldNotContain` "blocked indefinitely"
         stdout `shouldContain` "[FAIL]"
         stdout `shouldNotContain` "all branches reverted"
+        stdout `shouldNotContain` "partially explore"
         exitCode `shouldBe` (ExitFailure 1)
-      -- the hard mulmod query takes the solver many seconds, it must be killed once the easy cex is found
-      it "early-abort-kill-solver" $ do
-        (exitCode, stdout, stderr) <- runForge "test/contracts/fail/early-abort-kill-solver.sol" ["--early-abort"]
+      it "no-early-abort" $ do
+        (exitCode, stdout, stderr) <- runForge "test/contracts/pass/early-abort.sol" ["--max-iterations", "1000"]
         stderr `shouldNotContain` "CallStack"
-        stdout `shouldContain` ",7)"
-        length (filter (isInfixOf "Counterexample:") (lines stdout)) `shouldBe` 1
+        length (filter (isInfixOf "Counterexample:") (lines stdout)) `shouldSatisfy` (> 1)
         exitCode `shouldBe` (ExitFailure 1)
       it "rpc-cache" $ do
         (_, stdout, stderr) <- runForge "test/contracts/fail/rpc-test.sol"
