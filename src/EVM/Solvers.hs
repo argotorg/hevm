@@ -128,7 +128,7 @@ checkSatWithProps :: App m => SolverGroup -> [Prop] -> m (SMTResult)
 checkSatWithProps sg = checkSatWithPropsAbortable sg Nothing
 
 checkSatWithPropsAbortable :: App m => SolverGroup -> Maybe (TVar Bool) -> [Prop] -> m (SMTResult)
-checkSatWithPropsAbortable sg abort props = do
+checkSatWithPropsAbortable sg shouldAbort props = do
   conf <- readConfig
   let psSimp = if conf.simp then simplifyProps props else props
   if psSimp == [PBool False] then pure Qed
@@ -136,20 +136,20 @@ checkSatWithPropsAbortable sg abort props = do
     let concreteKeccaks = fmap (\(buf,val) -> PEq (Lit val) (Keccak buf)) (toList $ Keccak.concreteKeccaks props)
     let smt2 = assertProps conf (if conf.simp then psSimp <> concreteKeccaks else psSimp)
     if isLeft smt2 then pure $ Error $ getError smt2
-    else liftIO $ checkSat' sg (Just props) abort smt2
+    else liftIO $ checkSat' sg (Just props) shouldAbort smt2
 
 -- When props is Nothing, the cache will not be filled or used
 checkSat :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> IO SMTResult
 checkSat sg props = checkSat' sg props Nothing
 
 checkSat' :: SolverGroup -> Maybe [Prop] -> Maybe (TVar Bool) -> Err SMT2 -> IO SMTResult
-checkSat' (SolverGroup taskq) props abort smt2 = do
+checkSat' (SolverGroup taskq) props shouldAbort smt2 = do
   if isLeft smt2 then pure $ Error $ getError smt2
   else do
     -- prepare result channel
     resChan <- newChan
     -- send task to solver group
-    writeChan taskq (TaskSingle (SingleData (getNonError smt2) props abort resChan))
+    writeChan taskq (TaskSingle (SingleData (getNonError smt2) props shouldAbort resChan))
     -- collect result
     readChan resChan
 
@@ -193,7 +193,7 @@ withSolvers solver count timeout maxMemory cont = do
               orchestrate taskq cacheq sem knownUnsat fileCounter
             _ -> do
               runTask' <- case task of
-                TaskSingle (SingleData smt2 props abort r) -> toIO $ getOneSol solver timeout maxMemory smt2 props abort r cacheq sem fileCounter
+                TaskSingle (SingleData smt2 props shouldAbort r) -> toIO $ getOneSol solver timeout maxMemory smt2 props shouldAbort r cacheq sem fileCounter
                 TaskMulti (MultiData smt2 multiSol r) -> toIO $ getMultiSol solver timeout maxMemory smt2 multiSol r sem fileCounter
               _ <- liftIO $ forkIO runTask'
               orchestrate taskq cacheq sem knownUnsat (fileCounter + 1)
@@ -273,9 +273,9 @@ getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r sem f
     )
 
 getOneSol :: (MonadIO m, ReadConfig m) => Solver -> Maybe Natural -> Natural -> SMT2 -> Maybe [Prop] -> Maybe (TVar Bool) -> Chan SMTResult -> TChan CacheEntry -> QSem -> Int -> m ()
-getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) props abort r cacheq sem fileCounter = do
+getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) props shouldAbort r cacheq sem fileCounter = do
   conf <- readConfig
-  res <- liftIO $ abortable abort (Unknown "Query aborted") $ bracket_
+  res <- liftIO $ abortable shouldAbort (Unknown "Query aborted") $ bracket_
     (waitQSem sem)
     (signalQSem sem)
     (do
@@ -316,8 +316,8 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) props abort r cach
 -- Cancelling the action runs its bracket finalizers, which kill the solver process
 abortable :: Maybe (TVar Bool) -> a -> IO a -> IO a
 abortable Nothing _ act = act
-abortable (Just flag) onAbort act =
-  either (const onAbort) id <$> race (atomically $ readTVar flag >>= check) act
+abortable (Just shouldAbort) onAbort act =
+  either (const onAbort) id <$> race (atomically $ readTVar shouldAbort >>= check) act
 
 dumpUnsolved :: SMT2 -> Int -> Maybe FilePath -> IO ()
 dumpUnsolved fullSmt fileCounter dump = do
