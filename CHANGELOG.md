@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   invalid UTF-8: ABI `string` values are raw bytes, so e.g. `vm.setEnv`,
   `vm.envString` and `vm.label` no longer abort the whole run when handed a
   byte sequence that is not valid UTF-8 ([#1076](https://github.com/argotorg/hevm/issues/1076))
+- Storage decomposition no longer drops array writes that sit below a write to
+  a different store, which caused spurious counterexamples ([#1086](https://github.com/argotorg/hevm/issues/1086))
 
 ## [0.58.0] - 2026-06-26
 

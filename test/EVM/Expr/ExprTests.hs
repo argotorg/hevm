@@ -10,11 +10,11 @@ import Test.Tasty.HUnit
 import Test.Tasty.QuickCheck hiding (Failure, Success)
 
 import Data.Bits (shiftL)
+import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS (pack)
 import Data.Containers.ListUtils (nubOrd)
-import Data.List qualified as List (nub)
+import Data.List qualified as List (nub, tails)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe)
 import Data.Typeable
 
 import EVM.Effects
@@ -111,9 +111,44 @@ storageTests = testGroup "Storage tests"
            outer = And (Lit 1461501637330902918203684832716283019655932542975) (SLoad (keccAnd) (ConcreteStore (Map.fromList[(W256 1184450375068808042203882151692185743185288360635, W256 0xacab)])))
            simp = Expr.concKeccakSimpExpr outer
        assertEqual "Expression should simplify to value." simp (Lit 0xacab)
+    -- decomposition: keys of the read array become offsets, writes to other stores are dropped
+    , testCase "decompose-array-read-rebases-keys" $ assertEqual errorMsg
+        (Just $ SLoad (Var "i") (SStore (Lit 0) (Lit 1) emptyStore))
+        (Expr.decomposeStorage $ SLoad (arrElem 2 (Var "i"))
+          (SStore (arrZero 2) (Lit 1) emptyStore))
+    , testCase "decompose-array-read-drops-small-slot-write" $ assertEqual errorMsg
+        (Just $ SLoad (Var "i") emptyStore)
+        (Expr.decomposeStorage $ SLoad (arrElem 2 (Var "i"))
+          (SStore (Lit 0) (Var "a") emptyStore))
+    , testCase "decompose-array-read-drops-other-array-write" $ assertEqual errorMsg
+        (Just $ SLoad (Var "i") emptyStore)
+        (Expr.decomposeStorage $ SLoad (arrElem 2 (Var "i"))
+          (SStore (arrZero 1) (Lit 5) emptyStore))
+    , testCase "decompose-small-slot-read-drops-array-write" $ assertEqual errorMsg
+        (Just $ SLoad (Lit 0) (SStore (Lit 0) (Var "a") emptyStore))
+        (Expr.decomposeStorage $ SLoad (Lit 0)
+          (SStore (arrZero 2) (Lit 1) (SStore (Lit 0) (Var "a") emptyStore)))
+    -- #1086: a skipped write must not cause the already-rebased writes below it to be rebased again
+    , testCase "decompose-keeps-array-write-below-other-array-write" $ assertEqual errorMsg
+        (Just $ SLoad (Var "i") (SStore (Lit 0) (Lit 1) emptyStore))
+        (Expr.decomposeStorage $ SLoad (arrElem 2 (Var "i"))
+          (SStore (arrZero 1) (Lit 5) (SStore (arrZero 2) (Lit 1) emptyStore)))
+    , testCase "decompose-keeps-symbolic-array-write-below-small-slot" $ assertEqual errorMsg
+        (Just $ SLoad (Var "i") (SStore (Var "j") (Lit 1) emptyStore))
+        (Expr.decomposeStorage $ SLoad (arrElem 2 (Var "i"))
+          (SStore (Lit 0) (Var "a") (SStore (arrElem 2 (Var "j")) (Lit 1) emptyStore)))
+    , testCase "decompose-keeps-array-write-below-small-slot" $ assertEqual errorMsg
+        (Just $ SLoad (Var "i") (SStore (Lit 0) (Lit 1) emptyStore))
+        (Expr.decomposeStorage $ SLoad (arrElem 2 (Var "i"))
+          (SStore (Lit 0) (Var "a") (SStore (arrZero 2) (Lit 1) emptyStore)))
   ]
   where
     errorMsg = "Storage read expression not simplified correctly"
+    emptyStore = ConcreteStore mempty
+    -- element `off` of the dynamic array at storage slot n: keccak(n) + off
+    arrElem n off = Expr.ArraySlotWithOffs (arrId n) off
+    arrZero n = Expr.ArraySlotZero (arrId n)
+    arrId n = BS.pack (replicate 31 0 ++ [n])
     -- a symbolic read of the mapping at storage slot n: keccak(key . n)
     mappingRead n key = Keccak (WriteWord (Lit 0) (Var key) (ConcreteBuf (mapSlotBuf n)))
     mapSlotBuf n = BS.pack (replicate 63 0 ++ [n])
@@ -1461,10 +1496,18 @@ simplifierFuzzTests = testGroup "SimplifierPropertyTests"
         proveEquivExpr buflen (Expr.simplify buflen)
     , testProperty "store-simplification" $ \(expr :: Expr Storage) -> ioProperty $ proveEquivExpr expr (Expr.simplify expr)
     , testProperty "load-simplification" $ \(GenWriteStorageLoad expr) -> ioProperty $ proveEquivExpr expr (Expr.simplify expr)
-    , ignoreTest $ testProperty "load-decompose" $ \(GenWriteStorageLoad expr) -> ioProperty $ do
-        let simp = Expr.simplify expr
-        let decomposed = fromMaybe simp $ mapExprM Expr.decomposeStorage simp
-        proveEquivExpr expr decomposed
+    -- over a concrete base, decomposition must not change the loaded value, given its assumption
+    -- that keys of different stores never alias (keccak is uninterpreted in SMT, so assert it)
+    , testProperty "load-decompose" $ \(GenDecomposableLoad expr) -> ioProperty $
+        case Expr.decomposeStorage expr of
+          Nothing -> pure $ counterexample "decomposition failed" False
+          Just decomposed -> do
+            let keys = storeKeys expr
+                noAlias = [PNeg (PEq a b) | (a:rest) <- List.tails keys, b <- rest, storeId a /= storeId b]
+            res <- checkSat $ foldr PAnd (expr ./= decomposed) noAlias
+            -- a timeout proves nothing either way: discard it rather than count it as a pass
+            pure $ counterexample ("decomposed: " <> show decomposed <> "\nresult: " <> show res) $
+              not (isUnknown res) ==> isQed res
     , testProperty "byte-simplification" $ \(expr :: Expr Byte) -> ioProperty $ proveEquivExpr expr (Expr.simplify expr)
     , askOption $ \(QuickCheckTests n) -> testProperty "word-simplification" $ withMaxSuccess (min n 20) $ \(ZeroDepthWord expr) ->
         ioProperty $ proveEquivExpr expr (Expr.simplify expr)
@@ -1649,6 +1692,22 @@ equivConfig = defaultConfig {simp = False, dumpQueries = False}
 
 withOneBitwuzla :: App m => (SolverGroup -> m a) -> m a
 withOneBitwuzla = withSolvers Bitwuzla 1 (Just 1) defMemLimit
+
+storeKeys :: Expr EWord -> [Expr EWord]
+storeKeys (SLoad k s) = k : go s
+  where
+    go :: Expr Storage -> [Expr EWord]
+    go (SStore k' _ s') = k' : go s'
+    go _ = []
+storeKeys _ = []
+
+-- the logical store a key belongs to: Nothing for small slots
+storeId :: Expr EWord -> Maybe ByteString
+storeId = \case
+  Expr.MappingSlot idx _ -> Just idx
+  Expr.ArraySlotWithOffs idx _ -> Just idx
+  Expr.ArraySlotZero idx -> Just idx
+  _ -> Nothing
 
 isSat :: SMTResult -> Bool
 isSat = isCex
