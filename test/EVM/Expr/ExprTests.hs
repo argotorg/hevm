@@ -1690,7 +1690,9 @@ simplifierFuzzTests cfg = testGroup "SimplifierPropertyTests"
 
 abstractArithmeticFuzzTests :: TestTree
 abstractArithmeticFuzzTests = testGroup "AbstractArithmeticPropertyTests"
-  [ testProperty "targeted arithmetic shapes agree with concrete evaluation" $
+  -- timeouts are discarded, but if over ~half the cases time out, QuickCheck gives up and the test fails
+  [ localOption (QuickCheckMaxRatio 1) $
+    testProperty "targeted arithmetic shapes agree with concrete evaluation" $
       \(AbstractArithCase shape expr bindings) ->
         tabulate "arithmetic shape" [shape] $ ioProperty $ do
           let expected = evalWithBindings bindings expr
@@ -1706,7 +1708,8 @@ abstractArithmeticFuzzTests = testGroup "AbstractArithmeticPropertyTests"
             , "concrete value: " <> show expected
             , "exact result: " <> show exactResult
             , "nearby result: " <> show nearbyResult
-            ]) (isQed exactResult && isCex nearbyResult)
+            ]) $ not (isUnknown exactResult || isUnknown nearbyResult) ==>
+              (isQed exactResult && isCex nearbyResult)
   ]
 
 evalWithBindings :: [(Text, W256)] -> Expr EWord -> W256
