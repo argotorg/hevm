@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env sh
 # Fake SMT solver for tests: acks every command and never answers (check-sat), unless the query set :status unsat
 exec awk '
   /\(set-info :status unsat\)/ { unsat = 1 }
