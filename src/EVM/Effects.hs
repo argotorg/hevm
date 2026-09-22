@@ -68,7 +68,7 @@ defaultConfig = Config
   , verb = 0
   , simp = True
   , onlyDeployed = False
-  , earlyAbort = False
+  , earlyAbort = True
   , mergeMaxBudget = 100
   , maxDynSize = 64
   }
