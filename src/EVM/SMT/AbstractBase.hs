@@ -24,7 +24,6 @@ module EVM.SMT.AbstractBase
   , collectDivMods
   , collectMuls
   , collectConstMuls
-  , hasAbstractMul
   , asMul
   , asConstMul
     -- * Signed reconstruction helpers
@@ -117,10 +116,6 @@ collectMuls = maybe [] pure . asMul
 
 collectConstMuls :: Expr a -> [(W256, Expr EWord)]
 collectConstMuls = maybe [] pure . asConstMul
-
--- | True if any prop contains a symbolic*symbolic multiplication.
-hasAbstractMul :: [Prop] -> Bool
-hasAbstractMul props = not $ null $ concatMap (foldProp collectMuls []) props
 
 -- | An abstracted symbolic*symbolic product. Products with a concrete factor
 -- are handled natively, so only genuinely symbolic products are abstracted.
