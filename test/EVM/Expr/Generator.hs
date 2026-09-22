@@ -5,6 +5,7 @@ import Prelude hiding (LT, GT)
 import Control.Monad (replicateM)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.Map.Strict qualified as Map
 import Data.DoubleWord (Word128, Word256, Word160, fromHiAndLo)
 import Data.Proxy
 import Data.Text (Text)
@@ -56,6 +57,39 @@ genStorageKey = frequency
     -- unrecognized slot type
     , (1, genLit 5)
     ]
+
+-- GenDecomposableLoad
+-- A load over a chain of writes that storage decomposition must handle: small slots, arrays and
+-- mappings mixed, over a concrete base. Array offsets are Lit or Var "i0"/"i1".
+newtype GenDecomposableLoad = GenDecomposableLoad (Expr EWord)
+  deriving (Show, Eq)
+
+instance Arbitrary GenDecomposableLoad where
+  arbitrary = do
+    n <- chooseInt (1, 6)
+    keys <- vectorOf n genDecomposableKey
+    vals <- vectorOf n (oneof [Lit . fromIntegral <$> chooseInt (1, 9), Var <$> elements ["v0", "v1"]])
+    baseSlots <- frequency
+      [ (1, pure mempty)
+      , (2, Map.fromList <$> listOf1 ((,) <$> (fromIntegral <$> chooseInt (0, 3)) <*> (fromIntegral <$> chooseInt (1, 9))))
+      ]
+    -- reading a written key, or a slot of the base, makes it likely that the read reaches deep
+    key <- oneof $ [genDecomposableKey, elements keys] <> [elements (Lit <$> Map.keys baseSlots) | not (Map.null baseSlots)]
+    let base = ConcreteStore baseSlots
+    pure $ GenDecomposableLoad $ SLoad key (foldr (uncurry SStore) base (zip keys vals))
+
+genDecomposableKey :: Gen (Expr EWord)
+genDecomposableKey = oneof
+  [ Lit . fromIntegral <$> chooseInt (0, 3)
+  , Expr.ArraySlotZero <$> slotId 32 (1, 3)
+  , Expr.ArraySlotWithOffs <$> slotId 32 (1, 3) <*> oneof [Lit . fromIntegral <$> chooseInt (1, 3), Var <$> elements ["i0", "i1"]]
+  -- decomposition identifies a store by its slot alone, so an array and a mapping must not share one
+  , Expr.MappingSlot <$> slotId 64 (4, 5) <*> (Var <$> elements ["k0", "k1"])
+  ]
+  where
+    slotId len range = do
+      slot <- chooseInt range
+      pure $ BS.pack (replicate (len - 1) 0 ++ [fromIntegral slot])
 
 genByteStringKey :: W256 -> Gen (ByteString)
 genByteStringKey len = do

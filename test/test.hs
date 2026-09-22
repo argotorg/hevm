@@ -3282,6 +3282,15 @@ tests = testGroup "hevm"
           assertBoolM "Did not find expected storage cex" testCex
           putStrLnM "Expected counterexample found"
         ,
+        test "storage-decompose-array-below-small-slot" $ do
+          -- runtime bytecode from issue #1086
+          let c = hexText "0x60806040526004361060ab57635cb32be560e11b5f1960e01b5f35160360ab5760206004360312341760ab5760016004351160ab57600154600160401b81101560af576002549060015f526001810160015560018160205f200155606060e7565b606660e7565b60015481101560c05760ff9160999160015f52600260043515179060205f200154108060ff195f5416175f551501610137565b90549060031b1c161560d2575f604051f35b5f5ffd5b50634e487b7160e01b5f52604160df565b5050634e487b7160e01b5f52603260df565b634e487b7160e01b5f5260015b60045260245ffd5b600254600160401b811061010b575050634e487b7160e01b5f52604160045260245ffd5b60025f526001810160025560f88160051c60205f20019160031b1660ff6001821b911b19825416179055565b6002548110610156575050634e487b7160e01b5f52603260045260245ffd5b60025f52601f81169060051c60205f20019156fea2646970667358221220822df62052651071edfff3b72f120ff46df11bd05f5206f43d69ce0ae82c110764736f6c637816736f6c783a302e312e383b736f6c633a302e382e33340047"
+          (calldata, _) <- mkCalldata (Just (Sig "check_entrypoint(bool)" [AbiBoolType])) []
+          vm <- liftIO $ stToIO $ loadEmptySymVM (RuntimeCode (ConcreteRuntimeCode c)) (Lit 0) calldata
+          (_, []) <- withDefaultSolver $ \s ->
+            verify s (Fetch.noRpcFetcher s) defaultVeriOpts vm (checkAssertions defaultPanicCodes) Nothing
+          putStrLnM "Qed, array writes survive decomposition"
+        ,
         test "storage-cex-concrete" $ do
           Just c <- solcRuntime "C"
             [i|

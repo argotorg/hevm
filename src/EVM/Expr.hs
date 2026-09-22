@@ -1193,10 +1193,15 @@ decomposeStorage = go
       -- If it's not the same IDX, we can skip. This is possible because there are no
       -- mixed arrays/maps/small-slots, as checked by safeToDecompose
       if idx == idx2 then Just (SStore key2 v b)
-      else setLogicalBase idx b
+      -- b is already rewritten: rewriting it again would misread rewritten
+      -- array keys (e.g. Lit 0) as small slots and drop those writes (#1086)
+      else Just b
 
     -- empty concrete base is safe to reuse without any rewriting
     setLogicalBase _ s@(ConcreteStore m) | Map.null m = Just s
+
+    -- a small-slot read must keep the concrete small-slot values
+    setLogicalBase Nothing s@(ConcreteStore _) = Just s
 
     -- if the existing base is concrete but we have writes to only keys < 256
     -- then we can safely rewrite the base to an empty ConcreteStore (safe because we assume keccack(x) > 256)
