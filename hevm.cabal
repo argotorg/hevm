@@ -275,6 +275,7 @@ common test-common
     ghc-options: -threaded "-with-rtsopts=-N -A32m"
   build-depends:
     test-utils,
+    vector,
   other-modules:
     EVM.Test.Utils
     EVM.Test.BlockchainTests
@@ -310,7 +311,6 @@ test-suite test
     stm,
     tasty-quickcheck,
     text,
-    vector,
 
 -- these tests require network access so we split them into a separate test
 -- suite to make it easy to skip them when running nix-build
@@ -323,7 +323,6 @@ test-suite rpc-tests
     rpc.hs
   build-depends:
     text,
-    vector,
 
 test-suite ethereum-tests
   import: test-common
