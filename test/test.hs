@@ -18,6 +18,7 @@ import Control.Monad.State.Strict
 import Control.Monad.IO.Unlift
 import Control.Monad.Reader (ReaderT)
 import Data.Bits hiding (And, Xor)
+import Data.Char (isSpace)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Base16 qualified as BS16
@@ -154,19 +155,45 @@ hangingSolverFlag = "--hevm-fake-hanging-solver"
 
 -- Acks every command and never answers (check-sat), unless the query set :status unsat
 hangingSolverMain :: IO ()
-hangingSolverMain = hSetBuffering stdout LineBuffering >> go False (0 :: Int)
+hangingSolverMain = hSetBuffering stdout LineBuffering >> go False ""
   where
-    go unsat depth = do
+    go unsat pending = do
       eof <- isEOF
       unless eof $ do
         line <- getLine
-        let count c = length (filter (== c) line)
-        step line (unsat || "(set-info :status unsat)" `List.isInfixOf` line) (depth + count '(' - count ')')
-    step line unsat depth
-      | depth /= 0 = go unsat depth
-      | not ("(check-sat)" `List.isInfixOf` line) = putStrLn "success" >> go unsat 0
-      | unsat = putStrLn "unsat" >> go unsat 0
+        let cmd = if null pending then line else pending <> "\n" <> line
+            (depth, sawToken) = scanSMT cmd
+        if depth > 0 || not sawToken then go (sawUnsat unsat cmd) (if sawToken then cmd else "")
+        else reply (sawUnsat unsat cmd) cmd
+    sawUnsat unsat cmd = unsat || "(set-info :status unsat)" `List.isInfixOf` cmd
+    reply unsat cmd
+      | not ("(check-sat)" `List.isInfixOf` cmd) = putStrLn "success" >> go unsat ""
+      | unsat = putStrLn "unsat" >> go unsat ""
       | otherwise = forever $ threadDelay 1_000_000
+
+data ScanState = Normal | InString | InQuoted | InComment
+
+-- A command may span several lines, and one reply is owed per command rather
+-- than per line, so the reader tracks paren depth. Parens inside string
+-- literals, quoted symbols and comments are not structure. Also reports
+-- whether any token was seen at all, so blank lines are not mistaken for a
+-- complete command -- hevm emits some commands with a trailing newline.
+scanSMT :: String -> (Int, Bool)
+scanSMT = go Normal 0 False
+  where
+    go _ depth tok [] = (depth, tok)
+    go Normal depth tok (c:cs) = case c of
+      '(' -> go Normal (depth + 1) True cs
+      ')' -> go Normal (depth - 1) True cs
+      '"' -> go InString depth True cs
+      '|' -> go InQuoted depth True cs
+      ';' -> go InComment depth tok cs
+      _   -> go Normal depth (tok || not (isSpace c)) cs
+    go InString depth tok ('"':'"':cs) = go InString depth tok cs
+    go InString depth tok ('"':cs) = go Normal depth tok cs
+    go InQuoted depth tok ('|':cs) = go Normal depth tok cs
+    go InComment depth tok ('\n':cs) = go Normal depth tok cs
+    go st depth tok (_:cs) = go st depth tok cs
 
 -- | run a subset of tests in the repl. p is a tasty pattern:
 -- https://github.com/UnkindPartition/tasty/tree/ee6fe7136fbcc6312da51d7f1b396e1a2d16b98a#patterns
@@ -4568,6 +4595,18 @@ tests = testGroup "hevm"
       let unsatQuery = SMT2 (SMTScript [SMTCommand "(set-info :status unsat)"]) mempty []
       res <- liftIO $ checkSat s Nothing (Right unsatQuery)
       assertBoolM ("Expected Qed from the only solver slot, got: " <> show res) (isQed res)
+    , testCase "fake-solver-scan" $ do
+      assertEqual "complete command" (0, True) (scanSMT "(check-sat)")
+      assertEqual "incomplete command" (1, True) (scanSMT "(define-fun f () Word")
+      assertEqual "blank line" (0, False) (scanSMT "")
+      assertEqual "comment only" (0, False) (scanSMT "; a (comment")
+      assertEqual "paren in string literal" (0, True) (scanSMT "(set-info :name \"a(b\")")
+      assertEqual "paren in quoted symbol" (0, True) (scanSMT "(assert (= |a)b| x))")
+    -- hevm builds some commands with their own trailing newline
+    , test "fake-solver-trailing-newline" $ withHangingSolver $ \s -> do
+      let unsatQuery = SMT2 (SMTScript [SMTCommand "(set-info :status unsat)\n"]) mempty []
+      res <- liftIO $ checkSat s Nothing (Right unsatQuery)
+      assertBoolM ("Expected Qed, got: " <> show res) (isQed res)
     , test "early-abort-verify" $ do
       Just c <- solcRuntime "C" [i|
           contract C {
