@@ -135,8 +135,8 @@ assertProps conf ps =
   else assertPropsHelperWith ConcreteArith True [] (decompose conf ps)
 
 -- | Assert props with abstract div/mod/mul (uninterpreted functions + lemmas).
--- The query includes the div/mod ground truth. Also returns the mul ground
--- truth, empty if there is no abstract product, to re-check a SAT result with.
+-- Also returns the ground truth equating them with the native ops, empty if
+-- there is nothing abstract, to re-check a SAT result with.
 assertPropsAbstract :: Config -> [Prop] -> Err (SMT2, [SMTEntry])
 assertPropsAbstract conf ps = do
   base@(SMT2 _ _ goalPs) <- assertPropsHelperWith AbstractArith conf.simp divModAbstractDecls psDecomp
@@ -147,7 +147,7 @@ assertPropsAbstract conf ps = do
   mulLemmas <- mulEncoding enc goalPs
   divTruth <- divModGroundTruth enc goalPs
   mulTruth <- mulGroundTruth enc goalPs
-  pure (base <> SMT2 (SMTScript (shiftBounds <> mulLemmas <> divTruth)) mempty mempty, mulTruth)
+  pure (base <> SMT2 (SMTScript (shiftBounds <> mulLemmas)) mempty mempty, divTruth <> mulTruth)
   where
     enc = exprToSMTWith AbstractArith
     psDecomp = if conf.simp then decompose conf ps else ps

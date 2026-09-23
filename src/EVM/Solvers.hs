@@ -142,8 +142,8 @@ checkSatWithPropsAbortable sg shouldAbort props = do
       else liftIO $ checkSat' sg (Just props) shouldAbort mempty smt2
     else case assertPropsAbstract conf allProps of
       Left err -> pure $ Error err
-      Right (query, mulRefinement) ->
-        liftIO $ checkSat' sg (Just props) shouldAbort (SMTScript mulRefinement) (Right query)
+      Right (query, refinement) ->
+        liftIO $ checkSat' sg (Just props) shouldAbort (SMTScript refinement) (Right query)
 
 -- When props is Nothing, the cache will not be filled or used
 checkSat :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> IO SMTResult

@@ -114,6 +114,8 @@ mulGroundTruth enc props = do
       pure $ SMTCommand $ "(assert (= " <> abstract <> " " <> concrete <> "))"
 
 -- | Encode div/mod operations using abs values, shift-bounds, and congruence.
+-- This is all the first phase knows about division; the native ops only enter
+-- when a satisfiable query is re-checked.
 divModEncoding :: Enc -> [Prop] -> Err [SMTEntry]
 divModEncoding enc props = do
   let allDivMods = nubOrd $ concatMap (foldProp collectDivMods []) props
