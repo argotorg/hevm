@@ -22,6 +22,7 @@ module EVM.SMT.AbstractBase
   , concFnName
   , abstMulFnName
     -- * Collectors and shape matchers
+  , collectFrom
   , collectDivMods
   , collectMuls
   , collectConstMuls
@@ -109,6 +110,10 @@ concFnName IsSDiv = "bvsdiv"
 concFnName IsSMod = "bvsrem"
 concFnName IsUDiv = "bvudiv"
 concFnName IsUMod = "bvurem"
+
+-- | Every occurrence of a term family in the props, de-duplicated.
+collectFrom :: Ord b => (forall a. Expr a -> [b]) -> [Prop] -> [b]
+collectFrom collect = nubOrd . concatMap (foldProp collect [])
 
 collectDivMods :: Expr a -> [DivModOp]
 collectDivMods = \case
@@ -224,9 +229,9 @@ data AbstractCtx = AbstractCtx
 --     fires for a literal divisor, emitting a native @bvmul@.
 saturate :: [Prop] -> AbstractCtx
 saturate props =
-  let udivs = [ (a, b) | (IsUDiv, a, b) <- nubOrd $ concatMap (foldProp collectDivMods []) props ]
-      muls  = nubOrd $ concatMap (foldProp collectMuls []) props
-      constMuls = nubOrd $ concatMap (foldProp collectConstMuls []) props
+  let udivs = [ (a, b) | (IsUDiv, a, b) <- collectFrom collectDivMods props ]
+      muls  = collectFrom collectMuls props
+      constMuls = collectFrom collectConstMuls props
       divisors  = nubOrd [ b | (_, b) <- udivs ]
       synthDivs = nubOrd $ [ (T.Mul a b, b) | (a, b) <- muls, b `elem` divisors ]
                         <> [ (T.Mul a b, a) | (a, b) <- muls, a `elem` divisors ]

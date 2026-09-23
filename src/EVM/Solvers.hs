@@ -305,7 +305,9 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props s
         writeSMT2File smt2 "." (show fileCounter)
         when (refinement /= mempty) $ writeSMT2File (smt2 <> SMT2 refinement mempty mempty) "." (show fileCounter <> "-refined")
       case solver of
-        EmptySolver -> pure emptySolverResult
+        -- answers without spawning a process, so queries can be dumped
+        -- without a solver installed
+        EmptySolver -> pure $ Unknown "Result unknown by SMT solver"
         _ -> bracket
           (spawnSolver solver timeout maxMemory)
           (stopSolver)
@@ -345,11 +347,6 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props s
           in case supportIssue of
            True -> pure . Error $ "SMT solver reported unsupported operation: " <> T.unpack result
            False -> pure . Unknown $ "Unable to parse SMT solver output (maybe it got killed?): " <> T.unpack result
-
--- the empty solver answers every query without spawning a process, so queries
--- can be dumped without a solver installed
-emptySolverResult :: SMTResult
-emptySolverResult = Unknown "Result unknown by SMT solver"
 
 -- Cancelling act still runs its cleanup (stopSolver kills the solver, signalQSem frees the slot)
 abortable :: Maybe (TVar Bool) -> a -> IO a -> IO a
