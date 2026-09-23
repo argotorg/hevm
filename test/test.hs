@@ -11,7 +11,7 @@ import GHC.TypeLits
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.STM (atomically, newTVarIO, writeTVar)
 import Control.Monad
-import System.Environment (getExecutablePath, lookupEnv, setEnv)
+import System.Environment (getArgs, getExecutablePath)
 import System.IO (hSetBuffering, stdout, BufferMode(..), isEOF)
 import Control.Monad.ST (stToIO)
 import Control.Monad.State.Strict
@@ -135,7 +135,7 @@ withBitwuzlaSolver = withSolvers Bitwuzla 3 Nothing defMemLimit
 withHangingSolver :: App m => (SolverGroup -> m a) -> m a
 withHangingSolver cont = do
   self <- liftIO getExecutablePath
-  withSolvers (Custom (TL.pack self)) 1 Nothing defMemLimit cont
+  withSolvers (Custom (TL.pack self) [TL.pack hangingSolverFlag]) 1 Nothing defMemLimit cont
 
 hangingProps :: [Prop]
 hangingProps = [PEq (Var "x") (Lit 1)]
@@ -145,15 +145,12 @@ withShortBitwuzlaSolver = withSolvers Bitwuzla 3 (Just 5) defMemLimit
 
 
 main :: IO ()
-main = lookupEnv hangingSolverEnv >>= \case
-  Just _ -> hangingSolverMain
-  Nothing -> do
-    setEnv hangingSolverEnv "1"
-    defaultMain tests
+main = getArgs >>= \args ->
+  if hangingSolverFlag `elem` args then hangingSolverMain else defaultMain tests
 
 -- The test binary doubles as a fake SMT solver, so the fixture works on every OS and is never installed
-hangingSolverEnv :: String
-hangingSolverEnv = "HEVM_TEST_FAKE_SOLVER"
+hangingSolverFlag :: String
+hangingSolverFlag = "--hevm-fake-hanging-solver"
 
 -- Acks every command and never answers (check-sat), unless the query set :status unsat
 hangingSolverMain :: IO ()
@@ -1057,7 +1054,7 @@ tests = testGroup "hevm"
     ]
   , testGroup "Abstract-Arith"
     -- "make verify-hevm T=prove_div_negative_divisor" in https://github.com/gustavo-grieco/abdk-math-64.64-verification
-    [ testCase "prove_div_values-abdk" $ do
+    [ testAbstractArith "prove_div_values-abdk" $ do
         Just c <- solcRuntime "C" [i|
           contract C {
               bool public IS_TEST = true;
@@ -1102,17 +1099,11 @@ tests = testGroup "hevm"
               }
           } |]
         let sig = (Just $ Sig "prove_div_values(int128,int128)" [AbiIntType 128, AbiIntType 128])
-        let testEnvAbstract = Env { config = testEnv.config { abstractArith = True } }
-        runEnv testEnvAbstract $ do
-          (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        -- with abstract arith, we prove it
-          assertEqualM "Must be QED" res []
-        runEnv testEnv $ do
-          (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-          -- without abstract arith, we time out
-          liftIO $ assertBool "Must be unknown" (all isUnknown res)
+        -- natively this times out
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        assertEqualM "Must be QED" res []
     -- "make verify-hevm T=prove_div_negative_divisor" in https://github.com/gustavo-grieco/abdk-math-64.64-verification
-    , testCase "prove_div_negative_divisor" $ do
+    , testAbstractArith "prove_div_negative_divisor" $ do
         Just c <- solcRuntime "C" [i|
           contract C {
               bool public IS_TEST = true;
@@ -1152,15 +1143,9 @@ tests = testGroup "hevm"
               }
           } |]
         let sig = (Just $ Sig "prove_div_negative_divisor(int128,int128)" [AbiIntType 128, AbiIntType 128])
-        let testEnvAbstract = Env { config = testEnv.config { abstractArith = True } }
-        runEnv testEnvAbstract $ do
-          (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-          -- with abstract arith, we prove it
-          assertEqualM "Must be QED" res []
-        runEnv testEnv $ do
-          (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-          -- without abstract arith, we time out
-          liftIO $ assertBool "Must be unknown" (all isUnknown res)
+        -- natively this times out
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        assertEqualM "Must be QED" res []
 
     , testAbstractArith "sdiv-by-one" $ do
         Just c <- solcRuntime "C" [i|
@@ -1621,7 +1606,7 @@ tests = testGroup "hevm"
           } |]
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertEqualM "Must be QED" [] res
-    , testCase "vault-shares-monotonic" $ do
+    , testAbstractArith "vault-shares-monotonic" $ do
         -- ERC-4626: more assets deposited => at least as many shares. Provable
         -- WITH abstraction, native solving times out (unknown).
         Just c <- solcRuntime "C" [i|
@@ -1638,13 +1623,8 @@ tests = testGroup "hevm"
               assert(s1 <= s2);
             }
           } |]
-        let testEnvAbstract = Env { config = testEnv.config { abstractArith = True } }
-        runEnv testEnvAbstract $ do
-          (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-          assertEqualM "Must be QED with abstraction" [] res
-        runEnv testEnv $ do
-          (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-          liftIO $ assertBool "Must be unknown natively" (all isUnknown res)
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED with abstraction" [] res
     , testAbstractArith "mul-overflow-cex" $ do
         -- Unbounded monotonicity is false because raw multiplication wraps.
         Just c <- solcRuntime "C" [i|
@@ -4542,6 +4522,22 @@ tests = testGroup "hevm"
     assertEqual ""
       (pure "(store (store ((as const Storage) #x0000000000000000000000000000000000000000000000000000000000000000) (_ bv1 256) (_ bv2 256)) (_ bv3 256) (_ bv4 256))")
       (EVM.SMT.encodeConcreteStore ConcreteArith $ Map.fromList [(W256 1, W256 2), (W256 3, W256 4)])
+  -- a lemma that names the other multiplication function constrains an
+  -- application the goal never mentions, so it can never help
+  , testCase "abstract-lemmas-match-goal-mul-encoding" $ do
+      let x = Var "x"
+          y = Var "y"
+          -- x*1000 is a const-mul, so the goal encodes it (and the (x*1000/1000)*1000
+          -- link product the saturation adds) with a native bvmul
+          constMul = abstractQuery [PEq (Div (Mul (Lit 1000) x) (Lit 1000)) y]
+          -- x*y is genuinely symbolic, so it stays abstract
+          symMul = abstractQuery [PEq (Div (Mul x y) (Lit 1000)) (Var "z")]
+      assertBool ("abstract mul over a literal factor:\n" <> constMul)
+        (not ("(abst_evm_bvmul" `List.isInfixOf` constMul))
+      assertBool ("div-mul link dropped for a literal divisor:\n" <> constMul)
+        ("(bvmul (abst_evm_bvudiv" `List.isInfixOf` constMul)
+      assertBool ("symbolic product not abstracted:\n" <> symMul)
+        ("(abst_evm_bvmul" `List.isInfixOf` symMul)
   ]
   -- these test the abort itself: if it breaks, the fake solver never answers, so fail on a timeout instead of hanging
   , localOption (mkTimeout 20_000_000) $ testGroup "early-abort"
@@ -4879,3 +4875,10 @@ expectedConcVals nm val = case val of
   _ -> internalError $ "unsupported Abi type " <> show nm <> " val: " <> show val <> " val type: " <> showAlter val
   where
     mkWord = word . encodeAbiValue
+
+-- | The phase-one SMT for these props, encoded with abstract arithmetic.
+abstractQuery :: [Prop] -> String
+abstractQuery ps = case assertPropsAbstract cfg ps of
+  Left e -> internalError $ "could not encode abstract query: " <> e
+  Right (smt2, _) -> TL.unpack (formatSMT2 smt2)
+  where cfg = testEnv.config { abstractArith = True, simp = False }

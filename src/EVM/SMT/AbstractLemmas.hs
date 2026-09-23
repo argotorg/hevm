@@ -93,14 +93,14 @@ emitLemma :: Enc -> LemmaInst -> Err [SMTEntry]
 -- match the props regardless of operand order.
 emitLemma enc (Comm a b) = do
   aenc <- enc a; benc <- enc b
-  let m1 = "(abst_evm_bvmul" `sp` aenc `sp` benc <> ")"
-      m2 = "(abst_evm_bvmul" `sp` benc `sp` aenc <> ")"
+  let m1 = mulSMT (a, aenc) (b, benc)
+      m2 = mulSMT (b, benc) (a, aenc)
   pure [ SMTCommand $ "(assert (=" `sp` m1 `sp` m2 <> "))" ]
 
 -- 0/1 identities pinning the otherwise-free UF: x*0 = 0*y = 0, x*1 = x, 1*y = y
 emitLemma enc (Identity a b) = do
   aenc <- enc a; benc <- enc b
-  let m = "(abst_evm_bvmul" `sp` aenc `sp` benc <> ")"
+  let m = mulSMT (a, aenc) (b, benc)
   pure [ SMTCommand $ "(assert (=> (=" `sp` aenc `sp` zero <> ") (=" `sp` m `sp` zero  <> ")))"
        , SMTCommand $ "(assert (=> (=" `sp` benc `sp` zero <> ") (=" `sp` m `sp` zero  <> ")))"
        , SMTCommand $ "(assert (=> (=" `sp` aenc `sp` one  <> ") (=" `sp` m `sp` benc  <> ")))"
@@ -113,15 +113,15 @@ emitLemma enc (Identity a b) = do
 emitLemma enc (DivMulLink a b) = do
   aenc <- enc a; benc <- enc b
   let q  = "(abst_evm_bvudiv" `sp` aenc `sp` benc <> ")"
-      qb = "(abst_evm_bvmul" `sp` q `sp` benc <> ")"
+      qb = mulSMT (T.Div a b, q) (b, benc)
   pure [ SMTCommand $ "(assert (bvule" `sp` qb `sp` aenc <> "))" ]
 
 -- mul monotonicity (no-overflow guarded, hence sound):
 --   x <= y => x*z <= y*z
 emitLemma enc (MulMono x y z) = do
   xenc <- enc x; yenc <- enc y; zenc <- enc z
-  let mxz = "(abst_evm_bvmul" `sp` xenc `sp` zenc <> ")"
-      myz = "(abst_evm_bvmul" `sp` yenc `sp` zenc <> ")"
+  let mxz = mulSMT (x, xenc) (z, zenc)
+      myz = mulSMT (y, yenc) (z, zenc)
   pure [ SMTCommand $ "(assert (=> (and" `sp` mulNoOverflow xenc zenc `sp` mulNoOverflow yenc zenc
          <> " (bvule" `sp` xenc `sp` yenc <> ")) (bvule" `sp` mxz `sp` myz <> ")))" ]
 
@@ -228,8 +228,8 @@ emitLemma enc (Telescope a b k c) = do
   ae <- enc a; be <- enc b
   let m       = k `div` c                       -- exact, since c | k
       cbv     = wordAsBV c
-      full    = "(abst_evm_bvmul" `sp` ae `sp` be <> ")"
-      stepped = "(abst_evm_bvmul" `sp` ae `sp` ("(bvsub" `sp` be `sp` wordAsBV k <> ")") <> ")"
+      full    = mulSMT (a, ae) (b, be)
+      stepped = mulSMT (a, ae) (T.Sub b (Lit k), "(bvsub" `sp` be `sp` wordAsBV k <> ")")
       dFull   = "(abst_evm_bvudiv" `sp` full `sp` cbv <> ")"
       dStep   = "(abst_evm_bvudiv" `sp` stepped `sp` cbv <> ")"
       coeff   = if m == 1 then ae else "(bvmul" `sp` wordAsBV m `sp` ae <> ")"

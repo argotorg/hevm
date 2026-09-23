@@ -26,6 +26,8 @@ module EVM.SMT.AbstractBase
   , collectConstMuls
   , asMul
   , asConstMul
+  , isAbstractMul
+  , mulSMT
     -- * Signed reconstruction helpers
   , smtZeroGuard
   , smtAbsolute
@@ -134,6 +136,19 @@ notLit :: Expr a -> Bool
 notLit (Lit _) = False
 notLit _       = True
 
+-- | Whether 'exprToSMTWith' abstracts this product, i.e. whether both factors
+-- are genuinely symbolic.
+isAbstractMul :: Expr EWord -> Expr EWord -> Bool
+isAbstractMul a b = notLit a && notLit b
+
+-- | Render a product exactly as the goal encoder renders it. A lemma that
+-- picks the other function constrains an application the goal never mentions,
+-- so it is dead weight at best.
+mulSMT :: (Expr EWord, Builder) -> (Expr EWord, Builder) -> Builder
+mulSMT (a, aenc) (b, benc) =
+  "(" <> fn `sp` aenc `sp` benc <> ")"
+  where fn = if isAbstractMul a b then "abst_evm_bvmul" else "bvmul"
+
 -- | (ite (= divisor 0) 0 result) — the EVM's x/0 = 0 convention.
 smtZeroGuard :: Builder -> Builder -> Builder
 smtZeroGuard divisor nonZeroResult =
@@ -191,7 +206,9 @@ data AbstractCtx = AbstractCtx
 --   * /nested-division collapse/: @(A/c1)/c2@ also contributes @A/(c1*c2)@, so
 --     single-divide lemmas match code that splits precision across two divides.
 --   * /div-mul link products/: every division @a/b@ contributes the product
---     @(a/b)*b@ that the link lemma bounds by @a@.
+--     @(a/b)*b@ that the link lemma bounds by @a@. Only the abstract ones are
+--     collected here; the link lemma itself ranges over 'acUDivs' and so still
+--     fires for a literal divisor, emitting a native @bvmul@.
 saturate :: [Prop] -> AbstractCtx
 saturate props =
   let udivs = [ (a, b) | (IsUDiv, a, b) <- nubOrd $ concatMap (foldProp collectDivMods []) props ]
@@ -206,6 +223,8 @@ saturate props =
         , T.Div innerA (Lit c1) <- [a]
         , c1 /= 0, c2 /= 0, toInteger c1 * toInteger c2 < 2 ^ (256 :: Int) ]
       udivsAll  = nubOrd (udivs <> synthDivs <> collapsedDivs)
-      linkMuls  = [ (T.Div a b, b) | (a, b) <- udivsAll ]
+      -- a link product over a literal divisor is a native bvmul in the goal, so
+      -- it must not enter the families that range over abstract products
+      linkMuls  = [ (q, b) | (a, b) <- udivsAll, let q = T.Div a b, isAbstractMul q b ]
       allMuls   = nubOrd (muls <> linkMuls)
   in AbstractCtx { acUDivs = udivsAll, acMuls = allMuls, acConstMuls = constMuls }

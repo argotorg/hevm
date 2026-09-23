@@ -785,13 +785,13 @@ genSmallNonZero = fromInteger <$> chooseInteger (1, 1000)
 genSmallFactor :: Gen W256
 genSmallFactor = fromInteger <$> chooseInteger (2, 1000)
 
--- Half the time, move a binding to within one of a guard bound.
+-- Usually, move a binding to within one of a guard bound.
 nearValue :: Text -> W256 -> [(Text, W256)] -> Gen [(Text, W256)]
 nearValue name bound bs = do
   delta <- elements [Nothing, Just (-1), Just 0, Just 1]
   pure $ maybe bs (\d -> replaceBinding name (bound + d) bs) delta
 
--- Half the time, move a binding to within one of another binding.
+-- Usually, move a binding to within one of another binding.
 nearVar :: Text -> Text -> [(Text, W256)] -> Gen [(Text, W256)]
 nearVar name other bs = nearValue name (lookupBinding other bs) bs
 

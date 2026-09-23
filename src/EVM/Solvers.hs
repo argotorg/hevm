@@ -66,14 +66,14 @@ data Solver
   | CVC5
   | Bitwuzla
   | EmptySolver
-  | Custom Text
+  | Custom Text [Text] -- ^ executable path and the arguments to spawn it with
 
 instance Show Solver where
   show Z3 = "z3"
   show CVC5 = "cvc5"
   show Bitwuzla = "bitwuzla"
   show EmptySolver = "empty-smt-solver"
-  show (Custom s) = T.unpack s
+  show (Custom s _) = T.unpack s
 
 
 -- | A running solver instance
@@ -263,20 +263,22 @@ getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r solve
     (signalQSem solverSlots)
     (do
       when conf.dumpQueries $ writeSMT2File smt2 "." (show fileCounter)
-      bracket
-        (spawnSolver solver timeout maxMemory)
-        (stopSolver)
-        (\inst -> do
-          out <- sendScript inst cmds
-          case out of
-            Left err -> do
-              when conf.debug $ putStrLn $ "Issue while writing SMT to solver (maybe it got killed)?: " <> (T.unpack err)
-              writeChan r Nothing
-            Right _ -> do
-              sat <- sendCommand inst $ SMTCommand "(check-sat)"
-              when conf.dumpQueries $ writeSMT2File smt2 "." (show fileCounter <> "-origquery")
-              subRun inst [] smt2 sat
-        )
+      case solver of
+        EmptySolver -> writeChan r Nothing
+        _ -> bracket
+          (spawnSolver solver timeout maxMemory)
+          (stopSolver)
+          (\inst -> do
+            out <- sendScript inst cmds
+            case out of
+              Left err -> do
+                when conf.debug $ putStrLn $ "Issue while writing SMT to solver (maybe it got killed)?: " <> (T.unpack err)
+                writeChan r Nothing
+              Right _ -> do
+                sat <- sendCommand inst $ SMTCommand "(check-sat)"
+                when conf.dumpQueries $ writeSMT2File smt2 "." (show fileCounter <> "-origquery")
+                subRun inst [] smt2 sat
+          )
     )
 
 getOneSol
@@ -293,9 +295,6 @@ getOneSol
   -> QSem               -- ^ limits concurrent solvers
   -> Int                -- ^ query counter, for dump file names
   -> m ()
--- the empty solver answers every query "unknown" without spawning a process
-getOneSol EmptySolver _ _ _ _ _ _ r _ _ _ =
-  liftIO $ writeChan r (Unknown "Result unknown by SMT solver")
 getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props shouldAbort r cacheq solverSlots fileCounter = do
   conf <- readConfig
   res <- liftIO $ abortable shouldAbort (Unknown "Query aborted") $ bracket_
@@ -305,15 +304,17 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props s
       when (conf.dumpQueries) $ do
         writeSMT2File smt2 "." (show fileCounter)
         when (refinement /= mempty) $ writeSMT2File (smt2 <> SMT2 refinement mempty mempty) "." (show fileCounter <> "-refined")
-      bracket
-        (spawnSolver solver timeout maxMemory)
-        (stopSolver)
-        (\inst -> do
-          out <- sendScript inst cmds
-          case out of
-            Left e -> pure (Unknown $ "Issue while writing SMT to solver (maybe it got killed?): " <> T.unpack e)
-            Right () -> checkSatIn conf inst smt2 refinement
-        )
+      case solver of
+        EmptySolver -> pure emptySolverResult
+        _ -> bracket
+          (spawnSolver solver timeout maxMemory)
+          (stopSolver)
+          (\inst -> do
+            out <- sendScript inst cmds
+            case out of
+              Left e -> pure (Unknown $ "Issue while writing SMT to solver (maybe it got killed?): " <> T.unpack e)
+              Right () -> checkSatIn conf inst smt2 refinement
+          )
     )
   liftIO $ writeChan r res
   where
@@ -344,6 +345,11 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props s
           in case supportIssue of
            True -> pure . Error $ "SMT solver reported unsupported operation: " <> T.unpack result
            False -> pure . Unknown $ "Unable to parse SMT solver output (maybe it got killed?): " <> T.unpack result
+
+-- the empty solver answers every query without spawning a process, so queries
+-- can be dumped without a solver installed
+emptySolverResult :: SMTResult
+emptySolverResult = Unknown "Result unknown by SMT solver"
 
 -- Cancelling act still runs its cleanup (stopSolver kills the solver, signalQSem frees the slot)
 abortable :: Maybe (TVar Bool) -> a -> IO a -> IO a
@@ -455,6 +461,8 @@ solverArgs solver timeout = case solver of
   Bitwuzla ->
     [ "--lang=smt2"
     , "--produce-models"
+    -- per (check-sat), not per query: an --abstract-arith query that needs the
+    -- refinement re-check gets this budget twice
     , "--time-limit-per=" <> millisecs
     , "--bv-output-format=16"
     ]
@@ -471,7 +479,7 @@ solverArgs solver timeout = case solver of
     , "--arrays-exp"
     ]
   EmptySolver -> []
-  Custom _ -> []
+  Custom _ args -> args
   where millisecs = T.pack $ show $ 1000 * (mkTimeout timeout)
 
 -- | Spawns a solver instance, and sets the various global config options that we use for our queries
@@ -532,7 +540,7 @@ spawnSolver solver timeout maxMemoryMB = do
     Z3 -> do
       _ <- sendCommand solverInstance $ SMTCommand "(set-option :print-success true)"
       pure solverInstance
-    Custom _ -> pure solverInstance
+    Custom _ _ -> pure solverInstance
 
 -- | Cleanly shutdown a running solver instance
 stopSolver :: SolverInstance -> IO ()
