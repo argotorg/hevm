@@ -112,7 +112,7 @@ emitLemma enc (Identity a b) = do
 -- and chains nested divisions.
 emitLemma enc (DivMulLink a b) = do
   aenc <- enc a; benc <- enc b
-  let q  = "(abst_evm_bvudiv" `sp` aenc `sp` benc <> ")"
+  let q  = udivSMT aenc benc
       qb = mulSMT (T.Div a b, q) (b, benc)
   pure [ SMTCommand $ "(assert (bvule" `sp` qb `sp` aenc <> "))" ]
 
@@ -129,8 +129,8 @@ emitLemma enc (MulMono x y z) = do
 --   x <= y => floor(x/z) <= floor(y/z)
 emitLemma enc (DivMono x y z) = do
   xenc <- enc x; yenc <- enc y; zenc <- enc z
-  let dxz = "(abst_evm_bvudiv" `sp` xenc `sp` zenc <> ")"
-      dyz = "(abst_evm_bvudiv" `sp` yenc `sp` zenc <> ")"
+  let dxz = udivSMT xenc zenc
+      dyz = udivSMT yenc zenc
   pure [ SMTCommand $ "(assert (=> (bvule" `sp` xenc `sp` yenc <> ") (bvule" `sp` dxz `sp` dyz <> ")))" ]
 
 -- div anti-monotonicity in the divisor (sound for nonzero divisors): a bigger
@@ -138,8 +138,8 @@ emitLemma enc (DivMono x y z) = do
 --   y1 <= y2 && y1 != 0  =>  x/y2 <= x/y1
 emitLemma enc (DivisorMono y1 y2 x) = do
   y1e <- enc y1; y2e <- enc y2; xe <- enc x
-  let dxy1 = "(abst_evm_bvudiv" `sp` xe `sp` y1e <> ")"
-      dxy2 = "(abst_evm_bvudiv" `sp` xe `sp` y2e <> ")"
+  let dxy1 = udivSMT xe y1e
+      dxy2 = udivSMT xe y2e
   pure [ SMTCommand $ "(assert (=> (and (distinct" `sp` y1e `sp` zero <> ")"
          <> " (bvule" `sp` y1e `sp` y2e <> ")) (bvule" `sp` dxy2 `sp` dxy1 <> ")))" ]
 
@@ -149,7 +149,7 @@ emitLemma enc (DivisorMono y1 y2 x) = do
 -- `a` is the original product expr, so the div term matches the prop exactly.
 emitLemma enc (MulDivBound a x y z) = do
   ae <- enc a; xe <- enc x; ye <- enc y; ze <- enc z
-  let dv = "(abst_evm_bvudiv" `sp` ae `sp` ze <> ")"
+  let dv = udivSMT ae ze
   pure [ SMTCommand $ "(assert (=> (and (bvule" `sp` ye `sp` ze <> ")" `sp` mulNoOverflow xe ze
            <> ") (bvule" `sp` dv `sp` xe <> ")))"
        , SMTCommand $ "(assert (=> (and (bvule" `sp` xe `sp` ze <> ")" `sp` mulNoOverflow ye ze
@@ -176,7 +176,7 @@ emitLemma enc (ConstCancel a c1 c2 x) = do
   let c2bv = wordAsBV c2
       k    = c1 `div` c2                 -- exact, since c2 | c1
       rhs  = if k == 1 then xe else "(bvmul" `sp` wordAsBV k `sp` xe <> ")"
-      dv   = "(abst_evm_bvudiv" `sp` ae `sp` c2bv <> ")"
+      dv   = udivSMT ae c2bv
       bnd  = wordAsBV ((maxBound :: W256) `div` c1)  -- largest x with c1*x < 2^256
   pure [ SMTCommand $ "(assert (=> (bvule" `sp` xe `sp` bnd <> ") (=" `sp` dv `sp` rhs <> ")))" ]
 
@@ -185,9 +185,9 @@ emitLemma enc (ConstCancel a c1 c2 x) = do
 -- e.g. x*rate/1e9/1e18 == x*rate/1e27.
 emitLemma enc (NestedDiv innerA c1 c2) = do
   ae <- enc innerA
-  let inner     = "(abst_evm_bvudiv" `sp` ae `sp` wordAsBV c1 <> ")"
-      outer     = "(abst_evm_bvudiv" `sp` inner `sp` wordAsBV c2 <> ")"
-      collapsed = "(abst_evm_bvudiv" `sp` ae `sp` wordAsBV (c1 * c2) <> ")"
+  let inner     = udivSMT ae (wordAsBV c1)
+      outer     = udivSMT inner (wordAsBV c2)
+      collapsed = udivSMT ae (wordAsBV (c1 * c2))
   pure [ SMTCommand $ "(assert (=" `sp` outer `sp` collapsed <> "))" ]
 
 -- fraction-reduce (sound, no-overflow guarded): (c1*x)/c2 == x/(c2/c1) when
@@ -197,8 +197,8 @@ emitLemma enc (NestedDiv innerA c1 c2) = do
 emitLemma enc (FracReduce a c1 c2 x) = do
   ae <- enc a; xe <- enc x
   let k    = c2 `div` c1                 -- exact and >= 2, since c1 | c2 and c2 /= c1
-      dv   = "(abst_evm_bvudiv" `sp` ae `sp` wordAsBV c2 <> ")"   -- (c1*x)/c2
-      rhs  = "(abst_evm_bvudiv" `sp` xe `sp` wordAsBV k <> ")"    -- x/(c2/c1)
+      dv   = udivSMT ae (wordAsBV c2)   -- (c1*x)/c2
+      rhs  = udivSMT xe (wordAsBV k)    -- x/(c2/c1)
       bnd  = wordAsBV ((maxBound :: W256) `div` c1)  -- largest x with c1*x < 2^256
   pure [ SMTCommand $ "(assert (=> (bvule" `sp` xe `sp` bnd <> ") (=" `sp` dv `sp` rhs <> ")))" ]
 
@@ -211,7 +211,7 @@ emitLemma enc (CeilDivCancel a c1 c2 x) = do
   ae <- enc a; xe <- enc x
   let m    = c1 `div` c2                 -- exact, since c2 | c1
       mx   = if m == 1 then xe else "(bvmul" `sp` wordAsBV m `sp` xe <> ")"
-      dv   = "(abst_evm_bvudiv" `sp` ae `sp` wordAsBV c2 <> ")"   -- (c1*x - 1)/c2
+      dv   = udivSMT ae (wordAsBV c2)   -- (c1*x - 1)/c2
       rhs  = "(bvsub" `sp` mx `sp` one <> ")"                     -- (c1/c2)*x - 1
       bnd  = wordAsBV ((maxBound :: W256) `div` c1)  -- largest x with c1*x < 2^256
   pure [ SMTCommand $ "(assert (=> (and (bvuge" `sp` xe `sp` one <> ")"
@@ -230,8 +230,8 @@ emitLemma enc (Telescope a b k c) = do
       cbv     = wordAsBV c
       full    = mulSMT (a, ae) (b, be)
       stepped = mulSMT (a, ae) (T.Sub b (Lit k), "(bvsub" `sp` be `sp` wordAsBV k <> ")")
-      dFull   = "(abst_evm_bvudiv" `sp` full `sp` cbv <> ")"
-      dStep   = "(abst_evm_bvudiv" `sp` stepped `sp` cbv <> ")"
+      dFull   = udivSMT full cbv
+      dStep   = udivSMT stepped cbv
       coeff   = if m == 1 then ae else "(bvmul" `sp` wordAsBV m `sp` ae <> ")"
       rhs     = "(bvadd" `sp` dStep `sp` coeff <> ")"
   pure [ SMTCommand $ "(assert (=> (and" `sp` mulNoOverflow ae be

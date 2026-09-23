@@ -28,6 +28,7 @@ module EVM.SMT.AbstractBase
   , asConstMul
   , isAbstractMul
   , mulSMT
+  , udivSMT
     -- * Signed reconstruction helpers
   , smtZeroGuard
   , smtAbsolute
@@ -148,6 +149,13 @@ mulSMT :: (Expr EWord, Builder) -> (Expr EWord, Builder) -> Builder
 mulSMT (a, aenc) (b, benc) =
   "(" <> fn `sp` aenc `sp` benc <> ")"
   where fn = if isAbstractMul a b then "abst_evm_bvmul" else "bvmul"
+
+-- | Render an unsigned division. Unlike a product it is abstracted whatever
+-- its operands are, so there is no encoder choice to mirror; this only keeps
+-- the function name in one place. Takes the operands already rendered, since
+-- lemmas nest divisions.
+udivSMT :: Builder -> Builder -> Builder
+udivSMT aenc benc = "(" <> abstFnName IsUDiv `sp` aenc `sp` benc <> ")"
 
 -- | (ite (= divisor 0) 0 result) — the EVM's x/0 = 0 convention.
 smtZeroGuard :: Builder -> Builder -> Builder

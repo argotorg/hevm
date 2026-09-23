@@ -109,7 +109,8 @@ mulGroundTruth enc props = do
     mkGroundTruthAxiom (a, b) = do
       aenc <- enc a
       benc <- enc b
-      let abstract = "(abst_evm_bvmul" `sp` aenc `sp` benc <> ")"
+      -- collectMuls only yields symbolic*symbolic, so this is the abstract one
+      let abstract = mulSMT (a, aenc) (b, benc)
           concrete = "(bvmul" `sp` aenc `sp` benc <> ")"
       pure $ SMTCommand $ "(assert (= " <> abstract <> " " <> concrete <> "))"
 
