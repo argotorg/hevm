@@ -13,12 +13,12 @@ break the hevm CLI interface.
 import Test.Hspec
 import System.Process (readProcessWithExitCode)
 import System.Exit (ExitCode(..))
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, isPrefixOf, isSuffixOf)
 import Data.List.Split (splitOn)
 import Data.Text qualified as T
 import Data.String.Here
 import System.IO.Temp
-import System.Directory (doesFileExist, removeFile)
+import System.Directory (doesFileExist, listDirectory, removeFile)
 
 import EVM.Solidity
 import EVM.Types qualified as Types
@@ -50,6 +50,11 @@ runForge testFile extraOptions = do
         let options = ["run", "exe:hevm", "--", "test" , "--root", root] <> extraOptions
         (exitCode, stdout, stderr) <- readProcessWithExitCode "cabal" options ""
         pure (exitCode, stdout, stderr)
+
+-- the query-*.smt2 files --smt-debug writes into the cwd
+dumpedQueries :: IO [FilePath]
+dumpedQueries = filter isQuery <$> listDirectory "."
+  where isQuery f = "query-" `isPrefixOf` f && ".smt2" `isSuffixOf` f
 
 main :: IO ()
 main = do
@@ -225,6 +230,23 @@ main = do
         fileExists <- doesFileExist filename
         shouldBe fileExists True
         removeFile filename
+      -- the empty solver answers without spawning a process, so queries can be
+      -- dumped on a machine with no solver installed
+      it "empty-solver-dumps-queries" $ do
+        Just c <- runApp $ solcRuntime (T.pack "C") (T.pack [i|
+           contract C {
+             function stuff(uint a, uint b) public {
+                 assert (a * b != 5);
+             }
+           }
+          |])
+        let hexStr = Types.bsToHex c
+        (_, _, stderr) <- readProcessWithExitCode "cabal"
+          ["run", "exe:hevm", "--", "symbolic", "--code", hexStr, "--solver", "empty", "--smt-debug"] ""
+        stderr `shouldNotContain` "CallStack"
+        dumped <- dumpedQueries
+        mapM_ removeFile dumped
+        dumped `shouldContain` ["query-0.smt2"]
       it "early-abort" $ do
         (exitCode, stdout, stderr) <- runForge "test/contracts/pass/early-abort.sol" ["--max-iterations", "1000", "--early-abort"]
         stderr `shouldNotContain` "CallStack"
