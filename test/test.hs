@@ -4538,6 +4538,17 @@ tests = testGroup "hevm"
         ("(bvmul (abst_evm_bvudiv" `List.isInfixOf` constMul)
       assertBool ("symbolic product not abstracted:\n" <> symMul)
         ("(abst_evm_bvmul" `List.isInfixOf` symMul)
+  , testCase "abstract-lemma-section-only-when-lemmas-fire" $ do
+      let header = "multiplication abstraction lemmas"
+          -- a lone constant product triggers no lemma: const-mul monotonicity
+          -- needs a second product sharing the constant, and there is no division
+          noLemmas = abstractQuery [PEq (Mul (Lit 1000) (Var "x")) (Lit 5)]
+          -- the same product over a division does trigger some
+          someLemmas = abstractQuery [PEq (Div (Mul (Lit 1000) (Var "x")) (Lit 1000)) (Var "y")]
+      assertBool ("empty lemma section emitted:\n" <> noLemmas)
+        (not (header `List.isInfixOf` noLemmas))
+      assertBool ("lemma section missing:\n" <> someLemmas)
+        (header `List.isInfixOf` someLemmas)
   ]
   -- these test the abort itself: if it breaks, the fake solver never answers, so fail on a timeout instead of hanging
   , localOption (mkTimeout 20_000_000) $ testGroup "early-abort"
