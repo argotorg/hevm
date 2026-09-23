@@ -20,6 +20,7 @@ module EVM.SMT.AbstractBase
   , isSigned
   , abstFnName
   , concFnName
+  , abstMulFnName
     -- * Collectors and shape matchers
   , collectDivMods
   , collectMuls
@@ -52,16 +53,15 @@ import EVM.Types qualified as T
 type Enc = Expr EWord -> Err Builder
 
 -- | Uninterpreted-function declarations standing in for div/mod/mul. They are
--- equated to the native ops only when re-checking a satisfiable query.
+-- equated to the native ops only when re-checking a satisfiable query. Built
+-- from the name tables, so a new 'DivModKind' cannot be left undeclared.
 divModAbstractDecls :: [SMTEntry]
 divModAbstractDecls =
-  [ SMTComment "abstract division/modulo/multiplication (uninterpreted functions)"
-  , SMTCommand "(declare-fun abst_evm_bvsdiv ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
-  , SMTCommand "(declare-fun abst_evm_bvsrem ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
-  , SMTCommand "(declare-fun abst_evm_bvudiv ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
-  , SMTCommand "(declare-fun abst_evm_bvurem ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
-  , SMTCommand "(declare-fun abst_evm_bvmul ((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
-  ]
+  SMTComment "abstract division/modulo/multiplication (uninterpreted functions)"
+    : fmap declareBinOp (fmap abstFnName [minBound ..] <> [abstMulFnName])
+  where
+    declareBinOp fn = SMTCommand $
+      "(declare-fun" `sp` fn `sp` "((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
 
 -- | A /sufficient/ condition for x*y not to overflow 256 bits: both operands
 -- fit in 128 bits. Deliberately cheaper than the exact predicate
@@ -77,7 +77,7 @@ mulNoOverflow x y =
 -- | The four EVM division/modulo operations, kept in signed/unsigned groups so
 -- the sign-reconstruction machinery is never applied to unsigned operands.
 data DivModKind = IsSDiv | IsSMod | IsUDiv | IsUMod
-  deriving (Eq, Ord)
+  deriving (Eq, Ord, Enum, Bounded)
 
 type DivModOp = (DivModKind, Expr EWord, Expr EWord)
 
@@ -90,6 +90,11 @@ isSigned :: DivModKind -> Bool
 isSigned IsSDiv = True
 isSigned IsSMod = True
 isSigned _      = False
+
+-- | Name of the uninterpreted function standing in for symbolic*symbolic
+-- multiplication. Products with a literal factor stay native.
+abstMulFnName :: Builder
+abstMulFnName = "abst_evm_bvmul"
 
 -- | Name of the uninterpreted function standing in for this op.
 abstFnName :: DivModKind -> Builder
@@ -148,7 +153,7 @@ isAbstractMul a b = notLit a && notLit b
 mulSMT :: (Expr EWord, Builder) -> (Expr EWord, Builder) -> Builder
 mulSMT (a, aenc) (b, benc) =
   "(" <> fn `sp` aenc `sp` benc <> ")"
-  where fn = if isAbstractMul a b then "abst_evm_bvmul" else "bvmul"
+  where fn = if isAbstractMul a b then abstMulFnName else "bvmul"
 
 -- | Render an unsigned division. Unlike a product it is abstracted whatever
 -- its operands are, so there is no encoder choice to mirror; this only keeps

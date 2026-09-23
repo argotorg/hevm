@@ -69,6 +69,7 @@ import EVM.Effects
 import EVM.SMT.Types
 import EVM.SMT.SMTLIB
 import EVM.SMT.DivModEncoding
+import EVM.SMT.AbstractBase (DivModKind(..), abstFnName, concFnName, mulSMT)
 
 
 -- ** Encoding ** ----------------------------------------------------------------------------------
@@ -457,12 +458,14 @@ exprToSMTWith arithEnc = \case
 
   Add a b -> op2 "bvadd" a b
   Sub a b -> op2 "bvsub" a b
-  Mul a b -> case (a, b) of
-    -- only genuinely symbolic products are abstracted; a concrete factor
-    -- (0/1/power-of-two/constant) is handled natively / by the simplifier
-    (Lit _, _) -> op2 "bvmul" a b
-    (_, Lit _) -> op2 "bvmul" a b
-    _          -> mulOp a b
+  Mul a b -> case arithEnc of
+    ConcreteArith -> op2 "bvmul" a b
+    -- 'mulSMT' is the one definition of which products are abstracted; the
+    -- lemmas build theirs with it too, so their terms match the goal's
+    AbstractArith -> do
+      aenc <- exprToSMT a
+      benc <- exprToSMT b
+      pure $ mulSMT (a, aenc) (b, benc)
   Exp a b -> case a of
     Lit 0 -> do
       benc <- exprToSMT b
@@ -521,10 +524,10 @@ exprToSMTWith arithEnc = \case
   SAR a b -> op2 "bvashr" b a
   CLZ a -> op1 "clz256" a
   SEx a b -> op2 "signext" a b
-  Div a b -> divModOp "bvudiv" "abst_evm_bvudiv" a b
-  SDiv a b -> divModOp "bvsdiv" "abst_evm_bvsdiv" a b
-  Mod a b -> divModOp "bvurem" "abst_evm_bvurem" a b
-  SMod a b -> divModOp "bvsrem" "abst_evm_bvsrem" a b
+  Div a b -> divModOp IsUDiv a b
+  SDiv a b -> divModOp IsSDiv a b
+  Mod a b -> divModOp IsUMod a b
+  SMod a b -> divModOp IsSMod a b
   -- NOTE: this needs to do the MUL at a higher precision, then MOD, then downcast
   MulMod a b c -> do
     aExp <- exprToSMT a
@@ -636,16 +639,12 @@ exprToSMTWith arithEnc = \case
       aenc <- exprToSMT a
       benc <- exprToSMT b
       pure $ "(ite (= " <> benc <> " (_ bv0 256)) (_ bv0 256) " <>  "(" <> op `sp` aenc `sp` benc <> "))"
-    divModOp :: Builder -> Builder -> Expr x -> Expr y -> Err Builder
-    divModOp concreteOp abstractOp a b = case arithEnc of
-      ConcreteArith -> op2CheckZero concreteOp a b
-      AbstractArith -> op2 abstractOp a b
-    -- symbolic*symbolic multiplication: native under ConcreteArith, an
-    -- uninterpreted function under AbstractArith (no zero guard needed).
-    mulOp :: Expr x -> Expr y -> Err Builder
-    mulOp a b = case arithEnc of
-      ConcreteArith -> op2 "bvmul" a b
-      AbstractArith -> op2 "abst_evm_bvmul" a b
+    -- the abstract function needs no zero guard: 'divModEncoding' asserts the
+    -- EVM x/0 = 0 convention on it, and so does the ground truth
+    divModOp :: DivModKind -> Expr x -> Expr y -> Err Builder
+    divModOp kind a b = case arithEnc of
+      ConcreteArith -> op2CheckZero (concFnName kind) a b
+      AbstractArith -> op2 (abstFnName kind) a b
 
 propToSMTWith :: ArithEncoding -> Prop -> Err Builder
 propToSMTWith arithEnc = \case
