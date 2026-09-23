@@ -3,7 +3,7 @@
    Description: Shared vocabulary for the abstract arithmetic encoding.
 
    Base layer for 'EVM.SMT.AbstractLemmas' (the lemma catalogue) and
-   'EVM.SMT.DivModEncoding' (orchestration + div/mod ground truth): the div/mod
+   'EVM.SMT.ArithEncoding' (orchestration + div/mod ground truth): the div/mod
    taxonomy, term collectors/matchers, signed-reconstruction helpers, and the
    term /saturation/ ('saturate') that closes the set of div/mul terms the
    lemmas range over. Lives below both so neither needs to import the other for

@@ -6,7 +6,7 @@ module EVM.SMT
 (
   module EVM.SMT.Types,
   module EVM.SMT.SMTLIB,
-  module EVM.SMT.DivModEncoding,
+  module EVM.SMT.ArithEncoding,
 
   collapse,
   getVar,
@@ -68,7 +68,7 @@ import EVM.Types
 import EVM.Effects
 import EVM.SMT.Types
 import EVM.SMT.SMTLIB
-import EVM.SMT.DivModEncoding
+import EVM.SMT.ArithEncoding
 import EVM.SMT.AbstractBase (DivModKind(..), abstFnName, concFnName, mulSMT)
 
 

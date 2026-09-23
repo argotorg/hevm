@@ -6,7 +6,7 @@
    ('mulEncoding') and holds the /ground-truth/ encodings that equate the
    abstract functions with the native ops.
 -}
-module EVM.SMT.DivModEncoding
+module EVM.SMT.ArithEncoding
   ( divModGroundTruth
   , mulGroundTruth
   , divModEncoding

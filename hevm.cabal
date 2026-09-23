@@ -98,7 +98,6 @@ library
     EVM.Dapp,
     EVM.Expr,
     EVM.SMT,
-    EVM.SMT.DivModEncoding,
     EVM.Solvers,
     EVM.Exec,
     EVM.Format,
@@ -127,6 +126,7 @@ library
     EVM.SMT.SMTLIB,
     EVM.SMT.AbstractBase,
     EVM.SMT.AbstractLemmas,
+    EVM.SMT.ArithEncoding,
     Paths_hevm
   autogen-modules:
     Paths_hevm
