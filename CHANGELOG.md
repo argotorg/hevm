@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a different store, which caused spurious counterexamples ([#1086](https://github.com/argotorg/hevm/issues/1086))
 - Storage decomposition no longer empties a concrete base store when reading a
   small slot, which made such reads return 0 instead of the stored value
+- Calling a recognized but unimplemented precompile (`0x0a`–`0x11`, `0x100`)
+  no longer crashes with an internal error during gas calculation; it now
+  fails with `NonexistentPrecompile` (concrete) or a `PrecompileMissing`
+  partial (symbolic) ([#1084](https://github.com/argotorg/hevm/issues/1084))
 
 ## [0.58.0] - 2026-06-26
 
