@@ -305,7 +305,8 @@ symRun opts@UnitTestOptions{..} vm sig@(Sig testName types) sourceCache = do
     -- they still count as a warning so a bounded run is not reported as a clean
     -- pass (avoids a false sense of security).
     let warnings = any Expr.isPartial ends || any isUnknown results || any isError results || not (null caveats)
-    let allReverts = not . (any Expr.isSuccess) $ ends
+    -- early abort discards unexplored paths, so the surviving ends say nothing about reverts
+    let allReverts = not (any Expr.isSuccess ends) && not (conf.earlyAbort && any isCex results)
     let unexpectedAllRevert = allReverts && not shouldFail
     when conf.debug $ liftIO $ putStrLn $ "   symRun -- (cex,warnings,unexpectedAllRevert): " <> show (any isCex results, warnings, unexpectedAllRevert)
     txtResult <- case (any isCex results, warnings, unexpectedAllRevert) of

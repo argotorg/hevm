@@ -11,6 +11,7 @@ module EVM.Solvers
   , MultiSol(..)
   , checkSat
   , checkSatWithProps
+  , checkSatWithPropsAbortable
   , checkMulti
   , defMemLimit
   ) where
@@ -25,7 +26,8 @@ import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
 import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.QSem (QSem, newQSem, waitQSem, signalQSem)
 import Control.Exception (bracket, bracket_, try, IOException)
-import Control.Concurrent.STM (writeTChan, newTChan, TChan, tryReadTChan, atomically)
+import Control.Concurrent.Async (race)
+import Control.Concurrent.STM (writeTChan, newTChan, TChan, tryReadTChan, atomically, TVar, readTVar, check)
 import Control.Monad
 import Control.Monad.Trans.Maybe (MaybeT(..), runMaybeT)
 import Control.Monad.State.Strict
@@ -104,6 +106,7 @@ data MultiData = MultiData
 data SingleData = SingleData
   SMT2
   (Maybe [Prop])
+  (Maybe (TVar Bool)) -- shared abort flag; if another thread sets it, the query is cancelled and its solver killed
   (Chan SMTResult) -- result channel
 
 -- returns True if a is a superset of any of the sets in bs
@@ -122,7 +125,10 @@ checkMulti (SolverGroup taskq) smt2 multiSol = do
     readChan resChan
 
 checkSatWithProps :: App m => SolverGroup -> [Prop] -> m (SMTResult)
-checkSatWithProps sg props = do
+checkSatWithProps sg = checkSatWithPropsAbortable sg Nothing
+
+checkSatWithPropsAbortable :: App m => SolverGroup -> Maybe (TVar Bool) -> [Prop] -> m (SMTResult)
+checkSatWithPropsAbortable sg shouldAbort props = do
   conf <- readConfig
   let psSimp = if conf.simp then simplifyProps props else props
   if psSimp == [PBool False] then pure Qed
@@ -130,17 +136,20 @@ checkSatWithProps sg props = do
     let concreteKeccaks = fmap (\(buf,val) -> PEq (Lit val) (Keccak buf)) (toList $ Keccak.concreteKeccaks props)
     let smt2 = assertProps conf (if conf.simp then psSimp <> concreteKeccaks else psSimp)
     if isLeft smt2 then pure $ Error $ getError smt2
-    else liftIO $ checkSat sg (Just props) smt2
+    else liftIO $ checkSat' sg (Just props) shouldAbort smt2
 
 -- When props is Nothing, the cache will not be filled or used
 checkSat :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> IO SMTResult
-checkSat (SolverGroup taskq) props smt2 = do
+checkSat sg props = checkSat' sg props Nothing
+
+checkSat' :: SolverGroup -> Maybe [Prop] -> Maybe (TVar Bool) -> Err SMT2 -> IO SMTResult
+checkSat' (SolverGroup taskq) props shouldAbort smt2 = do
   if isLeft smt2 then pure $ Error $ getError smt2
   else do
     -- prepare result channel
     resChan <- newChan
     -- send task to solver group
-    writeChan taskq (TaskSingle (SingleData (getNonError smt2) props resChan))
+    writeChan taskq (TaskSingle (SingleData (getNonError smt2) props shouldAbort resChan))
     -- collect result
     readChan resChan
 
@@ -155,8 +164,8 @@ withSolvers solver count timeout maxMemory cont = do
     -- spawn orchestration thread
     taskq <- liftIO newChan
     cacheq <- liftIO . atomically $ newTChan
-    sem <- liftIO $ newQSem (fromIntegral count)
-    orchestrate' <- toIO $ orchestrate taskq cacheq sem [] 0
+    solverSlots <- liftIO $ newQSem (fromIntegral count)
+    orchestrate' <- toIO $ orchestrate taskq cacheq solverSlots [] 0
     orchestrateId <- liftIO $ forkIO orchestrate'
 
     -- run continuation with task queue
@@ -167,30 +176,30 @@ withSolvers solver count timeout maxMemory cont = do
     pure res
   where
     orchestrate :: App m => Chan Task -> TChan CacheEntry -> QSem -> [Set Prop] -> Int -> m b
-    orchestrate taskq cacheq sem knownUnsat fileCounter = do
+    orchestrate taskq cacheq solverSlots knownUnsat fileCounter = do
       conf <- readConfig
       mx <- liftIO . atomically $ tryReadTChan cacheq
       case mx of
         Just (CacheEntry props)  -> do
           let knownUnsat' = (fromList props):knownUnsat
           when conf.debug $ liftIO $ putStrLn "   adding UNSAT cache"
-          orchestrate taskq cacheq sem knownUnsat' fileCounter
+          orchestrate taskq cacheq solverSlots knownUnsat' fileCounter
         Nothing -> do
           task <- liftIO $ readChan taskq
           case task of
-            TaskSingle (SingleData _ props r) | isJust props && supersetAny (fromList (fromJust props)) knownUnsat -> do
+            TaskSingle (SingleData _ props _ r) | isJust props && supersetAny (fromList (fromJust props)) knownUnsat -> do
               liftIO $ writeChan r Qed
               when conf.debug $ liftIO $ putStrLn "   Qed found via cache!"
-              orchestrate taskq cacheq sem knownUnsat fileCounter
+              orchestrate taskq cacheq solverSlots knownUnsat fileCounter
             _ -> do
               runTask' <- case task of
-                TaskSingle (SingleData smt2 props r) -> toIO $ getOneSol solver timeout maxMemory smt2 props r cacheq sem fileCounter
-                TaskMulti (MultiData smt2 multiSol r) -> toIO $ getMultiSol solver timeout maxMemory smt2 multiSol r sem fileCounter
+                TaskSingle (SingleData smt2 props shouldAbort r) -> toIO $ getOneSol solver timeout maxMemory smt2 props shouldAbort r cacheq solverSlots fileCounter
+                TaskMulti (MultiData smt2 multiSol r) -> toIO $ getMultiSol solver timeout maxMemory smt2 multiSol r solverSlots fileCounter
               _ <- liftIO $ forkIO runTask'
-              orchestrate taskq cacheq sem knownUnsat (fileCounter + 1)
+              orchestrate taskq cacheq solverSlots knownUnsat (fileCounter + 1)
 
 getMultiSol :: forall m. (MonadIO m, ReadConfig m) => Solver -> Maybe Natural -> Natural -> SMT2 -> MultiSol -> Chan (Maybe [W256]) -> QSem -> Int -> m ()
-getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r sem fileCounter = do
+getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r solverSlots fileCounter = do
   conf <- readConfig
   let
     maskFromBytesCount k
@@ -243,8 +252,8 @@ getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r sem f
           when conf.debug $ putStrLn $ "Error while writing SMT to solver: " <> (T.unpack err)
           writeChan r Nothing
   liftIO $ bracket_
-    (waitQSem sem)
-    (signalQSem sem)
+    (waitQSem solverSlots)
+    (signalQSem solverSlots)
     (do
       when conf.dumpQueries $ writeSMT2File smt2 "." (show fileCounter)
       bracket
@@ -263,12 +272,24 @@ getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r sem f
         )
     )
 
-getOneSol :: (MonadIO m, ReadConfig m) => Solver -> Maybe Natural -> Natural -> SMT2 -> Maybe [Prop] -> Chan SMTResult -> TChan CacheEntry -> QSem -> Int -> m ()
-getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) props r cacheq sem fileCounter = do
+getOneSol
+  :: (MonadIO m, ReadConfig m)
+  => Solver
+  -> Maybe Natural      -- ^ timeout (seconds)
+  -> Natural            -- ^ memory limit (MB)
+  -> SMT2               -- ^ query
+  -> Maybe [Prop]       -- ^ props for the UNSAT cache
+  -> Maybe (TVar Bool)  -- ^ shared abort flag
+  -> Chan SMTResult     -- ^ result channel
+  -> TChan CacheEntry   -- ^ UNSAT cache channel
+  -> QSem               -- ^ limits concurrent solvers
+  -> Int                -- ^ query counter, for dump file names
+  -> m ()
+getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) props shouldAbort r cacheq solverSlots fileCounter = do
   conf <- readConfig
-  liftIO $ bracket_
-    (waitQSem sem)
-    (signalQSem sem)
+  res <- liftIO $ abortable shouldAbort (Unknown "Query aborted") $ bracket_
+    (waitQSem solverSlots)
+    (signalQSem solverSlots)
     (do
       when (conf.dumpQueries) $ writeSMT2File smt2 "." (show fileCounter)
       bracket
@@ -277,33 +298,38 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) props r cacheq sem
         (\inst -> do
           out <- sendScript inst cmds
           case out of
-            Left e -> writeChan r (Unknown $ "Issue while writing SMT to solver (maybe it got killed?): " <> T.unpack e)
+            Left e -> pure (Unknown $ "Issue while writing SMT to solver (maybe it got killed?): " <> T.unpack e)
             Right () -> do
               sat <- sendCommand inst $ SMTCommand "(check-sat)"
-              res <- do
-                  case sat of
-                    "unsat" -> do
-                      when (isJust props) $ liftIO . atomically $ writeTChan cacheq (CacheEntry (fromJust props))
-                      pure Qed
-                    "timeout" -> pure $ Unknown "Result timeout by SMT solver"
-                    "unknown" -> do
-                      dumpUnsolved smt2 fileCounter conf.dumpUnsolved
-                      pure $ Unknown "Result unknown by SMT solver"
-                    "sat" -> do
-                      mmodel <- getModel inst cexvars
-                      case mmodel of
-                        Just model -> pure $ Cex model
-                        Nothing -> pure $ Unknown "Solver died while extracting model"
-                    _ -> let  supportIssue =
-                                  ("does not yet support" `T.isInfixOf` sat)
-                                  || ("unsupported" `T.isInfixOf` sat)
-                                  || ("not support" `T.isInfixOf` sat)
-                      in case supportIssue of
-                       True -> pure . Error $ "SMT solver reported unsupported operation: " <> T.unpack sat
-                       False -> pure . Unknown $ "Unable to parse SMT solver output (maybe it got killed?): " <> T.unpack sat
-              writeChan r res
+              case sat of
+                "unsat" -> do
+                  when (isJust props) $ liftIO . atomically $ writeTChan cacheq (CacheEntry (fromJust props))
+                  pure Qed
+                "timeout" -> pure $ Unknown "Result timeout by SMT solver"
+                "unknown" -> do
+                  dumpUnsolved smt2 fileCounter conf.dumpUnsolved
+                  pure $ Unknown "Result unknown by SMT solver"
+                "sat" -> do
+                  mmodel <- getModel inst cexvars
+                  case mmodel of
+                    Just model -> pure $ Cex model
+                    Nothing -> pure $ Unknown "Solver died while extracting model"
+                _ -> let  supportIssue =
+                              ("does not yet support" `T.isInfixOf` sat)
+                              || ("unsupported" `T.isInfixOf` sat)
+                              || ("not support" `T.isInfixOf` sat)
+                  in case supportIssue of
+                   True -> pure . Error $ "SMT solver reported unsupported operation: " <> T.unpack sat
+                   False -> pure . Unknown $ "Unable to parse SMT solver output (maybe it got killed?): " <> T.unpack sat
         )
     )
+  liftIO $ writeChan r res
+
+-- Cancelling act still runs its cleanup (stopSolver kills the solver, signalQSem frees the slot)
+abortable :: Maybe (TVar Bool) -> a -> IO a -> IO a
+abortable Nothing _ act = act
+abortable (Just shouldAbort) onAbort act =
+  either (const onAbort) id <$> race (atomically $ readTVar shouldAbort >>= check) act
 
 dumpUnsolved :: SMT2 -> Int -> Maybe FilePath -> IO ()
 dumpUnsolved fullSmt fileCounter dump = do

@@ -56,7 +56,7 @@ import EVM.Effects
 import EVM.Expr qualified as Expr
 import EVM.Format (formatExpr, formatPartial, formatPartialDetailed, showVal, indent, formatBinary, formatProp, formatState, formatError)
 import EVM.SMT qualified as SMT
-import EVM.Solvers (SolverGroup, checkSatWithProps)
+import EVM.Solvers (SolverGroup, checkSatWithProps, checkSatWithPropsAbortable)
 import EVM.Stepper (Stepper)
 import EVM.Stepper qualified as Stepper
 import EVM.Traversals (mapExpr, mapExprM, foldTerm)
@@ -405,7 +405,7 @@ interpret fetcher iterConf vm stepper handler = do
   allProcessDone <- liftIO newEmptyTMVarIO
 
   -- spawn task orchestration thread
-  taskOrchestrate' <- toIO $ taskOrchestrate taskQ shouldAbort availableInstances processQ numTasks numProcs
+  taskOrchestrate' <- toIO $ taskOrchestrate taskQ shouldAbort availableInstances processQ numTasks numProcs allProcessDone
   taskOrchestrateId <- liftIO $ forkIO taskOrchestrate'
 
   -- spawn processing orchestration thread
@@ -439,13 +439,15 @@ interpret fetcher iterConf vm stepper handler = do
       => Chan (InterpTask m a)
       -> TVar Bool
       -> Chan () -> Chan (Process m a)
-      -> TVar Natural -> TVar Natural -> m ()
-    taskOrchestrate taskQ shouldAbort avail processQ numTasks numProcs = forever $ do
+      -> TVar Natural -> TVar Natural -> TMVar () -> m ()
+    taskOrchestrate taskQ shouldAbort avail processQ numTasks numProcs allProcessDone = forever $ do
       _ <- liftIO $ readChan avail
       task <- liftIO $ readChan taskQ
       abortFlag <- liftIO $ readTVarIO shouldAbort
       if abortFlag
-        then liftIO $ writeChan avail ()
+        then liftIO $ do
+          writeChan avail ()
+          atomically $ modifyTVar numTasks (subtract 1) >> signalIfDone numProcs numTasks allProcessDone
         else do
           runTask' <- toIO $ getOneExpr task avail processQ numTasks numProcs
           void $ liftIO $ forkIO runTask'
@@ -459,7 +461,9 @@ interpret fetcher iterConf vm stepper handler = do
       proc <- liftIO $ readChan processQ
       abortFlag <- liftIO $ readTVarIO shouldAbort
       if abortFlag
-        then liftIO $ writeChan avail ()
+        then liftIO $ do
+          writeChan avail ()
+          atomically $ modifyTVar numProcs (subtract 1) >> signalIfDone numProcs numTasks allProcessDone
         else do
           runProcess' <- toIO $ processOne proc shouldAbort avail resChan numProcs numTasks allProcessDone
           void $ liftIO $ forkIO runProcess'
@@ -473,14 +477,13 @@ interpret fetcher iterConf vm stepper handler = do
       -- Return instance to pool immediately after processing
       liftIO $ writeChan avail ()
 
-      -- Decrement and check if all done
-      liftIO $ atomically $ do
-        np <- readTVar numProcs
-        let np' = np - 1
-        writeTVar numProcs np'
-        -- Check if both interpretation and processing are done
-        nt <- readTVar numTasks
-        when (np' == 0 && nt == 0) $ putTMVar allProcessDone ()
+      liftIO $ atomically $ modifyTVar numProcs (subtract 1) >> signalIfDone numProcs numTasks allProcessDone
+
+    signalIfDone :: TVar Natural -> TVar Natural -> TMVar () -> STM ()
+    signalIfDone numProcs numTasks allProcessDone = do
+      np <- readTVar numProcs
+      nt <- readTVar numTasks
+      when (np == 0 && nt == 0) $ putTMVar allProcessDone ()
 
 getOneExpr :: forall m a . App m
   => InterpTask m a
@@ -893,7 +896,7 @@ verifyInputsWithHandler solvers opts fetcher preState post cexHandler = do
     let props = toProps leaf preState.keccakPreImgs post
     smtResult <- if canBeSat (props, leaf)
       then do
-        res <- checkSatWithProps solvers props
+        res <- checkSatWithPropsAbortable solvers (if conf.earlyAbort then Just shouldAbort else Nothing) props
         when (conf.debug && conf.verb >=2) $ liftIO $ putStrLn $ "   Checking leaf with props: " <> show props <> " SMT result: " <> show res
         -- Call custom handler if provided (for immediate Cex processing/validation/printing)
         case (cexHandler, res) of
@@ -904,9 +907,10 @@ verifyInputsWithHandler solvers opts fetcher preState post cexHandler = do
           _ -> pure ()
         pure (res, leaf)
       else pure (Qed, leaf)
-    pure (smtResult, mPartial)
+    aborted <- liftIO $ readTVarIO shouldAbort
+    pure $ if aborted && not (isCex (fst smtResult)) then Nothing else Just (smtResult, mPartial)
 
-  let (smtResults, partials) = unzip results
+  let (smtResults, partials) = unzip (catMaybes results)
   when conf.debug $ liftIO $ do
     putStrLn $ "   Exploration and solving finished, " <> show (length results) <> " branch(es) checked in call " <> call <> " of which partial: "
                 <> show (length smtResults)

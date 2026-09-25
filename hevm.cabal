@@ -305,6 +305,7 @@ test-suite test
     QuickCheck,
     quickcheck-instances,
     regex,
+    stm,
     tasty-quickcheck,
     text,
 

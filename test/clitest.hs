@@ -13,6 +13,7 @@ break the hevm CLI interface.
 import Test.Hspec
 import System.Process (readProcessWithExitCode)
 import System.Exit (ExitCode(..))
+import Data.List (isInfixOf)
 import Data.List.Split (splitOn)
 import Data.Text qualified as T
 import Data.String.Here
@@ -226,10 +227,18 @@ main = do
         shouldBe fileExists True
         removeFile filename
       it "early-abort" $ do
-        (exitcode, stdout, stderr) <- runForge "test/contracts/pass/early-abort.sol" ["--max-iterations", "1000"]
-        putStrLn $ "Exit code: " ++ show exitcode
-        putStrLn stderr
-        putStrLn stdout
+        (exitCode, stdout, stderr) <- runForge "test/contracts/pass/early-abort.sol" ["--max-iterations", "1000", "--early-abort"]
+        stderr `shouldNotContain` "CallStack"
+        stderr `shouldNotContain` "blocked indefinitely"
+        stdout `shouldContain` "[FAIL]"
+        stdout `shouldNotContain` "all branches reverted"
+        stdout `shouldNotContain` "partially explore"
+        exitCode `shouldBe` (ExitFailure 1)
+      it "no-early-abort" $ do
+        (exitCode, stdout, stderr) <- runForge "test/contracts/pass/early-abort.sol" ["--max-iterations", "1000"]
+        stderr `shouldNotContain` "CallStack"
+        length (filter (isInfixOf "Counterexample:") (lines stdout)) `shouldSatisfy` (> 1)
+        exitCode `shouldBe` (ExitFailure 1)
       it "rpc-cache" $ do
         (_, stdout, stderr) <- runForge "test/contracts/fail/rpc-test.sol"
           ["--rpc", "http://mock.mock", "--prefix", "test_attack_symbolic"
