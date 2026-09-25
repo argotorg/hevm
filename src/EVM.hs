@@ -1285,7 +1285,8 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
                          assign' (#state % #stack) (Lit 0 : xs)
                          pushTrace $ ErrorTrace PrecompileFailure
                          next
-  if not (enoughGas cost gasCap) then
+  if preCompileAddr > 0x9 then notImplemented
+  else if not (enoughGas cost gasCap) then
     burn' gasCap $ do
       assign' (#state % #stack) (Lit 0 : xs)
       next

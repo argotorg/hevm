@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--early-abort` no longer deadlocks ("thread blocked indefinitely in an STM
   transaction") when paths are still queued at the time of the abort, and no
   longer reports a spurious "all branches reverted" warning
+- Calling a recognized but unimplemented precompile (`0x0a`–`0x11`, `0x100`)
+  no longer crashes with an internal error during gas calculation; it now
+  fails with `NonexistentPrecompile` (concrete) or a `PrecompileMissing`
+  partial (symbolic) ([#1084](https://github.com/argotorg/hevm/issues/1084))
 
 ## [0.58.0] - 2026-06-26
 

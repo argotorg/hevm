@@ -766,6 +766,34 @@ tests = testGroup "hevm"
                 Nothing
                 (execute 1 (h <> v <> r <> s) 32)
           ]
+      , testGroup "Unimplemented"
+          [ test "concrete call gives NonexistentPrecompile" $ forM_ [0x0a, 0x10, 0x11, 0x100 :: Addr] $ \a -> do
+              let code = BS.pack . mapMaybe maybeLitByteSimp $ V.toList $ assemble
+                    [ OpPush (Lit 0)
+                    , OpPush (Lit 0)
+                    , OpPush (Lit 0)
+                    , OpPush (Lit 0)
+                    , OpPush (Lit (into a))
+                    , OpGas
+                    , OpStaticcall
+                    , OpStop
+                    ]
+              vm <- liftIO $ stToIO $ vmForEthrunCreation code
+              vm' <- Stepper.interpret (Fetch.zero 0 Nothing 1024) vm Stepper.runFully
+              case vm'.result of
+                Just (VMFailure (NonexistentPrecompile a')) -> assertEqualM "wrong address" a a'
+                r -> liftIO $ assertFailure $ "unexpected result for " <> show a <> ": " <> show r
+          , test "symbolic call gives partial" $ do
+              Just c <- solcRuntime "C" [i|
+                  contract C {
+                    function fun() public {
+                      (bool success, ) = address(0x10).staticcall("");
+                      assert(success);
+                    }
+                  } |]
+              (e, _) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c (Just $ Sig "fun()" []) [] defaultVeriOpts
+              assertBoolM "expected a PrecompileMissing partial" $ any isPartial e
+          ]
       ]
   , testGroup "Byte/word manipulations"
     [ testProperty "padLeft length" $ \n (Bytes bs) ->
