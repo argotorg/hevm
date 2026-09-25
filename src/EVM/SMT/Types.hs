@@ -11,6 +11,9 @@ import EVM.Types
 
 type MaybeIO = MaybeT IO
 
+data ArithEncoding = ConcreteArith | AbstractArith
+  deriving (Show, Eq)
+
 data SMTEntry = SMTCommand Builder | SMTComment Builder
   deriving (Eq)
 

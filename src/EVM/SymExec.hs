@@ -912,8 +912,8 @@ verifyInputsWithHandler solvers opts fetcher preState post cexHandler = do
 
   let (smtResults, partials) = unzip (catMaybes results)
   when conf.debug $ liftIO $ do
-    putStrLn $ "   Exploration and solving finished, " <> show (length results) <> " branch(es) checked in call " <> call <> " of which partial: "
-                <> show (length smtResults)
+    putStrLn $ "   Exploration and solving finished, " <> show (length smtResults) <> " branch(es) checked in call " <> call <> " of which partial: "
+                <> show (length (catMaybes partials))
     let cexs = filter (\(res, _) -> not . isQed $ res) smtResults
     putStrLn $ "   Found " <> show (length cexs) <> " potential counterexample(s) in call " <> call
 
