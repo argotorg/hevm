@@ -241,6 +241,7 @@ evmSetup contr txData gaslimitExec = (txn, evmEnv, contrAlloc, fromAddress, toAd
       , maxPriorityFeeGas =  Just 1
       , maxFeePerGas = Just 1
       , chainId = 1
+      , authorizationList = []
       }
     evmEnv = EVMToolEnv { coinbase      = 0xff
                         , timestamp     = Lit 0x3e8
