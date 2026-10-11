@@ -111,6 +111,27 @@ storageTests = testGroup "Storage tests"
            outer = And (Lit 1461501637330902918203684832716283019655932542975) (SLoad (keccAnd) (ConcreteStore (Map.fromList[(W256 1184450375068808042203882151692185743185288360635, W256 0xacab)])))
            simp = Expr.concKeccakSimpExpr outer
        assertEqual "Expression should simplify to value." simp (Lit 0xacab)
+    -- A concrete mapping preimage is key || slot, just like MappingSlot.
+    -- Use distinct keys and slots so reversing them cannot pass unnoticed.
+    , testCase "decompose-concrete-mapping-read-selects-slot" $ assertEqual errorMsg
+        (Just $ SLoad (Lit 1) (AbstractStore (LitAddr 0) (Just 0)))
+        (Expr.decomposeStorage $ SLoad (mappingConcrete 0 1) (AbstractStore (LitAddr 0) Nothing))
+    , testCase "decompose-symbolic-mapping-read-keeps-concrete-write" $ assertEqual errorMsg
+        (Just $ SLoad (Var "k") (SStore (Lit 1) (Lit 3) emptyStore))
+        (Expr.decomposeStorage $ SLoad (mappingRead 0 "k")
+          (SStore (mappingConcrete 0 1) (Lit 3) emptyStore))
+    , testCase "decompose-symbolic-mapping-read-drops-other-concrete-write" $ assertEqual errorMsg
+        (Just $ SLoad (Var "k") emptyStore)
+        (Expr.decomposeStorage $ SLoad (mappingRead 1 "k")
+          (SStore (mappingConcrete 0 1) (Lit 3) emptyStore))
+    , testCase "decompose-concrete-mapping-read-keeps-symbolic-write" $ assertEqual errorMsg
+        (Just $ SLoad (Lit 1) (SStore (Var "k") (Lit 3) emptyStore))
+        (Expr.decomposeStorage $ SLoad (mappingConcrete 0 1)
+          (SStore (mappingRead 0 "k") (Lit 3) emptyStore))
+    , testCase "decompose-concrete-mapping-read-drops-other-symbolic-write" $ assertEqual errorMsg
+        (Just $ SLoad (Lit 0) emptyStore)
+        (Expr.decomposeStorage $ SLoad (mappingConcrete 1 0)
+          (SStore (mappingRead 0 "k") (Lit 3) emptyStore))
     -- decomposition: keys of the read array become offsets, writes to other stores are dropped
     , testCase "decompose-array-read-rebases-keys" $ assertEqual errorMsg
         (Just $ SLoad (Var "i") (SStore (Lit 0) (Lit 1) emptyStore))
@@ -158,6 +179,7 @@ storageTests = testGroup "Storage tests"
     arrId n = BS.pack (replicate 31 0 ++ [n])
     -- a symbolic read of the mapping at storage slot n: keccak(key . n)
     mappingRead n key = Keccak (WriteWord (Lit 0) (Var key) (ConcreteBuf (mapSlotBuf n)))
+    mappingConcrete n key = Keccak (ConcreteBuf (BS.pack (replicate 31 0 ++ [key] ++ replicate 31 0 ++ [n])))
     mapSlotBuf n = BS.pack (replicate 63 0 ++ [n])
     -- recorded preimage of a write to the mapping at slot 0 with key 0xaa
     preImgBytes = BS.pack (replicate 31 0 ++ [0xaa] ++ replicate 32 0)

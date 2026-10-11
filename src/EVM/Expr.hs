@@ -1165,9 +1165,10 @@ decomposeStorage = go
       Lit a -> Just (Nothing, Lit a)
       -- maps
       (Keccak (ConcreteBuf k)) | BS.length k == 64 -> do
-        let key = idxToWord (BS.take 32 k)
-            idx = Lit $ idxToWord (BS.drop 32 k)
-        Just (Just key, idx)
+        -- Solidity hashes key || slot; the slot identifies the logical store.
+        let key = Lit $ idxToWord (BS.take 32 k)
+            idx = idxToWord (BS.drop 32 k)
+        Just (Just idx, key)
       (MappingSlot idx key) | BS.length idx == 64 -> Just (Just $ idxToWord idx, key)
       -- arrays
       (ArraySlotWithOffs idx offset) | BS.length idx == 32 -> Just (Just $ idxToWord64 idx, offset)

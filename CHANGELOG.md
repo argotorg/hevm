@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Fixed
+- Storage decomposition now uses the mapping slot as the logical store and the
+  key as the element index for concrete mapping hashes, matching symbolic
+  mapping accesses. This fixes spurious counterexamples and false proofs when
+  concrete and symbolic mapping accesses are combined.
 - A symbolic-key `SLOAD` over a `ConcreteStore` is now resolved during execution
   instead of being carried into a fork as an unresolved read: an empty store
   reads 0 at every slot, and a symbolic mapping read filters out concrete
