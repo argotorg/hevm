@@ -9,6 +9,8 @@ import Test.Tasty.ExpectedFailure (ignoreTest)
 import Test.Tasty.HUnit
 import Test.Tasty.QuickCheck hiding (Failure, Success)
 
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Reader (ReaderT)
 import Data.Bits (shiftL)
 import Data.ByteString qualified as BS (drop, length, pack, take)
 import Data.Containers.ListUtils (nubOrd)
@@ -16,14 +18,17 @@ import Data.List qualified as List (nub, tails)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Typeable
+import Numeric.Natural (Natural)
 
 import EVM.Effects
 import EVM.Expr qualified as Expr
 import EVM.Expr.Generator
 import EVM.Format (hexText)
+import EVM.SMT (AbstractQuery(..), SMT2(..), SMTScript(..), assertPropsAbstract)
 import EVM.Solvers hiding (checkSat)
+import EVM.Solvers qualified as Solvers (checkSat)
 import EVM.SymExec (subModel)
-import EVM.Traversals (foldExpr, mapExpr, mapExprM)
+import EVM.Traversals (foldExpr, mapExpr, mapExprM, mapProp)
 import EVM.Types hiding (Env)
 
 
@@ -1714,44 +1719,108 @@ abstractArithmeticFuzzTests = testGroup "AbstractArithmeticPropertyTests"
   -- timeouts are discarded, but if over ~half the cases time out, QuickCheck gives up and the test fails
   [ localOption (QuickCheckMaxRatio 1) $
     testProperty "targeted arithmetic shapes agree with concrete evaluation" $
-      \(AbstractArithCase kind parts expr bindings) ->
+      \(AbstractArithCase kind parts expr _ bindings) ->
         tabulate "arithmetic shape" [kind] $ tabulate "component shape" parts $ ioProperty $ do
           let expected = evalWithBindings bindings expr
               assignments = fmap (\(name, value) -> PEq (Var name) (Lit value)) bindings
               counterexampleQuery rhs = PNeg (PEq expr (Lit rhs)) : assignments
-          (exactResult, nearbyResult) <- checkAbstractArith
-            (counterexampleQuery expected)
-            (counterexampleQuery (expected + 1))
-          pure $ counterexample (unlines
+              nearbyQuery = counterexampleQuery (expected + 1)
+          ((exactResult, exactPhase), (nearbyResult, nearbyPhase), families, lemmaResult) <-
+            runAbstractArith abstractConfig 5 $ \solvers -> do
+              exact <- checkSatWithPropsPhase solvers Nothing (counterexampleQuery expected)
+              nearby <- checkSatWithPropsPhase solvers Nothing nearbyQuery
+              (families, lemmaResult) <- checkLemmasAtPoint solvers nearbyQuery
+              pure (exact, nearby, families, lemmaResult)
+          pure $ tabulate "lemma family" (nubOrd families)
+               $ tabulate "decided by" [show exactPhase, show nearbyPhase]
+               $ counterexample (unlines
             [ "shape: " <> kind <> " " <> show parts
             , "expression: " <> show expr
             , "bindings: " <> show bindings
             , "concrete value: " <> show expected
             , "exact result: " <> show exactResult
             , "nearby result: " <> show nearbyResult
-            ]) $ not (isUnknown exactResult || isUnknown nearbyResult) ==>
-              (isQed exactResult && isCex nearbyResult)
+            , "lemmas over fully interpreted terms: " <> show lemmaResult
+            ]) $ not (any isUnknown [exactResult, nearbyResult, lemmaResult]) ==>
+              (isQed exactResult && isCex nearbyResult && isCex lemmaResult)
+  , looselyConstrained "loosely constrained queries have a valid model" abstractConfig
+  , looselyConstrained "loosely constrained queries have a valid model (simplified)" abstractConfig {simp = True}
   ]
+  where
+    -- the production pipeline: variables left free or ranged, arithmetic
+    -- spread over several props, and a counterexample that has to check out
+    looselyConstrained name cfg = localOption (QuickCheckMaxRatio 3) $ testProperty name $
+      \c@(AbstractArithCase kind _ _ _ bindings) -> forAll (genLooseQuery c) $ \props ->
+        tabulate "arithmetic shape" [kind] $ ioProperty $ do
+          (result, phase) <- runAbstractArith cfg 1 $ \solvers -> checkSatWithPropsPhase solvers Nothing props
+          let outcome = case result of
+                Cex model | modelHolds bindings model props -> "valid model"
+                Cex _ -> "invalid model"
+                Qed -> "unsound Qed"
+                _ -> "unknown"
+          pure $ tabulate "decided by" [show phase] $ tabulate "outcome" [outcome]
+               $ counterexample (unlines
+            [ "props: " <> show props
+            , "satisfying bindings: " <> show bindings
+            , "result: " <> show result
+            ]) $ outcome /= "unknown" ==> outcome == "valid model"
+
+-- | Props that hold at the case's bindings, so the query is satisfiable: a
+-- relation on the expression, relations on some of its components, and each
+-- variable pinned, ranged around its binding, or left free.
+genLooseQuery :: AbstractArithCase -> Gen [Prop]
+genLooseQuery (AbstractArithCase _ _ expr components bindings) = do
+  goal <- trueRelation expr
+  sides <- sublistOf components >>= mapM trueRelation
+  constraints <- concat <$> mapM constrain bindings
+  pure (goal : sides <> constraints)
+  where
+    trueRelation e = do
+      let v = evalWithBindings bindings e
+      elements $ [PEq e (Lit v), PLEq e (Lit v), PGEq e (Lit v), PNeg (PEq e (Lit (v + 1)))]
+        <> [PLT e (Lit (v + 1)) | v /= maxBound] <> [PGT e (Lit (v - 1)) | v /= 0]
+    constrain (name, v) = frequency
+      [ (2, pure [PEq (Var name) (Lit v)])
+      , (2, do
+          slack <- fromInteger <$> chooseInteger (0, 0xffff)
+          pure $ [PLEq (Var name) (Lit (v + slack)) | v <= maxBound - slack]
+              <> [PGEq (Var name) (Lit (v - slack)) | v >= slack])
+      , (1, pure [])
+      ]
+
+-- | Whether the props hold under the model. A variable the simplifier removed
+-- from the query is missing from the model; its binding is as good as any.
+modelHolds :: [(Text, W256)] -> SMTCex -> [Prop] -> Bool
+modelHolds bindings model = all holds
+  where
+    assignment = [(name, Map.findWithDefault v (Var name) model.vars) | (name, v) <- bindings]
+    holds p = Expr.simplifyProp (mapProp (substituteBindings assignment) p) == PBool True
 
 evalWithBindings :: [(Text, W256)] -> Expr EWord -> W256
 evalWithBindings bindings expr =
-  case Expr.simplify (mapExpr substitute expr) of
+  case Expr.simplify (mapExpr (substituteBindings bindings) expr) of
     Lit value -> value
     other -> internalError $ "targeted arithmetic expression did not concretize: " <> show other
-  where
-    substitute :: Expr a -> Expr a
-    substitute (Var name) = case lookup name bindings of
-      Just value -> Lit value
-      Nothing -> internalError $ "missing targeted arithmetic binding: " <> show name
-    substitute other = other
 
-checkAbstractArith :: [Prop] -> [Prop] -> IO (SMTResult, SMTResult)
-checkAbstractArith exactQuery nearbyQuery =
-  runEnv (Env {config = abstractConfig}) $
-    withSolvers Bitwuzla 1 (Just 5) defMemLimit $ \solvers -> do
-      exactResult <- checkSatWithProps solvers exactQuery
-      nearbyResult <- checkSatWithProps solvers nearbyQuery
-      pure (exactResult, nearbyResult)
+substituteBindings :: [(Text, W256)] -> Expr a -> Expr a
+substituteBindings bindings (Var name) = case lookup name bindings of
+  Just value -> Lit value
+  Nothing -> internalError $ "missing targeted arithmetic binding: " <> show name
+substituteBindings _ other = other
+
+runAbstractArith :: Config -> Natural -> (SolverGroup -> ReaderT Env IO a) -> IO a
+runAbstractArith cfg timeout = runEnv (Env {config = cfg}) . withSolvers Bitwuzla 1 (Just timeout) defMemLimit
+
+-- | The lemmas of the query with every abstract term they mention equated to
+-- the native op. The props hold at a point, so a Qed means some lemma instance
+-- is false there. The refinement cannot show this for a lemma about a
+-- synthesized term, which it leaves uninterpreted.
+checkLemmasAtPoint :: SolverGroup -> [Prop] -> ReaderT Env IO ([String], SMTResult)
+checkLemmasAtPoint solvers props = case assertPropsAbstract abstractConfig props of
+  Left e -> internalError $ "could not encode abstract query: " <> e
+  Right q -> do
+    res <- liftIO $ Solvers.checkSat solvers Nothing (Right (q.query <> SMT2 (SMTScript q.saturatedTruth) mempty mempty))
+    pure (q.lemmaFamilies, res)
 
 
 proveEquivPropWith :: Config -> Prop -> Prop -> IO Bool

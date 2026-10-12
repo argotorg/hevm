@@ -611,12 +611,13 @@ genWordArith litFreq sz = frequency
 -- div/mod encoding, together with concrete values for all of its symbolic
 -- variables. The generic expression generator almost never produces these
 -- related terms. @kind@ is the shape family (or "combined"/"nested"), @parts@
--- the base shapes it was built from.
+-- the base shapes it was built from, @components@ their expressions.
 data AbstractArithCase = AbstractArithCase
-  { kind     :: String
-  , parts    :: [String]
-  , expr     :: Expr EWord
-  , bindings :: [(Text, W256)]
+  { kind       :: String
+  , parts      :: [String]
+  , expr       :: Expr EWord
+  , components :: [Expr EWord]
+  , bindings   :: [(Text, W256)]
   }
   deriving Show
 
@@ -624,12 +625,22 @@ instance Arbitrary AbstractArithCase where
   arbitrary = genAbstractArithCase
 
 genAbstractArithCase :: Gen AbstractArithCase
-genAbstractArithCase = frequency
-  [ (6, genBaseArithCase)
-  , (2, combinedCase)
-  , (2, nestedCase)
-  ]
+genAbstractArithCase = do
+  AbstractArithCase kind parts e comps bs <- frequency
+    [ (6, genBaseArithCase)
+    , (2, combinedCase)
+    , (2, nestedCase)
+    ]
+  -- the smart constructors put a literal factor first; the encoder also has to
+  -- cope with the other order, which unsimplified input can have
+  reorder <- frequency [(3, pure id), (1, pure swapMulOperands)]
+  pure $ AbstractArithCase kind parts (reorder e) (fmap reorder comps) bs
   where
+    swapMulOperands :: Expr a -> Expr a
+    swapMulOperands = mapExpr $ \case
+      Mul a b -> Mul b a
+      e -> e
+
     -- sums/differences of several shapes over the same variables, so their
     -- lemmas and saturated terms meet in one query
     combinedCase = do
@@ -637,7 +648,8 @@ genAbstractArithCase = frequency
       rest <- chooseInt (1, 2) >>= flip vectorOf genBaseArithCase
       combined <- foldM combine first.expr (fmap (.expr) rest)
       bs <- elements (fmap (.bindings) (first : rest))
-      pure $ AbstractArithCase "combined" (concatMap (.parts) (first : rest)) combined bs
+      pure $ AbstractArithCase "combined" (concatMap (.parts) (first : rest)) combined
+        (concatMap (.components) (first : rest)) bs
     combine x y = elements [Expr.add x y, Expr.sub x y, Sub x y]
 
     -- one shape substituted for a variable of another, e.g. a telescope whose
@@ -647,8 +659,8 @@ genAbstractArithCase = frequency
       inner <- genBaseArithCase
       name <- elements [arithAName, arithBName, arithCName]
       bs <- elements [outer.bindings, inner.bindings]
-      pure $ AbstractArithCase "nested" (outer.parts <> inner.parts)
-        (substVar name inner.expr outer.expr) bs
+      let nested = substVar name inner.expr outer.expr
+      pure $ AbstractArithCase "nested" (outer.parts <> inner.parts) nested [inner.expr, nested] bs
 
 genBaseArithCase :: Gen AbstractArithCase
 genBaseArithCase = oneof
@@ -680,12 +692,14 @@ genBaseArithCase = oneof
   , congruenceCase "signed division congruence" SDiv
   , congruenceCase "signed modulo congruence" SMod
   , congruenceCase "unsigned modulo congruence" Mod
+  , divisorCongruenceCase "signed division divisor congruence" SDiv
+  , divisorCongruenceCase "signed modulo divisor congruence" SMod
   ]
   where
     withBindings shape e adjust = do
       bs <- genArithBindings
       bs' <- foldr (=<<) (pure bs) adjust
-      pure $ AbstractArithCase shape [shape] e bs'
+      pure $ AbstractArithCase shape [shape] e [e] bs'
 
     identityCase = do
       identity <- elements [0, 1]
@@ -736,7 +750,8 @@ genBaseArithCase = oneof
 
     -- dividend a left shift, divisor around 2^k: the div/mod shift bounds
     shiftDividendCase = do
-      k <- frequency [(3, chooseInteger (0, 16)), (1, chooseInteger (0, 255))]
+      -- a shift of 256 or more empties the dividend, and 2^k wraps to zero
+      k <- frequency [(6, chooseInteger (0, 16)), (2, chooseInteger (0, 255)), (1, chooseInteger (256, 300))]
       op <- elements [Div, SDiv]
       withBindings "shift-dividend division" (op (SHL (Lit (fromInteger k)) arithA) arithB)
         [nearValue arithBName (2 ^ k)]
@@ -753,6 +768,15 @@ genBaseArithCase = oneof
         (\bs -> do
             sameMagnitude <- elements [id, negate]
             pure $ replaceBinding arithCName (sameMagnitude (lookupBinding arithAName bs)) bs)
+        : signedEdges
+
+    -- same, with the divisor negated: the sign of the result then depends on
+    -- which operand the op takes it from
+    divisorCongruenceCase shape op =
+      withBindings shape (Expr.add (op arithA arithB) (op arithA arithC)) $
+        (\bs -> do
+            sameMagnitude <- elements [id, negate]
+            pure $ replaceBinding arithCName (sameMagnitude (lookupBinding arithBName bs)) bs)
         : signedEdges
 
     -- |2^255| wraps to 2^255, and 2^255 / -1 overflows
@@ -780,6 +804,7 @@ genArithBindings = mapM genBinding [arithAName, arithBName, arithCName]
 genArithValue :: Gen W256
 genArithValue = frequency
   [ (8, fromInteger <$> chooseInteger (0, 0xffff))
+  , (2, negate . fromInteger <$> chooseInteger (1, 0xffff))
   , (3, elements [0, 1, 2, 2 ^ (128 :: Int) - 1, 2 ^ (128 :: Int), 2 ^ (128 :: Int) + 1
                  , 2 ^ (255 :: Int) - 1, 2 ^ (255 :: Int), 2 ^ (255 :: Int) + 1, maxBound - 1, maxBound])
   , (1, arbitrary)
