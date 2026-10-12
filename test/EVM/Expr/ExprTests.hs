@@ -16,6 +16,7 @@ import Data.ByteString qualified as BS (drop, length, pack, take)
 import Data.Containers.ListUtils (nubOrd)
 import Data.List qualified as List (nub, tails)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Typeable
 import Numeric.Natural (Natural)
@@ -1578,6 +1579,9 @@ simplifierFuzzTests cfg = testGroup "SimplifierPropertyTests"
         case Expr.decomposeStorageProps props of
           Nothing -> pure $ label "declined" True
           Just decomposed -> label "decomposed" <$> decomposeEquivProps cfg props decomposed
+    -- guards against the entry point backing off from what it is there for
+    , testProperty "props-decompose-accepts" $ \(GenDecomposableLoad a) (GenDecomposableLoad b) ->
+        isJust $ Expr.decomposeStorageProps [PEq a b]
     , testProperty "byte-simplification" $ \(expr :: Expr Byte) -> ioProperty $ proveEquivExprWith cfg expr (Expr.simplify expr)
     , askOption $ \(QuickCheckTests n) -> testProperty "word-simplification" $ withMaxSuccess (min n 20) $ \(ZeroDepthWord expr) ->
         ioProperty $ proveEquivExprWith cfg expr (Expr.simplify expr)

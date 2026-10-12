@@ -115,24 +115,33 @@ newtype GenDecomposableProps = GenDecomposableProps [Prop]
 
 instance Arbitrary GenDecomposableProps where
   arbitrary = do
+    (genKey, genOddProp) <- frequency
+      [ (5, pure (genDecomposableKey, pure []))
+      , (2, pure (frequency [(10, genDecomposableKey), (1, genOddKey)], frequency [(2, pure []), (1, pure <$> genUndecomposableProp)]))
+      , (3, pure (frequency [(4, genDecomposableKey), (1, genClashKey)], pure []))
+      ]
+    let load = genLoadOver genKey 1
     n <- chooseInt (1, 3)
     props <- vectorOf n $ PEq <$> oneof [Lit . fromIntegral <$> chooseInt (0, 9), Var <$> elements ["r0", "r1"], load] <*> load
-    odd' <- frequency [(4, pure []), (1, pure <$> genUndecomposableProp)]
-    GenDecomposableProps <$> shuffle (props <> odd')
-    where
-      load = genLoadOver (frequency [(40, genDecomposableKey), (1, genOddKey)]) 1
+    oddProp <- genOddProp
+    GenDecomposableProps <$> shuffle (props <> oddProp)
 
 genOddKey :: Gen (Expr EWord)
-genOddKey = oneof
-  [ pure $ Var "x"
-  , pure $ Lit 1000
+genOddKey = elements
+  [ Var "x"
+  , Lit 1000
   -- a mapping at a symbolic slot
-  , pure $ Keccak (WriteWord (Lit 32) (Var "s") (WriteWord (Lit 0) (Var "k0") (ConcreteBuf (BS.replicate 64 0))))
+  , Keccak (WriteWord (Lit 32) (Var "s") (WriteWord (Lit 0) (Var "k0") (ConcreteBuf (BS.replicate 64 0))))
   -- ids of the wrong length
-  , pure $ Expr.MappingSlot (BS.replicate 33 0) (Var "k0")
-  , pure $ Expr.ArraySlotWithOffs (BS.replicate 64 0) (Var "i0")
-  -- an array on a slot that the mappings use
-  , Expr.ArraySlotWithOffs <$> slotId 32 (4, 5) <*> (Var <$> elements ["i0", "i1"])
+  , Expr.MappingSlot (BS.replicate 33 0) (Var "k0")
+  , Expr.ArraySlotWithOffs (BS.replicate 64 0) (Var "i0")
+  ]
+
+-- an array on a slot that the mappings use
+genClashKey :: Gen (Expr EWord)
+genClashKey = oneof
+  [ Expr.ArraySlotZero <$> slotId 32 (4, 5)
+  , Expr.ArraySlotWithOffs <$> slotId 32 (4, 5) <*> oneof [Lit . fromIntegral <$> chooseInt (1, 3), Var <$> elements ["i0", "i1", "k0", "k1"]]
   ]
 
 genUndecomposableProp :: Gen Prop
