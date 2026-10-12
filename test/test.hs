@@ -1554,30 +1554,14 @@ tests = testGroup "hevm"
           } |]
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertEqualM "Must be QED" [] res
-    , testAbstractArith "mul-by-zero" $ do
-        -- x*y == 0 when y == 0 (0-identity lemma; y is symbolic, not folded)
-        Just c <- solcRuntime "C" [i|
-          contract C {
-            function prove_mul_zero(uint256 x, uint256 y) external pure {
-              require(y == 0);
-              uint256 p; assembly { p := mul(x, y) }
-              assert(p == 0);
-            }
-          } |]
-        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-        assertEqualM "Must be QED" [] res
-    , testAbstractArith "mul-by-one" $ do
-        -- x*y == x when y == 1 (1-identity lemma)
-        Just c <- solcRuntime "C" [i|
-          contract C {
-            function prove_mul_one(uint256 x, uint256 y) external pure {
-              require(y == 1);
-              uint256 p; assembly { p := mul(x, y) }
-              assert(p == x);
-            }
-          } |]
-        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-        assertEqualM "Must be QED" [] res
+    -- the refinement proves the identities too, so only the phase shows the
+    -- lemma at work
+    , testCase "mul-by-zero" $ do
+        res <- abstractPhase [PNeg (PEq (Mul (Var "x") (Var "y")) (Lit 0)), PEq (Var "y") (Lit 0)]
+        assertEqual "x*0 == 0 must not need the refinement" (Qed, PhaseAbstract) res
+    , testCase "mul-by-one" $ do
+        res <- abstractPhase [PNeg (PEq (Mul (Var "x") (Var "y")) (Var "x")), PEq (Var "y") (Lit 1)]
+        assertEqual "x*1 == x must not need the refinement" (Qed, PhaseAbstract) res
     , testCase "mul-refinement-rejects-spurious-cex" $ do
         let env = Env { config = testEnv.config { abstractArith = True, simp = False } }
             x = Var "x"
@@ -4946,3 +4930,8 @@ abstractQuery ps = case assertPropsAbstract cfg ps of
   Left e -> internalError $ "could not encode abstract query: " <> e
   Right q -> TL.unpack (formatSMT2 q.query)
   where cfg = testEnv.config { abstractArith = True, simp = False }
+
+-- | The result for these props under abstract arithmetic, and the phase that gave it.
+abstractPhase :: [Prop] -> IO (SMTResult, SolvePhase)
+abstractPhase ps = runEnv env $ withShortBitwuzlaSolver $ \s -> checkSatWithPropsPhase s Nothing ps
+  where env = Env { config = testEnv.config { abstractArith = True, simp = False } }
