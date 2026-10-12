@@ -4563,6 +4563,19 @@ tests = testGroup "hevm"
         ("(bvmul (abst_evm_bvudiv" `List.isInfixOf` constMul)
       assertBool ("symbolic product not abstracted:\n" <> symMul)
         ("(abst_evm_bvmul" `List.isInfixOf` symMul)
+  -- the terms 'saturate' adds exist only in the lemmas, so no proof can be
+  -- relied on to notice one going missing
+  , testCase "abstract-saturation-terms" $ do
+      let x = Var "x"
+          y = Var "y"
+          z = Var "z"
+          emits what needle q = assertBool (what <> " missing:\n" <> q) (needle `List.isInfixOf` q)
+      emits "link product" "(abst_evm_bvmul (abst_evm_bvudiv x y) y)" $
+        abstractQuery [PEq (Div x y) z]
+      emits "synthetic division by a reused factor" "(abst_evm_bvudiv (abst_evm_bvmul y z) y)" $
+        abstractQuery [PEq (Add (Div x y) (Mul y z)) (Lit 5)]
+      emits "collapsed nested division" "(bvmul (abst_evm_bvudiv (abst_evm_bvmul x y) (_ bv7000 256)) (_ bv7000 256))" $
+        abstractQuery [PEq (Div (Div (Mul x y) (Lit 1000)) (Lit 7)) z]
   , testCase "abstract-lemma-section-only-when-lemmas-fire" $ do
       let header = "multiplication abstraction lemmas"
           -- a lone constant product triggers no lemma: const-mul monotonicity
