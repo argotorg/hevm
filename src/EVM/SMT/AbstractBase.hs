@@ -75,8 +75,6 @@ mulNoOverflow x y =
   "(and (bvule " <> x <> " " <> maxU128 <> ") (bvule " <> y <> " " <> maxU128 <> "))"
   where maxU128 = "(_ bv340282366920938463463374607431768211455 256)"
 
--- | The four EVM division/modulo operations, kept in signed/unsigned groups so
--- the sign-reconstruction machinery is never applied to unsigned operands.
 data DivModKind = IsSDiv | IsSMod | IsUDiv | IsUMod
   deriving (Eq, Ord, Enum, Bounded)
 

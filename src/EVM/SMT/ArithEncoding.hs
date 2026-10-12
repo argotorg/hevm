@@ -76,9 +76,9 @@ assertAbstEqResult enc unsignedResult (kind, a, b) = do
         IsUMod -> smtZeroGuard benc unsignedResult
   pure $ SMTCommand $ "(assert (=" `sp` abstract `sp` concrete <> "))"
 
--- | Ground-truth axioms: for each sdiv/smod op, assert that the abstract
--- uninterpreted function equals the real bvsdiv/bvsrem.
--- e.g. (assert (= (abst_evm_bvsdiv a b) (bvsdiv a b)))
+-- | Ground-truth axioms: for each div/mod op, assert that the abstract
+-- uninterpreted function equals the native one,
+-- e.g. (assert (= (abst_evm_bvsdiv a b) (ite (= b 0) 0 (bvsdiv a b))))
 divModGroundTruth :: Enc -> [Prop] -> Err [SMTEntry]
 divModGroundTruth enc props = do
   let allDivMods = collectFrom collectDivMods props
@@ -142,9 +142,9 @@ divModEncoding enc props = do
           absoluteA = absoluteAName idx
           absoluteB = absoluteBName idx
 
-      -- When the dividend is a left-shift (a = x << k, i.e. a = x * 2^k),
-      -- we can bound the unsigned division result using cheap bitshift
-      -- operations instead of the expensive bvudiv SMT theory.
+      -- Bound the unsigned quotient with cheap shifts instead of bvudiv. The
+      -- bounds hold for any dividend and any k; a left-shift or literal
+      -- dividend only suggests a k that is likely to be useful.
       -- The pivot point is |a| >> k (= |a| / 2^k):
       --   - If |b| >= 2^k: result <= |a| >> k  (upper bound)
       --   - If |b| <  2^k and b != 0: result >= |a| >> k  (lower bound)

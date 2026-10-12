@@ -1012,10 +1012,8 @@ tests = testGroup "hevm"
           let exprSimp = map Expr.simplify paths
           assertBoolM "expected partial execution" (any isPartial exprSimp)
     ]
-  -- NOTE: Foundry/Dapp tests moved to EVM.Test.FoundryTests
   , testGroup "Arith"
     -- Tests adapted from halmos (tests/regression/test/Arith.t.sol, tests/solver/test/SignedDiv.t.sol, tests/solver/test/Math.t.sol)
-    -- Run with abstractArith = True to exercise two-phase solving
     [ test "math-avg" $ do
         Just c <- solcRuntime "C" [i|
           contract C {
@@ -1080,7 +1078,7 @@ tests = testGroup "hevm"
         assertBoolM "Expected counterexample" (any isCex res)
     ]
   , testGroup "Abstract-Arith"
-    -- "make verify-hevm T=prove_div_negative_divisor" in https://github.com/gustavo-grieco/abdk-math-64.64-verification
+    -- "make verify-hevm T=prove_div_values" in https://github.com/gustavo-grieco/abdk-math-64.64-verification
     [ testAbstractArith "prove_div_values-abdk" $ do
         Just c <- solcRuntime "C" [i|
           contract C {
