@@ -247,6 +247,26 @@ main = do
         dumped <- dumpedQueries
         mapM_ removeFile dumped
         dumped `shouldContain` ["query-0.smt2"]
+      -- with the default solver, which the library tests do not use
+      it "abstract-arith" $ do
+        Just c <- runApp $ solcRuntime (T.pack "C") (T.pack [i|
+           contract C {
+             function stuff(uint x) public {
+                 require(x < (1 << 128));
+                 uint y;
+                 assembly { y := div(mul(x, 1000000000000000000), 1000000000000000000) }
+                 assert(y == x);
+             }
+           }
+          |])
+        let hexStr = Types.bsToHex c
+        (_, stdout, stderr) <- readProcessWithExitCode "cabal"
+          ["run", "exe:hevm", "--", "symbolic", "--code", hexStr, "--abstract-arith", "--smt-debug"] ""
+        stderr `shouldNotContain` "CallStack"
+        dumped <- dumpedQueries
+        mapM_ removeFile dumped
+        stdout `shouldContain` "QED"
+        filter ("-refined.smt2" `isSuffixOf`) dumped `shouldNotBe` []
       it "early-abort" $ do
         (exitCode, stdout, stderr) <- runForge "test/contracts/pass/early-abort.sol" ["--max-iterations", "1000", "--early-abort"]
         stderr `shouldNotContain` "CallStack"
