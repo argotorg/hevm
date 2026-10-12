@@ -120,6 +120,9 @@ library
     EVM.UnitTest,
     EVM.Sign,
     EVM.Effects,
+    EVM.SMT.AbstractBase,
+    EVM.SMT.AbstractLemmas,
+    EVM.SMT.ArithEncoding,
   other-modules:
     EVM.CheatsTH,
     EVM.SMT.Types,

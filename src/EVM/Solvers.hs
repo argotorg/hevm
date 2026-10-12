@@ -12,6 +12,8 @@ module EVM.Solvers
   , checkSat
   , checkSatWithProps
   , checkSatWithPropsAbortable
+  , checkSatWithPropsPhase
+  , SolvePhase(..)
   , checkMulti
   , defMemLimit
   ) where
@@ -25,13 +27,14 @@ import GHC.IO.Handle (Handle, hFlush, hSetBuffering, BufferMode(..))
 import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
 import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.QSem (QSem, newQSem, waitQSem, signalQSem)
-import Control.Exception (bracket, bracket_, try, IOException)
+import Control.Exception (bracket, bracket_, finally, try, IOException)
 import Control.Concurrent.Async (race)
-import Control.Concurrent.STM (writeTChan, newTChan, TChan, tryReadTChan, atomically, TVar, readTVar, check)
+import Control.Concurrent.STM (writeTChan, newTChan, TChan, tryReadTChan, atomically, TVar, readTVar, readTVarIO, newTVarIO, modifyTVar', check)
 import Control.Monad
 import Control.Monad.Trans.Maybe (MaybeT(..), runMaybeT)
 import Control.Monad.State.Strict
 import Control.Monad.IO.Unlift
+import Data.List qualified as List
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Set (Set, isSubsetOf, fromList, toList)
@@ -66,14 +69,14 @@ data Solver
   | CVC5
   | Bitwuzla
   | EmptySolver
-  | Custom Text
+  | Custom Text [Text] -- ^ executable path and the arguments to spawn it with
 
 instance Show Solver where
   show Z3 = "z3"
   show CVC5 = "cvc5"
   show Bitwuzla = "bitwuzla"
   show EmptySolver = "empty-smt-solver"
-  show (Custom s) = T.unpack s
+  show (Custom s _) = T.unpack s
 
 
 -- | A running solver instance
@@ -84,7 +87,7 @@ data SolverInstance = SolverInstance
   ProcessHandle
 
 -- | A channel representing a group of solvers
-newtype SolverGroup = SolverGroup (Chan Task)
+data SolverGroup = SolverGroup (Chan Task) (TVar SolveStats)
 
 data MultiSol = MultiSol
   { maxSols :: Int
@@ -105,16 +108,63 @@ data MultiData = MultiData
 
 data SingleData = SingleData
   SMT2
+  SMTScript -- refinement: asserted in the same solver and re-checked if the query is sat; empty for none
   (Maybe [Prop])
   (Maybe (TVar Bool)) -- shared abort flag; if another thread sets it, the query is cancelled and its solver killed
-  (Chan SMTResult) -- result channel
+  (Chan (SMTResult, SolvePhase)) -- result channel
+
+-- | Which query produced an answer
+data SolvePhase
+  = PhasePlain    -- ^ native arithmetic
+  | PhaseAbstract -- ^ the abstract query on its own
+  | PhaseRefined  -- ^ the abstract query with the ground truth asserted
+  | PhaseFallback -- ^ native arithmetic, after the abstract path gave no answer
+  | PhaseNone     -- ^ the simplifier, the UNSAT cache, or an encoding error
+  deriving (Show, Eq, Ord)
+
+-- | What answered the queries of a solver group, for the end-of-run summary
+data SolveStats = SolveStats
+  { answers :: Map (SolvePhase, String) Int -- ^ by phase and verdict
+  , lemmas  :: Map String Int               -- ^ lemma instances by family
+  }
+
+recordAnswer :: SolverGroup -> [String] -> (SMTResult, SolvePhase) -> IO ()
+recordAnswer (SolverGroup _ stats) families (res, phase) = atomically $ modifyTVar' stats $ \s -> SolveStats
+  { answers = Map.insertWith (+) (phase, verdict) 1 s.answers
+  , lemmas = foldr (\f -> Map.insertWith (+) f 1) s.lemmas families
+  }
+  where
+    verdict = case res of
+      Qed -> "unsat"
+      Cex _ -> "sat"
+      Unknown _ -> "unknown"
+      Error _ -> "error"
+
+formatSolveStats :: SolveStats -> [String]
+formatSolveStats s =
+  ("Queries answered: " <> show (sum s.answers))
+  : [ "  " <> pad 36 (describe phase <> ":") <> show (sum (fmap snd verdicts)) <> " (" <> breakdown verdicts <> ")"
+    | (phase, verdicts) <- Map.toList byPhase ]
+  <> if Map.null s.lemmas then [] else
+       ("Lemma instances: " <> show (sum s.lemmas))
+       : [ "  " <> pad 36 (family <> ":") <> show n | (family, n) <- Map.toList s.lemmas ]
+  where
+    byPhase = Map.fromListWith (<>) [ (phase, [(verdict, n)]) | ((phase, verdict), n) <- Map.toList s.answers ]
+    breakdown verdicts = List.intercalate ", " [ show n <> " " <> verdict | (verdict, n) <- verdicts ]
+    pad n str = str <> replicate (n - length str) ' '
+    describe = \case
+      PhasePlain -> "native arithmetic"
+      PhaseAbstract -> "abstract arithmetic alone"
+      PhaseRefined -> "abstract arithmetic, refined"
+      PhaseFallback -> "native, after abstraction gave up"
+      PhaseNone -> "no solver (simplifier, cache)"
 
 -- returns True if a is a superset of any of the sets in bs
 supersetAny :: Set Prop -> [Set Prop] -> Bool
 supersetAny a bs = any (`isSubsetOf` a) bs
 
 checkMulti :: SolverGroup -> Err SMT2 -> MultiSol -> IO (Maybe [W256])
-checkMulti (SolverGroup taskq) smt2 multiSol = do
+checkMulti (SolverGroup taskq _) smt2 multiSol = do
   if isLeft smt2 then pure Nothing
   else do
     -- prepare result channel
@@ -128,28 +178,44 @@ checkSatWithProps :: App m => SolverGroup -> [Prop] -> m (SMTResult)
 checkSatWithProps sg = checkSatWithPropsAbortable sg Nothing
 
 checkSatWithPropsAbortable :: App m => SolverGroup -> Maybe (TVar Bool) -> [Prop] -> m (SMTResult)
-checkSatWithPropsAbortable sg shouldAbort props = do
+checkSatWithPropsAbortable sg shouldAbort props = fst <$> checkSatWithPropsPhase sg shouldAbort props
+
+checkSatWithPropsPhase :: App m => SolverGroup -> Maybe (TVar Bool) -> [Prop] -> m (SMTResult, SolvePhase)
+checkSatWithPropsPhase sg shouldAbort props = do
   conf <- readConfig
   let psSimp = if conf.simp then simplifyProps props else props
-  if psSimp == [PBool False] then pure Qed
+      answered families answer = liftIO (recordAnswer sg families answer) >> pure answer
+  if psSimp == [PBool False] then answered [] (Qed, PhaseNone)
   else do
     let concreteKeccaks = fmap (\(buf,val) -> PEq (Lit val) (Keccak buf)) (toList $ Keccak.concreteKeccaks props)
-    let smt2 = assertProps conf (if conf.simp then psSimp <> concreteKeccaks else psSimp)
-    if isLeft smt2 then pure $ Error $ getError smt2
-    else liftIO $ checkSat' sg (Just props) shouldAbort smt2
+    let allProps = if conf.simp then psSimp <> concreteKeccaks else psSimp
+        native = liftIO $ checkSat' sg (Just props) shouldAbort mempty (assertProps conf allProps)
+    if not conf.abstractArith then native >>= answered []
+    else case assertPropsAbstract conf allProps of
+      Left err -> answered [] (Error err, PhaseNone)
+      Right q -> do
+        (res, phase) <- liftIO $ checkSat' sg (Just props) shouldAbort (SMTScript q.refinement) (Right q.query)
+        aborted <- liftIO $ maybe (pure False) readTVarIO shouldAbort
+        case res of
+          -- the abstract path can be harder for the solver than the native
+          -- one, so it must not be the last word
+          Unknown _ | phase /= PhasePlain && not aborted -> do
+            (nativeRes, _) <- native
+            answered q.lemmaFamilies (nativeRes, PhaseFallback)
+          _ -> answered q.lemmaFamilies (res, phase)
 
 -- When props is Nothing, the cache will not be filled or used
 checkSat :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> IO SMTResult
-checkSat sg props = checkSat' sg props Nothing
+checkSat sg props smt2 = fst <$> checkSat' sg props Nothing mempty smt2
 
-checkSat' :: SolverGroup -> Maybe [Prop] -> Maybe (TVar Bool) -> Err SMT2 -> IO SMTResult
-checkSat' (SolverGroup taskq) props shouldAbort smt2 = do
-  if isLeft smt2 then pure $ Error $ getError smt2
+checkSat' :: SolverGroup -> Maybe [Prop] -> Maybe (TVar Bool) -> SMTScript -> Err SMT2 -> IO (SMTResult, SolvePhase)
+checkSat' (SolverGroup taskq _) props shouldAbort refinement smt2 = do
+  if isLeft smt2 then pure (Error $ getError smt2, PhaseNone)
   else do
     -- prepare result channel
     resChan <- newChan
     -- send task to solver group
-    writeChan taskq (TaskSingle (SingleData (getNonError smt2) props shouldAbort resChan))
+    writeChan taskq (TaskSingle (SingleData (getNonError smt2) refinement props shouldAbort resChan))
     -- collect result
     readChan resChan
 
@@ -169,11 +235,16 @@ withSolvers solver count timeout maxMemory cont = do
     orchestrateId <- liftIO $ forkIO orchestrate'
 
     -- run continuation with task queue
-    res <- cont (SolverGroup taskq)
-
-    -- cleanup and return results
-    liftIO $ killThread orchestrateId
-    pure res
+    stats <- liftIO $ newTVarIO (SolveStats mempty mempty)
+    conf <- readConfig
+    let summarise = do
+          final <- readTVarIO stats
+          when ((conf.debug || conf.verb >= 2) && not (Map.null final.answers)) $
+            mapM_ putStrLn (formatSolveStats final)
+    -- a failing run leaves through an exit exception, and should still clean
+    -- up and report
+    withRunInIO $ \run ->
+      run (cont (SolverGroup taskq stats)) `finally` (killThread orchestrateId >> summarise)
   where
     orchestrate :: App m => Chan Task -> TChan CacheEntry -> QSem -> [Set Prop] -> Int -> m b
     orchestrate taskq cacheq solverSlots knownUnsat fileCounter = do
@@ -187,13 +258,13 @@ withSolvers solver count timeout maxMemory cont = do
         Nothing -> do
           task <- liftIO $ readChan taskq
           case task of
-            TaskSingle (SingleData _ props _ r) | isJust props && supersetAny (fromList (fromJust props)) knownUnsat -> do
-              liftIO $ writeChan r Qed
+            TaskSingle (SingleData _ _ props _ r) | isJust props && supersetAny (fromList (fromJust props)) knownUnsat -> do
+              liftIO $ writeChan r (Qed, PhaseNone)
               when conf.debug $ liftIO $ putStrLn "   Qed found via cache!"
               orchestrate taskq cacheq solverSlots knownUnsat fileCounter
             _ -> do
               runTask' <- case task of
-                TaskSingle (SingleData smt2 props shouldAbort r) -> toIO $ getOneSol solver timeout maxMemory smt2 props shouldAbort r cacheq solverSlots fileCounter
+                TaskSingle (SingleData smt2 refinement props shouldAbort r) -> toIO $ getOneSol solver timeout maxMemory smt2 refinement props shouldAbort r cacheq solverSlots fileCounter
                 TaskMulti (MultiData smt2 multiSol r) -> toIO $ getMultiSol solver timeout maxMemory smt2 multiSol r solverSlots fileCounter
               _ <- liftIO $ forkIO runTask'
               orchestrate taskq cacheq solverSlots knownUnsat (fileCounter + 1)
@@ -256,20 +327,22 @@ getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r solve
     (signalQSem solverSlots)
     (do
       when conf.dumpQueries $ writeSMT2File smt2 "." (show fileCounter)
-      bracket
-        (spawnSolver solver timeout maxMemory)
-        (stopSolver)
-        (\inst -> do
-          out <- sendScript inst cmds
-          case out of
-            Left err -> do
-              when conf.debug $ putStrLn $ "Issue while writing SMT to solver (maybe it got killed)?: " <> (T.unpack err)
-              writeChan r Nothing
-            Right _ -> do
-              sat <- sendCommand inst $ SMTCommand "(check-sat)"
-              when conf.dumpQueries $ writeSMT2File smt2 "." (show fileCounter <> "-origquery")
-              subRun inst [] smt2 sat
-        )
+      case solver of
+        EmptySolver -> writeChan r Nothing
+        _ -> bracket
+          (spawnSolver solver timeout maxMemory)
+          (stopSolver)
+          (\inst -> do
+            out <- sendScript inst cmds
+            case out of
+              Left err -> do
+                when conf.debug $ putStrLn $ "Issue while writing SMT to solver (maybe it got killed)?: " <> (T.unpack err)
+                writeChan r Nothing
+              Right _ -> do
+                sat <- sendCommand inst $ SMTCommand "(check-sat)"
+                when conf.dumpQueries $ writeSMT2File smt2 "." (show fileCounter <> "-origquery")
+                subRun inst [] smt2 sat
+          )
     )
 
 getOneSol
@@ -278,52 +351,71 @@ getOneSol
   -> Maybe Natural      -- ^ timeout (seconds)
   -> Natural            -- ^ memory limit (MB)
   -> SMT2               -- ^ query
+  -> SMTScript          -- ^ refinement, re-checked in the same solver if the query is sat
   -> Maybe [Prop]       -- ^ props for the UNSAT cache
   -> Maybe (TVar Bool)  -- ^ shared abort flag
-  -> Chan SMTResult     -- ^ result channel
+  -> Chan (SMTResult, SolvePhase) -- ^ result channel
   -> TChan CacheEntry   -- ^ UNSAT cache channel
   -> QSem               -- ^ limits concurrent solvers
   -> Int                -- ^ query counter, for dump file names
   -> m ()
-getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) props shouldAbort r cacheq solverSlots fileCounter = do
+getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props shouldAbort r cacheq solverSlots fileCounter = do
   conf <- readConfig
-  res <- liftIO $ abortable shouldAbort (Unknown "Query aborted") $ bracket_
+  res <- liftIO $ abortable shouldAbort (Unknown "Query aborted", phaseOf refinement) $ bracket_
     (waitQSem solverSlots)
     (signalQSem solverSlots)
     (do
-      when (conf.dumpQueries) $ writeSMT2File smt2 "." (show fileCounter)
-      bracket
-        (spawnSolver solver timeout maxMemory)
-        (stopSolver)
-        (\inst -> do
-          out <- sendScript inst cmds
-          case out of
-            Left e -> pure (Unknown $ "Issue while writing SMT to solver (maybe it got killed?): " <> T.unpack e)
-            Right () -> do
-              sat <- sendCommand inst $ SMTCommand "(check-sat)"
-              case sat of
-                "unsat" -> do
-                  when (isJust props) $ liftIO . atomically $ writeTChan cacheq (CacheEntry (fromJust props))
-                  pure Qed
-                "timeout" -> pure $ Unknown "Result timeout by SMT solver"
-                "unknown" -> do
-                  dumpUnsolved smt2 fileCounter conf.dumpUnsolved
-                  pure $ Unknown "Result unknown by SMT solver"
-                "sat" -> do
-                  mmodel <- getModel inst cexvars
-                  case mmodel of
-                    Just model -> pure $ Cex model
-                    Nothing -> pure $ Unknown "Solver died while extracting model"
-                _ -> let  supportIssue =
-                              ("does not yet support" `T.isInfixOf` sat)
-                              || ("unsupported" `T.isInfixOf` sat)
-                              || ("not support" `T.isInfixOf` sat)
-                  in case supportIssue of
-                   True -> pure . Error $ "SMT solver reported unsupported operation: " <> T.unpack sat
-                   False -> pure . Unknown $ "Unable to parse SMT solver output (maybe it got killed?): " <> T.unpack sat
-        )
+      when (conf.dumpQueries) $ do
+        writeSMT2File smt2 "." (show fileCounter)
+        when (refinement /= mempty) $ writeSMT2File (smt2 <> SMT2 refinement mempty mempty) "." (show fileCounter <> "-refined")
+      case solver of
+        -- answers without spawning a process, so queries can be dumped
+        -- without a solver installed
+        EmptySolver -> pure (Unknown "Result unknown by SMT solver", phaseOf refinement)
+        _ -> bracket
+          (spawnSolver solver timeout maxMemory)
+          (stopSolver)
+          (\inst -> do
+            out <- sendScript inst cmds
+            case out of
+              Left e -> pure (Unknown $ "Issue while writing SMT to solver (maybe it got killed?): " <> T.unpack e, phaseOf refinement)
+              Right () -> checkSatIn conf inst smt2 refinement
+          )
     )
   liftIO $ writeChan r res
+  where
+    phaseOf pending
+      | refinement == mempty = PhasePlain
+      | pending == mempty = PhaseRefined
+      | otherwise = PhaseAbstract
+    checkSatIn conf inst query pending = do
+      result <- sendCommand inst $ SMTCommand "(check-sat)"
+      let done res = pure (res, phaseOf pending)
+      case result of
+        "unsat" -> do
+          when (isJust props) $ liftIO . atomically $ writeTChan cacheq (CacheEntry (fromJust props))
+          done Qed
+        "timeout" -> done $ Unknown "Result timeout by SMT solver"
+        "unknown" -> do
+          dumpUnsolved query fileCounter conf.dumpUnsolved
+          done $ Unknown "Result unknown by SMT solver"
+        "sat" | pending /= mempty -> do
+          out <- sendScript inst pending
+          case out of
+            Left e -> done (Unknown $ "Issue while writing SMT refinement to solver (maybe it got killed?): " <> T.unpack e)
+            Right () -> checkSatIn conf inst (query <> SMT2 pending mempty mempty) mempty
+        "sat" -> do
+          mmodel <- getModel inst cexvars
+          case mmodel of
+            Just model -> done $ Cex model
+            Nothing -> done $ Unknown "Solver died while extracting model"
+        _ -> let  supportIssue =
+                      ("does not yet support" `T.isInfixOf` result)
+                      || ("unsupported" `T.isInfixOf` result)
+                      || ("not support" `T.isInfixOf` result)
+          in case supportIssue of
+           True -> done . Error $ "SMT solver reported unsupported operation: " <> T.unpack result
+           False -> done . Unknown $ "Unable to parse SMT solver output (maybe it got killed?): " <> T.unpack result
 
 -- Cancelling act still runs its cleanup (stopSolver kills the solver, signalQSem frees the slot)
 abortable :: Maybe (TVar Bool) -> a -> IO a -> IO a
@@ -435,6 +527,8 @@ solverArgs solver timeout = case solver of
   Bitwuzla ->
     [ "--lang=smt2"
     , "--produce-models"
+    -- per (check-sat), not per query: an --abstract-arith query that needs the
+    -- refinement re-check gets this budget twice
     , "--time-limit-per=" <> millisecs
     , "--bv-output-format=16"
     ]
@@ -451,7 +545,7 @@ solverArgs solver timeout = case solver of
     , "--arrays-exp"
     ]
   EmptySolver -> []
-  Custom _ -> []
+  Custom _ args -> args
   where millisecs = T.pack $ show $ 1000 * (mkTimeout timeout)
 
 -- | Spawns a solver instance, and sets the various global config options that we use for our queries
@@ -512,7 +606,7 @@ spawnSolver solver timeout maxMemoryMB = do
     Z3 -> do
       _ <- sendCommand solverInstance $ SMTCommand "(set-option :print-success true)"
       pure solverInstance
-    Custom _ -> pure solverInstance
+    Custom _ _ -> pure solverInstance
 
 -- | Cleanly shutdown a running solver instance
 stopSolver :: SolverInstance -> IO ()
