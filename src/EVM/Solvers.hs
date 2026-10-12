@@ -27,7 +27,7 @@ import GHC.IO.Handle (Handle, hFlush, hSetBuffering, BufferMode(..))
 import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
 import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.QSem (QSem, newQSem, waitQSem, signalQSem)
-import Control.Exception (bracket, bracket_, try, IOException)
+import Control.Exception (bracket, bracket_, finally, try, IOException)
 import Control.Concurrent.Async (race)
 import Control.Concurrent.STM (writeTChan, newTChan, TChan, tryReadTChan, atomically, TVar, readTVar, readTVarIO, newTVarIO, modifyTVar', check)
 import Control.Monad
@@ -236,15 +236,15 @@ withSolvers solver count timeout maxMemory cont = do
 
     -- run continuation with task queue
     stats <- liftIO $ newTVarIO (SolveStats mempty mempty)
-    res <- cont (SolverGroup taskq stats)
-
-    -- cleanup and return results
-    liftIO $ killThread orchestrateId
     conf <- readConfig
-    final <- liftIO $ readTVarIO stats
-    when ((conf.debug || conf.verb >= 2) && not (Map.null final.answers)) $
-      liftIO $ mapM_ putStrLn (formatSolveStats final)
-    pure res
+    let summarise = do
+          final <- readTVarIO stats
+          when ((conf.debug || conf.verb >= 2) && not (Map.null final.answers)) $
+            mapM_ putStrLn (formatSolveStats final)
+    -- a failing run leaves through an exit exception, and should still clean
+    -- up and report
+    withRunInIO $ \run ->
+      run (cont (SolverGroup taskq stats)) `finally` (killThread orchestrateId >> summarise)
   where
     orchestrate :: App m => Chan Task -> TChan CacheEntry -> QSem -> [Set Prop] -> Int -> m b
     orchestrate taskq cacheq solverSlots knownUnsat fileCounter = do
