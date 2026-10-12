@@ -10,7 +10,6 @@ import Test.Tasty.HUnit
 import Test.Tasty.QuickCheck hiding (Failure, Success)
 
 import Data.Bits (shiftL)
-import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS (drop, length, pack, take)
 import Data.Containers.ListUtils (nubOrd)
 import Data.List qualified as List (nub, tails)
