@@ -15,7 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   solver otherwise cannot discharge. Caveats: the lemma families range over
   pairs of collected terms, so the number of emitted assertions is quadratic in
   the number of products and divisions in a query and is currently uncapped;
-  and a query that needs the refinement re-check gets the SMT timeout twice
+  and a query the abstraction cannot answer is retried with native arithmetic,
+  so it can take up to three times the SMT timeout.
 
 ## Fixed
 - Storage decomposition no longer swaps key and slot for concrete mapping

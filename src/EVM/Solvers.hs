@@ -29,7 +29,7 @@ import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.QSem (QSem, newQSem, waitQSem, signalQSem)
 import Control.Exception (bracket, bracket_, try, IOException)
 import Control.Concurrent.Async (race)
-import Control.Concurrent.STM (writeTChan, newTChan, TChan, tryReadTChan, atomically, TVar, readTVar, check)
+import Control.Concurrent.STM (writeTChan, newTChan, TChan, tryReadTChan, atomically, TVar, readTVar, readTVarIO, check)
 import Control.Monad
 import Control.Monad.Trans.Maybe (MaybeT(..), runMaybeT)
 import Control.Monad.State.Strict
@@ -117,6 +117,7 @@ data SolvePhase
   = PhasePlain    -- ^ native arithmetic
   | PhaseAbstract -- ^ the abstract query on its own
   | PhaseRefined  -- ^ the abstract query with the ground truth asserted
+  | PhaseFallback -- ^ native arithmetic, after the abstract path gave no answer
   | PhaseNone     -- ^ the simplifier, the UNSAT cache, or an encoding error
   deriving (Show, Eq)
 
@@ -154,7 +155,15 @@ checkSatWithPropsPhase sg shouldAbort props = do
     else case assertPropsAbstract conf allProps of
       Left err -> pure (Error err, PhaseNone)
       Right q -> do
-        liftIO $ checkSat' sg (Just props) shouldAbort (SMTScript q.refinement) (Right q.query)
+        (res, phase) <- liftIO $ checkSat' sg (Just props) shouldAbort (SMTScript q.refinement) (Right q.query)
+        aborted <- liftIO $ maybe (pure False) readTVarIO shouldAbort
+        case res of
+          -- the abstract path can be harder for the solver than the native
+          -- one, so it must not be the last word
+          Unknown _ | phase /= PhasePlain && not aborted -> do
+            (nativeRes, _) <- native
+            pure (nativeRes, PhaseFallback)
+          _ -> pure (res, phase)
 
 -- When props is Nothing, the cache will not be filled or used
 checkSat :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> IO SMTResult
