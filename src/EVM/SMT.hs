@@ -12,8 +12,6 @@ module EVM.SMT
   formatSMT2,
   declareIntermediates,
   assertProps,
-  assertSMT,
-  queryValue,
   exprToSMT,
   encodeConcreteStore,
   zero,
@@ -62,7 +60,7 @@ import EVM.Format (formatProp)
 import EVM.CSE
 import EVM.Expr (writeByte, bufLengthEnv, bufLength, minLength, inRange)
 import EVM.Expr qualified as Expr
-import EVM.Keccak (keccakAssumptions, concreteKeccaks, findKeccakPropsExprs, keccakAliases)
+import EVM.Keccak (keccakAssumptions, concreteKeccaks, findKeccakPropsExprs)
 import EVM.Traversals
 import EVM.Types
 import EVM.Effects
@@ -193,10 +191,7 @@ assertPropsHelper simp psPreConc = do
       pure (SMTComment "read assumptions" : assumps)
 
     cexInfo :: StorageReads -> CexVars
-    cexInfo a = mempty
-      { storeReads = a
-      , keccakAliases = keccakAliases (Set.toList allKeccaks) (Set.map snd concreteKecc) psElim bufVals storeVals
-      }
+    cexInfo a = mempty { storeReads = a }
 
 
 referencedAbstractStores :: TraversableTerm a => a -> Set Builder

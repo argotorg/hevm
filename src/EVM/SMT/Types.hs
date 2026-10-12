@@ -53,13 +53,11 @@ data CexVars = CexVars
   , blockContext :: [Text]
     -- | the names of any tx context variables
   , txContext    :: [Text]
-    -- | keccak terms and potentially aliased slot literals
-  , keccakAliases :: KeccakAliases
   }
   deriving (Eq, Show)
 
 instance Semigroup CexVars where
-  (CexVars a b c d e f g) <> (CexVars a2 b2 c2 d2 e2 f2 g2) = CexVars (a <> a2) (b <> b2) (c <> c2) (d <> d2) (e <> e2) (f <> f2) (g <> g2)
+  (CexVars a b c d e f) <> (CexVars a2 b2 c2 d2 e2 f2) = CexVars (a <> a2) (b <> b2) (c <> c2) (d <> d2) (e <> e2) (f <> f2)
 
 instance Monoid CexVars where
     mempty = CexVars
@@ -69,20 +67,4 @@ instance Monoid CexVars where
       , storeReads = mempty
       , blockContext = mempty
       , txContext = mempty
-      , keccakAliases = mempty
       }
-
--- | Data for recovering compiler-folded mapping slot preimages.
-data KeccakAliases = KeccakAliases
-  { terms     :: [Expr EWord]
-    -- | slot literals >= 256, excluding known hashes and their field offsets
-  , slotLits  :: Set W256
-  , keyCands  :: Set W256
-  }
-  deriving (Eq, Show)
-
-instance Semigroup KeccakAliases where
-  KeccakAliases a b c <> KeccakAliases a2 b2 c2 = KeccakAliases (a <> a2) (b <> b2) (c <> c2)
-
-instance Monoid KeccakAliases where
-  mempty = KeccakAliases mempty mempty mempty
