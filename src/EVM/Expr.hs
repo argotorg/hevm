@@ -1157,17 +1157,18 @@ decomposeStorage = go
         pure (SLoad key base)
       _ -> Nothing
 
-    -- NOTE: we use (Maybe W256) for idx here, because for small slot numbers we want to keep the
-    -- Logical Store value a Nothing
+    -- Turns a storage slot expression into a pair (logical store id, index within that store)
+    -- The store id is Nothing for small slot numbers (< 256), which all share one logical store.
     inferLogicalIdx :: Expr EWord -> Maybe (Maybe W256, Expr EWord)
     inferLogicalIdx = \case
       Lit a | a >= 256 -> Nothing
       Lit a -> Just (Nothing, Lit a)
       -- maps
       (Keccak (ConcreteBuf k)) | BS.length k == 64 -> do
-        let key = idxToWord (BS.take 32 k)
-            idx = Lit $ idxToWord (BS.drop 32 k)
-        Just (Just key, idx)
+        -- Solidity hashes key || slot; the slot identifies the logical store.
+        let key = Lit $ idxToWord (BS.take 32 k)
+            idx = idxToWord (BS.drop 32 k)
+        Just (Just idx, key)
       (MappingSlot idx key) | BS.length idx == 64 -> Just (Just $ idxToWord idx, key)
       -- arrays
       (ArraySlotWithOffs idx offset) | BS.length idx == 32 -> Just (Just $ idxToWord64 idx, offset)

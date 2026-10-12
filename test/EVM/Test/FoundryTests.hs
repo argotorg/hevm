@@ -144,6 +144,12 @@ tests = testGroup "Foundry tests"
           (\(TestMethodInfo _ (Sig name _)) -> name == "check_constCancelConcreteKey")
           (Just 10) Nothing False Fetch.noRpc
           >>= assertEqualM "test result" [(True, True)]
+    , test "Mapping-Decomposition" $ do
+        let testFile = "test/contracts/pass/mappingDecomposition.sol"
+        executeSingleMethod testFile "prove_unwritten" >>= assertEqualM "unwritten mapping reads zero" (True, True)
+    , test "Mapping-Decomposition-Fail" $ do
+        let testFile = "test/contracts/fail/mappingDecomposition.sol"
+        executeSingleMethod testFile "prove_written_is_zero" >>= assertEqualM "written mapping read must falsify" (False, True)
     , test "AssertApproxEqAbs-Pass" $ do
         let testFile = "test/contracts/pass/assertApproxEqAbs.sol"
         assertAllMethodsWithPrefix testFile "prove" (True, True)
