@@ -134,6 +134,12 @@ tests = testGroup "Foundry tests"
         -- #1082 soundness: same-mapping entries must be kept, so this falsifies
         let testFile = "test/contracts/fail/symbolicKeySload.sol"
         executeSingleMethod testFile "prove_same_mapping_falsifiable" >>= assertEqualM "same-mapping read must falsify" (False, True)
+    , test "Mapping-Decomposition" $ do
+        let testFile = "test/contracts/pass/mappingDecomposition.sol"
+        executeSingleMethod testFile "prove_unwritten" >>= assertEqualM "unwritten mapping reads zero" (True, True)
+    , test "Mapping-Decomposition-Fail" $ do
+        let testFile = "test/contracts/fail/mappingDecomposition.sol"
+        executeSingleMethod testFile "prove_written_is_zero" >>= assertEqualM "written mapping read must falsify" (False, True)
     , test "AssertApproxEqAbs-Pass" $ do
         let testFile = "test/contracts/pass/assertApproxEqAbs.sol"
         assertAllMethodsWithPrefix testFile "prove" (True, True)

@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Fixed
+- Storage decomposition no longer swaps key and slot for concrete mapping
+  hashes, which caused spurious counterexamples and false proofs when concrete
+  and symbolic mapping accesses were mixed ([#1099](https://github.com/argotorg/hevm/issues/1099)).
+  To make sure this issue doesn't happen again, the storage decomposition fuzzer
+  now also generates concrete-key mapping accesses
 - A symbolic-key `SLOAD` over a `ConcreteStore` is now resolved during execution
   instead of being carried into a fork as an unresolved read: an empty store
   reads 0 at every slot, and a symbolic mapping read filters out concrete
