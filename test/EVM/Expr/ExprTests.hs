@@ -1717,7 +1717,9 @@ simplifierFuzzTests cfg = testGroup "SimplifierPropertyTests"
 abstractArithmeticFuzzTests :: TestTree
 abstractArithmeticFuzzTests = testGroup "AbstractArithmeticPropertyTests"
   -- timeouts are discarded, but if over ~half the cases time out, QuickCheck gives up and the test fails
-  [ localOption (QuickCheckMaxRatio 1) $
+  -- several kinds of broken lemma only show after more than the default number of cases
+  [ adjustOption (\(QuickCheckTests n) -> QuickCheckTests (2 * n)) $
+    localOption (QuickCheckMaxRatio 1) $
     testProperty "targeted arithmetic shapes agree with concrete evaluation" $
       \(AbstractArithCase kind parts expr _ bindings) ->
         tabulate "arithmetic shape" [kind] $ tabulate "component shape" parts $ ioProperty $ do
