@@ -29,11 +29,12 @@ import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.QSem (QSem, newQSem, waitQSem, signalQSem)
 import Control.Exception (bracket, bracket_, try, IOException)
 import Control.Concurrent.Async (race)
-import Control.Concurrent.STM (writeTChan, newTChan, TChan, tryReadTChan, atomically, TVar, readTVar, readTVarIO, check)
+import Control.Concurrent.STM (writeTChan, newTChan, TChan, tryReadTChan, atomically, TVar, readTVar, readTVarIO, newTVarIO, modifyTVar', check)
 import Control.Monad
 import Control.Monad.Trans.Maybe (MaybeT(..), runMaybeT)
 import Control.Monad.State.Strict
 import Control.Monad.IO.Unlift
+import Data.List qualified as List
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Set (Set, isSubsetOf, fromList, toList)
@@ -86,7 +87,7 @@ data SolverInstance = SolverInstance
   ProcessHandle
 
 -- | A channel representing a group of solvers
-newtype SolverGroup = SolverGroup (Chan Task)
+data SolverGroup = SolverGroup (Chan Task) (TVar SolveStats)
 
 data MultiSol = MultiSol
   { maxSols :: Int
@@ -119,14 +120,51 @@ data SolvePhase
   | PhaseRefined  -- ^ the abstract query with the ground truth asserted
   | PhaseFallback -- ^ native arithmetic, after the abstract path gave no answer
   | PhaseNone     -- ^ the simplifier, the UNSAT cache, or an encoding error
-  deriving (Show, Eq)
+  deriving (Show, Eq, Ord)
+
+-- | What answered the queries of a solver group, for the end-of-run summary
+data SolveStats = SolveStats
+  { answers :: Map (SolvePhase, String) Int -- ^ by phase and verdict
+  , lemmas  :: Map String Int               -- ^ lemma instances by family
+  }
+
+recordAnswer :: SolverGroup -> [String] -> (SMTResult, SolvePhase) -> IO ()
+recordAnswer (SolverGroup _ stats) families (res, phase) = atomically $ modifyTVar' stats $ \s -> SolveStats
+  { answers = Map.insertWith (+) (phase, verdict) 1 s.answers
+  , lemmas = foldr (\f -> Map.insertWith (+) f 1) s.lemmas families
+  }
+  where
+    verdict = case res of
+      Qed -> "unsat"
+      Cex _ -> "sat"
+      Unknown _ -> "unknown"
+      Error _ -> "error"
+
+formatSolveStats :: SolveStats -> [String]
+formatSolveStats s =
+  ("Queries answered: " <> show (sum s.answers))
+  : [ "  " <> pad 36 (describe phase <> ":") <> show (sum (fmap snd verdicts)) <> " (" <> breakdown verdicts <> ")"
+    | (phase, verdicts) <- Map.toList byPhase ]
+  <> if Map.null s.lemmas then [] else
+       ("Lemma instances: " <> show (sum s.lemmas))
+       : [ "  " <> pad 36 (family <> ":") <> show n | (family, n) <- Map.toList s.lemmas ]
+  where
+    byPhase = Map.fromListWith (<>) [ (phase, [(verdict, n)]) | ((phase, verdict), n) <- Map.toList s.answers ]
+    breakdown verdicts = List.intercalate ", " [ show n <> " " <> verdict | (verdict, n) <- verdicts ]
+    pad n str = str <> replicate (n - length str) ' '
+    describe = \case
+      PhasePlain -> "native arithmetic"
+      PhaseAbstract -> "abstract arithmetic alone"
+      PhaseRefined -> "abstract arithmetic, refined"
+      PhaseFallback -> "native, after abstraction gave up"
+      PhaseNone -> "no solver (simplifier, cache)"
 
 -- returns True if a is a superset of any of the sets in bs
 supersetAny :: Set Prop -> [Set Prop] -> Bool
 supersetAny a bs = any (`isSubsetOf` a) bs
 
 checkMulti :: SolverGroup -> Err SMT2 -> MultiSol -> IO (Maybe [W256])
-checkMulti (SolverGroup taskq) smt2 multiSol = do
+checkMulti (SolverGroup taskq _) smt2 multiSol = do
   if isLeft smt2 then pure Nothing
   else do
     -- prepare result channel
@@ -146,14 +184,15 @@ checkSatWithPropsPhase :: App m => SolverGroup -> Maybe (TVar Bool) -> [Prop] ->
 checkSatWithPropsPhase sg shouldAbort props = do
   conf <- readConfig
   let psSimp = if conf.simp then simplifyProps props else props
-  if psSimp == [PBool False] then pure (Qed, PhaseNone)
+      answered families answer = liftIO (recordAnswer sg families answer) >> pure answer
+  if psSimp == [PBool False] then answered [] (Qed, PhaseNone)
   else do
     let concreteKeccaks = fmap (\(buf,val) -> PEq (Lit val) (Keccak buf)) (toList $ Keccak.concreteKeccaks props)
     let allProps = if conf.simp then psSimp <> concreteKeccaks else psSimp
         native = liftIO $ checkSat' sg (Just props) shouldAbort mempty (assertProps conf allProps)
-    if not conf.abstractArith then native
+    if not conf.abstractArith then native >>= answered []
     else case assertPropsAbstract conf allProps of
-      Left err -> pure (Error err, PhaseNone)
+      Left err -> answered [] (Error err, PhaseNone)
       Right q -> do
         (res, phase) <- liftIO $ checkSat' sg (Just props) shouldAbort (SMTScript q.refinement) (Right q.query)
         aborted <- liftIO $ maybe (pure False) readTVarIO shouldAbort
@@ -162,15 +201,15 @@ checkSatWithPropsPhase sg shouldAbort props = do
           -- one, so it must not be the last word
           Unknown _ | phase /= PhasePlain && not aborted -> do
             (nativeRes, _) <- native
-            pure (nativeRes, PhaseFallback)
-          _ -> pure (res, phase)
+            answered q.lemmaFamilies (nativeRes, PhaseFallback)
+          _ -> answered q.lemmaFamilies (res, phase)
 
 -- When props is Nothing, the cache will not be filled or used
 checkSat :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> IO SMTResult
 checkSat sg props smt2 = fst <$> checkSat' sg props Nothing mempty smt2
 
 checkSat' :: SolverGroup -> Maybe [Prop] -> Maybe (TVar Bool) -> SMTScript -> Err SMT2 -> IO (SMTResult, SolvePhase)
-checkSat' (SolverGroup taskq) props shouldAbort refinement smt2 = do
+checkSat' (SolverGroup taskq _) props shouldAbort refinement smt2 = do
   if isLeft smt2 then pure (Error $ getError smt2, PhaseNone)
   else do
     -- prepare result channel
@@ -196,10 +235,15 @@ withSolvers solver count timeout maxMemory cont = do
     orchestrateId <- liftIO $ forkIO orchestrate'
 
     -- run continuation with task queue
-    res <- cont (SolverGroup taskq)
+    stats <- liftIO $ newTVarIO (SolveStats mempty mempty)
+    res <- cont (SolverGroup taskq stats)
 
     -- cleanup and return results
     liftIO $ killThread orchestrateId
+    conf <- readConfig
+    final <- liftIO $ readTVarIO stats
+    when ((conf.debug || conf.verb >= 2) && not (Map.null final.answers)) $
+      liftIO $ mapM_ putStrLn (formatSolveStats final)
     pure res
   where
     orchestrate :: App m => Chan Task -> TChan CacheEntry -> QSem -> [Set Prop] -> Int -> m b
