@@ -2,27 +2,18 @@
     Module: EVM.Keccak
     Description: Expr passes to determine Keccak assumptions
 -}
-module EVM.Keccak
-  ( keccakAssumptions
-  , concreteKeccaks
-  , findKeccakPropsExprs
-  , keccakAliases
-  , recoverMappingPreimage
-  , knownKeccakAssumptions
-  ) where
+module EVM.Keccak (keccakAssumptions, concreteKeccaks, findKeccakPropsExprs) where
 
 import Control.Monad.State
 import Data.ByteString (ByteString)
-import Data.Map qualified as Map
+import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.List (tails)
-import Data.Maybe (listToMaybe)
 
 import EVM.Traversals
 import EVM.Types
 import EVM.Expr
-import EVM.SMT.Types (KeccakAliases(..))
 
 
 newtype KeccakStore = KeccakStore
@@ -72,18 +63,18 @@ keccakAssumptions keccaks = injectivity <> minValue <> minDiffOfPairs
     keccakPairs = uniquePairs ks
     injectivity = map injProp keccakPairs
     minValue = map minProp ks
+      where
+        minProp :: Expr EWord -> Prop
+        minProp k@(Keccak _) = PGT k (Lit 256)
+        minProp _ = internalError "expected keccak expression"
     minDiffOfPairs = map minDistance keccakPairs
-
-minProp :: Expr EWord -> Prop
-minProp k@(Keccak _) = PGT k (Lit 256)
-minProp _ = internalError "expected keccak expression"
-
-minDistance :: (Expr EWord, Expr EWord) -> Prop
-minDistance (ka@(Keccak a), kb@(Keccak b)) = PImpl ((a ./= b) .|| (bufLength a ./= bufLength b)) (PAnd req1 req2)
-  where
-    req1 = PGEq (Sub ka kb) (Lit 256)
-    req2 = PGEq (Sub kb ka) (Lit 256)
-minDistance _ = internalError "expected Keccak expression"
+     where
+      minDistance :: (Expr EWord, Expr EWord) -> Prop
+      minDistance (ka@(Keccak a), kb@(Keccak b)) = PImpl ((a ./= b) .|| (bufLength a ./= bufLength b)) (PAnd req1 req2)
+        where
+          req1 = (PGEq (Sub ka kb) (Lit 256))
+          req2 = (PGEq (Sub kb ka) (Lit 256))
+      minDistance _ = internalError "expected Keccak expression"
 
 concretizeKeccakParam :: Expr EWord -> Expr EWord
 concretizeKeccakParam (Keccak buf) = Keccak (concKeccakSimpExpr buf)
@@ -92,8 +83,24 @@ concretizeKeccakParam _ = internalError "Cannot happen"
 
 type KeccakValue = (Expr Buf, W256)
 concreteKeccaks :: [Prop] -> Set KeccakValue
-concreteKeccaks ps = foldMap concreteKeccakProp ps
+concreteKeccaks ps = foldMap concreteKeccakProp ps <> recovered
   where
+  (slots, keys) = foldMap (foldProp literals mempty) ps
+  preimages = smallMappingPreimages <> mappingPreimages (Set.toList $ Set.filter (> 255) keys)
+  recovered = Set.fromList
+    [ (ConcreteBuf pre, h)
+    | slot <- Set.toList (Set.filter (>= 256) slots)
+    , Just (h, pre) <- [Map.lookupLE slot preimages]
+    , slot - h < 256
+    ]
+  literals :: forall a. Expr a -> (Set W256, Set W256)
+  literals = \case
+    SLoad (Lit k) _ -> (Set.singleton k, mempty)
+    SStore (Lit k) _ _ -> (Set.singleton k, mempty)
+    ConcreteStore m -> (Map.keysSet m, Set.fromList (Map.elems m))
+    Lit w -> (mempty, Set.singleton w)
+    _ -> mempty
+
   concreteKeccakProp :: Prop -> Set KeccakValue
   concreteKeccakProp p = foldProp compute Set.empty p
 
@@ -106,41 +113,13 @@ concreteKeccaks ps = foldMap concreteKeccakProp ps
         _ -> Set.empty
     _ -> Set.empty
 
--- | Collect slot literals without known preimages and candidate mapping keys.
-keccakAliases :: [Expr EWord] -> Set W256 -> [Prop] -> [Expr Buf] -> [Expr Storage] -> KeccakAliases
-keccakAliases terms known ps bufs stores = KeccakAliases
-  { terms = terms
-  , slotLits = Set.filter (\l -> l >= 256 && Prelude.not (nearKnown l)) slots
-  , keyCands = lits
-  }
-  where
-    nearKnown l = case Set.lookupLE l known of
-      Just h -> l - h < 256
-      Nothing -> False
-    (slots, lits) = foldMap (foldProp go mempty) ps
-                 <> foldMap (foldExpr go mempty) bufs
-                 <> foldMap (foldExpr go mempty) stores
-    go :: forall a. Expr a -> (Set W256, Set W256)
-    go = \case
-      SLoad (Lit k) _ -> (Set.singleton k, mempty)
-      SStore (Lit k) _ _ -> (Set.singleton k, mempty)
-      ConcreteStore m -> (Map.keysSet m, Set.fromList (Map.elems m))
-      Lit w -> (mempty, Set.singleton w)
-      _ -> mempty
+-- Shared across queries; compiler-folded mapping slots contain no keccak term.
+smallMappingPreimages :: Map.Map W256 ByteString
+smallMappingPreimages = mappingPreimages [0..255]
 
--- | Recover keccak(key || slot) + offset, trying candidate or small keys and slots/offsets below 256.
-recoverMappingPreimage :: Set W256 -> W256 -> Maybe (ByteString, W256)
-recoverMappingPreimage cands lit = listToMaybe
-  [ (pre, lit - h)
-  | key <- Set.toAscList (cands <> Set.fromList [0..255])
-  , slot <- [0..255 :: W256]
+mappingPreimages :: [W256] -> Map.Map W256 ByteString
+mappingPreimages keys = Map.fromList
+  [ (keccak' pre, pre)
+  | key <- keys, slot <- [0..255]
   , let pre = word256Bytes key <> word256Bytes slot
-        h = keccak' pre
-  , h <= lit, lit - h < 256
   ]
-
--- | Pin a recovered hash and relate it to the query's existing keccak terms.
-knownKeccakAssumptions :: ByteString -> [Expr EWord] -> [Prop]
-knownKeccakAssumptions pre others =
-  PEq k (Lit (keccak' pre)) : minProp k : concatMap (\o -> [injProp (k, o), minDistance (k, o)]) others
-  where k = Keccak (ConcreteBuf pre)

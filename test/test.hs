@@ -77,7 +77,7 @@ import EVM.Types hiding (Env)
 import EVM.Effects
 import EVM.UnitTest (writeTrace, printWarnings)
 import EVM.Expr (maybeLitByteSimp)
-import EVM.Keccak (concreteKeccaks, recoverMappingPreimage)
+import EVM.Keccak (concreteKeccaks)
 
 import EVM.Expr.ExprTests qualified as ExprTests
 import EVM.Expr.RewriteFuzz qualified as RewriteFuzz
@@ -4798,7 +4798,7 @@ tests = testGroup "hevm"
       assertBoolM ("Expected only counterexamples, got: " <> show res) (all isCex res)
   ]
   , testGroup "calling-solvers"
-  [ testGroup "keccak-alias-of-folded-slot-refined"
+  [ testGroup "keccak-alias-of-folded-slot"
       [ test (show solver) $ withSolvers solver 3 Nothing defMemLimit $ \s ->
           forM_ [0, 5, 255] $ \offset -> do
             let foldedSlot = keccak' (word256Bytes 3 <> word256Bytes 0) + offset
@@ -4813,7 +4813,7 @@ tests = testGroup "hevm"
               _ -> liftIO $ assertFailure $ "read of the same mapping must be sat, got " <> show same
       | solver <- [Z3, Bitwuzla]
       ]
-    , test "keccak-alias-multiple-refinements" $ do
+    , test "keccak-alias-multiple-slots" $ do
       let foldedSlot key = keccak' (word256Bytes key <> word256Bytes 0)
           readB = Keccak (WriteWord (Lit 0) (Var "k") (ConcreteBuf (BS.replicate 32 0 <> word256Bytes 1)))
           store = ConcreteStore (Map.fromList [(foldedSlot 3, 2), (foldedSlot 4, 7)])
@@ -4903,24 +4903,13 @@ tests = testGroup "hevm"
           props = [PEq (Keccak buf2) (Lit 0x123)]
           concrete = concreteKeccaks props
       assertEqualM "Must find two keccaks" 2 (length concrete)
-    , test "recover-mapping-preimage" $ do
-      let pre key slot = word256Bytes key <> word256Bytes slot
-          lit = keccak' (pre 3 0)
-          far = keccak' (pre 0x5eed1234 0)
-      assertEqualM "small key and slot" (Just (pre 3 0, 0)) (recoverMappingPreimage mempty lit)
-      assertEqualM "struct field offset" (Just (pre 3 0, 5)) (recoverMappingPreimage mempty (lit + 5))
-      assertEqualM "unknown key" Nothing (recoverMappingPreimage mempty far)
-      assertEqualM "candidate key" (Just (pre 0x5eed1234 0, 0)) (recoverMappingPreimage (Set.singleton 0x5eed1234) far)
-    , test "keccak-alias-slot-literals" $ do
-      let foldedSlot = keccak' (word256Bytes 3 <> word256Bytes 0)
-          known = keccak' (word256Bytes 4 <> word256Bytes 0)
-          readB = Keccak (WriteWord (Lit 0) (Var "k") (ConcreteBuf (BS.replicate 32 0 <> word256Bytes 1)))
-          store = ConcreteStore (Map.fromList [(foldedSlot, 2), (known, 7)])
-          props = [ PNeg (PEq (SLoad readB store) (Lit 0))
-                  , PEq (Var "x") (Keccak (ConcreteBuf (word256Bytes 4 <> word256Bytes 0))) ]
-      conf <- readConfig
-      let SMT2 _ cexVars _ = fromRight (internalError "Must succeed") (assertProps conf props)
-      assertEqualM "only the literal without a known keccak is a candidate" (Set.singleton foldedSlot) cexVars.keccakAliases.slotLits
+    , test "recover-folded-mapping-slot" $ do
+      let pre = word256Bytes 0x5eed1234 <> word256Bytes 255
+          h = keccak' pre
+          props value offset = [PEq (SLoad (Var "k") (ConcreteStore (Map.singleton (h + offset) value))) (Lit 0)]
+      assertEqualM "unknown key" mempty (concreteKeccaks $ props 2 0)
+      assertEqualM "candidate key and field offset" (Set.singleton (ConcreteBuf pre, h)) (concreteKeccaks $ props 0x5eed1234 255)
+      assertEqualM "offset outside recovery range" mempty (concreteKeccaks $ props 0x5eed1234 256)
     , testCase "store-over-concrete-buffer" $ runEnv (testEnv {config = testEnv.config {simp = False}}) $ do
       let
         as = AbstractStore (SymAddr "test") Nothing
@@ -4928,7 +4917,7 @@ tests = testGroup "hevm"
         e1 = SLoad (Lit 0x1) (SStore (Lit 0x8) (SLoad (Lit 0x40) as) cs)
         eq = PEq e1 (Lit 0x0)
       conf <- readConfig
-      let SMT2 _ (CexVars _ _ _ storeReads _ _ _) _ = fromRight (internalError "Must succeed") (assertProps conf [eq])
+      let SMT2 _ (CexVars _ _ _ storeReads _ _) _ = fromRight (internalError "Must succeed") (assertProps conf [eq])
       let expected = StorageReads $ Map.singleton (SymAddr "test", Nothing) (Set.singleton (Lit 0x40))
       assertEqualM "Reads must be properly collected" storeReads expected
     , test "all-abstract-reads-detected" $ do
