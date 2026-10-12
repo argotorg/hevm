@@ -267,6 +267,22 @@ main = do
         mapM_ removeFile dumped
         stdout `shouldContain` "QED"
         filter ("-refined.smt2" `isSuffixOf`) dumped `shouldNotBe` []
+      -- a failing run leaves through an exit exception, which must not skip the summary
+      it "solver-summary" $ do
+        let summarised body = do
+              Just c <- runApp $ solcRuntime (T.pack "C") (T.pack ("contract C { function stuff(uint x, uint y) public { " <> body <> " } }"))
+              readProcessWithExitCode "cabal"
+                ["run", "exe:hevm", "--", "symbolic", "--code", Types.bsToHex c, "--verb", "2"] ""
+        (passCode, passOut, _) <- summarised "unchecked { require(x < 100 && y < 100); assert(x + y < 200); }"
+        passCode `shouldBe` ExitSuccess
+        passOut `shouldContain` "Queries answered:"
+        (failCode, failOut, _) <- summarised "unchecked { assert(x + y != 5); }"
+        failCode `shouldBe` ExitFailure 1
+        failOut `shouldContain` "Queries answered:"
+        (_, quietOut, _) <- do
+          Just c <- runApp $ solcRuntime (T.pack "C") (T.pack "contract C { function stuff(uint x, uint y) public { unchecked { assert(x + y != 5); } } }")
+          readProcessWithExitCode "cabal" ["run", "exe:hevm", "--", "symbolic", "--code", Types.bsToHex c] ""
+        quietOut `shouldNotContain` "Queries answered:"
       it "early-abort" $ do
         (exitCode, stdout, stderr) <- runForge "test/contracts/pass/early-abort.sol" ["--max-iterations", "1000", "--early-abort"]
         stderr `shouldNotContain` "CallStack"
