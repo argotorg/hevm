@@ -1157,8 +1157,8 @@ decomposeStorage = go
         pure (SLoad key base)
       _ -> Nothing
 
-    -- NOTE: we use (Maybe W256) for idx here, because for small slot numbers we want to keep the
-    -- Logical Store value a Nothing
+    -- Turns a storage slot expression into a pair (logical store id, index within that store)
+    -- The store id is Nothing for small slot numbers (< 256), which all share one logical store.
     inferLogicalIdx :: Expr EWord -> Maybe (Maybe W256, Expr EWord)
     inferLogicalIdx = \case
       Lit a | a >= 256 -> Nothing
