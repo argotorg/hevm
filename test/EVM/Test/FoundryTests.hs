@@ -159,6 +159,12 @@ tests = testGroup "Foundry tests"
     , test "Array-Mapping-Same-Slot-Fail" $ do
         let testFile = "test/contracts/fail/arrayMappingSameSlot.sol"
         executeSingleMethod testFile "prove_array_write_read" >>= assertEqualM "unwritten mapping read must falsify" (False, True)
+    , test "Keccak-Literal-Slot" $ do
+        let testFile = "test/contracts/pass/keccakLiteralSlot.sol"
+        executeSingleMethod testFile "prove_other_mapping" >>= assertEqualM "folded slot literal must not alias another mapping" (True, True)
+    , test "Keccak-Literal-Slot-Fail" $ do
+        let testFile = "test/contracts/fail/keccakLiteralSlot.sol"
+        executeSingleMethod testFile "prove_same_mapping" >>= assertEqualM "folded slot literal of the same mapping must falsify" (False, True)
     , test "AssertApproxEqAbs-Pass" $ do
         let testFile = "test/contracts/pass/assertApproxEqAbs.sol"
         assertAllMethodsWithPrefix testFile "prove" (True, True)

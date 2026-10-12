@@ -77,7 +77,7 @@ import EVM.Types hiding (Env)
 import EVM.Effects
 import EVM.UnitTest (writeTrace, printWarnings)
 import EVM.Expr (maybeLitByteSimp)
-import EVM.Keccak (concreteKeccaks)
+import EVM.Keccak (concreteKeccaks, recoverMappingPreimage)
 
 import EVM.Expr.ExprTests qualified as ExprTests
 import EVM.Expr.RewriteFuzz qualified as RewriteFuzz
@@ -4798,7 +4798,35 @@ tests = testGroup "hevm"
       assertBoolM ("Expected only counterexamples, got: " <> show res) (all isCex res)
   ]
   , testGroup "calling-solvers"
-  [ testMaxBuf64 "no-error-on-large-buf" $ do
+  [ testGroup "keccak-alias-of-folded-slot-refined"
+      [ test (show solver) $ withSolvers solver 3 Nothing defMemLimit $ \s ->
+          forM_ [0, 5, 255] $ \offset -> do
+            let foldedSlot = keccak' (word256Bytes 3 <> word256Bytes 0) + offset
+                readAt slot = Add (Keccak (WriteWord (Lit 0) (Var "k") (ConcreteBuf (BS.replicate 32 0 <> word256Bytes slot)))) (Lit offset)
+                store = ConcreteStore (Map.singleton foldedSlot 2)
+                readQuery slot = [PNeg (PEq (SLoad (readAt slot) store) (Lit 0))]
+            other <- checkSatWithProps s (readQuery 1)
+            assertBoolM ("read of another mapping must be unsat, got " <> show other) (isQed other)
+            same <- checkSatWithProps s (readQuery 0)
+            case same of
+              Cex cex -> assertEqualM "same mapping must alias at k = 3" (Just 3) (Map.lookup (Var "k") cex.vars)
+              _ -> liftIO $ assertFailure $ "read of the same mapping must be sat, got " <> show same
+      | solver <- [Z3, Bitwuzla]
+      ]
+    , test "keccak-alias-multiple-refinements" $ do
+      let foldedSlot key = keccak' (word256Bytes key <> word256Bytes 0)
+          readB = Keccak (WriteWord (Lit 0) (Var "k") (ConcreteBuf (BS.replicate 32 0 <> word256Bytes 1)))
+          store = ConcreteStore (Map.fromList [(foldedSlot 3, 2), (foldedSlot 4, 7)])
+      withDefaultSolver $ \s -> do
+        res <- checkSatWithProps s [PNeg (PEq (SLoad readB store) (Lit 0))]
+        assertBoolM ("all folded slots must be separated, got " <> show res) (isQed res)
+    , test "keccak-alias-unrecoverable-keeps-model" $ do
+      let readB = Keccak (WriteWord (Lit 0) (Var "k") (ConcreteBuf (BS.replicate 32 0 <> word256Bytes 1)))
+          store = ConcreteStore (Map.singleton 0xdeadbeef 2)
+      withDefaultSolver $ \s -> do
+        res <- checkSatWithProps s [PNeg (PEq (SLoad readB store) (Lit 0))]
+        assertBoolM ("unrecoverable literals must stay unconstrained, got " <> show res) (isCex res)
+    , testMaxBuf64 "no-error-on-large-buf" $ do
       -- These two tests generates a very large buffer that previously would cause an internalError when
       -- printed via "formatCex". We should be able to print it now.
       Just c <- solcRuntime "MyContract" [i|
@@ -4875,6 +4903,24 @@ tests = testGroup "hevm"
           props = [PEq (Keccak buf2) (Lit 0x123)]
           concrete = concreteKeccaks props
       assertEqualM "Must find two keccaks" 2 (length concrete)
+    , test "recover-mapping-preimage" $ do
+      let pre key slot = word256Bytes key <> word256Bytes slot
+          lit = keccak' (pre 3 0)
+          far = keccak' (pre 0x5eed1234 0)
+      assertEqualM "small key and slot" (Just (pre 3 0, 0)) (recoverMappingPreimage mempty lit)
+      assertEqualM "struct field offset" (Just (pre 3 0, 5)) (recoverMappingPreimage mempty (lit + 5))
+      assertEqualM "unknown key" Nothing (recoverMappingPreimage mempty far)
+      assertEqualM "candidate key" (Just (pre 0x5eed1234 0, 0)) (recoverMappingPreimage (Set.singleton 0x5eed1234) far)
+    , test "keccak-alias-slot-literals" $ do
+      let foldedSlot = keccak' (word256Bytes 3 <> word256Bytes 0)
+          known = keccak' (word256Bytes 4 <> word256Bytes 0)
+          readB = Keccak (WriteWord (Lit 0) (Var "k") (ConcreteBuf (BS.replicate 32 0 <> word256Bytes 1)))
+          store = ConcreteStore (Map.fromList [(foldedSlot, 2), (known, 7)])
+          props = [ PNeg (PEq (SLoad readB store) (Lit 0))
+                  , PEq (Var "x") (Keccak (ConcreteBuf (word256Bytes 4 <> word256Bytes 0))) ]
+      conf <- readConfig
+      let SMT2 _ cexVars _ = fromRight (internalError "Must succeed") (assertProps conf props)
+      assertEqualM "only the literal without a known keccak is a candidate" (Set.singleton foldedSlot) cexVars.keccakAliases.slotLits
     , testCase "store-over-concrete-buffer" $ runEnv (testEnv {config = testEnv.config {simp = False}}) $ do
       let
         as = AbstractStore (SymAddr "test") Nothing
@@ -4882,7 +4928,7 @@ tests = testGroup "hevm"
         e1 = SLoad (Lit 0x1) (SStore (Lit 0x8) (SLoad (Lit 0x40) as) cs)
         eq = PEq e1 (Lit 0x0)
       conf <- readConfig
-      let SMT2 _ (CexVars _ _ _ storeReads _ _) _ = fromRight (internalError "Must succeed") (assertProps conf [eq])
+      let SMT2 _ (CexVars _ _ _ storeReads _ _ _) _ = fromRight (internalError "Must succeed") (assertProps conf [eq])
       let expected = StorageReads $ Map.singleton (SymAddr "test", Nothing) (Set.singleton (Lit 0x40))
       assertEqualM "Reads must be properly collected" storeReads expected
     , test "all-abstract-reads-detected" $ do

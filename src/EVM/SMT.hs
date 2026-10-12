@@ -15,6 +15,8 @@ module EVM.SMT
   assertProps,
   assertPropsAbstract,
   AbstractQuery(..),
+  assertSMT,
+  queryValue,
   encodeConcreteStore,
   parseVar,
   parseEAddr,
@@ -64,7 +66,7 @@ import EVM.Format (formatProp)
 import EVM.CSE
 import EVM.Expr (bufLengthEnv, bufLength, minLength, inRange)
 import EVM.Expr qualified as Expr
-import EVM.Keccak (keccakAssumptions, concreteKeccaks, findKeccakPropsExprs)
+import EVM.Keccak (keccakAssumptions, concreteKeccaks, findKeccakPropsExprs, keccakAliases)
 import EVM.Traversals
 import EVM.Types
 import EVM.Effects
@@ -243,7 +245,10 @@ assertPropsHelperWith arithEnc simp extraDecls psPreConc = do
       pure (SMTComment "read assumptions" : assumps)
 
     cexInfo :: StorageReads -> CexVars
-    cexInfo a = mempty { storeReads = a }
+    cexInfo a = mempty
+      { storeReads = a
+      , keccakAliases = keccakAliases (Set.toList allKeccaks) (Set.map snd concreteKecc) psElim bufVals storeVals
+      }
 
 
 referencedAbstractStores :: TraversableTerm a => a -> Set Builder

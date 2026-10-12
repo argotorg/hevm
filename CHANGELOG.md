@@ -159,6 +159,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   terms in errors and partial executions, `BALANCE` addresses and log topics.
 - Storage reads now skip writes at lower struct field offsets as well as higher
   offsets. Unsigned subtraction previously left these reads unresolved.
+- Recover compiler-folded mapping slot preimages when they alias symbolic keccaks,
+  preventing spurious counterexamples ([#1103](https://github.com/argotorg/hevm/issues/1103)).
 - Storage decomposition no longer swaps key and slot for concrete mapping
   hashes, which caused spurious counterexamples and false proofs when concrete
   and symbolic mapping accesses were mixed ([#1099](https://github.com/argotorg/hevm/issues/1099)).

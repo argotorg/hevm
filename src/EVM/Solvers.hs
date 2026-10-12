@@ -37,7 +37,9 @@ import Control.Monad.IO.Unlift
 import Data.List qualified as List
 import Data.Map (Map)
 import Data.Map qualified as Map
+import Data.ByteString qualified as BS
 import Data.Set (Set, isSubsetOf, fromList, toList)
+import Data.Set qualified as Set
 import Data.Maybe (fromMaybe, isJust, fromJust)
 import Data.Either (isLeft)
 import Data.Foldable (for_)
@@ -57,7 +59,7 @@ import Data.Bits ((.&.))
 import Numeric (showHex)
 import EVM.Expr (simplifyProps)
 
-import EVM.Keccak qualified as Keccak (concreteKeccaks)
+import EVM.Keccak qualified as Keccak (concreteKeccaks, recoverMappingPreimage, knownKeccakAssumptions)
 import EVM.SMT
 import EVM.Format (formatProp)
 import EVM.Types
@@ -408,7 +410,8 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props s
       | pending == mempty = PhaseRefined
       | otherwise = PhaseAbstract
     checkSatIn conf inst query pending = do
-      result <- sendCommand inst $ SMTCommand "(check-sat)"
+      result <- sendCommand inst (SMTCommand "(check-sat)")
+        >>= refineKeccakAliases conf inst query fileCounter cexvars.keccakAliases
       let done res = pure (res, phaseOf pending)
       case result of
         "unsat" -> do
@@ -435,6 +438,34 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props s
           in case supportIssue of
            True -> done . Error $ "SMT solver reported unsupported operation: " <> T.unpack result
            False -> done . Unknown $ "Unable to parse SMT solver output (maybe it got killed?): " <> T.unpack result
+
+-- | Re-check aliases after recovering their preimages. Unrecoverable literals stay unconstrained.
+refineKeccakAliases :: Config -> SolverInstance -> SMT2 -> Int -> KeccakAliases -> Text -> IO Text
+refineKeccakAliases conf inst smt2 fileCounter info = go info.slotLits smt2 (0 :: Int)
+  where
+    go unresolved fullSmt n "sat" | not (Set.null unresolved) = do
+      mvals <- runMaybeT $ mapM (queryValue (getValue inst)) info.terms
+      let aliased = case mvals of
+            Nothing -> []
+            Just vals -> filter (\l -> any (\v -> v <= l && l - v < 256) vals) (Set.toList unresolved)
+          recovered = [ (l, pre) | l <- aliased, Just (pre, _) <- [Keccak.recoverMappingPreimage info.keyCands l] ]
+          props = concatMap (\(_, pre) -> Keccak.knownKeccakAssumptions pre info.terms) recovered
+      case mapM assertSMT props of
+        Right cmds | not (null recovered) -> do
+          let newSmt = fullSmt <> SMT2 (SMTScript cmds) mempty mempty
+          when conf.debug $ forM_ recovered $ \(l, pre) -> putStrLn $
+            "   Keccak alias of storage literal 0x" <> showHex l "" <> ", recovered mapping preimage 0x"
+              <> concatMap (\b -> (if b < 16 then "0" else "") <> showHex b "") (BS.unpack pre) <> ", re-checking"
+          when conf.dumpQueries $
+            writeSMT2File newSmt "." (show fileCounter <> "-keccak-" <> show n)
+          sent <- sendScript inst (SMTScript cmds)
+          case sent of
+            Left _ -> pure "unknown"
+            Right () -> do
+              answer <- sendCommand inst $ SMTCommand "(check-sat)"
+              go (foldr (Set.delete . fst) unresolved recovered) newSmt (n + 1) answer
+        _ -> pure "sat"
+    go _ _ _ answer = pure answer
 
 -- Cancelling act still runs its cleanup (stopSolver kills the solver, signalQSem frees the slot)
 abortable :: Maybe (TVar Bool) -> a -> IO a -> IO a
