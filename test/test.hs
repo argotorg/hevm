@@ -1014,7 +1014,7 @@ tests = testGroup "hevm"
     ]
   , testGroup "Arith"
     -- Tests adapted from halmos (tests/regression/test/Arith.t.sol, tests/solver/test/SignedDiv.t.sol, tests/solver/test/Math.t.sol)
-    [ test "math-avg" $ do
+    [ testAbstractArith "math-avg" $ do
         Just c <- solcRuntime "C" [i|
           contract C {
             function prove_Avg(uint a, uint b) external pure {
@@ -1028,7 +1028,7 @@ tests = testGroup "hevm"
           } |]
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertEqualM "Must be QED" [] res
-      , test "unsigned-div-by-zero" $ do
+      , testAbstractArith "unsigned-div-by-zero" $ do
         Just c <- solcRuntime "C" [i|
           contract C {
             function prove_unsigned_div_by_zero(uint256 a) external pure {
@@ -1039,7 +1039,7 @@ tests = testGroup "hevm"
           } |]
         (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertEqualM "Must be QED" [] res
-      , test "arith-div-pass" $ do
+      , testAbstractArith "arith-div-pass" $ do
         Just c <- solcRuntime "C" [i|
           contract C {
             function prove_Div_pass(uint x, uint y) external pure {
@@ -1052,7 +1052,7 @@ tests = testGroup "hevm"
           } |]
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertEqualM "Must be QED" [] res
-    , test "arith-div-fail" $ do
+    , testAbstractArith "arith-div-fail" $ do
         Just c <- solcRuntime "C" [i|
           contract C {
             function prove_Div_fail(uint x, uint y) external pure {
@@ -1064,7 +1064,7 @@ tests = testGroup "hevm"
           } |]
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertBoolM "Expected counterexample" (any isCex res)
-    , test "arith-mod-fail" $ do
+    , testAbstractArith "arith-mod-fail" $ do
         Just c <- solcRuntime "C" [i|
           contract C {
             function prove_Mod_fail(uint x, uint y) external pure {
