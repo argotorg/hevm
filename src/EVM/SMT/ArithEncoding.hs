@@ -9,6 +9,7 @@
 module EVM.SMT.ArithEncoding
   ( divModGroundTruth
   , mulGroundTruth
+  , saturatedGroundTruth
   , divModEncoding
   , divModAbstractDecls
   , mulEncoding
@@ -18,7 +19,9 @@ import Data.Bits (countTrailingZeros)
 import Data.Text.Lazy.Builder (Builder, fromString)
 
 import EVM.SMT.AbstractBase
-import EVM.SMT.AbstractLemmas (collectLemmas, emitLemma, lemmaFamily)
+import Data.Containers.ListUtils (nubOrd)
+
+import EVM.SMT.AbstractLemmas (collectLemmas, emitLemma, lemmaFamily, lemmaDivs)
 import EVM.SMT.SMTLIB (sp, zero, wordAsBV)
 import EVM.SMT.Types
 import EVM.Types (Prop, EType(EWord), Err, W256, Expr, Expr(Lit), Expr(SHL))
@@ -82,8 +85,10 @@ assertAbstEqResult enc unsignedResult (kind, a, b) = do
 -- uninterpreted function equals the native one,
 -- e.g. (assert (= (abst_evm_bvsdiv a b) (ite (= b 0) 0 (bvsdiv a b))))
 divModGroundTruth :: Enc -> [Prop] -> Err [SMTEntry]
-divModGroundTruth enc props = do
-  let allDivMods = collectFrom collectDivMods props
+divModGroundTruth enc props = divModTruthFor enc (collectFrom collectDivMods props)
+
+divModTruthFor :: Enc -> [DivModOp] -> Err [SMTEntry]
+divModTruthFor enc allDivMods = do
   if null allDivMods then pure []
   else do
     axioms <- mapM mkGroundTruthAxiom allDivMods
@@ -103,8 +108,24 @@ divModGroundTruth enc props = do
 -- | Equate every abstract multiplication in the properties with native
 -- bit-vector multiplication.
 mulGroundTruth :: Enc -> [Prop] -> Err [SMTEntry]
-mulGroundTruth enc props = do
-  let allMuls = collectFrom collectMuls props
+mulGroundTruth enc props = mulTruthFor enc (collectFrom collectMuls props)
+
+-- | Ground truth for every abstract term the lemmas mention, not only the
+-- goal's. The refinement leaves the synthesized terms uninterpreted, which is
+-- enough to decide the goal but hides a false lemma about them; asserting this
+-- instead makes any false lemma instance a contradiction.
+saturatedGroundTruth :: Enc -> [Prop] -> Err [SMTEntry]
+saturatedGroundTruth enc props = do
+  let ctx = saturate props
+      extraDivs = concatMap lemmaDivs (collectLemmas ctx)
+      udivs = [ (IsUDiv, a, b) | (a, b) <- ctx.acUDivs <> extraDivs ]
+      muls = ctx.acMuls <> [ (b, a) | (a, b) <- ctx.acMuls ]
+  divTruth <- divModTruthFor enc (nubOrd (collectFrom collectDivMods props <> udivs))
+  mulTruth <- mulTruthFor enc (nubOrd muls)
+  pure (divTruth <> mulTruth)
+
+mulTruthFor :: Enc -> [(Expr EWord, Expr EWord)] -> Err [SMTEntry]
+mulTruthFor enc allMuls = do
   if null allMuls then pure []
   else do
     axioms <- mapM mkGroundTruthAxiom allMuls
@@ -114,7 +135,6 @@ mulGroundTruth enc props = do
     mkGroundTruthAxiom (a, b) = do
       aenc <- enc a
       benc <- enc b
-      -- collectMuls only yields symbolic*symbolic, so this is the abstract one
       let abstract = mulSMT (a, aenc) (b, benc)
           concrete = "(bvmul" `sp` aenc `sp` benc <> ")"
       pure $ SMTCommand $ "(assert (= " <> abstract <> " " <> concrete <> "))"

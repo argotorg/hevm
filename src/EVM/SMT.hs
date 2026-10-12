@@ -137,6 +137,8 @@ data AbstractQuery = AbstractQuery
   , refinement :: [SMTEntry]
     -- ^ equates the goal's abstract terms with the native ops, to re-check a
     -- SAT result with; empty if nothing is abstract
+  , saturatedTruth :: [SMTEntry]
+    -- ^ the same for every term the lemmas mention, see 'saturatedGroundTruth'
   , lemmaFamilies :: [String]
     -- ^ the family of each lemma instance in the query
   }
@@ -152,9 +154,11 @@ assertPropsAbstract conf ps = do
   (families, mulLemmas) <- mulEncoding enc goalPs
   divTruth <- divModGroundTruth enc goalPs
   mulTruth <- mulGroundTruth enc goalPs
+  saturated <- saturatedGroundTruth enc goalPs
   pure AbstractQuery
     { query = base <> SMT2 (SMTScript (shiftBounds <> mulLemmas)) mempty mempty
     , refinement = divTruth <> mulTruth
+    , saturatedTruth = saturated
     , lemmaFamilies = families
     }
   where

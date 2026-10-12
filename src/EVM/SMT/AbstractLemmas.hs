@@ -15,6 +15,7 @@ module EVM.SMT.AbstractLemmas
   ( LemmaInst(..)
   , collectLemmas
   , lemmaFamily
+  , lemmaDivs
   , emitLemma
   ) where
 
@@ -59,6 +60,13 @@ lemmaFamily = \case
   FracReduce{} -> "fraction reduction"
   CeilDivCancel{} -> "ceilDiv cancellation"
   Telescope{} -> "telescope"
+
+-- | Divisions an instance's assertion mentions that are neither in the goal
+-- nor in the saturated set.
+lemmaDivs :: LemmaInst -> [(Expr EWord, Expr EWord)]
+lemmaDivs = \case
+  FracReduce _ c1 c2 x -> [(x, Lit (c2 `div` c1))]
+  _ -> []
 
 -- | Every lemma instance triggered by the saturated term set, in emission
 -- order. One clause per family; see 'emitLemma' for the math.
