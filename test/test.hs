@@ -960,7 +960,7 @@ tests = testGroup "hevm"
         (e, res) <- withDefaultSolver $
           \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
         liftIO $ printWarnings Nothing mempty e res "the contracts under test"
-        assertEqualM "Must be QED" res []
+        assertEqualM "Must be QED" [] res
     , test "extcodesize-symbolic2" $ do
         Just c <- solcRuntime "C"
           [i|
@@ -1067,7 +1067,7 @@ tests = testGroup "hevm"
     , test "arith-mod-fail" $ do
         Just c <- solcRuntime "C" [i|
           contract C {
-            function prove_Div_fail(uint x, uint y) external pure {
+            function prove_Mod_fail(uint x, uint y) external pure {
               require(x > y);
               uint q;
               assembly { q := mod(x, y) }
@@ -1126,7 +1126,7 @@ tests = testGroup "hevm"
         let sig = (Just $ Sig "prove_div_values(int128,int128)" [AbiIntType 128, AbiIntType 128])
         -- natively this times out
         (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        assertEqualM "Must be QED" res []
+        assertEqualM "Must be QED" [] res
     -- "make verify-hevm T=prove_div_negative_divisor" in https://github.com/gustavo-grieco/abdk-math-64.64-verification
     , testAbstractArith "prove_div_negative_divisor" $ do
         Just c <- solcRuntime "C" [i|
@@ -1170,7 +1170,7 @@ tests = testGroup "hevm"
         let sig = (Just $ Sig "prove_div_negative_divisor(int128,int128)" [AbiIntType 128, AbiIntType 128])
         -- natively this times out
         (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        assertEqualM "Must be QED" res []
+        assertEqualM "Must be QED" [] res
 
     , testAbstractArith "sdiv-by-one" $ do
         Just c <- solcRuntime "C" [i|
@@ -1182,7 +1182,7 @@ tests = testGroup "hevm"
             }
           } |]
         (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-        assertEqualM "Must be QED" res []
+        assertEqualM "Must be QED" [] res
     , testAbstractArith "sdiv-by-neg-one" $ do
         Just c <- solcRuntime "C" [i|
           contract C {
@@ -1197,7 +1197,7 @@ tests = testGroup "hevm"
             }
           } |]
         (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-        assertEqualM "Must be QED" res []
+        assertEqualM "Must be QED" [] res
     , testAbstractArith "sdiv-intmin-by-two" $ do
         Just c <- solcRuntime "C" [i|
           contract C {
@@ -1223,7 +1223,7 @@ tests = testGroup "hevm"
             }
           } |]
         (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-        assertEqualM "Must be QED" res []
+        assertEqualM "Must be QED" [] res
     , testAbstractArith "smod-intmin-by-three" $ do
         Just c <- solcRuntime "C" [i|
           contract C {
@@ -1234,7 +1234,7 @@ tests = testGroup "hevm"
             }
           } |]
         (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-        assertEqualM "Must be QED" res []
+        assertEqualM "Must be QED" [] res
     , testAbstractArith "sdiv-by-zero" $ do
         Just c <- solcRuntime "C" [i|
           contract C {
