@@ -66,7 +66,7 @@ import EVM.Effects
 import EVM.SMT.Types
 import EVM.SMT.SMTLIB
 import EVM.SMT.ArithEncoding
-import EVM.SMT.AbstractBase (DivModKind(..), abstFnName, concFnName, mulSMT)
+import EVM.SMT.AbstractBase (DivModKind(..), abstFnName, concFnName, mulSMT, shareTerms)
 
 
 -- ** Encoding ** ----------------------------------------------------------------------------------
@@ -150,20 +150,25 @@ assertPropsAbstract conf ps = do
   -- Lemmas and ground truth come from the helper's concretized props, the ones
   -- the goal is encoded from: raw props can keep storage reads that simplify
   -- away in the goal, so their terms would not match.
+  let (share, terms) = shareTerms goalPs
+      enc = exprToSMTWith AbstractArith . share
+  termDefs <- mapM defineTerm terms
   shiftBounds <- divModEncoding enc goalPs
   (families, mulLemmas) <- mulEncoding enc goalPs
   divTruth <- divModGroundTruth enc goalPs
   mulTruth <- mulGroundTruth enc goalPs
   saturated <- saturatedGroundTruth enc goalPs
   pure AbstractQuery
-    { query = base <> SMT2 (SMTScript (shiftBounds <> mulLemmas)) mempty mempty
+    { query = base <> SMT2 (SMTScript (termDefs <> shiftBounds <> mulLemmas)) mempty mempty
     , refinement = divTruth <> mulTruth
     , saturatedTruth = saturated
     , lemmaFamilies = families
     }
   where
-    enc = exprToSMTWith AbstractArith
     psDecomp = if conf.simp then decompose conf ps else ps
+    defineTerm (name, body) = do
+      encoded <- exprToSMTWith AbstractArith body
+      pure $ SMTCommand $ "(define-fun " <> fromText name <> " () (_ BitVec 256) " <> encoded <> ")"
 
 -- Note: we need a version that does NOT call simplify,
 -- because we make use of it to verify the correctness of our simplification

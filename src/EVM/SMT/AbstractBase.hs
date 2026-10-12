@@ -39,9 +39,15 @@ module EVM.SMT.AbstractBase
     -- * Abstract-term saturation
   , AbstractCtx(..)
   , saturate
+    -- * Term sharing
+  , shareTerms
   ) where
 
 import Data.Containers.ListUtils (nubOrd)
+import Data.List (foldl', sortOn)
+import Data.Map.Strict qualified as Map
+import Data.Monoid (Sum(..))
+import Data.Text qualified as TS
 import Data.Text.Lazy.Builder
 
 import EVM.SMT.SMTLIB (sp, zero)
@@ -244,3 +250,41 @@ saturate props =
       linkMuls  = [ (q, b) | (a, b) <- udivsAll, let q = T.Div a b, isAbstractMul q b ]
       allMuls   = nubOrd (muls <> linkMuls)
   in AbstractCtx { acUDivs = udivsAll, acMuls = allMuls, acConstMuls = constMuls }
+
+-- | Names for the arithmetic terms of the props, smallest first, each defined
+-- over the names of the terms inside it. The lemmas mention an operand many
+-- times over; encoding it through the returned substitution makes each mention
+-- a name rather than the whole term, which would otherwise be repeated at
+-- every level of nesting.
+shareTerms :: [Prop] -> (Expr EWord -> Expr EWord, [(TS.Text, Expr EWord)])
+shareTerms props = (mapExpr (named table), reverse defs)
+  where
+    terms = sortOn termSize (collectFrom arithTerm props)
+    (table, defs) = foldl' define (mempty, []) (zip [0 :: Int ..] terms)
+    define (tbl, ds) (i, term) =
+      let name = "arith_term_" <> TS.pack (show i)
+          -- the term is not in the table yet, so only what is inside it is named
+          body = mapExpr (named tbl) term
+      in (Map.insert body name tbl, (name, body) : ds)
+
+    termSize :: Expr EWord -> Int
+    termSize = getSum . foldExpr (const (Sum 1)) mempty
+
+    arithTerm :: Expr a -> [Expr EWord]
+    arithTerm e = case e of
+      T.Mul{}  -> [e]
+      T.Div{}  -> [e]
+      T.SDiv{} -> [e]
+      T.Mod{}  -> [e]
+      T.SMod{} -> [e]
+      _        -> []
+
+    named :: Map.Map (Expr EWord) TS.Text -> Expr a -> Expr a
+    named tbl e = case e of
+      T.Mul{}  -> look e
+      T.Div{}  -> look e
+      T.SDiv{} -> look e
+      T.Mod{}  -> look e
+      T.SMod{} -> look e
+      _        -> e
+      where look t = maybe t T.Var (Map.lookup t tbl)

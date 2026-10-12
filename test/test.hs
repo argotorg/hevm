@@ -4572,10 +4572,13 @@ tests = testGroup "hevm"
           emits what needle q = assertBool (what <> " missing:\n" <> q) (needle `List.isInfixOf` q)
       emits "link product" "(abst_evm_bvmul (abst_evm_bvudiv x y) y)" $
         abstractQuery [PEq (Div x y) z]
-      emits "synthetic division by a reused factor" "(abst_evm_bvudiv (abst_evm_bvmul y z) y)" $
-        abstractQuery [PEq (Add (Div x y) (Mul y z)) (Lit 5)]
-      emits "collapsed nested division" "(bvmul (abst_evm_bvudiv (abst_evm_bvmul x y) (_ bv7000 256)) (_ bv7000 256))" $
-        abstractQuery [PEq (Div (Div (Mul x y) (Lit 1000)) (Lit 7)) z]
+      -- the goal's own terms are referred to by name, smallest first
+      let reused = abstractQuery [PEq (Add (Div x y) (Mul y z)) (Lit 5)]
+      emits "shared term" "(define-fun arith_term_1 () (_ BitVec 256) (abst_evm_bvmul y z))" reused
+      emits "synthetic division by a reused factor" "(abst_evm_bvudiv arith_term_1 y)" reused
+      let nested = abstractQuery [PEq (Div (Div (Mul x y) (Lit 1000)) (Lit 7)) z]
+      emits "shared term" "(define-fun arith_term_0 () (_ BitVec 256) (abst_evm_bvmul x y))" nested
+      emits "collapsed nested division" "(bvmul (abst_evm_bvudiv arith_term_0 (_ bv7000 256)) (_ bv7000 256))" nested
   , testCase "abstract-lemma-section-only-when-lemmas-fire" $ do
       let header = "multiplication abstraction lemmas"
           -- a lone constant product triggers no lemma: const-mul monotonicity
