@@ -1915,6 +1915,29 @@ tests = testGroup "hevm"
           } |]
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertBoolM "Expected an off-by-one counterexample" (any isCex res)
+    -- natively these all time out
+    , provesAbstractly "muldiv-symbolic-denominator-cap" "uint256 a, uint256 n, uint256 d"
+        "require(a < (1<<128) && d < (1<<128) && n <= d); uint256 r; assembly { r := div(mul(a, n), d) } assert(r <= a);"
+    , provesAbstractly "share-price-falls-as-assets-grow" "uint256 a, uint256 ts, uint256 ta1, uint256 ta2"
+        "require(ta1 != 0 && ta1 <= ta2); uint256 s1; uint256 s2; assembly { s1 := div(mul(a, ts), ta1) s2 := div(mul(a, ts), ta2) } assert(s2 <= s1);"
+    , provesAbstractly "two-hop-fee-cap" "uint256 a, uint256 f1, uint256 f2, uint256 d"
+        "require(a < (1<<128) && d < (1<<128) && f1 <= d && f2 <= d); uint256 x; uint256 y; assembly { x := div(mul(a, f1), d) y := div(mul(x, f2), d) } assert(y <= a);"
+    , provesAbstractly "floor-rounding" "uint256 a, uint256 b, uint256 c"
+        "uint256 p; uint256 q; uint256 r; assembly { p := mul(a, b) q := div(p, c) r := mul(q, c) } assert(r <= p);"
+    , provesAbstractly "roundtrip-virtual-offset" "uint256 a, uint256 ts, uint256 ta"
+        "require(a < (1<<127) && ts < (1<<127) && ta < (1<<127)); uint256 s; uint256 o; assembly { s := div(mul(a, add(ts, 1)), add(ta, 1)) o := div(mul(s, add(ta, 1)), add(ts, 1)) } assert(o <= a);"
+    -- checked arithmetic: the overflow check is itself a division of the product
+    , provesAbstractly "checked-muldiv-cap" "uint256 a, uint256 n, uint256 d"
+        "require(a < (1<<128) && d < (1<<128) && n <= d && d != 0); uint256 r = a * n / d; assert(r <= a);"
+    , provesAbstractly "muldiv-monotone-literal-divisor" "uint256 a1, uint256 a2, uint256 p"
+        "require(a1 <= a2 && a2 < (1<<128) && p < (1<<128)); uint256 r1; uint256 r2; assembly { r1 := div(mul(a1, p), 1000000000000000000) r2 := div(mul(a2, p), 1000000000000000000) } assert(r1 <= r2);"
+    , abstractArithGap "gap-divmod-identity" "uint256 a, uint256 b"
+        "require(b != 0); uint256 r; assembly { r := add(mul(div(a, b), b), mod(a, b)) } assert(r == a);"
+    , abstractArithGap "gap-checked-mul-div-cancel" "uint256 x, uint256 y"
+        "require(y != 0); uint256 r = x * y / y; assert(r == x);"
+    -- the lemmas would need the cross term x2*w1, which the query never mentions
+    , abstractArithGap "gap-monotone-in-both-factors" "uint256 x1, uint256 x2, uint256 w1, uint256 w2"
+        "require(x1 <= x2 && w1 <= w2 && x2 < (1<<100) && w2 < (1<<100)); uint256 r1; uint256 r2; assembly { r1 := div(mul(x1, w1), 1000000000000000000) r2 := div(mul(x2, w2), 1000000000000000000) } assert(r1 <= r2);"
     ]
   , testGroup "max-iterations"
     [ test "concrete-loops-reached" $ do
@@ -4935,3 +4958,23 @@ abstractQuery ps = case assertPropsAbstract cfg ps of
 abstractPhase :: [Prop] -> IO (SMTResult, SolvePhase)
 abstractPhase ps = runEnv env $ withShortBitwuzlaSolver $ \s -> checkSatWithPropsPhase s Nothing ps
   where env = Env { config = testEnv.config { abstractArith = True, simp = False } }
+
+abstractArithContract :: Text -> Text -> App m => m (Maybe ByteString)
+abstractArithContract params body =
+  solcRuntime "C" ("contract C { function prove(" <> params <> ") external pure { " <> body <> " } }")
+
+-- | A function body whose assertions must verify with abstract arithmetic.
+provesAbstractly :: TestName -> Text -> Text -> TestTree
+provesAbstractly name params body = testAbstractArith name $ do
+  Just c <- abstractArithContract params body
+  (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+  assertEqualM "Must be QED" [] res
+
+-- | A true property that neither the lemmas nor the solver decide yet. When
+-- one of these starts verifying, move it to 'provesAbstractly'.
+abstractArithGap :: TestName -> Text -> Text -> TestTree
+abstractArithGap name params body = testAbstractArith name $ do
+  Just c <- abstractArithContract params body
+  (_, res) <- withSolvers Bitwuzla 1 (Just 1) defMemLimit $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+  assertBoolM "a true property must not be falsified" (not (any isCex res))
+  assertBoolM "expected no proof yet" (not (null res))
