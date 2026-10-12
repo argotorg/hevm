@@ -120,13 +120,13 @@ library
     EVM.UnitTest,
     EVM.Sign,
     EVM.Effects,
+    EVM.SMT.AbstractBase,
+    EVM.SMT.AbstractLemmas,
+    EVM.SMT.ArithEncoding,
   other-modules:
     EVM.CheatsTH,
     EVM.SMT.Types,
     EVM.SMT.SMTLIB,
-    EVM.SMT.AbstractBase,
-    EVM.SMT.AbstractLemmas,
-    EVM.SMT.ArithEncoding,
     Paths_hevm
   autogen-modules:
     Paths_hevm
