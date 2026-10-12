@@ -28,7 +28,7 @@ import EVM.SMT (AbstractQuery(..), SMT2(..), SMTScript(..), assertPropsAbstract)
 import EVM.Solvers hiding (checkSat)
 import EVM.Solvers qualified as Solvers (checkSat)
 import EVM.SymExec (subModel)
-import EVM.Traversals (foldExpr, mapExpr, mapExprM, mapProp)
+import EVM.Traversals (foldExpr, foldProp, mapExpr, mapExprM, mapProp)
 import EVM.Types hiding (Env)
 
 
@@ -137,6 +137,25 @@ storageTests = testGroup "Storage tests"
         (Just $ SLoad (Lit 0) emptyStore)
         (Expr.decomposeStorage $ SLoad (mappingConcrete 1 0)
           (SStore (mappingRead 0 "k") (Lit 3) emptyStore))
+    -- an array and a mapping on one slot would end up in the same logical store
+    , testCase "decompose-props-declines-array-and-mapping-on-one-slot" $ assertEqual errorMsg
+        Nothing
+        (Expr.decomposeStorageProps
+          [PEq (Lit 0) (SLoad (mappingRead 2 "k") (SStore (arrElem 2 (Var "i")) (Lit 3) emptyStore))])
+    , testCase "decompose-props-declines-clash-across-props" $ assertEqual errorMsg
+        Nothing
+        (Expr.decomposeStorageProps
+          [ PEq (Lit 0) (SLoad (mappingRead 2 "k") emptyStore)
+          , PEq (Lit 0) (SLoad (arrElem 2 (Var "i")) emptyStore) ])
+    , testCase "decompose-props-mixes-array-and-mapping-on-different-slots" $ assertEqual errorMsg
+        (Just [PEq (Lit 0) (SLoad (Var "k") emptyStore)])
+        (Expr.decomposeStorageProps
+          [PEq (Lit 0) (SLoad (mappingRead 1 "k") (SStore (arrElem 2 (Var "i")) (Lit 3) emptyStore))])
+    , testCase "decompose-props-declines-unrecognized-key" $ assertEqual errorMsg
+        Nothing
+        (Expr.decomposeStorageProps
+          [ PEq (Lit 0) (SLoad (mappingRead 1 "k") emptyStore)
+          , PEq (Lit 0) (SLoad (Var "x") emptyStore) ])
     -- decomposition: keys of the read array become offsets, writes to other stores are dropped
     , testCase "decompose-array-read-rebases-keys" $ assertEqual errorMsg
         (Just $ SLoad (Var "i") (SStore (Lit 0) (Lit 1) emptyStore))
@@ -1554,6 +1573,11 @@ simplifierFuzzTests cfg = testGroup "SimplifierPropertyTests"
         case mapExprM Expr.decomposeStorage simp of
           Nothing -> pure $ property Discard
           Just decomposed -> decomposeEquiv cfg (nubOrd $ storeKeys expr <> storeKeys simp) expr decomposed
+    -- the entry point the solver pipeline uses: it backs off, or the props keep their meaning
+    , testProperty "props-decompose" $ \(GenDecomposableProps props) -> ioProperty $
+        case Expr.decomposeStorageProps props of
+          Nothing -> pure $ label "declined" True
+          Just decomposed -> label "decomposed" <$> decomposeEquivProps cfg props decomposed
     , testProperty "byte-simplification" $ \(expr :: Expr Byte) -> ioProperty $ proveEquivExprWith cfg expr (Expr.simplify expr)
     , askOption $ \(QuickCheckTests n) -> testProperty "word-simplification" $ withMaxSuccess (min n 20) $ \(ZeroDepthWord expr) ->
         ioProperty $ proveEquivExprWith cfg expr (Expr.simplify expr)
@@ -1860,33 +1884,47 @@ withOneBitwuzla = withSolvers Bitwuzla 1 (Just 1) defMemLimit
 
 -- keccak is uninterpreted in SMT, so the no-aliasing assumption has to be asserted. A decomposed
 -- abstract base is a different SMT array per logical store, so tie each one to the original base
-decomposeEquiv :: Config -> [Expr EWord] -> Expr EWord -> Expr EWord -> IO Property
-decomposeEquiv cfg keys expr decomposed = do
-  let noAlias = [PNeg (PEq a b) | (a:rest) <- List.tails keys, b <- rest, storeId a /= storeId b]
-      link = [ PEq (SLoad k (AbstractStore a Nothing)) (SLoad logicalKey (AbstractStore a (Just idx)))
-             | a <- abstractAddrs expr, k <- keys, Just (idx, logicalKey) <- [logicalLoc k] ]
-  res <- checkSatWith cfg $ foldr PAnd (expr ./= decomposed) (noAlias <> link)
+decomposeAssumes :: [Expr EWord] -> [Expr EAddr] -> [Prop]
+decomposeAssumes keys addrs = noAlias <> link
+  where
+    noAlias = [PNeg (PEq a b) | (a:rest) <- List.tails keys, b <- rest, storeId a /= storeId b]
+    link = [ PEq (SLoad k (AbstractStore a Nothing)) (SLoad logicalKey (AbstractStore a (Just idx)))
+           | a <- addrs, k <- keys, Just (idx, logicalKey) <- [logicalLoc k] ]
+
+-- differ must be unsatisfiable under the assumptions
+checkDecomposed :: Show a => Config -> [Prop] -> Prop -> a -> IO Property
+checkDecomposed cfg assumes differ decomposed = do
+  res <- checkSatWith cfg $ foldr PAnd differ assumes
   -- a timeout proves nothing either way: discard it rather than count it as a pass
   pure $ counterexample ("decomposed: " <> show decomposed <> "\nresult: " <> show res) $
     not (isUnknown res) ==> isQed res
 
-storeKeys :: Expr a -> [Expr EWord]
-storeKeys = foldExpr go []
-  where
-    go :: Expr b -> [Expr EWord]
-    go = \case
-      SLoad k _ -> [k]
-      SStore k _ _ -> [k]
-      ConcreteStore m -> Lit <$> Map.keys m
-      _ -> []
+decomposeEquiv :: Config -> [Expr EWord] -> Expr EWord -> Expr EWord -> IO Property
+decomposeEquiv cfg keys expr decomposed =
+  checkDecomposed cfg (decomposeAssumes keys (nubOrd $ foldExpr abstractAddr [] expr)) (expr ./= decomposed) decomposed
 
-abstractAddrs :: Expr a -> [Expr EAddr]
-abstractAddrs = nubOrd . foldExpr go []
+decomposeEquivProps :: Config -> [Prop] -> [Prop] -> IO Property
+decomposeEquivProps cfg props decomposed = checkDecomposed cfg (decomposeAssumes keys addrs) differ decomposed
   where
-    go :: Expr b -> [Expr EAddr]
-    go = \case
-      AbstractStore a _ -> [a]
-      _ -> []
+    keys = nubOrd $ concatMap (foldProp storeKey []) props
+    addrs = nubOrd $ concatMap (foldProp abstractAddr []) props
+    (a, b) = (foldr PAnd (PBool True) props, foldr PAnd (PBool True) decomposed)
+    differ = POr (PAnd a (PNeg b)) (PAnd (PNeg a) b)
+
+storeKeys :: Expr a -> [Expr EWord]
+storeKeys = foldExpr storeKey []
+
+storeKey :: Expr a -> [Expr EWord]
+storeKey = \case
+  SLoad k _ -> [k]
+  SStore k _ _ -> [k]
+  ConcreteStore m -> Lit <$> Map.keys m
+  _ -> []
+
+abstractAddr :: Expr a -> [Expr EAddr]
+abstractAddr = \case
+  AbstractStore a _ -> [a]
+  _ -> []
 
 -- the logical store a key belongs to: Nothing for small slots
 storeId :: Expr EWord -> Maybe W256

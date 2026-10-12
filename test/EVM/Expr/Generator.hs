@@ -73,13 +73,16 @@ instance Arbitrary GenDecomposableLoad where
     ]
 
 genDecomposableLoad :: Int -> Gen (Expr EWord)
-genDecomposableLoad depth = do
+genDecomposableLoad = genLoadOver genDecomposableKey
+
+genLoadOver :: Gen (Expr EWord) -> Int -> Gen (Expr EWord)
+genLoadOver genKey depth = do
   n <- chooseInt (1, 6)
-  keys <- vectorOf n genDecomposableKey
+  keys <- vectorOf n genKey
   vals <- vectorOf n $ frequency $
     [ (3, Lit . fromIntegral <$> chooseInt (1, 9))
     , (3, Var <$> elements ["v0", "v1"])
-    ] <> [(1, genDecomposableLoad (depth - 1)) | depth > 0]
+    ] <> [(1, genLoadOver genKey (depth - 1)) | depth > 0]
   baseSlots <- Map.fromList <$> listOf1 ((,) <$> (fromIntegral <$> chooseInt (0, 3)) <*> (fromIntegral <$> chooseInt (1, 9)))
   base <- frequency
     [ (1, pure $ ConcreteStore mempty)
@@ -87,7 +90,7 @@ genDecomposableLoad depth = do
     , (2, (`AbstractStore` Nothing) <$> elements [SymAddr "a0", SymAddr "a1"])
     ]
   -- reading a written key, or a slot of the base, makes it likely that the read reaches deep
-  key <- oneof $ [genDecomposableKey, elements keys] <> [elements (Lit <$> Map.keys m) | ConcreteStore m <- [base], not (Map.null m)]
+  key <- oneof $ [genKey, elements keys] <> [elements (Lit <$> Map.keys m) | ConcreteStore m <- [base], not (Map.null m)]
   pure $ SLoad key (foldr (uncurry SStore) base (zip keys vals))
 
 genDecomposableKey :: Gen (Expr EWord)
@@ -103,9 +106,49 @@ genDecomposableKey = oneof
   ]
   where
     smallLit range = Lit . fromIntegral <$> chooseInt range
-    slotId len range = do
-      slot <- chooseInt range
-      pure $ BS.pack (replicate (len - 1) 0 ++ [fromIntegral slot])
+
+-- GenDecomposableProps
+-- Props over decomposable loads. Some contain what decomposition must back off from: a key of an
+-- unrecognized shape, an array and a mapping on the same slot, or an equality of whole stores.
+newtype GenDecomposableProps = GenDecomposableProps [Prop]
+  deriving (Show, Eq)
+
+instance Arbitrary GenDecomposableProps where
+  arbitrary = do
+    n <- chooseInt (1, 3)
+    props <- vectorOf n $ PEq <$> oneof [Lit . fromIntegral <$> chooseInt (0, 9), Var <$> elements ["r0", "r1"], load] <*> load
+    odd' <- frequency [(4, pure []), (1, pure <$> genUndecomposableProp)]
+    GenDecomposableProps <$> shuffle (props <> odd')
+    where
+      load = genLoadOver (frequency [(40, genDecomposableKey), (1, genOddKey)]) 1
+
+genOddKey :: Gen (Expr EWord)
+genOddKey = oneof
+  [ pure $ Var "x"
+  , pure $ Lit 1000
+  -- a mapping at a symbolic slot
+  , pure $ Keccak (WriteWord (Lit 32) (Var "s") (WriteWord (Lit 0) (Var "k0") (ConcreteBuf (BS.replicate 64 0))))
+  -- ids of the wrong length
+  , pure $ Expr.MappingSlot (BS.replicate 33 0) (Var "k0")
+  , pure $ Expr.ArraySlotWithOffs (BS.replicate 64 0) (Var "i0")
+  -- an array on a slot that the mappings use
+  , Expr.ArraySlotWithOffs <$> slotId 32 (4, 5) <*> (Var <$> elements ["i0", "i1"])
+  ]
+
+genUndecomposableProp :: Gen Prop
+genUndecomposableProp = oneof
+  [ pure $ PEq (SStore (Lit 0) (Var "v0") base) base
+  -- a concrete base with a slot that is not a small one
+  , pure $ PEq (Lit 1) (SLoad (Expr.MappingSlot (slot 64 4) (Var "k0")) (ConcreteStore (Map.singleton 1000 1)))
+  ]
+  where
+    base = AbstractStore (SymAddr "a0") Nothing
+    slot len n = BS.pack (replicate (len - 1) 0 ++ [n])
+
+slotId :: Int -> (Int, Int) -> Gen ByteString
+slotId len range = do
+  slot <- chooseInt range
+  pure $ BS.pack (replicate (len - 1) 0 ++ [fromIntegral slot])
 
 genByteStringKey :: W256 -> Gen (ByteString)
 genByteStringKey len = do
