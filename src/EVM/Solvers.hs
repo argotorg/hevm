@@ -12,6 +12,8 @@ module EVM.Solvers
   , checkSat
   , checkSatWithProps
   , checkSatWithPropsAbortable
+  , checkSatWithPropsPhase
+  , SolvePhase(..)
   , checkMulti
   , defMemLimit
   ) where
@@ -108,7 +110,15 @@ data SingleData = SingleData
   SMTScript -- refinement: asserted in the same solver and re-checked if the query is sat; empty for none
   (Maybe [Prop])
   (Maybe (TVar Bool)) -- shared abort flag; if another thread sets it, the query is cancelled and its solver killed
-  (Chan SMTResult) -- result channel
+  (Chan (SMTResult, SolvePhase)) -- result channel
+
+-- | Which query produced an answer
+data SolvePhase
+  = PhasePlain    -- ^ native arithmetic
+  | PhaseAbstract -- ^ the abstract query on its own
+  | PhaseRefined  -- ^ the abstract query with the ground truth asserted
+  | PhaseNone     -- ^ the simplifier, the UNSAT cache, or an encoding error
+  deriving (Show, Eq)
 
 -- returns True if a is a superset of any of the sets in bs
 supersetAny :: Set Prop -> [Set Prop] -> Bool
@@ -129,29 +139,30 @@ checkSatWithProps :: App m => SolverGroup -> [Prop] -> m (SMTResult)
 checkSatWithProps sg = checkSatWithPropsAbortable sg Nothing
 
 checkSatWithPropsAbortable :: App m => SolverGroup -> Maybe (TVar Bool) -> [Prop] -> m (SMTResult)
-checkSatWithPropsAbortable sg shouldAbort props = do
+checkSatWithPropsAbortable sg shouldAbort props = fst <$> checkSatWithPropsPhase sg shouldAbort props
+
+checkSatWithPropsPhase :: App m => SolverGroup -> Maybe (TVar Bool) -> [Prop] -> m (SMTResult, SolvePhase)
+checkSatWithPropsPhase sg shouldAbort props = do
   conf <- readConfig
   let psSimp = if conf.simp then simplifyProps props else props
-  if psSimp == [PBool False] then pure Qed
+  if psSimp == [PBool False] then pure (Qed, PhaseNone)
   else do
     let concreteKeccaks = fmap (\(buf,val) -> PEq (Lit val) (Keccak buf)) (toList $ Keccak.concreteKeccaks props)
     let allProps = if conf.simp then psSimp <> concreteKeccaks else psSimp
-    if not conf.abstractArith then do
-      let smt2 = assertProps conf allProps
-      if isLeft smt2 then pure $ Error $ getError smt2
-      else liftIO $ checkSat' sg (Just props) shouldAbort mempty smt2
+        native = liftIO $ checkSat' sg (Just props) shouldAbort mempty (assertProps conf allProps)
+    if not conf.abstractArith then native
     else case assertPropsAbstract conf allProps of
-      Left err -> pure $ Error err
-      Right (query, refinement) ->
-        liftIO $ checkSat' sg (Just props) shouldAbort (SMTScript refinement) (Right query)
+      Left err -> pure (Error err, PhaseNone)
+      Right q -> do
+        liftIO $ checkSat' sg (Just props) shouldAbort (SMTScript q.refinement) (Right q.query)
 
 -- When props is Nothing, the cache will not be filled or used
 checkSat :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> IO SMTResult
-checkSat sg props = checkSat' sg props Nothing mempty
+checkSat sg props smt2 = fst <$> checkSat' sg props Nothing mempty smt2
 
-checkSat' :: SolverGroup -> Maybe [Prop] -> Maybe (TVar Bool) -> SMTScript -> Err SMT2 -> IO SMTResult
+checkSat' :: SolverGroup -> Maybe [Prop] -> Maybe (TVar Bool) -> SMTScript -> Err SMT2 -> IO (SMTResult, SolvePhase)
 checkSat' (SolverGroup taskq) props shouldAbort refinement smt2 = do
-  if isLeft smt2 then pure $ Error $ getError smt2
+  if isLeft smt2 then pure (Error $ getError smt2, PhaseNone)
   else do
     -- prepare result channel
     resChan <- newChan
@@ -195,7 +206,7 @@ withSolvers solver count timeout maxMemory cont = do
           task <- liftIO $ readChan taskq
           case task of
             TaskSingle (SingleData _ _ props _ r) | isJust props && supersetAny (fromList (fromJust props)) knownUnsat -> do
-              liftIO $ writeChan r Qed
+              liftIO $ writeChan r (Qed, PhaseNone)
               when conf.debug $ liftIO $ putStrLn "   Qed found via cache!"
               orchestrate taskq cacheq solverSlots knownUnsat fileCounter
             _ -> do
@@ -290,14 +301,14 @@ getOneSol
   -> SMTScript          -- ^ refinement, re-checked in the same solver if the query is sat
   -> Maybe [Prop]       -- ^ props for the UNSAT cache
   -> Maybe (TVar Bool)  -- ^ shared abort flag
-  -> Chan SMTResult     -- ^ result channel
+  -> Chan (SMTResult, SolvePhase) -- ^ result channel
   -> TChan CacheEntry   -- ^ UNSAT cache channel
   -> QSem               -- ^ limits concurrent solvers
   -> Int                -- ^ query counter, for dump file names
   -> m ()
 getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props shouldAbort r cacheq solverSlots fileCounter = do
   conf <- readConfig
-  res <- liftIO $ abortable shouldAbort (Unknown "Query aborted") $ bracket_
+  res <- liftIO $ abortable shouldAbort (Unknown "Query aborted", phaseOf refinement) $ bracket_
     (waitQSem solverSlots)
     (signalQSem solverSlots)
     (do
@@ -307,46 +318,51 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props s
       case solver of
         -- answers without spawning a process, so queries can be dumped
         -- without a solver installed
-        EmptySolver -> pure $ Unknown "Result unknown by SMT solver"
+        EmptySolver -> pure (Unknown "Result unknown by SMT solver", phaseOf refinement)
         _ -> bracket
           (spawnSolver solver timeout maxMemory)
           (stopSolver)
           (\inst -> do
             out <- sendScript inst cmds
             case out of
-              Left e -> pure (Unknown $ "Issue while writing SMT to solver (maybe it got killed?): " <> T.unpack e)
+              Left e -> pure (Unknown $ "Issue while writing SMT to solver (maybe it got killed?): " <> T.unpack e, phaseOf refinement)
               Right () -> checkSatIn conf inst smt2 refinement
           )
     )
   liftIO $ writeChan r res
   where
+    phaseOf pending
+      | refinement == mempty = PhasePlain
+      | pending == mempty = PhaseRefined
+      | otherwise = PhaseAbstract
     checkSatIn conf inst query pending = do
       result <- sendCommand inst $ SMTCommand "(check-sat)"
+      let done res = pure (res, phaseOf pending)
       case result of
         "unsat" -> do
           when (isJust props) $ liftIO . atomically $ writeTChan cacheq (CacheEntry (fromJust props))
-          pure Qed
-        "timeout" -> pure $ Unknown "Result timeout by SMT solver"
+          done Qed
+        "timeout" -> done $ Unknown "Result timeout by SMT solver"
         "unknown" -> do
           dumpUnsolved query fileCounter conf.dumpUnsolved
-          pure $ Unknown "Result unknown by SMT solver"
+          done $ Unknown "Result unknown by SMT solver"
         "sat" | pending /= mempty -> do
           out <- sendScript inst pending
           case out of
-            Left e -> pure (Unknown $ "Issue while writing SMT refinement to solver (maybe it got killed?): " <> T.unpack e)
+            Left e -> done (Unknown $ "Issue while writing SMT refinement to solver (maybe it got killed?): " <> T.unpack e)
             Right () -> checkSatIn conf inst (query <> SMT2 pending mempty mempty) mempty
         "sat" -> do
           mmodel <- getModel inst cexvars
           case mmodel of
-            Just model -> pure $ Cex model
-            Nothing -> pure $ Unknown "Solver died while extracting model"
+            Just model -> done $ Cex model
+            Nothing -> done $ Unknown "Solver died while extracting model"
         _ -> let  supportIssue =
                       ("does not yet support" `T.isInfixOf` result)
                       || ("unsupported" `T.isInfixOf` result)
                       || ("not support" `T.isInfixOf` result)
           in case supportIssue of
-           True -> pure . Error $ "SMT solver reported unsupported operation: " <> T.unpack result
-           False -> pure . Unknown $ "Unable to parse SMT solver output (maybe it got killed?): " <> T.unpack result
+           True -> done . Error $ "SMT solver reported unsupported operation: " <> T.unpack result
+           False -> done . Unknown $ "Unable to parse SMT solver output (maybe it got killed?): " <> T.unpack result
 
 -- Cancelling act still runs its cleanup (stopSolver kills the solver, signalQSem frees the slot)
 abortable :: Maybe (TVar Bool) -> a -> IO a -> IO a

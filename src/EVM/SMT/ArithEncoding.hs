@@ -18,7 +18,7 @@ import Data.Bits (countTrailingZeros)
 import Data.Text.Lazy.Builder (Builder, fromString)
 
 import EVM.SMT.AbstractBase
-import EVM.SMT.AbstractLemmas (collectLemmas, emitLemma)
+import EVM.SMT.AbstractLemmas (collectLemmas, emitLemma, lemmaFamily)
 import EVM.SMT.SMTLIB (sp, zero, wordAsBV)
 import EVM.SMT.Types
 import EVM.Types (Prop, EType(EWord), Err, W256, Expr, Expr(Lit), Expr(SHL))
@@ -27,11 +27,13 @@ import EVM.Types (Prop, EType(EWord), Err, W256, Expr, Expr(Lit), Expr(SHL))
 -- algebraic facts catalogued in
 -- "EVM.SMT.AbstractLemmas". 'saturate' closes the term set the lemmas range
 -- over; 'collectLemmas' picks the instances; 'emitLemma' renders each to SMT.
-mulEncoding :: Enc -> [Prop] -> Err [SMTEntry]
+-- Also returns the family of every instance, for reporting.
+mulEncoding :: Enc -> [Prop] -> Err ([String], [SMTEntry])
 mulEncoding enc props = do
-  lemmas <- concat <$> mapM (emitLemma enc) (collectLemmas (saturate props))
-  pure $ if null lemmas then []
-         else SMTComment "multiplication abstraction lemmas" : lemmas
+  let insts = collectLemmas (saturate props)
+  lemmas <- concat <$> mapM (emitLemma enc) insts
+  pure (fmap lemmaFamily insts, if null lemmas then []
+         else SMTComment "multiplication abstraction lemmas" : lemmas)
 
 -- | The variables an op introduces, named from its index. 'mkCongruenceLinks'
 -- refers to the same ones, so both derive them here rather than agreeing by

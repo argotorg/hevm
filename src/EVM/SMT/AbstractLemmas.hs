@@ -14,6 +14,7 @@
 module EVM.SMT.AbstractLemmas
   ( LemmaInst(..)
   , collectLemmas
+  , lemmaFamily
   , emitLemma
   ) where
 
@@ -41,6 +42,23 @@ data LemmaInst
   | CeilDivCancel (Expr EWord) W256 W256 (Expr EWord)                  -- ^ ceilDiv(c1*x,c2) inner divide
   | Telescope     (Expr EWord) (Expr EWord) W256 W256                  -- ^ (a*b)/c - (a*(b-k))/c == a*(k/c)
   deriving (Eq, Ord)
+
+-- | The family an instance belongs to, for reporting which lemmas fired.
+lemmaFamily :: LemmaInst -> String
+lemmaFamily = \case
+  Comm{} -> "commutativity"
+  Identity{} -> "zero/one identity"
+  DivMulLink{} -> "div-mul link"
+  MulMono{} -> "mul monotonicity"
+  DivMono{} -> "dividend monotonicity"
+  DivisorMono{} -> "divisor monotonicity"
+  MulDivBound{} -> "mulDiv bound"
+  ConstMulMono{} -> "const-mul monotonicity"
+  ConstCancel{} -> "const cancellation"
+  NestedDiv{} -> "nested-division collapse"
+  FracReduce{} -> "fraction reduction"
+  CeilDivCancel{} -> "ceilDiv cancellation"
+  Telescope{} -> "telescope"
 
 -- | Every lemma instance triggered by the saturated term set, in emission
 -- order. One clause per family; see 'emitLemma' for the math.

@@ -4928,5 +4928,5 @@ expectedConcVals nm val = case val of
 abstractQuery :: [Prop] -> String
 abstractQuery ps = case assertPropsAbstract cfg ps of
   Left e -> internalError $ "could not encode abstract query: " <> e
-  Right (smt2, _) -> TL.unpack (formatSMT2 smt2)
+  Right q -> TL.unpack (formatSMT2 q.query)
   where cfg = testEnv.config { abstractArith = True, simp = False }

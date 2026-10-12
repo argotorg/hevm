@@ -14,6 +14,7 @@ module EVM.SMT
   declareIntermediates,
   assertProps,
   assertPropsAbstract,
+  AbstractQuery(..),
   encodeConcreteStore,
   parseVar,
   parseEAddr,
@@ -131,20 +132,31 @@ assertProps conf ps =
   if not conf.simp then assertPropsHelperWith ConcreteArith False [] ps
   else assertPropsHelperWith ConcreteArith True [] (decompose conf ps)
 
+data AbstractQuery = AbstractQuery
+  { query :: SMT2
+  , refinement :: [SMTEntry]
+    -- ^ equates the goal's abstract terms with the native ops, to re-check a
+    -- SAT result with; empty if nothing is abstract
+  , lemmaFamilies :: [String]
+    -- ^ the family of each lemma instance in the query
+  }
+
 -- | Assert props with abstract div/mod/mul (uninterpreted functions + lemmas).
--- Also returns the ground truth equating them with the native ops, empty if
--- there is nothing abstract, to re-check a SAT result with.
-assertPropsAbstract :: Config -> [Prop] -> Err (SMT2, [SMTEntry])
+assertPropsAbstract :: Config -> [Prop] -> Err AbstractQuery
 assertPropsAbstract conf ps = do
   base@(SMT2 _ _ goalPs) <- assertPropsHelperWith AbstractArith conf.simp divModAbstractDecls psDecomp
   -- Lemmas and ground truth come from the helper's concretized props, the ones
   -- the goal is encoded from: raw props can keep storage reads that simplify
   -- away in the goal, so their terms would not match.
   shiftBounds <- divModEncoding enc goalPs
-  mulLemmas <- mulEncoding enc goalPs
+  (families, mulLemmas) <- mulEncoding enc goalPs
   divTruth <- divModGroundTruth enc goalPs
   mulTruth <- mulGroundTruth enc goalPs
-  pure (base <> SMT2 (SMTScript (shiftBounds <> mulLemmas)) mempty mempty, divTruth <> mulTruth)
+  pure AbstractQuery
+    { query = base <> SMT2 (SMTScript (shiftBounds <> mulLemmas)) mempty mempty
+    , refinement = divTruth <> mulTruth
+    , lemmaFamilies = families
+    }
   where
     enc = exprToSMTWith AbstractArith
     psDecomp = if conf.simp then decompose conf ps else ps
