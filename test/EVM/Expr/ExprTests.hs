@@ -11,7 +11,7 @@ import Test.Tasty.QuickCheck hiding (Failure, Success)
 
 import Data.Bits (shiftL)
 import Data.ByteString (ByteString)
-import Data.ByteString qualified as BS (pack)
+import Data.ByteString qualified as BS (drop, length, pack, take)
 import Data.Containers.ListUtils (nubOrd)
 import Data.List qualified as List (nub, tails)
 import Data.Map.Strict qualified as Map
@@ -23,7 +23,7 @@ import EVM.Expr.Generator
 import EVM.Format (hexText)
 import EVM.Solvers hiding (checkSat)
 import EVM.SymExec (subModel)
-import EVM.Traversals (mapExprM)
+import EVM.Traversals (foldExpr, mapExprM)
 import EVM.Types hiding (Env)
 
 
@@ -1525,18 +1525,18 @@ simplifierFuzzTests = testGroup "SimplifierPropertyTests"
         proveEquivExpr buflen (Expr.simplify buflen)
     , testProperty "store-simplification" $ \(expr :: Expr Storage) -> ioProperty $ proveEquivExpr expr (Expr.simplify expr)
     , testProperty "load-simplification" $ \(GenWriteStorageLoad expr) -> ioProperty $ proveEquivExpr expr (Expr.simplify expr)
-    -- over a concrete base, decomposition must not change the loaded value, given its assumption
-    -- that keys of different stores never alias (keccak is uninterpreted in SMT, so assert it)
+    -- decomposition must not change the loaded value, given its assumption that keys of different
+    -- stores never alias
     , testProperty "load-decompose" $ \(GenDecomposableLoad expr) -> ioProperty $
-        case Expr.decomposeStorage expr of
+        case mapExprM Expr.decomposeStorage expr of
           Nothing -> pure $ counterexample "decomposition failed" False
-          Just decomposed -> do
-            let keys = storeKeys expr
-                noAlias = [PNeg (PEq a b) | (a:rest) <- List.tails keys, b <- rest, storeId a /= storeId b]
-            res <- checkSat $ foldr PAnd (expr ./= decomposed) noAlias
-            -- a timeout proves nothing either way: discard it rather than count it as a pass
-            pure $ counterexample ("decomposed: " <> show decomposed <> "\nresult: " <> show res) $
-              not (isUnknown res) ==> isQed res
+          Just decomposed -> decomposeEquiv (storeKeys expr) expr decomposed
+    -- same, on the shapes the simplifier leaves behind. It may leave some that cannot be decomposed
+    , testProperty "load-simplify-decompose" $ \(GenDecomposableLoad expr) -> ioProperty $ do
+        let simp = Expr.simplify expr
+        case mapExprM Expr.decomposeStorage simp of
+          Nothing -> pure $ property Discard
+          Just decomposed -> decomposeEquiv (nubOrd $ storeKeys expr <> storeKeys simp) expr decomposed
     , testProperty "byte-simplification" $ \(expr :: Expr Byte) -> ioProperty $ proveEquivExpr expr (Expr.simplify expr)
     , askOption $ \(QuickCheckTests n) -> testProperty "word-simplification" $ withMaxSuccess (min n 20) $ \(ZeroDepthWord expr) ->
         ioProperty $ proveEquivExpr expr (Expr.simplify expr)
@@ -1722,21 +1722,48 @@ equivConfig = defaultConfig {simp = False, dumpQueries = False}
 withOneBitwuzla :: App m => (SolverGroup -> m a) -> m a
 withOneBitwuzla = withSolvers Bitwuzla 1 (Just 1) defMemLimit
 
-storeKeys :: Expr EWord -> [Expr EWord]
-storeKeys (SLoad k s) = k : go s
+-- keccak is uninterpreted in SMT, so the no-aliasing assumption has to be asserted. A decomposed
+-- abstract base is a different SMT array per logical store, so tie each one to the original base
+decomposeEquiv :: [Expr EWord] -> Expr EWord -> Expr EWord -> IO Property
+decomposeEquiv keys expr decomposed = do
+  let noAlias = [PNeg (PEq a b) | (a:rest) <- List.tails keys, b <- rest, storeId a /= storeId b]
+      link = [ PEq (SLoad k (AbstractStore a Nothing)) (SLoad logicalKey (AbstractStore a (Just idx)))
+             | a <- abstractAddrs expr, k <- keys, Just (idx, logicalKey) <- [logicalLoc k] ]
+  res <- checkSat $ foldr PAnd (expr ./= decomposed) (noAlias <> link)
+  -- a timeout proves nothing either way: discard it rather than count it as a pass
+  pure $ counterexample ("decomposed: " <> show decomposed <> "\nresult: " <> show res) $
+    not (isUnknown res) ==> isQed res
+
+storeKeys :: Expr a -> [Expr EWord]
+storeKeys = foldExpr go []
   where
-    go :: Expr Storage -> [Expr EWord]
-    go (SStore k' _ s') = k' : go s'
-    go (ConcreteStore m) = Lit <$> Map.keys m
-    go _ = []
-storeKeys _ = []
+    go :: Expr b -> [Expr EWord]
+    go = \case
+      SLoad k _ -> [k]
+      SStore k _ _ -> [k]
+      ConcreteStore m -> Lit <$> Map.keys m
+      _ -> []
+
+abstractAddrs :: Expr a -> [Expr EAddr]
+abstractAddrs = nubOrd . foldExpr go []
+  where
+    go :: Expr b -> [Expr EAddr]
+    go = \case
+      AbstractStore a _ -> [a]
+      _ -> []
 
 -- the logical store a key belongs to: Nothing for small slots
-storeId :: Expr EWord -> Maybe ByteString
-storeId = \case
-  Expr.MappingSlot idx _ -> Just idx
-  Expr.ArraySlotWithOffs idx _ -> Just idx
-  Expr.ArraySlotZero idx -> Just idx
+storeId :: Expr EWord -> Maybe W256
+storeId = fmap fst . logicalLoc
+
+-- the logical store of a key and the key within it. Written independently of decomposeStorage
+logicalLoc :: Expr EWord -> Maybe (W256, Expr EWord)
+logicalLoc = \case
+  Expr.MappingSlot idx key -> Just (word (BS.drop 32 idx), key)
+  Keccak (ConcreteBuf k) | BS.length k == 64 -> Just (word (BS.drop 32 k), Lit (word (BS.take 32 k)))
+  Expr.ArraySlotWithOffs idx offs -> Just (word idx, offs)
+  Expr.ArraySlotWithOffs2 idx offs1 offs2 -> Just (word idx, Add (Lit offs1) offs2)
+  Expr.ArraySlotZero idx -> Just (word idx, Lit 0)
   _ -> Nothing
 
 isSat :: SMTResult -> Bool
