@@ -28,16 +28,16 @@ tests = withResource (newMVar ()) (const (pure ())) $ \getLock ->
   let withHC :: Bool -> IO a -> IO a
       withHC on act = getLock >>= \lock -> withFlag lock on act
   in testGroup "HashCons"
-  [ testCase "interning-is-live" $ do
+  [ testCase "hash-cons-is-live" $ do
       let e = Add (Var "x") (Mul (Var "x") (Lit 3))
       (c, copied, off) <- withHC False $ do
         c <- clone e
-        off <- same <$> internExprIO e <*> internExprIO c
+        off <- same <$> hashConsExprIO e <*> hashConsExprIO c
         pure (c, c == e && not (same c e), off)
-      on <- withHC True $ same <$> internExprIO e <*> internExprIO c
+      on <- withHC True $ same <$> hashConsExprIO e <*> hashConsExprIO c
       assertBool "clone must build a new, equal term" copied
-      assertBool "interning must do nothing when disabled" (not off)
-      assertBool "equal terms must intern to one object" on
+      assertBool "hash-consing must do nothing when disabled" (not off)
+      assertBool "equal terms must become one object" on
   , testProperty "simplify-differential" $ \(t :: SharedTerms) -> ioProperty $ do
       let jobs = concat
             [ concat [ [ Job "simplify" Expr.simplify w, Job "concKeccakSimpExpr" Expr.concKeccakSimpExpr w
@@ -59,22 +59,22 @@ tests = withResource (newMVar ()) (const (pure ())) $ \getLock ->
       -- only most: without hash-consing the simplifier walks these heavily shared terms as trees,
       -- which can be exponentially larger
       pure $ cover 90 (10 * length refs >= 9 * length jobs) "most jobs terminate" $ noFailures (catMaybes fails)
-  , testProperty "intern-invariants" $ \(t :: SharedTerms) -> ioProperty $ do
+  , testProperty "hash-cons-invariants" $ \(t :: SharedTerms) -> ioProperty $ do
       let attempt = do
             (cw, cb, cs, cy) <- withHC False $
               (,,,) <$> mapM clone t.words <*> mapM clone t.bufs <*> mapM clone t.stores <*> mapM clone t.bytes
             (f1, (iw, ib, is, iy)) <- withHC True $ do
-              (fw, iw) <- internChecks t.words cw
-              (fb, ib) <- internChecks t.bufs cb
-              (fs, is) <- internChecks t.stores cs
-              (fy, iy) <- internChecks t.bytes cy
+              (fw, iw) <- hashConsChecks t.words cw
+              (fb, ib) <- hashConsChecks t.bufs cb
+              (fs, is) <- hashConsChecks t.stores cs
+              (fy, iy) <- hashConsChecks t.bytes cy
               pure (fw <> fb <> fs <> fy, (iw, ib, is, iy))
             -- terms that were canonical in tables that are gone by now
             f2 <- withHC True $ do
-              (fw, _) <- internChecks iw cw
-              (fb, _) <- internChecks ib cb
-              (fs, _) <- internChecks is cs
-              (fy, _) <- internChecks iy cy
+              (fw, _) <- hashConsChecks iw cw
+              (fb, _) <- hashConsChecks ib cb
+              (fs, _) <- hashConsChecks is cs
+              (fy, _) <- hashConsChecks iy cy
               pure (fw <> fb <> fs <> fy)
             let orderFails = orderChecks (t.words <> cw <> iw) <> orderChecks (t.bufs <> cb <> ib)
                           <> orderChecks (t.stores <> cs <> is) <> orderChecks (t.bytes <> cy <> iy)
@@ -123,16 +123,16 @@ noFailures fails = counterexample (unlines (take 3 fails)) (null fails)
 
 -- | Runs with hash-consing forced on or off, starting from empty tables. Every 'interpret' sets
 -- the same global flag and wipes the tables, and under -f devel tests run concurrently, so the
--- action is rerun if a sentinel interned at the start is no longer canonical at the end.
+-- action is rerun if a sentinel hash-consed at the start is no longer canonical at the end.
 withFlag :: MVar () -> Bool -> IO a -> IO a
 withFlag lock on act = withMVar lock (const loop)
   where
     loop = do
       setHashConsEnabled on
       resetHashCons
-      s <- internExprIO sentinel
+      s <- hashConsExprIO sentinel
       r <- act
-      s' <- internExprIO sentinel
+      s' <- hashConsExprIO sentinel
       still <- getHashConsEnabled
       if still == on && (not on || same s s') then pure r else loop
 
@@ -147,7 +147,7 @@ inTime :: Show a => Int -> a -> IO (Maybe a)
 inTime secs x = timeout (secs * 1000000) (force x)
 
 -- | A structurally equal term that shares no interior node with the original. Only a copy when
--- hash-consing is off, as 'mapExpr' interns what it rebuilds.
+-- hash-consing is off, as 'mapExpr' deduplicates what it rebuilds.
 clone :: Expr a -> IO (Expr a)
 clone e = force (mapExpr id e)
 
@@ -170,7 +170,7 @@ againstReference (Ref name f x expected) = do
       else Just $ name <> " differs with hash-consing on\ninput:    " <> show x
                 <> "\nwith:     " <> show got <> "\nwithout:  " <> show expected
 
--- Interning invariants ------------------------------------------------------------------------------
+-- Hash-consing invariants ---------------------------------------------------------------------------
 
 -- | JoinBytes is given an identity but is not keyed by its structure, so neither it nor anything
 -- above it is shared
@@ -185,26 +185,26 @@ keyed = not . getAny . foldExpr isJoin mempty
 
 data Subterm = forall b . Subterm (Expr b)
 
-internChecks :: [Expr a] -> [Expr a] -> IO ([String], [Expr a])
-internChecks xs copies = do
-  is <- mapM internExprIO xs
+hashConsChecks :: [Expr a] -> [Expr a] -> IO ([String], [Expr a])
+hashConsChecks xs copies = do
+  is <- mapM hashConsExprIO xs
   perTerm <- forM (zip3 xs copies is) $ \(x, c, i) -> do
-    twice <- internExprIO i
-    fromCopy <- internExprIO c
+    twice <- hashConsExprIO i
+    fromCopy <- hashConsExprIO c
     stray <- fmap catMaybes . forM (foldExpr (\s -> [Subterm s]) [] i) $ \(Subterm s) -> do
-      s' <- internExprIO s
+      s' <- hashConsExprIO s
       pure $ if same s' s then Nothing else Just (show s)
     pure $ fmap (<> "\n" <> show x) $ concat
-      [ [ "interning changed the term" | show i /= show x || i /= x || compare i x /= EQ ]
-      , [ "interning is not idempotent" | not (same twice i) ]
-      , [ "an equal copy interned to another object" | keyed x && not (same fromCopy i) ]
-      , [ "an equal copy interned to a different term" | show fromCopy /= show x ]
-      , [ "a subterm of an interned term is not canonical: " <> s | keyed x, s <- take 1 stray ]
+      [ [ "hash-consing changed the term" | show i /= show x || i /= x || compare i x /= EQ ]
+      , [ "hash-consing is not idempotent" | not (same twice i) ]
+      , [ "an equal copy became another object" | keyed x && not (same fromCopy i) ]
+      , [ "an equal copy became a different term" | show fromCopy /= show x ]
+      , [ "a subterm of a hash-consed term is not canonical: " <> s | keyed x, s <- take 1 stray ]
       ]
   let shown = zip (fmap show xs) is
       pairwise = concat
-        [ [ "different terms interned to one object\n" <> sa <> "\n" <> sb | same a b && sa /= sb ]
-          <> [ "equal terms interned to different objects\n" <> sa | sa == sb && keyed a && not (same a b) ]
+        [ [ "different terms became one object\n" <> sa <> "\n" <> sb | same a b && sa /= sb ]
+          <> [ "equal terms became different objects\n" <> sa | sa == sb && keyed a && not (same a b) ]
         | ((sa, a):rest) <- tails shown, (sb, b) <- rest ]
   pure (concat perTerm <> pairwise, is)
 

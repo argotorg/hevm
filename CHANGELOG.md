@@ -69,7 +69,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `BufLength` of a `CopySlice` with a symbolic size no longer counts the copy
   when the size is zero
 - `Show Addr` no longer corrupts the text printed after the address
-- Fuzzers for hash-consing (interning invariants, simplifier results with it on
+- Fuzzers for hash-consing (its invariants, simplifier results with it on
   and off) and for the simplifier on closed terms, skewed towards values that
   wrap around 2^256
 
