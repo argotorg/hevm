@@ -76,7 +76,7 @@ defaultConfig = Config
   , mergeMaxBudget = 100
   , maxDynSize = 64
   , abstractArith = True
-  , hashConsExplore = False
+  , hashConsExplore = True
   }
 
 -- Write to the console

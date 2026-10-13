@@ -104,7 +104,7 @@ data CommonOptions = CommonOptions
   , mergeMaxBudget :: Int
   , maxDynSize    ::Int
   , noAbstractArith ::Bool
-  , hashCons      ::Bool
+  , noHashCons    ::Bool
   }
 
 commonOptions :: Parser CommonOptions
@@ -138,7 +138,7 @@ commonOptions = CommonOptions
   <*> (option auto $ long "merge-max-budget" <> showDefault <> value 100 <> help "Max instructions for speculative merge exploration during path merging")
   <*> (option auto $ long "max-dyn-size" <> showDefault <> value 64 <> help "Max byte length for concretized dynamic types (bytes, string) in symbolic arguments")
   <*> (switch $  long "no-abstract-arith" <> help "Don't abstract symbolic multiplication and division as uninterpreted functions with sound lemmas; use native bitvector arithmetic instead")
-  <*> (switch $ long "hash-cons" <> help "Experimental: hash-cons (share equal subterms of) the symbolic VM state during exploration, reducing memory use on targets that build deeply-shared terms")
+  <*> (switch $ long "no-hash-cons" <> help "Don't hash-cons (share equal subterms of) the symbolic VM state during exploration")
 
 data CommonExecOptions = CommonExecOptions
   { address       ::Maybe Addr
@@ -385,7 +385,7 @@ main = do
         , mergeMaxBudget = cOpts.mergeMaxBudget
         , maxDynSize = cOpts.maxDynSize
         , abstractArith = Prelude.not cOpts.noAbstractArith
-        , hashConsExplore = cOpts.hashCons
+        , hashConsExplore = Prelude.not cOpts.noHashCons
         } }
 
 

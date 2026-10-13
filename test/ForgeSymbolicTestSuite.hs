@@ -75,8 +75,7 @@ runCase getRoot fn = do
   root <- getRoot
   (_, out, err) <- readProcessWithExitCode "cabal"
     [ "run", "-v0", "exe:hevm", "--", "test", "--root", root
-    , "--prefix", "check", "--match", fn, "--solver", "bitwuzla", "--max-iterations", "100"
-    , "--hash-cons" ] ""
+    , "--prefix", "check", "--match", fn, "--solver", "bitwuzla", "--max-iterations", "100" ] ""
   let report = "\n--- stdout ---\n" <> out <> "\n--- stderr ---\n" <> err
   assertBool ("no validated counterexample for " <> fn <> report)
     ("[FAIL]" `isInfixOf` out && "validated" `isInfixOf` out)
