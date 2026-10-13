@@ -150,6 +150,12 @@ tests = testGroup "Foundry tests"
     , test "Mapping-Decomposition-Fail" $ do
         let testFile = "test/contracts/fail/mappingDecomposition.sol"
         executeSingleMethod testFile "prove_written_is_zero" >>= assertEqualM "written mapping read must falsify" (False, True)
+    , test "Array-Mapping-Same-Slot" $ do
+        let testFile = "test/contracts/pass/arrayMappingSameSlot.sol"
+        executeSingleMethod testFile "prove_array_write_not_read" >>= assertEqualM "array write is not a mapping write" (True, True)
+    , test "Array-Mapping-Same-Slot-Fail" $ do
+        let testFile = "test/contracts/fail/arrayMappingSameSlot.sol"
+        executeSingleMethod testFile "prove_array_write_read" >>= assertEqualM "unwritten mapping read must falsify" (False, True)
     , test "AssertApproxEqAbs-Pass" $ do
         let testFile = "test/contracts/pass/assertApproxEqAbs.sol"
         assertAllMethodsWithPrefix testFile "prove" (True, True)

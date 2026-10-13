@@ -92,8 +92,8 @@ module EVM.Expr
 
     -- * Decomposition
   , safeToDecomposeProp
-  , safeToDecompose
   , decomposeStorage
+  , decomposeStorageProps
 
     -- * Simplification
   , simplify
@@ -149,6 +149,7 @@ import Data.Map qualified as LMap
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe, isJust, fromMaybe)
 import Data.Semigroup (Any, Any(..), getAny)
+import Data.Set qualified as Set
 import Data.Typeable
 import Data.Vector qualified as V
 import Data.Vector (Vector)
@@ -1051,9 +1052,6 @@ getLogicalIdx (GVar _) = internalError "cannot determine addr of a GVar"
 -- ** Whole Expression Simplification ** -----------------------------------------------------------
 
 
-data StorageType = SmallSlot | Array | Map | Mixed | UNK
-  deriving (Show, Eq)
-
 -- We can't currently decompose cases when the FULL returned state is equated
 -- This is because the decomposition would need to take into account that ALL
 -- maps/arrays/small-slots need to be equivalent. This could be done, but is left
@@ -1071,78 +1069,47 @@ safeToDecomposeProp p = isJust $ mapPropM' findPEqStore p
       (PEq (AbstractStore {}) (AbstractStore {})) -> Nothing
       a -> Just a
 
--- This checks if the decomposition is possible by making sure there is no
--- mixture of different types of accesses such as array/map/small-slot.
-safeToDecompose :: Expr a -> Maybe ()
-safeToDecompose inp = if result /= Mixed then Just () else Nothing
+-- | A logical sub-store of the storage of a contract
+data LogicalStore = SmallSlots | ArrayStore W256 | MapStore W256
+  deriving (Show, Eq, Ord)
+
+-- | Turns a storage slot expression into a pair (logical store, index within that store)
+inferLogicalStore :: Expr EWord -> Maybe (LogicalStore, Expr EWord)
+inferLogicalStore = \case
+  Lit a | a >= 256 -> Nothing
+  Lit a -> Just (SmallSlots, Lit a)
+  -- maps
+  (Keccak (ConcreteBuf k)) | BS.length k == 64 -> do
+    -- Solidity hashes key || slot; the slot identifies the logical store.
+    let key = Lit $ idxToWord (BS.take 32 k)
+        idx = idxToWord (BS.drop 32 k)
+    Just (MapStore idx, key)
+  (MappingSlot idx key) | BS.length idx == 64 -> Just (MapStore $ idxToWord idx, key)
+  -- arrays
+  (ArraySlotWithOffs idx offset) | BS.length idx == 32 -> Just (ArrayStore $ idxToWord64 idx, offset)
+  (ArraySlotWithOffs2 idx offs1 offs2) | BS.length idx == 32 -> Just (ArrayStore $ idxToWord64 idx, Add (Lit offs1) offs2)
+  (ArraySlotZero idx) | BS.length idx == 32 -> Just (ArrayStore $ idxToWord64 idx, Lit 0)
+  _ -> Nothing
   where
-    result = execState (safeToDecomposeRunner inp) UNK
+    idxToWord :: ByteString -> W256
+    idxToWord = W256 . word256 . (BS.takeEnd 32)
+    -- Arrays take the whole `id` and keccak it. It's supposed to be 64B
+    idxToWord64 :: ByteString -> W256
+    idxToWord64 = W256 . word256 . (BS.takeEnd 64)
 
-    safeToDecomposeRunner :: forall a. Expr a -> State StorageType ()
-    safeToDecomposeRunner a = go a
-
-    go :: forall b. Expr b -> State StorageType ()
-    go e@(SLoad (MappingSlot x _) _) = if BS.length x == 64 then setMap e else setMixed e
-    go e@(SLoad (Keccak x) _) = case bufLength x of
-                                  Lit 32 -> setArray e
-                                  Lit 64 -> setMap e
-                                  _ -> setMixed e
-    go e@(SLoad (ArraySlotWithOffs x _) _) = if BS.length x == 32 then setArray e else setMixed e
-    go e@(SLoad (ArraySlotWithOffs2 x _ _) _) = if BS.length x == 32 then setArray e else setMixed e
-    go e@(SLoad (Lit x) _) | x < 256 = setSmall e
-    go e@(SLoad _ _) = setMixed e
-    go e@(SStore (MappingSlot x _) _ _) = if BS.length x == 64 then setMap e else setMixed e
-    go e@(SStore (Keccak x) _ _) =  case bufLength x of
-                                  Lit 32 -> setArray e
-                                  Lit 64 -> setMap e
-                                  _ -> setMixed e
-    go e@(SStore (ArraySlotWithOffs x _) _ _) = if BS.length x == 32 then setArray e else setMixed e
-    go e@(SStore (ArraySlotWithOffs2 x _ _) _ _) = if BS.length x == 32 then setArray e else setMixed e
-    go e@(SStore (Lit x) _ _) | x < 256 = setSmall e
-    go e@(SStore _ _ _) = setMixed e
-    go _ = pure ()
-
-    -- Helper functions for detecting mixed load/store
-    setMixed _ = do
-      put Mixed
-      pure ()
-    setMap _ = do
-      s <- get
-      case s of
-        Array -> put Mixed
-        SmallSlot -> put Mixed
-        UNK -> put Map
-        _ -> pure ()
-      pure ()
-    setArray _ = do
-      s <- get
-      case s of
-        Map -> put Mixed
-        SmallSlot -> put Mixed
-        UNK -> put Array
-        _ -> pure ()
-      pure ()
-    setSmall _ = do
-      s <- get
-      case s of
-        Map -> put Mixed
-        Array -> put Mixed
-        UNK -> put SmallSlot
-        _ -> pure ()
-      pure ()
-
--- | Splits storage into logical sub-stores if (1) all SLoad->SStore* chains are one of:
---     (1a) Lit < 256, (1b) MappingSlot, (1c) ArraySlotWithOffs, (1d) ArraySlotZero
---  and (2) there is no mixing of different types (e.g. Map with Array) within
---  the same SStore -> SLoad* chain
+-- | Splits storage into logical sub-stores: the small slots (Lit < 256), and one per mapping and
+--  per array. A read then only sees the writes to its own logical store, since slots of
+--  different logical stores are assumed never to alias.
 --
---  Mixing (2) and (3) are attempted to be prevented (if possible) as part of the rewrites
---  done by the `readStorage` function that is ran before this. If there is still mixing here,
---  we abort with a Nothing.
+--  Returns Nothing if the key of the read, or of a write below it, is not one of
+--  Lit < 256, MappingSlot, ArraySlotWithOffs, ArraySlotWithOffs2, ArraySlotZero.
+--  The rewrites done by `readStorage`, which runs before this, try to get keys into that shape.
 --
 --  We do NOT rewrite stand-alone `SStore`-s (i.e. SStores that are not read), since
 --  they are often used to describe a post-state, and are not dispatched as-is to
 --  the solver
+--
+--  Only sound when applied to all the reads of a query at once: use `decomposeStorageProps`
 decomposeStorage :: Expr a -> Maybe (Expr a)
 decomposeStorage = go
   where
@@ -1157,30 +1124,14 @@ decomposeStorage = go
         pure (SLoad key base)
       _ -> Nothing
 
-    -- Turns a storage slot expression into a pair (logical store id, index within that store)
-    -- The store id is Nothing for small slot numbers (< 256), which all share one logical store.
+    -- The store id is Nothing for the small slots, which keep the name of the original store
     inferLogicalIdx :: Expr EWord -> Maybe (Maybe W256, Expr EWord)
-    inferLogicalIdx = \case
-      Lit a | a >= 256 -> Nothing
-      Lit a -> Just (Nothing, Lit a)
-      -- maps
-      (Keccak (ConcreteBuf k)) | BS.length k == 64 -> do
-        -- Solidity hashes key || slot; the slot identifies the logical store.
-        let key = Lit $ idxToWord (BS.take 32 k)
-            idx = idxToWord (BS.drop 32 k)
-        Just (Just idx, key)
-      (MappingSlot idx key) | BS.length idx == 64 -> Just (Just $ idxToWord idx, key)
-      -- arrays
-      (ArraySlotWithOffs idx offset) | BS.length idx == 32 -> Just (Just $ idxToWord64 idx, offset)
-      (ArraySlotWithOffs2 idx offs1 offs2) | BS.length idx == 32 -> Just (Just $ idxToWord64 idx, Add (Lit offs1) offs2)
-      (ArraySlotZero idx) | BS.length idx == 32 -> Just (Just $ idxToWord64 idx, Lit 0)
-      _ -> Nothing
-
-    idxToWord :: ByteString -> W256
-    idxToWord = W256 . word256 . (BS.takeEnd 32)
-    -- Arrays take the whole `id` and keccak it. It's supposed to be 64B
-    idxToWord64 :: ByteString -> W256
-    idxToWord64 = W256 . word256 . (BS.takeEnd 64)
+    inferLogicalIdx k = do
+      (store, key) <- inferLogicalStore k
+      pure $ case store of
+        SmallSlots -> (Nothing, key)
+        ArrayStore idx -> (Just idx, key)
+        MapStore idx -> (Just idx, key)
 
     -- Updates the logical base store of the given expression if it is safe to do so
     setLogicalBase :: Maybe W256 -> Expr Storage -> Maybe (Expr Storage)
@@ -1191,8 +1142,7 @@ decomposeStorage = go
     setLogicalBase idx (SStore k v prevStorage) = do
       (idx2, key2) <- inferLogicalIdx k
       b <- setLogicalBase idx prevStorage
-      -- If it's not the same IDX, we can skip. This is possible because there are no
-      -- mixed arrays/maps/small-slots, as checked by safeToDecompose
+      -- A write to another logical store cannot change what this read sees
       if idx == idx2 then Just (SStore key2 v b)
       -- b is already rewritten: rewriting it again would misread rewritten
       -- array keys (e.g. Lit 0) as small slots and drop those writes (#1086)
@@ -1212,6 +1162,21 @@ decomposeStorage = go
       else Nothing
     setLogicalBase _ (GVar _) = internalError "Unexpected GVar"
 
+-- | Decomposes the storage of all the props, or of none of them
+decomposeStorageProps :: [Prop] -> Maybe [Prop]
+decomposeStorageProps props
+  | all safeToDecomposeProp props && noSlotClash = mapM (mapPropM decomposeStorage) props
+  | otherwise = Nothing
+  where
+    -- A logical store is named by its slot alone, so an array and a mapping on the same slot
+    -- would be merged into one. Solidity never lays storage out like that, other bytecode can
+    noSlotClash = Set.disjoint (Set.fromList [i | ArrayStore i <- stores]) (Set.fromList [i | MapStore i <- stores])
+    stores = concatMap (foldProp accessed []) props
+    accessed :: Expr a -> [LogicalStore]
+    accessed = \case
+      SLoad k _ -> fst <$> maybe [] pure (inferLogicalStore k)
+      SStore k _ _ -> fst <$> maybe [] pure (inferLogicalStore k)
+      _ -> []
 
 -- | Simple recursive match based AST simplification
 -- Note: may not terminate!

@@ -24,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and symbolic mapping accesses were mixed ([#1099](https://github.com/argotorg/hevm/issues/1099)).
   To make sure this issue doesn't happen again, the storage decomposition fuzzer
   now also generates concrete-key mapping accesses
+- Storage decomposition no longer treats an array and a mapping that share a
+  storage slot as one store, which caused false proofs and spurious
+  counterexamples ([#1101](https://github.com/argotorg/hevm/issues/1101)).
+  Solidity never lays storage out that way, but other bytecode can.
+  Decomposition is now skipped for such queries. The check that was meant to
+  refuse mixed access types never triggered and is removed
 - A symbolic-key `SLOAD` over a `ConcreteStore` is now resolved during execution
   instead of being carried into a fork as an unresolved read: an empty store
   reads 0 at every slot, and a symbolic mapping read filters out concrete

@@ -38,7 +38,7 @@ import Data.Foldable (Foldable(..))
 import Data.List qualified as List
 import Data.List.NonEmpty (NonEmpty((:|)))
 import Data.List.NonEmpty qualified as NonEmpty
-import Data.Maybe (fromJust, fromMaybe, isJust, listToMaybe)
+import Data.Maybe (fromJust, fromMaybe, listToMaybe)
 import Data.Either.Extra (fromRight')
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -116,13 +116,9 @@ declareIntermediatesWith enc bufs stores = do
       pure [SMTCommand ("(define-fun store" <> (Data.Text.Lazy.Builder.Int.decimal n) <> " () Storage " <> storage <> ")")]
 
 decompose :: Config -> [Prop] -> [Prop]
-decompose conf props = if conf.decomposeStorage && safeExprs && safeProps
-                    then fromMaybe props (mapM (mapPropM Expr.decomposeStorage) props)
+decompose conf props = if conf.decomposeStorage
+                    then fromMaybe props (Expr.decomposeStorageProps props)
                     else props
-  where
-    -- All in these lists must be a `Just ()` or we cannot decompose
-    safeExprs = all (isJust . mapPropM_ Expr.safeToDecompose) props
-    safeProps = all Expr.safeToDecomposeProp props
 
 -- simplify to rewrite sload/sstore combos
 -- notice: it is VERY important not to concretize early, because Keccak assumptions
