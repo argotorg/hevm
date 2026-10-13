@@ -497,7 +497,7 @@ exec1 conf = do
                             modifying' #keccakPreImgs (insert (bs, kc))
                           pure $ Lit kc
                         )
-                    buf -> pure $ HashCons.internExpr (Keccak buf)
+                    buf -> pure $ HashCons.hashConsExpr (Keccak buf)
                   next
                   assign' (#state % #stack) (hash : xs)
             _ -> underrun
@@ -795,9 +795,9 @@ exec1 conf = do
 
                 symbolicRead :: EVM t () = if this.external
                   then accessStorage self x finalizeLoad
-                  else let slot = HashCons.internExpr (Expr.concKeccakOnePass x)
+                  else let slot = HashCons.hashConsExpr (Expr.concKeccakOnePass x)
                            preMap = Map.fromList [ (h, bs) | (bs, h) <- toList vm.keccakPreImgs ]
-                       in finalizeLoad $ HashCons.internExpr (Expr.readStorage' slot (Expr.filterStoreByReadSlot preMap slot this.storage))
+                       in finalizeLoad $ HashCons.hashConsExpr (Expr.readStorage' slot (Expr.filterStoreByReadSlot preMap slot this.storage))
 
                 concreteRead :: EVM t () = do
                   acc <- accessStorageForGas self (forceLit x)
@@ -3284,7 +3284,7 @@ stackOp1 cost f =
     x:xs ->
       burn cost $ do
         next
-        let !y = HashCons.internExpr (f x)
+        let !y = HashCons.hashConsExpr (f x)
         assign' (#state % #stack) $ y : xs
     _ ->
       underrun
@@ -3299,7 +3299,7 @@ stackOp2 cost f =
     x:y:xs ->
       burn cost $ do
         next
-        assign' (#state % #stack) $ HashCons.internExpr (f x y) : xs
+        assign' (#state % #stack) $ HashCons.hashConsExpr (f x y) : xs
     _ ->
       underrun
 
@@ -3313,7 +3313,7 @@ stackOp3 cost f =
     x:y:z:xs ->
       burn cost $ do
       next
-      assign' (#state % #stack) $ HashCons.internExpr (f x y z) : xs
+      assign' (#state % #stack) $ HashCons.hashConsExpr (f x y z) : xs
     _ ->
       underrun
 

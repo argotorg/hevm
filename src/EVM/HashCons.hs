@@ -9,7 +9,7 @@
     22 GB peak), and it makes every structural traversal or comparison pay the logical - not the
     shared - size.
 
-    'internExpr' returns a canonical representative for a node: the first structurally-equal node
+    'hashConsExpr' returns a canonical representative for a node: the first structurally-equal node
     ever seen is reused for all later duplicates, so the heap holds the DAG, not the tree. It is
     exact (never merges structurally-different terms) and O(1) amortized per constructed node:
 
@@ -22,7 +22,7 @@
     the ptrEq fast paths in Expr's Eq/Ord instances and 'untilFixpoint' exploit: comparisons on
     shared terms drop from O(logical size) to O(size of the differing part).
 
-    internExpr e is always structurally equal to e, so it is semantically the identity; it only
+    hashConsExpr e is always structurally equal to e, so it is semantically the identity; it only
     shares memory. Gated by 'setHashConsEnabled' (off by default): when disabled every call is a
     single IORef read returning the argument unchanged, so ordinary (non-symbolic) use is
     unaffected.
@@ -34,7 +34,7 @@
     between runs.
 -}
 module EVM.HashCons
-  ( internExpr
+  ( hashConsExpr
   , setHashConsEnabled
   , hashConsEnabled
   , resetHashCons
@@ -116,7 +116,7 @@ resetHashCons = do
 -- | Per-pass memo of simplification results, keyed by canonical node id, with one table per
 -- expression type. Values are recovered at their own type by dispatching on the node's
 -- constructor (which fixes the type via GADT refinement), so no coercion is involved. Cleared
--- together with the intern tables.
+-- together with the hash-consing tables.
 data MemoTables = MemoTables
   { mtW  :: !(IM.IntMap (Expr EWord))
   , mtBy :: !(IM.IntMap (Expr Byte))
@@ -170,13 +170,13 @@ hashConsEnabled :: Expr b -> Bool
 hashConsEnabled x = unsafePerformIO (x `seq` readIORef hcEnabled)
 {-# NOINLINE hashConsEnabled #-}
 
--- | Intern a node (and, as needed, its not-yet-canonical descendants) to a canonical
+-- | Map a node (and, as needed, its not-yet-canonical descendants) to its canonical
 -- representative. Semantically the identity.
-internExpr :: Expr a -> Expr a
-internExpr e = unsafePerformIO $ do
+hashConsExpr :: Expr a -> Expr a
+hashConsExpr e = unsafePerformIO $ do
   en <- readIORef hcEnabled
   if en then fst <$> go e else pure e
-{-# NOINLINE internExpr #-}
+{-# NOINLINE hashConsExpr #-}
 
 -- Look up a node's id by physical identity. A hit means the node is already canonical.
 lookupSN :: Expr a -> IO (Maybe Int)
@@ -356,7 +356,7 @@ goBuild = \case
 -- | Memoized structural map for repeatedly-applied simplification passes over hash-consed terms.
 -- Matches Traversals.mapExprM's f-application at every node, with three additions:
 --
---   * the rewrite's output is interned, so a rewrite that rebuilds a structurally-equal node
+--   * the rewrite's output is deduplicated, so a rewrite that rebuilds a structurally-equal node
 --     (e.g. via argument normalization) collapses back to the canonical object;
 --   * reconstruction is identity-preserving: when nothing changed, the ORIGINAL node is returned,
 --     so convergence is detectable by pointer identity in O(1) (see 'untilFixpoint');
@@ -371,7 +371,7 @@ memoFixTraverse :: Int -> (forall x. Expr x -> Expr x) -> Expr b -> Expr b
 memoFixTraverse slot f root = unsafePerformIO (goM root)
   where
     fi :: Expr x -> Expr x
-    fi x = internExpr (f x)
+    fi x = hashConsExpr (f x)
 
     goM :: Expr x -> IO (Expr x)
     goM n = do

@@ -12,7 +12,7 @@ import Data.Foldable (Foldable(..))
 import Data.Map.Strict qualified as Map
 
 import EVM.Types
-import EVM.HashCons (internExpr, memoFixTraverse, hashConsEnabled)
+import EVM.HashCons (hashConsExpr, memoFixTraverse, hashConsEnabled)
 
 foldProp :: forall b . Monoid b => (forall a . Expr a -> b) -> b -> Prop -> b
 foldProp f acc p = acc <> (go p)
@@ -253,11 +253,11 @@ mapPropM' f = \case
     y <- mapPropM' f b
     f $ PImpl x y
 
--- | internExpr shares each rebuilt node as it is produced (bottom-up, O(1) per node since children
+-- | hashConsExpr shares each rebuilt node as it is produced (bottom-up, O(1) per node since children
 -- are already canonical), so passes built on mapExpr (notably Expr.simplify) never materialize the
 -- unshared exponential tree. It is a no-op unless hash-consing is enabled (EVM.HashCons).
 mapExpr :: (forall a . Expr a -> Expr a) -> Expr b -> Expr b
-mapExpr f expr = runIdentity (mapExprM (Identity . internExpr . f) expr)
+mapExpr f expr = runIdentity (mapExprM (Identity . hashConsExpr . f) expr)
 
 -- | Like 'mapExpr', for the repeatedly-applied simplification passes: when hash-consing is
 -- enabled, each distinct subterm is visited once and subterms already known to be fixpoints of
