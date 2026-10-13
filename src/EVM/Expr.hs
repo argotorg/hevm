@@ -638,26 +638,12 @@ writeWord o@(Lit offset) v@(Lit val) buf@(ConcreteBuf src)
 writeWord idx val b@(WriteWord idx' val' buf)
   -- if the indices match exactly then we just replace the value in the current write and return
   | idx == idx' = WriteWord idx val buf
-  | otherwise
-    = case (idx, idx') of
-        (Lit i, Lit i') -> if i > i' && i - i' >= 32 && i <= maxWord256 - 31
-                           -- if we can statically determine that the write at
-                           -- idx doesn't overlap the write at idx', then we
-                           -- push the write down we only consider writes where
-                           -- i > i' to avoid infinite loops in this routine.
-                           -- A write that wraps past 2^256 stays put: it may
-                           -- overlap a lower write.
-                           -- This also has the nice side effect of imposing a
-                           -- canonical ordering on write chains, making exact
-                           -- syntactic equalities between abstract terms more
-                           -- likely to occur
-                           then WriteWord idx' val' (writeWord idx val buf)
-                           -- if we cannot statically determine freedom from
-                           -- overlap, then we just return an abstract term
-                           else WriteWord idx val b
-        -- if we cannot determine statically that the write at idx' is out of
-        -- bounds for idx, then we return an abstract term
-        _ -> WriteWord idx val b
+  -- Push the write below a lower one it provably doesn't overlap. Only for i > i', so this
+  -- terminates and write chains get a canonical order. A write that wraps past 2^256 may
+  -- overlap a lower one, so it stays put.
+  | Lit i <- idx, Lit i' <- idx', i > i', i - i' >= 32, i <= maxWord256 - 31
+  = WriteWord idx' val' (writeWord idx val buf)
+  | otherwise = WriteWord idx val b
 writeWord offset val src = WriteWord offset val src
 
 

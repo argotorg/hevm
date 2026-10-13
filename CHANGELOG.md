@@ -60,10 +60,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no longer crashes with an internal error during gas calculation; it now
   fails with `NonexistentPrecompile` (concrete) or a `PrecompileMissing`
   partial (symbolic) ([#1084](https://github.com/argotorg/hevm/issues/1084))
-- `simplify` no longer loops forever on a `WriteWord` whose offset wraps past
-  2^256 over another `WriteWord` (the two could also be reordered although they
-  overlap), nor on a `CopySlice` of fewer than 32 bytes out of a `WriteWord`
-  into an abstract buffer
+- A `WriteWord` whose offset wraps past 2^256 is no longer moved below an
+  earlier `WriteWord` that it overlaps, which changed the buffer's contents
+  and could make `simplify` loop forever
+- `simplify` no longer loops forever on a `CopySlice` of fewer than 32 bytes
+  out of a `WriteWord` into an abstract buffer
 - `ReadWord` at an index that wraps past 2^256 no longer skips a `WriteByte` or
   `CopySlice` at a low index
 - `BufLength` of a `CopySlice` with a symbolic size no longer counts the copy
