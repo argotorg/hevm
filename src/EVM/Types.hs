@@ -1337,9 +1337,9 @@ instance Read Addr where
 
 instance Show Addr where
   showsPrec _ addr next =
-    let hex = showHex addr next
+    let hex = showHex addr ""
         str = replicate (40 - length hex) '0' ++ hex
-    in "0x" ++ toChecksumAddress str ++ drop 40 str
+    in "0x" ++ toChecksumAddress str ++ next
 
 -- https://eips.ethereum.org/EIPS/eip-55
 toChecksumAddress :: String -> String

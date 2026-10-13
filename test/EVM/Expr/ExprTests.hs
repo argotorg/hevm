@@ -1558,6 +1558,44 @@ wrappingTests = testGroup "W256 wrapping edge cases"
           simplified = Expr.copySlice (Lit srcOff) (Lit 0) (Lit size) srcBuf dstBuf
       result <- proveEquivExpr full simplified
       assertBool "copySlice with wrapping srcOffset" result
+
+  , -- F1: a write that wraps past 2^256 overlaps the lower write, and swapping the two back and
+    -- forth made simplify loop forever
+    testCase "writeWord-wrapping-write-stays-on-top" $ do
+      let lower = WriteWord (Lit 0) (Var "x") (AbstractBuf "b")
+          full = ReadWord (Lit 0) (WriteWord (Lit maxBound) (Var "v") lower)
+          simplified = ReadWord (Lit 0) (Expr.writeWord (Lit maxBound) (Var "v") lower)
+          nested = WriteWord (Lit maxBound) (Var "v") (WriteWord (Lit 0x2a) (Var "x") (AbstractBuf "b"))
+      result <- proveEquivExpr full simplified
+      assertBool "writeWord with a wrapping offset over a lower write" result
+      assertEqual "simplify terminates" nested (Expr.simplify nested)
+
+  , testCase "copySlice-short-from-writeWord-terminates" $ do
+      let buf = CopySlice (Var "c") (Lit 0x26) (Lit 3) (WriteWord (Var "c") (Var "x") (AbstractBuf "b")) (AbstractBuf "b")
+          expected = CopySlice (Lit 0) (Lit 0x26) (Lit 3) (WriteWord (Lit 0) (Var "x") (ConcreteBuf "")) (AbstractBuf "b")
+      assertEqual "" expected (Expr.simplify buf)
+
+  , testCase "bufLength-copySlice-symbolic-size-zero" $ do
+      let len = Expr.bufLength (CopySlice (Lit 0x30) (Lit 0x4b) (Var "s") (AbstractBuf "b") (ConcreteBuf ""))
+          at :: W256 -> Expr EWord
+          at v = Expr.simplify (mapExpr (\case { Var "s" -> Lit v; e -> e }) len)
+      assertEqual "a copy of zero bytes does not grow the buffer" (Lit 0) (at 0)
+      assertEqual "" (Lit 0x50) (at 5)
+
+  , testCase "readWord-wrap-over-low-writeByte" $ do
+      let buf = WriteByte (Lit 5) (LitByte 0xAB) (ConcreteBuf (BS.pack [1..50]))
+          full = ReadWord (Lit maxBound) buf
+      result <- proveEquivExpr full (Expr.readWord (Lit maxBound) buf)
+      assertBool "readWord wrapping onto a WriteByte at a low index" result
+
+  , testCase "readWord-wrap-over-low-copySlice" $ do
+      let buf = CopySlice (Lit 0) (Lit 0) (Lit 3) (AbstractBuf "src") (AbstractBuf "dst")
+          full = ReadWord (Lit maxBound) buf
+      result <- proveEquivExpr full (Expr.readWord (Lit maxBound) buf)
+      assertBool "readWord wrapping onto a CopySlice at a low index" result
+
+  , testCase "show-addr-leaves-rest-alone" $
+      assertEqual "" "(0x0000000000000000000000000000000000001234,Just 1)" (show (Addr 0x1234, Just (1 :: Int)))
   ]
 
 fuzzTests :: TestTree

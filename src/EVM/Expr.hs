@@ -484,7 +484,7 @@ readWord idx b@(WriteWord idx' val buf)
     -- the region we want to read overlaps the WriteWord
     _ -> readWordFromBytes idx b
 readWord i@(Lit idx) (WriteByte (Lit idx') _ buf)
-  | idx' < idx || (idx' >= idx + 32 && idx <= (maxBound :: W256) - 32) = readWord i buf
+  | idx' - idx >= 32 = readWord i buf
 -- reading a Word that is before the CopySlice destination region, so just read from dst
 -- We must ensure x+32 and dstOffset+size do not wrap past maxBound.
 -- When size is symbolic, we bound dstOffset to ensure no wrapping is possible.
@@ -502,10 +502,12 @@ readWord i@(Lit x) (CopySlice _ (Lit dstOffset) (Lit size) _ dst)
 readWord i@(Lit x) (CopySlice _ (Lit dstOffset) _ _ dst)
   | x >= dstOffset + maxBytes
   , dstOffset + maxBytes >= dstOffset
+  , x + 31 >= x
   = readWord i dst
 readWord i@(Lit x) (CopySlice _ (Lit dstOffset) (Lit size) _ dst)
   | x >= dstOffset + size
   , dstOffset + size >= dstOffset
+  , x + 31 >= x
   = readWord i dst
 readWord (Lit idx) b@(CopySlice (Lit srcOff) (Lit dstOff) (Lit size) src dst)
   -- the region we are trying to read is enclosed in the sliced region
@@ -599,8 +601,9 @@ copySlice s@(Lit srcOffset) d@(Lit dstOffset) sz@(Lit size) src ds@(ConcreteBuf 
        else CopySlice s d sz src ds
   | otherwise = CopySlice s d sz src ds
 
-copySlice srcOff dstOff (Lit size) (WriteWord srcOff2 val _) dstBuff
-  | size < 32 && srcOff == srcOff2 = copySlice (Lit 0) dstOff (Lit size) (WriteWord (Lit 0) val (ConcreteBuf "")) dstBuff
+copySlice srcOff dstOff (Lit size) (WriteWord srcOff2 val base) dstBuff
+  -- already in the form this rewrites to: rewriting it again would never terminate
+  | size < 32 && srcOff == srcOff2 && (srcOff /= Lit 0 || base /= ConcreteBuf "") = copySlice (Lit 0) dstOff (Lit size) (WriteWord (Lit 0) val (ConcreteBuf "")) dstBuff
 
 -- abstract indices
 copySlice srcOffset dstOffset size src dst = CopySlice srcOffset dstOffset size src dst
@@ -637,11 +640,13 @@ writeWord idx val b@(WriteWord idx' val' buf)
   | idx == idx' = WriteWord idx val buf
   | otherwise
     = case (idx, idx') of
-        (Lit i, Lit i') -> if i >= i' + 32
+        (Lit i, Lit i') -> if i > i' && i - i' >= 32 && i <= maxWord256 - 31
                            -- if we can statically determine that the write at
                            -- idx doesn't overlap the write at idx', then we
                            -- push the write down we only consider writes where
                            -- i > i' to avoid infinite loops in this routine.
+                           -- A write that wraps past 2^256 stays put: it may
+                           -- overlap a lower write.
                            -- This also has the nice side effect of imposing a
                            -- canonical ordering on write chains, making exact
                            -- syntactic equalities between abstract terms more
@@ -672,7 +677,9 @@ bufLengthEnv env useEnv buf = go (Lit 0) buf
     go l (WriteWord idx _ b) = go (EVM.Expr.max l (add idx (Lit 32))) b
     go l (WriteByte idx _ b) = go (EVM.Expr.max l (add idx (Lit 1))) b
     go l (CopySlice _ _ (Lit 0) _ dst) = go l dst
-    go l (CopySlice _ dstOffset size _ dst) = go (EVM.Expr.max l (add dstOffset size)) dst
+    go l (CopySlice _ dstOffset size@(Lit _) _ dst) = go (EVM.Expr.max l (add dstOffset size)) dst
+    -- a copy of zero bytes does not grow dst, whatever its dstOffset
+    go l (CopySlice _ dstOffset size _ dst) = go (ITE (iszero size) l (EVM.Expr.max l (add dstOffset size))) dst
 
     go l (GVar (BufVar a)) | useEnv =
       case Map.lookup a env of
