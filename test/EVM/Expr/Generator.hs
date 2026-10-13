@@ -762,14 +762,14 @@ genBaseArithCase = oneof
       coeff <- genArithConst
       withBindings "constant multiplication monotonicity"
         (Expr.add (Expr.mul (Lit coeff) arithA) (Expr.mul (Lit coeff) arithB))
-        [nearValue arithAName (maxBound `div` coeff), nearVar arithBName arithAName]
+        [nearOverflow arithAName coeff, nearVar arithBName arithAName]
 
     constCancelCase = do
       divisor <- genArithConst
       factor <- genSmallFactor
       let coeff = divisor * factor
       withBindings "constant cancellation" (Div (Expr.mul (Lit coeff) arithA) (Lit divisor))
-        [nearValue arithAName (maxBound `div` coeff)]
+        [nearOverflow arithAName coeff]
 
     nestedDivCase = do
       divisor1 <- genArithConst
@@ -782,7 +782,7 @@ genBaseArithCase = oneof
       factor <- genSmallFactor
       let divisor = coeff * factor
       withBindings "fraction reduction" (Div (Expr.mul (Lit coeff) arithA) (Lit divisor))
-        [nearValue arithAName (maxBound `div` coeff)]
+        [nearOverflow arithAName coeff]
 
     ceilDivCase = do
       divisor <- genArithConst
@@ -790,7 +790,7 @@ genBaseArithCase = oneof
       let coeff = divisor * factor
       withBindings "ceil-div cancellation"
         (Expr.add (Lit 1) (Div (Sub (Expr.mul (Lit coeff) arithA) (Lit 1)) (Lit divisor)))
-        [nearValue arithAName (maxBound `div` coeff), nearValue arithAName 1]
+        [nearOverflow arithAName coeff, nearValue arithAName 1]
 
     telescopeCase = do
       divisor <- genArithConst
@@ -882,6 +882,13 @@ nearValue :: Text -> W256 -> [(Text, W256)] -> Gen [(Text, W256)]
 nearValue name bound bs = do
   delta <- elements [Nothing, Just (-1), Just 0, Just 1]
   pure $ maybe bs (\d -> replaceBinding name (bound + d) bs) delta
+
+-- Usually, move a binding to where its product with coeff starts to overflow.
+-- A product of two constants can wrap to a zero coeff, which never overflows.
+nearOverflow :: Text -> W256 -> [(Text, W256)] -> Gen [(Text, W256)]
+nearOverflow name coeff
+  | coeff == 0 = pure
+  | otherwise = nearValue name (maxBound `div` coeff)
 
 -- Usually, move a binding to within one of another binding.
 nearVar :: Text -> Text -> [(Text, W256)] -> Gen [(Text, W256)]
