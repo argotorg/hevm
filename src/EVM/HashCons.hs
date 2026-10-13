@@ -15,7 +15,9 @@ module EVM.HashCons
   ( Rewrite(..)
   , runRewrite
   , hashConsExpr
+  , hashConsExprIO
   , setHashConsEnabled
+  , getHashConsEnabled
   , hashConsEnabled
   , resetHashCons
   , memoFixTraverse
@@ -80,6 +82,9 @@ hcState = unsafePerformIO (newIORef emptyHC)
 
 setHashConsEnabled :: Bool -> IO ()
 setHashConsEnabled = writeIORef hcEnabled
+
+getHashConsEnabled :: IO Bool
+getHashConsEnabled = readIORef hcEnabled
 
 resetHashCons :: IO ()
 resetHashCons = do
@@ -168,10 +173,13 @@ hashConsEnabled x = unsafePerformIO (x `seq` readIORef hcEnabled)
 
 -- | The canonical node equal to the argument
 hashConsExpr :: Expr a -> Expr a
-hashConsExpr e = unsafePerformIO $ do
+hashConsExpr e = unsafePerformIO (hashConsExprIO e)
+{-# NOINLINE hashConsExpr #-}
+
+hashConsExprIO :: Expr a -> IO (Expr a)
+hashConsExprIO e = do
   en <- readIORef hcEnabled
   if en then fst <$> go e else pure e
-{-# NOINLINE hashConsExpr #-}
 
 -- A hit means the node is already canonical
 lookupSN :: Expr a -> IO (Maybe Int)

@@ -1,6 +1,3 @@
--- Results below depend on the global hash-consing flag, so two textually equal calls must never be shared
-{-# OPTIONS_GHC -fno-cse -fno-full-laziness #-}
-
 module EVM.Expr.HashConsTests (tests) where
 
 import Prelude hiding (LT, GT)
@@ -12,15 +9,12 @@ import Control.Concurrent.MVar
 import Control.Exception (evaluate)
 import Control.Monad (forM)
 import Data.ByteString (ByteString)
-import Data.IORef
 import Data.List (sort, tails)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes)
 import Data.Set qualified as Set
 import Data.Monoid (Any(..), Sum(..))
 import Data.Ord qualified as Ord
-import Data.Text qualified as T
-import System.IO.Unsafe (unsafePerformIO)
 import System.Timeout (timeout)
 
 import EVM.Expr qualified as Expr
@@ -30,18 +24,20 @@ import EVM.Traversals (foldExpr, mapExpr)
 import EVM.Types
 
 tests :: TestTree
-tests = testGroup "HashCons"
+tests = withResource (newMVar ()) (const (pure ())) $ \getLock ->
+  let withHC :: Bool -> IO a -> IO a
+      withHC on act = getLock >>= \lock -> withFlag lock on act
+  in testGroup "HashCons"
   [ testCase "interning-is-live" $ do
-      let mk v = Add (Var v) (Mul (Var v) (Lit 3))
-      off <- withHC False $ evaluate (same (internExpr (mk "x")) (internExpr (mk "x")))
-      on <- withHC True $ evaluate (same (internExpr (mk "x")) (internExpr (mk "x")))
-      copied <- withHC False $ do
-        let e = mk "x"
+      let e = Add (Var "x") (Mul (Var "x") (Lit 3))
+      (c, copied, off) <- withHC False $ do
         c <- clone e
-        pure (c == e && not (same c e))
+        off <- same <$> internExprIO e <*> internExprIO c
+        pure (c, c == e && not (same c e), off)
+      on <- withHC True $ same <$> internExprIO e <*> internExprIO c
+      assertBool "clone must build a new, equal term" copied
       assertBool "interning must do nothing when disabled" (not off)
       assertBool "equal terms must intern to one object" on
-      assertBool "clone must build a new, equal term" copied
   , testProperty "simplify-differential" $ \(t :: SharedTerms) -> ioProperty $ do
       let jobs = concat
             [ concat [ [ Job "simplify" Expr.simplify w, Job "concKeccakSimpExpr" Expr.concKeccakSimpExpr w
@@ -125,32 +121,23 @@ noFailures fails = counterexample (unlines (take 3 fails)) (null fails)
 
 -- Running under a fixed flag ------------------------------------------------------------------------
 
-hcLock :: MVar ()
-hcLock = unsafePerformIO (newMVar ())
-{-# NOINLINE hcLock #-}
-
-sentinelCtr :: IORef Int
-sentinelCtr = unsafePerformIO (newIORef 0)
-{-# NOINLINE sentinelCtr #-}
-
 -- | Runs with hash-consing forced on or off, starting from empty tables. Every 'interpret' sets
 -- the same global flag and wipes the tables, and under -f devel tests run concurrently, so the
 -- action is rerun if a sentinel interned at the start is no longer canonical at the end.
-withHC :: Bool -> IO a -> IO a
-withHC on act = withMVar hcLock (const loop)
+withFlag :: MVar () -> Bool -> IO a -> IO a
+withFlag lock on act = withMVar lock (const loop)
   where
     loop = do
       setHashConsEnabled on
       resetHashCons
-      n <- atomicModifyIORef' sentinelCtr (\i -> (i + 1, i))
-      s <- evaluate (internExpr (sentinel n))
+      s <- internExprIO sentinel
       r <- act
-      s' <- evaluate (internExpr (sentinel n))
-      if hashConsEnabled s' == on && (not on || same s s') then pure r else loop
+      s' <- internExprIO sentinel
+      still <- getHashConsEnabled
+      if still == on && (not on || same s s') then pure r else loop
 
-sentinel :: Int -> Expr EWord
-sentinel n = Var (T.pack ("hashcons-sentinel-" <> show n))
-{-# NOINLINE sentinel #-}
+sentinel :: Expr EWord
+sentinel = Var "hashcons-sentinel"
 
 -- | Forces the whole term: a lazily built result would otherwise be computed later, under another flag
 force :: Show a => a -> IO a
@@ -162,11 +149,7 @@ inTime secs x = timeout (secs * 1000000) (force x)
 -- | A structurally equal term that shares no interior node with the original. Only a copy when
 -- hash-consing is off, as 'mapExpr' interns what it rebuilds.
 clone :: Expr a -> IO (Expr a)
-clone e = force (mapExpr copyNode e)
-
-copyNode :: Expr a -> Expr a
-copyNode x = x
-{-# NOINLINE copyNode #-}
+clone e = force (mapExpr id e)
 
 -- Differential -----------------------------------------------------------------------------------
 
@@ -200,13 +183,17 @@ keyed = not . getAny . foldExpr isJoin mempty
     isJoin :: Expr b -> Any
     isJoin = \case { JoinBytes {} -> Any True; _ -> Any False }
 
+data Subterm = forall b . Subterm (Expr b)
+
 internChecks :: [Expr a] -> [Expr a] -> IO ([String], [Expr a])
 internChecks xs copies = do
-  is <- mapM (evaluate . internExpr) xs
+  is <- mapM internExprIO xs
   perTerm <- forM (zip3 xs copies is) $ \(x, c, i) -> do
-    twice <- evaluate (internExpr i)
-    fromCopy <- evaluate (internExpr c)
-    stray <- force (foldExpr (\s -> [ show s | not (same (internExpr s) s) ]) [] i)
+    twice <- internExprIO i
+    fromCopy <- internExprIO c
+    stray <- fmap catMaybes . forM (foldExpr (\s -> [Subterm s]) [] i) $ \(Subterm s) -> do
+      s' <- internExprIO s
+      pure $ if same s' s then Nothing else Just (show s)
     pure $ fmap (<> "\n" <> show x) $ concat
       [ [ "interning changed the term" | show i /= show x || i /= x || compare i x /= EQ ]
       , [ "interning is not idempotent" | not (same twice i) ]
@@ -219,10 +206,7 @@ internChecks xs copies = do
         [ [ "different terms interned to one object\n" <> sa <> "\n" <> sb | same a b && sa /= sb ]
           <> [ "equal terms interned to different objects\n" <> sa | sa == sb && keyed a && not (same a b) ]
         | ((sa, a):rest) <- tails shown, (sb, b) <- rest ]
-      fails = concat perTerm <> pairwise
-  -- forced here: once the caller releases the lock, another test may reset the tables
-  _ <- evaluate (sum (fmap length fails))
-  pure (fails, is)
+  pure (concat perTerm <> pairwise, is)
 
 -- | The hand-written Eq and Ord have to agree with structural equality whether or not the two
 -- sides share heap objects
