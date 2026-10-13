@@ -1,4 +1,5 @@
 {-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE StaticPointers #-}
 
 {-|
    Helper functions for working with Expr instances.
@@ -1003,7 +1004,7 @@ litToArrayPreimage val =
       Nothing
 
 litToKeccak :: Expr a -> Expr a
-litToKeccak e = mapExprShared 0 go e
+litToKeccak e = mapExprShared (static (HC.Rewrite go)) e
   where
     go :: Expr a -> Expr a
     go orig@(Lit key) = case litToArrayPreimage key of
@@ -1193,7 +1194,7 @@ simplify e = untilFixpoint (simplifyNoLitToKeccak . litToKeccak) (HC.hashConsExp
 simplifyNoLitToKeccak :: Expr a -> Expr a
 simplifyNoLitToKeccak l@(Lit _) = l
 simplifyNoLitToKeccak s@(ConcreteStore _) = s
-simplifyNoLitToKeccak e = untilFixpoint (mapExprShared 1 go) (HC.hashConsExpr e)
+simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go))) (HC.hashConsExpr e)
   where
     go :: Expr a -> Expr a
 
@@ -2066,7 +2067,7 @@ constPropagate ps =
 
 -- Concretize & simplify Keccak expressions until fixed-point.
 concKeccakSimpExpr :: Expr a -> Expr a
-concKeccakSimpExpr orig = untilFixpoint (simplifyNoLitToKeccak . (mapExprShared 2 concKeccakOnePass)) (simplify orig)
+concKeccakSimpExpr orig = untilFixpoint (simplifyNoLitToKeccak . (mapExprShared (static (HC.Rewrite concKeccakOnePass)))) (simplify orig)
 
 -- Concretize Keccak in Props, but don't simplify
 -- Needed because if it also simplified, we may not find some simplification errors, as

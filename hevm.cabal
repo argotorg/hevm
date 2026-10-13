@@ -112,6 +112,7 @@ library
     EVM.Tracing,
     EVM.SymExec,
     EVM.Traversals,
+    EVM.Traversals.Children,
     EVM.CSE,
     EVM.HashCons,
     EVM.Keccak,
