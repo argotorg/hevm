@@ -60,6 +60,8 @@ tests = testGroup "HashCons"
       refs <- catMaybes <$> withHC False (mapM reference jobs)
       -- one table generation for everything, twice over, so later jobs run against the memos of earlier ones
       fails <- withHC True $ mapM againstReference (refs <> reverse refs)
+      -- only most: without hash-consing the simplifier walks these heavily shared terms as trees,
+      -- which can be exponentially larger, and a job can also miss its time limit on a loaded machine
       pure $ cover 90 (10 * length refs >= 9 * length jobs) "most jobs terminate" $ noFailures (catMaybes fails)
   , testProperty "intern-invariants" $ \(t :: SharedTerms) -> ioProperty $ do
       let attempt = do
