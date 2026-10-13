@@ -602,7 +602,7 @@ copySlice s@(Lit srcOffset) d@(Lit dstOffset) sz@(Lit size) src ds@(ConcreteBuf 
   | otherwise = CopySlice s d sz src ds
 
 copySlice srcOff dstOff (Lit size) (WriteWord srcOff2 val base) dstBuff
-  -- already in the form this rewrites to: rewriting it again would never terminate
+  -- normalize to offset 0 over an empty buffer, unless it already is
   | size < 32 && srcOff == srcOff2 && (srcOff /= Lit 0 || base /= ConcreteBuf "") = copySlice (Lit 0) dstOff (Lit size) (WriteWord (Lit 0) val (ConcreteBuf "")) dstBuff
 
 -- abstract indices
