@@ -1559,7 +1559,7 @@ wrappingTests = testGroup "W256 wrapping edge cases"
       result <- proveEquivExpr full simplified
       assertBool "copySlice with wrapping srcOffset" result
 
-  , -- F1: a write that wraps past 2^256 overlaps the lower write, and swapping the two back and
+  , -- a write that wraps past 2^256 overlaps the lower write, and swapping the two back and
     -- forth made simplify loop forever
     testCase "writeWord-wrapping-write-stays-on-top" $ do
       let lower = WriteWord (Lit 0) (Var "x") (AbstractBuf "b")
