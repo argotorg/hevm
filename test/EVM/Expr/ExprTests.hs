@@ -289,6 +289,45 @@ copySliceTests = testGroup "CopySlice tests"
             e = CopySlice (Lit 0x3f) (Lit 0x0) (Lit 0x1) src (ConcreteBuf "")
         assertEqual "size-1 copy must read the correct (last) byte"
           (ConcreteBuf (BS.pack [0x89])) (Expr.simplify e)
+  , testCase "copyslice-window-trim-canonicalizes-mapping-keys" $ do
+      let key rest = Expr.simplify $ Keccak (CopySlice (Lit 0) (Lit 0) (Lit 64)
+                       (WriteWord (Lit 0) (Var "acc") (WriteWord (Lit 32) (Lit 7) rest)) (ConcreteBuf ""))
+          k1 = key (WriteWord (Lit 192) (Var "x") (ConcreteBuf (BS.pack [9, 9, 9])))
+          k2 = key (WriteWord (Lit 64) (Var "y") (WriteWord (Lit 320) (Lit 5) (ConcreteBuf "")))
+          k3 = Expr.simplify $ Keccak (CopySlice (Lit 0) (Lit 0) (Lit 64)
+                 (WriteWord (Lit 0) (Var "acc") (WriteWord (Lit 32) (Lit 8) (ConcreteBuf ""))) (ConcreteBuf ""))
+      assertEqual "same first 64 bytes give the same key" k1 k2
+      assertBool "a different second word gives a different key" (k1 /= k3)
+      assertEqual "the equivalent key resolves a storage read" (Var "value")
+        (Expr.readStorage' k2 (SStore k1 (Var "value") (AbstractStore (SymAddr "c") Nothing)))
+  , localOption (mkTimeout 5_000_000) $ testCase "copyslice-window-trim-short-copy" $ do
+      let src = WriteWord (Lit 192) (Var "other") (WriteWord (Lit 16) (Var "value") (ConcreteBuf ""))
+          dst = AbstractBuf "dst"
+          expected = CopySlice (Lit 0) (Lit 5) (Lit 3) (WriteWord (Lit 0) (Var "value") (ConcreteBuf "")) dst
+      assertEqual "short copies reach a stable result" expected (Expr.copySlice (Lit 16) (Lit 5) (Lit 3) src dst)
+  , testCase "copyslice-window-trim-unsupported" $ do
+      let base = ConcreteBuf ""
+          src = WriteWord (Lit 0) (Var "value") base
+          check (off, size, buf) =
+            assertEqual "unsupported windows and writes stay intact"
+              (CopySlice (Lit off) (Lit 0) (Lit size) buf (AbstractBuf "dst"))
+              (Expr.copySlice (Lit off) (Lit 0) (Lit size) buf (AbstractBuf "dst"))
+      mapM_ check
+        [ (0, 64, WriteWord (Var "offset") (Var "value") base)
+        , (0, 64, WriteWord (Lit (maxBound - 15)) (Var "value") base)
+        , (0, 64, WriteWord (Lit 0) (Var "value") (AbstractBuf "src"))
+        , (maxBound - 15, 64, src)
+        , (0, Expr.maxBytes, src)
+        ]
+  , testProperty "copyslice-window-trim-equivalence" $ withMaxSuccess 200 $ forAll genTrimWriteChain $ \src ->
+      forAll (choose (0 :: Int, 160)) $ \so -> forAll (choose (1 :: Int, 96)) $ \sz ->
+      forAll (frequency [(4, fromIntegral <$> choose (0 :: Int, 64)), (1, elements [Expr.maxBytes, maxBound - 15])]) $ \dOff ->
+      forAll (elements [ConcreteBuf "", AbstractBuf "dst", ConcreteBuf (BS.pack [1..100])]) $ \dst -> ioProperty $ do
+        let lit = Lit . fromIntegral
+            full = CopySlice (lit so) (Lit dOff) (lit sz) src dst
+            simp = Expr.copySlice (lit so) (Lit dOff) (lit sz) src dst
+        res <- checkSatWith equivConfig ((full ./= simp) .|| (Expr.bufLength full ./= Expr.bufLength simp))
+        pure $ counterexample (show res) $ isQed res
   ]
 
 memoryTests :: TestTree
@@ -2048,3 +2087,12 @@ isSatOrUnknown res = isSat res || isUnknown res
 
 isUnsatOrUnknown :: SMTResult -> Bool
 isUnsatOrUnknown res = isQed res || isUnknown res
+
+genTrimWriteChain :: Gen (Expr Buf)
+genTrimWriteChain = do
+  n <- choose (1 :: Int, 6)
+  len <- choose (0 :: Int, 200)
+  base <- ConcreteBuf . BS.pack <$> vectorOf len arbitrary
+  writes <- vectorOf n $ (,) <$> (Lit . fromIntegral <$> choose (0 :: Int, 200))
+                             <*> oneof [Lit <$> arbitrary, elements [Var "a", Var "b", Var "c"]]
+  pure $ foldr (\(i, v) acc -> WriteWord i v acc) base writes

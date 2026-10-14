@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- `copySlice` now trims irrelevant writes and base bytes from concrete source
+  windows, allowing mapping keys built over different scratch memory to compare equal.
 - Symbolic execution now avoids forking when simplification shows that
   the path conditions imply the branch condition.
 - Symbolic jump targets and jump conditions that depend on a subterm with few
