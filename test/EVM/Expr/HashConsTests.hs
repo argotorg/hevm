@@ -8,6 +8,7 @@ import Test.Tasty.QuickCheck hiding (Failure, Success)
 import Control.Concurrent.MVar
 import Control.Exception (evaluate)
 import Control.Monad (forM)
+import Data.IORef (newIORef, readIORef)
 import Data.ByteString (ByteString)
 import Data.List (sort, tails)
 import Data.Map.Strict qualified as Map
@@ -38,6 +39,18 @@ tests = withResource (newMVar ()) (const (pure ())) $ \getLock ->
       assertBool "clone must build a new, equal term" copied
       assertBool "hash-consing must do nothing when disabled" (not off)
       assertBool "equal terms must become one object" on
+  , testCase "buffer-and-store-vars-get-own-ids" $ do
+      r <- newIORef (0 :: Int)
+      n1 <- readIORef r
+      n2 <- readIORef r
+      let b1 = GVar (BufVar n1)
+          b2 = GVar (BufVar n2)
+      shared <- withHC True $ do
+        _ <- hashConsExprIO b1
+        _ <- hashConsExprIO (GVar (StoreVar n1))
+        same <$> hashConsExprIO (BufLength b1) <*> hashConsExprIO (BufLength b2)
+      assertBool "the two buffer variables must be separate objects" (not (same b1 b2))
+      assertBool "equal terms over a buffer variable must become one object" shared
   , testProperty "simplify-differential" $ \(t :: SharedTerms) -> ioProperty $ do
       let jobs = concat
             [ concat [ [ Job "simplify" Expr.simplify w, Job "concKeccakSimpExpr" Expr.concKeccakSimpExpr w
