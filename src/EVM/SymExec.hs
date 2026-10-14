@@ -388,7 +388,7 @@ interpret fetcher iterConf vm stepper handler = do
   conf <- readConfig
   -- Construction-time hash-consing (EVM.HashCons): share structurally-identical subterms as they
   -- are built, so deeply-reused symbolic terms stay DAGs instead of materializing as exponential
-  -- trees. Enabled per exploration; tables start clean.
+  -- trees. The flag is process-wide and outlives this exploration.
   liftIO $ do HashCons.setHashConsEnabled conf.hashConsExplore
               HashCons.resetHashCons
   taskQ <- liftIO newChan

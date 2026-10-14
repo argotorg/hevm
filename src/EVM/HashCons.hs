@@ -23,15 +23,15 @@
     shared terms drop from O(logical size) to O(size of the differing part).
 
     hashConsExpr e is always structurally equal to e, so it is semantically the identity; it only
-    shares memory. Gated by 'setHashConsEnabled' (off by default): when disabled every call is a
-    single IORef read returning the argument unchanged, so ordinary (non-symbolic) use is
-    unaffected.
+    shares memory. Gated by a process-wide flag that every 'interpret' sets from
+    'hashConsExplore' and that stays set afterwards: 'simplify' outside an exploration, and
+    explorations running concurrently, see whichever value was set last. That changes sharing,
+    never results. When off, every call is a single IORef read returning the argument unchanged.
 
     The tables are module-global state in the style of GHC's FastString table: this module is the
-    only code that can touch them, a canonical node never changes meaning (the tables are only
-    ever consulted to return an already-constructed, structurally-equal node), and
-    'resetHashCons' is called at the start of each symbolic exploration so entries never leak
-    between runs.
+    only code that can touch them, and a canonical node never changes meaning (the tables are
+    only ever consulted to return an already-constructed, structurally-equal node). Every
+    'interpret' starts them afresh with 'resetHashCons'.
 -}
 module EVM.HashCons
   ( Rewrite(..)
