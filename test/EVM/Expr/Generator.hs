@@ -939,7 +939,6 @@ data Pool = Pool
 poolVars :: [Text]
 poolVars = ["esc_word_a", "esc_word_b", "esc_word_c"]
 
--- | Sharing makes the tree size exponential in the depth, so entries above @cap@ are dropped
 -- | Values that an offset, a size or a sum of the two carries past 2^256 (or past the sign bit)
 genWrapValue :: Gen W256
 genWrapValue = frequency
@@ -950,6 +949,7 @@ genWrapValue = frequency
   , (2, (\d -> 2 ^ (255 :: Int) + 50 - fromInteger d) <$> chooseInteger (0, 100))
   ]
 
+-- | Sharing makes the tree size exponential in the depth, so entries above @cap@ are dropped
 genPool :: Int -> Int -> Gen Pool
 genPool steps cap = do
   lits <- (<>) <$> vectorOf 2 (fmap Lit arbitrary) <*> vectorOf 3 (Lit <$> genWrapValue)
@@ -960,7 +960,7 @@ genPool steps cap = do
   byte <- LitByte <$> arbitrary
   let leaf x = (1, x)
       seed = Pool
-        { pWords = fmap leaf $ [Lit 0, Lit 1, Lit 32, Lit Expr.maxLit, env] <> fmap Var poolVars <> lits <> keys
+        { pWords = fmap leaf $ [Lit 0, Lit 1, Lit 32, Lit Expr.maxLit, env, Gas "esc_gas" 0, Gas "esc_gas" 1] <> fmap Var poolVars <> lits <> keys
         , pBufs = fmap leaf [ConcreteBuf "", AbstractBuf "esc_buf_a", AbstractBuf "esc_buf_b", buf]
         , pStores = fmap leaf [AbstractStore (SymAddr "esc_addr_a") Nothing, AbstractStore (SymAddr "esc_addr_a") (Just 1), AbstractStore (LitAddr 0x1234) Nothing, store]
         , pBytes = fmap leaf [LitByte 0, LitByte 0xff, byte]

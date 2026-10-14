@@ -1,3 +1,5 @@
+{-# LANGUAGE TemplateHaskell #-}
+
 module EVM.Expr.HashConsTests (tests) where
 
 import Prelude hiding (LT, GT)
@@ -20,6 +22,7 @@ import System.Timeout (timeout)
 
 import EVM.Expr qualified as Expr
 import EVM.Expr.Generator
+import EVM.Expr.Probe (Variant(..), variants)
 import EVM.HashCons
 import EVM.Traversals (foldExpr, mapExpr)
 import EVM.Types
@@ -28,6 +31,14 @@ tests :: TestTree
 tests = withResource (newMVar ()) (const (pure ())) $ \getLock ->
   let withHC :: Bool -> IO a -> IO a
       withHC on act = getLock >>= \lock -> withFlag lock on act
+      differential :: [Job] -> IO Property
+      differential jobs = do
+        refs <- catMaybes <$> withHC False (mapM reference jobs)
+        -- one table generation for everything, twice over, so later jobs run against the memos of earlier ones
+        fails <- withHC True $ mapM againstReference (refs <> reverse refs)
+        -- only most: without hash-consing the simplifier walks heavily shared terms as trees,
+        -- which can be exponentially larger
+        pure $ cover 90 (10 * length refs >= 9 * length jobs) "most jobs terminate" $ noFailures (catMaybes fails)
   in testGroup "HashCons"
   [ testCase "hash-cons-is-live" $ do
       let e = Add (Var "x") (Mul (Var "x") (Lit 3))
@@ -39,20 +50,34 @@ tests = withResource (newMVar ()) (const (pure ())) $ \getLock ->
       assertBool "clone must build a new, equal term" copied
       assertBool "hash-consing must do nothing when disabled" (not off)
       assertBool "equal terms must become one object" on
-  , testCase "buffer-and-store-vars-get-own-ids" $ do
+  , testCase "every-field-is-in-the-key" $ do
+      merged <- withHC True $ fmap catMaybes . forM $(variants ['GVar] ''Expr) $ \(field, Variant a b) -> do
+        s <- same <$> hashConsExprIO a <*> hashConsExprIO b
+        pure (if s then Just field else Nothing)
+      assertBool ("terms that differ only in these fields became one object: " <> show merged) (null merged)
+  , testCase "gvars-are-keyed-by-index" $ do
+      -- read at runtime, so GHC cannot share the equal terms built from them
       r <- newIORef (0 :: Int)
-      n1 <- readIORef r
-      n2 <- readIORef r
-      let b1 = GVar (BufVar n1)
-          b2 = GVar (BufVar n2)
-      shared <- withHC True $ do
-        _ <- hashConsExprIO b1
-        _ <- hashConsExprIO (GVar (StoreVar n1))
-        same <$> hashConsExprIO (BufLength b1) <*> hashConsExprIO (BufLength b2)
-      assertBool "the two buffer variables must be separate objects" (not (same b1 b2))
-      assertBool "equal terms over a buffer variable must become one object" shared
-  , testProperty "simplify-differential" $ \(t :: SharedTerms) -> ioProperty $ do
-      let jobs = concat
+      i <- readIORef r
+      i' <- readIORef r
+      (bufs, stores) <- withHC True $ do
+        b <- hashConsExprIO (GVar (BufVar i))
+        b' <- hashConsExprIO (GVar (BufVar i'))
+        b1 <- hashConsExprIO (GVar (BufVar (i + 1)))
+        s <- hashConsExprIO (GVar (StoreVar i))
+        s' <- hashConsExprIO (GVar (StoreVar i'))
+        s1 <- hashConsExprIO (GVar (StoreVar (i + 1)))
+        pure ((same b b', same b b1), (same s s', same s s1))
+      assertEqual "BufVar: equal index shared, other index not" (True, False) bufs
+      assertEqual "StoreVar: equal index shared, other index not" (True, False) stores
+  , testProperty "simplify-differential-trees" $
+      \(b :: Expr Buf, s :: Expr Storage, y :: Expr Byte, GenWriteStorageLoad l, ps :: [Prop]) -> ioProperty $
+        differential
+          [ Job "simplify" Expr.simplify b, Job "simplify" Expr.simplify s, Job "simplify" Expr.simplify y
+          , Job "simplify" Expr.simplify l, Job "concKeccakSimpExpr" Expr.concKeccakSimpExpr l
+          , Job "simplifyProps" Expr.simplifyProps ps ]
+  , testProperty "simplify-differential" $ \(t :: SharedTerms) -> ioProperty $
+      differential $ concat
             [ concat [ [ Job "simplify" Expr.simplify w, Job "concKeccakSimpExpr" Expr.concKeccakSimpExpr w
                        , Job "litToKeccak" Expr.litToKeccak w ]
                      | w <- t.words ]
@@ -66,12 +91,6 @@ tests = withResource (newMVar ()) (const (pure ())) $ \getLock ->
             , [ Job "writeStorage" (\(a, b, c) -> Expr.writeStorage a b c) (k, v, s)
               | (k, v, s) <- zip3 t.words (reverse t.words) (cycle t.stores) ]
             ]
-      refs <- catMaybes <$> withHC False (mapM reference jobs)
-      -- one table generation for everything, twice over, so later jobs run against the memos of earlier ones
-      fails <- withHC True $ mapM againstReference (refs <> reverse refs)
-      -- only most: without hash-consing the simplifier walks these heavily shared terms as trees,
-      -- which can be exponentially larger
-      pure $ cover 90 (10 * length refs >= 9 * length jobs) "most jobs terminate" $ noFailures (catMaybes fails)
   , testProperty "hash-cons-invariants" $ \(t :: SharedTerms) -> ioProperty $ do
       let attempt = do
             (cw, cb, cs, cy) <- withHC False $
