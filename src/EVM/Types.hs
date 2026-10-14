@@ -62,6 +62,7 @@ import Numeric (readHex, showHex)
 import Options.Generic
 import Optics.TH
 import EVM.FeeSchedule (FeeSchedule (..))
+import EVM.Types.TH (shortcutEq, shortcutCompare)
 import Data.Kind (Type)
 
 import Text.Regex.TDFA qualified as Regex
@@ -391,181 +392,10 @@ data Expr (a :: EType) where
 
 deriving instance Show (Expr a)
 
--- The hand-written Eq/Ord instances below have semantics identical to the previously-derived
--- ones (constructor declaration order, fields compared left-to-right), but every recursive
--- comparison first checks physical identity. On hash-consed / shared terms (EVM.HashCons) this
--- makes comparisons O(size of the differing part) instead of O(logical tree size), which removes
--- the dominant cost of simplifier guards (a == b) and normalization compares on deeply-shared
--- symbolic terms.
--- The outer case in each has no wildcard, so a new constructor does not compile until it is
--- handled here.
-
 -- | Position of the constructor in the declaration, which is how the derived Ord orders
 -- different constructors
 exprRank :: Expr a -> Int
 exprRank !e = I# (dataToTag# e)
-
-instance Eq (Expr a) where
-  x == y = ptrEq x y || go x y
-    where
-      eqSC :: Eq c => c -> c -> Bool
-      eqSC u v = ptrEq u v || u Prelude.== v
-      go :: Expr b -> Expr b -> Bool
-      go l r = case l of
-        Lit x0a -> case r of { Lit x0b -> eqSC x0a x0b; _ -> False }
-        Var x0a -> case r of { Var x0b -> eqSC x0a x0b; _ -> False }
-        GVar x0a -> case r of { GVar x0b -> eqSC x0a x0b; _ -> False }
-        LitByte x0a -> case r of { LitByte x0b -> eqSC x0a x0b; _ -> False }
-        IndexWord x0a x1a -> case r of { IndexWord x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        EqByte x0a x1a -> case r of { EqByte x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        JoinBytes x0a x1a x2a x3a x4a x5a x6a x7a x8a x9a x10a x11a x12a x13a x14a x15a x16a x17a x18a x19a x20a x21a x22a x23a x24a x25a x26a x27a x28a x29a x30a x31a -> case r of { JoinBytes x0b x1b x2b x3b x4b x5b x6b x7b x8b x9b x10b x11b x12b x13b x14b x15b x16b x17b x18b x19b x20b x21b x22b x23b x24b x25b x26b x27b x28b x29b x30b x31b -> eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b && eqSC x3a x3b && eqSC x4a x4b && eqSC x5a x5b && eqSC x6a x6b && eqSC x7a x7b && eqSC x8a x8b && eqSC x9a x9b && eqSC x10a x10b && eqSC x11a x11b && eqSC x12a x12b && eqSC x13a x13b && eqSC x14a x14b && eqSC x15a x15b && eqSC x16a x16b && eqSC x17a x17b && eqSC x18a x18b && eqSC x19a x19b && eqSC x20a x20b && eqSC x21a x21b && eqSC x22a x22b && eqSC x23a x23b && eqSC x24a x24b && eqSC x25a x25b && eqSC x26a x26b && eqSC x27a x27b && eqSC x28a x28b && eqSC x29a x29b && eqSC x30a x30b && eqSC x31a x31b; _ -> False }
-        Partial x0a x1a x2a -> case r of { Partial x0b x1b x2b -> eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b; _ -> False }
-        Failure x0a x1a x2a -> case r of { Failure x0b x1b x2b -> eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b; _ -> False }
-        Success x0a x1a x2a x3a -> case r of { Success x0b x1b x2b x3b -> eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b && eqSC x3a x3b; _ -> False }
-        Add x0a x1a -> case r of { Add x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        Sub x0a x1a -> case r of { Sub x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        Mul x0a x1a -> case r of { Mul x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        Div x0a x1a -> case r of { Div x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        SDiv x0a x1a -> case r of { SDiv x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        Mod x0a x1a -> case r of { Mod x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        SMod x0a x1a -> case r of { SMod x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        AddMod x0a x1a x2a -> case r of { AddMod x0b x1b x2b -> eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b; _ -> False }
-        MulMod x0a x1a x2a -> case r of { MulMod x0b x1b x2b -> eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b; _ -> False }
-        Exp x0a x1a -> case r of { Exp x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        SEx x0a x1a -> case r of { SEx x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        Min x0a x1a -> case r of { Min x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        Max x0a x1a -> case r of { Max x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        EVM.Types.LT x0a x1a -> case r of { EVM.Types.LT x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        EVM.Types.GT x0a x1a -> case r of { EVM.Types.GT x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        LEq x0a x1a -> case r of { LEq x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        GEq x0a x1a -> case r of { GEq x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        SLT x0a x1a -> case r of { SLT x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        SGT x0a x1a -> case r of { SGT x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        Eq x0a x1a -> case r of { Eq x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        IsZero x0a -> case r of { IsZero x0b -> eqSC x0a x0b; _ -> False }
-        ITE x0a x1a x2a -> case r of { ITE x0b x1b x2b -> eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b; _ -> False }
-        And x0a x1a -> case r of { And x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        Or x0a x1a -> case r of { Or x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        Xor x0a x1a -> case r of { Xor x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        Not x0a -> case r of { Not x0b -> eqSC x0a x0b; _ -> False }
-        SHL x0a x1a -> case r of { SHL x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        SHR x0a x1a -> case r of { SHR x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        SAR x0a x1a -> case r of { SAR x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        CLZ x0a -> case r of { CLZ x0b -> eqSC x0a x0b; _ -> False }
-        Keccak x0a -> case r of { Keccak x0b -> eqSC x0a x0b; _ -> False }
-        Origin -> case r of { Origin -> True; _ -> False }
-        BlockHash x0a -> case r of { BlockHash x0b -> eqSC x0a x0b; _ -> False }
-        Coinbase -> case r of { Coinbase -> True; _ -> False }
-        Timestamp -> case r of { Timestamp -> True; _ -> False }
-        BlockNumber -> case r of { BlockNumber -> True; _ -> False }
-        PrevRandao -> case r of { PrevRandao -> True; _ -> False }
-        GasLimit -> case r of { GasLimit -> True; _ -> False }
-        ChainId -> case r of { ChainId -> True; _ -> False }
-        BaseFee -> case r of { BaseFee -> True; _ -> False }
-        TxValue -> case r of { TxValue -> True; _ -> False }
-        Balance x0a -> case r of { Balance x0b -> eqSC x0a x0b; _ -> False }
-        Gas x0a x1a -> case r of { Gas x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        CodeSize x0a -> case r of { CodeSize x0b -> eqSC x0a x0b; _ -> False }
-        CodeHash x0a -> case r of { CodeHash x0b -> eqSC x0a x0b; _ -> False }
-        LogEntry x0a x1a x2a -> case r of { LogEntry x0b x1b x2b -> eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b; _ -> False }
-        C x0a x1a x2a x3a x4a -> case r of { C x0b x1b x2b x3b x4b -> eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b && eqSC x3a x3b && eqSC x4a x4b; _ -> False }
-        SymAddr x0a -> case r of { SymAddr x0b -> eqSC x0a x0b; _ -> False }
-        LitAddr x0a -> case r of { LitAddr x0b -> eqSC x0a x0b; _ -> False }
-        WAddr x0a -> case r of { WAddr x0b -> eqSC x0a x0b; _ -> False }
-        ConcreteStore x0a -> case r of { ConcreteStore x0b -> eqSC x0a x0b; _ -> False }
-        AbstractStore x0a x1a -> case r of { AbstractStore x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        SLoad x0a x1a -> case r of { SLoad x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        SStore x0a x1a x2a -> case r of { SStore x0b x1b x2b -> eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b; _ -> False }
-        ConcreteBuf x0a -> case r of { ConcreteBuf x0b -> eqSC x0a x0b; _ -> False }
-        AbstractBuf x0a -> case r of { AbstractBuf x0b -> eqSC x0a x0b; _ -> False }
-        ReadWord x0a x1a -> case r of { ReadWord x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        ReadByte x0a x1a -> case r of { ReadByte x0b x1b -> eqSC x0a x0b && eqSC x1a x1b; _ -> False }
-        WriteWord x0a x1a x2a -> case r of { WriteWord x0b x1b x2b -> eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b; _ -> False }
-        WriteByte x0a x1a x2a -> case r of { WriteByte x0b x1b x2b -> eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b; _ -> False }
-        CopySlice x0a x1a x2a x3a x4a -> case r of { CopySlice x0b x1b x2b x3b x4b -> eqSC x0a x0b && eqSC x1a x1b && eqSC x2a x2b && eqSC x3a x3b && eqSC x4a x4b; _ -> False }
-        BufLength x0a -> case r of { BufLength x0b -> eqSC x0a x0b; _ -> False }
-
-instance Ord (Expr a) where
-  compare x y = if ptrEq x y then Prelude.EQ else go x y
-    where
-      cmpSC :: Ord c => c -> c -> Ordering
-      cmpSC u v = if ptrEq u v then Prelude.EQ else Prelude.compare u v
-      go :: Expr b -> Expr b -> Ordering
-      go l r = let byRank = Prelude.compare (exprRank l) (exprRank r) in case l of
-        Lit x0a -> case r of { Lit x0b -> cmpSC x0a x0b; _ -> byRank }
-        Var x0a -> case r of { Var x0b -> cmpSC x0a x0b; _ -> byRank }
-        GVar x0a -> case r of { GVar x0b -> cmpSC x0a x0b; _ -> byRank }
-        LitByte x0a -> case r of { LitByte x0b -> cmpSC x0a x0b; _ -> byRank }
-        IndexWord x0a x1a -> case r of { IndexWord x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        EqByte x0a x1a -> case r of { EqByte x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        JoinBytes x0a x1a x2a x3a x4a x5a x6a x7a x8a x9a x10a x11a x12a x13a x14a x15a x16a x17a x18a x19a x20a x21a x22a x23a x24a x25a x26a x27a x28a x29a x30a x31a -> case r of { JoinBytes x0b x1b x2b x3b x4b x5b x6b x7b x8b x9b x10b x11b x12b x13b x14b x15b x16b x17b x18b x19b x20b x21b x22b x23b x24b x25b x26b x27b x28b x29b x30b x31b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b Prelude.<> cmpSC x3a x3b Prelude.<> cmpSC x4a x4b Prelude.<> cmpSC x5a x5b Prelude.<> cmpSC x6a x6b Prelude.<> cmpSC x7a x7b Prelude.<> cmpSC x8a x8b Prelude.<> cmpSC x9a x9b Prelude.<> cmpSC x10a x10b Prelude.<> cmpSC x11a x11b Prelude.<> cmpSC x12a x12b Prelude.<> cmpSC x13a x13b Prelude.<> cmpSC x14a x14b Prelude.<> cmpSC x15a x15b Prelude.<> cmpSC x16a x16b Prelude.<> cmpSC x17a x17b Prelude.<> cmpSC x18a x18b Prelude.<> cmpSC x19a x19b Prelude.<> cmpSC x20a x20b Prelude.<> cmpSC x21a x21b Prelude.<> cmpSC x22a x22b Prelude.<> cmpSC x23a x23b Prelude.<> cmpSC x24a x24b Prelude.<> cmpSC x25a x25b Prelude.<> cmpSC x26a x26b Prelude.<> cmpSC x27a x27b Prelude.<> cmpSC x28a x28b Prelude.<> cmpSC x29a x29b Prelude.<> cmpSC x30a x30b Prelude.<> cmpSC x31a x31b; _ -> byRank }
-        Partial x0a x1a x2a -> case r of { Partial x0b x1b x2b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b; _ -> byRank }
-        Failure x0a x1a x2a -> case r of { Failure x0b x1b x2b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b; _ -> byRank }
-        Success x0a x1a x2a x3a -> case r of { Success x0b x1b x2b x3b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b Prelude.<> cmpSC x3a x3b; _ -> byRank }
-        Add x0a x1a -> case r of { Add x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        Sub x0a x1a -> case r of { Sub x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        Mul x0a x1a -> case r of { Mul x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        Div x0a x1a -> case r of { Div x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        SDiv x0a x1a -> case r of { SDiv x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        Mod x0a x1a -> case r of { Mod x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        SMod x0a x1a -> case r of { SMod x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        AddMod x0a x1a x2a -> case r of { AddMod x0b x1b x2b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b; _ -> byRank }
-        MulMod x0a x1a x2a -> case r of { MulMod x0b x1b x2b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b; _ -> byRank }
-        Exp x0a x1a -> case r of { Exp x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        SEx x0a x1a -> case r of { SEx x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        Min x0a x1a -> case r of { Min x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        Max x0a x1a -> case r of { Max x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        EVM.Types.LT x0a x1a -> case r of { EVM.Types.LT x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        EVM.Types.GT x0a x1a -> case r of { EVM.Types.GT x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        LEq x0a x1a -> case r of { LEq x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        GEq x0a x1a -> case r of { GEq x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        SLT x0a x1a -> case r of { SLT x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        SGT x0a x1a -> case r of { SGT x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        Eq x0a x1a -> case r of { Eq x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        IsZero x0a -> case r of { IsZero x0b -> cmpSC x0a x0b; _ -> byRank }
-        ITE x0a x1a x2a -> case r of { ITE x0b x1b x2b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b; _ -> byRank }
-        And x0a x1a -> case r of { And x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        Or x0a x1a -> case r of { Or x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        Xor x0a x1a -> case r of { Xor x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        Not x0a -> case r of { Not x0b -> cmpSC x0a x0b; _ -> byRank }
-        SHL x0a x1a -> case r of { SHL x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        SHR x0a x1a -> case r of { SHR x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        SAR x0a x1a -> case r of { SAR x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        CLZ x0a -> case r of { CLZ x0b -> cmpSC x0a x0b; _ -> byRank }
-        Keccak x0a -> case r of { Keccak x0b -> cmpSC x0a x0b; _ -> byRank }
-        Origin -> case r of { Origin -> Prelude.EQ; _ -> byRank }
-        BlockHash x0a -> case r of { BlockHash x0b -> cmpSC x0a x0b; _ -> byRank }
-        Coinbase -> case r of { Coinbase -> Prelude.EQ; _ -> byRank }
-        Timestamp -> case r of { Timestamp -> Prelude.EQ; _ -> byRank }
-        BlockNumber -> case r of { BlockNumber -> Prelude.EQ; _ -> byRank }
-        PrevRandao -> case r of { PrevRandao -> Prelude.EQ; _ -> byRank }
-        GasLimit -> case r of { GasLimit -> Prelude.EQ; _ -> byRank }
-        ChainId -> case r of { ChainId -> Prelude.EQ; _ -> byRank }
-        BaseFee -> case r of { BaseFee -> Prelude.EQ; _ -> byRank }
-        TxValue -> case r of { TxValue -> Prelude.EQ; _ -> byRank }
-        Balance x0a -> case r of { Balance x0b -> cmpSC x0a x0b; _ -> byRank }
-        Gas x0a x1a -> case r of { Gas x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        CodeSize x0a -> case r of { CodeSize x0b -> cmpSC x0a x0b; _ -> byRank }
-        CodeHash x0a -> case r of { CodeHash x0b -> cmpSC x0a x0b; _ -> byRank }
-        LogEntry x0a x1a x2a -> case r of { LogEntry x0b x1b x2b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b; _ -> byRank }
-        C x0a x1a x2a x3a x4a -> case r of { C x0b x1b x2b x3b x4b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b Prelude.<> cmpSC x3a x3b Prelude.<> cmpSC x4a x4b; _ -> byRank }
-        SymAddr x0a -> case r of { SymAddr x0b -> cmpSC x0a x0b; _ -> byRank }
-        LitAddr x0a -> case r of { LitAddr x0b -> cmpSC x0a x0b; _ -> byRank }
-        WAddr x0a -> case r of { WAddr x0b -> cmpSC x0a x0b; _ -> byRank }
-        ConcreteStore x0a -> case r of { ConcreteStore x0b -> cmpSC x0a x0b; _ -> byRank }
-        AbstractStore x0a x1a -> case r of { AbstractStore x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        SLoad x0a x1a -> case r of { SLoad x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        SStore x0a x1a x2a -> case r of { SStore x0b x1b x2b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b; _ -> byRank }
-        ConcreteBuf x0a -> case r of { ConcreteBuf x0b -> cmpSC x0a x0b; _ -> byRank }
-        AbstractBuf x0a -> case r of { AbstractBuf x0b -> cmpSC x0a x0b; _ -> byRank }
-        ReadWord x0a x1a -> case r of { ReadWord x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        ReadByte x0a x1a -> case r of { ReadByte x0b x1b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b; _ -> byRank }
-        WriteWord x0a x1a x2a -> case r of { WriteWord x0b x1b x2b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b; _ -> byRank }
-        WriteByte x0a x1a x2a -> case r of { WriteByte x0b x1b x2b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b; _ -> byRank }
-        CopySlice x0a x1a x2a x3a x4a -> case r of { CopySlice x0b x1b x2b x3b x4b -> cmpSC x0a x0b Prelude.<> cmpSC x1a x1b Prelude.<> cmpSC x2a x2b Prelude.<> cmpSC x3a x3b Prelude.<> cmpSC x4a x4b; _ -> byRank }
-        BufLength x0a -> case r of { BufLength x0b -> cmpSC x0a x0b; _ -> byRank }
-
-
 
 -- Existential Wrapper -----------------------------------------------------------------------------
 
@@ -574,17 +404,7 @@ data SomeExpr = forall a . Typeable a => SomeExpr (Expr a)
 
 deriving instance Show SomeExpr
 
-instance Eq SomeExpr where
-  SomeExpr (a :: Expr b) == SomeExpr (c :: Expr d) =
-    case eqT @b @d of
-      Just Refl -> a == c
-      Nothing -> False
 
-instance Ord SomeExpr where
-  compare (SomeExpr (a :: Expr b)) (SomeExpr (c :: Expr d)) =
-    case eqT @b @d of
-      Just Refl -> compare a c
-      Nothing -> compare (toNum a) (toNum c)
 
 toNum :: (Typeable a) => Expr a -> Int
 toNum (_ :: Expr a) =
@@ -652,50 +472,7 @@ pand = foldl' PAnd (PBool True)
 por :: [Prop] -> Prop
 por = foldl' POr (PBool False)
 
-instance Eq Prop where
-  PBool a == PBool b = a == b
-  PEq (a :: Expr x) (b :: Expr x) == PEq (c :: Expr y) (d :: Expr y)
-    = case eqT @x @y of
-       Just Refl -> a == c && b == d
-       Nothing -> False
-  PLT a b == PLT c d = a == c && b == d
-  PGT a b == PGT c d = a == c && b == d
-  PGEq a b == PGEq c d = a == c && b == d
-  PLEq a b == PLEq c d = a == c && b == d
-  PNeg a == PNeg b = a == b
-  PAnd a b == PAnd c d = a == c && b == d
-  POr a b == POr c d = a == c && b == d
-  PImpl a b == PImpl c d = a == c && b == d
-  _ == _ = False
 
-instance Ord Prop where
-  compare (PBool a) (PBool b) = compare a b
-  compare (PEq (a :: Expr x) (b :: Expr x)) (PEq (c :: Expr y) (d :: Expr y)) =
-    case eqT @x @y of
-      Just Refl -> compare (a, b) (c, d)
-      Nothing   -> compare (typeRep a) (typeRep c)
-  compare (PNeg a) (PNeg b) = compare a b
-  compare (PLT a1 b1) (PLT a2 b2) = compare (a1, b1) (a2, b2)
-  compare (PGT a1 b1) (PGT a2 b2) = compare (a1, b1) (a2, b2)
-  compare (PGEq a1 b1) (PGEq a2 b2) = compare (a1, b1) (a2, b2)
-  compare (PLEq a1 b1) (PLEq a2 b2) = compare (a1, b1) (a2, b2)
-  compare (PAnd a1 b1) (PAnd a2 b2) = compare (a1, b1) (a2, b2)
-  compare (POr a1 b1) (POr a2 b2) = compare (a1, b1) (a2, b2)
-  compare (PImpl a1 b1) (PImpl a2 b2) = compare (a1, b1) (a2, b2)
-  compare a b = compare (tag a) (tag b)
-
-    where
-      tag :: Prop -> Int
-      tag PBool{} = 0
-      tag PEq{}   = 1
-      tag PLT{}   = 2
-      tag PGT{}   = 3
-      tag PGEq{}  = 4
-      tag PLEq{}  = 5
-      tag PNeg{}  = 6
-      tag PAnd{}  = 7
-      tag POr{}   = 8
-      tag PImpl{} = 9
 
 
 isPBool :: Prop -> Bool
@@ -738,7 +515,7 @@ data EvmError
   | BadCheatCode String FunctionSelector
   | NonexistentFork Int
   | AssumeCheatFailed
-  deriving (Show, Eq, Ord)
+  deriving (Show)
 
 evmErrToString :: EvmError -> String
 evmErrToString = \case
@@ -774,7 +551,7 @@ data PartialExec
   | PrecompileMissing     { pc :: Int, addr :: Expr EAddr, preAddr :: Addr }
   | CheatCodeMissing      { pc :: Int, addr :: Expr EAddr, selector :: FunctionSelector }
   | BranchTooDeep         { pc :: Int, addr :: Expr EAddr}
-  deriving (Show, Eq, Ord)
+  deriving (Show)
 
 -- | A program-wide soundness caveat. Unlike a 'PartialExec', a caveat does not
 -- mark an execution path that we failed to explore: every reachable path was
@@ -988,7 +765,7 @@ data FrameContext
     , callreversion :: Map (Expr EAddr) Contract
     , subState      :: SubState
     }
-  deriving (Eq, Ord, Show, Generic)
+  deriving (Show, Generic)
 
 -- | The "accrued substate" across a transaction
 data SubState = SubState
@@ -1000,7 +777,7 @@ data SubState = SubState
   , createdContracts    :: Set (Expr EAddr)
   -- in principle we should include logs here, but do not for now
   }
-  deriving (Eq, Ord, Show)
+  deriving (Show)
 
 -- | The "registers" of the VM along with memory and data stack
 data FrameState (t :: VMType) = FrameState
@@ -1083,7 +860,7 @@ data Contract = Contract
   , opIxMap     :: VS.Vector Int -- ^ map from byte index to op index
   , external    :: Bool
   }
-  deriving (Show, Eq, Ord)
+  deriving (Show)
 
 class VMOps (t :: VMType) where
   burn' :: Gas t -> EVM t () -> EVM t ()
@@ -1151,7 +928,7 @@ data ContractCode
   = UnknownCode (Expr EAddr)       -- ^ Fully abstract code, keyed on an address to give consistent results for e.g. extcodehash
   | InitCode ByteString (Expr Buf) -- ^ "Constructor" code, during contract creation
   | RuntimeCode RuntimeCode        -- ^ "Instance" code, after contract creation
-  deriving (Show, Eq, Ord)
+  deriving (Show)
 
 -- | We have two variants here to optimize the fully concrete case.
 -- ConcreteRuntimeCode just wraps a ByteString
@@ -1159,7 +936,6 @@ data ContractCode
 data RuntimeCode
   = ConcreteRuntimeCode ByteString
   | SymbolicRuntimeCode (V.Vector (Expr Byte))
-  deriving (Eq, Ord)
 instance Show RuntimeCode
   where
     show = \case
@@ -1174,7 +950,7 @@ data Trace = Trace
   , contract  :: Contract
   , tracedata :: TraceData
   }
-  deriving (Eq, Ord, Show, Generic)
+  deriving (Show, Generic)
 
 data TraceData
   = EventTrace (Expr EWord) (Expr Buf) [Expr EWord]
@@ -1183,7 +959,7 @@ data TraceData
   | EntryTrace Text
   | ReturnTrace (Expr Buf) FrameContext
   | ConsoleLog (Expr Buf)
-  deriving (Eq, Ord, Show, Generic)
+  deriving (Show, Generic)
 
 -- | Wrapper type containing vm traces and the context needed to pretty print them properly
 data TraceContext = TraceContext
@@ -1191,12 +967,8 @@ data TraceContext = TraceContext
   , contracts :: Map (Expr EAddr) Contract
   , labels :: Map Addr Text
   }
-  deriving (Eq, Ord, Show, Generic)
+  deriving (Show, Generic)
 
-instance Semigroup TraceContext where
-  (TraceContext a b c) <> (TraceContext d e f) = TraceContext (a <> d) (b <> e) (c <> f)
-instance Monoid TraceContext where
-  mempty = TraceContext mempty mempty mempty
 
 
 -- VM Initialization -------------------------------------------------------------------------------
@@ -1359,27 +1131,9 @@ data SMTCex = SMTCex
   , blockContext :: Map (Expr EWord) W256
   , txContext :: Map (Expr EWord) W256
   }
-  deriving (Eq, Show)
+  deriving (Show)
 
-instance Semigroup SMTCex where
-  a <> b = SMTCex
-    { vars = a.vars <> b.vars
-    , addrs = a.addrs <> b.addrs
-    , buffers = a.buffers <> b.buffers
-    , store = a.store <> b.store
-    , blockContext = a.blockContext <> b.blockContext
-    , txContext = a.txContext <> b.txContext
-    }
 
-instance Monoid SMTCex where
-  mempty = SMTCex
-    { vars = mempty
-    , addrs = mempty
-    , buffers = mempty
-    , store = mempty
-    , blockContext = mempty
-    , txContext = mempty
-    }
 
 data ReproducibleCex = ReproducibleCex
   { testName :: Text
@@ -1896,3 +1650,123 @@ makeFieldLabelsNoPrefix ''Contract
 makeFieldLabelsNoPrefix ''Env
 makeFieldLabelsNoPrefix ''Block
 makeFieldLabelsNoPrefix ''RuntimeConfig
+
+-- Eq and Ord compare as the derived instances would, but check physical identity before every
+-- comparison. On hash-consed / shared terms (EVM.HashCons) this makes comparisons O(size of the
+-- differing part) instead of O(logical tree size), which removes the dominant cost of simplifier
+-- guards (a == b) and normalization compares on deeply-shared symbolic terms.
+--
+-- The splices can only see Expr once every type it mentions is declared, so they sit at the end,
+-- and every instance that compares Exprs has to come after them: a type containing Expr derives
+-- Eq or Ord down here rather than in its declaration.
+
+instance Eq (Expr a) where
+  (==) = $(shortcutEq ''Expr)
+
+instance Ord (Expr a) where
+  compare = $(shortcutCompare ''Expr)
+
+deriving instance Eq EvmError
+deriving instance Ord EvmError
+deriving instance Eq PartialExec
+deriving instance Ord PartialExec
+deriving instance Eq FrameContext
+deriving instance Ord FrameContext
+deriving instance Eq SubState
+deriving instance Ord SubState
+deriving instance Eq Contract
+deriving instance Ord Contract
+deriving instance Eq ContractCode
+deriving instance Ord ContractCode
+deriving instance Eq RuntimeCode
+deriving instance Ord RuntimeCode
+deriving instance Eq TraceData
+deriving instance Ord TraceData
+deriving instance Eq TraceContext
+deriving instance Ord TraceContext
+deriving instance Eq SMTCex
+deriving instance Eq Trace
+deriving instance Ord Trace
+
+instance Eq SomeExpr where
+  SomeExpr (a :: Expr b) == SomeExpr (c :: Expr d) =
+    case eqT @b @d of
+      Just Refl -> a == c
+      Nothing -> False
+
+instance Ord SomeExpr where
+  compare (SomeExpr (a :: Expr b)) (SomeExpr (c :: Expr d)) =
+    case eqT @b @d of
+      Just Refl -> compare a c
+      Nothing -> compare (toNum a) (toNum c)
+
+instance Eq Prop where
+  PBool a == PBool b = a == b
+  PEq (a :: Expr x) (b :: Expr x) == PEq (c :: Expr y) (d :: Expr y)
+    = case eqT @x @y of
+       Just Refl -> a == c && b == d
+       Nothing -> False
+  PLT a b == PLT c d = a == c && b == d
+  PGT a b == PGT c d = a == c && b == d
+  PGEq a b == PGEq c d = a == c && b == d
+  PLEq a b == PLEq c d = a == c && b == d
+  PNeg a == PNeg b = a == b
+  PAnd a b == PAnd c d = a == c && b == d
+  POr a b == POr c d = a == c && b == d
+  PImpl a b == PImpl c d = a == c && b == d
+  _ == _ = False
+
+instance Ord Prop where
+  compare (PBool a) (PBool b) = compare a b
+  compare (PEq (a :: Expr x) (b :: Expr x)) (PEq (c :: Expr y) (d :: Expr y)) =
+    case eqT @x @y of
+      Just Refl -> compare (a, b) (c, d)
+      Nothing   -> compare (typeRep a) (typeRep c)
+  compare (PNeg a) (PNeg b) = compare a b
+  compare (PLT a1 b1) (PLT a2 b2) = compare (a1, b1) (a2, b2)
+  compare (PGT a1 b1) (PGT a2 b2) = compare (a1, b1) (a2, b2)
+  compare (PGEq a1 b1) (PGEq a2 b2) = compare (a1, b1) (a2, b2)
+  compare (PLEq a1 b1) (PLEq a2 b2) = compare (a1, b1) (a2, b2)
+  compare (PAnd a1 b1) (PAnd a2 b2) = compare (a1, b1) (a2, b2)
+  compare (POr a1 b1) (POr a2 b2) = compare (a1, b1) (a2, b2)
+  compare (PImpl a1 b1) (PImpl a2 b2) = compare (a1, b1) (a2, b2)
+  compare a b = compare (tag a) (tag b)
+
+    where
+      tag :: Prop -> Int
+      tag PBool{} = 0
+      tag PEq{}   = 1
+      tag PLT{}   = 2
+      tag PGT{}   = 3
+      tag PGEq{}  = 4
+      tag PLEq{}  = 5
+      tag PNeg{}  = 6
+      tag PAnd{}  = 7
+      tag POr{}   = 8
+      tag PImpl{} = 9
+
+instance Semigroup TraceContext where
+  (TraceContext a b c) <> (TraceContext d e f) = TraceContext (a <> d) (b <> e) (c <> f)
+
+instance Monoid TraceContext where
+  mempty = TraceContext mempty mempty mempty
+
+instance Semigroup SMTCex where
+  a <> b = SMTCex
+    { vars = a.vars <> b.vars
+    , addrs = a.addrs <> b.addrs
+    , buffers = a.buffers <> b.buffers
+    , store = a.store <> b.store
+    , blockContext = a.blockContext <> b.blockContext
+    , txContext = a.txContext <> b.txContext
+    }
+
+instance Monoid SMTCex where
+  mempty = SMTCex
+    { vars = mempty
+    , addrs = mempty
+    , buffers = mempty
+    , store = mempty
+    , blockContext = mempty
+    , txContext = mempty
+    }
