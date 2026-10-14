@@ -72,7 +72,7 @@ defaultConfig = Config
   , earlyAbort = False
   , mergeMaxBudget = 100
   , maxDynSize = 64
-  , abstractArith = False
+  , abstractArith = True
   }
 
 -- Write to the console

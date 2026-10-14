@@ -261,7 +261,7 @@ main = do
           |])
         let hexStr = Types.bsToHex c
         (_, stdout, stderr) <- readProcessWithExitCode "cabal"
-          ["run", "exe:hevm", "--", "symbolic", "--code", hexStr, "--abstract-arith", "--smt-debug"] ""
+          ["run", "exe:hevm", "--", "symbolic", "--code", hexStr, "--smt-debug"] ""
         stderr `shouldNotContain` "CallStack"
         dumped <- dumpedQueries
         mapM_ removeFile dumped
