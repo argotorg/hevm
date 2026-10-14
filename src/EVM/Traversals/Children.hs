@@ -40,8 +40,8 @@ mapChildrenM g expr = case expr of
               <*> g b16 <*> g b17 <*> g b18 <*> g b19 <*> g b20 <*> g b21 <*> g b22 <*> g b23
               <*> g b24 <*> g b25 <*> g b26 <*> g b27 <*> g b28 <*> g b29 <*> g b30 <*> g b31
 
-  Failure a b c -> (\a' -> Failure a' b c) <$> traverse (mapPropChildrenM g) a
-  Partial a b c -> (\a' -> Partial a' b c) <$> traverse (mapPropChildrenM g) a
+  Failure a b c -> (\a' c' -> Failure a' b c') <$> traverse (mapPropChildrenM g) a <*> mapErrorChildrenM g c
+  Partial a b c -> (\a' c' -> Partial a' b c') <$> traverse (mapPropChildrenM g) a <*> mapPartialChildrenM g c
   Success a b c d ->
     (\a' c' d' -> Success a' b c' (Map.fromList d'))
       <$> traverse (mapPropChildrenM g) a
@@ -136,3 +136,38 @@ mapCodeChildrenM g = \case
   c@(RuntimeCode (ConcreteRuntimeCode _)) -> pure c
   RuntimeCode (SymbolicRuntimeCode c) -> RuntimeCode . SymbolicRuntimeCode <$> traverse g c
   InitCode bs buf -> InitCode bs <$> g buf
+
+mapErrorChildrenM :: Applicative m => (forall a . Expr a -> m (Expr a)) -> EvmError -> m EvmError
+mapErrorChildrenM g = \case
+  BalanceTooLow a b -> BalanceTooLow <$> g a <*> g b
+  Revert a -> Revert <$> g a
+  MaxInitCodeSizeExceeded a b -> MaxInitCodeSizeExceeded a <$> g b
+  e@UnrecognizedOpcode{} -> pure e
+  e@SelfDestruction -> pure e
+  e@StackUnderrun -> pure e
+  e@BadJumpDestination -> pure e
+  e@OutOfGas{} -> pure e
+  e@StackLimitExceeded -> pure e
+  e@IllegalOverflow -> pure e
+  e@StateChangeWhileStatic -> pure e
+  e@InvalidMemoryAccess -> pure e
+  e@CallDepthLimitReached -> pure e
+  e@MaxCodeSizeExceeded{} -> pure e
+  e@InvalidFormat -> pure e
+  e@PrecompileFailure -> pure e
+  e@NonexistentPrecompile{} -> pure e
+  e@ReturnDataOutOfBounds -> pure e
+  e@NonceOverflow -> pure e
+  e@BadCheatCode{} -> pure e
+  e@NonexistentFork{} -> pure e
+  e@AssumeCheatFailed -> pure e
+
+mapPartialChildrenM :: Applicative m => (forall a . Expr a -> m (Expr a)) -> PartialExec -> m PartialExec
+mapPartialChildrenM g = \case
+  UnexpectedSymbolicArg pc a op msg args ->
+    (\a' args' -> UnexpectedSymbolicArg pc a' op msg args') <$> g a <*> traverse (\(SomeExpr e) -> SomeExpr <$> g e) args
+  MaxIterationsReached pc a -> MaxIterationsReached pc <$> g a
+  JumpIntoSymbolicCode pc a dst -> (\a' -> JumpIntoSymbolicCode pc a' dst) <$> g a
+  PrecompileMissing pc a pre -> (\a' -> PrecompileMissing pc a' pre) <$> g a
+  CheatCodeMissing pc a sel -> (\a' -> CheatCodeMissing pc a' sel) <$> g a
+  BranchTooDeep pc a -> BranchTooDeep pc <$> g a

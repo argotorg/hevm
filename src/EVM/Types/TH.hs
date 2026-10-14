@@ -8,7 +8,7 @@
     generate the comparisons the compiler would derive, with it added. The generated code refers
     to @ptrEq@ and @exprRank@, which must be in scope at the splice.
 -}
-module EVM.Types.TH (shortcutEq, shortcutCompare) where
+module EVM.Types.TH (shortcutEq, shortcutCompare, constructors) where
 
 import Control.Monad (replicateM)
 import Language.Haskell.TH
@@ -48,7 +48,8 @@ shortcut cmp ty = do
   cons <- constructors ty
   l <- newName "l"
   r <- newName "r"
-  let alt (c, n) = do
+  let alt (c, fs) = do
+        let n = length fs
         as <- replicateM n (newName "a")
         bs <- replicateM n (newName "b")
         let fields = zipWith cmp.field (fmap varE as) (fmap varE bs)
@@ -61,15 +62,16 @@ shortcut cmp ty = do
   lamE [varP l, varP r]
     [| if $ptrEq $(varE l) $(varE r) then $(cmp.same) else $(caseE (varE l) (fmap alt cons)) |]
 
-constructors :: Name -> Q [(Name, Int)]
+-- | The constructors of a data type, with their field types
+constructors :: Name -> Q [(Name, [Type])]
 constructors ty = reify ty >>= \case
   TyConI (DataD _ _ _ _ cons _) -> pure (concatMap con cons)
   _ -> fail ("not a data type: " <> show ty)
   where
     con = \case
-      NormalC n fs -> [(n, length fs)]
-      RecC n fs -> [(n, length fs)]
-      InfixC _ n _ -> [(n, 2)]
-      GadtC ns fs _ -> [(n, length fs) | n <- ns]
-      RecGadtC ns fs _ -> [(n, length fs) | n <- ns]
+      NormalC n fs -> [(n, fmap snd fs)]
+      RecC n fs -> [(n, [t | (_, _, t) <- fs])]
+      InfixC (_, a) n (_, b) -> [(n, [a, b])]
+      GadtC ns fs _ -> [(n, fmap snd fs) | n <- ns]
+      RecGadtC ns fs _ -> [(n, [t | (_, _, t) <- fs]) | n <- ns]
       ForallC _ _ c -> con c

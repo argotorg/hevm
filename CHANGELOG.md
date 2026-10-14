@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fixpoints when hash-consing is on. Disabled from the CLI with `--no-hash-cons`.
 
 ## Fixed
+- Simplification and the other `Expr` traversals now also reach revert data, the
+  terms in errors and partial executions, `BALANCE` addresses and log topics.
 - Storage decomposition no longer swaps key and slot for concrete mapping
   hashes, which caused spurious counterexamples and false proofs when concrete
   and symbolic mapping accesses were mixed ([#1099](https://github.com/argotorg/hevm/issues/1099)).

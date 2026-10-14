@@ -4,12 +4,11 @@
 -}
 module EVM.Traversals where
 
-import Prelude hiding (LT, GT, Foldable(..))
+import Prelude hiding (LT, GT)
 
 import Control.Monad (void)
 import Control.Monad.Identity (Identity(Identity), runIdentity)
-import Data.Foldable (Foldable(..))
-import Data.Map.Strict qualified as Map
+import Data.Functor.Const (Const(..))
 import GHC.StaticPtr (StaticPtr, deRefStaticPtr)
 
 import EVM.Types
@@ -17,192 +16,16 @@ import EVM.HashCons (Rewrite, runRewrite, hashConsExpr, memoFixTraverse, hashCon
 import EVM.Traversals.Children
 
 foldProp :: forall b . Monoid b => (forall a . Expr a -> b) -> b -> Prop -> b
-foldProp f acc p = acc <> (go p)
-  where
-    go :: Prop -> b
-    go = \case
-      PBool _ -> mempty
-      PEq a b -> (foldExpr f mempty a) <> (foldExpr f mempty b)
-      PLT a b -> foldExpr f mempty a <> foldExpr f mempty b
-      PGT a b -> foldExpr f mempty a <> foldExpr f mempty b
-      PGEq a b -> foldExpr f mempty a <> foldExpr f mempty b
-      PLEq a b -> foldExpr f mempty a <> foldExpr f mempty b
-      PNeg a -> go a
-      PAnd a b -> go a <> go b
-      POr a b -> go a <> go b
-      PImpl a b -> go a <> go b
+foldProp f acc p = acc <> getConst (mapPropChildrenM (Const . foldExpr f mempty) p)
 
-foldEContract :: forall b . Monoid b => (forall a . Expr a -> b) -> b -> Expr EContract -> b
-foldEContract f _ g@(GVar _) = f g
-foldEContract f acc (C code storage tStorage balance _)
-  =  acc
-  <> foldCode f code
-  <> foldExpr f mempty storage
-  <> foldExpr f mempty tStorage
-  <> foldExpr f mempty balance
-
-foldCode :: forall b . Monoid b => (forall a . Expr a -> b) -> ContractCode -> b
-foldCode f = \case
-  RuntimeCode (ConcreteRuntimeCode _) -> mempty
-  RuntimeCode (SymbolicRuntimeCode c) -> foldl' (foldExpr f) mempty c
-  InitCode _ buf -> foldExpr f mempty buf
-  UnknownCode addr -> foldExpr f mempty addr
-
--- | Recursively folds a given function over a given expression
--- Recursion schemes do this & a lot more, but defining them over GADT's isn't worth the hassle
+-- | Recursively folds a given function over a given expression, visiting the same terms as
+-- 'mapExprM' in the same order
 foldExpr :: forall b c . Monoid b => (forall a . Expr a -> b) -> b -> Expr c -> b
-foldExpr f acc expr = acc <> (go expr)
+foldExpr f acc expr = acc <> go expr
   where
     go :: forall a . Expr a -> b
-    go = \case
-
-      -- literals & variables
-
-      e@(Lit _) -> f e
-      e@(LitByte _) -> f e
-      e@(Var _) -> f e
-      e@(GVar _) -> f e
-
-      -- contracts
-
-      e@(C {}) -> foldEContract f acc e
-
-      -- bytes
-
-      e@(IndexWord a b) -> f e <> (go a) <> (go b)
-      e@(EqByte a b) -> f e <> (go a) <> (go b)
-
-      e@(JoinBytes
-        zero one two three four five six seven
-        eight nine ten eleven twelve thirteen fourteen fifteen
-        sixteen seventeen eighteen nineteen twenty twentyone twentytwo twentythree
-        twentyfour twentyfive twentysix twentyseven twentyeight twentynine thirty thirtyone)
-        -> f e
-        <> (go zero) <> (go one) <> (go two) <> (go three)
-        <> (go four) <> (go five) <> (go six) <> (go seven)
-        <> (go eight) <> (go nine) <> (go ten) <> (go eleven)
-        <> (go twelve) <> (go thirteen) <> (go fourteen)
-        <> (go fifteen) <> (go sixteen) <> (go seventeen)
-        <> (go eighteen) <> (go nineteen) <> (go twenty)
-        <> (go twentyone) <> (go twentytwo) <> (go twentythree)
-        <> (go twentyfour) <> (go twentyfive) <> (go twentysix)
-        <> (go twentyseven) <> (go twentyeight) <> (go twentynine)
-        <> (go thirty) <> (go thirtyone)
-
-      -- control flow
-
-      e@(Success a _ c d) -> f e
-                          <> foldl' (foldProp f) mempty a
-                          <> go c
-                          <> foldl' (foldExpr f) mempty (Map.keys d)
-                          <> foldl' (foldEContract f) mempty d
-      e@(Failure a _ (Revert c)) -> f e <> (foldl' (foldProp f) mempty a) <> go c
-      e@(Failure a _ _) -> f e <> (foldl' (foldProp f) mempty a)
-      e@(Partial a _ _) -> f e <> (foldl' (foldProp f) mempty a)
-
-      -- integers
-
-      e@(Add a b) -> f e <> (go a) <> (go b)
-      e@(Sub a b) -> f e <> (go a) <> (go b)
-      e@(Mul a b) -> f e <> (go a) <> (go b)
-      e@(Div a b) -> f e <> (go a) <> (go b)
-      e@(SDiv a b) -> f e <> (go a) <> (go b)
-      e@(Mod a b) -> f e <> (go a) <> (go b)
-      e@(SMod a b) -> f e <> (go a) <> (go b)
-      e@(AddMod a b c) -> f e <> (go a) <> (go b) <> (go c)
-      e@(MulMod a b c) -> f e <> (go a) <> (go b) <> (go c)
-      e@(Exp a b) -> f e <> (go a) <> (go b)
-      e@(SEx a b) -> f e <> (go a) <> (go b)
-      e@(Min a b) -> f e <> (go a) <> (go b)
-      e@(Max a b) -> f e <> (go a) <> (go b)
-
-      -- booleans
-
-      e@(LT a b) -> f e <> (go a) <> (go b)
-      e@(GT a b) -> f e <> (go a) <> (go b)
-      e@(LEq a b) -> f e <> (go a) <> (go b)
-      e@(GEq a b) -> f e <> (go a) <> (go b)
-      e@(SLT a b) -> f e <> (go a) <> (go b)
-      e@(SGT a b) -> f e <> (go a) <> (go b)
-      e@(Eq a b) -> f e <> (go a) <> (go b)
-      e@(IsZero a) -> f e <> (go a)
-      e@(ITE c t el) -> f e <> (go c) <> (go t) <> (go el)
-
-      -- bits
-
-      e@(And a b) -> f e <> (go a) <> (go b)
-      e@(Or a b) -> f e <> (go a) <> (go b)
-      e@(Xor a b) -> f e <> (go a) <> (go b)
-      e@(Not a) -> f e <> (go a)
-      e@(SHL a b) -> f e <> (go a) <> (go b)
-      e@(SHR a b) -> f e <> (go a) <> (go b)
-      e@(SAR a b) -> f e <> (go a) <> (go b)
-      e@(CLZ a) -> f e <> (go a)
-
-      -- Hashes
-
-      e@(Keccak a) -> f e <> (go a)
-
-      -- block context
-
-      e@(Origin) -> f e
-      e@(Coinbase) -> f e
-      e@(Timestamp) -> f e
-      e@(BlockNumber) -> f e
-      e@(PrevRandao) -> f e
-      e@(GasLimit) -> f e
-      e@(ChainId) -> f e
-      e@(BaseFee) -> f e
-      e@(BlockHash a) -> f e <> (go a)
-
-      -- tx context
-
-      e@(TxValue) -> f e
-
-      -- frame context
-
-      e@(Gas _ _) -> f e
-      e@(Balance {}) -> f e
-
-      -- code
-
-      e@(CodeSize a) -> f e <> (go a)
-      e@(CodeHash a) -> f e <> (go a)
-
-      -- logs
-
-      e@(LogEntry a b c) -> f e <> (go a) <> (go b) <> (foldl' (<>) mempty (fmap f c))
-
-      -- storage
-
-      e@(LitAddr _) -> f e
-      e@(WAddr a) -> f e <> go a
-      e@(SymAddr _) -> f e
-
-      -- storage
-
-      e@(ConcreteStore _) -> f e
-      e@(AbstractStore _ _) -> f e
-      e@(SLoad a b) -> f e <> (go a) <> (go b)
-      e@(SStore a b c) -> f e <> (go a) <> (go b) <> (go c)
-
-      -- buffers
-
-      e@(ConcreteBuf _) -> f e
-      e@(AbstractBuf _) -> f e
-      e@(ReadWord a b) -> f e <> (go a) <> (go b)
-      e@(ReadByte a b) -> f e <> (go a) <> (go b)
-      e@(WriteWord a b c) -> f e <> (go a) <> (go b) <> (go c)
-      e@(WriteByte a b c) -> f e <> (go a) <> (go b) <> (go c)
-
-      e@(CopySlice a b c d g)
-        -> f e
-        <> (go a)
-        <> (go b)
-        <> (go c)
-        <> (go d)
-        <> (go g)
-      e@(BufLength a) -> f e <> (go a)
+    go e = self <> getConst (mapChildrenM (Const . go) e)
+      where self = case e of { C {} -> mempty; _ -> f e }
 
 mapProp :: (forall a . Expr a -> Expr a) -> Prop -> Prop
 mapProp f = \case
