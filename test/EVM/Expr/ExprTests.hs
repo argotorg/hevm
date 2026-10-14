@@ -300,6 +300,15 @@ copySliceTests = testGroup "CopySlice tests"
       assertBool "a different second word gives a different key" (k1 /= k3)
       assertEqual "the equivalent key resolves a storage read" (Var "value")
         (Expr.readStorage' k2 (SStore k1 (Var "value") (AbstractStore (SymAddr "c") Nothing)))
+  , testCase "copyslice-window-trim-preserves-zero-mapping-slot" $ do
+      let src = WriteWord (Lit 0) (Var "acc") (WriteWord (Lit 32) (Lit 0)
+                  (WriteWord (Lit 192) (Var "scratch") (ConcreteBuf "")))
+          key = Expr.simplify $ Keccak (CopySlice (Lit 0) (Lit 0) (Lit 64) src (ConcreteBuf ""))
+      assertEqual "retains the 64-byte mapping preimage"
+        (Expr.MappingSlot (BS.pack (replicate 64 0)) (Var "acc")) key
+      assertEqual "slot zero still decomposes"
+        (Just $ SLoad (Var "acc") (AbstractStore (SymAddr "c") (Just 0)))
+        (Expr.decomposeStorage $ SLoad key (AbstractStore (SymAddr "c") Nothing))
   , localOption (mkTimeout 5_000_000) $ testCase "copyslice-window-trim-short-copy" $ do
       let src = WriteWord (Lit 192) (Var "other") (WriteWord (Lit 16) (Var "value") (ConcreteBuf ""))
           dst = AbstractBuf "dst"
