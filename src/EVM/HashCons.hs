@@ -2,36 +2,14 @@
     Module: EVM.HashCons
     Description: Construction-time hash-consing (structural sharing) for the Expr AST.
 
-    The symbolic interpreter rebuilds structurally-identical subterms as separate heap objects
-    (e.g. a mapping-slot keccak recomputed on every storage access), so a computation that reuses
-    an intermediate at k nesting levels materializes a 2^k tree with no sharing. On storage-heavy
-    targets this exhausts memory (observed: a 914-node DAG materialized as a 601,664-node tree,
-    22 GB peak), and it makes every structural traversal or comparison pay the logical - not the
-    shared - size.
+    The interpreter rebuilds equal subterms as separate heap objects, so a reused intermediate
+    turns into an exponentially large tree. 'hashConsExpr' maps a node to the first equal node
+    seen, keyed by (constructor, scalar payload, child ids), so the heap holds the DAG and
+    pointer equality witnesses structural equality. It is semantically the identity.
 
-    'hashConsExpr' returns a canonical representative for a node: the first structurally-equal node
-    ever seen is reused for all later duplicates, so the heap holds the DAG, not the tree. It is
-    exact (never merges structurally-different terms) and O(1) amortized per constructed node:
-
-      * a StableName table shortcuts nodes that are ALREADY canonical, so canonical subtrees
-        (e.g. operands taken off the stack) are not re-traversed, and
-      * the structural tables are keyed by (constructor tag, scalar payload, child ids) - all
-        shallow - so a lookup never compares whole subterms.
-
-    Canonicalization also makes physical identity a cheap witness for structural equality, which
-    the ptrEq fast paths in Expr's Eq/Ord instances and 'untilFixpoint' exploit: comparisons on
-    shared terms drop from O(logical size) to O(size of the differing part).
-
-    hashConsExpr e is always structurally equal to e, so it is semantically the identity; it only
-    shares memory. Gated by a process-wide flag that every 'interpret' sets from
-    'hashConsExplore' and that stays set afterwards: 'simplify' outside an exploration, and
-    explorations running concurrently, see whichever value was set last. That changes sharing,
-    never results. When off, every call is a single IORef read returning the argument unchanged.
-
-    The tables are module-global state in the style of GHC's FastString table: this module is the
-    only code that can touch them, and a canonical node never changes meaning (the tables are
-    only ever consulted to return an already-constructed, structurally-equal node). Every
-    'interpret' starts them afresh with 'resetHashCons'.
+    The tables and the on/off flag are process-wide. Every 'interpret' sets the flag from
+    'hashConsExplore' and resets the tables; the flag stays set afterwards, and concurrent
+    explorations see whichever value was set last. That changes sharing, never results.
 -}
 module EVM.HashCons
   ( Rewrite(..)
@@ -59,8 +37,7 @@ import GHC.StaticPtr (StaticPtr, StaticKey, staticKey, deRefStaticPtr)
 import EVM.Traversals.Children (mapChildrenM)
 import EVM.Types
 
--- | Scalar data carried by leaf/annotated constructors, folded into the structural key so that
--- e.g. two different literals are never merged.
+-- | The non-term fields of a node, part of its key
 data Payload
   = P0
   | PW  !W256
@@ -74,22 +51,19 @@ data Payload
   | PInt !Int
   deriving (Eq, Ord)
 
--- | Structural key: constructor tag, scalar payload, child ids. All shallow.
+-- | Constructor tag, payload, child ids
 type Key = (Int, Payload, [Int])
 
--- | A type-erased StableName. 'eqStableName' compares heterogeneously, so no coercion is ever
--- needed to look a name up again.
 data SomeSN = forall x. SomeSN !(StableName x)
 
--- | One canonical-node table per expression type, so nodes are recovered at their own type and
--- no unsafe coercion is involved anywhere.
+-- | One table per expression type, so no coercion is needed
 data HCState = HCState
   { hcWords  :: !(Map Key (Expr EWord, Int))
   , hcBytes  :: !(Map Key (Expr Byte, Int))
   , hcBufs   :: !(Map Key (Expr Buf, Int))
   , hcStores :: !(Map Key (Expr Storage, Int))
   , hcAddrs  :: !(Map Key (Expr EAddr, Int))
-  , hcSns    :: !(IM.IntMap [(SomeSN, Int)])  -- ^ hashStableName -> [(name, id)]: node -> id
+  , hcSns    :: !(IM.IntMap [(SomeSN, Int)])  -- ^ ids of canonical nodes, by StableName
   , hcNext   :: !Int
   }
 
@@ -109,16 +83,11 @@ setHashConsEnabled = writeIORef hcEnabled
 
 resetHashCons :: IO ()
 resetHashCons = do
-  -- The id counter survives the reset: ids are never reused, so if another exploration is
-  -- still running (parallel test suites), its stale memo entries reference ids that no new
-  -- node can be assigned — a mid-run reset can only lose sharing, never correctness.
+  -- ids are never reused, so memo entries of a concurrent exploration can't hit a new node
   atomicModifyIORef' hcState $ \st -> (emptyHC { hcNext = st.hcNext }, ())
   writeIORef passMemos M.empty
 
--- | Per-pass memo of simplification results, keyed by canonical node id, with one table per
--- expression type. Values are recovered at their own type by dispatching on the node's
--- constructor (which fixes the type via GADT refinement), so no coercion is involved. Cleared
--- together with the hash-consing tables.
+-- | Per-pass results of 'memoFixTraverse', by node id
 data MemoTables = MemoTables
   { mtW  :: !(IM.IntMap (Expr EWord))
   , mtBy :: !(IM.IntMap (Expr Byte))
@@ -157,16 +126,12 @@ storeT = Table (.hcStores) (\s t -> s { hcStores = t }) (.mtS) (\m t -> m { mtS 
 addrT :: Table EAddr
 addrT = Table (.hcAddrs) (\s t -> s { hcAddrs = t }) (.mtA) (\m t -> m { mtA = t })
 
--- | How a node is hash-consed. Matching on the constructor fixes the type, so nodes come back
--- out of the tables at their own type.
 data Shape a
   = Keyed (Table a) Payload  -- ^ shared by structure: constructor, payload and child ids
-  | Unkeyed (Table a)        -- ^ given an identity, but an equal node built later is not shared
-  | Untabled                 -- ^ End, Log and EContract nodes: an identity, and no memo either
+  | Unkeyed (Table a)        -- ^ given an id, but an equal node built later is not shared
+  | Untabled                 -- ^ given an id, not memoized
 
--- | No wildcard, so a new constructor does not compile until it is given a shape here. A
--- constructor with a field that is not a term must put that field in the payload, or terms that
--- differ only there are merged.
+-- | A field that is not a term must go in the payload, or terms differing only there are merged
 shape :: Expr a -> Shape a
 shape = \case
   Lit x -> ew (PW x); Var t -> ew (PT t); Gas p i -> ew (PGas p i)
@@ -196,21 +161,19 @@ shape = \case
   where
     ew = Keyed wordT
 
--- | Read the enable flag with a data dependency on the argument so the check cannot be floated
--- out and shared across calls (the flag changes between explorations).
+-- | Depends on the argument so GHC can't float the flag read out and share it across calls
 hashConsEnabled :: Expr b -> Bool
 hashConsEnabled x = unsafePerformIO (x `seq` readIORef hcEnabled)
 {-# NOINLINE hashConsEnabled #-}
 
--- | Map a node (and, as needed, its not-yet-canonical descendants) to its canonical
--- representative. Semantically the identity.
+-- | The canonical node equal to the argument
 hashConsExpr :: Expr a -> Expr a
 hashConsExpr e = unsafePerformIO $ do
   en <- readIORef hcEnabled
   if en then fst <$> go e else pure e
 {-# NOINLINE hashConsExpr #-}
 
--- Look up a node's id by physical identity. A hit means the node is already canonical.
+-- A hit means the node is already canonical
 lookupSN :: Expr a -> IO (Maybe Int)
 lookupSN e = do
   sn <- makeStableName $! e
@@ -225,16 +188,13 @@ lookupSN e = do
       | eqStableName sn sn' = Just i
       | otherwise = lookupBucket sn rest
 
--- Record a canonical node's StableName -> id (atomic; interpreters may run concurrently).
 recordSN :: Expr a -> Int -> IO ()
 recordSN e i = do
   sn <- makeStableName $! e
   atomicModifyIORef' hcState $ \st ->
     (st { hcSns = IM.insertWith (++) (hashStableName sn) [(SomeSN sn, i)] st.hcSns }, ())
 
--- Canonicalize a rebuilt node (children already canonical) by its structural key. The id counter
--- is bumped atomically so concurrent interpreters can never hand out the same id for different
--- structures.
+-- Expects canonical children
 recanon :: Table a -> Key -> Expr a -> IO (Expr a, Int)
 recanon tab key e' = do
   r <- atomicModifyIORef' hcState $ \st ->
@@ -248,15 +208,12 @@ recanon tab key e' = do
     Left c  -> pure c
     Right i -> do recordSN e' i; pure (e', i)
 
--- Assign a fresh id without structural deduping. Recording the StableName still makes the object
--- canonical-by-identity on later encounters.
 freshOpaque :: Expr a -> IO (Expr a, Int)
 freshOpaque e = do
   i <- atomicModifyIORef' hcState $ \st -> (st { hcNext = st.hcNext + 1 }, st.hcNext)
   recordSN e i
   pure (e, i)
 
--- Top-down: shortcut already-canonical nodes, else canonicalize bottom-up.
 go :: Expr a -> IO (Expr a, Int)
 go e = do
   m <- lookupSN e
@@ -279,26 +236,16 @@ goBuild e = case shape e of
       childIds <- readIORef ids
       recanon tab (exprRank e, payload, reverse childIds) e'
 
--- | A simplification pass. Its results are remembered for as long as the tables live, which is
--- only sound for a function that depends on nothing but the node, so 'memoFixTraverse' takes it
--- as a 'StaticPtr': the compiler rejects a @static@ form that captures a local variable.
+-- | A simplification pass. Its results are memoized, so it must depend on nothing but the node:
+-- 'memoFixTraverse' takes it as a 'StaticPtr', and @static@ rejects captured variables.
 newtype Rewrite = Rewrite (forall a . Expr a -> Expr a)
 
 runRewrite :: Rewrite -> Expr a -> Expr a
 runRewrite (Rewrite f) = f
 
--- | Memoized structural map for repeatedly-applied simplification passes over hash-consed terms.
--- Matches Traversals.mapExprM's f-application at every node, with three additions:
---
---   * the rewrite's output is deduplicated, so a rewrite that rebuilds a structurally-equal node
---     (e.g. via argument normalization) collapses back to the canonical object;
---   * reconstruction is identity-preserving: when nothing changed, the ORIGINAL node is returned,
---     so convergence is detectable by pointer identity in O(1) (see 'untilFixpoint');
---   * the result for a canonical node is remembered per pass, so later applications skip it in
---     O(1). On a shared DAG this turns each pass from O(logical size) into O(nodes not yet seen).
---
--- All results are forced before use: an unevaluated thunk never has the pointer identity of the
--- node it evaluates to.
+-- | 'mapExpr' that hash-conses each result, memoizes it per pass and node, and returns the
+-- original object when nothing changed, so 'untilFixpoint' sees convergence by pointer equality.
+-- Results are forced: a thunk never has the pointer identity of the node it evaluates to.
 memoFixTraverse :: StaticPtr Rewrite -> Expr b -> Expr b
 memoFixTraverse pass root = unsafePerformIO (goM root)
   where

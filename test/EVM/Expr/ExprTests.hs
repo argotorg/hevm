@@ -65,9 +65,7 @@ traversalTests = testCase "every-field-is-traversed" $ assertBool (unlines misse
       | (SomeExpr e, ms) <- cases
       , let renamed = List.sort (fmap (<> "'") ms)
       , (name, ok) <-
-          -- a non-empty accumulator, as it was once counted again below a contract
           [ ("foldExpr", List.sort (foldExpr probeName ["acc"] e) == List.sort ("acc" : ms))
-          -- simplify's traversal without and with hash-consing
           , ("mapExpr", names (mapExpr renameProbe e) == renamed)
           , ("memoFixTraverse", names (HC.memoFixTraverse (static (HC.Rewrite renameProbe)) e) == renamed)
           ]

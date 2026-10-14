@@ -1598,19 +1598,14 @@ paddedShowHex w n = pad ++ str
      pad = replicate (w - length str) '0'
 
 
--- | Pointer equality. Sound as a fast-path before structural (==): a True result means the two
--- values are the same heap object (hence equal); a False result falls through to structural ==.
+-- | True only if both are one heap object; False says nothing
 ptrEq :: a -> a -> Bool
 ptrEq x y = isTrue# (reallyUnsafePtrEquality# x y)
 
 untilFixpoint :: Eq a => (a -> a) -> a -> a
 untilFixpoint f a0 = go a0
   where
-    -- ptrEq short-circuits the common "f made no change" case: an identity-preserving f (see
-    -- EVM.HashCons.memoFixTraverse) returns the *same object* on convergence, detected in O(1)
-    -- instead of an O(term-size) structural comparison.
-    -- a' must be forced before ptrEq: comparing an unevaluated thunk against the input is always
-    -- False even when the thunk evaluates to the very same object, silently defeating the fast path.
+    -- a' must be forced: a thunk is never ptrEq to the object it evaluates to
     go a =
       let !a' = f a
       in if ptrEq a' a || a' == a then a else go a'
@@ -1651,14 +1646,9 @@ makeFieldLabelsNoPrefix ''Env
 makeFieldLabelsNoPrefix ''Block
 makeFieldLabelsNoPrefix ''RuntimeConfig
 
--- Eq and Ord compare as the derived instances would, but check physical identity before every
--- comparison. On hash-consed / shared terms (EVM.HashCons) this makes comparisons O(size of the
--- differing part) instead of O(logical tree size), which removes the dominant cost of simplifier
--- guards (a == b) and normalization compares on deeply-shared symbolic terms.
---
--- The splices can only see Expr once every type it mentions is declared, so they sit at the end,
--- and every instance that compares Exprs has to come after them: a type containing Expr derives
--- Eq or Ord down here rather than in its declaration.
+-- Eq and Ord as derived, plus a ptrEq check before every comparison. The splices can only see
+-- Expr once every type it mentions is declared, so they, and every instance that compares
+-- Exprs, sit down here.
 
 instance Eq (Expr a) where
   (==) = $(shortcutEq ''Expr)

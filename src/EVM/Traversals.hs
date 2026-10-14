@@ -78,15 +78,11 @@ mapPropM' f = \case
     y <- mapPropM' f b
     f $ PImpl x y
 
--- | hashConsExpr shares each rebuilt node as it is produced (bottom-up, O(1) per node since children
--- are already canonical), so passes built on mapExpr (notably Expr.simplify) never materialize the
--- unshared exponential tree. It is a no-op unless hash-consing is enabled (EVM.HashCons).
+-- | Hash-conses every rebuilt node, when hash-consing is on
 mapExpr :: (forall a . Expr a -> Expr a) -> Expr b -> Expr b
 mapExpr f expr = runIdentity (mapExprM (Identity . hashConsExpr . f) expr)
 
--- | Like 'mapExpr', for the repeatedly-applied simplification passes: when hash-consing is
--- enabled, each distinct subterm is visited once and subterms already known to be fixpoints of
--- this pass are skipped in O(1). Falls back to plain mapExpr otherwise.
+-- | 'mapExpr' memoized per pass when hash-consing is on, see 'memoFixTraverse'
 mapExprShared :: StaticPtr Rewrite -> Expr b -> Expr b
 mapExprShared pass expr
   | hashConsEnabled expr = memoFixTraverse pass expr

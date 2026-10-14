@@ -14,9 +14,7 @@ import Data.Map.Strict qualified as Map
 
 import EVM.Types
 
--- | Applies @g@ to every term directly below a node, left to right, and rebuilds the node.
--- A node without children is returned as is. The case has no wildcard, so a new constructor
--- does not compile until it is handled here.
+-- | Applies @g@ to every term directly below a node, left to right, and rebuilds the node
 mapChildrenM :: Applicative m => (forall a . Expr a -> m (Expr a)) -> Expr b -> m (Expr b)
 mapChildrenM g expr = case expr of
   Lit _ -> pure expr

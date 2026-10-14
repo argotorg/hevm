@@ -865,11 +865,7 @@ readStorage w st = go (simplifyNoLitToKeccak w) (simplifyNoLitToKeccak st)
     go slot s@(SStore prevSlot val prev) = case (prevSlot, slot) of
       -- if address and slot match then we return the val in this write
       _ | prevSlot == slot -> Just val
-      -- Fast path for concrete keys: two distinct literal slots (equality already handled above)
-      -- can never alias, so skip straight down the write chain without invoking surelyEqual/
-      -- surelyNotEqual (which each run the simplifier). This makes reading through a long chain of
-      -- concrete SStores — e.g. a symbolic contract whose setup did many concrete writes over an
-      -- AbstractStore base — O(chain) cheap compares instead of O(chain) simplifier calls.
+      -- distinct literal slots never alias; skip the simplifier-backed checks below
       (Lit _, Lit _) -> go slot prev
       (a, b) | surelyEqual a b -> Just val
       (a, b) | surelyNotEqual a b -> go slot prev

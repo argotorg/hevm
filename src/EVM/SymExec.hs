@@ -386,9 +386,7 @@ interpret :: forall m a . App m
 interpret fetcher iterConf vm stepper handler = do
   shouldAbort <- liftIO $ newTVarIO False
   conf <- readConfig
-  -- Construction-time hash-consing (EVM.HashCons): share structurally-identical subterms as they
-  -- are built, so deeply-reused symbolic terms stay DAGs instead of materializing as exponential
-  -- trees. The flag is process-wide and outlives this exploration.
+  -- the flag is process-wide and outlives this exploration
   liftIO $ do HashCons.setHashConsEnabled conf.hashConsExplore
               HashCons.resetHashCons
   taskQ <- liftIO newChan

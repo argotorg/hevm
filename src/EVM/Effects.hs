@@ -50,9 +50,7 @@ data Config = Config
   , mergeMaxBudget   :: Int        -- ^ Max instructions for speculative merge exploration
   , maxDynSize       :: Int        -- ^ Max byte length for concretized dynamic types (bytes, string)
   , abstractArith    :: Bool
-  , hashConsExplore  :: Bool       -- ^ Hash-cons (share equal subterms of) the live symbolic VM
-                                   -- state as it is built, so a shared DAG never materializes as
-                                   -- an exponential tree during exploration. See EVM.HashCons.
+  , hashConsExplore  :: Bool       -- ^ Share equal subterms during exploration, see EVM.HashCons
   }
   deriving (Show, Eq)
 
