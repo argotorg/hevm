@@ -84,18 +84,17 @@ data SomeSN = forall x. SomeSN !(StableName x)
 -- | One canonical-node table per expression type, so nodes are recovered at their own type and
 -- no unsafe coercion is involved anywhere.
 data HCState = HCState
-  { hcWords  :: !(Map Key (Expr EWord))
-  , hcBytes  :: !(Map Key (Expr Byte))
-  , hcBufs   :: !(Map Key (Expr Buf))
-  , hcStores :: !(Map Key (Expr Storage))
-  , hcAddrs  :: !(Map Key (Expr EAddr))
+  { hcWords  :: !(Map Key (Expr EWord, Int))
+  , hcBytes  :: !(Map Key (Expr Byte, Int))
+  , hcBufs   :: !(Map Key (Expr Buf, Int))
+  , hcStores :: !(Map Key (Expr Storage, Int))
+  , hcAddrs  :: !(Map Key (Expr EAddr, Int))
   , hcSns    :: !(IM.IntMap [(SomeSN, Int)])  -- ^ hashStableName -> [(name, id)]: node -> id
-  , hcKeyIds :: !(Map Key Int)                -- ^ structural key -> id
   , hcNext   :: !Int
   }
 
 emptyHC :: HCState
-emptyHC = HCState M.empty M.empty M.empty M.empty M.empty IM.empty M.empty 0
+emptyHC = HCState M.empty M.empty M.empty M.empty M.empty IM.empty 0
 
 {-# NOINLINE hcEnabled #-}
 hcEnabled :: IORef Bool
@@ -137,8 +136,8 @@ passMemos = unsafePerformIO (newIORef M.empty)
 
 -- | The canonical-node table and the memo table for one expression type
 data Table a = Table
-  { nodes    :: HCState -> Map Key (Expr a)
-  , setNodes :: HCState -> Map Key (Expr a) -> HCState
+  { nodes    :: HCState -> Map Key (Expr a, Int)
+  , setNodes :: HCState -> Map Key (Expr a, Int) -> HCState
   , memo     :: MemoTables -> IM.IntMap (Expr a)
   , setMemo  :: MemoTables -> IM.IntMap (Expr a) -> MemoTables
   }
@@ -240,15 +239,14 @@ recanon :: Table a -> Key -> Expr a -> IO (Expr a, Int)
 recanon tab key e' = do
   r <- atomicModifyIORef' hcState $ \st ->
     case M.lookup key (tab.nodes st) of
-      Just c -> (st, Left (c, M.findWithDefault (-1) key st.hcKeyIds))
+      Just c -> (st, Left c)
       Nothing ->
         let i = st.hcNext
-            st' = (tab.setNodes st (M.insert key e' (tab.nodes st)))
-                    { hcKeyIds = M.insert key i st.hcKeyIds, hcNext = i + 1 }
+            st' = (tab.setNodes st (M.insert key (e', i) (tab.nodes st))) { hcNext = i + 1 }
         in (st', Right i)
   case r of
-    Left (c, i) -> pure (c, i)
-    Right i     -> do recordSN e' i; pure (e', i)
+    Left c  -> pure c
+    Right i -> do recordSN e' i; pure (e', i)
 
 -- Assign a fresh id without structural deduping. Recording the StableName still makes the object
 -- canonical-by-identity on later encounters.
