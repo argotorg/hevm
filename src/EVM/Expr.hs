@@ -696,7 +696,8 @@ trimToWindow off size buf
       let keep j = j >= off && j < end && all (\(a, b) -> j < a || j >= b) shadow
           bytes = BS.pack [ if keep (unsafeInto j) then b else 0
                           | (j, b) <- zip [0 :: Int ..] (BS.unpack (BS.take (unsafeInto end) bs)) ]
-      in Just $ ConcreteBuf $ if BS.all (== 0) bytes then "" else bytes
+      -- Preserve padding so zero-slot mapping preimages remain 64 bytes.
+      in Just $ ConcreteBuf bytes
     go _ _ = Nothing
 
 writeByte :: Expr EWord -> Expr Byte -> Expr Buf -> Expr Buf
