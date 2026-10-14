@@ -194,6 +194,24 @@ storageTests = testGroup "Storage tests"
         (Just $ SLoad (Var "i") (SStore (Lit 0) (Lit 1) emptyStore))
         (Expr.decomposeStorage $ SLoad (arrElem 2 (Var "i"))
           (SStore (Lit 0) (Var "a") (SStore (arrZero 2) (Lit 1) emptyStore)))
+    , testCase "readStorage-struct-field-offsets" $ do
+        let slot o = Add (Lit o) (mappingRead 0 "acc")
+            store a b = SStore (slot a) (Var "other")
+              (SStore (slot b) (Var "wanted") (AbstractStore (SymAddr "c") Nothing))
+        assertEqual "skips a lower field offset" (Var "wanted") (Expr.readStorage' (slot 3) (store 2 3))
+        assertEqual "skips a higher field offset" (Var "wanted") (Expr.readStorage' (slot 2) (store 3 2))
+    , testProperty "readStorage-struct-offsets-equivalence" $ withMaxSuccess 100 $ \(offs :: [Int]) ->
+        forAll (choose (0 :: Int, 11)) $ \r -> ioProperty $ do
+          let slot 0 = mappingRead 0 "acc"
+              slot o = Add (Lit (fromIntegral o)) (mappingRead 0 "acc")
+              base = AbstractStore (SymAddr "c") Nothing
+              writes = zip (map (`mod` 12) offs) [Var "v0", Var "v1", Var "v2", Var "v3", Var "v4", Var "v5"]
+              store = foldr (\(o, v) acc -> SStore (slot o) v acc) base writes
+              rslot = slot r
+              simp = Expr.readStorage' rslot store
+              expected = maybe (SLoad rslot base) id (lookup r writes)
+          res <- checkSatWith equivConfig (SLoad rslot store ./= simp)
+          pure $ counterexample (show res) $ simp === expected .&&. isQed res
   ]
   where
     errorMsg = "Storage read expression not simplified correctly"
