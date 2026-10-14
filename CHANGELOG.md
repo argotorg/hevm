@@ -61,8 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails with `NonexistentPrecompile` (concrete) or a `PrecompileMissing`
   partial (symbolic) ([#1084](https://github.com/argotorg/hevm/issues/1084))
 - A `WriteWord` whose offset wraps past 2^256 is no longer moved below an
-  earlier `WriteWord` that it overlaps, which changed the buffer's contents
-  and could make `simplify` loop forever
+  earlier `WriteWord` that it overlaps
 - `simplify` no longer loops forever on a `CopySlice` of fewer than 32 bytes
   out of a `WriteWord` into an abstract buffer
 - `ReadWord` at an index that wraps past 2^256 no longer skips a `WriteByte` or
@@ -70,9 +69,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `BufLength` of a `CopySlice` with a symbolic size no longer counts the copy
   when the size is zero
 - `Show Addr` no longer corrupts the text printed after the address
-- Fuzzers for hash-consing (its invariants, simplifier results with it on
-  and off) and for the simplifier on closed terms, skewed towards values that
-  wrap around 2^256
 
 ## [0.58.0] - 2026-06-26
 

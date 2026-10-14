@@ -925,9 +925,7 @@ genEnd sz = oneof
     subBuf = defaultBuf (sz `div` 2)
     subProp = genProps False (sz `div` 2)
 
--- | Subterms to build larger terms from, each with its tree size. Drawing children from here
--- makes equal subterms recur, both as one shared heap object and as separately built copies,
--- which independently generated trees almost never do.
+-- | Subterms with their tree sizes, so that larger terms built from them share subterms
 data Pool = Pool
   { pWords  :: [(Int, Expr EWord)]
   , pBufs   :: [(Int, Expr Buf)]

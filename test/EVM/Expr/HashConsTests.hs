@@ -151,11 +151,9 @@ same !a !b = ptrEq a b
 noFailures :: [String] -> Property
 noFailures fails = counterexample (unlines (take 3 fails)) (null fails)
 
--- Running under a fixed flag ------------------------------------------------------------------------
 
--- | Runs with hash-consing forced on or off, starting from empty tables. Every 'interpret' sets
--- the same global flag and wipes the tables, and under -f devel tests run concurrently, so the
--- action is rerun if a sentinel hash-consed at the start is no longer canonical at the end.
+-- | Runs with hash-consing forced on or off, from empty tables. A concurrent 'interpret' may
+-- flip the flag or wipe the tables, so rerun if a sentinel stopped being canonical.
 withFlag :: MVar () -> Bool -> IO a -> IO a
 withFlag lock on act = withMVar lock (const loop)
   where
@@ -183,7 +181,6 @@ inTime secs x = timeout (secs * 1000000) (force x)
 clone :: Expr a -> IO (Expr a)
 clone e = force (mapExpr id e)
 
--- Differential -----------------------------------------------------------------------------------
 
 data Job = forall a b . (Show a, Show b, Eq b) => Job String (a -> b) a
 data Ref = forall a b . (Show a, Show b, Eq b) => Ref String (a -> b) a b
@@ -202,10 +199,8 @@ againstReference (Ref name f x expected) = do
       else Just $ name <> " differs with hash-consing on\ninput:    " <> show x
                 <> "\nwith:     " <> show got <> "\nwithout:  " <> show expected
 
--- Hash-consing invariants ---------------------------------------------------------------------------
 
--- | JoinBytes is given an identity but is not keyed by its structure, so neither it nor anything
--- above it is shared
+-- | JoinBytes is not keyed, so neither it nor anything above it is shared
 isLeaf :: Expr a -> Bool
 isLeaf e = getSum (foldExpr (const (Sum (1 :: Int))) mempty e) == 1
 
@@ -253,7 +248,6 @@ orderChecks xs = concat
   where
     flipOrd = \case { Ord.LT -> Ord.GT; Ord.GT -> Ord.LT; EQ -> EQ }
 
--- Closed terms --------------------------------------------------------------------------------------
 
 -- | One concrete value for every symbolic leaf the pool generator emits
 data Closing = Closing
