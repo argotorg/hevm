@@ -595,6 +595,11 @@ copySlice a@(Lit srcOffset) b@(Lit dstOffset) c@(Lit size) d@(ConcreteBuf src) e
     in ConcreteBuf $ hd <> sl <> tl
   | otherwise = CopySlice a b c d e
 
+-- Drop source bytes that a concrete copy window cannot observe.
+copySlice s@(Lit srcOffset) d@(Lit _) sz@(Lit size) src@(WriteWord {}) dst
+  | Just src' <- trimToWindow srcOffset size src, src' /= src
+  = copySlice s d sz src' dst
+
 -- concrete indices & abstract src (may produce a concrete result if we are
 -- copying from a concrete region of src)
 copySlice s@(Lit srcOffset) d@(Lit dstOffset) sz@(Lit size) src ds@(ConcreteBuf dst)
@@ -675,6 +680,24 @@ keccakInputsDiffer a b
     offset (Sub x (Lit n)) = let (o, base) = offset x in (o - n, base)
     offset x = (0, x)
 
+-- | Keep only word writes and base bytes visible in a bounded window.
+trimToWindow :: W256 -> W256 -> Expr Buf -> Maybe (Expr Buf)
+trimToWindow off size buf
+  | off >= maxBytes || size >= maxBytes = Nothing
+  | otherwise = go [] buf
+  where
+    end = off + size
+    go :: [(W256, W256)] -> Expr Buf -> Maybe (Expr Buf)
+    go shadow (WriteWord i@(Lit idx) v rest)
+      | idx >= maxBytes = Nothing
+      | idx >= end || idx + 32 <= off = go shadow rest
+      | otherwise = writeWord i v <$> go ((idx, idx + 32) : shadow) rest
+    go shadow (ConcreteBuf bs) =
+      let keep j = j >= off && j < end && all (\(a, b) -> j < a || j >= b) shadow
+          bytes = BS.pack [ if keep (unsafeInto j) then b else 0
+                          | (j, b) <- zip [0 :: Int ..] (BS.unpack (BS.take (unsafeInto end) bs)) ]
+      in Just $ ConcreteBuf $ if BS.all (== 0) bytes then "" else bytes
+    go _ _ = Nothing
 
 writeByte :: Expr EWord -> Expr Byte -> Expr Buf -> Expr Buf
 writeByte (Lit offset) (LitByte val) (ConcreteBuf "")
