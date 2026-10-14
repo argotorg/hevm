@@ -22,10 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without parsing ANSI escape codes. Terminal output is unchanged.
 - New `hashConsExplore` config option (on by default): construction-time
   hash-consing of the symbolic VM state (new `EVM.HashCons` module), so structurally
-  shared terms stay DAGs instead of materializing as trees during exploration. The
-  `Expr` `Eq`/`Ord` instances gained a pointer-equality fast path (same semantics as
-  the derived ones), and the repeatedly-applied simplifier passes memoize per-node
-  fixpoints when hash-consing is on. Disabled from the CLI with `--no-hash-cons`.
+  shared terms stay DAGs instead of materializing as exponential trees during
+  exploration. The `Expr` `Eq`/`Ord` instances gained a pointer-equality fast path
+  (identical semantics to the derived ones), and the repeatedly-applied simplifier
+  passes memoize per-node fixpoints when hash-consing is on. Disabled from the CLI
+  with `--no-hash-cons`.
 
 ## Fixed
 - Simplification and the other `Expr` traversals now also reach revert data, the
