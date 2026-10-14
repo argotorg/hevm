@@ -8,9 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
-- New `--abstract-arith` flag: symbolic multiplication and division are encoded
-  as uninterpreted functions constrained by sound algebraic lemmas, and are
-  equated with the native bitvector operations only when the abstract query
+- Abstract arithmetic, on by default (disable with `--no-abstract-arith`):
+  symbolic multiplication and division are encoded as uninterpreted functions
+  constrained by sound algebraic lemmas, and are equated with the native bitvector operations only when the abstract query
   comes back satisfiable. This proves many `mulDiv`-style properties that the
   solver otherwise cannot discharge. Caveats: the lemma families range over
   pairs of collected terms, so the number of emitted assertions is quadratic in
