@@ -511,6 +511,34 @@ basicSimplificationTests = testGroup "Basic simplification tests"
   , testCase "simp-double-not" $ do
       let simp = Expr.simplify $ Not (Not (Var "a"))
       assertEqual "Not should be concretized" (Var "a") simp
+  , testCase "simp-packed-field-read-back" $ do
+      let ts = And (Lit 0xffffffff) (Var "ts")
+          upper = And (Lit 0xffffffff) (Var "upper")
+          clear64 = maxBound - (0xffffffff `shiftL` 64)
+          clear32 = maxBound - (0xffffffff `shiftL` 32)
+          packed = Or (Mul (Lit (1 `shiftL` 64)) upper)
+                      (And (Lit clear64) (Or (Mul (Lit (1 `shiftL` 32)) ts) (And (Lit clear32) (Var "old"))))
+      assertEqual "lower field, Div" ts (Expr.simplify (And (Lit 0xffffffff) (Div packed (Lit (1 `shiftL` 32)))))
+      assertEqual "lower field, SHR" ts (Expr.simplify (And (Lit 0xffffffff) (SHR (Lit 32) packed)))
+      assertEqual "upper field, Div" upper (Expr.simplify (And (Lit 0xffffffff) (Div packed (Lit (1 `shiftL` 64)))))
+      assertEqual "upper field, SHR" upper (Expr.simplify (And (Lit 0xffffffff) (SHR (Lit 64) packed)))
+  , testCase "simp-packed-field-at-word-boundary" $ do
+      let field = And (Lit 1) (Var "top")
+          clear = maxBound - (1 `shiftL` 255)
+          packed = Or (SHL (Lit 255) field) (And (Lit clear) (Var "old"))
+      assertEqual "top bit, Div" field (Expr.simplify (And (Lit 1) (Div packed (Lit (1 `shiftL` 255)))))
+      assertEqual "top bit, SHR" field (Expr.simplify (And (Lit 1) (SHR (Lit 255) packed)))
+  , testProperty "simp-packed-field-equivalence" $ withMaxSuccess 300 $ forAll genPackedFieldWord $ \w ->
+      forAll (elements [0, 1, 8, 32, 64, 96, 128, 160, 200, 224, 255, 256]) $ \k ->
+      forAll (elements [0, 1, 8, 32, 64, 128, 255, 256]) $ \n -> forAll arbitrary $ \useShr -> ioProperty $ do
+        let mask = (1 `shiftL` n) - 1 :: W256
+            inner = if useShr then SHR (Lit (fromIntegral k)) w else Div w (Lit (1 `shiftL` k))
+            full = And (Lit mask) inner
+            simp = Expr.simplify full
+        res <- if full == simp then pure Qed
+               else checkSatWith (equivConfig {abstractArith = False}) (full ./= simp)
+        pure $ counterexample ("simplified: " <> show simp <> "\nresult: " <> show res) $
+          classify (full /= simp) "rewritten" (isQed res)
   ]
 
 propSimplificationTests :: TestTree
@@ -1952,3 +1980,23 @@ isSatOrUnknown res = isSat res || isUnknown res
 
 isUnsatOrUnknown :: SMTResult -> Bool
 isUnsatOrUnknown res = isQed res || isUnknown res
+
+-- Packed writes may overlap or extend past bit 255.
+genPackedFieldWord :: Gen (Expr EWord)
+genPackedFieldWord = do
+  n <- choose (1 :: Int, 4)
+  base <- oneof [pure (Var "old"), Lit <$> arbitrary]
+  fields <- vectorOf n $ do
+    j <- elements [0, 1, 8, 32, 64, 96, 128, 160, 224, 255, 256]
+    w <- elements [1, 8, 32, 64, 128, 255, 256]
+    f <- oneof [Lit <$> arbitrary, elements [Var "a", Var "b", Var "c"]]
+    shiftForm <- arbitrary
+    pure (j, w, f, shiftForm)
+  pure $ foldr place base fields
+  where
+    place (j, w, f, shiftForm) acc =
+      let mask = (1 `shiftL` w) - 1 :: W256
+          clear = maxBound - (mask `shiftL` j)
+          shifted = if shiftForm then SHL (Lit (fromIntegral j)) (And (Lit mask) f)
+                                 else Mul (Lit (1 `shiftL` j)) (And (Lit mask) f)
+      in Or shifted (And (Lit clear) acc)
