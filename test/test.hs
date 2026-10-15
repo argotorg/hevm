@@ -74,6 +74,7 @@ import EVM.Expr (maybeLitByteSimp)
 import EVM.Keccak (concreteKeccaks)
 
 import EVM.Expr.ExprTests qualified as ExprTests
+import EVM.Expr.HashConsTests qualified as HashConsTests
 import EVM.ConcreteExecution.ConcreteExecutionTests qualified as ConcreteExecutionTests
 import EVM.Equivalence.EquivalenceTests qualified as EquivalenceTests
 import EVM.SymExec.SymExecTests qualified as SymExecTests
@@ -136,7 +137,9 @@ withBitwuzlaSolver = withSolvers Bitwuzla 3 Nothing defMemLimit
 withHangingSolver :: App m => (SolverGroup -> m a) -> m a
 withHangingSolver cont = do
   self <- liftIO getExecutablePath
-  withSolvers (Custom (TL.pack self) [TL.pack hangingSolverFlag]) 1 Nothing defMemLimit cont
+  -- under -f devel the test binary starts one capability per core, each with its own nursery
+  -- and stacks, which does not fit in the address space a real solver is limited to
+  withSolvers (Custom (TL.pack self) [TL.pack hangingSolverFlag]) 1 Nothing (64 * defMemLimit) cont
 
 hangingProps :: [Prop]
 hangingProps = [PEq (Var "x") (Lit 1)]
@@ -204,6 +207,7 @@ tests :: TestTree
 tests = testGroup "hevm"
   [ FuzzSymExec.tests
   , ExprTests.tests
+  , HashConsTests.tests
   , ConcreteExecutionTests.tests
   , SymExecTests.tests
   , EquivalenceTests.tests

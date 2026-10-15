@@ -298,6 +298,7 @@ test-suite test
     EVM.Equivalence.EquivalenceTests
     EVM.Expr.ExprTests
     EVM.Expr.Generator
+    EVM.Expr.HashConsTests
     EVM.Expr.Probe
     EVM.ConcreteExecution.ConcreteExecutionTests
     EVM.SymExec.SymExecTests
