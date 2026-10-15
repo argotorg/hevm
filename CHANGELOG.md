@@ -37,6 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   16 MB) instead of 64, which is still more than gas limits allow.
 
 ## Fixed
+- Symbolic `GAS` readings are now only ordered within a call frame, so a caller
+  can have more gas left after a call than its callee had.
 - `hevm equivalence` no longer reports each partially explored path once per end
   state of the other program, which inflated the counts in its warnings.
 - Simplification and the other `Expr` traversals now also reach revert data, the

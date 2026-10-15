@@ -651,6 +651,42 @@ panicCodeTests = testGroup "Panic code tests via symbolic execution"
         let sig = (Just (Sig "fun(uint8)" [AbiUIntType 8]))
         (_, results) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
         expectNoCex results
+  , testCase "gas-decrease-monotone-across-call" $ do
+        Just c <- solcRuntime "MyContract"
+            [i|
+            contract Child {
+              function g() external view returns (uint) { return gasleft(); }
+            }
+            contract MyContract {
+              function fun() external {
+                Child child = new Child();
+                uint a = gasleft();
+                child.g{gas: 1000}();
+                uint b = gasleft();
+                assert(a > b);
+              }
+             }
+            |]
+        (_, results) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just (Sig "fun()" [])) [] defaultVeriOpts
+        expectNoCex results
+  -- #1123: gas readings in different call frames are not ordered
+  , testCase "gas-callee-below-caller" $ do
+        Just c <- solcRuntime "MyContract"
+            [i|
+            contract Child {
+              function g() external view returns (uint) { return gasleft(); }
+            }
+            contract MyContract {
+              function fun() external {
+                Child child = new Child();
+                uint childGas = child.g{gas: 1000}();
+                uint parentGas = gasleft();
+                assert(childGas >= parentGas);
+              }
+             }
+            |]
+        (_, results) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just (Sig "fun()" [])) [] defaultVeriOpts
+        assertBool "The callee must be able to have less gas than the caller" (any isCex results)
   , testCase "enum-conversion-fail" $ do
         Just c <- solcRuntime "MyContract"
             [i|

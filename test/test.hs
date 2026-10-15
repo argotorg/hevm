@@ -4588,6 +4588,10 @@ tests = testGroup "hevm"
       in case reference of
            ConcreteBuf bs -> collapse (EVM.Types.Comp model) === Just (Flat bs)
            _ -> property False
+  , testCase "parse-gas-names" $ do
+      -- gas readings appear in models when they are part of a path condition
+      assertEqual "plain" (Gas "" 2) (parseTxCtx "gas_2")
+      assertEqual "equivalence prefix" (Gas "A-" 13) (parseTxCtx "gas_A-13")
   , testCase "encodeConcreteStore-overwrite" $
     assertEqual ""
       (pure "(store (store ((as const Storage) #x0000000000000000000000000000000000000000000000000000000000000000) (_ bv1 256) (_ bv2 256)) (_ bv3 256) (_ bv4 256))")
