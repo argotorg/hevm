@@ -32,7 +32,7 @@ import Witch (unsafeInto)
 import Options.Generic as OptionsGeneric
 import Options.Applicative as Options
 import Paths_hevm qualified as Paths
-import System.Directory (withCurrentDirectory, getCurrentDirectory, doesDirectoryExist, makeAbsolute)
+import System.Directory (withCurrentDirectory, getCurrentDirectory, doesDirectoryExist, makeAbsolute, findExecutable)
 import System.FilePath ((</>))
 import System.Exit (exitFailure, exitWith, ExitCode(..))
 import Data.List.Split (splitOn)
@@ -114,7 +114,7 @@ commonOptions = CommonOptions
   <*> option auto (long "loop-detection-heuristic" <> showDefault <> value StackBased <>
     help "Which heuristic should be used to determine if we are in a loop: StackBased or Naive")
   <*> (switch $ long "no-decompose"         <> help "Don't decompose storage slots into separate arrays")
-  <*> (strOption $ long "solver"            <> value "z3" <> help "Used SMT solver: z3, cvc5, or bitwuzla")
+  <*> (strOption $ long "solver"            <> value "bitwuzla" <> help "Used SMT solver: bitwuzla (default), z3, or cvc5")
   <*> (switch $ long "debug"                <> help "Debug printing of internal behaviour, and dump internal expressions")
   <*> (optional $ strOption $ long "calldata" <> help "Tx: calldata")
   <*> (switch $ long "trace"                <> help "Dump trace")
@@ -458,13 +458,20 @@ equivalence eqOpts cOpts = do
 
 getSolver :: Text -> IO Solver
 getSolver s = case T.unpack s of
-  "z3" -> pure Z3
-  "cvc5" -> pure CVC5
-  "bitwuzla" -> pure Bitwuzla
+  "z3" -> onPath "z3" Z3
+  "cvc5" -> onPath "cvc5" CVC5
+  "bitwuzla" -> onPath "bitwuzla" Bitwuzla
   "empty" -> pure EmptySolver
   input -> do
     putStrLn $ "unrecognised solver: " <> input
     exitFailure
+  where
+    onPath name solver = findExecutable name >>= \case
+      Just _ -> pure solver
+      Nothing -> do
+        putStrLn $ "Error: the SMT solver " <> name <> " is not installed (not found in PATH). "
+          <> "Install it, or pick another one with --solver (bitwuzla, z3, or cvc5)."
+        exitFailure
 
 getSrcInfo :: App m => ExecOptions -> CommonOptions -> m DappInfo
 getSrcInfo execOpts cOpts = do

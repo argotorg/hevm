@@ -15,7 +15,7 @@ generate counterexamples that are easier to examine and understand.
 
 hevm can use any SMT solver that supports the AUFBV theory and incremental
 solving. Currently, z3, cvc5, and bitwuzla's interfaces are implemented. While
-any of these solvers work, we recommend using bitwuzla as it is in general
+any of these solvers work, bitwuzla is the default, as it is in general
 extremely fast, almost always significantly faster than e.g. z3.
 
 ## Number of Solvers, ``--num-solvers``
