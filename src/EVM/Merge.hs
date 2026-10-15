@@ -79,9 +79,9 @@ tryMergeForwardJump
   -> [Expr EWord]     -- ^ Stack after popping JUMPI args
   -> EVM Symbolic Bool
 tryMergeForwardJump conf exec1Step currentPC jumpTarget cond stackAfterPop = do
-  -- Only handle forward jumps (skip block pattern)
-  if jumpTarget <= currentPC
-  then pure False  -- Not a forward jump
+  -- Only symbolic forward jumps need merging.
+  if jumpTarget <= currentPC || Expr.isLitWord cond
+  then pure False
   else do
     vm0 <- get
 
@@ -108,7 +108,9 @@ tryMergeForwardJump conf exec1Step currentPC jumpTarget cond stackAfterPop = do
               then do
                 -- Merge stacks using ITE expressions, simplifying to prevent growth
                 let condSimp = Expr.simplify cond
-                    mergeExpr t f = Expr.simplify $ ITE condSimp t f
+                    mergeExpr t f
+                      | t == f = t
+                      | otherwise = Expr.simplify $ ITE condSimp t f
                     mergedStack = zipWith mergeExpr trueStack falseStack
                 -- Use vm0 as base and update only PC and stack
                 when conf.debug $ traceM $ "Merged forward jump"

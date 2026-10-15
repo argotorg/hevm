@@ -63,6 +63,7 @@ import EVM.Exec
 import EVM.Expr qualified as Expr
 import EVM.Fetch qualified as Fetch
 import EVM.Format (hexText, hexByteString)
+import EVM.Merge qualified as Merge
 import EVM.Progress (withProgress, ProgressOpts(..))
 import EVM.Precompiled
 import EVM.RLP
@@ -4367,7 +4368,29 @@ tests = testGroup "hevm"
   , testGroup "state-merging"
     -- Tests for ITE-based state merging during symbolic execution
     -- State merging combines multiple execution paths into a single path with ITE expressions
-    [ testCase "merge-simple-branches" $ do
+    [ testCase "merge-skips-concrete-conditions" $ do
+        vm <- stToIO $ loadEmptySymVM (RuntimeCode (ConcreteRuntimeCode "")) (Lit 0) (ConcreteBuf "", []) >>= freezeVM
+        let stack = [Var "value"]
+            initial = vm & set (#state % #stack) stack
+            step = error "concrete conditions must not trigger speculation"
+        forM_ [Lit 0, Lit 1, Lit maxBound, WAddr (LitAddr 0), WAddr (LitAddr 1)] $ \cond -> do
+          (merged, result) <- stToIO $ runStateT (Merge.tryMergeForwardJump testEnv.config step 0 2 cond stack) initial
+          assertBool "leave concrete branches to the executor" (not merged)
+          assertEqual "PC is unchanged" initial.state.pc result.state.pc
+          assertEqual "stack is unchanged" stack result.state.stack
+    , testCase "merge-preserves-unchanged-stack-slots" $ do
+        vm <- stToIO $ loadEmptySymVM (RuntimeCode (ConcreteRuntimeCode "")) (Lit 0) (ConcreteBuf "", []) >>= freezeVM
+        let cond = Var "cond"
+            untouched = Add (Lit 0) (Var "untouched")
+            stack = [Var "value", untouched]
+            step = do
+              assign (#state % #pc) 2
+              assign (#state % #stack) [Mul (Lit 0) (Var "value"), untouched]
+        (merged, result) <- stToIO $ runStateT (Merge.tryMergeForwardJump testEnv.config step 0 2 cond stack) vm
+        assertBool "symbolic branches still merge" merged
+        assertEqual "only changed slots are simplified"
+          [ITE cond (Var "value") (Lit 0), untouched] result.state.stack
+    , testCase "merge-simple-branches" $ do
         -- Simple branching pattern that should be merged
         Just c <- solcRuntime "C"
           [i|
