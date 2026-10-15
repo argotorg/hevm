@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the number of products and divisions in a query and is currently uncapped;
   and a query the abstraction cannot answer is retried with native arithmetic,
   so it can take up to three times the SMT timeout.
+- Traces are now built as `prettyprinter` documents with semantic annotations
+  (`showTraceDoc`, `traceDocForest`, `TraceAnn`), so frontends can style them
+  without parsing ANSI escape codes. Terminal output is unchanged.
 
 ## Fixed
 - Storage decomposition no longer swaps key and slot for concrete mapping
