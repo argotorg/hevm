@@ -31,7 +31,8 @@ import Prelude hiding (LT, GT, Foldable(..))
 
 import Control.Monad
 import Control.Monad.Trans.Maybe (MaybeT(..))
-import Data.Containers.ListUtils (nubOrd, nubInt)
+import Data.Char (isDigit)
+import Data.Containers.ListUtils (nubOrd)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.Vector.Storable qualified as VS
@@ -202,7 +203,6 @@ assertPropsHelperWith arithEnc simp extraDecls psPreConc = do
   <> SMT2 (SMTScript intermediates) mempty mempty
   <> SMT2 (SMTScript keccakAssertions') mempty mempty
   <> SMT2 (SMTScript readAssumes') mempty mempty
-  <> SMT2 (SMTScript gasOrder) mempty mempty
   <> SMT2 (SMTScript (fmap (\p -> SMTCommand("(assert " <> p <> ")")) encs)) (cexInfo storageReads) ps
 
   where
@@ -217,7 +217,6 @@ assertPropsHelperWith arithEnc simp extraDecls psPreConc = do
     allVars = fmap referencedVars toDeclarePsElim <> fmap referencedVars bufVals <> fmap referencedVars storeVals
     frameCtx = fmap (referencedFrameContext arithEnc) toDeclarePsElim <> fmap (referencedFrameContext arithEnc) bufVals <> fmap (referencedFrameContext arithEnc) storeVals
     blockCtx = fmap referencedBlockContext toDeclarePsElim <> fmap referencedBlockContext bufVals <> fmap referencedBlockContext storeVals
-    gasOrder = enforceGasOrder arithEnc psPreConc
 
     -- Buf, Storage, etc. declarations needed
     bufVals = Map.elems bufs
@@ -407,28 +406,6 @@ declareConstrainAddrs names = SMT2 (SMTScript ([SMTComment "concrete and symboli
     -- assume that symbolic addresses do not collide with the zero address or precompiles
     assume n = SMTCommand $ "(assert (bvugt " <> n <> " (_ bv9 160)))"
     cexvars = (mempty :: CexVars){ addrs = fmap toLazyText names }
-
--- The gas is a tuple of (prefix, index). Within each prefix, the gas is strictly decreasing as the
--- index increases. This function gets a map of Prefix -> [Int], and for each prefix,
--- enforces the order
-enforceGasOrder :: ArithEncoding -> [Prop] -> [SMTEntry]
-enforceGasOrder enc ps = [SMTComment "gas ordering"] <> (concatMap (uncurry order) indices)
-  where
-    order :: TS.Text -> [Int] -> [SMTEntry]
-    order prefix n = consecutivePairs (nubInt n) >>= \(x, y)->
-      -- The GAS instruction itself costs gas, so it's strictly decreasing
-      [SMTCommand $ "(assert (bvugt " <> fromRight' (exprToSMTWith enc (Gas prefix x)) <> " " <>
-        fromRight' ((exprToSMTWith enc (Gas prefix y))) <> "))"]
-    consecutivePairs :: [Int] -> [(Int, Int)]
-    consecutivePairs [] = []
-    consecutivePairs l@(_:t) = zip l t
-    indices = Map.toList $ toMapOfLists $ concatMap (foldProp go mempty) ps
-    toMapOfLists :: [(TS.Text, Int)] -> Map.Map TS.Text [Int]
-    toMapOfLists = foldr (\(k, v) acc -> Map.insertWith (++) k [v] acc) Map.empty
-    go :: Expr a -> [(TS.Text, Int)]
-    go e = case e of
-      Gas prefix v -> [(prefix, v)]
-      _ -> []
 
 declareFrameContext :: [(Builder, [Prop])] -> Err SMT2
 declareFrameContext names = do
@@ -843,6 +820,9 @@ parseTxCtx name
   | name == "txvalue" = TxValue
   | Just a <- TS.stripPrefix "balance_" name = Balance (parseEAddr a)
   | Just a <- TS.stripPrefix "codehash_" name = CodeHash (parseEAddr a)
+  | Just a <- TS.stripPrefix "gas_" name
+  , n <- TS.takeWhileEnd isDigit a
+  , not (TS.null n) = Gas (TS.dropWhileEnd isDigit a) (read (TS.unpack n))
   | otherwise = internalError $ "cannot parse " <> (TS.unpack name) <> " into an Expr"
 
 type ValGetter = Text -> MaybeIO Text

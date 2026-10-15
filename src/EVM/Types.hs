@@ -815,6 +815,7 @@ data FrameState (t :: VMType) = FrameState
   , static       :: Bool
   , overrideCaller :: Maybe (Expr EAddr)
   , resetCaller  :: Bool
+  , lastGasReading :: Maybe (Expr EWord) -- ^ previous symbolic GAS reading in this frame
   }
   deriving (Generic)
 

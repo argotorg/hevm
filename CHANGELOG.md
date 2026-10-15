@@ -37,6 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   16 MB) instead of 64, which is still more than gas limits allow.
 
 ## Fixed
+- Symbolic `GAS` readings are now only ordered within a call frame, so a caller
+  can have more gas left after a call than its callee had.
 - Calls to unknown code with the same inputs now return the same results, also
   between the two programs of `hevm equivalence`, which no longer reports
   differences that only come from such calls returning different results.

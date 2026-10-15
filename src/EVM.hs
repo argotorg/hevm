@@ -121,6 +121,7 @@ blankState = do
     , static       = False
     , overrideCaller = Nothing
     , resetCaller  = False
+    , lastGasReading = Nothing
     }
 
 -- | An "external" view of a contract's bytecode, appropriate for
@@ -186,6 +187,7 @@ makeVm o = do
       , static = False
       , overrideCaller = Nothing
       , resetCaller = False
+      , lastGasReading = Nothing
       }
     , env = env
     , burned = initialGas
@@ -3654,7 +3656,12 @@ instance VMOps Symbolic where
   pushGas = do
     modifying (#env % #freshGasVals) (+ 1)
     n <- use (#env % #freshGasVals)
-    pushSym $ Expr.Gas "" n
+    let g = Expr.Gas "" n
+    -- GAS costs gas, so the readings within one call frame strictly decrease
+    prev <- use (#state % #lastGasReading)
+    mapM_ (\p -> pushTo #constraints (PGT p g)) prev
+    assign (#state % #lastGasReading) (Just g)
+    pushSym g
   enoughGas _ _ = True
   subGas _ _ = ()
   toGas _ = ()
