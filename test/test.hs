@@ -4204,7 +4204,8 @@ tests = testGroup "hevm"
           (_, []) <-  withDefaultSolver $ \s -> verify s (Fetch.noRpcFetcher s) defaultVeriOpts vm (checkAssertions defaultPanicCodes) Nothing
           putStrLnM "Proven"
         ,
-        test "safemath-distributivity-sol" $ do
+        -- Native arithmetic proves this identity without costly abstraction refinement.
+        testCase "safemath-distributivity-sol" $ runEnv (testEnv { config = testEnv.config { abstractArith = False } }) $ do
           Just c <- solcRuntime "C"
             [i|
               contract C {
