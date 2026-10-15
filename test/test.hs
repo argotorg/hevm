@@ -4804,7 +4804,8 @@ tests = testGroup "hevm"
                          , buffers = bufs
                          , store = mempty
                          , blockContext = mempty
-                         , txContext = Map.fromList [(TxValue,0x0)]}
+                         , txContext = Map.fromList [(TxValue,0x0)]
+                         , calls = mempty}
       putStrLnM $ "Cex found:" <> T.unpack (formatCex (AbstractBuf "txdata") Nothing mycex)
     , test "correct-model-for-empty-buffer" $ do
       withDefaultSolver $ \s -> do

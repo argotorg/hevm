@@ -466,7 +466,7 @@ getModel inst cexvars = runMaybeT $ do
       storage <- getStore (getValue inst) cexvars.storeReads
       blockctx <- getVars parseBlockCtx (getValue inst) (fmap T.toStrict cexvars.blockContext)
       txctx <- getVars parseTxCtx (getValue inst) (fmap T.toStrict cexvars.txContext)
-      pure $ SMTCex vars addrs buffers storage blockctx txctx
+      pure $ SMTCex vars addrs buffers storage blockctx txctx mempty
 
     -- sometimes the solver might give us back a model for the max read index
     -- that is too high to be a useful cex (e.g. in the case of reads from a

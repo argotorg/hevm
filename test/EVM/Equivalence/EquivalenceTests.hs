@@ -459,6 +459,14 @@ bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
     forM_ replays $ \case
       Validated ra rb -> assertBool "Replay must show the different stores" (ra /= rb)
       r -> assertFailure $ "Counterexample must replay as validated, got: " <> show r
+  , testCase "eq-replay-answers-calls-to-unknown-code" $ do
+    -- STATICCALL(gas, 0x1234, 0, 0, 0, 32), then sstore(0, mload(0) == 5) vs sstore(0, 0)
+    let callOut = "60205f5f5f6112345afa50"
+    replays <- replayAll (callOut <> "5f516005145f55") (callOut <> "5f5f55")
+    assertBool "Must have a counterexample" (not (null replays))
+    forM_ replays $ \case
+      Validated {} -> pure ()
+      r -> assertFailure $ "The callee must answer as in the counterexample, got: " <> show r
   , testCase "eq-replay-equal-programs-not-reproducible" $ do
     -- sstore(0, 1), and the same after a JUMPDEST
     let a = fromJust (hexByteString "6001600055")
