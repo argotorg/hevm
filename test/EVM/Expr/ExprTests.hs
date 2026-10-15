@@ -1607,10 +1607,29 @@ fuzzTests = testGroup "ExprFuzzTests"
       , simplifierFuzzTests abstractConfig
       ]
   , abstractArithmeticFuzzTests
+  , enumerateFuzzTests
   ]
   where
     halfQuickCheckTests = adjustOption $ \(Test.Tasty.QuickCheck.QuickCheckTests n) ->
       Test.Tasty.QuickCheck.QuickCheckTests (div n 2)
+
+-- | Every model of the path conditions must take a value of the subterm that is enumerated,
+-- and give the word the value enumerated with it: one left out drops a feasible path.
+enumerateFuzzTests :: TestTree
+enumerateFuzzTests = testGroup "enumerateViaSmallSubterm"
+  [ testProperty "enumerate-small-subterm-complete" $ \(SmallRange limit props e) -> ioProperty $
+      -- path conditions are stored simplified
+      case Expr.enumerateViaSmallSubterm limit (Expr.simplifyProps props) e of
+        Nothing -> pure $ label "nothing enumerated" True
+        Just (atom, groups) -> do
+          let ks = concatMap snd groups
+              covered = foldr POr (PBool False) [PAnd (PEq atom (Lit k)) (PEq e (Lit v)) | (v, vks) <- groups, k <- vks]
+          res <- checkSat $ foldr PAnd (PNeg covered) props
+          pure $ label (if null groups then "enumerated as infeasible" else "enumerated")
+               $ label (if isUnknown res then "solver gave up" else "solver answered")
+               $ counterexample ("subterm: " <> show atom <> "\ngroups: " <> show groups <> "\nresult: " <> show res)
+               $ length ks <= limit && length ks == length (nubOrd ks) && isUnsatOrUnknown res
+  ]
 
 equivalenceSanityChecks :: Config -> TestTree
 equivalenceSanityChecks cfg = testGroup "Expr equivalence sanity checks"

@@ -1071,3 +1071,48 @@ instance Arbitrary SharedTerms where
       <*> pick 6 p.pBytes
       <*> vectorOf 6 (genPoolProp p 2)
       <*> vectorOf 3 (genPoolEnd p)
+
+-- | A word that depends on a symbolic subterm only through a few values, with path conditions
+-- that may bound it, for 'Expr.enumerateViaSmallSubterm'
+data SmallRange = SmallRange Int [Prop] (Expr EWord)
+  deriving (Show)
+
+instance Arbitrary SmallRange where
+  arbitrary = do
+    limit <- chooseInt (1, 40)
+    base <- elements [Var "x", Add (Var "x") (Lit 7), Mul (Lit 3) (Var "x"), SHR (Lit 8) (Var "x")]
+    atom <- frequency
+      [ (2, pure base)
+      , (2, Mod base . Lit <$> genEdge 1 (fromIntegral limit + 2))
+      , (2, (\m -> And (Lit m) base) <$> genEdge 0 (fromIntegral limit * 2))
+      , (1, (\k -> SHR (Lit k) base) <$> genEdge 250 256)
+      ]
+    e <- genOver atom 3
+    props <- chooseInt (0, 4) >>= \n -> replicateM n (genBound (fromIntegral limit + 8) [base, atom, atom, Var "x"])
+    pure $ SmallRange limit props e
+    where
+      genOver :: Expr EWord -> Int -> Gen (Expr EWord)
+      genOver atom 0 = frequency [(3, pure atom), (1, Lit <$> genEdge 0 40), (1, pure (Var "y"))]
+      genOver atom n = let sub = genOver atom (n - 1) in frequency
+        [ (2, genOver atom 0)
+        , (1, Add <$> sub <*> sub), (1, Sub <$> sub <*> sub), (1, Mul <$> sub <*> sub)
+        , (1, Div <$> sub <*> sub), (1, Mod <$> sub <*> sub), (1, And <$> sub <*> sub)
+        , (1, SHL <$> sub <*> sub), (1, Eq <$> sub <*> sub), (1, LT <$> sub <*> sub)
+        , (1, IsZero <$> sub), (1, ITE <$> sub <*> sub <*> sub)
+        ]
+      genBound :: W256 -> [Expr EWord] -> Gen Prop
+      genBound hi ts = do
+        t <- elements ts
+        c <- Lit <$> genEdge 0 hi
+        frequency
+          [ (2, pure (PLEq t c)), (2, pure (PLT t c)), (2, pure (PLEq c t)), (2, pure (PLT c t))
+          , (1, pure (PEq c t)), (1, pure (PEq t c)), (4, pure (PNeg (PEq c t)))
+          , (1, pure (PEq (Lit 0) (Xor c t))), (2, pure (PNeg (PEq (Lit 0) (Xor t c))))
+          , (1, pure (PGEq t c)), (1, PAnd <$> genBound hi ts <*> genBound hi ts)
+          ]
+      -- mostly in range, sometimes at the edges of the word
+      genEdge :: W256 -> W256 -> Gen W256
+      genEdge lo hi = frequency
+        [ (8, fromIntegral <$> chooseInteger (toInteger lo, toInteger hi))
+        , (1, elements [0, 1, Expr.maxLit - 1, Expr.maxLit])
+        ]
