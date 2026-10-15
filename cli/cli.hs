@@ -453,21 +453,25 @@ equivalence eqOpts cOpts = do
     sess <- Fetch.mkSession cOpts.cacheDir Nothing
     eq <- equivalenceCheck s (Just sess) (fromJust bytecodeA) (fromJust bytecodeB) veriOpts calldata eqOpts.create
     let anyIssues =  not (null eq.partials) || any (isUnknown . fst) eq.res  || any (isError . fst) eq.res
-    Progress.markPhase "report" [("cexes", length (filter (isCex . fst) eq.res)), ("partials", length eq.partials)]
+        cd = AbstractBuf "txdata"
+    cexes <- replayEqCexes s eqOpts.create (fromJust bytecodeA) (fromJust bytecodeB) cd (mapMaybe getCexP eq.res)
+    let nValidated = length [() | (_, _, Validated {}) <- cexes]
+    Progress.markPhase "report" [("cexes", length cexes), ("validated", nValidated), ("partials", length eq.partials)]
     Progress.stopStatus
-    liftIO $ case (any (isCex . fst) eq.res, anyIssues) of
-      (False, False) -> putStrLn "   \x1b[32m[PASS]\x1b[0m Contracts behave equivalently"
-      (True, _)      -> putStrLn "   \x1b[31m[FAIL]\x1b[0m Contracts do not behave equivalently"
-      (_, True)      -> putStrLn "   \x1b[31m[FAIL]\x1b[0m Contracts may not behave equivalently"
+    liftIO $ case (nValidated > 0, null cexes && Prelude.not anyIssues) of
+      (True, _) -> putStrLn "   \x1b[31m[FAIL]\x1b[0m Contracts do not behave equivalently"
+      (_, True) -> putStrLn "   \x1b[32m[PASS]\x1b[0m Contracts behave equivalently"
+      _         -> putStrLn "   \x1b[31m[FAIL]\x1b[0m Contracts may not behave equivalently"
     liftIO $ printWarnings Nothing mempty eq.partials (map fst eq.res) "the contracts under test"
-    case any (isCex . fst) eq.res of
-      False -> liftIO $ do
+    case cexes of
+      [] -> liftIO $ do
         when anyIssues exitFailure
         putStrLn "No discrepancies found"
-      True -> liftIO $ do
-        let cexes = mapMaybe getCexP eq.res
+      _ -> liftIO $ do
         T.putStrLn . T.unlines $
-          [ "Not equivalent. The following inputs result in differing behaviours:"
+          [ if nValidated > 0
+              then "Not equivalent. The following inputs result in differing behaviours:"
+              else "Possibly not equivalent: none of these inputs could be confirmed by running A and B concretely:"
           , "" , "-----", ""
           ] <> (intersperse (T.unlines [ "", "-----" ]) $ fmap formatCexes cexes)
         exitFailure
@@ -476,7 +480,11 @@ equivalence eqOpts cOpts = do
     getCexP :: (ProofResult a b, String) -> Maybe (a, String)
     getCexP (Cex c, reason) = Just (c, reason)
     getCexP _ = Nothing
-    formatCexes (cex, reason) = formatCex (AbstractBuf "txdata") Nothing cex <> "Difference: " <> T.pack reason
+    formatCexes (cex, reason, replay) = formatCex (AbstractBuf "txdata") Nothing cex <> "Difference: " <> T.pack reason
+      <> "\nConcrete replay: " <> replayTag replay <> case replay of
+        Validated a b -> "\n  A: " <> a <> "\n  B: " <> b
+        NotReproducible a b -> "\n  A: " <> a <> "\n  B: " <> b
+        CannotReplay _ -> ""
 
 getSolver :: Text -> IO Solver
 getSolver s = case T.unpack s of

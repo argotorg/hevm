@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- `hevm equivalence` replays every counterexample concretely and marks it as
+  validated, not reproducible, or not replayable. It only reports that the
+  contracts do not behave equivalently if a counterexample is validated.
 - A live status line on stderr for `hevm symbolic` and `hevm equivalence`
   (disable with `--no-progress`), and a JSONL log of interpreter and solver
   progress (`--progress-log FILE` or `--verb 3`; `--progress-exprs` or `--verb 4`
