@@ -8,7 +8,7 @@ import Data.ByteString (ByteString)
 import Data.Either.Extra (fromRight)
 import Data.Functor ((<&>))
 import Data.Maybe (fromMaybe, mapMaybe, fromJust)
-import Data.List qualified as List (isInfixOf)
+import Data.List qualified as List (isInfixOf, nub)
 import Data.String.Here
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -89,6 +89,26 @@ runtimeSolidityEquivalenceTests = testGroup "Solidity runtime equivalence"
       expectDifference 1 a b
   -- diverging gas overapproximations are caught
   -- previously, they had the same name (gas_...), so they compared equal
+  , testCase "eq-partials-not-duplicated" $ do
+    let a = [here|
+              contract C {
+                function stuff(uint n) public returns (uint256) {
+                  uint count = 0;
+                  for (uint i = 0; i < n; i++) count++;
+                  return count;
+                }
+              }
+           |]
+        b = replace $ "return count;" `with` "return count + 1;" `on` a
+    codeA <- compile a Solidity.Runtime
+    codeB <- compile b Solidity.Runtime
+    let opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 3 } }
+    eq <- Effects.runApp $ withSolvers Bitwuzla 3 Nothing defMemLimit $ \sg -> do
+      (calldata, _) <- mkCalldata Nothing []
+      equivalenceCheck sg Nothing codeA codeB opts calldata False
+    assertBool "Must have partial end states" (not (null eq.partials))
+    -- each partial end state used to be reported once per end state of the other program
+    assertEqual "Partial end states must not be duplicated" (List.nub eq.partials) eq.partials
   , testCase "eq-divergent-overapprox-gas" $ do
     let a = [here|
               contract C {
