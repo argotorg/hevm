@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error at startup if the selected solver is not installed.
 
 ## Fixed
+- `hevm equivalence` no longer reports each partially explored path once per end
+  state of the other program, which inflated the counts in its warnings.
 - Simplification and the other `Expr` traversals now also reach revert data, the
   terms in errors and partial executions, `BALANCE` addresses and log topics.
 - Storage decomposition no longer swaps key and slot for concrete mapping

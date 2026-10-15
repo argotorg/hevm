@@ -1074,8 +1074,7 @@ equivalenceCheck' solvers sess branchesA branchesB create = do
     distinct :: App m => Expr End -> Expr End -> m (Maybe (Set Prop, String), EqIssues)
     distinct aEnd bEnd = do
       (requireToDiff, issues) <- resultsDiffer aEnd bEnd
-      let newIssues = EqIssues [] (filter isPartial [aEnd, bEnd])
-      pure (collectReqs requireToDiff, issues <> newIssues)
+      pure (collectReqs requireToDiff, issues)
       where
         collectReqs (Just (reqToDiff, meaning)) = Just (Set.fromList $ Expr.simplifyProps (reqToDiff : extractProps aEnd <> extractProps bEnd), meaning)
         collectReqs Nothing  = Nothing
