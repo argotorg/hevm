@@ -91,6 +91,7 @@ renameProbe = \case
 simplificationTests :: TestTree
 simplificationTests = testGroup "Expr-rewriting"
   [ storageTests
+  , keccakTests
   , copySliceTests
   , memoryTests
   , basicSimplificationTests
@@ -251,6 +252,46 @@ storageTests = testGroup "Storage tests"
     preImgBytes = BS.pack (replicate 31 0 ++ [0xaa] ++ replicate 32 0)
     preImgHash = keccak' preImgBytes
     preImgs = Map.fromList [(preImgHash, preImgBytes)]
+
+keccakTests :: TestTree
+keccakTests = testGroup "Keccak input canonicalization"
+  [ testCase "mapping-key-forms" $ do
+      let inner = Keccak (ConcreteBuf (BS.pack [1..64]))
+          written key = Keccak (WriteWord (Lit 0) key (WriteWord (Lit 32) inner (ConcreteBuf "")))
+          copied key = Keccak (CopySlice (Lit 256) (Lit 0) (Lit 64)
+            (WriteWord (Lit 256) key (WriteWord (Lit 288) inner (ConcreteBuf (BS.pack [7, 7])))) (ConcreteBuf ""))
+      mapM_ (\key -> do
+        assertEqual "same preimage" (Expr.simplify $ written key) (Expr.simplify $ copied key)
+        assertEqual "read through an equivalent key" (Var "value") $
+          Expr.simplify (SLoad (copied key) (SStore (written key) (Var "value") (AbstractStore (SymAddr "c") Nothing)))
+        ) [Lit 100, Var "acc"]
+      assertBool "different keys remain distinct" (Expr.simplify (written (Lit 100)) /= Expr.simplify (written (Var "acc")))
+  , testCase "nested-mapping-preimages" $ do
+      let outer slot = Keccak (WriteWord (Lit 0) (Var "key") (WriteWord (Lit 32) slot (ConcreteBuf "")))
+          concrete = outer (Keccak (ConcreteBuf (word256Bytes 3 <> word256Bytes 0)))
+          symbolic slot = outer (Keccak (WriteWord (Lit 0) (Var "innerKey") (ConcreteBuf (word256Bytes 0 <> word256Bytes slot))))
+      different <- checkSat (Expr.simplify concrete .== Expr.simplify (symbolic 1))
+      assertBool ("different mappings must not alias: " <> show different) (isQed different)
+      same <- checkSat (Expr.simplify concrete .== Expr.simplify (symbolic 0))
+      assertBool ("the same mapping can alias: " <> show same) (isSat same)
+  , testCase "unsupported-inputs" $ do
+      let source = WriteWord (Lit 0) (Var "value") (AbstractBuf "src")
+          slice n = CopySlice (Lit 16) (Lit 0) (Lit n) source (ConcreteBuf "")
+          base = ConcreteBuf (word256Bytes 0 <> word256Bytes 0)
+          wrapped = [ WriteByte (Lit maxBound) (LitByte 0xff) base
+                    , WriteWord (Lit maxBound) (Lit maxBound) base
+                    , CopySlice (Lit 0) (Lit maxBound) (Lit 1) (ConcreteBuf "x") base ]
+      mapM_ (\buf -> assertEqual "keep unresolved or unsupported buffers"
+        (Keccak $ Expr.simplify buf) (Expr.simplify $ Keccak buf))
+        (source : wrapped <> map slice [0, 31, 33, 64, 257, 288])
+  , testProperty "bytes-length-and-idempotence" $ withMaxSuccess 100 $ forAll genKeccakInput $ \buf -> ioProperty $ do
+      let simplified@(Keccak canonical) = Expr.simplify (Keccak buf)
+      result <- runEnv (Env {config = equivConfig}) $ withSolvers Bitwuzla 1 (Just 5) defMemLimit $ \solvers ->
+        checkSatWithProps solvers [POr (buf ./= canonical) (BufLength buf ./= BufLength canonical)]
+      pure $ label (if canonical == Expr.simplify buf then "unchanged" else "canonicalized") $
+        counterexample (show result) (isQed result)
+        .&&. Expr.simplify simplified === simplified
+  ]
 
 copySliceTests :: TestTree
 copySliceTests = testGroup "CopySlice tests"
@@ -2029,3 +2070,18 @@ isSatOrUnknown res = isSat res || isUnknown res
 
 isUnsatOrUnknown :: SMTResult -> Bool
 isUnsatOrUnknown res = isQed res || isUnknown res
+
+genKeccakInput :: Gen (Expr Buf)
+genKeccakInput = do
+  n <- elements [32, 64 .. 256 :: Int]
+  off <- elements [0, 16, 32, 256 :: Int]
+  base <- ConcreteBuf . BS.pack <$> vectorOf (off + n + 32) arbitrary
+  values <- vectorOf (n `div` 32) $ oneof
+    [ Lit <$> arbitrary
+    , elements [Var "a", Var "b", ReadWord (Lit 0) (AbstractBuf "input")]
+    , pure $ Keccak (ConcreteBuf (word256Bytes 3 <> word256Bytes 0))
+    , pure $ Add (Lit 5) (Keccak (ConcreteBuf (word256Bytes 4 <> word256Bytes 0)))
+    ]
+  writes <- shuffle (zip [off, off + 32 ..] values)
+  let source = foldr (\(i, w) b -> WriteWord (Lit $ fromIntegral i) w b) base writes
+  pure $ CopySlice (Lit $ fromIntegral off) (Lit 0) (Lit $ fromIntegral n) source (ConcreteBuf "")

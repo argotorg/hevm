@@ -611,6 +611,38 @@ copySlice srcOff dstOff (Lit size) (WriteWord srcOff2 val base) dstBuff
 copySlice srcOffset dstOffset size src dst = CopySlice srcOffset dstOffset size src dst
 
 
+-- | Canonicalize resolved, word-aligned keccak inputs up to 256 bytes.
+canonKeccakBuf :: Expr Buf -> Maybe (Expr Buf)
+canonKeccakBuf (ConcreteBuf _) = Nothing
+canonKeccakBuf buf = case bufLength buf of
+  Lit n | n >= 32, n <= 256, n `Prelude.mod` 32 == 0, noWrap buf ->
+    let ws = [(i, w, literal w) | i <- [0, 32 .. n - 32], let w = readWord (Lit i) buf]
+        base = ConcreteBuf $ BS.concat [maybe (word256Bytes 0) word256Bytes v | (_, _, v) <- ws]
+        writes = [(i, w) | (i, w, Nothing) <- ws]
+    in if any (\(_, w, _) -> containsNode unresolved w) ws
+       then Nothing
+       else Just $ foldr (\(i, w) b -> WriteWord (Lit i) w b) base writes
+  _ -> Nothing
+  where
+    -- Keep keccak terms: the solver needs their preimages for collision assumptions.
+    literal :: Expr EWord -> Maybe W256
+    literal (Lit v) = Just v
+    literal _ = Nothing
+    -- A wrapped length can hide bytes outside the reconstructed buffer.
+    noWrap :: Expr Buf -> Bool
+    noWrap (ConcreteBuf _) = True
+    noWrap (WriteWord (Lit i) _ b) = i <= maxBound - 32 && noWrap b
+    noWrap (WriteByte (Lit i) _ b) = i < maxBound && noWrap b
+    noWrap (CopySlice _ (Lit i) (Lit size) _ b) = i <= maxBound - size && noWrap b
+    noWrap _ = False
+    unresolved :: Expr a -> Bool
+    unresolved = \case
+      ReadWord _ (AbstractBuf _) -> False
+      ReadByte _ (AbstractBuf _) -> False
+      ReadWord _ _ -> True
+      ReadByte _ _ -> True
+      _ -> False
+
 writeByte :: Expr EWord -> Expr Byte -> Expr Buf -> Expr Buf
 writeByte (Lit offset) (LitByte val) (ConcreteBuf "")
   | offset < maxBytes
@@ -1199,6 +1231,8 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
       size1 == size2 && readOff == writeOff = CopySlice srcOff dstOff size1 src dst
     -- overwrite empty buf with a buf, return is the buf
     go (CopySlice (Lit 0) (Lit 0) (BufLength src1) src2 (ConcreteBuf "")) | src1 == src2 = src1
+
+    go (Keccak buf) | Just buf' <- canonKeccakBuf buf, buf' /= buf = Keccak buf'
 
     -- simplify storage
     go (SLoad slot store) = readStorage' slot store
