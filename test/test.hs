@@ -109,6 +109,10 @@ exactlyCex n results = let numcex = sum $ map (fromEnum . isCex) results
 test :: TestName -> ReaderT Env IO () -> TestTree
 test a b = testCase a $ runEnv testEnv b
 
+-- | For tests that need buffers larger than the default 2^24 bytes
+testMaxBuf64 :: TestName -> ReaderT Env IO () -> TestTree
+testMaxBuf64 a b = testCase a $ runEnv (Env { config = testEnv.config { maxBufSize = 64 } }) b
+
 testNoSimplify :: TestName -> ReaderT Env IO () -> TestTree
 testNoSimplify a b = let testEnvNoSimp = Env { config = testEnv.config { simp = False } }
   in testCase a $ runEnv testEnvNoSimp b
@@ -4649,7 +4653,7 @@ tests = testGroup "hevm"
       assertBoolM ("Expected only counterexamples, got: " <> show res) (all isCex res)
   ]
   , testGroup "calling-solvers"
-  [ test "no-error-on-large-buf" $ do
+  [ testMaxBuf64 "no-error-on-large-buf" $ do
       -- These two tests generates a very large buffer that previously would cause an internalError when
       -- printed via "formatCex". We should be able to print it now.
       Just c <- solcRuntime "MyContract" [i|

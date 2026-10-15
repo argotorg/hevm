@@ -128,7 +128,7 @@ commonOptions = CommonOptions
   <*> (optional $ option auto $ long "num-solvers" <> help "Number of solver instances to use (default: number of cpu cores)")
   <*> (option auto $ long "max-iterations"  <> showDefault <> value 5 <> help "Number of times we may revisit a particular branching point. For no bound, set -1")
   <*> (switch $ long "promise-no-reent"     <> help "Promise no reentrancy is possible into the contract(s) being examined")
-  <*> (option auto $ long "max-buf-size"    <> value 64 <> help "Maximum size of buffers such as calldata and returndata in exponents of 2 (default: 64, i.e. 2^64 bytes)")
+  <*> (option auto $ long "max-buf-size"    <> value 24 <> help "Maximum size of buffers such as calldata and returndata in exponents of 2 (default: 24, i.e. 16 MB, more than gas limits allow)")
   <*> (option auto $ long "max-width"      <> showDefault <> value 100 <> help "Max number of concrete values to explore when encountering a symbolic value. This is a form of branch width limitation per symbolic value")
   <*> (optional $ option auto $ long "max-depth" <> help "Limit maximum depth of branching during exploration (default: unlimited)")
   <*> (switch $ long "no-simplify" <> help "Don't perform simplification of expressions")
