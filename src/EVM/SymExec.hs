@@ -1402,7 +1402,7 @@ showBuffer buf cex = case Map.lookup buf cex.buffers of
 
 formatCex :: Expr Buf -> Maybe Sig -> SMTCex -> Text
 formatCex cd sig m@(SMTCex _ addrs _ store blockContext txContext) = T.unlines $
-  [ "Calldata:", indent 2 cd' ]
+  [ bold "Calldata:", indent 2 cd' ]
   <> storeCex
   <> txCtx
   <> blockCtx
@@ -1425,7 +1425,7 @@ formatCex cd sig m@(SMTCex _ addrs _ store blockContext txContext) = T.unlines $
     storeCex
       | Map.null store = []
       | otherwise =
-          [ "Storage:"
+          [ bold "Storage:"
           , indent 2 $ T.unlines $ Map.foldrWithKey (\key val acc ->
               ("Addr " <> (T.pack . show $ key)
                 <> ": " <> (T.pack $ show (Map.toList val))) : acc
@@ -1436,7 +1436,7 @@ formatCex cd sig m@(SMTCex _ addrs _ store blockContext txContext) = T.unlines $
     txCtx
       | Map.null txContext = []
       | otherwise =
-        [ "Transaction Context:"
+        [ bold "Transaction Context:"
         , indent 2 $ T.unlines $ Map.foldrWithKey (\key val acc ->
             (showTxCtx key <> ": " <> (T.pack $ show val)) : acc
           ) mempty (filterSubCtx txContext)
@@ -1446,11 +1446,14 @@ formatCex cd sig m@(SMTCex _ addrs _ store blockContext txContext) = T.unlines $
     addrsCex
       | Map.null addrs = []
       | otherwise =
-          [ "Addrs:"
+          [ bold "Addrs:"
           , indent 2 $ T.unlines $ Map.foldrWithKey (\key val acc ->
               ((T.pack . show $ key) <> ": " <> (T.pack $ show val)) : acc
             ) mempty addrs
           ]
+
+    bold :: Text -> Text
+    bold t = "\x1b[1m" <> t <> "\x1b[0m"
 
     -- strips the frame arg from frame context vars to make them easier to read
     showTxCtx :: Expr EWord -> Text
@@ -1471,7 +1474,7 @@ formatCex cd sig m@(SMTCex _ addrs _ store blockContext txContext) = T.unlines $
     blockCtx
       | Map.null blockContext = []
       | otherwise =
-        [ "Block Context:"
+        [ bold "Block Context:"
         , indent 2 $ T.unlines $ Map.foldrWithKey (\key val acc ->
             (T.pack $ show key <> ": " <> show val) : acc
           ) mempty blockContext

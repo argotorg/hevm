@@ -18,7 +18,7 @@ import qualified Data.ByteString.Lazy as BS
 import Data.ByteString.Builder (toLazyByteString)
 import qualified Data.ByteString.Char8 as BC
 import Data.DoubleWord (Word256)
-import Data.List (intersperse, intercalate)
+import Data.List (intercalate)
 import Data.Maybe (fromMaybe, mapMaybe, fromJust, isNothing, isJust)
 import Data.Text qualified as T
 import Data.Text.IO qualified as T
@@ -468,23 +468,29 @@ equivalence eqOpts cOpts = do
         when anyIssues exitFailure
         putStrLn "No discrepancies found"
       _ -> liftIO $ do
-        T.putStrLn . T.unlines $
-          [ if nValidated > 0
-              then "Not equivalent. The following inputs result in differing behaviours:"
-              else "Possibly not equivalent: none of these inputs could be confirmed by running A and B concretely:"
-          , "" , "-----", ""
-          ] <> (intersperse (T.unlines [ "", "-----" ]) $ fmap formatCexes cexes)
+        T.putStr . T.unlines $ cexHeader (length cexes) nValidated : concatMap (\c -> ["-----", formatCexes c]) cexes
         exitFailure
   where
     decipher = maybe Nothing (hexByteString . strip0x)
     getCexP :: (ProofResult a b, String) -> Maybe (a, String)
     getCexP (Cex c, reason) = Just (c, reason)
     getCexP _ = Nothing
-    formatCexes (cex, reason, replay) = formatCex (AbstractBuf "txdata") Nothing cex <> "Difference: " <> T.pack reason
-      <> "\nConcrete replay: " <> replayTag replay <> case replay of
+    cexHeader :: Int -> Int -> Text
+    cexHeader 1 1 = "Not equivalent. This input results in differing behaviours:"
+    cexHeader _ v | v > 0 = "Not equivalent. These inputs result in differing behaviours:"
+    cexHeader 1 _ = "Possibly not equivalent: the input below could not be confirmed by running A and B concretely:"
+    cexHeader n _ = "Possibly not equivalent: none of these " <> T.pack (show n) <> " inputs could be confirmed by running A and B concretely:"
+    bold t = "\x1b[1m" <> t <> "\x1b[0m"
+    formatCexes (cex, reason, replay) = formatCex (AbstractBuf "txdata") Nothing cex <> bold "Difference:" <> " " <> T.pack reason
+      <> "\n" <> bold "Concrete replay:" <> " " <> replayTagColoured replay <> case replay of
         Validated a b -> "\n  A: " <> a <> "\n  B: " <> b
         NotReproducible a b -> "\n  A: " <> a <> "\n  B: " <> b
         CannotReplay _ -> ""
+    -- as `hevm test` shows its counterexamples
+    replayTagColoured r = case r of
+      Validated {} -> "\x1b[90m[" <> replayTag r <> "]\x1b[0m"
+      NotReproducible {} -> "\x1b[31m[" <> replayTag r <> "]\x1b[0m"
+      CannotReplay _ -> "\x1b[33m[" <> replayTag r <> "]\x1b[0m"
 
 getSolver :: Text -> IO Solver
 getSolver s = case T.unpack s of
