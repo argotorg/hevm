@@ -237,6 +237,22 @@ This is helpful to prevent the exploration from running for too long. Useful in
 scenarios where you use e.g. both symbolic execution and fuzzing, and don't
 want the symbolic execution to run for too long. It will often read to
 WARNING-s related to <code>Branches too deep at program counter</code>.</p>
+<h2 id="progress---no-progress---progress-log---progress-exprs"><a class="header" href="#progress---no-progress---progress-log---progress-exprs">Progress, <code>--no-progress</code>, <code>--progress-log</code>, <code>--progress-exprs</code></a></h2>
+<p>While <code>hevm symbolic</code> and <code>hevm equivalence</code> run, a status line on stderr
+shows the current phase, the number of finished paths, the interpreter tasks,
+the SMT queries done and running, and the slowest query so far. Finished phases
+stay on screen as a line of their own. When stderr is not a terminal, the
+status is printed as a plain line every 30 seconds instead. <code>--no-progress</code>
+turns it off.</p>
+<p><code>--progress-log FILE</code> (or <code>--verb 3</code>, which writes <code>hevm-progress.jsonl</code>)
+writes a JSONL log of what the interpreter and the solvers are doing: forks,
+finished paths with the reason for partial ones, every SMT query with the
+program counter that issued it, its duration and its result, the phases of
+equivalence checking, and every 2 seconds a snapshot of what each worker and
+each running query is doing. Every line is flushed, so the log of a run that
+was killed or timed out is still complete up to that point, which shows where
+it got stuck. <code>--progress-exprs</code> (or <code>--verb 4</code>) also logs the expressions and
+path conditions sent to the solver.</p>
 
                     </main>
 
