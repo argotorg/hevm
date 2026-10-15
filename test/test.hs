@@ -4576,7 +4576,7 @@ tests = testGroup "hevm"
             stack = [Lit 7]
             initial = vm & set (#state % #stack) stack
             step = error "concrete conditions must not trigger speculation"
-        forM_ [Lit 0, Lit 1, h, Eq h (Lit (keccak' bytes)), Eq h (Lit (keccak' bytes + 1))] $ \cond -> do
+        forM_ [Lit 0, Lit 1, h, Eq h (Lit (keccak' bytes)), Eq h (Lit (keccak' bytes + 1)), Lit maxBound, WAddr (LitAddr 0), WAddr (LitAddr 1)] $ \cond -> do
           (merged, result) <- stToIO $
             runStateT (Merge.tryMergeForwardJump testEnv.config step 0 2 cond stack) initial
           assertBool "leave concrete branches to the executor" (not merged)
@@ -4600,6 +4600,18 @@ tests = testGroup "hevm"
           assertBoolM "execution finishes" (not (any Expr.isPartial paths))
           assertEqualM "the selected branch returns a literal" [Lit expected]
             [Expr.readWord (Lit 0) buf | Success _ _ buf _ <- paths]
+    , testCase "merge-preserves-unchanged-stack-slots" $ do
+        vm <- stToIO $ loadEmptySymVM (RuntimeCode (ConcreteRuntimeCode "")) (Lit 0) (ConcreteBuf "", []) >>= freezeVM
+        let cond = Var "cond"
+            untouched = Add (Lit 0) (Var "untouched")
+            stack = [Var "value", untouched]
+            step = do
+              assign (#state % #pc) 2
+              assign (#state % #stack) [Mul (Lit 0) (Var "value"), untouched]
+        (merged, result) <- stToIO $ runStateT (Merge.tryMergeForwardJump testEnv.config step 0 2 cond stack) vm
+        assertBool "symbolic branches still merge" merged
+        assertEqual "only changed slots are simplified"
+          [ITE cond (Var "value") (Lit 0), untouched] result.state.stack
     , testCase "merge-simple-branches" $ do
         -- Simple branching pattern that should be merged
         Just c <- solcRuntime "C"
