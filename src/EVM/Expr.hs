@@ -164,6 +164,8 @@ import Data.Containers.ListUtils (nubOrd)
 
 import EVM.HashCons qualified as HC
 import EVM.Traversals
+import EVM.Traversals.Children (mapPropChildrenM)
+import Data.Functor.Identity (Identity(..))
 import EVM.Types
 
 -- ** Constants **
@@ -1681,6 +1683,7 @@ simplifyProp prop =
     simpInnerExpr (POr a b) = POr (simpInnerExpr a) (simpInnerExpr b)
     simpInnerExpr (PImpl a b) = PImpl (simpInnerExpr a) (simpInnerExpr b)
     simpInnerExpr orig@(PBool _) = orig
+    simpInnerExpr p@PCall {} = runIdentity $ mapPropChildrenM (Identity . simplify) p
 
 -- Makes [PAnd a b] into [a,b]
 flattenProps :: [Prop] -> [Prop]

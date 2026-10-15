@@ -39,6 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Fixed
 - Symbolic `GAS` readings are now only ordered within a call frame, so a caller
   can have more gas left after a call than its callee had.
+- Calls to unknown code with the same inputs now return the same results, also
+  between the two programs of `hevm equivalence`, which no longer reports
+  differences that only come from such calls returning different results.
 - `hevm equivalence` no longer reports each partially explored path once per end
   state of the other program, which inflated the counts in its warnings.
 - Simplification and the other `Expr` traversals now also reach revert data, the
