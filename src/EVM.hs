@@ -993,7 +993,7 @@ exec1 conf = do
                             touchAccount from'
                             touchAccount callee
                             transfer from' callee xValue
-              where fallback = freshBufFallback xTo' xValue xInOffset xInSize True xs
+              where fallback = freshBufFallback xTo' xValue xInOffset xInSize xOutOffset xOutSize True xs
             _ -> underrun
 
         OpCallcode -> {-# SCC "OpCallcode" #-}
@@ -1099,7 +1099,7 @@ exec1 conf = do
                       touchAccount self
                       touchAccount callee
                 where
-                  fallback = freshBufFallback xTo (Lit 0) xInOffset xInSize False xs
+                  fallback = freshBufFallback xTo (Lit 0) xInOffset xInSize xOutOffset xOutSize False xs
             _ -> underrun
 
         OpSelfdestruct -> {-# SCC "OpSelfdestruct" #-}
@@ -1764,8 +1764,8 @@ unknownCode n = unexpectedSymArg "call target has unknown code" [n]
 -- functions of the call's inputs (see 'PCall'), so that calls with equal
 -- inputs, e.g. in the two programs of an equivalence check, get equal results.
 freshBufFallback :: (?conf :: Config, VMOps t, ?op :: Word8)
-  => Expr EWord -> Expr EWord -> Expr EWord -> Expr EWord -> Bool -> [Expr EWord] -> EVM t ()
-freshBufFallback target value inOffset inSize changesState xs = do
+  => Expr EWord -> Expr EWord -> Expr EWord -> Expr EWord -> Expr EWord -> Expr EWord -> Bool -> [Expr EWord] -> EVM t ()
+freshBufFallback target value inOffset inSize outOffset outSize changesState xs = do
   self <- use (#state % #contract)
   caller <- fromMaybe self <$> use (#state % #overrideCaller)
   callee <- use (#env % #contracts % at self)
@@ -1797,7 +1797,26 @@ freshBufFallback target value inOffset inSize changesState xs = do
   modifying #constraints ((:) (PCall inputs freshVarExpr freshReturndataExpr worldAfter))
   mapM_ (assign (#env % #callWorld)) worldAfter
   assign (#state % #returndata) freshReturndataExpr
+  writeCallOutput freshReturndataExpr outSize outOffset
   next >> assign' (#state % #stack) (freshVarExpr:xs)
+
+-- | Writes the first @min(outSize, length output)@ bytes of a call's output to
+-- memory, keeping the rest of the region, like 'copyCallBytesToMemory'. The length
+-- of a fresh output is symbolic, and the SMT encoding can't copy a region of
+-- symbolic size, so each word is merged instead: bytes of a buffer past its
+-- length read as zero, so the output only needs masking where the old memory stays.
+writeCallOutput :: Expr Buf -> Expr EWord -> Expr EWord -> EVM t ()
+writeCallOutput output outSize outOffset = case outSize of
+  Lit n | n <= 1024 -> flip mapM_ (takeWhile (< n) [0, 32 ..]) $ \k -> do
+    let size = Prelude.min 32 (n - k)
+        off = Expr.add outOffset (Lit k)
+        len = bufLength output
+        fromOutput = Expr.min (Lit size) (ITE (Expr.lt len (Lit k)) (Lit 0) (Expr.sub len (Lit k)))
+        keep = SHR (Expr.mul (Lit 8) fromOutput) (Lit maxBound)
+    old <- Expr.readWord (Lit 0) <$> readMemory off (Lit 32)
+    let merged = Or (And (Not keep) (Expr.readWord (Lit k) output)) (And keep old)
+    copyBytesToMemory (WriteWord (Lit 0) merged mempty) (Lit size) (Lit 0) off
+  _ -> copyCallBytesToMemory output outSize outOffset
 
 freshVarFallback:: (VMOps t, ?op :: Word8) => [Expr EWord] -> Expr a -> EVM t ()
 freshVarFallback xs _ = do

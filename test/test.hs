@@ -2555,6 +2555,48 @@ tests = testGroup "hevm"
       (res, []) <- withDefaultSolver $ \s ->
         checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
       putStrLnM $ "successfully explored " <> show (length res) <> " paths"
+    , test "call-to-unknown-code-writes-output-region" $ do
+      Just c <- solcRuntime "C"
+        [i|
+        contract C {
+            function f(address a) public view {
+                uint r;
+                assembly {
+                    mstore(0, 0x42)
+                    pop(staticcall(gas(), a, 0, 0, 0, 32))
+                    r := mload(0)
+                }
+                assert(r == 0x42);
+            }
+        }
+        |]
+      (_, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c (Just (Sig "f(address)" [AbiAddressType])) [] defaultVeriOpts
+      assertBoolM "the output of the callee must overwrite memory" (any isCex ret)
+    , test "call-to-unknown-code-short-output-keeps-memory" $ do
+      Just c <- solcRuntime "C"
+        [i|
+        contract C {
+            function f(address a) public view {
+                uint r;
+                uint first;
+                uint size;
+                assembly {
+                    mstore(0, 0x42)
+                    pop(staticcall(gas(), a, 0, 0, 0, 32))
+                    r := mload(0)
+                    size := returndatasize()
+                    if eq(size, 1) {
+                        returndatacopy(0x20, 0, 1)
+                        first := mload(0x20)
+                    }
+                }
+                if (size == 0) assert(r == 0x42);
+                if (size == 1) assert(r == first | 0x42);
+            }
+        }
+        |]
+      (_, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c (Just (Sig "f(address)" [AbiAddressType])) [] defaultVeriOpts
+      assertEqualM "only the bytes the callee returned are overwritten" [] ret
     , test "staticcall-check-orig" $ do
       Just c <- solcRuntime "C"
         [i|
