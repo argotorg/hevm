@@ -2190,27 +2190,9 @@ propBounds = foldl go mempty
       PLT (Lit c) t | c < maxLit -> atLeast t (c + 1) m
       _ -> m
 
--- | Refines @Expr a@ to a word for the constructors a bounded subterm is
--- usually built from (the traversals don't carry 'Typeable').
 asWordRefl :: Expr a -> Maybe (a :~: EWord)
-asWordRefl = \case
-  Var {} -> Just Refl
-  Add {} -> Just Refl
-  Sub {} -> Just Refl
-  Mul {} -> Just Refl
-  Div {} -> Just Refl
-  Mod {} -> Just Refl
-  And {} -> Just Refl
-  Or {} -> Just Refl
-  Xor {} -> Just Refl
-  SHL {} -> Just Refl
-  SHR {} -> Just Refl
-  Min {} -> Just Refl
-  Max {} -> Just Refl
-  ITE {} -> Just Refl
-  SLoad {} -> Just Refl
-  ReadWord {} -> Just Refl
-  JoinBytes {} -> Just Refl
+asWordRefl e = case exprType e of
+  WordRep -> Just Refl
   _ -> Nothing
 
 asWord :: Expr a -> Maybe (Expr EWord)

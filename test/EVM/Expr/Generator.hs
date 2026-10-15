@@ -1080,7 +1080,8 @@ data SmallRange = SmallRange Int [Prop] (Expr EWord)
 instance Arbitrary SmallRange where
   arbitrary = do
     limit <- chooseInt (1, 40)
-    base <- elements [Var "x", Add (Var "x") (Lit 7), Mul (Lit 3) (Var "x"), SHR (Lit 8) (Var "x")]
+    base <- elements [Var "x", Add (Var "x") (Lit 7), Mul (Lit 3) (Var "x"), SHR (Lit 8) (Var "x")
+                     , Not (Var "x"), SAR (Lit 4) (Var "x"), BufLength (AbstractBuf "b"), TxValue]
     atom <- frequency
       [ (2, pure base)
       , (2, Mod base . Lit <$> genEdge 1 (fromIntegral limit + 2))
