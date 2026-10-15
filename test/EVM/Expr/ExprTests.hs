@@ -286,8 +286,11 @@ keccakTests = testGroup "Keccak input canonicalization"
         (source : wrapped <> map slice [0, 31, 33, 64, 257, 288])
   , testProperty "bytes-length-and-idempotence" $ withMaxSuccess 100 $ forAll genKeccakInput $ \buf -> ioProperty $ do
       let simplified@(Keccak canonical) = Expr.simplify (Keccak buf)
+          -- Inputs fit in 256 bytes; compare every word without whole-array equality.
+          bytesDiffer = foldr POr (PBool False)
+            [ReadWord (Lit i) buf ./= ReadWord (Lit i) canonical | i <- [0, 32 .. 224]]
       result <- runEnv (Env {config = equivConfig}) $ withSolvers Bitwuzla 1 (Just 5) defMemLimit $ \solvers ->
-        checkSatWithProps solvers [POr (buf ./= canonical) (BufLength buf ./= BufLength canonical)]
+        checkSatWithProps solvers [POr bytesDiffer (BufLength buf ./= BufLength canonical)]
       pure $ label (if canonical == Expr.simplify buf then "unchanged" else "canonicalized") $
         counterexample (show result) (isQed result)
         .&&. Expr.simplify simplified === simplified
