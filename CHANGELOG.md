@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Added
 - Symbolic execution now avoids forking when simplification shows that
   the path conditions imply the branch condition.
+- Symbolic jump targets and jump conditions that depend on a subterm with few
+  possible values, e.g. `selector mod n` in jumptable dispatchers or a loop bound
+  limited by an earlier check, are resolved by enumerating those values instead
+  of asking the SMT solver.
 - `hevm equivalence` replays every counterexample concretely and marks it as
   validated, not reproducible, or not replayable. It only reports that the
   contracts do not behave equivalently if a counterexample is validated.

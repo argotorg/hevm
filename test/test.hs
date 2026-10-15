@@ -2015,7 +2015,35 @@ tests = testGroup "hevm"
         (e, []) <- withDefaultSolver $
           \s -> checkAssert s defaultPanicCodes c (Just (Sig "fun(uint256)" [AbiUIntType 256])) [] veriOpts
         assertBoolM "The expression MUST be partial" $ any (Expr.containsNode isPartial) e
+    , test "jumptable-without-solver" $ do
+        -- jumps to table[selector mod 3], read with CODECOPY as Vyper's dispatcher does;
+        -- the empty solver answers nothing, so the targets must be found without it
+        let c = fromJust $ hexByteString $ "5f3560e01c600260038206600" <> "11b61003301601e395f5156"
+              <> "5b60015f5260205ff3" <> "5b60025f5260205ff3" <> "5b60035f5260205ff3" <> "00180021002a"
+        (e, _) <- withSolvers EmptySolver 1 Nothing defMemLimit $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertBoolM "The expression must not be partial" $ not (any (Expr.containsNode isPartial) e)
+        assertEqualM "One path per table entry" 3 (length (filter Expr.isSuccess e))
     , test "inconsistent-paths" $ do
+        Just c <- solcRuntime "C"
+            [i|
+            contract C {
+              function fun(uint j) external payable returns (uint) {
+                require(j <= 1000);
+                uint count = 0;
+                for (uint i = 0; i < j; i++) count++;
+                return count;
+              }
+            }
+            |]
+        let sig = Just $ Sig "fun(uint256)" [AbiUIntType 256]
+            -- we don't ask the solver about the loop condition until we're
+            -- already in an inconsistent path (i == 5, j <= 1000, i < j), so we
+            -- will continue looping here until we hit max iterations
+            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 10, askSmtIters = 5 }}
+        (e, []) <- withDefaultSolver $
+          \s -> checkAssert s defaultPanicCodes c sig [] opts
+        assertBoolM "The expression MUST be partial" $ any (Expr.containsNode isPartial) e
+    , test "bounded-loop-fully-explored" $ do
         Just c <- solcRuntime "C"
             [i|
             contract C {
@@ -2028,7 +2056,7 @@ tests = testGroup "hevm"
             }
             |]
         let sig = Just $ Sig "fun(uint256)" [AbiUIntType 256]
-            -- Simplification should stop at j's bound before askSmtIters is reached.
+            -- the loop condition is decided by j's bound, by simplification or by forking on j's 4 values
             opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 10, askSmtIters = 5 }}
         (e, []) <- withDefaultSolver $
           \s -> checkAssert s defaultPanicCodes c sig [] opts

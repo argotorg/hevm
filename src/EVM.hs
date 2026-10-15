@@ -909,7 +909,7 @@ exec1 conf = do
                             let jumpSym :: Bool -> EVM Symbolic ()
                                 jumpSym False = assign' (#state % #stack) xs >> next
                                 jumpSym _    = checkJump jumpTarget xs
-                            branch conf.maxDepth cond jumpSym
+                            branchBounded conf cond jumpSym
                 in case eqT @t @Symbolic of
                      Just Refl -> symbolicMerge
                      Nothing -> branch conf.maxDepth cond jump
@@ -1741,7 +1741,7 @@ forceAddr :: forall t . (?conf :: Config, VMOps t, Typeable t) =>
   -> (Expr EAddr -> EVM t ())
   -> EVM t ()
 forceAddr addrExpr fallback continue = case wordToAddr addrExpr of
-  Nothing -> manySolutions (?conf).maxDepth addrExpr 20 $ \case
+  Nothing -> manySolutions (?conf).maxDepth (?conf).maxWidth addrExpr 20 $ \case
     Just sol -> continue $ LitAddr (truncateToAddr sol)
     Nothing -> onlyDeployed addrExpr fallback continue
   Just c -> continue c
@@ -1811,18 +1811,54 @@ freshVarFallback xs _ = do
   let freshVarExpr = Var (opName <> "-result-stack-fresh-" <> (pack . show) freshVar)
   next >> assign' (#state % #stack) (freshVarExpr:xs)
 
+-- | A symbolic JUMPI whose condition is decided by a subterm with few possible
+-- values, e.g. a loop counter compared against a length that the path
+-- conditions bound. If all values agree, no solver call is needed. At a loop
+-- head it forks on each value, so the rest of the loop runs concretely instead
+-- of asking the solver once per iteration.
+branchBounded :: Config -> Expr EWord -> (Bool -> EVM Symbolic ()) -> EVM Symbolic ()
+branchBounded conf cond continue = do
+  pathconds <- use #constraints
+  loc <- codeloc
+  seen <- use (#iterations % at loc)
+  case Expr.enumerateViaSmallSubterm conf.maxWidth pathconds cond of
+    Just (_, [(v, _)]) -> branch conf.maxDepth (Lit v) continue
+    Just (atom, groups) | isJust seen ->
+      forkOnSubterm conf.maxDepth atom [(v, [k]) | (v, ks) <- groups, k <- ks] $ \v ->
+        branch conf.maxDepth (Lit v) continue
+    _ -> branch conf.maxDepth cond continue
+
+-- | Forks into one path per group, constraining @atom@ to that group's values.
+forkOnSubterm :: Maybe Int -> Expr EWord -> [(W256, [W256])] -> (W256 -> EVM Symbolic ()) -> EVM Symbolic ()
+forkOnSubterm maxDepth atom groups continue = do
+  pathconds <- use #constraints
+  vm <- get
+  let caseProp ks = Expr.simplifyProp $ foldr1 POr [atom .== Lit k | k <- ks]
+      feasible = [ (v, p) | (v, ks) <- groups, let p = caseProp ks
+                 , Expr.simplifyProps (p : pathconds) /= [PBool False] ]
+      runCase (v, p) = do
+        assign #result Nothing
+        pushTo #constraints p
+        continue v
+  case feasible of
+    [] -> finishAllFramesAndStop
+    [c] -> runCase c
+    _ -> fork maxDepth vm.exploreDepth $ PleaseRunAll (map Lit [0 .. fromIntegral (length feasible) - 1]) $ \case
+      Lit i -> runCase (feasible !! fromIntegral i)
+      _ -> internalError "forkOnSubterm: unexpected case index"
+
 forceConcrete :: (?conf :: Config, VMOps t) => Expr EWord -> String -> (W256 -> EVM t ()) -> EVM t ()
 forceConcrete n = forceConcreteLimitSz n 32
 
 forceConcreteLimitSz :: (?conf :: Config, VMOps t) => Expr EWord -> Int -> String -> (W256 -> EVM t ()) -> EVM t ()
 forceConcreteLimitSz n bytes msg continue = case maybeLitWordSimp n of
-  Nothing -> manySolutions (?conf).maxDepth n bytes $ maybe fallback continue
+  Nothing -> manySolutions (?conf).maxDepth (?conf).maxWidth n bytes $ maybe fallback continue
   Just c -> continue c
   where fallback = unexpectedSymArg msg [n]
 
 forceConcreteAddr :: (?conf :: Config, VMOps t) => Expr EAddr -> String -> (Addr -> EVM t ()) -> EVM t ()
 forceConcreteAddr n msg continue = case maybeLitAddrSimp n of
-  Nothing -> manySolutions (?conf).maxDepth (WAddr n) 20 $ maybe fallback $ \c -> continue (truncateToAddr c)
+  Nothing -> manySolutions (?conf).maxDepth (?conf).maxWidth (WAddr n) 20 $ maybe fallback $ \c -> continue (truncateToAddr c)
   Just c -> continue c
   where fallback = unexpectedSymArg msg [n]
 
@@ -1918,7 +1954,7 @@ cheat gas (inOffset, inSize) (outOffset, outSize) xs = do
                     }
   case maybeLitWordSimp abi of
     -- 4-byte function selector
-    Nothing -> manySolutions (?conf).maxDepth abi 4 $ \case
+    Nothing -> manySolutions (?conf).maxDepth (?conf).maxWidth abi 4 $ \case
       Just concAbi -> runCheat concAbi input
       Nothing -> unexpectedSymArg "symbolic cheatcode selector" [abi]
     Just concAbi -> runCheat concAbi input
@@ -3691,24 +3727,27 @@ instance VMOps Symbolic where
   -- numBytes allows us to specify how many bytes of the returned value is relevant
   -- if it's e.g.a JUMP, only 2 bytes can be relevant. This allows us to avoid
   -- getting solutions that are nonsensical
-  manySolutions maxDepth ewordExpr numBytes continue = do
+  manySolutions maxDepth maxWidth ewordExpr numBytes continue = do
     pathconds <- use #constraints
     vm <- get
-    query $ PleaseGetSols ewordExpr numBytes pathconds $ \case
-      Just concVals -> do
-        assign #result Nothing
-        case concVals of
-          -- zero solutions means that we are in a branch that's not possible
-          -- so revert all frames and stop all execution on this branch
-          [] -> finishAllFramesAndStop
-          [val] -> do
+    case Expr.enumerateViaSmallSubterm maxWidth pathconds ewordExpr of
+      Just (_, [(v, _)]) -> continue $ Just v
+      Just (atom, groups) -> forkOnSubterm maxDepth atom groups (continue . Just)
+      Nothing -> query $ PleaseGetSols ewordExpr numBytes pathconds $ \case
+          Just concVals -> do
             assign #result Nothing
-            pushTo #constraints $ Expr.simplifyProp (ewordExpr .== (Lit val))
-            continue $ Just val
-          _ -> fork maxDepth vm.exploreDepth $ PleaseRunAll (map Lit concVals) runAllPaths
-      Nothing -> do
-        assign #result Nothing
-        continue Nothing
+            case concVals of
+              -- zero solutions means that we are in a branch that's not possible
+              -- so revert all frames and stop all execution on this branch
+              [] -> finishAllFramesAndStop
+              [val] -> do
+                assign #result Nothing
+                pushTo #constraints $ Expr.simplifyProp (ewordExpr .== (Lit val))
+                continue $ Just val
+              _ -> fork maxDepth vm.exploreDepth $ PleaseRunAll (map Lit concVals) runAllPaths
+          Nothing -> do
+            assign #result Nothing
+            continue Nothing
     where
       runAllPaths val = do
         assign #result Nothing

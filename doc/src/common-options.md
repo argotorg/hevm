@@ -58,6 +58,11 @@ JUMP instruction is called with a symbolic expression, the system will explore
 all possible valid jump destinations, which may be too many. This option limits
 the branching factor in these cases. Default is 100.
 
+When a symbolic jump target, or a jump condition, is decided by a subterm with
+at most this many possible values, such as `selector mod n` in a jumptable
+dispatcher, or a loop bound limited by an earlier check, the values are
+enumerated directly instead of asking the SMT solver for them.
+
 If there are more than the given maximum number of possible values, the system
 will try to deal with the symbolic value, if possible, e.g. via
 over-approximation. If over-approximation is not possible, symbolic execution
