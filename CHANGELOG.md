@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hash-consing of symbolic terms, on by default (`hashConsExplore` config
   option); disable it with `--no-hash-cons`.
 
+## Changed
+- The default SMT solver is now bitwuzla instead of z3. hevm now stops with an
+  error at startup if the selected solver is not installed.
+
 ## Fixed
 - Simplification and the other `Expr` traversals now also reach revert data, the
   terms in errors and partial executions, `BALANCE` addresses and log topics.

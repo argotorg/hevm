@@ -7,8 +7,12 @@ To fastest way to start using hevm is to install
 curl -L https://foundry.paradigm.xyz | bash
 ```
 
-Next, you need to have either [Z3](https://github.com/Z3Prover/z3) or
-[cvc5](https://cvc5.github.io/) installed. Often, these can be installed via:
+Next, you need an SMT solver. hevm uses [bitwuzla](https://bitwuzla.github.io/)
+by default; [Z3](https://github.com/Z3Prover/z3) and [cvc5](https://cvc5.github.io/)
+are also supported, via "--solver z3" and "--solver cvc5". Bitwuzla is available
+from many package managers, or as a binary from its [releases
+page](https://github.com/bitwuzla/bitwuzla/releases). Z3 and cvc5 can often be
+installed via:
 ```
 $ sudo apt-get install z3 cvc5
 ```
@@ -18,10 +22,6 @@ or similar for Linux. For Mac:
 brew install z3
 brew install --cask cvc5
 ```
-
-If you installed cvc5 and want to use it, you will need to pass the flag
-"--solver cvc5". The z3 solver is default, but cvc5 is often faster, so you may
-want to try it out.
 
 Finally, download the static hevm binary from [the GitHub
 repository](https://github.com/argotorg/hevm/releases/) for your platform and
