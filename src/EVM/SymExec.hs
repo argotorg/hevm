@@ -1102,7 +1102,8 @@ replayEqCex solvers create codeA codeB cd cex
     store = ConcreteStore $ Map.findWithDefault mempty (SymAddr "entrypoint") cex.store
     run code calldata = do
       vm <- liftIO $ stToIO $ makeVm $ (defaultVMOpts @Concrete)
-        { contract = (initialContract (RuntimeCode (ConcreteRuntimeCode code))) { storage = store, origStorage = store }
+        { contract = set #balance (Lit (ctx (Balance (SymAddr "entrypoint")) cex.txContext))
+            (initialContract (RuntimeCode (ConcreteRuntimeCode code))) { storage = store, origStorage = store }
         , calldata = (ConcreteBuf calldata, [])
         , value = Lit (ctx TxValue cex.txContext)
         , address = entry
@@ -1456,13 +1457,12 @@ formatCex cd sig m@(SMTCex _ addrs _ store blockContext txContext) = T.unlines $
     showTxCtx (TxValue) = "TxValue"
     showTxCtx x = T.pack $ show x
 
-    -- strips all frame context that doesn't come from the top frame
     filterSubCtx :: Map (Expr EWord) W256 -> Map (Expr EWord) W256
     filterSubCtx = Map.filterWithKey go
       where
         go :: Expr EWord -> W256 -> Bool
         go (TxValue) _ = True
-        go (Balance {}) _ = internalError "TODO: BALANCE"
+        go (Balance {}) _ = True
         -- gas readings are produced by the run, not part of its input
         go (Gas {}) _ = False
         go _ _ = False
@@ -1474,7 +1474,7 @@ formatCex cd sig m@(SMTCex _ addrs _ store blockContext txContext) = T.unlines $
         [ "Block Context:"
         , indent 2 $ T.unlines $ Map.foldrWithKey (\key val acc ->
             (T.pack $ show key <> ": " <> show val) : acc
-          ) mempty txContext
+          ) mempty blockContext
         ]
 
 prettyBuf :: Expr Buf -> Text
