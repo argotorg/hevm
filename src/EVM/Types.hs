@@ -440,7 +440,26 @@ data Prop where
   POr :: Prop -> Prop -> Prop
   PImpl :: Prop -> Prop -> Prop
   PBool :: Bool -> Prop
+  -- | The fresh success flag and return data of a call to unknown code, and the
+  -- world after it if it can change state, are what uninterpreted functions of
+  -- the call's inputs give, so that calls with equal inputs get equal results
+  PCall :: CallInputs -> Expr EWord -> Expr Buf -> Maybe (Expr EWord) -> Prop
 deriving instance (Show Prop)
+
+-- | Everything the callee of a call to unknown code can observe
+data CallInputs = CallInputs
+  { world :: Expr EWord -- ^ the state of all other contracts, which only calls change
+  , callKind :: Expr EWord
+  , target :: Expr EWord
+  , callValue :: Expr EWord
+  , callData :: Expr Buf
+  , callDataLen :: Expr EWord
+  , caller :: Expr EAddr
+  , callerStorage :: Expr Storage
+  , callerTStorage :: Expr Storage
+  , callerBalance :: Expr EWord
+  }
+deriving instance Show CallInputs
 
 infixr 3 .&&
 (.&&) :: Prop -> Prop -> Prop
@@ -833,6 +852,7 @@ data Env = Env
   , chainId        :: W256
   , freshAddresses :: Int
   , freshGasVals :: Int
+  , callWorld :: Expr EWord -- ^ token for the state calls to unknown code have left behind, see 'PCall'
   }
   deriving (Show, Generic)
 
@@ -1658,6 +1678,8 @@ instance Ord (Expr a) where
 
 deriving instance Eq EvmError
 deriving instance Ord EvmError
+deriving instance Eq CallInputs
+deriving instance Ord CallInputs
 deriving instance Eq PartialExec
 deriving instance Ord PartialExec
 deriving instance Eq FrameContext
@@ -1704,6 +1726,7 @@ instance Eq Prop where
   PAnd a b == PAnd c d = a == c && b == d
   POr a b == POr c d = a == c && b == d
   PImpl a b == PImpl c d = a == c && b == d
+  PCall a b c d == PCall e f g h = (a, b, c, d) == (e, f, g, h)
   _ == _ = False
 
 instance Ord Prop where
@@ -1720,6 +1743,7 @@ instance Ord Prop where
   compare (PAnd a1 b1) (PAnd a2 b2) = compare (a1, b1) (a2, b2)
   compare (POr a1 b1) (POr a2 b2) = compare (a1, b1) (a2, b2)
   compare (PImpl a1 b1) (PImpl a2 b2) = compare (a1, b1) (a2, b2)
+  compare (PCall a1 b1 c1 d1) (PCall a2 b2 c2 d2) = compare (a1, b1, c1, d1) (a2, b2, c2, d2)
   compare a b = compare (tag a) (tag b)
 
     where
@@ -1734,6 +1758,7 @@ instance Ord Prop where
       tag PAnd{}  = 7
       tag POr{}   = 8
       tag PImpl{} = 9
+      tag PCall{} = 10
 
 instance Semigroup TraceContext where
   (TraceContext a b c) <> (TraceContext d e f) = TraceContext (a <> d) (b <> e) (c <> f)

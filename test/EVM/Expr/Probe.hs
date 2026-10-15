@@ -44,6 +44,13 @@ instance Probe EvmError where probe m = (Revert (AbstractBuf m), [m])
 instance Probe PartialExec where probe m = (MaxIterationsReached 0 (SymAddr m), [m])
 instance Probe ContractCode where probe m = (UnknownCode (SymAddr m), [m])
 instance Probe RuntimeCode where probe m = (SymbolicRuntimeCode (V.singleton (IndexWord (Lit 0) (Var m))), [m])
+instance Probe (Maybe (Expr EWord)) where probe m = (Just (Var m), [m])
+instance Probe CallInputs where
+  probe m = (CallInputs (Var (f 1)) (Var (f 2)) (Var (f 3)) (Var (f 4)) (AbstractBuf (f 5)) (Var (f 6))
+                        (SymAddr (f 7)) (AbstractStore (SymAddr (f 8)) Nothing) (AbstractStore (SymAddr (f 9)) Nothing)
+                        (Var (f 10)), map f [1 .. 10])
+    where f :: Int -> Text
+          f i = m <> "/" <> T.pack (show i)
 instance Probe (Map (Expr EAddr) (Expr EContract)) where
   probe m = (Map.singleton (SymAddr k) (contract (UnknownCode (SymAddr v))), [k, v])
     where k = m <> "/key"; v = m <> "/value"

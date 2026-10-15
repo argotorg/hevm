@@ -135,9 +135,17 @@ if they do not, and as not replayable if it cannot be run concretely (e.g. for
 `--create`). hevm only reports that the contracts do not behave equivalently if
 at least one counterexample is validated; otherwise it reports that they may
 not behave equivalently. Counterexamples that do not reproduce typically come
-from the over-approximation of calls to unknown code, which lets the same call
-return different results in A and B (see
-[#1116](https://github.com/argotorg/hevm/issues/1116)).
+from over-approximations, e.g. of calls to unknown code, which can return
+anything.
+
+## Calls to unknown code
+
+A call to code that hevm does not know returns symbolic values. Calls with the
+same inputs, in the same program or in A and B, return the same values: the
+results are uninterpreted functions of everything the callee can observe, i.e.
+the call's target, kind, value and calldata, the caller's address, storage,
+transient storage and balance, and the effects of earlier state-changing calls.
+Gas is not among them, as hevm does not model gas.
 
 ## Creation code equivalence
 
