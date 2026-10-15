@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- Contradictory comparisons and equalities now simplify to `false`,
+  allowing infeasible branches to be pruned before invoking the solver.
 - Abstract arithmetic, on by default (disable with `--no-abstract-arith`):
   symbolic multiplication and division are encoded as uninterpreted functions
   constrained by sound algebraic lemmas, and are equated with the native bitvector operations only when the abstract query

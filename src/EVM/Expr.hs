@@ -144,7 +144,7 @@ import Data.Bits qualified (xor)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.DoubleWord (Int256, Word256(Word256), Word128(Word128))
-import Data.List (sort, find)
+import Data.List (sort)
 import Data.Map qualified as LMap
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe, isJust, fromMaybe)
@@ -159,7 +159,6 @@ import Data.Vector.Storable qualified as VS
 import Data.Vector.Storable.ByteString
 import Data.Word (Word8, Word32)
 import Witch (unsafeInto, into, tryInto)
-import Data.Containers.ListUtils (nubOrd)
 
 import EVM.Traversals
 import EVM.Types
@@ -1694,11 +1693,22 @@ flattenProps (a:ax) = case a of
   PAnd x1 x2 -> flattenProps [x1] ++ flattenProps [x2] ++ flattenProps ax
   x -> x:flattenProps ax
 
--- removes redundant (constant True/False) props
+-- Remove constants and duplicates, collapsing complementary props to false.
 remRedundantProps :: [Prop] -> [Prop]
-remRedundantProps p = nubOrd $ collapseFalse . filter (\x -> x /= PBool True) $ p
+remRedundantProps = go Set.empty []
   where
-    collapseFalse ps = if isJust $ find (== PBool False) ps then [PBool False] else ps
+    go _ acc [] = reverse acc
+    go seen acc (p:ps)
+      | p == PBool False || complementProp p `Set.member` seen = [PBool False]
+      | p == PBool True || p `Set.member` seen = go seen acc ps
+      | otherwise = go (Set.insert p seen) (p:acc) ps
+
+    -- simplifyProp normalizes comparisons to PLT/PLEq.
+    complementProp = \case
+      PLT a b -> PLEq b a
+      PLEq a b -> PLT b a
+      PNeg p -> p
+      p -> PNeg p
 
 
 -- ** Conversions ** -------------------------------------------------------------------------------

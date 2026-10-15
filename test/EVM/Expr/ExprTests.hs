@@ -685,7 +685,35 @@ propSimplificationTests = testGroup "prop-simplifications"
         a = [PImpl (PBool False) (PEq (Var "abc") (Var "bcd"))]
         b = Expr.simplifyProps a
       assertEqual "Must simplify down" [] b
+  , testCase "prop-simp-complements" $ do
+      let a = Var "a"
+          b = Var "b"
+          pairs = [ (PLT a b, PLEq b a)
+                  , (PGT a b, PGEq b a)
+                  , (PEq a b, PNeg (PEq b a))
+                  , (PEq (AbstractBuf "a") (AbstractBuf "b"), PNeg (PEq (AbstractBuf "b") (AbstractBuf "a")))
+                  , (PImpl (PLT a b) (PEq a b), PNeg (PImpl (PLT a b) (PEq a b)))
+                  ]
+      mapM_ (\(p, q) -> mapM_ (\ps -> assertEqual (show ps) [PBool False] (Expr.simplifyProps ps))
+        [[p, q], [q, p], [PAnd p q], [PBool True, p, p, q]]) pairs
+  , testCase "prop-simp-compatible-keeps-order" $ do
+      let p = PLT (Var "a") (Var "b")
+          q = PLEq (Var "a") (Var "b")
+      assertEqual "keeps compatible comparisons" [p, q] (Expr.simplifyProps [PBool True, p, q, p])
+      assertEqual "keeps first-occurrence order" [q, p] (Expr.simplifyProps [q, p, q, PBool True])
+  , testProperty "prop-simp-complement-equivalence" $ withMaxSuccess 200 $
+      forAll comparisonWord $ \a -> forAll comparisonWord $ \b ->
+      forAll (vectorOf 2 $ elements [PLT a b, PLEq a b, PGT a b, PGEq a b, PEq a b, PNeg (PEq a b)]) $ \ps -> ioProperty $ do
+        let simplified = Expr.simplifyProps ps
+            original = pand ps
+            reduced = pand simplified
+            differ = POr (PAnd original (PNeg reduced)) (PAnd (PNeg original) reduced)
+        res <- checkSatWith (equivConfig {abstractArith = False}) differ
+        pure $ counterexample ("simplified: " <> show simplified <> "\nresult: " <> show res) $
+          classify (simplified == [PBool False]) "collapsed" (isQed res)
   ]
+  where
+    comparisonWord = oneof [Lit <$> arbitrary, Lit <$> elements [0, 1, maxBound], Var <$> elements ["a", "b", "c"]]
 
 constantPropagationTests :: TestTree
 constantPropagationTests = testGroup "isUnsat-concrete-tests"
