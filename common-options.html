@@ -194,7 +194,7 @@ generate counterexamples that are easier to examine and understand.</p>
 <h2 id="choice-of-solver---solver"><a class="header" href="#choice-of-solver---solver">Choice of Solver, <code>--solver</code></a></h2>
 <p>hevm can use any SMT solver that supports the AUFBV theory and incremental
 solving. Currently, z3, cvc5, and bitwuzla's interfaces are implemented. While
-any of these solvers work, we recommend using bitwuzla as it is in general
+any of these solvers work, bitwuzla is the default, as it is in general
 extremely fast, almost always significantly faster than e.g. z3.</p>
 <h2 id="number-of-solvers---num-solvers"><a class="header" href="#number-of-solvers---num-solvers">Number of Solvers, <code>--num-solvers</code></a></h2>
 <p>hevm can run multiple solvers in parallel and will run as many solvers as it
