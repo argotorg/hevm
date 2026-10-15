@@ -1427,9 +1427,9 @@ hevm equivalence --code-a-file a.bin --code-b-file b.bin
 <h2 id="calldata-size-limits"><a class="header" href="#calldata-size-limits">Calldata size limits</a></h2>
 <p>If <code>--sig</code> is given, calldata is assumed to take the form of the function
 given. If <code>--calldata</code> is provided, a specific, concrete calldata is used. If
-neither is provided, a fully abstract calldata of at most <code>2**64</code> byte is
-assumed. Note that a <code>2**64</code> byte calldata would go over the gas limit, and
-hence should cover all meaningful cases. You can limit the buffer size via
+neither is provided, a fully abstract calldata of at most <code>2**24</code> bytes
+(16 MB) is assumed. Gas limits keep real calldata well below that, so this
+covers all meaningful cases. You can change the buffer size via
 <code>--max-buf-size</code>, which sets the exponent of the size, i.e. 10 would limit the
 calldata to <code>2**10</code> bytes.</p>
 <h2 id="what-constitutes-equivalence"><a class="header" href="#what-constitutes-equivalence">What constitutes equivalence</a></h2>
@@ -1562,10 +1562,11 @@ hevm exec --caller $(cast tx $TXHASH from) --address $(cast tx $TXHASH to) \
 of common options. Here, we document these options in detail.</p>
 <h2 id="maximum-buffer-size---max-buf-size"><a class="header" href="#maximum-buffer-size---max-buf-size">Maximum Buffer Size, <code>--max-buf-size</code></a></h2>
 <p>The buffers in hevm are limited to a maximum size of 2^N bytes, where N is by
-default 64, but adjustable via the <code>--max-buf-size</code> flag. This helps to prevent
-the system from creating buffers that are too large and would exceed the gas
-limit. Limiting this value further to e.g. 20 can help to force the system to
-generate counterexamples that are easier to examine and understand.</p>
+default 24 (16 MB), but adjustable via the <code>--max-buf-size</code> flag (at most 64).
+Gas limits keep real calldata and returndata well below 16 MB, so the default
+covers all transactions that can actually be executed, while keeping
+counterexamples small enough to examine and to replay. Limiting this value
+further to e.g. 20 can make counterexamples even easier to understand.</p>
 <h2 id="choice-of-solver---solver"><a class="header" href="#choice-of-solver---solver">Choice of Solver, <code>--solver</code></a></h2>
 <p>hevm can use any SMT solver that supports the AUFBV theory and incremental
 solving. Currently, z3, cvc5, and bitwuzla's interfaces are implemented. While
