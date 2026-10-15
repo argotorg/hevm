@@ -15,7 +15,8 @@ import Control.Concurrent.STM.TVar (TVar, newTVarIO, modifyTVar, readTVar, readT
 import Control.Concurrent.STM.TMVar (TMVar, putTMVar, takeTMVar, newEmptyTMVarIO)
 import Control.Monad (when, unless, forM_, forM, forever, void)
 import Control.Monad.Loops (whileM)
-import Control.Monad.IO.Unlift (MonadUnliftIO, toIO, withRunInIO)
+import Control.Exception (evaluate)
+import Control.Monad.IO.Unlift (MonadIO, MonadUnliftIO, toIO, withRunInIO)
 import Control.Monad.Operational qualified as Operational
 import Control.Monad.ST (RealWorld, stToIO, ST)
 import Control.Monad.State.Strict (liftIO, runStateT)
@@ -31,6 +32,8 @@ import Data.Map.Strict qualified as Map
 import Data.Map.Merge.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
+import Data.Aeson ((.=))
+import Data.Aeson qualified as JSON
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
@@ -54,6 +57,7 @@ import EVM.Fetch qualified as Fetch
 import EVM.ABI
 import EVM.Effects
 import EVM.Expr qualified as Expr
+import EVM.Progress qualified as Progress
 import EVM.Format (formatExpr, formatPartial, formatPartialDetailed, showVal, indent, formatBinary, formatProp, formatState, formatError)
 import EVM.SMT qualified as SMT
 import EVM.Solvers (SolverGroup, checkSatWithProps, checkSatWithPropsAbortable)
@@ -405,6 +409,7 @@ interpret fetcher iterConf vm stepper handler = do
   availableProcs <- liftIO newChan
   liftIO $ forM_ procInstances (writeChan availableProcs)
   numTasks <- liftIO $ newTVarIO 1
+  Progress.setTaskCounter (fromIntegral <$> readTVarIO numTasks)
   numProcs <- liftIO $ newTVarIO 0
   allProcessDone <- liftIO newEmptyTMVarIO
 
@@ -498,6 +503,13 @@ getOneExpr :: forall m a . App m
   -> m ()
 getOneExpr task availableInstances processQ numTasks numProcs = do
   out <- interpretInternal task
+  Progress.clearWorker
+  Progress.pathDone (isPartial out)
+  Progress.emit "path-end" $ case out of
+    Partial _ _ reason -> ["leaf" .= ("partial" :: Text), "reason" .= T.take 2000 (formatPartial reason)]
+    Failure _ _ err -> ["leaf" .= ("failure" :: Text), "reason" .= T.pack (show err)]
+    Success {} -> ["leaf" .= ("success" :: Text)]
+    _ -> ["leaf" .= T.take 200 (T.pack (show out))]
 
   -- Enqueue for processing
   let process = Process { result = out, handler = task.handler }
@@ -520,7 +532,14 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
   where
   eval :: Operational.ProgramView (Stepper.Action Symbolic) (Expr End) -> m (Expr End)
   eval (Operational.Return x) = pure x
-  eval (action Operational.:>>= k) =
+  eval (action Operational.:>>= k) = do
+    Progress.setWorker
+      [ "pc" .= vm.state.pc
+      , "addr" .= T.pack (show vm.state.contract)
+      , "frames" .= length vm.frames
+      , "exploreDepth" .= vm.exploreDepth
+      , "step" .= stepName action
+      ]
     case action of
       Stepper.Exec -> do
         conf <- readConfig
@@ -531,6 +550,8 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
         interpretInternal t { vm = vm', stepper = (k r) }
       Stepper.Fork (PleaseRunAll vals continue) -> do
         when (length vals < 2) $ internalError "PleaseRunAll requires at least 2 branches"
+        Progress.emit "fork" [ "pc" .= vm.state.pc, "addr" .= T.pack (show vm.state.contract)
+                             , "branches" .= length vals, "values" .= map (T.pack . show) (take 20 vals) ]
         frozen <- liftIO $ stToIO $ freezeVM vm
         let newDepth = vm.exploreDepth+1
         runOne frozen newDepth vals
@@ -553,6 +574,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
             runOne frozen newDepth rest
           runOne _ _ [] = internalError "unreachable"
       Stepper.Fork (PleaseRunBoth continue) -> do
+        Progress.emit "fork" ["pc" .= vm.state.pc, "addr" .= T.pack (show vm.state.contract), "branches" .= (2 :: Int)]
         conf <- readConfig
         frozen <- liftIO $ stToIO $ freezeVM vm
         let newDepth = vm.exploreDepth+1
@@ -569,6 +591,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
         interpretInternal t { vm = vmb, stepper = (k rb) }
       Stepper.Wait q -> do
         let performQuery = do
+              logQueryExprs q
               m <- fetcher q
               (r, vm') <- liftIO$ stToIO $ runStateT m vm
               interpretInternal t { vm = vm', stepper = (k r) }
@@ -613,6 +636,31 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
                       _ -> liftIO $ stToIO $ runStateT (continue UnknownBranch) vm
                     interpretInternal t { vm = vm', stepper = (k r) }
           _ -> performQuery
+
+logQueryExprs :: MonadIO m => Query Symbolic -> m ()
+logQueryExprs = \case
+  PleaseAskSMT cond pathconds _ ->
+    Progress.emitExprs "branch-query" $ Progress.bigText "cond" (formatExpr cond) <> props pathconds
+  PleaseGetSols e numBytes pathconds _ ->
+    Progress.emitExprs "solutions-query" $
+      ["numBytes" .= numBytes] <> Progress.bigText "expr" (formatExpr e) <> props pathconds
+  _ -> pure ()
+  where
+    props ps = ["pathconds" .= map (JSON.object . Progress.bigText "prop" . formatProp) ps]
+
+stepName :: Stepper.Action Symbolic x -> Text
+stepName = \case
+  Stepper.Exec -> "exec"
+  Stepper.EVM _ -> "evm"
+  Stepper.Fork (PleaseRunAll vals _) -> "fork-" <> T.pack (show (length vals))
+  Stepper.Fork (PleaseRunBoth _) -> "fork-2"
+  Stepper.Wait q -> case q of
+    PleaseAskSMT {} -> "query-branch"
+    PleaseGetSols {} -> "query-solutions"
+    PleaseFetchContract {} -> "query-fetch-contract"
+    PleaseFetchSlot {} -> "query-fetch-slot"
+    PleaseDoFFI {} -> "query-ffi"
+    PleaseReadEnv {} -> "query-env"
 
 maxIterationsReached :: VM Symbolic -> Maybe Integer -> Maybe Bool
 maxIterationsReached _ Nothing = Nothing
@@ -986,8 +1034,8 @@ equivalenceCheck solvers sess bytecodeA bytecodeB opts calldata create = do
     False -> do
       when conf.debug $ liftIO $ do
         putStrLn "bytecodeA and bytecodeB are different, checking for equivalence"
-      branchesAorig <- getBranches bytecodeA
-      branchesBorig <- getBranches bytecodeB
+      branchesAorig <- explorePhase "A" $ getBranches bytecodeA
+      branchesBorig <- explorePhase "B" $ getBranches bytecodeB
       when conf.debug $ liftIO $ do
         liftIO $ putStrLn $ "branchesA props: " <> show (map extractProps branchesAorig)
         liftIO $ putStrLn $ "branchesB props: " <> show (map extractProps branchesBorig)
@@ -1008,6 +1056,9 @@ equivalenceCheck solvers sess bytecodeA bytecodeB opts calldata create = do
       prestate <- liftIO $ stToIO $ abstractVM calldata bytecode Nothing create
       interpret (Fetch.oracle solvers sess Fetch.noRpc) opts.iterConf prestate runExpr noopPathHandler
     filterQeds (EqIssues res partials) = EqIssues (filter (\(r, _) -> not . isQed $ r) res) partials
+    explorePhase :: Text -> m [Expr End] -> m [Expr End]
+    explorePhase prog = Progress.withPhase ("explore " <> prog) ["program" .= prog] $ \ends ->
+      ["paths" .= length ends, "partial" .= length (filter isPartial ends)]
 
 rewriteFresh :: Text -> [Expr a] -> [Expr a]
 rewriteFresh prefix exprs = fmap (mapExpr mymap) exprs
@@ -1035,7 +1086,18 @@ equivalenceCheck' solvers sess branchesA branchesB create = do
         putStrLn $ "endstates in bytecodeA: " <> show (length branchesA)
                    <> "\nendstates in bytecodeB: " <> show (length branchesB)
 
-      ps <- forM allPairs $ uncurry distinct
+      let numPairs = length allPairs
+      ps <- Progress.withPhase "build-pairs" ["pairs" .= numPairs] (\r -> ["toCheck" .= length (mapMaybe (view _1) r)]) $ do
+        Progress.phaseTotal numPairs
+        forM (zip [(0::Int)..] allPairs) $ \(i, (a, b)) -> do
+          when (i `mod` 1000 == 0) $ do
+            Progress.setWorker ["phase" .= ("build-pairs" :: Text), "pair" .= i, "of" .= numPairs]
+            Progress.phaseAt i
+          r <- distinct a b
+          -- force the simplification here, or it would be timed as part of the next phase
+          _ <- liftIO $ evaluate $ maybe 0 (Set.size . fst) (fst r)
+          pure r
+      Progress.clearWorker
       let differingEndStates = sortBySize $ mapMaybe (view _1) ps
       let knownIssues = foldr ((<>) . (view _2)) mempty ps
       when conf.debug $ liftIO $ putStrLn $ "Asking the SMT solver for " <> (show $ length differingEndStates) <> " pairs"
@@ -1043,7 +1105,11 @@ equivalenceCheck' solvers sess branchesA branchesB create = do
         liftIO $ T.writeFile ("prop-checked-" <> show i <> ".prop") (T.pack $ show props <> msg))
 
       procs <- liftIO getNumProcessors
-      newDifferences <- checkAll differingEndStates procs
+      newDifferences <- Progress.withPhase "check-pairs" ["pairs" .= length differingEndStates]
+        (\r -> [ "sat" .= length (filter (isCex . fst) r), "unsat" .= length (filter (isQed . fst) r)
+               , "other" .= length (filter (\(x, _) -> not (isCex x || isQed x)) r) ]) $ do
+        Progress.phaseTotal (length differingEndStates)
+        checkAll differingEndStates procs
       let additionalIssues = EqIssues newDifferences mempty
       pure $ knownIssues <> additionalIssues
 
@@ -1060,10 +1126,16 @@ equivalenceCheck' solvers sess branchesA branchesB create = do
     checkAll :: (App m, MonadUnliftIO m) => [(Set Prop, String)] -> Int -> m [(EquivResult, String)]
     checkAll input numproc = withRunInIO $ \env -> do
        wrap <- pool numproc
-       parMapIO (runOne env wrap) input
+       parMapIO (runOne env wrap) (zip [(0::Int)..] input)
        where
-         runOne env wrap (props, meaning) = do
-           res <- wrap (env $ checkSatWithProps solvers (Set.toList props))
+         total = length input
+         runOne env wrap (i, (props, meaning)) = do
+           res <- wrap $ do
+             Progress.setWorker ["phase" .= ("check-pairs" :: Text), "pair" .= i, "of" .= total, "props" .= Set.size props]
+             r <- env $ checkSatWithProps solvers (Set.toList props)
+             Progress.clearWorker
+             Progress.phaseTick
+             pure r
            pure (res, meaning)
 
     -- Takes two branches and returns a set of props that will need to be

@@ -23,6 +23,10 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Base16 qualified as BS16
 import Data.ByteString.Lazy qualified as BSLazy
+import Data.Aeson qualified as JSON
+import Data.Aeson.KeyMap qualified as KeyMap
+import System.FilePath ((</>))
+import System.IO.Temp (withSystemTempDirectory)
 import Data.Binary.Put (runPut)
 import Data.Binary.Get (runGetOrFail)
 import Data.Either
@@ -58,7 +62,8 @@ import EVM.ConsoleLog (formatConsoleLog)
 import EVM.Exec
 import EVM.Expr qualified as Expr
 import EVM.Fetch qualified as Fetch
-import EVM.Format (hexText)
+import EVM.Format (hexText, hexByteString)
+import EVM.Progress (withProgress, ProgressOpts(..))
 import EVM.Precompiled
 import EVM.RLP
 import EVM.SMT
@@ -127,6 +132,20 @@ prop a = ioProperty $ runEnv testEnv a
 propNoSimp :: Testable prop => ReaderT Env IO prop -> Property
 propNoSimp a = let testEnvNoSimp = Env { config = testEnv.config { simp = False } }
   in ioProperty $ runEnv testEnvNoSimp a
+
+-- | Runs an action with the progress log on, and returns each logged event's
+-- name and phase. Fails if a line is not a JSON object with a time and a name.
+progressEvents :: ReaderT Env IO () -> ReaderT Env IO [(String, Maybe String)]
+progressEvents act = withRunInIO $ \runIO -> withSystemTempDirectory "progress" $ \dir -> do
+  let f = dir </> "progress.jsonl"
+  runIO $ withProgress (ProgressOpts (Just f) True False) act
+  ls <- BSLazy.split 10 <$> BSLazy.readFile f
+  forM (filter (not . BSLazy.null) ls) $ \l -> case JSON.decode l of
+    Just (JSON.Object o) | Just (JSON.String ev) <- KeyMap.lookup "ev" o, Just (JSON.Number _) <- KeyMap.lookup "t" o ->
+      pure (T.unpack ev, case KeyMap.lookup "phase" o of
+        Just (JSON.String ph) -> Just (T.unpack ph)
+        _ -> Nothing)
+    _ -> assertFailure $ "not a progress event: " <> show l
 
 withDefaultSolver :: App m => (SolverGroup -> m a) -> m a
 withDefaultSolver = withSolvers Z3 3 Nothing defMemLimit
@@ -4607,6 +4626,29 @@ tests = testGroup "hevm"
       assertBool ("lemma section missing:\n" <> someLemmas)
         (header `List.isInfixOf` someLemmas)
   ]
+  -- the progress log is process-wide, so these must not run concurrently
+  , sequentialTestGroup "progress-log" AllFinish
+    [ test "progress-log-is-valid-jsonl" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function fun(uint x) external pure {
+              if (x > 5) assert(x != 7);
+            }
+          } |]
+        evs <- progressEvents $
+          void $ withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        forM_ ["start", "path-end", "query-start", "query-end", "end"] $ \ev ->
+          assertBoolM ("missing event " <> ev) (ev `elem` map fst evs)
+    , test "eq-progress-log-phases" $ do
+        let a = fromJust (hexByteString "6001600055")
+            b = fromJust (hexByteString "6002600055")
+        evs <- progressEvents $ void $ withDefaultSolver $ \s -> do
+          (calldata, _) <- mkCalldata Nothing []
+          equivalenceCheck s Nothing a b defaultVeriOpts calldata False
+        forM_ ["explore A", "explore B", "build-pairs", "check-pairs"] $ \ph ->
+          forM_ ["phase-start", "phase-end"] $ \ev ->
+            assertBoolM ("missing " <> ev <> " of " <> ph) ((ev, Just ph) `elem` evs)
+    ]
   -- these test the abort itself: if it breaks, the fake solver never answers, so fail on a timeout instead of hanging
   , localOption (mkTimeout 20_000_000) $ testGroup "early-abort"
   [ test "abort-running-query" $ withHangingSolver $ \s -> do

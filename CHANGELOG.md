@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- A live status line on stderr for `hevm symbolic` and `hevm equivalence`
+  (disable with `--no-progress`), and a JSONL log of interpreter and solver
+  progress (`--progress-log FILE` or `--verb 3`; `--progress-exprs` or `--verb 4`
+  also logs solver expressions).
 - Abstract arithmetic, on by default (disable with `--no-abstract-arith`):
   symbolic multiplication and division are encoded as uninterpreted functions
   constrained by sound algebraic lemmas, and are equated with the native bitvector operations only when the abstract query
