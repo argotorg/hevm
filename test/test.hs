@@ -4592,6 +4592,10 @@ tests = testGroup "hevm"
       -- gas readings appear in models when they are part of a path condition
       assertEqual "plain" (Gas "" 2) (parseTxCtx "gas_2")
       assertEqual "equivalence prefix" (Gas "A-" 13) (parseTxCtx "gas_A-13")
+  -- #1124: the encoder must not order gas readings by where they appear in the props
+  , test "gas-order-not-from-props" $ do
+      res <- withBitwuzlaSolver $ \s -> checkSatWithProps s [PLT (Gas "" 2) (Gas "" 1)]
+      assertBoolM "a later reading can be lower" (isCex res)
   , testCase "encodeConcreteStore-overwrite" $
     assertEqual ""
       (pure "(store (store ((as const Storage) #x0000000000000000000000000000000000000000000000000000000000000000) (_ bv1 256) (_ bv2 256)) (_ bv3 256) (_ bv4 256))")
