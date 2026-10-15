@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Changed
 - The default SMT solver is now bitwuzla instead of z3. hevm now stops with an
   error at startup if the selected solver is not installed.
+- The default `--max-buf-size` is now 24 (calldata and returndata of up to
+  16 MB) instead of 64, which is still more than gas limits allow.
 
 ## Fixed
 - `hevm equivalence` no longer reports each partially explored path once per end

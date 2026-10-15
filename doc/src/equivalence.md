@@ -49,9 +49,9 @@ hevm equivalence --code-a-file a.bin --code-b-file b.bin
 
 If `--sig` is given, calldata is assumed to take the form of the function
 given. If `--calldata` is provided, a specific, concrete calldata is used. If
-neither is provided, a fully abstract calldata of at most `2**64` byte is
-assumed. Note that a `2**64` byte calldata would go over the gas limit, and
-hence should cover all meaningful cases. You can limit the buffer size via
+neither is provided, a fully abstract calldata of at most `2**24` bytes
+(16 MB) is assumed. Gas limits keep real calldata well below that, so this
+covers all meaningful cases. You can change the buffer size via
 `--max-buf-size`, which sets the exponent of the size, i.e. 10 would limit the
 calldata to `2**10` bytes.
 

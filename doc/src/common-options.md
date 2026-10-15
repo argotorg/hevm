@@ -6,10 +6,11 @@ of common options. Here, we document these options in detail.
 ## Maximum Buffer Size, ``--max-buf-size``
 
 The buffers in hevm are limited to a maximum size of 2^N bytes, where N is by
-default 64, but adjustable via the `--max-buf-size` flag. This helps to prevent
-the system from creating buffers that are too large and would exceed the gas
-limit. Limiting this value further to e.g. 20 can help to force the system to
-generate counterexamples that are easier to examine and understand.
+default 24 (16 MB), but adjustable via the `--max-buf-size` flag (at most 64).
+Gas limits keep real calldata and returndata well below 16 MB, so the default
+covers all transactions that can actually be executed, while keeping
+counterexamples small enough to examine and to replay. Limiting this value
+further to e.g. 20 can make counterexamples even easier to understand.
 
 ## Choice of Solver, ``--solver``
 
