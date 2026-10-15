@@ -127,6 +127,11 @@ mapPropChildrenM g = \case
   PAnd a b -> PAnd <$> mapPropChildrenM g a <*> mapPropChildrenM g b
   POr a b -> POr <$> mapPropChildrenM g a <*> mapPropChildrenM g b
   PImpl a b -> PImpl <$> mapPropChildrenM g a <*> mapPropChildrenM g b
+  PCall i s r w -> PCall <$> mapCallInputsM g i <*> g s <*> g r <*> traverse g w
+
+mapCallInputsM :: Applicative m => (forall a . Expr a -> m (Expr a)) -> CallInputs -> m CallInputs
+mapCallInputsM g (CallInputs w k t v d l c s ts b) =
+  CallInputs <$> g w <*> g k <*> g t <*> g v <*> g d <*> g l <*> g c <*> g s <*> g ts <*> g b
 
 mapCodeChildrenM :: Applicative m => (forall a . Expr a -> m (Expr a)) -> ContractCode -> m ContractCode
 mapCodeChildrenM g = \case

@@ -696,7 +696,21 @@ propToSMTWith arithEnc = \case
     benc <- propToSMT b
     pure $ "(=> " <> aenc <> " " <> benc <> ")"
   PBool b -> pure $ if b then "true" else "false"
+  PCall i success retdata world -> do
+    args <- sequence
+      [ encE i.world, encE i.callKind, encE i.target, encE i.callValue, encE i.callData, encE i.callDataLen
+      , encE i.caller, encE i.callerStorage, encE i.callerTStorage, encE i.callerBalance ]
+    let app f = "(" <> f <> " " <> mconcat (List.intersperse " " args) <> ")"
+        def v f = "(= " <> v <> " " <> app f <> ")"
+    s <- encE success
+    r <- encE retdata
+    l <- encE (bufLength retdata)
+    w <- traverse encE world
+    pure $ "(and " <> def s "call_success" <> " " <> def r "call_retdata" <> " " <> def l "call_retlen"
+      <> maybe "" (\w' -> " " <> def w' "call_world") w <> ")"
   where
+    encE :: Expr x -> Err Builder
+    encE = exprToSMTWith arithEnc
     propToSMT :: Prop -> Err Builder
     propToSMT = propToSMTWith arithEnc
     op2 :: Builder -> Expr x -> Expr y -> Err Builder

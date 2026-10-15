@@ -39,6 +39,7 @@ mapProp f = \case
   PAnd a b -> PAnd (mapProp f a) (mapProp f b)
   POr a b -> POr (mapProp f a) (mapProp f b)
   PImpl a b -> PImpl (mapProp f a) (mapProp f b)
+  p@PCall {} -> runIdentity $ mapPropChildrenM (Identity . mapExpr f . f) p
 
 mapProp' :: (Prop -> Prop) -> Prop -> Prop
 mapProp' f = \case
@@ -52,6 +53,7 @@ mapProp' f = \case
   PAnd a b -> f $ PAnd (mapProp' f a) (mapProp' f b)
   POr a b -> f $ POr (mapProp' f a) (mapProp' f b)
   PImpl a b -> f $ PImpl (mapProp' f a) (mapProp' f b)
+  p@PCall {} -> f p
 
 
 mapPropM' :: forall m . (Monad m) => (Prop -> m Prop) -> Prop -> m Prop
@@ -77,6 +79,7 @@ mapPropM' f = \case
     x <- mapPropM' f a
     y <- mapPropM' f b
     f $ PImpl x y
+  p@PCall {} -> f p
 
 -- | Hash-conses every rebuilt node, when hash-consing is on
 mapExpr :: (forall a . Expr a -> Expr a) -> Expr b -> Expr b

@@ -889,6 +889,25 @@ formatProp x = T.stripEnd $ case x of
   POr a b -> fmt' "POr" [a, b]
   PImpl a b -> fmt' "PImpl" [a, b]
   PBool a -> T.pack (show a)
+  PCall i success retdata world -> T.unlines
+    [ "(PCall"
+    , indent 2 $ T.unlines $
+        [ "success: " <> formatExpr success
+        , "returndata: " <> formatExpr retdata
+        ] <> maybe [] (\w -> ["world after: " <> formatExpr w]) world <>
+        [ "world: " <> formatExpr i.world
+        , "kind: " <> formatExpr i.callKind
+        , "target: " <> formatExpr i.target
+        , "value: " <> formatExpr i.callValue
+        , "calldata: " <> formatExpr i.callData
+        , "calldata length: " <> formatExpr i.callDataLen
+        , "caller: " <> formatExpr i.caller
+        , "caller storage: " <> formatExpr i.callerStorage
+        , "caller transient storage: " <> formatExpr i.callerTStorage
+        , "caller balance: " <> formatExpr i.callerBalance
+        ]
+    , ")"
+    ]
   where
     fmt nm args = T.unlines
       [ "(" <> nm
