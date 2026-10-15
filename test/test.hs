@@ -4578,7 +4578,17 @@ tests = testGroup "hevm"
         assertEqualM "Merging should not cause issues with memory writes" [] ret
     ]
   , testGroup "SMT-encoding"
-  [ testCase "encodeConcreteStore-overwrite" $
+  [ testProperty "collapse-matches-writeByte" $ \(baseByte, NonNegative sz, ws) ->
+      let base = W256 (fromIntegral (sz `mod` 200 :: Int))
+          writes = [(W256 (fromIntegral (pos `mod` 300 :: Int)), b) | (NonNegative pos, b) <- take 20 ws]
+          model = foldr (\(pos, b) acc -> Write b pos acc) (Base baseByte base) writes
+          -- the definition: apply the writes, innermost first, with writeByte
+          reference = foldr (\(pos, b) acc -> Expr.writeByte (Lit pos) (LitByte b) acc)
+                            (ConcreteBuf (BS.replicate (fromIntegral base) baseByte)) writes
+      in case reference of
+           ConcreteBuf bs -> collapse (EVM.Types.Comp model) === Just (Flat bs)
+           _ -> property False
+  , testCase "encodeConcreteStore-overwrite" $
     assertEqual ""
       (pure "(store (store ((as const Storage) #x0000000000000000000000000000000000000000000000000000000000000000) (_ bv1 256) (_ bv2 256)) (_ bv3 256) (_ bv4 256))")
       (EVM.SMT.encodeConcreteStore ConcreteArith $ Map.fromList [(W256 1, W256 2), (W256 3, W256 4)])
