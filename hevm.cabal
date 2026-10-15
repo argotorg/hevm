@@ -112,7 +112,10 @@ library
     EVM.Tracing,
     EVM.SymExec,
     EVM.Traversals,
+    EVM.Traversals.Children,
+    EVM.Types.TH,
     EVM.CSE,
+    EVM.HashCons,
     EVM.Keccak,
     EVM.Merge,
     EVM.Transaction,
@@ -295,6 +298,7 @@ test-suite test
     EVM.Equivalence.EquivalenceTests
     EVM.Expr.ExprTests
     EVM.Expr.Generator
+    EVM.Expr.Probe
     EVM.ConcreteExecution.ConcreteExecutionTests
     EVM.SymExec.SymExecTests
     EVM.Test.FuzzSymExec
@@ -312,7 +316,9 @@ test-suite test
     regex,
     stm,
     tasty-quickcheck,
+    template-haskell,
     text,
+    vector,
 
 -- these tests require network access so we split them into a separate test
 -- suite to make it easy to skip them when running nix-build

@@ -1,4 +1,5 @@
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE MagicHash #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilyDependencies #-}
 {-# LANGUAGE UndecidableInstances #-}
@@ -14,6 +15,7 @@ module EVM.Types where
 import Prelude hiding (Foldable(..))
 
 import GHC.Stack (HasCallStack, prettyCallStack, callStack)
+import GHC.Exts (reallyUnsafePtrEquality#, isTrue#, dataToTag#, Int(I#))
 import GHC.ByteOrder (targetByteOrder, ByteOrder(..))
 import Control.Arrow ((>>>))
 import Control.Monad (mzero)
@@ -60,6 +62,7 @@ import Numeric (readHex, showHex)
 import Options.Generic
 import Optics.TH
 import EVM.FeeSchedule (FeeSchedule (..))
+import EVM.Types.TH (shortcutEq, shortcutCompare)
 import Data.Kind (Type)
 
 import Text.Regex.TDFA qualified as Regex
@@ -388,9 +391,11 @@ data Expr (a :: EType) where
   BufLength      :: Expr Buf -> Expr EWord
 
 deriving instance Show (Expr a)
-deriving instance Eq (Expr a)
-deriving instance Ord (Expr a)
 
+-- | Position of the constructor in the declaration, which is how the derived Ord orders
+-- different constructors
+exprRank :: Expr a -> Int
+exprRank !e = I# (dataToTag# e)
 
 -- Existential Wrapper -----------------------------------------------------------------------------
 
@@ -399,17 +404,7 @@ data SomeExpr = forall a . Typeable a => SomeExpr (Expr a)
 
 deriving instance Show SomeExpr
 
-instance Eq SomeExpr where
-  SomeExpr (a :: Expr b) == SomeExpr (c :: Expr d) =
-    case eqT @b @d of
-      Just Refl -> a == c
-      Nothing -> False
 
-instance Ord SomeExpr where
-  compare (SomeExpr (a :: Expr b)) (SomeExpr (c :: Expr d)) =
-    case eqT @b @d of
-      Just Refl -> compare a c
-      Nothing -> compare (toNum a) (toNum c)
 
 toNum :: (Typeable a) => Expr a -> Int
 toNum (_ :: Expr a) =
@@ -477,50 +472,7 @@ pand = foldl' PAnd (PBool True)
 por :: [Prop] -> Prop
 por = foldl' POr (PBool False)
 
-instance Eq Prop where
-  PBool a == PBool b = a == b
-  PEq (a :: Expr x) (b :: Expr x) == PEq (c :: Expr y) (d :: Expr y)
-    = case eqT @x @y of
-       Just Refl -> a == c && b == d
-       Nothing -> False
-  PLT a b == PLT c d = a == c && b == d
-  PGT a b == PGT c d = a == c && b == d
-  PGEq a b == PGEq c d = a == c && b == d
-  PLEq a b == PLEq c d = a == c && b == d
-  PNeg a == PNeg b = a == b
-  PAnd a b == PAnd c d = a == c && b == d
-  POr a b == POr c d = a == c && b == d
-  PImpl a b == PImpl c d = a == c && b == d
-  _ == _ = False
 
-instance Ord Prop where
-  compare (PBool a) (PBool b) = compare a b
-  compare (PEq (a :: Expr x) (b :: Expr x)) (PEq (c :: Expr y) (d :: Expr y)) =
-    case eqT @x @y of
-      Just Refl -> compare (a, b) (c, d)
-      Nothing   -> compare (typeRep a) (typeRep c)
-  compare (PNeg a) (PNeg b) = compare a b
-  compare (PLT a1 b1) (PLT a2 b2) = compare (a1, b1) (a2, b2)
-  compare (PGT a1 b1) (PGT a2 b2) = compare (a1, b1) (a2, b2)
-  compare (PGEq a1 b1) (PGEq a2 b2) = compare (a1, b1) (a2, b2)
-  compare (PLEq a1 b1) (PLEq a2 b2) = compare (a1, b1) (a2, b2)
-  compare (PAnd a1 b1) (PAnd a2 b2) = compare (a1, b1) (a2, b2)
-  compare (POr a1 b1) (POr a2 b2) = compare (a1, b1) (a2, b2)
-  compare (PImpl a1 b1) (PImpl a2 b2) = compare (a1, b1) (a2, b2)
-  compare a b = compare (tag a) (tag b)
-
-    where
-      tag :: Prop -> Int
-      tag PBool{} = 0
-      tag PEq{}   = 1
-      tag PLT{}   = 2
-      tag PGT{}   = 3
-      tag PGEq{}  = 4
-      tag PLEq{}  = 5
-      tag PNeg{}  = 6
-      tag PAnd{}  = 7
-      tag POr{}   = 8
-      tag PImpl{} = 9
 
 
 isPBool :: Prop -> Bool
@@ -563,7 +515,7 @@ data EvmError
   | BadCheatCode String FunctionSelector
   | NonexistentFork Int
   | AssumeCheatFailed
-  deriving (Show, Eq, Ord)
+  deriving (Show)
 
 evmErrToString :: EvmError -> String
 evmErrToString = \case
@@ -599,7 +551,7 @@ data PartialExec
   | PrecompileMissing     { pc :: Int, addr :: Expr EAddr, preAddr :: Addr }
   | CheatCodeMissing      { pc :: Int, addr :: Expr EAddr, selector :: FunctionSelector }
   | BranchTooDeep         { pc :: Int, addr :: Expr EAddr}
-  deriving (Show, Eq, Ord)
+  deriving (Show)
 
 -- | A program-wide soundness caveat. Unlike a 'PartialExec', a caveat does not
 -- mark an execution path that we failed to explore: every reachable path was
@@ -813,7 +765,7 @@ data FrameContext
     , callreversion :: Map (Expr EAddr) Contract
     , subState      :: SubState
     }
-  deriving (Eq, Ord, Show, Generic)
+  deriving (Show, Generic)
 
 -- | The "accrued substate" across a transaction
 data SubState = SubState
@@ -825,7 +777,7 @@ data SubState = SubState
   , createdContracts    :: Set (Expr EAddr)
   -- in principle we should include logs here, but do not for now
   }
-  deriving (Eq, Ord, Show)
+  deriving (Show)
 
 -- | The "registers" of the VM along with memory and data stack
 data FrameState (t :: VMType) = FrameState
@@ -908,7 +860,7 @@ data Contract = Contract
   , opIxMap     :: VS.Vector Int -- ^ map from byte index to op index
   , external    :: Bool
   }
-  deriving (Show, Eq, Ord)
+  deriving (Show)
 
 class VMOps (t :: VMType) where
   burn' :: Gas t -> EVM t () -> EVM t ()
@@ -976,7 +928,7 @@ data ContractCode
   = UnknownCode (Expr EAddr)       -- ^ Fully abstract code, keyed on an address to give consistent results for e.g. extcodehash
   | InitCode ByteString (Expr Buf) -- ^ "Constructor" code, during contract creation
   | RuntimeCode RuntimeCode        -- ^ "Instance" code, after contract creation
-  deriving (Show, Eq, Ord)
+  deriving (Show)
 
 -- | We have two variants here to optimize the fully concrete case.
 -- ConcreteRuntimeCode just wraps a ByteString
@@ -984,7 +936,6 @@ data ContractCode
 data RuntimeCode
   = ConcreteRuntimeCode ByteString
   | SymbolicRuntimeCode (V.Vector (Expr Byte))
-  deriving (Eq, Ord)
 instance Show RuntimeCode
   where
     show = \case
@@ -999,7 +950,7 @@ data Trace = Trace
   , contract  :: Contract
   , tracedata :: TraceData
   }
-  deriving (Eq, Ord, Show, Generic)
+  deriving (Show, Generic)
 
 data TraceData
   = EventTrace (Expr EWord) (Expr Buf) [Expr EWord]
@@ -1008,7 +959,7 @@ data TraceData
   | EntryTrace Text
   | ReturnTrace (Expr Buf) FrameContext
   | ConsoleLog (Expr Buf)
-  deriving (Eq, Ord, Show, Generic)
+  deriving (Show, Generic)
 
 -- | Wrapper type containing vm traces and the context needed to pretty print them properly
 data TraceContext = TraceContext
@@ -1016,12 +967,8 @@ data TraceContext = TraceContext
   , contracts :: Map (Expr EAddr) Contract
   , labels :: Map Addr Text
   }
-  deriving (Eq, Ord, Show, Generic)
+  deriving (Show, Generic)
 
-instance Semigroup TraceContext where
-  (TraceContext a b c) <> (TraceContext d e f) = TraceContext (a <> d) (b <> e) (c <> f)
-instance Monoid TraceContext where
-  mempty = TraceContext mempty mempty mempty
 
 
 -- VM Initialization -------------------------------------------------------------------------------
@@ -1184,27 +1131,9 @@ data SMTCex = SMTCex
   , blockContext :: Map (Expr EWord) W256
   , txContext :: Map (Expr EWord) W256
   }
-  deriving (Eq, Show)
+  deriving (Show)
 
-instance Semigroup SMTCex where
-  a <> b = SMTCex
-    { vars = a.vars <> b.vars
-    , addrs = a.addrs <> b.addrs
-    , buffers = a.buffers <> b.buffers
-    , store = a.store <> b.store
-    , blockContext = a.blockContext <> b.blockContext
-    , txContext = a.txContext <> b.txContext
-    }
 
-instance Monoid SMTCex where
-  mempty = SMTCex
-    { vars = mempty
-    , addrs = mempty
-    , buffers = mempty
-    , store = mempty
-    , blockContext = mempty
-    , txContext = mempty
-    }
 
 data ReproducibleCex = ReproducibleCex
   { testName :: Text
@@ -1668,12 +1597,18 @@ paddedShowHex w n = pad ++ str
      str = showHex n ""
      pad = replicate (w - length str) '0'
 
+
+-- | True only if both are one heap object; False says nothing
+ptrEq :: a -> a -> Bool
+ptrEq x y = isTrue# (reallyUnsafePtrEquality# x y)
+
 untilFixpoint :: Eq a => (a -> a) -> a -> a
-untilFixpoint f a =
-  let a' = f a in
-    if a' == a
-    then a
-    else untilFixpoint f a'
+untilFixpoint f a0 = go a0
+  where
+    -- a' must be forced: a thunk is never ptrEq to the object it evaluates to
+    go a =
+      let !a' = f a
+      in if ptrEq a' a || a' == a then a else go a'
 
 bsToHex :: ByteString -> String
 bsToHex bs = concatMap (paddedShowHex 2) (BS.unpack bs)
@@ -1710,3 +1645,118 @@ makeFieldLabelsNoPrefix ''Contract
 makeFieldLabelsNoPrefix ''Env
 makeFieldLabelsNoPrefix ''Block
 makeFieldLabelsNoPrefix ''RuntimeConfig
+
+-- Eq and Ord as derived, plus a ptrEq check before every comparison. The splices can only see
+-- Expr once every type it mentions is declared, so they, and every instance that compares
+-- Exprs, sit down here.
+
+instance Eq (Expr a) where
+  (==) = $(shortcutEq ''Expr)
+
+instance Ord (Expr a) where
+  compare = $(shortcutCompare ''Expr)
+
+deriving instance Eq EvmError
+deriving instance Ord EvmError
+deriving instance Eq PartialExec
+deriving instance Ord PartialExec
+deriving instance Eq FrameContext
+deriving instance Ord FrameContext
+deriving instance Eq SubState
+deriving instance Ord SubState
+deriving instance Eq Contract
+deriving instance Ord Contract
+deriving instance Eq ContractCode
+deriving instance Ord ContractCode
+deriving instance Eq RuntimeCode
+deriving instance Ord RuntimeCode
+deriving instance Eq TraceData
+deriving instance Ord TraceData
+deriving instance Eq TraceContext
+deriving instance Ord TraceContext
+deriving instance Eq SMTCex
+deriving instance Eq Trace
+deriving instance Ord Trace
+
+instance Eq SomeExpr where
+  SomeExpr (a :: Expr b) == SomeExpr (c :: Expr d) =
+    case eqT @b @d of
+      Just Refl -> a == c
+      Nothing -> False
+
+instance Ord SomeExpr where
+  compare (SomeExpr (a :: Expr b)) (SomeExpr (c :: Expr d)) =
+    case eqT @b @d of
+      Just Refl -> compare a c
+      Nothing -> compare (toNum a) (toNum c)
+
+instance Eq Prop where
+  PBool a == PBool b = a == b
+  PEq (a :: Expr x) (b :: Expr x) == PEq (c :: Expr y) (d :: Expr y)
+    = case eqT @x @y of
+       Just Refl -> a == c && b == d
+       Nothing -> False
+  PLT a b == PLT c d = a == c && b == d
+  PGT a b == PGT c d = a == c && b == d
+  PGEq a b == PGEq c d = a == c && b == d
+  PLEq a b == PLEq c d = a == c && b == d
+  PNeg a == PNeg b = a == b
+  PAnd a b == PAnd c d = a == c && b == d
+  POr a b == POr c d = a == c && b == d
+  PImpl a b == PImpl c d = a == c && b == d
+  _ == _ = False
+
+instance Ord Prop where
+  compare (PBool a) (PBool b) = compare a b
+  compare (PEq (a :: Expr x) (b :: Expr x)) (PEq (c :: Expr y) (d :: Expr y)) =
+    case eqT @x @y of
+      Just Refl -> compare (a, b) (c, d)
+      Nothing   -> compare (typeRep a) (typeRep c)
+  compare (PNeg a) (PNeg b) = compare a b
+  compare (PLT a1 b1) (PLT a2 b2) = compare (a1, b1) (a2, b2)
+  compare (PGT a1 b1) (PGT a2 b2) = compare (a1, b1) (a2, b2)
+  compare (PGEq a1 b1) (PGEq a2 b2) = compare (a1, b1) (a2, b2)
+  compare (PLEq a1 b1) (PLEq a2 b2) = compare (a1, b1) (a2, b2)
+  compare (PAnd a1 b1) (PAnd a2 b2) = compare (a1, b1) (a2, b2)
+  compare (POr a1 b1) (POr a2 b2) = compare (a1, b1) (a2, b2)
+  compare (PImpl a1 b1) (PImpl a2 b2) = compare (a1, b1) (a2, b2)
+  compare a b = compare (tag a) (tag b)
+
+    where
+      tag :: Prop -> Int
+      tag PBool{} = 0
+      tag PEq{}   = 1
+      tag PLT{}   = 2
+      tag PGT{}   = 3
+      tag PGEq{}  = 4
+      tag PLEq{}  = 5
+      tag PNeg{}  = 6
+      tag PAnd{}  = 7
+      tag POr{}   = 8
+      tag PImpl{} = 9
+
+instance Semigroup TraceContext where
+  (TraceContext a b c) <> (TraceContext d e f) = TraceContext (a <> d) (b <> e) (c <> f)
+
+instance Monoid TraceContext where
+  mempty = TraceContext mempty mempty mempty
+
+instance Semigroup SMTCex where
+  a <> b = SMTCex
+    { vars = a.vars <> b.vars
+    , addrs = a.addrs <> b.addrs
+    , buffers = a.buffers <> b.buffers
+    , store = a.store <> b.store
+    , blockContext = a.blockContext <> b.blockContext
+    , txContext = a.txContext <> b.txContext
+    }
+
+instance Monoid SMTCex where
+  mempty = SMTCex
+    { vars = mempty
+    , addrs = mempty
+    , buffers = mempty
+    , store = mempty
+    , blockContext = mempty
+    , txContext = mempty
+    }
