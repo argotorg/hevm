@@ -56,6 +56,8 @@ import EVM.Types qualified
 import EVM.UnitTest
 import EVM.Effects
 import EVM.Expr (maybeLitWordSimp, maybeLitAddrSimp)
+import EVM.Progress (withProgress, ProgressOpts(..))
+import EVM.Progress qualified as Progress
 import EVM.Tracing (interpretWithTrace, VMTraceStepResult(..))
 
 data AssertionType = DSTest | Forge
@@ -105,6 +107,9 @@ data CommonOptions = CommonOptions
   , maxDynSize    ::Int
   , noAbstractArith ::Bool
   , noHashCons    ::Bool
+  , progressLog   ::Maybe FilePath
+  , progressExprs ::Bool
+  , noProgress    ::Bool
   }
 
 commonOptions :: Parser CommonOptions
@@ -118,7 +123,7 @@ commonOptions = CommonOptions
   <*> (switch $ long "debug"                <> help "Debug printing of internal behaviour, and dump internal expressions")
   <*> (optional $ strOption $ long "calldata" <> help "Tx: calldata")
   <*> (switch $ long "trace"                <> help "Dump trace")
-  <*> (option auto $ long "verb"            <> showDefault <> value 1 <> help "Append call trace: {1} failures {2} all")
+  <*> (option auto $ long "verb"            <> showDefault <> value 1 <> help "Append call trace: {1} failures {2} all {3} also log progress to hevm-progress.jsonl {4} also log solver expressions there")
   <*> (optional $ strOption $ long "root"   <> help "Path to  project root directory")
   <*> (option auto $ long "assertion-type"  <> showDefault <> value Forge <> help "Assertions as per Forge or DSTest")
   <*> (option auto $ long "smt-timeout"     <> value 300 <> help "Timeout given to SMT solver in seconds. Not available on Windows")
@@ -139,6 +144,9 @@ commonOptions = CommonOptions
   <*> (option auto $ long "max-dyn-size" <> showDefault <> value 64 <> help "Max byte length for concretized dynamic types (bytes, string) in symbolic arguments")
   <*> (switch $  long "no-abstract-arith" <> help "Don't abstract symbolic multiplication and division as uninterpreted functions with sound lemmas; use native bitvector arithmetic instead")
   <*> (switch $ long "no-hash-cons" <> help "Don't hash-cons (share equal subterms of) the symbolic VM state during exploration")
+  <*> (optional $ strOption $ long "progress-log" <> help "Write a JSONL log of interpreter and solver progress to this file (default with --verb 3: hevm-progress.jsonl)")
+  <*> (switch $ long "progress-exprs" <> help "Also log the expressions and path conditions sent to the solver in the progress log (implied by --verb 4)")
+  <*> (switch $ long "no-progress" <> help "Don't show the live status line on stderr")
 
 data CommonExecOptions = CommonExecOptions
   { address       ::Maybe Addr
@@ -329,17 +337,17 @@ main = do
     Symbolic cFileOpts symbOpts cExecOpts cOpts -> do
       env <- makeEnv cOpts
       root <- getRoot cOpts
-      withCurrentDirectory root $ runEnv env $ symbCheck cFileOpts symbOpts cExecOpts cOpts
+      withCurrentDirectory root $ runEnv env $ withProgress (progressOpts env cOpts True) $ symbCheck cFileOpts symbOpts cExecOpts cOpts
     Equal eqOpts cOpts -> do
       env <- makeEnv cOpts
-      runEnv env $ equivalence eqOpts cOpts
+      runEnv env $ withProgress (progressOpts env cOpts True) $ equivalence eqOpts cOpts
     Test testOpts cOpts -> do
       env <- makeEnv cOpts
       root <- getRoot cOpts
       solver <- getSolver cOpts.solver
       cores <- liftIO $ unsafeInto <$> getNumProcessors
       let solverCount = fromMaybe cores cOpts.numSolvers
-      runEnv env $ withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
+      runEnv env $ withProgress (progressOpts env cOpts False) $ withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
         buildOut <- readBuildOutput root testOpts.projectType
         case buildOut of
           Left e -> liftIO $ do
@@ -358,6 +366,13 @@ main = do
       runEnv env $ launchExec cFileOpts execOpts cExecOpts cOpts
     Version {} ->putStrLn getFullVersion
   where
+    -- the status line is only for commands that print their results at the end
+    progressOpts :: Env -> CommonOptions -> Bool -> ProgressOpts
+    progressOpts env cOpts printsAtEnd = ProgressOpts
+      { logFile = env.config.progressLog
+      , logExprs = env.config.progressExprs
+      , statusLine = printsAtEnd && Prelude.not cOpts.noProgress && Prelude.not cOpts.debug
+      }
     makeEnv :: CommonOptions -> IO Env
     makeEnv cOpts = do
       when (cOpts.maxBufSize > 64) $ do
@@ -386,7 +401,12 @@ main = do
         , maxDynSize = cOpts.maxDynSize
         , abstractArith = Prelude.not cOpts.noAbstractArith
         , hashConsExplore = Prelude.not cOpts.noHashCons
+        , progressLog = progressFile cOpts
+        , progressExprs = cOpts.progressExprs || cOpts.verb >= 4
         } }
+    progressFile cOpts = case cOpts.progressLog of
+      Nothing | cOpts.verb >= 3 -> Just "hevm-progress.jsonl"
+      f -> f
 
 
 getCode :: App m => Maybe String -> Maybe ByteString -> m (Maybe ByteString)
@@ -433,6 +453,8 @@ equivalence eqOpts cOpts = do
     sess <- Fetch.mkSession cOpts.cacheDir Nothing
     eq <- equivalenceCheck s (Just sess) (fromJust bytecodeA) (fromJust bytecodeB) veriOpts calldata eqOpts.create
     let anyIssues =  not (null eq.partials) || any (isUnknown . fst) eq.res  || any (isError . fst) eq.res
+    Progress.markPhase "report" [("cexes", length (filter (isCex . fst) eq.res)), ("partials", length eq.partials)]
+    Progress.stopStatus
     liftIO $ case (any (isCex . fst) eq.res, anyIssues) of
       (False, False) -> putStrLn "   \x1b[32m[PASS]\x1b[0m Contracts behave equivalently"
       (True, _)      -> putStrLn "   \x1b[31m[FAIL]\x1b[0m Contracts do not behave equivalently"
@@ -545,6 +567,7 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = do
                             }
     let fetcher = Fetch.oracle solvers (Just sess) veriOpts.rpcInfo
     (expr, res) <- verify solvers fetcher veriOpts preState (checkAssertions errCodes) Nothing
+    Progress.stopStatus
     liftIO $ forM_ ((,) <$> cOpts.cacheDir <*> cExecOpts.block) $ \(dir, block) -> do
       cache <- readMVar sess.sharedCache
       Fetch.saveCache dir block cache

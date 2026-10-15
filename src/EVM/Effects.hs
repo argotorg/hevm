@@ -51,6 +51,8 @@ data Config = Config
   , maxDynSize       :: Int        -- ^ Max byte length for concretized dynamic types (bytes, string)
   , abstractArith    :: Bool
   , hashConsExplore  :: Bool       -- ^ Share equal subterms (EVM.HashCons)
+  , progressLog      :: Maybe FilePath
+  , progressExprs    :: Bool
   }
   deriving (Show, Eq)
 
@@ -75,6 +77,8 @@ defaultConfig = Config
   , maxDynSize = 64
   , abstractArith = True
   , hashConsExplore = True
+  , progressLog = Nothing
+  , progressExprs = False
   }
 
 -- Write to the console

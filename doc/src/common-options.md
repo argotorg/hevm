@@ -71,3 +71,22 @@ This is helpful to prevent the exploration from running for too long. Useful in
 scenarios where you use e.g. both symbolic execution and fuzzing, and don't
 want the symbolic execution to run for too long. It will often read to
 WARNING-s related to `Branches too deep at program counter`.
+
+## Progress, ``--no-progress``, ``--progress-log``, ``--progress-exprs``
+
+While `hevm symbolic` and `hevm equivalence` run, a status line on stderr
+shows the current phase, the number of finished paths, the interpreter tasks,
+the SMT queries done and running, and the slowest query so far. Finished phases
+stay on screen as a line of their own. When stderr is not a terminal, the
+status is printed as a plain line every 30 seconds instead. `--no-progress`
+turns it off.
+
+`--progress-log FILE` (or `--verb 3`, which writes `hevm-progress.jsonl`)
+writes a JSONL log of what the interpreter and the solvers are doing: forks,
+finished paths with the reason for partial ones, every SMT query with the
+program counter that issued it, its duration and its result, the phases of
+equivalence checking, and every 2 seconds a snapshot of what each worker and
+each running query is doing. Every line is flushed, so the log of a run that
+was killed or timed out is still complete up to that point, which shows where
+it got stuck. `--progress-exprs` (or `--verb 4`) also logs the expressions and
+path conditions sent to the solver.
