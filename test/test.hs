@@ -2028,13 +2028,13 @@ tests = testGroup "hevm"
             }
             |]
         let sig = Just $ Sig "fun(uint256)" [AbiUIntType 256]
-            -- we don't ask the solver about the loop condition until we're
-            -- already in an inconsistent path (i == 5, j <= 3, i < j), so we
-            -- will continue looping here until we hit max iterations
+            -- Simplification should stop at j's bound before askSmtIters is reached.
             opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 10, askSmtIters = 5 }}
         (e, []) <- withDefaultSolver $
           \s -> checkAssert s defaultPanicCodes c sig [] opts
-        assertBoolM "The expression MUST be partial" $ any (Expr.containsNode isPartial) e
+        assertBoolM "The bounded loop must not be partial" $ not (any (Expr.containsNode isPartial) e)
+        assertEqualM "All feasible iteration counts remain" (map Lit [0..3])
+          (List.sort [Expr.readWord (Lit 0) buf | Success _ _ buf _ <- e])
     , test "mem-tuple" $ do
         Just c <- solcRuntime "C"
           [i|

@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- Symbolic execution now avoids forking when simplification shows that
+  the path conditions imply the branch condition.
 - `hevm equivalence` replays every counterexample concretely and marks it as
   validated, not reproducible, or not replayable. It only reports that the
   contracts do not behave equivalently if a counterexample is validated.

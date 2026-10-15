@@ -629,11 +629,12 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
                     -- ask the smt solver about the loop condition
                     performQuery
                   _ -> do
-                    let simpProps = Expr.concKeccakSimpProps ((cond ./= Lit 0):preconds)
-                    (r, vm') <- case simpProps of
-                      [PBool False] -> liftIO $ stToIO $ runStateT (continue (Case False)) vm
-                      [] -> liftIO $ stToIO $ runStateT (continue (Case True)) vm
-                      _ -> liftIO $ stToIO $ runStateT (continue UnknownBranch) vm
+                    let decision = case Expr.concKeccakSimpProps ((cond ./= Lit 0):preconds) of
+                          [PBool False] -> Case False
+                          [] -> Case True
+                          _ | Expr.concKeccakSimpProps ((cond .== Lit 0):preconds) == [PBool False] -> Case True
+                            | otherwise -> UnknownBranch
+                    (r, vm') <- liftIO $ stToIO $ runStateT (continue decision) vm
                     interpretInternal t { vm = vm', stepper = (k r) }
           _ -> performQuery
 
