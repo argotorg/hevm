@@ -34,6 +34,9 @@ import Control.Monad.Trans.Maybe (MaybeT(..))
 import Data.Containers.ListUtils (nubOrd, nubInt)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.Vector.Storable qualified as VS
+import Data.Vector.Storable.Mutable qualified as VSM
+import Data.Vector.Storable.ByteString (vectorToByteString)
 import Data.Foldable (Foldable(..))
 import Data.List qualified as List
 import Data.List.NonEmpty (NonEmpty((:|)))
@@ -57,7 +60,7 @@ import Witch (into, unsafeInto)
 import EVM.Format (formatProp)
 
 import EVM.CSE
-import EVM.Expr (writeByte, bufLengthEnv, bufLength, minLength, inRange)
+import EVM.Expr (bufLengthEnv, bufLength, minLength, inRange)
 import EVM.Expr qualified as Expr
 import EVM.Keccak (keccakAssumptions, concreteKeccaks, findKeccakPropsExprs)
 import EVM.Traversals
@@ -73,15 +76,26 @@ import EVM.SMT.AbstractBase (DivModKind(..), abstFnName, concFnName, mulSMT, sha
 
 
 -- | Attempts to collapse a compressed buffer representation down to a flattened one
+-- | Flattens a buffer model, with the semantics of applying its writes with
+-- 'writeByte'. Builds the bytes in one pass: applying the writes one by one
+-- copies the whole buffer for every write.
 collapse :: BufModel -> Maybe BufModel
-collapse model = case toBuf model of
-  Just (ConcreteBuf b) -> Just $ Flat b
-  _ -> Nothing
+collapse (Flat b) = Just (Flat b)
+collapse (Comp c) = Flat <$> go c []
   where
-    toBuf (Comp (Base b sz)) | sz <= 120_000_000 = Just . ConcreteBuf $ BS.replicate (unsafeInto sz) b
-    toBuf (Comp (Write b idx next)) = fmap (writeByte (Lit idx) (LitByte b)) (toBuf $ Comp next)
-    toBuf (Flat b) = Just . ConcreteBuf $ b
-    toBuf _ = Nothing
+    -- collected innermost first, so the outermost write to an index wins in 'Map.fromList'
+    go (Write byte idx next) ws = go next ((idx, byte) : ws)
+    go (Base byte sz) ws
+      | sz <= 120_000_000, all ((< Expr.maxBytes) . fst) ws = Just $ vectorToByteString $ VS.create $ do
+          -- writes past the base pad it with zeros, as 'writeByte' does
+          v <- VSM.replicate (Prelude.max base (maybe 0 ((+ 1) . unsafeInto . fst) (Map.lookupMax writes))) 0
+          VSM.set (VSM.slice 0 base v) byte
+          forM_ (Map.toList writes) $ \(i, b) -> VSM.write v (unsafeInto i) b
+          pure v
+      | otherwise = Nothing
+      where
+        base = unsafeInto sz
+        writes = Map.fromList ws
 
 getVar :: SMTCex -> TS.Text -> W256
 getVar cex name = fromJust $ Map.lookup (Var name) cex.vars

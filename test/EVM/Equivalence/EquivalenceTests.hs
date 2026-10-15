@@ -427,7 +427,32 @@ bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
     let def = fromRight (internalError "cannot be") $ defaultSymbolicValues $ subModel cex (AbstractBuf "txdata")
     let buf = prettyBuf $ Expr.concKeccakSimpExpr def
     assertBool "Must start with specific string" (T.isPrefixOf "0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe0c" buf)
+  , testCase "eq-replay-validates-storage-difference" $ do
+    -- sstore(0, 1) vs sstore(0, 2)
+    replays <- replayAll "6001600055" "6002600055"
+    assertBool "Must have a counterexample" (not (null replays))
+    forM_ replays $ \case
+      Validated ra rb -> assertBool "Replay must show the different stores" (ra /= rb)
+      r -> assertFailure $ "Counterexample must replay as validated, got: " <> show r
+  , testCase "eq-replay-equal-programs-not-reproducible" $ do
+    -- sstore(0, 1), and the same after a JUMPDEST
+    let a = fromJust (hexByteString "6001600055")
+        b = fromJust (hexByteString "5b6001600055")
+    r <- Effects.runApp $ withSolvers Bitwuzla 1 Nothing defMemLimit $ \s ->
+      replayEqCex s False a b (AbstractBuf "txdata") mempty
+    case r of
+      NotReproducible {} -> pure ()
+      _ -> assertFailure $ "Replay of equal programs must not reproduce, got: " <> show r
   ]
+  where
+    replayAll :: ByteString -> ByteString -> IO [CexReplay]
+    replayAll ha hb = do
+      let a = fromJust (hexByteString ha)
+          b = fromJust (hexByteString hb)
+      Effects.runApp $ withSolvers Bitwuzla 1 Nothing defMemLimit $ \s -> do
+        (calldata, _) <- mkCalldata Nothing []
+        eq <- equivalenceCheck s Nothing a b defaultVeriOpts calldata False
+        mapM (replayEqCex s False a b (AbstractBuf "txdata")) (mapMaybe (getCex . fst) eq.res)
 
 yulEquivalenceTests :: TestTree
 yulEquivalenceTests = testGroup "Yul equivalence"

@@ -125,6 +125,20 @@ REVERT
 Are considered different, as one of them reverts (i.e. fails) and the other
 succeeds.
 
+## Confirming counterexamples
+
+Every counterexample is replayed: A and B are run concretely on its input,
+with the values the solver chose for the caller, call value, storage and block,
+and their return data, errors and final storage are compared. A counterexample
+is reported as validated if the two concrete runs differ, as not reproducible
+if they do not, and as not replayable if it cannot be run concretely (e.g. for
+`--create`). hevm only reports that the contracts do not behave equivalently if
+at least one counterexample is validated; otherwise it reports that they may
+not behave equivalently. Counterexamples that do not reproduce typically come
+from the over-approximation of calls to unknown code, which lets the same call
+return different results in A and B (see
+[#1116](https://github.com/argotorg/hevm/issues/1116)).
+
 ## Creation code equivalence
 
 If you want to check the equivalence of not just the runtime code, but also the
