@@ -10,6 +10,8 @@
     The tables and the on/off flag are process-wide. Every 'interpret' sets the flag from
     'hashConsExplore' and resets the tables; the flag stays set afterwards, and concurrent
     explorations see whichever value was set last. That changes sharing, never results.
+    The tables pin every node they ever saw, so they are also reset once they grow past
+    'setHashConsLimit' nodes.
 -}
 module EVM.HashCons
   ( Rewrite(..)
@@ -20,6 +22,7 @@ module EVM.HashCons
   , getHashConsEnabled
   , hashConsEnabled
   , resetHashCons
+  , setHashConsLimit
   , memoFixTraverse
   ) where
 
@@ -28,7 +31,7 @@ import Data.IORef
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as M
 import Data.IntMap.Strict qualified as IM
-import Control.Monad (unless)
+import Control.Monad (unless, when)
 import Data.Word (Word8)
 import Data.Text (Text)
 import Data.ByteString (ByteString)
@@ -67,10 +70,11 @@ data HCState = HCState
   , hcAddrs  :: !(Map Key (Expr EAddr, Int))
   , hcSns    :: !(IM.IntMap [(SomeSN, Int)])  -- ^ ids of canonical nodes, by StableName
   , hcNext   :: !Int
+  , hcBase   :: !Int  -- ^ 'hcNext' at the last reset
   }
 
 emptyHC :: HCState
-emptyHC = HCState M.empty M.empty M.empty M.empty M.empty IM.empty 0
+emptyHC = HCState M.empty M.empty M.empty M.empty M.empty IM.empty 0 0
 
 {-# NOINLINE hcEnabled #-}
 hcEnabled :: IORef Bool
@@ -89,8 +93,22 @@ getHashConsEnabled = readIORef hcEnabled
 resetHashCons :: IO ()
 resetHashCons = do
   -- ids are never reused, so memo entries of a concurrent exploration can't hit a new node
-  atomicModifyIORef' hcState $ \st -> (emptyHC { hcNext = st.hcNext }, ())
+  atomicModifyIORef' hcState $ \st -> (emptyHC { hcNext = st.hcNext, hcBase = st.hcNext }, ())
   writeIORef passMemos M.empty
+
+{-# NOINLINE hcLimit #-}
+hcLimit :: IORef Int
+hcLimit = unsafePerformIO (newIORef 1000000)
+
+-- | How many nodes the tables may take in before they are reset; returns the previous limit
+setHashConsLimit :: Int -> IO Int
+setHashConsLimit n = atomicModifyIORef' hcLimit (n,)
+
+bounded :: Int -> IO ()
+bounded i = do
+  lim <- readIORef hcLimit
+  st <- readIORef hcState
+  when (i - st.hcBase >= lim) resetHashCons
 
 -- | Per-pass results of 'memoFixTraverse', by node id
 data MemoTables = MemoTables
@@ -214,12 +232,13 @@ recanon tab key e' = do
         in (st', Right i)
   case r of
     Left c  -> pure c
-    Right i -> do recordSN e' i; pure (e', i)
+    Right i -> do recordSN e' i; bounded i; pure (e', i)
 
 freshOpaque :: Expr a -> IO (Expr a, Int)
 freshOpaque e = do
   i <- atomicModifyIORef' hcState $ \st -> (st { hcNext = st.hcNext + 1 }, st.hcNext)
   recordSN e i
+  bounded i
   pure (e, i)
 
 go :: Expr a -> IO (Expr a, Int)

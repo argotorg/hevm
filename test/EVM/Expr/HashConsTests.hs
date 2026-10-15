@@ -8,7 +8,7 @@ import Test.Tasty.HUnit
 import Test.Tasty.QuickCheck hiding (Failure, Success)
 
 import Control.Concurrent.MVar
-import Control.Exception (evaluate)
+import Control.Exception (bracket, evaluate)
 import Control.Monad (forM)
 import Data.IORef (newIORef, readIORef)
 import Data.ByteString (ByteString)
@@ -32,10 +32,12 @@ tests = withResource (newMVar ()) (const (pure ())) $ \getLock ->
   let withHC :: Bool -> IO a -> IO a
       withHC on act = getLock >>= \lock -> withFlag lock on act
       differential :: [Job] -> IO Property
-      differential jobs = do
+      differential = differentialWith (withHC True)
+      differentialWith :: (forall a . IO a -> IO a) -> [Job] -> IO Property
+      differentialWith withOn jobs = do
         refs <- catMaybes <$> withHC False (mapM reference jobs)
         -- one table generation for everything, twice over, so later jobs run against the memos of earlier ones
-        fails <- withHC True $ mapM againstReference (refs <> reverse refs)
+        fails <- withOn $ mapM againstReference (refs <> reverse refs)
         -- only most: without hash-consing the simplifier walks heavily shared terms as trees,
         -- which can be exponentially larger
         pure $ cover 90 (10 * length refs >= 9 * length jobs) "most jobs terminate" $ noFailures (catMaybes fails)
@@ -76,21 +78,14 @@ tests = withResource (newMVar ()) (const (pure ())) $ \getLock ->
           [ Job "simplify" Expr.simplify b, Job "simplify" Expr.simplify s, Job "simplify" Expr.simplify y
           , Job "simplify" Expr.simplify l, Job "concKeccakSimpExpr" Expr.concKeccakSimpExpr l
           , Job "simplifyProps" Expr.simplifyProps ps ]
-  , testProperty "simplify-differential" $ \(t :: SharedTerms) -> ioProperty $
-      differential $ concat
-            [ concat [ [ Job "simplify" Expr.simplify w, Job "concKeccakSimpExpr" Expr.concKeccakSimpExpr w
-                       , Job "litToKeccak" Expr.litToKeccak w ]
-                     | w <- t.words ]
-            , [ Job "simplify" Expr.simplify x | x <- t.bufs ]
-            , [ Job "simplify" Expr.simplify x | x <- t.stores ]
-            , [ Job "simplify" Expr.simplify x | x <- t.bytes ]
-            , [ Job "simplify" Expr.simplify x | x <- t.ends ]
-            , [ Job "simplifyProp" Expr.simplifyProp x | x <- t.props ]
-            , [ Job "simplifyProps" Expr.simplifyProps t.props, Job "concKeccakProps" Expr.concKeccakProps t.props ]
-            , [ Job "readStorage" (uncurry Expr.readStorage) (k, s) | (k, s) <- zip t.words (cycle t.stores) ]
-            , [ Job "writeStorage" (\(a, b, c) -> Expr.writeStorage a b c) (k, v, s)
-              | (k, v, s) <- zip3 t.words (reverse t.words) (cycle t.stores) ]
-            ]
+  , testProperty "simplify-differential" $ \(t :: SharedTerms) -> ioProperty $ differential (sharedJobs t)
+  -- the tables are reset mid-job, so the sentinel check of withHC would rerun forever
+  , testProperty "simplify-differential-tiny-tables" $ \(t :: SharedTerms) -> ioProperty $
+      differentialWith (\act -> getLock >>= \lock -> withMVar lock $ \_ -> do
+          setHashConsEnabled True
+          resetHashCons
+          bracket (setHashConsLimit 20) setHashConsLimit (const act))
+        (sharedJobs t)
   , testProperty "hash-cons-invariants" $ \(t :: SharedTerms) -> ioProperty $ do
       let attempt = do
             (cw, cb, cs, cy) <- withHC False $
@@ -181,6 +176,22 @@ inTime secs x = timeout (secs * 1000000) (force x)
 clone :: Expr a -> IO (Expr a)
 clone e = force (mapExpr id e)
 
+
+sharedJobs :: SharedTerms -> [Job]
+sharedJobs t = concat
+  [ concat [ [ Job "simplify" Expr.simplify w, Job "concKeccakSimpExpr" Expr.concKeccakSimpExpr w
+             , Job "litToKeccak" Expr.litToKeccak w ]
+           | w <- t.words ]
+  , [ Job "simplify" Expr.simplify x | x <- t.bufs ]
+  , [ Job "simplify" Expr.simplify x | x <- t.stores ]
+  , [ Job "simplify" Expr.simplify x | x <- t.bytes ]
+  , [ Job "simplify" Expr.simplify x | x <- t.ends ]
+  , [ Job "simplifyProp" Expr.simplifyProp x | x <- t.props ]
+  , [ Job "simplifyProps" Expr.simplifyProps t.props, Job "concKeccakProps" Expr.concKeccakProps t.props ]
+  , [ Job "readStorage" (uncurry Expr.readStorage) (k, s) | (k, s) <- zip t.words (cycle t.stores) ]
+  , [ Job "writeStorage" (\(a, b, c) -> Expr.writeStorage a b c) (k, v, s)
+    | (k, v, s) <- zip3 t.words (reverse t.words) (cycle t.stores) ]
+  ]
 
 data Job = forall a b . (Show a, Show b, Eq b) => Job String (a -> b) a
 data Ref = forall a b . (Show a, Show b, Eq b) => Ref String (a -> b) a b

@@ -39,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   16 MB) instead of 64, which is still more than gas limits allow.
 
 ## Fixed
+- The hash-consing tables are reset once they grow past a size limit, instead of
+  growing without bound after exploration.
 - Symbolic `GAS` readings are now only ordered within a call frame, so a caller
   can have more gas left after a call than its callee had.
 - Calls to unknown code with the same inputs now return the same results, also
