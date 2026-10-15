@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- Small, word-aligned keccak inputs are canonicalized so equivalent mapping
+  keys built from memory writes or copies can resolve to the same storage entry.
 - `hevm equivalence` replays every counterexample concretely and marks it as
   validated, not reproducible, or not replayable. It only reports that the
   contracts do not behave equivalently if a counterexample is validated.
