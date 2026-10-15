@@ -50,7 +50,7 @@ data Config = Config
   , mergeMaxBudget   :: Int        -- ^ Max instructions for speculative merge exploration
   , maxDynSize       :: Int        -- ^ Max byte length for concretized dynamic types (bytes, string)
   , abstractArith    :: Bool
-  , hashConsExplore  :: Bool       -- ^ Share equal subterms during exploration, see EVM.HashCons
+  , hashConsExplore  :: Bool       -- ^ Share equal subterms (EVM.HashCons)
   }
   deriving (Show, Eq)
 
