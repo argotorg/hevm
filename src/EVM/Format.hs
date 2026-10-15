@@ -15,6 +15,12 @@ module EVM.Format
   , showTree
   , showTraceTree
   , showTraceTree'
+  , TraceAnn(..)
+  , traceAnnStyle
+  , renderTraceDoc
+  , showTraceDoc
+  , traceDocForest
+  , traceDocForest'
   , showValues
   , prettyvmresult
   , prettyvmresults
@@ -25,6 +31,10 @@ module EVM.Format
   , showValue
   , textValues
   , showAbiValue
+  , showAbiValueDoc
+  , showValuesDoc
+  , showCallDoc
+  , showErrorDoc
   , prettyIfConcreteWord
   , formatBytes
   , formatBinary
@@ -60,16 +70,18 @@ import Data.ByteString.Lazy (toStrict, fromStrict)
 import Data.Char qualified as Char
 import Data.DoubleWord (signedWord)
 import Data.Foldable (toList)
-import Data.List (isPrefixOf, sort)
+import Data.List (isPrefixOf, sortOn)
 import Data.Map qualified as Map
-import Data.Maybe (catMaybes, fromMaybe, listToMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isNothing, listToMaybe)
 import Data.Text (Text, pack, unpack, intercalate, dropEnd, splitOn)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as T
+import Data.Tree (Forest)
 import Data.Tree.View (showTree)
-import Data.Vector (Vector)
 import Hexdump (prettyHex)
 import Numeric (showHex)
+import Prettyprinter (Doc, LayoutOptions(..), PageWidth(..), annotate, hcat, layoutPretty, pretty, punctuate, reAnnotateS)
+import Prettyprinter.Render.Terminal (AnsiStyle, Color(..), bold, color, colorDull, renderStrict)
 import Witch (into, unsafeInto, tryFrom)
 
 data Signedness = Signed | Unsigned
@@ -111,55 +123,71 @@ prettyIfConcreteWord = \case
   w -> T.pack $ show w
 
 showAbiValue :: (?context :: DappContext) => AbiValue -> Text
-showAbiValue (AbiString bs) = formatBytes bs
-showAbiValue (AbiBytesDynamic bs) = formatBytes bs
-showAbiValue (AbiBytes _ bs) = formatBytes bs
-showAbiValue (AbiAddress addr) = ppAddr (LitAddr addr) False
-showAbiValue v = pack $ show v
+showAbiValue = renderTraceDoc . showAbiValueDoc
 
-textAbiValues :: (?context :: DappContext) => Vector AbiValue -> [Text]
-textAbiValues vs = toList (fmap showAbiValue vs)
+showAbiValueDoc :: (?context :: DappContext) => AbiValue -> Doc TraceAnn
+showAbiValueDoc = \case
+  AbiString bs -> pretty (formatBytes bs)
+  AbiBytesDynamic bs -> pretty (formatBytes bs)
+  AbiBytes _ bs -> pretty (formatBytes bs)
+  AbiAddress addr -> ppAddr (LitAddr addr) False
+  v -> pretty (show v)
 
 textValues :: (?context :: DappContext) => [AbiType] -> Expr Buf -> [Text]
-textValues ts (ConcreteBuf bs) =
-  case runGetOrFail (getAbiSeq (length ts) ts) (fromStrict bs) of
-    Right (_, _, xs) -> textAbiValues xs
-    Left (_, _, _)   -> [formatBinary bs]
-textValues ts _ = fmap (const "<symbolic>") ts
+textValues ts b = renderTraceDoc <$> textValuesDoc ts b
 
-textValue :: (?context :: DappContext) => AbiType -> Expr Buf -> Text
-textValue ts (ConcreteBuf bs) =
+textValuesDoc :: (?context :: DappContext) => [AbiType] -> Expr Buf -> [Doc TraceAnn]
+textValuesDoc ts (ConcreteBuf bs) =
+  case runGetOrFail (getAbiSeq (length ts) ts) (fromStrict bs) of
+    Right (_, _, xs) -> toList (fmap showAbiValueDoc xs)
+    Left (_, _, _)   -> [pretty (formatBinary bs)]
+textValuesDoc ts _ = fmap (const "<symbolic>") ts
+
+textValueDoc :: (?context :: DappContext) => AbiType -> Expr Buf -> Doc TraceAnn
+textValueDoc ts (ConcreteBuf bs) =
   case runGetOrFail (getAbiSeq 1 [ts]) (fromStrict bs) of
-    Right (_, _, xs) -> fromMaybe (internalError "impossible empty list") $ listToMaybe $ textAbiValues xs
-    Left (_, _, _)   -> formatBinary bs
-textValue _ _ = "<symbolic>"
+    Right (_, _, xs) -> fromMaybe (internalError "impossible empty list") $ listToMaybe $ toList (fmap showAbiValueDoc xs)
+    Left (_, _, _)   -> pretty (formatBinary bs)
+textValueDoc _ _ = "<symbolic>"
 
 parenthesise :: [Text] -> Text
 parenthesise ts = "(" <> intercalate ", " ts <> ")"
 
+parenthesiseDoc :: [Doc ann] -> Doc ann
+parenthesiseDoc ts = "(" <> hcat (punctuate ", " ts) <> ")"
+
 showValues :: (?context :: DappContext) => [AbiType] -> Expr Buf -> Text
-showValues ts b = parenthesise $ textValues ts b
+showValues ts b = renderTraceDoc (showValuesDoc ts b)
+
+showValuesDoc :: (?context :: DappContext) => [AbiType] -> Expr Buf -> Doc TraceAnn
+showValuesDoc ts b = parenthesiseDoc $ textValuesDoc ts b
 
 showValue :: (?context :: DappContext) => AbiType -> Expr Buf -> Text
-showValue t b = textValue t b
+showValue t b = renderTraceDoc (textValueDoc t b)
 
 showCall :: (?context :: DappContext) => [AbiType] -> Expr Buf -> Text
-showCall ts (ConcreteBuf bs) = showValues ts $ ConcreteBuf (BS.drop 4 bs)
-showCall _ _ = "(<symbolic>)"
+showCall ts b = renderTraceDoc (showCallDoc ts b)
+
+showCallDoc :: (?context :: DappContext) => [AbiType] -> Expr Buf -> Doc TraceAnn
+showCallDoc ts (ConcreteBuf bs) = showValuesDoc ts $ ConcreteBuf (BS.drop 4 bs)
+showCallDoc _ _ = "(<symbolic>)"
 
 showError :: (?context :: DappContext) => Expr Buf -> Text
-showError (ConcreteBuf bs) =
+showError = renderTraceDoc . showErrorDoc
+
+showErrorDoc :: (?context :: DappContext) => Expr Buf -> Doc TraceAnn
+showErrorDoc (ConcreteBuf bs) =
   let dappinfo = ?context.info
       bs4 = BS.take 4 bs
   in case Map.lookup (word bs4) dappinfo.errorMap of
-      Just (SolError errName ts) -> errName <> " " <> showCall ts (ConcreteBuf bs)
+      Just (SolError errName ts) -> pretty errName <> " " <> showCallDoc ts (ConcreteBuf bs)
       Nothing -> case bs4 of
                   -- Method ID for Error(string)
-                  "\b\195y\160" -> showCall [AbiStringType] (ConcreteBuf bs)
+                  "\b\195y\160" -> showCallDoc [AbiStringType] (ConcreteBuf bs)
                   -- Method ID for Panic(uint256)
-                  "NH{q"        -> "Panic" <> parenthesise [formatBinary bs]
-                  _             -> formatBinary bs
-showError b = T.pack $ show b
+                  "NH{q"        -> "Panic" <> parenthesiseDoc [pretty (formatBinary bs)]
+                  _             -> pretty (formatBinary bs)
+showErrorDoc b = pretty (show b)
 
 -- the conditions under which bytes will be decoded and rendered as a string
 isPrintable :: ByteString -> Bool
@@ -192,31 +220,49 @@ formatSBinary e = format $ Expr.concKeccakSimpExpr e
     format (AbstractBuf t) = "<" <> t <> " abstract buf>"
     format e2 = T.pack $ "Symbolic expression: " <> show e2
 
-showTraceTree :: DappInfo -> VM t -> Text
-showTraceTree dapp vm =
+-- | Semantic annotations on trace docs, so non-terminal frontends can style them their own way
+data TraceAnn = TraceEmph | TraceHighlight | TraceError
+  deriving (Eq, Show)
+
+traceAnnStyle :: TraceAnn -> AnsiStyle
+traceAnnStyle = \case
+  TraceEmph -> bold
+  TraceHighlight -> colorDull Cyan
+  TraceError -> color Red
+
+renderTraceDoc :: Doc TraceAnn -> Text
+renderTraceDoc = renderStrict . reAnnotateS traceAnnStyle . layoutPretty (LayoutOptions Unbounded)
+
+traceDocForest :: DappInfo -> VM t -> Forest (Doc TraceAnn)
+traceDocForest dapp vm =
   let ?context = DappContext { info = dapp
                              , contracts = vm.env.contracts
                              , labels = vm.labels }
-  in let forest = traceForest vm
-         traces = fmap (fmap (unpack . showTrace)) forest
-  in pack $ concatMap showTree traces
+  in fmap (fmap showTraceDoc) (traceForest vm)
 
-showTraceTree' :: DappInfo -> Expr End -> Text
-showTraceTree' dapp leaf =
+traceDocForest' :: DappInfo -> Expr End -> Forest (Doc TraceAnn)
+traceDocForest' dapp leaf =
   let ?context = DappContext { info = dapp, contracts, labels }
-  in let forest = traceForest' leaf
-         traces = fmap (fmap (unpack . showTrace)) forest
-  in pack $ concatMap showTree traces
+  in fmap (fmap showTraceDoc) (traceForest' leaf)
   where TraceContext { contracts, labels } = traceContext leaf
 
-showTrace :: (?context :: DappContext) => Trace -> Text
-showTrace trace =
+showTraceTree :: DappInfo -> VM t -> Text
+showTraceTree dapp vm = renderTraceForest (traceDocForest dapp vm)
+
+showTraceTree' :: DappInfo -> Expr End -> Text
+showTraceTree' dapp leaf = renderTraceForest (traceDocForest' dapp leaf)
+
+renderTraceForest :: Forest (Doc TraceAnn) -> Text
+renderTraceForest = pack . concatMap (showTree . fmap (unpack . renderTraceDoc))
+
+showTraceDoc :: (?context :: DappContext) => Trace -> Doc TraceAnn
+showTraceDoc trace =
   let
     dapp = ?context.info
     pos =
       case showTraceLocation dapp trace of
-        Left x -> " \x1b[1m" <> x <> "\x1b[0m"
-        Right x -> " \x1b[1m(" <> x <> ")\x1b[0m"
+        Left x -> " " <> annotate TraceEmph (pretty x)
+        Right x -> " " <> annotate TraceEmph ("(" <> pretty x <> ")")
   in case trace.tracedata of
     EventTrace _ bytes topics ->
       case topics of
@@ -257,42 +303,38 @@ showTrace trace =
             Nothing ->
               logn
       where
-        logn = mconcat
-          [ "\x1b[36m"
-          , "log" <> (pack (show (length topics)))
-          , parenthesise ((map (pack . show) topics) ++ [formatSBinary bytes])
-          , "\x1b[0m"
-          ] <> pos
+        logn = annotate TraceHighlight (pretty $
+          "log" <> (pack (show (length topics)))
+          <> parenthesise ((map (pack . show) topics) ++ [formatSBinary bytes])
+          ) <> pos
 
-        showEvent eventName argInfos indexedTopics = mconcat
-          [ "emit "
-          , "\x1b[36m"
-          , eventName
-          , "\x1b[0m"
-          , parenthesise (snd <$> sort (unindexedArgs <> indexedArgs))
-          ] <> pos
+        showEvent eventName argInfos indexedTopics =
+          "emit "
+          <> annotate TraceHighlight (pretty eventName)
+          <> parenthesiseDoc (snd <$> sortOn fst (unindexedArgs <> indexedArgs))
+          <> pos
           where
           -- We maintain the original position of event arguments since indexed
           -- and not indexed arguments can be interleaved.
-          unindexedArgs :: [(Int, Text)]
+          unindexedArgs :: [(Int, Doc TraceAnn)]
           unindexedArgs =
             let (positions, names, abiTypes) = unzip3 (filterArgInfos NotIndexed)
-            in zip positions (zipWith withName names (textValues abiTypes bytes))
+            in zip positions (zipWith withName names (textValuesDoc abiTypes bytes))
 
-          indexedArgs :: [(Int, Text)]
+          indexedArgs :: [(Int, Doc TraceAnn)]
           indexedArgs =
             let (positions, names, abiTypes) = unzip3 (filterArgInfos Indexed)
             in zip positions (zipWith withName names (zipWith showTopic abiTypes indexedTopics))
             where
-            showTopic :: AbiType -> Expr EWord -> Text
+            showTopic :: AbiType -> Expr EWord -> Doc TraceAnn
             showTopic abiType topic =
               case maybeLitWordSimp (Expr.concKeccakSimpExpr topic) of
-                Just w -> textValue abiType (ConcreteBuf (word256Bytes w))
+                Just w -> textValueDoc abiType (ConcreteBuf (word256Bytes w))
                 _ -> "<symbolic>"
 
-          withName :: Text -> Text -> Text
+          withName :: Text -> Doc TraceAnn -> Doc TraceAnn
           withName "" value = value
-          withName argName value = argName <> "=" <> value
+          withName argName value = pretty argName <> "=" <> value
 
           filterArgInfos :: Indexed -> [(Int, Text, AbiType)]
           filterArgInfos which =
@@ -300,19 +342,15 @@ showTrace trace =
                                     , indexed == which
             ]
 
-        lognote sig usr = mconcat
-          [ "\x1b[36m"
-          , "LogNote"
-          , parenthesise [sig, usr, "..."]
-          , "\x1b[0m"
-          ] <> pos
+        lognote sig usr =
+          annotate TraceHighlight (pretty $ "LogNote" <> parenthesise [sig, usr, "..."]) <> pos
 
     ErrorTrace e ->
       case e of
         Revert out ->
-          "\x1b[91merror\x1b[0m " <> "Revert " <> showError out <> pos
+          annotate TraceError "error" <> " Revert " <> showErrorDoc out <> pos
         _ ->
-          "\x1b[91merror\x1b[0m " <> pack (show e) <> pos
+          annotate TraceError "error" <> " " <> pretty (show e) <> pos
 
     ReturnTrace out (CallContext { abi = Just abi }) ->
       "← " <>
@@ -320,20 +358,20 @@ showTrace trace =
           Just m  ->
             case unzip m.output of
               ([], []) ->
-                formatSBinary out
+                pretty (formatSBinary out)
               (_, ts) ->
-                showValues ts out
+                showValuesDoc ts out
           Nothing ->
-            formatSBinary out
+            pretty (formatSBinary out)
     ReturnTrace out (CallContext {}) ->
-      "← " <> formatSBinary out
+      "← " <> pretty (formatSBinary out)
     ReturnTrace out (CreationContext {}) ->
       let l = Expr.bufLength out
-      in "← " <> formatExpr l <> " bytes of code"
+      in "← " <> pretty (formatExpr l) <> " bytes of code"
     ConsoleLog buf ->
-      "\x1b[36m" <> formatConsoleLog buf <> "\x1b[0m"
+      annotate TraceHighlight (pretty (formatConsoleLog buf))
     EntryTrace t ->
-      t
+      pretty t
     FrameTrace (CreationContext { address }) ->
       "create "
       <> ppAddr address True
@@ -350,20 +388,18 @@ showTrace trace =
         Nothing ->
           case Map.lookup (unsafeInto (fromMaybe 0x00 abi)) dapp.abiMap of
             Just m  ->
-              "\x1b[1m"
-              <> m.name
-              <> "\x1b[0m"
-              <> showCall (catMaybes (getAbiTypes m.methodSignature)) calldata
+              annotate TraceEmph (pretty m.name)
+              <> showCallDoc (catMaybes (getAbiTypes m.methodSignature)) calldata
             Nothing ->
-              formatSBinary calldata
+              pretty (formatSBinary calldata)
           <> pos
 
         Just solc ->
-          maybe "[fallback function]"
-                 (fromMaybe "[unknown method]" . maybeAbiName solc)
-                 abi
-          <> maybe ("(" <> formatSBinary calldata <> ")")
-                   (\x -> showCall (catMaybes x) calldata)
+          pretty (maybe "[fallback function]"
+                   (fromMaybe "[unknown method]" . maybeAbiName solc)
+                   abi)
+          <> maybe ("(" <> pretty (formatSBinary calldata) <> ")")
+                   (\x -> showCallDoc (catMaybes x) calldata)
                    (abi >>= fmap getAbiTypes . maybeAbiName solc)
           <> pos
     where
@@ -371,7 +407,7 @@ showTrace trace =
       contract <- Map.lookup addr ?context.contracts
       findSrc contract ?context.info
 
-ppAddr :: (?context :: DappContext) => Expr EAddr -> Bool -> Text
+ppAddr :: (?context :: DappContext) => Expr EAddr -> Bool -> Doc TraceAnn
 ppAddr addr alwaysShowAddr =
   let
     sourceName = case Map.lookup addr ?context.contracts of
@@ -383,16 +419,16 @@ ppAddr addr alwaysShowAddr =
         case (findSrc contract ?context.info) of
           Just x -> Just (contractNamePart x.contractName)
           Nothing -> Nothing
-    label = case do litAddr <- maybeLitAddrSimp addr
-                    Map.lookup litAddr ?context.labels of
-              Nothing -> ""
-              Just l -> "[" <> "\x1b[1m" <> l <> "\x1b[0m" <> "]"
-    name = maybe "" (\n -> "\x1b[1m" <> n <> "\x1b[0m") sourceName <> label
+    label = do
+      litAddr <- maybeLitAddrSimp addr
+      Map.lookup litAddr ?context.labels
+    name = maybe mempty (annotate TraceEmph . pretty) sourceName
+      <> maybe mempty (\l -> "[" <> annotate TraceEmph (pretty l) <> "]") label
   in
-    if name == "" then
-      formatAddr addr
+    if isNothing sourceName && isNothing label then
+      pretty (formatAddr addr)
     else if alwaysShowAddr then
-      name <> "@" <> formatAddr addr
+      name <> "@" <> pretty (formatAddr addr)
     else
       name
 
