@@ -296,7 +296,7 @@ abstractContract :: ContractCode -> Expr EAddr -> Contract
 abstractContract code addr = Contract
   { code        = code
   , storage     = AbstractStore addr Nothing
-  , tStorage    = AbstractStore addr Nothing
+  , tStorage    = ConcreteStore mempty -- transient storage is empty when a transaction starts
   , origStorage = AbstractStore addr Nothing
   , balance     = Balance addr
   , nonce       = if isCreation code then Just 1 else Just 0

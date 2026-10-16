@@ -447,6 +447,10 @@ bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
   , testCase "eq-staticcall-in-one-program" $ do
     eq <- eqBytecode False (sCall "1234" "5f" <> pop) ""
     assertBool "a view call whose result is unused changes nothing" (null eq.res)
+  , testCase "eq-transient-storage-starts-empty" $ do
+    -- tload(0) is zero, so this stops in both
+    eq <- eqBytecode False "5f5c15600757fe5b00" "00"
+    assertBool "transient storage must start empty" (null eq.res)
   , testCase "eq-call-after-same-state-changing-call" $ do
     eq <- eqBytecode True (call "1234" <> pop <> sCall "5678" "5f" <> pop <> revertRet)
                           ("5b" <> call "1234" <> pop <> sCall "5678" "5f" <> pop <> revertRet)
