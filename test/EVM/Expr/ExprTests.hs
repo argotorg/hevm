@@ -552,6 +552,30 @@ basicSimplificationTests = testGroup "Basic simplification tests"
   , testCase "simp-double-not" $ do
       let simp = Expr.simplify $ Not (Not (Var "a"))
       assertEqual "Not should be concretized" (Var "a") simp
+  , testCase "keccak-small-literal" $ do
+      let k = Keccak (AbstractBuf "buf")
+      assertEqual "keccak is nonzero" (Lit 0) (Expr.simplify (IsZero k))
+      mapM_ (\(a, b) -> do
+        assertEqual "expression equality" (Lit 0) (Expr.simplify (Eq a b))
+        assertEqual "proposition equality" [PBool False] (Expr.simplifyProps [PEq a b])
+        assertEqual "negated equality" [] (Expr.simplifyProps [PNeg (PEq a b)]))
+        [(a, b) | c <- [0..256], (a, b) <- [(Lit c, k), (k, Lit c)]]
+  , testCase "keccak-small-literal-boundary" $ do
+      let k = Keccak (AbstractBuf "buf")
+      assertEqual "257 remains undecided" (Eq (Lit 257) k) (Expr.simplify (Eq k (Lit 257)))
+      assertEqual "257 remains undecided in props" [PEq (Lit 257) k] (Expr.simplifyProps [PEq k (Lit 257)])
+      res <- checkSatWith equivConfig (PEq (Lit 257) k)
+      assertBool ("257 is allowed by the SMT assumptions: " <> show res) (isSat res)
+  , testProperty "keccak-small-literal-matches-smt" $ withMaxSuccess 100 $
+      forAll (resize 8 (genBuf 64 1)) $ \buf ->
+      forAll (Lit . fromIntegral <$> chooseInt (0, 256)) $ \c -> ioProperty $ do
+        let k = Keccak buf
+        res <- checkSatWith equivConfig (PEq c k)
+        pure $ conjoin
+          [ Expr.simplify (Eq c k) === Lit 0
+          , Expr.simplifyProps [PEq c k] === [PBool False]
+          , counterexample (show res) (isQed res)
+          ]
   ]
 
 propSimplificationTests :: TestTree
