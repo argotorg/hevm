@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- Keccak equality and storage reads now use known differences in input lengths
+  or words to rule out aliases, including struct offsets below 256, under the
+  existing keccak assumptions.
 - Symbolic execution now avoids forking when simplification shows that
   the path conditions imply the branch condition.
 - `hevm equivalence` replays every counterexample concretely and marks it as
