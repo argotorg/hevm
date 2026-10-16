@@ -1449,7 +1449,7 @@ equivalenceCheck' solvers sess branchesA branchesB create = do
         _ -> internalError $ "Symbolic code returned from constructor." <> " A: " <> show simpA <> " B: " <> show simpB
 
     statesDiffer :: Map (Expr EAddr) (Expr EContract) -> Map (Expr EAddr) (Expr EContract) -> Prop
-    statesDiffer aState bState =
+    statesDiffer aState' bState' =
       case aState == bState of
         True -> PBool False
         False ->  if Set.fromList (Map.keys aState) /= Set.fromList (Map.keys bState)
@@ -1458,6 +1458,15 @@ equivalenceCheck' solvers sess branchesA branchesB create = do
           else let
             merged = (Map.merge Map.dropMissing Map.dropMissing (Map.zipWithMatched (\_ x y -> (x,y))) aState bState)
           in Map.foldl' (\a (ac, bc) -> a .|| contractsDiffer ac bc) (PBool False) merged
+      where
+        -- a call to unknown code adds its untouched callee to the state of
+        -- only the program that made it, which is the same as not having it
+        aState = Map.filterWithKey (\k c -> Map.member k bState' || not (untouched k c)) aState'
+        bState = Map.filterWithKey (\k c -> Map.member k aState' || not (untouched k c)) bState'
+        untouched :: Expr EAddr -> Expr EContract -> Bool
+        untouched k = \case
+          C (UnknownCode a) (AbstractStore s Nothing) _ (Balance b) Nothing -> a == k && s == k && b == k
+          _ -> False
 
     contractsDiffer :: Expr EContract -> Expr EContract -> Prop
     contractsDiffer ac bc = let

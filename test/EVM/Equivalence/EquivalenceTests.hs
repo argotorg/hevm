@@ -444,6 +444,9 @@ bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
     eq <- eqBytecode False (sCall "1234" "5f" <> sCall "1234" "5f" <> "1415" <> "5f52" <> "60205ff3")
                            (sCall "1234" "5f" <> pop <> "5f5f5260205ff3")
     assertEqual "identical calls must agree" [] (map fst eq.res)
+  , testCase "eq-staticcall-in-one-program" $ do
+    eq <- eqBytecode False (sCall "1234" "5f" <> pop) ""
+    assertBool "a view call whose result is unused changes nothing" (null eq.res)
   , testCase "eq-call-after-same-state-changing-call" $ do
     eq <- eqBytecode True (call "1234" <> pop <> sCall "5678" "5f" <> pop <> revertRet)
                           ("5b" <> call "1234" <> pop <> sCall "5678" "5f" <> pop <> revertRet)
