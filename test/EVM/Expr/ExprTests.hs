@@ -235,6 +235,7 @@ storageTests = testGroup "Storage tests"
         (Just $ SLoad (Var "i") (SStore (Lit 0) (Lit 1) emptyStore))
         (Expr.decomposeStorage $ SLoad (arrElem 2 (Var "i"))
           (SStore (Lit 0) (Var "a") (SStore (arrZero 2) (Lit 1) emptyStore)))
+    , concreteKeccakStorageTests
   ]
   where
     errorMsg = "Storage read expression not simplified correctly"
@@ -251,6 +252,54 @@ storageTests = testGroup "Storage tests"
     preImgBytes = BS.pack (replicate 31 0 ++ [0xaa] ++ replicate 32 0)
     preImgHash = keccak' preImgBytes
     preImgs = Map.fromList [(preImgHash, preImgBytes)]
+
+concreteKeccakStorageTests :: TestTree
+concreteKeccakStorageTests = testGroup "Concrete keccak storage"
+  [ testCase "read-through-write-chain" $ do
+      let base = ConcreteStore (Map.singleton h1 11)
+          store = SStore k2 (Var "v") (SStore (Lit 5) (Var "w") base)
+      assertEqual "skip a concrete-keccak write" (Var "w") (Expr.readStorage' (Lit 5) store)
+      assertEqual "reach the concrete base" (Lit 11) (Expr.readStorage' k1 store)
+      assertEqual "match a nested keccak by value" (Var "v") (Expr.readStorage' (Lit h2) store)
+  , testCase "lookup-and-cache-miss" $ mapM_ (\(slot, value) -> do
+      assertEqual "lookup" (Just (Lit 11))
+        (Expr.readStorage slot (ConcreteStore (Map.singleton value 11)))
+      let missing = SStore (Lit (value + 1)) (Var "v") (ConcreteStore mempty)
+      assertEqual "preserve RPC cache misses" Nothing (Expr.readStorage slot missing)
+      assertEqual "default to zero locally" (Lit 0) (Expr.readStorage' slot missing)
+    ) slots
+  , testCase "keep-unresolved-preimages" $ mapM_ (\slot -> do
+      let base = ConcreteStore (Map.singleton h1 11)
+          store = SStore (Lit h2) (Var "v") base
+      assertEqual "unknown lookup" (Just (SLoad slot base)) (Expr.readStorage slot base)
+      assertEqual "unknown write may alias" (Just (SLoad slot store)) (Expr.readStorage slot store)
+    ) [ Keccak (AbstractBuf "buf")
+      , Keccak (WriteWord (Lit 0) (Var "key") (ConcreteBuf bytes))
+      , Keccak (WriteWord (Lit 225) k1 (ConcreteBuf ""))
+      ]
+  -- All slots are concrete: check every four-write chain against a Map (6^5 reads).
+  , testCase "write-chain-equivalence" $ mapM_ (\writes -> do
+      let base = Map.singleton h1 9
+          entries = zip writes [100 ..]
+          store = foldr (\((s, _), v) acc -> SStore s (Lit v) acc) (ConcreteStore base) entries
+          concrete = foldr (\((_, s), v) -> Map.insert s v) base entries
+      mapM_ (\(slot, value) -> assertEqual (show (slot, writes))
+        (Lit (Map.findWithDefault 0 value concrete)) (Expr.readStorage' slot store)) slots
+    ) (sequence (replicate 4 slots))
+  ]
+  where
+    bytes = word256Bytes 0 <> word256Bytes 1
+    k1 = Keccak (ConcreteBuf bytes)
+    h1 = keccak' bytes
+    k2 = Keccak (WriteWord (Lit 32) k1 (ConcreteBuf (word256Bytes 100)))
+    h2 = keccak' (word256Bytes 100 <> word256Bytes h1)
+    slots =
+      [ (k1, h1), (k2, h2), (Lit h2, h2)
+      , (Add (Lit 1) k2, h2 + 1)
+      , (Add (Lit (negate h1)) k1, 0)
+      , (Keccak (WriteWord (Lit 224) k1 (ConcreteBuf "")),
+          keccak' (BS.pack (replicate 224 0) <> word256Bytes h1))
+      ]
 
 copySliceTests :: TestTree
 copySliceTests = testGroup "CopySlice tests"

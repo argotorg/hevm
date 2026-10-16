@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- Storage reads resolve concrete keccak slots, including nested hashes and
+  literal offsets, when comparing writes or looking up a concrete store.
 - Symbolic execution now avoids forking when simplification shows that
   the path conditions imply the branch condition.
 - `hevm equivalence` replays every counterexample concretely and marks it as
