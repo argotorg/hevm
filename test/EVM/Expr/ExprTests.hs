@@ -277,16 +277,15 @@ concreteKeccakStorageTests = testGroup "Concrete keccak storage"
       , Keccak (WriteWord (Lit 0) (Var "key") (ConcreteBuf bytes))
       , Keccak (WriteWord (Lit 225) k1 (ConcreteBuf ""))
       ]
-  , testProperty "write-chain-equivalence" $ withMaxSuccess 100 $
-      forAll (vectorOf 4 (elements slots)) $ \writes -> forAll (elements slots) $ \(slot, value) -> ioProperty $ do
-        let base = Map.singleton h1 9
-            entries = zip writes [100 ..]
-            store = foldr (\((s, _), v) acc -> SStore s (Lit v) acc) (ConcreteStore base) entries
-            concrete = foldr (\((_, s), v) -> Map.insert s v) base entries
-            result = Expr.readStorage' slot store
-        proof <- checkSatWith equivConfig (SLoad slot store ./= result)
-        pure $ counterexample (show proof) $
-          result === Lit (Map.findWithDefault 0 value concrete) .&&. property (isQed proof)
+  -- All slots are concrete: check every four-write chain against a Map (6^5 reads).
+  , testCase "write-chain-equivalence" $ mapM_ (\writes -> do
+      let base = Map.singleton h1 9
+          entries = zip writes [100 ..]
+          store = foldr (\((s, _), v) acc -> SStore s (Lit v) acc) (ConcreteStore base) entries
+          concrete = foldr (\((_, s), v) -> Map.insert s v) base entries
+      mapM_ (\(slot, value) -> assertEqual (show (slot, writes))
+        (Lit (Map.findWithDefault 0 value concrete)) (Expr.readStorage' slot store)) slots
+    ) (sequence (replicate 4 slots))
   ]
   where
     bytes = word256Bytes 0 <> word256Bytes 1
