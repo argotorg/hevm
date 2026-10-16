@@ -95,6 +95,15 @@ main = do
         stdout `shouldContain` "FAIL"
         exitCode `shouldBe` ExitFailure 1
 
+      it "equivalence-cex-with-balance" $ do
+        -- A returns SELFBALANCE, B returns 0
+        let torun = splitOn " " "equivalence --code-a 4760005260206000f3 --code-b 600060005260206000f3"
+        (exitCode, stdout, stderr) <- readProcessWithExitCode "cabal" (["run", "exe:hevm", "--" ] ++ torun) ""
+        stderr `shouldNotContain` "CallStack"
+        stdout `shouldContain` "Balance (SymAddr \"entrypoint\")"
+        stdout `shouldContain` "Concrete replay: validated"
+        exitCode `shouldBe` ExitFailure 1
+
       it "hevm equivalence tutorial works -- PASS" $ do
         Just a <- runApp $ solcRuntime (T.pack "MyContract") (T.pack [i|
           contract MyContract {

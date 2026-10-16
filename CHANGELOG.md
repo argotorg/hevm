@@ -43,6 +43,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   16 MB) instead of 64, which is still more than gas limits allow.
 
 ## Fixed
+- `hevm equivalence` no longer crashes printing a counterexample that sets the
+  balance of the contract, and uses that balance when replaying it. The block
+  context of counterexamples is now printed instead of the transaction context.
 - The hash-consing tables are reset once they grow past a size limit, instead of
   growing without bound after exploration.
 - Symbolic `GAS` readings are now only ordered within a call frame, so a caller
