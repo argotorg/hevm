@@ -397,6 +397,93 @@ deriving instance Show (Expr a)
 exprRank :: Expr a -> Int
 exprRank !e = I# (dataToTag# e)
 
+-- | Which 'EType' an expression has, for traversals that visit nodes of every type
+data ETypeRep (a :: EType) where
+  BufRep      :: ETypeRep Buf
+  StorageRep  :: ETypeRep Storage
+  LogRep      :: ETypeRep Log
+  WordRep     :: ETypeRep EWord
+  AddrRep     :: ETypeRep EAddr
+  ContractRep :: ETypeRep EContract
+  ByteRep     :: ETypeRep Byte
+  EndRep      :: ETypeRep End
+
+exprType :: Expr a -> ETypeRep a
+exprType = \case
+  GVar (BufVar _) -> BufRep
+  GVar (StoreVar _) -> StorageRep
+  Lit {} -> WordRep
+  Var {} -> WordRep
+  LitByte {} -> ByteRep
+  IndexWord {} -> ByteRep
+  EqByte {} -> WordRep
+  JoinBytes {} -> WordRep
+  Partial {} -> EndRep
+  Failure {} -> EndRep
+  Success {} -> EndRep
+  Add {} -> WordRep
+  Sub {} -> WordRep
+  Mul {} -> WordRep
+  Div {} -> WordRep
+  SDiv {} -> WordRep
+  Mod {} -> WordRep
+  SMod {} -> WordRep
+  AddMod {} -> WordRep
+  MulMod {} -> WordRep
+  Exp {} -> WordRep
+  SEx {} -> WordRep
+  Min {} -> WordRep
+  Max {} -> WordRep
+  PrevRandao {} -> WordRep
+  EVM.Types.LT {} -> WordRep
+  EVM.Types.GT {} -> WordRep
+  LEq {} -> WordRep
+  GEq {} -> WordRep
+  SLT {} -> WordRep
+  SGT {} -> WordRep
+  Eq {} -> WordRep
+  IsZero {} -> WordRep
+  ITE {} -> WordRep
+  And {} -> WordRep
+  Or {} -> WordRep
+  Xor {} -> WordRep
+  Not {} -> WordRep
+  SHL {} -> WordRep
+  SHR {} -> WordRep
+  SAR {} -> WordRep
+  CLZ {} -> WordRep
+  Keccak {} -> WordRep
+  Origin {} -> WordRep
+  BlockHash {} -> WordRep
+  Coinbase {} -> WordRep
+  Timestamp {} -> WordRep
+  BlockNumber {} -> WordRep
+  GasLimit {} -> WordRep
+  ChainId {} -> WordRep
+  BaseFee {} -> WordRep
+  TxValue {} -> WordRep
+  Balance {} -> WordRep
+  Gas {} -> WordRep
+  CodeSize {} -> WordRep
+  CodeHash {} -> WordRep
+  LogEntry {} -> LogRep
+  C {} -> ContractRep
+  SymAddr {} -> AddrRep
+  LitAddr {} -> AddrRep
+  WAddr {} -> WordRep
+  ConcreteStore {} -> StorageRep
+  AbstractStore {} -> StorageRep
+  SLoad {} -> WordRep
+  SStore {} -> StorageRep
+  ConcreteBuf {} -> BufRep
+  AbstractBuf {} -> BufRep
+  ReadWord {} -> WordRep
+  ReadByte {} -> ByteRep
+  WriteWord {} -> BufRep
+  WriteByte {} -> BufRep
+  CopySlice {} -> BufRep
+  BufLength {} -> WordRep
+
 -- Existential Wrapper -----------------------------------------------------------------------------
 
 
@@ -917,7 +1004,7 @@ class VMOps (t :: VMType) where
 
   partial :: PartialExec -> EVM t ()
   branch :: Maybe Int -> Expr EWord -> (Bool -> EVM t ()) -> EVM t ()
-  manySolutions :: Maybe Int -> Expr EWord -> Int -> (Maybe W256 -> EVM t ()) -> EVM t ()
+  manySolutions :: Maybe Int -> Int -> Expr EWord -> Int -> (Maybe W256 -> EVM t ()) -> EVM t ()
 
 -- Bytecode Representations ------------------------------------------------------------------------
 
