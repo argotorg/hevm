@@ -1,4 +1,5 @@
 {-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE StaticPointers #-}
 
 {-|
    Helper functions for working with Expr instances.
@@ -161,7 +162,10 @@ import Data.Word (Word8, Word32)
 import Witch (unsafeInto, into, tryInto)
 import Data.Containers.ListUtils (nubOrd)
 
+import EVM.HashCons qualified as HC
 import EVM.Traversals
+import EVM.Traversals.Children (mapPropChildrenM)
+import Data.Functor.Identity (Identity(..))
 import EVM.Types
 
 -- ** Constants **
@@ -482,7 +486,7 @@ readWord idx b@(WriteWord idx' val buf)
     -- the region we want to read overlaps the WriteWord
     _ -> readWordFromBytes idx b
 readWord i@(Lit idx) (WriteByte (Lit idx') _ buf)
-  | idx' < idx || (idx' >= idx + 32 && idx <= (maxBound :: W256) - 32) = readWord i buf
+  | idx' - idx >= 32 = readWord i buf
 -- reading a Word that is before the CopySlice destination region, so just read from dst
 -- We must ensure x+32 and dstOffset+size do not wrap past maxBound.
 -- When size is symbolic, we bound dstOffset to ensure no wrapping is possible.
@@ -500,10 +504,12 @@ readWord i@(Lit x) (CopySlice _ (Lit dstOffset) (Lit size) _ dst)
 readWord i@(Lit x) (CopySlice _ (Lit dstOffset) _ _ dst)
   | x >= dstOffset + maxBytes
   , dstOffset + maxBytes >= dstOffset
+  , x + 31 >= x
   = readWord i dst
 readWord i@(Lit x) (CopySlice _ (Lit dstOffset) (Lit size) _ dst)
   | x >= dstOffset + size
   , dstOffset + size >= dstOffset
+  , x + 31 >= x
   = readWord i dst
 readWord (Lit idx) b@(CopySlice (Lit srcOff) (Lit dstOff) (Lit size) src dst)
   -- the region we are trying to read is enclosed in the sliced region
@@ -597,8 +603,9 @@ copySlice s@(Lit srcOffset) d@(Lit dstOffset) sz@(Lit size) src ds@(ConcreteBuf 
        else CopySlice s d sz src ds
   | otherwise = CopySlice s d sz src ds
 
-copySlice srcOff dstOff (Lit size) (WriteWord srcOff2 val _) dstBuff
-  | size < 32 && srcOff == srcOff2 = copySlice (Lit 0) dstOff (Lit size) (WriteWord (Lit 0) val (ConcreteBuf "")) dstBuff
+copySlice srcOff dstOff (Lit size) (WriteWord srcOff2 val base) dstBuff
+  -- normalize to offset 0 over an empty buffer, unless it already is
+  | size < 32 && srcOff == srcOff2 && (srcOff /= Lit 0 || base /= ConcreteBuf "") = copySlice (Lit 0) dstOff (Lit size) (WriteWord (Lit 0) val (ConcreteBuf "")) dstBuff
 
 -- abstract indices
 copySlice srcOffset dstOffset size src dst = CopySlice srcOffset dstOffset size src dst
@@ -633,24 +640,10 @@ writeWord o@(Lit offset) v@(Lit val) buf@(ConcreteBuf src)
 writeWord idx val b@(WriteWord idx' val' buf)
   -- if the indices match exactly then we just replace the value in the current write and return
   | idx == idx' = WriteWord idx val buf
-  | otherwise
-    = case (idx, idx') of
-        (Lit i, Lit i') -> if i >= i' + 32
-                           -- if we can statically determine that the write at
-                           -- idx doesn't overlap the write at idx', then we
-                           -- push the write down we only consider writes where
-                           -- i > i' to avoid infinite loops in this routine.
-                           -- This also has the nice side effect of imposing a
-                           -- canonical ordering on write chains, making exact
-                           -- syntactic equalities between abstract terms more
-                           -- likely to occur
-                           then WriteWord idx' val' (writeWord idx val buf)
-                           -- if we cannot statically determine freedom from
-                           -- overlap, then we just return an abstract term
-                           else WriteWord idx val b
-        -- if we cannot determine statically that the write at idx' is out of
-        -- bounds for idx, then we return an abstract term
-        _ -> WriteWord idx val b
+  -- push the write below a lower one it can't overlap; only for i > i', so this terminates
+  | Lit i <- idx, Lit i' <- idx', i > i', i - i' >= 32, i <= maxWord256 - 31
+  = WriteWord idx' val' (writeWord idx val buf)
+  | otherwise = WriteWord idx val b
 writeWord offset val src = WriteWord offset val src
 
 
@@ -670,7 +663,9 @@ bufLengthEnv env useEnv buf = go (Lit 0) buf
     go l (WriteWord idx _ b) = go (EVM.Expr.max l (add idx (Lit 32))) b
     go l (WriteByte idx _ b) = go (EVM.Expr.max l (add idx (Lit 1))) b
     go l (CopySlice _ _ (Lit 0) _ dst) = go l dst
-    go l (CopySlice _ dstOffset size _ dst) = go (EVM.Expr.max l (add dstOffset size)) dst
+    go l (CopySlice _ dstOffset size@(Lit _) _ dst) = go (EVM.Expr.max l (add dstOffset size)) dst
+    -- a copy of zero bytes does not grow dst, whatever its dstOffset
+    go l (CopySlice _ dstOffset size _ dst) = go (ITE (iszero size) l (EVM.Expr.max l (add dstOffset size))) dst
 
     go l (GVar (BufVar a)) | useEnv =
       case Map.lookup a env of
@@ -863,6 +858,8 @@ readStorage w st = go (simplifyNoLitToKeccak w) (simplifyNoLitToKeccak st)
     go slot s@(SStore prevSlot val prev) = case (prevSlot, slot) of
       -- if address and slot match then we return the val in this write
       _ | prevSlot == slot -> Just val
+      -- distinct literal slots never alias; skip the simplifier-backed checks below
+      (Lit _, Lit _) -> go slot prev
       (a, b) | surelyEqual a b -> Just val
       (a, b) | surelyNotEqual a b -> go slot prev
 
@@ -996,7 +993,7 @@ litToArrayPreimage val =
       Nothing
 
 litToKeccak :: Expr a -> Expr a
-litToKeccak e = mapExpr go e
+litToKeccak e = mapExprShared (static (HC.Rewrite go)) e
   where
     go :: Expr a -> Expr a
     go orig@(Lit key) = case litToArrayPreimage key of
@@ -1181,12 +1178,12 @@ decomposeStorageProps props
 -- | Simple recursive match based AST simplification
 -- Note: may not terminate!
 simplify :: Expr a -> Expr a
-simplify e = untilFixpoint (simplifyNoLitToKeccak . litToKeccak) e
+simplify e = untilFixpoint (simplifyNoLitToKeccak . litToKeccak) (HC.hashConsExpr e)
 
 simplifyNoLitToKeccak :: Expr a -> Expr a
 simplifyNoLitToKeccak l@(Lit _) = l
 simplifyNoLitToKeccak s@(ConcreteStore _) = s
-simplifyNoLitToKeccak e = untilFixpoint (mapExpr go) e
+simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go))) (HC.hashConsExpr e)
   where
     go :: Expr a -> Expr a
 
@@ -1686,6 +1683,7 @@ simplifyProp prop =
     simpInnerExpr (POr a b) = POr (simpInnerExpr a) (simpInnerExpr b)
     simpInnerExpr (PImpl a b) = PImpl (simpInnerExpr a) (simpInnerExpr b)
     simpInnerExpr orig@(PBool _) = orig
+    simpInnerExpr p@PCall {} = runIdentity $ mapPropChildrenM (Identity . simplify) p
 
 -- Makes [PAnd a b] into [a,b]
 flattenProps :: [Prop] -> [Prop]
@@ -2059,7 +2057,7 @@ constPropagate ps =
 
 -- Concretize & simplify Keccak expressions until fixed-point.
 concKeccakSimpExpr :: Expr a -> Expr a
-concKeccakSimpExpr orig = untilFixpoint (simplifyNoLitToKeccak . (mapExpr concKeccakOnePass)) (simplify orig)
+concKeccakSimpExpr orig = untilFixpoint (simplifyNoLitToKeccak . (mapExprShared (static (HC.Rewrite concKeccakOnePass)))) (simplify orig)
 
 -- Concretize Keccak in Props, but don't simplify
 -- Needed because if it also simplified, we may not find some simplification errors, as

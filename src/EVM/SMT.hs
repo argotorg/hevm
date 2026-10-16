@@ -31,9 +31,13 @@ import Prelude hiding (LT, GT, Foldable(..))
 
 import Control.Monad
 import Control.Monad.Trans.Maybe (MaybeT(..))
-import Data.Containers.ListUtils (nubOrd, nubInt)
+import Data.Char (isDigit)
+import Data.Containers.ListUtils (nubOrd)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.Vector.Storable qualified as VS
+import Data.Vector.Storable.Mutable qualified as VSM
+import Data.Vector.Storable.ByteString (vectorToByteString)
 import Data.Foldable (Foldable(..))
 import Data.List qualified as List
 import Data.List.NonEmpty (NonEmpty((:|)))
@@ -57,7 +61,7 @@ import Witch (into, unsafeInto)
 import EVM.Format (formatProp)
 
 import EVM.CSE
-import EVM.Expr (writeByte, bufLengthEnv, bufLength, minLength, inRange)
+import EVM.Expr (bufLengthEnv, bufLength, minLength, inRange)
 import EVM.Expr qualified as Expr
 import EVM.Keccak (keccakAssumptions, concreteKeccaks, findKeccakPropsExprs)
 import EVM.Traversals
@@ -73,15 +77,26 @@ import EVM.SMT.AbstractBase (DivModKind(..), abstFnName, concFnName, mulSMT, sha
 
 
 -- | Attempts to collapse a compressed buffer representation down to a flattened one
+-- | Flattens a buffer model, with the semantics of applying its writes with
+-- 'writeByte'. Builds the bytes in one pass: applying the writes one by one
+-- copies the whole buffer for every write.
 collapse :: BufModel -> Maybe BufModel
-collapse model = case toBuf model of
-  Just (ConcreteBuf b) -> Just $ Flat b
-  _ -> Nothing
+collapse (Flat b) = Just (Flat b)
+collapse (Comp c) = Flat <$> go c []
   where
-    toBuf (Comp (Base b sz)) | sz <= 120_000_000 = Just . ConcreteBuf $ BS.replicate (unsafeInto sz) b
-    toBuf (Comp (Write b idx next)) = fmap (writeByte (Lit idx) (LitByte b)) (toBuf $ Comp next)
-    toBuf (Flat b) = Just . ConcreteBuf $ b
-    toBuf _ = Nothing
+    -- collected innermost first, so the outermost write to an index wins in 'Map.fromList'
+    go (Write byte idx next) ws = go next ((idx, byte) : ws)
+    go (Base byte sz) ws
+      | sz <= 120_000_000, all ((< Expr.maxBytes) . fst) ws = Just $ vectorToByteString $ VS.create $ do
+          -- writes past the base pad it with zeros, as 'writeByte' does
+          v <- VSM.replicate (Prelude.max base (maybe 0 ((+ 1) . unsafeInto . fst) (Map.lookupMax writes))) 0
+          VSM.set (VSM.slice 0 base v) byte
+          forM_ (Map.toList writes) $ \(i, b) -> VSM.write v (unsafeInto i) b
+          pure v
+      | otherwise = Nothing
+      where
+        base = unsafeInto sz
+        writes = Map.fromList ws
 
 getVar :: SMTCex -> TS.Text -> W256
 getVar cex name = fromJust $ Map.lookup (Var name) cex.vars
@@ -188,7 +203,6 @@ assertPropsHelperWith arithEnc simp extraDecls psPreConc = do
   <> SMT2 (SMTScript intermediates) mempty mempty
   <> SMT2 (SMTScript keccakAssertions') mempty mempty
   <> SMT2 (SMTScript readAssumes') mempty mempty
-  <> SMT2 (SMTScript gasOrder) mempty mempty
   <> SMT2 (SMTScript (fmap (\p -> SMTCommand("(assert " <> p <> ")")) encs)) (cexInfo storageReads) ps
 
   where
@@ -203,7 +217,6 @@ assertPropsHelperWith arithEnc simp extraDecls psPreConc = do
     allVars = fmap referencedVars toDeclarePsElim <> fmap referencedVars bufVals <> fmap referencedVars storeVals
     frameCtx = fmap (referencedFrameContext arithEnc) toDeclarePsElim <> fmap (referencedFrameContext arithEnc) bufVals <> fmap (referencedFrameContext arithEnc) storeVals
     blockCtx = fmap referencedBlockContext toDeclarePsElim <> fmap referencedBlockContext bufVals <> fmap referencedBlockContext storeVals
-    gasOrder = enforceGasOrder arithEnc psPreConc
 
     -- Buf, Storage, etc. declarations needed
     bufVals = Map.elems bufs
@@ -393,28 +406,6 @@ declareConstrainAddrs names = SMT2 (SMTScript ([SMTComment "concrete and symboli
     -- assume that symbolic addresses do not collide with the zero address or precompiles
     assume n = SMTCommand $ "(assert (bvugt " <> n <> " (_ bv9 160)))"
     cexvars = (mempty :: CexVars){ addrs = fmap toLazyText names }
-
--- The gas is a tuple of (prefix, index). Within each prefix, the gas is strictly decreasing as the
--- index increases. This function gets a map of Prefix -> [Int], and for each prefix,
--- enforces the order
-enforceGasOrder :: ArithEncoding -> [Prop] -> [SMTEntry]
-enforceGasOrder enc ps = [SMTComment "gas ordering"] <> (concatMap (uncurry order) indices)
-  where
-    order :: TS.Text -> [Int] -> [SMTEntry]
-    order prefix n = consecutivePairs (nubInt n) >>= \(x, y)->
-      -- The GAS instruction itself costs gas, so it's strictly decreasing
-      [SMTCommand $ "(assert (bvugt " <> fromRight' (exprToSMTWith enc (Gas prefix x)) <> " " <>
-        fromRight' ((exprToSMTWith enc (Gas prefix y))) <> "))"]
-    consecutivePairs :: [Int] -> [(Int, Int)]
-    consecutivePairs [] = []
-    consecutivePairs l@(_:t) = zip l t
-    indices = Map.toList $ toMapOfLists $ concatMap (foldProp go mempty) ps
-    toMapOfLists :: [(TS.Text, Int)] -> Map.Map TS.Text [Int]
-    toMapOfLists = foldr (\(k, v) acc -> Map.insertWith (++) k [v] acc) Map.empty
-    go :: Expr a -> [(TS.Text, Int)]
-    go e = case e of
-      Gas prefix v -> [(prefix, v)]
-      _ -> []
 
 declareFrameContext :: [(Builder, [Prop])] -> Err SMT2
 declareFrameContext names = do
@@ -682,7 +673,21 @@ propToSMTWith arithEnc = \case
     benc <- propToSMT b
     pure $ "(=> " <> aenc <> " " <> benc <> ")"
   PBool b -> pure $ if b then "true" else "false"
+  PCall i success retdata world -> do
+    args <- sequence
+      [ encE i.world, encE i.callKind, encE i.target, encE i.callValue, encE i.callData, encE i.callDataLen
+      , encE i.caller, encE i.callerStorage, encE i.callerTStorage, encE i.callerBalance ]
+    let app f = "(" <> f <> " " <> mconcat (List.intersperse " " args) <> ")"
+        def v f = "(= " <> v <> " " <> app f <> ")"
+    s <- encE success
+    r <- encE retdata
+    l <- encE (bufLength retdata)
+    w <- traverse encE world
+    pure $ "(and " <> def s "call_success" <> " " <> def r "call_retdata" <> " " <> def l "call_retlen"
+      <> maybe "" (\w' -> " " <> def w' "call_world") w <> ")"
   where
+    encE :: Expr x -> Err Builder
+    encE = exprToSMTWith arithEnc
     propToSMT :: Prop -> Err Builder
     propToSMT = propToSMTWith arithEnc
     op2 :: Builder -> Expr x -> Expr y -> Err Builder
@@ -815,6 +820,9 @@ parseTxCtx name
   | name == "txvalue" = TxValue
   | Just a <- TS.stripPrefix "balance_" name = Balance (parseEAddr a)
   | Just a <- TS.stripPrefix "codehash_" name = CodeHash (parseEAddr a)
+  | Just a <- TS.stripPrefix "gas_" name
+  , n <- TS.takeWhileEnd isDigit a
+  , not (TS.null n) = Gas (TS.dropWhileEnd isDigit a) (read (TS.unpack n))
   | otherwise = internalError $ "cannot parse " <> (TS.unpack name) <> " into an Expr"
 
 type ValGetter = Text -> MaybeIO Text

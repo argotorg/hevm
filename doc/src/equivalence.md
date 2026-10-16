@@ -49,9 +49,9 @@ hevm equivalence --code-a-file a.bin --code-b-file b.bin
 
 If `--sig` is given, calldata is assumed to take the form of the function
 given. If `--calldata` is provided, a specific, concrete calldata is used. If
-neither is provided, a fully abstract calldata of at most `2**64` byte is
-assumed. Note that a `2**64` byte calldata would go over the gas limit, and
-hence should cover all meaningful cases. You can limit the buffer size via
+neither is provided, a fully abstract calldata of at most `2**24` bytes
+(16 MB) is assumed. Gas limits keep real calldata well below that, so this
+covers all meaningful cases. You can change the buffer size via
 `--max-buf-size`, which sets the exponent of the size, i.e. 10 would limit the
 calldata to `2**10` bytes.
 
@@ -124,6 +124,28 @@ REVERT
 
 Are considered different, as one of them reverts (i.e. fails) and the other
 succeeds.
+
+## Confirming counterexamples
+
+Every counterexample is replayed: A and B are run concretely on its input,
+with the values the solver chose for the caller, call value, storage and block,
+and their return data, errors and final storage are compared. A counterexample
+is reported as validated if the two concrete runs differ, as not reproducible
+if they do not, and as not replayable if it cannot be run concretely (e.g. for
+`--create`). hevm only reports that the contracts do not behave equivalently if
+at least one counterexample is validated; otherwise it reports that they may
+not behave equivalently. Counterexamples that do not reproduce typically come
+from over-approximations, e.g. of calls to unknown code, which can return
+anything.
+
+## Calls to unknown code
+
+A call to code that hevm does not know returns symbolic values. Calls with the
+same inputs, in the same program or in A and B, return the same values: the
+results are uninterpreted functions of everything the callee can observe, i.e.
+the call's target, kind, value and calldata, the caller's address, storage,
+transient storage and balance, and the effects of earlier state-changing calls.
+Gas is not among them, as hevm does not model gas.
 
 ## Creation code equivalence
 

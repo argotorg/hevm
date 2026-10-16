@@ -210,6 +210,7 @@ main = do
         stdout `shouldContain` "[FAIL]"
         stdout `shouldContain` "[validated]"
       it "dump unsolved" $ do
+        -- z3, as bitwuzla solves this within the timeout
         -- >>> (139487132679483*2347234698674) % 982374892374389278894734
         -- 278198683154907855159120
         Just c <- runApp $ solcRuntime (T.pack "C") (T.pack [i|
@@ -225,7 +226,7 @@ main = do
            }
           |])
         let hexStr = Types.bsToHex c
-        _ <- readProcessWithExitCode "cabal" ["run", "exe:hevm", "--", "symbolic", "--code", hexStr, "--smt-timeout", "1", "--dump-unsolved", "."] ""
+        _ <- readProcessWithExitCode "cabal" ["run", "exe:hevm", "--", "symbolic", "--code", hexStr, "--solver", "z3", "--smt-timeout", "1", "--dump-unsolved", "."] ""
         let filename = "query-unsolved-0.smt2"
         fileExists <- doesFileExist filename
         shouldBe fileExists True

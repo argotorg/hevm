@@ -32,7 +32,7 @@ import Witch (unsafeInto)
 import Options.Generic as OptionsGeneric
 import Options.Applicative as Options
 import Paths_hevm qualified as Paths
-import System.Directory (withCurrentDirectory, getCurrentDirectory, doesDirectoryExist, makeAbsolute)
+import System.Directory (withCurrentDirectory, getCurrentDirectory, doesDirectoryExist, makeAbsolute, findExecutable)
 import System.FilePath ((</>))
 import System.Exit (exitFailure, exitWith, ExitCode(..))
 import Data.List.Split (splitOn)
@@ -56,6 +56,8 @@ import EVM.Types qualified
 import EVM.UnitTest
 import EVM.Effects
 import EVM.Expr (maybeLitWordSimp, maybeLitAddrSimp)
+import EVM.Progress (withProgress, ProgressOpts(..))
+import EVM.Progress qualified as Progress
 import EVM.Tracing (interpretWithTrace, VMTraceStepResult(..))
 
 data AssertionType = DSTest | Forge
@@ -104,6 +106,10 @@ data CommonOptions = CommonOptions
   , mergeMaxBudget :: Int
   , maxDynSize    ::Int
   , noAbstractArith ::Bool
+  , noHashCons    ::Bool
+  , progressLog   ::Maybe FilePath
+  , progressExprs ::Bool
+  , noProgress    ::Bool
   }
 
 commonOptions :: Parser CommonOptions
@@ -113,11 +119,11 @@ commonOptions = CommonOptions
   <*> option auto (long "loop-detection-heuristic" <> showDefault <> value StackBased <>
     help "Which heuristic should be used to determine if we are in a loop: StackBased or Naive")
   <*> (switch $ long "no-decompose"         <> help "Don't decompose storage slots into separate arrays")
-  <*> (strOption $ long "solver"            <> value "z3" <> help "Used SMT solver: z3, cvc5, or bitwuzla")
+  <*> (strOption $ long "solver"            <> value "bitwuzla" <> help "Used SMT solver: bitwuzla (default), z3, or cvc5")
   <*> (switch $ long "debug"                <> help "Debug printing of internal behaviour, and dump internal expressions")
   <*> (optional $ strOption $ long "calldata" <> help "Tx: calldata")
   <*> (switch $ long "trace"                <> help "Dump trace")
-  <*> (option auto $ long "verb"            <> showDefault <> value 1 <> help "Append call trace: {1} failures {2} all")
+  <*> (option auto $ long "verb"            <> showDefault <> value 1 <> help "Append call trace: {1} failures {2} all {3} also log progress to hevm-progress.jsonl {4} also log solver expressions there")
   <*> (optional $ strOption $ long "root"   <> help "Path to  project root directory")
   <*> (option auto $ long "assertion-type"  <> showDefault <> value Forge <> help "Assertions as per Forge or DSTest")
   <*> (option auto $ long "smt-timeout"     <> value 300 <> help "Timeout given to SMT solver in seconds. Not available on Windows")
@@ -127,7 +133,7 @@ commonOptions = CommonOptions
   <*> (optional $ option auto $ long "num-solvers" <> help "Number of solver instances to use (default: number of cpu cores)")
   <*> (option auto $ long "max-iterations"  <> showDefault <> value 5 <> help "Number of times we may revisit a particular branching point. For no bound, set -1")
   <*> (switch $ long "promise-no-reent"     <> help "Promise no reentrancy is possible into the contract(s) being examined")
-  <*> (option auto $ long "max-buf-size"    <> value 64 <> help "Maximum size of buffers such as calldata and returndata in exponents of 2 (default: 64, i.e. 2^64 bytes)")
+  <*> (option auto $ long "max-buf-size"    <> value 24 <> help "Maximum size of buffers such as calldata and returndata in exponents of 2 (default: 24, i.e. 16 MB, more than gas limits allow)")
   <*> (option auto $ long "max-width"      <> showDefault <> value 100 <> help "Max number of concrete values to explore when encountering a symbolic value. This is a form of branch width limitation per symbolic value")
   <*> (optional $ option auto $ long "max-depth" <> help "Limit maximum depth of branching during exploration (default: unlimited)")
   <*> (switch $ long "no-simplify" <> help "Don't perform simplification of expressions")
@@ -137,6 +143,10 @@ commonOptions = CommonOptions
   <*> (option auto $ long "merge-max-budget" <> showDefault <> value 100 <> help "Max instructions for speculative merge exploration during path merging")
   <*> (option auto $ long "max-dyn-size" <> showDefault <> value 64 <> help "Max byte length for concretized dynamic types (bytes, string) in symbolic arguments")
   <*> (switch $  long "no-abstract-arith" <> help "Don't abstract symbolic multiplication and division as uninterpreted functions with sound lemmas; use native bitvector arithmetic instead")
+  <*> (switch $ long "no-hash-cons" <> help "Don't hash-cons (share equal subterms of) the symbolic VM state during exploration")
+  <*> (optional $ strOption $ long "progress-log" <> help "Write a JSONL log of interpreter and solver progress to this file (default with --verb 3: hevm-progress.jsonl)")
+  <*> (switch $ long "progress-exprs" <> help "Also log the expressions and path conditions sent to the solver in the progress log (implied by --verb 4)")
+  <*> (switch $ long "no-progress" <> help "Don't show the live status line on stderr")
 
 data CommonExecOptions = CommonExecOptions
   { address       ::Maybe Addr
@@ -327,17 +337,17 @@ main = do
     Symbolic cFileOpts symbOpts cExecOpts cOpts -> do
       env <- makeEnv cOpts
       root <- getRoot cOpts
-      withCurrentDirectory root $ runEnv env $ symbCheck cFileOpts symbOpts cExecOpts cOpts
+      withCurrentDirectory root $ runEnv env $ withProgress (progressOpts env cOpts True) $ symbCheck cFileOpts symbOpts cExecOpts cOpts
     Equal eqOpts cOpts -> do
       env <- makeEnv cOpts
-      runEnv env $ equivalence eqOpts cOpts
+      runEnv env $ withProgress (progressOpts env cOpts True) $ equivalence eqOpts cOpts
     Test testOpts cOpts -> do
       env <- makeEnv cOpts
       root <- getRoot cOpts
       solver <- getSolver cOpts.solver
       cores <- liftIO $ unsafeInto <$> getNumProcessors
       let solverCount = fromMaybe cores cOpts.numSolvers
-      runEnv env $ withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
+      runEnv env $ withProgress (progressOpts env cOpts False) $ withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
         buildOut <- readBuildOutput root testOpts.projectType
         case buildOut of
           Left e -> liftIO $ do
@@ -356,6 +366,13 @@ main = do
       runEnv env $ launchExec cFileOpts execOpts cExecOpts cOpts
     Version {} ->putStrLn getFullVersion
   where
+    -- the status line is only for commands that print their results at the end
+    progressOpts :: Env -> CommonOptions -> Bool -> ProgressOpts
+    progressOpts env cOpts printsAtEnd = ProgressOpts
+      { logFile = env.config.progressLog
+      , logExprs = env.config.progressExprs
+      , statusLine = printsAtEnd && Prelude.not cOpts.noProgress && Prelude.not cOpts.debug
+      }
     makeEnv :: CommonOptions -> IO Env
     makeEnv cOpts = do
       when (cOpts.maxBufSize > 64) $ do
@@ -383,7 +400,13 @@ main = do
         , mergeMaxBudget = cOpts.mergeMaxBudget
         , maxDynSize = cOpts.maxDynSize
         , abstractArith = Prelude.not cOpts.noAbstractArith
+        , hashConsExplore = Prelude.not cOpts.noHashCons
+        , progressLog = progressFile cOpts
+        , progressExprs = cOpts.progressExprs || cOpts.verb >= 4
         } }
+    progressFile cOpts = case cOpts.progressLog of
+      Nothing | cOpts.verb >= 3 -> Just "hevm-progress.jsonl"
+      f -> f
 
 
 getCode :: App m => Maybe String -> Maybe ByteString -> m (Maybe ByteString)
@@ -430,19 +453,25 @@ equivalence eqOpts cOpts = do
     sess <- Fetch.mkSession cOpts.cacheDir Nothing
     eq <- equivalenceCheck s (Just sess) (fromJust bytecodeA) (fromJust bytecodeB) veriOpts calldata eqOpts.create
     let anyIssues =  not (null eq.partials) || any (isUnknown . fst) eq.res  || any (isError . fst) eq.res
-    liftIO $ case (any (isCex . fst) eq.res, anyIssues) of
-      (False, False) -> putStrLn "   \x1b[32m[PASS]\x1b[0m Contracts behave equivalently"
-      (True, _)      -> putStrLn "   \x1b[31m[FAIL]\x1b[0m Contracts do not behave equivalently"
-      (_, True)      -> putStrLn "   \x1b[31m[FAIL]\x1b[0m Contracts may not behave equivalently"
+        cd = AbstractBuf "txdata"
+    cexes <- replayEqCexes s eqOpts.create (fromJust bytecodeA) (fromJust bytecodeB) cd (mapMaybe getCexP eq.res)
+    let nValidated = length [() | (_, _, Validated {}) <- cexes]
+    Progress.markPhase "report" [("cexes", length cexes), ("validated", nValidated), ("partials", length eq.partials)]
+    Progress.stopStatus
+    liftIO $ case (nValidated > 0, null cexes && Prelude.not anyIssues) of
+      (True, _) -> putStrLn "   \x1b[31m[FAIL]\x1b[0m Contracts do not behave equivalently"
+      (_, True) -> putStrLn "   \x1b[32m[PASS]\x1b[0m Contracts behave equivalently"
+      _         -> putStrLn "   \x1b[31m[FAIL]\x1b[0m Contracts may not behave equivalently"
     liftIO $ printWarnings Nothing mempty eq.partials (map fst eq.res) "the contracts under test"
-    case any (isCex . fst) eq.res of
-      False -> liftIO $ do
+    case cexes of
+      [] -> liftIO $ do
         when anyIssues exitFailure
         putStrLn "No discrepancies found"
-      True -> liftIO $ do
-        let cexes = mapMaybe getCexP eq.res
+      _ -> liftIO $ do
         T.putStrLn . T.unlines $
-          [ "Not equivalent. The following inputs result in differing behaviours:"
+          [ if nValidated > 0
+              then "Not equivalent. The following inputs result in differing behaviours:"
+              else "Possibly not equivalent: none of these inputs could be confirmed by running A and B concretely:"
           , "" , "-----", ""
           ] <> (intersperse (T.unlines [ "", "-----" ]) $ fmap formatCexes cexes)
         exitFailure
@@ -451,17 +480,28 @@ equivalence eqOpts cOpts = do
     getCexP :: (ProofResult a b, String) -> Maybe (a, String)
     getCexP (Cex c, reason) = Just (c, reason)
     getCexP _ = Nothing
-    formatCexes (cex, reason) = formatCex (AbstractBuf "txdata") Nothing cex <> "Difference: " <> T.pack reason
+    formatCexes (cex, reason, replay) = formatCex (AbstractBuf "txdata") Nothing cex <> "Difference: " <> T.pack reason
+      <> "\nConcrete replay: " <> replayTag replay <> case replay of
+        Validated a b -> "\n  A: " <> a <> "\n  B: " <> b
+        NotReproducible a b -> "\n  A: " <> a <> "\n  B: " <> b
+        CannotReplay _ -> ""
 
 getSolver :: Text -> IO Solver
 getSolver s = case T.unpack s of
-  "z3" -> pure Z3
-  "cvc5" -> pure CVC5
-  "bitwuzla" -> pure Bitwuzla
+  "z3" -> onPath "z3" Z3
+  "cvc5" -> onPath "cvc5" CVC5
+  "bitwuzla" -> onPath "bitwuzla" Bitwuzla
   "empty" -> pure EmptySolver
   input -> do
     putStrLn $ "unrecognised solver: " <> input
     exitFailure
+  where
+    onPath name solver = findExecutable name >>= \case
+      Just _ -> pure solver
+      Nothing -> do
+        putStrLn $ "Error: the SMT solver " <> name <> " is not installed (not found in PATH). "
+          <> "Install it, or pick another one with --solver (bitwuzla, z3, or cvc5)."
+        exitFailure
 
 getSrcInfo :: App m => ExecOptions -> CommonOptions -> m DappInfo
 getSrcInfo execOpts cOpts = do
@@ -535,6 +575,7 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = do
                             }
     let fetcher = Fetch.oracle solvers (Just sess) veriOpts.rpcInfo
     (expr, res) <- verify solvers fetcher veriOpts preState (checkAssertions errCodes) Nothing
+    Progress.stopStatus
     liftIO $ forM_ ((,) <$> cOpts.cacheDir <*> cExecOpts.block) $ \(dir, block) -> do
       cache <- readMVar sess.sharedCache
       Fetch.saveCache dir block cache

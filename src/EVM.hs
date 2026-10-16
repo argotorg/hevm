@@ -14,6 +14,7 @@ import EVM.ABI
 import EVM.Expr (readStorage, concStoreContains, writeStorage, readByte, readWord, writeWord,
   writeByte, bufLength, indexWord, readBytes, copySlice, wordToAddr, maybeLitByteSimp, maybeLitWordSimp, maybeLitAddrSimp)
 import EVM.Expr qualified as Expr
+import EVM.HashCons qualified as HashCons
 import EVM.FeeSchedule (FeeSchedule (..))
 import EVM.FeeSchedule qualified as Fees (feeSchedule)
 import EVM.Merge qualified as Merge
@@ -120,6 +121,7 @@ blankState = do
     , static       = False
     , overrideCaller = Nothing
     , resetCaller  = False
+    , lastGasReading = Nothing
     }
 
 -- | An "external" view of a contract's bytecode, appropriate for
@@ -185,6 +187,7 @@ makeVm o = do
       , static = False
       , overrideCaller = Nothing
       , resetCaller = False
+      , lastGasReading = Nothing
       }
     , env = env
     , burned = initialGas
@@ -213,6 +216,7 @@ makeVm o = do
       , contracts = Map.fromList ((o.address,o.contract):o.otherContracts)
       , freshAddresses = o.freshAddresses
       , freshGasVals = 0
+      , callWorld = Lit 0
       }
     block = Block
       { coinbase = o.coinbase
@@ -496,7 +500,7 @@ exec1 conf = do
                             modifying' #keccakPreImgs (insert (bs, kc))
                           pure $ Lit kc
                         )
-                    buf -> pure $ Keccak buf
+                    buf -> pure $ HashCons.hashConsExpr (Keccak buf)
                   next
                   assign' (#state % #stack) (hash : xs)
             _ -> underrun
@@ -794,9 +798,9 @@ exec1 conf = do
 
                 symbolicRead :: EVM t () = if this.external
                   then accessStorage self x finalizeLoad
-                  else let slot = Expr.concKeccakOnePass x
+                  else let slot = HashCons.hashConsExpr (Expr.concKeccakOnePass x)
                            preMap = Map.fromList [ (h, bs) | (bs, h) <- toList vm.keccakPreImgs ]
-                       in finalizeLoad $ Expr.readStorage' slot (Expr.filterStoreByReadSlot preMap slot this.storage)
+                       in finalizeLoad $ HashCons.hashConsExpr (Expr.readStorage' slot (Expr.filterStoreByReadSlot preMap slot this.storage))
 
                 concreteRead :: EVM t () = do
                   acc <- accessStorageForGas self (forceLit x)
@@ -989,7 +993,7 @@ exec1 conf = do
                             touchAccount from'
                             touchAccount callee
                             transfer from' callee xValue
-              where fallback = freshBufFallback xs
+              where fallback = freshBufFallback xTo' xValue xInOffset xInSize True xs
             _ -> underrun
 
         OpCallcode -> {-# SCC "OpCallcode" #-}
@@ -1095,7 +1099,7 @@ exec1 conf = do
                       touchAccount self
                       touchAccount callee
                 where
-                  fallback = freshBufFallback xs
+                  fallback = freshBufFallback xTo (Lit 0) xInOffset xInSize False xs
             _ -> underrun
 
         OpSelfdestruct -> {-# SCC "OpSelfdestruct" #-}
@@ -1756,12 +1760,20 @@ unexpectedSymArgW msg n = unexpectedSymArg msg [n]
 unknownCode :: VMOps t => Expr EAddr -> EVM t ()
 unknownCode n = unexpectedSymArg "call target has unknown code" [n]
 
-freshBufFallback :: (?conf :: Config, VMOps t, ?op :: Word8) => [Expr EWord] -> EVM t ()
-freshBufFallback xs = do
+-- | Overapproximates a call to unknown code with fresh results, defined as
+-- functions of the call's inputs (see 'PCall'), so that calls with equal
+-- inputs, e.g. in the two programs of an equivalence check, get equal results.
+freshBufFallback :: (?conf :: Config, VMOps t, ?op :: Word8)
+  => Expr EWord -> Expr EWord -> Expr EWord -> Expr EWord -> Bool -> [Expr EWord] -> EVM t ()
+freshBufFallback target value inOffset inSize changesState xs = do
+  self <- use (#state % #contract)
+  caller <- fromMaybe self <$> use (#state % #overrideCaller)
+  callee <- use (#env % #contracts % at self)
+  calldata <- readMemory inOffset inSize
+  world <- use (#env % #callWorld)
   -- Reset caller if needed
   resetCaller <- use $ #state % #resetCaller
   when resetCaller $ assign (#state % #overrideCaller) Nothing
-  -- overapproximate by returning a symbolic value
   freshVar <- use #freshVar
   assign #freshVar (freshVar + 1)
   let opName = pack $ show $ getOp ?op
@@ -1769,6 +1781,21 @@ freshBufFallback xs = do
   modifying #constraints ((:) (PLEq freshVarExpr (Lit 1) ))
   let freshReturndataExpr = AbstractBuf (opName <> "-result-data-fresh-" <> (pack . show) freshVar)
   modifying #constraints ((:) (PLEq (bufLength freshReturndataExpr) (Lit (2 ^ ?conf.maxBufSize))))
+  let worldAfter = if changesState then Just (Var (opName <> "-world-fresh-" <> (pack . show) freshVar)) else Nothing
+      inputs = CallInputs
+        { world = world
+        , callKind = Lit (into ?op)
+        , target = target
+        , callValue = value
+        , callData = calldata
+        , callDataLen = inSize
+        , caller = caller
+        , callerStorage = maybe (AbstractStore self Nothing) (.storage) callee
+        , callerTStorage = maybe (AbstractStore self Nothing) (.tStorage) callee
+        , callerBalance = maybe (Balance self) (.balance) callee
+        }
+  modifying #constraints ((:) (PCall inputs freshVarExpr freshReturndataExpr worldAfter))
+  mapM_ (assign (#env % #callWorld)) worldAfter
   assign (#state % #returndata) freshReturndataExpr
   next >> assign' (#state % #stack) (freshVarExpr:xs)
 
@@ -3283,7 +3310,7 @@ stackOp1 cost f =
     x:xs ->
       burn cost $ do
         next
-        let !y = f x
+        let !y = HashCons.hashConsExpr (f x)
         assign' (#state % #stack) $ y : xs
     _ ->
       underrun
@@ -3298,7 +3325,7 @@ stackOp2 cost f =
     x:y:xs ->
       burn cost $ do
         next
-        assign' (#state % #stack) $ f x y : xs
+        assign' (#state % #stack) $ HashCons.hashConsExpr (f x y) : xs
     _ ->
       underrun
 
@@ -3312,7 +3339,7 @@ stackOp3 cost f =
     x:y:z:xs ->
       burn cost $ do
       next
-      assign' (#state % #stack) $ f x y z : xs
+      assign' (#state % #stack) $ HashCons.hashConsExpr (f x y z) : xs
     _ ->
       underrun
 
@@ -3629,7 +3656,12 @@ instance VMOps Symbolic where
   pushGas = do
     modifying (#env % #freshGasVals) (+ 1)
     n <- use (#env % #freshGasVals)
-    pushSym $ Expr.Gas "" n
+    let g = Expr.Gas "" n
+    -- GAS costs gas, so the readings within one call frame strictly decrease
+    prev <- use (#state % #lastGasReading)
+    mapM_ (\p -> pushTo #constraints (PGT p g)) prev
+    assign (#state % #lastGasReading) (Just g)
+    pushSym g
   enoughGas _ _ = True
   subGas _ _ = ()
   toGas _ = ()

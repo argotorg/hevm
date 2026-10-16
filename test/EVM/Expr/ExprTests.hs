@@ -1,4 +1,6 @@
 {-# LANGUAGE TypeAbstractions #-}
+{-# LANGUAGE StaticPointers #-}
+{-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -Wno-incomplete-uni-patterns #-} -- It's OK to crash in tests if the pattern does not match
 
 module EVM.Expr.ExprTests (tests) where
@@ -14,7 +16,7 @@ import Control.Monad.Reader (ReaderT)
 import Data.Bits (shiftL)
 import Data.ByteString qualified as BS (drop, length, pack, take)
 import Data.Containers.ListUtils (nubOrd)
-import Data.List qualified as List (nub, tails)
+import Data.List qualified as List (nub, sort, tails)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust)
 import Data.Text (Text)
@@ -24,6 +26,8 @@ import Numeric.Natural (Natural)
 import EVM.Effects
 import EVM.Expr qualified as Expr
 import EVM.Expr.Generator
+import EVM.Expr.Probe (probes, contract)
+import EVM.HashCons qualified as HC
 import EVM.Format (hexText)
 import EVM.SMT (AbstractQuery(..), SMT2(..), SMTScript(..), assertPropsAbstract)
 import EVM.Solvers hiding (checkSat)
@@ -45,7 +49,44 @@ unitTests = testGroup "Unit tests"
   , comparisonTests
   , signExtendTests
   , concretizationTests
+  , traversalTests
   ]
+
+traversalTests :: TestTree
+traversalTests = testCase "every-field-is-traversed" $ assertBool (unlines missed) (null missed)
+  where
+    cases = $(probes [| SomeExpr |] ['GVar] ''Expr)
+      <> [ (SomeExpr (Failure [] mempty e), ms) | (e, ms) <- $(probes [| id |] [] ''EvmError) ]
+      <> [ (SomeExpr (Partial [] mempty p), ms) | (p, ms) <- $(probes [| id |] [] ''PartialExec) ]
+      <> [ (SomeExpr (contract c), ms) | (c, ms) <- $(probes [| id |] [] ''ContractCode) ]
+      <> [ (SomeExpr (Failure [p] mempty StackUnderrun), ms) | (p, ms) <- $(probes [| id |] [] ''Prop) ]
+    missed =
+      [ name <> " misses a field of " <> show e
+      | (SomeExpr e, ms) <- cases
+      , let renamed = List.sort (fmap (<> "'") ms)
+      , (name, ok) <-
+          [ ("foldExpr", List.sort (foldExpr probeName ["acc"] e) == List.sort ("acc" : ms))
+          , ("mapExpr", names (mapExpr renameProbe e) == renamed)
+          , ("memoFixTraverse", names (HC.memoFixTraverse (static (HC.Rewrite renameProbe)) e) == renamed)
+          ]
+      , not ok ]
+    names :: Expr a -> [Text]
+    names = List.sort . foldExpr probeName []
+    probeName :: Expr a -> [Text]
+    probeName = \case
+      Var n -> [n]; AbstractBuf n -> [n]; SymAddr n -> [n]; Gas n _ -> [n]
+      -- the address is part of this leaf, not a child
+      AbstractStore (SymAddr n) _ -> [n]
+      _ -> []
+
+renameProbe :: Expr a -> Expr a
+renameProbe = \case
+  Var n -> Var (n <> "'")
+  AbstractBuf n -> AbstractBuf (n <> "'")
+  SymAddr n -> SymAddr (n <> "'")
+  Gas n i -> Gas (n <> "'") i
+  AbstractStore (SymAddr n) w -> AbstractStore (SymAddr (n <> "'")) w
+  e -> e
 
 simplificationTests :: TestTree
 simplificationTests = testGroup "Expr-rewriting"
@@ -1535,6 +1576,42 @@ wrappingTests = testGroup "W256 wrapping edge cases"
           simplified = Expr.copySlice (Lit srcOff) (Lit 0) (Lit size) srcBuf dstBuf
       result <- proveEquivExpr full simplified
       assertBool "copySlice with wrapping srcOffset" result
+
+  , testCase "writeWord-wrapping-write-stays-on-top" $ do
+      let lower = WriteWord (Lit 0) (Var "x") (AbstractBuf "b")
+          full = ReadWord (Lit 0) (WriteWord (Lit maxBound) (Var "v") lower)
+          simplified = ReadWord (Lit 0) (Expr.writeWord (Lit maxBound) (Var "v") lower)
+          nested = WriteWord (Lit maxBound) (Var "v") (WriteWord (Lit 0x2a) (Var "x") (AbstractBuf "b"))
+      result <- proveEquivExpr full simplified
+      assertBool "writeWord with a wrapping offset over a lower write" result
+      assertEqual "simplify terminates" nested (Expr.simplify nested)
+
+  , testCase "copySlice-short-from-writeWord-terminates" $ do
+      let buf = CopySlice (Var "c") (Lit 0x26) (Lit 3) (WriteWord (Var "c") (Var "x") (AbstractBuf "b")) (AbstractBuf "b")
+          expected = CopySlice (Lit 0) (Lit 0x26) (Lit 3) (WriteWord (Lit 0) (Var "x") (ConcreteBuf "")) (AbstractBuf "b")
+      assertEqual "" expected (Expr.simplify buf)
+
+  , testCase "bufLength-copySlice-symbolic-size-zero" $ do
+      let len = Expr.bufLength (CopySlice (Lit 0x30) (Lit 0x4b) (Var "s") (AbstractBuf "b") (ConcreteBuf ""))
+          at :: W256 -> Expr EWord
+          at v = Expr.simplify (mapExpr (\case { Var "s" -> Lit v; e -> e }) len)
+      assertEqual "a copy of zero bytes does not grow the buffer" (Lit 0) (at 0)
+      assertEqual "" (Lit 0x50) (at 5)
+
+  , testCase "readWord-wrap-over-low-writeByte" $ do
+      let buf = WriteByte (Lit 5) (LitByte 0xAB) (ConcreteBuf (BS.pack [1..50]))
+          full = ReadWord (Lit maxBound) buf
+      result <- proveEquivExpr full (Expr.readWord (Lit maxBound) buf)
+      assertBool "readWord wrapping onto a WriteByte at a low index" result
+
+  , testCase "readWord-wrap-over-low-copySlice" $ do
+      let buf = CopySlice (Lit 0) (Lit 0) (Lit 3) (AbstractBuf "src") (AbstractBuf "dst")
+          full = ReadWord (Lit maxBound) buf
+      result <- proveEquivExpr full (Expr.readWord (Lit maxBound) buf)
+      assertBool "readWord wrapping onto a CopySlice at a low index" result
+
+  , testCase "show-addr-leaves-rest-alone" $
+      assertEqual "" "(0x0000000000000000000000000000000000001234,Just 1)" (show (Addr 0x1234, Just (1 :: Int)))
   ]
 
 fuzzTests :: TestTree

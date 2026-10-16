@@ -50,6 +50,8 @@ import qualified Data.Text.Lazy.Builder.Int (decimal)
 import System.Process (createProcess, cleanupProcess, proc, ProcessHandle, std_in, std_out, std_err, StdStream(..), createPipe)
 import System.FilePath ((</>))
 import EVM.Effects
+import EVM.Progress qualified as Progress
+import Data.Aeson ((.=))
 import Data.Bits ((.&.))
 import Numeric (showHex)
 import EVM.Expr (simplifyProps)
@@ -166,7 +168,8 @@ supersetAny a bs = any (`isSubsetOf` a) bs
 checkMulti :: SolverGroup -> Err SMT2 -> MultiSol -> IO (Maybe [W256])
 checkMulti (SolverGroup taskq _) smt2 multiSol = do
   if isLeft smt2 then pure Nothing
-  else do
+  else Progress.timedQuery "multi" ["numBytes" .= multiSol.numBytes, "maxSols" .= multiSol.maxSols]
+         (maybe "gave up" (\vs -> TStrict.pack (show (length vs)) <> " solutions")) $ do
     -- prepare result channel
     resChan <- newChan
     -- send task to solver group
@@ -211,13 +214,21 @@ checkSat sg props smt2 = fst <$> checkSat' sg props Nothing mempty smt2
 checkSat' :: SolverGroup -> Maybe [Prop] -> Maybe (TVar Bool) -> SMTScript -> Err SMT2 -> IO (SMTResult, SolvePhase)
 checkSat' (SolverGroup taskq _) props shouldAbort refinement smt2 = do
   if isLeft smt2 then pure (Error $ getError smt2, PhaseNone)
-  else do
+  else Progress.timedQuery "sat" ["props" .= maybe 0 length props] showRes $ do
     -- prepare result channel
     resChan <- newChan
     -- send task to solver group
     writeChan taskq (TaskSingle (SingleData (getNonError smt2) refinement props shouldAbort resChan))
     -- collect result
     readChan resChan
+
+    where
+      showRes :: (SMTResult, SolvePhase) -> TStrict.Text
+      showRes (r, phase) = (<> " (" <> TStrict.pack (show phase) <> ")") $ case r of
+        Qed -> "unsat"
+        Cex _ -> "sat"
+        Unknown _ -> "unknown"
+        Error e -> "error: " <> TStrict.take 300 (TStrict.pack e)
 
 writeSMT2File :: SMT2 -> FilePath -> String -> IO ()
 writeSMT2File smt2 path postfix = do
@@ -284,14 +295,17 @@ getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r solve
           writeChan r (Just vals)
         "timeout" -> do
            when conf.debug $ putStrLn "Timeout inside SMT solver."
+           Progress.emit "multi-stop" ["reason" .= ("timeout" :: TStrict.Text), "solutions" .= length vals]
            writeChan r Nothing
         "unknown" -> do
            when conf.debug $ putStrLn "Unknown result by SMT solver."
+           Progress.emit "multi-stop" ["reason" .= ("unknown" :: TStrict.Text), "solutions" .= length vals]
            dumpUnsolved fullSmt fileCounter conf.dumpUnsolved
            writeChan r Nothing
         "sat" -> do
           if length vals >= multiSol.maxSols then do
             when conf.debug $ putStrLn "Too many solutions to symbolic query."
+            Progress.emit "multi-stop" ["reason" .= ("too many solutions" :: TStrict.Text), "solutions" .= length vals]
             writeChan r Nothing
           else do
             mcex <- getModel inst cexvars
@@ -317,10 +331,12 @@ getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r solve
                       subRun inst (maskedVal:vals) newSmt out2
                     err -> do
                       when conf.debug $ putStrLn $ "Error while writing SMT to solver: " <> (T.unpack err)
+                      Progress.emit "multi-stop" ["reason" .= ("solver error: " <> TStrict.take 300 (T.toStrict err)), "solutions" .= length vals]
                       writeChan r Nothing
                 Nothing -> internalError $ "variable " <>  multiSol.var <> " not part of model (i.e. cex) ... that's not possible"
         err -> do
           when conf.debug $ putStrLn $ "Error while writing SMT to solver: " <> (T.unpack err)
+          Progress.emit "multi-stop" ["reason" .= ("solver error: " <> TStrict.take 300 (T.toStrict err)), "solutions" .= length vals]
           writeChan r Nothing
   liftIO $ bracket_
     (waitQSem solverSlots)

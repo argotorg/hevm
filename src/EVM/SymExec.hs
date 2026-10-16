@@ -15,7 +15,8 @@ import Control.Concurrent.STM.TVar (TVar, newTVarIO, modifyTVar, readTVar, readT
 import Control.Concurrent.STM.TMVar (TMVar, putTMVar, takeTMVar, newEmptyTMVarIO)
 import Control.Monad (when, unless, forM_, forM, forever, void)
 import Control.Monad.Loops (whileM)
-import Control.Monad.IO.Unlift (MonadUnliftIO, toIO, withRunInIO)
+import Control.Exception (evaluate)
+import Control.Monad.IO.Unlift (MonadIO, MonadUnliftIO, toIO, withRunInIO)
 import Control.Monad.Operational qualified as Operational
 import Control.Monad.ST (RealWorld, stToIO, ST)
 import Control.Monad.State.Strict (liftIO, runStateT)
@@ -31,6 +32,8 @@ import Data.Map.Strict qualified as Map
 import Data.Map.Merge.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
+import Data.Aeson ((.=))
+import Data.Aeson qualified as JSON
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
@@ -54,12 +57,14 @@ import EVM.Fetch qualified as Fetch
 import EVM.ABI
 import EVM.Effects
 import EVM.Expr qualified as Expr
+import EVM.Progress qualified as Progress
 import EVM.Format (formatExpr, formatPartial, formatPartialDetailed, showVal, indent, formatBinary, formatProp, formatState, formatError)
 import EVM.SMT qualified as SMT
 import EVM.Solvers (SolverGroup, checkSatWithProps, checkSatWithPropsAbortable)
 import EVM.Stepper (Stepper)
 import EVM.Stepper qualified as Stepper
 import EVM.Traversals (mapExpr, mapExprM, foldTerm)
+import EVM.HashCons qualified as HashCons
 import EVM.Types hiding (Comp)
 import EVM.Types qualified
 data LoopHeuristic
@@ -385,6 +390,9 @@ interpret :: forall m a . App m
 interpret fetcher iterConf vm stepper handler = do
   shouldAbort <- liftIO $ newTVarIO False
   conf <- readConfig
+  -- the flag is process-wide and outlives this exploration
+  liftIO $ do HashCons.setHashConsEnabled conf.hashConsExplore
+              HashCons.resetHashCons
   taskQ <- liftIO newChan
   processQ <- liftIO newChan
 
@@ -401,6 +409,7 @@ interpret fetcher iterConf vm stepper handler = do
   availableProcs <- liftIO newChan
   liftIO $ forM_ procInstances (writeChan availableProcs)
   numTasks <- liftIO $ newTVarIO 1
+  Progress.setTaskCounter (fromIntegral <$> readTVarIO numTasks)
   numProcs <- liftIO $ newTVarIO 0
   allProcessDone <- liftIO newEmptyTMVarIO
 
@@ -494,6 +503,13 @@ getOneExpr :: forall m a . App m
   -> m ()
 getOneExpr task availableInstances processQ numTasks numProcs = do
   out <- interpretInternal task
+  Progress.clearWorker
+  Progress.pathDone (isPartial out)
+  Progress.emit "path-end" $ case out of
+    Partial _ _ reason -> ["leaf" .= ("partial" :: Text), "reason" .= T.take 2000 (formatPartial reason)]
+    Failure _ _ err -> ["leaf" .= ("failure" :: Text), "reason" .= T.pack (show err)]
+    Success {} -> ["leaf" .= ("success" :: Text)]
+    _ -> ["leaf" .= T.take 200 (T.pack (show out))]
 
   -- Enqueue for processing
   let process = Process { result = out, handler = task.handler }
@@ -516,7 +532,14 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
   where
   eval :: Operational.ProgramView (Stepper.Action Symbolic) (Expr End) -> m (Expr End)
   eval (Operational.Return x) = pure x
-  eval (action Operational.:>>= k) =
+  eval (action Operational.:>>= k) = do
+    Progress.setWorker
+      [ "pc" .= vm.state.pc
+      , "addr" .= T.pack (show vm.state.contract)
+      , "frames" .= length vm.frames
+      , "exploreDepth" .= vm.exploreDepth
+      , "step" .= stepName action
+      ]
     case action of
       Stepper.Exec -> do
         conf <- readConfig
@@ -527,6 +550,8 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
         interpretInternal t { vm = vm', stepper = (k r) }
       Stepper.Fork (PleaseRunAll vals continue) -> do
         when (length vals < 2) $ internalError "PleaseRunAll requires at least 2 branches"
+        Progress.emit "fork" [ "pc" .= vm.state.pc, "addr" .= T.pack (show vm.state.contract)
+                             , "branches" .= length vals, "values" .= map (T.pack . show) (take 20 vals) ]
         frozen <- liftIO $ stToIO $ freezeVM vm
         let newDepth = vm.exploreDepth+1
         runOne frozen newDepth vals
@@ -549,6 +574,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
             runOne frozen newDepth rest
           runOne _ _ [] = internalError "unreachable"
       Stepper.Fork (PleaseRunBoth continue) -> do
+        Progress.emit "fork" ["pc" .= vm.state.pc, "addr" .= T.pack (show vm.state.contract), "branches" .= (2 :: Int)]
         conf <- readConfig
         frozen <- liftIO $ stToIO $ freezeVM vm
         let newDepth = vm.exploreDepth+1
@@ -565,6 +591,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
         interpretInternal t { vm = vmb, stepper = (k rb) }
       Stepper.Wait q -> do
         let performQuery = do
+              logQueryExprs q
               m <- fetcher q
               (r, vm') <- liftIO$ stToIO $ runStateT m vm
               interpretInternal t { vm = vm', stepper = (k r) }
@@ -602,13 +629,39 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
                     -- ask the smt solver about the loop condition
                     performQuery
                   _ -> do
-                    let simpProps = Expr.concKeccakSimpProps ((cond ./= Lit 0):preconds)
-                    (r, vm') <- case simpProps of
-                      [PBool False] -> liftIO $ stToIO $ runStateT (continue (Case False)) vm
-                      [] -> liftIO $ stToIO $ runStateT (continue (Case True)) vm
-                      _ -> liftIO $ stToIO $ runStateT (continue UnknownBranch) vm
+                    let decision = case Expr.concKeccakSimpProps ((cond ./= Lit 0):preconds) of
+                          [PBool False] -> Case False
+                          [] -> Case True
+                          _ | Expr.concKeccakSimpProps ((cond .== Lit 0):preconds) == [PBool False] -> Case True
+                            | otherwise -> UnknownBranch
+                    (r, vm') <- liftIO $ stToIO $ runStateT (continue decision) vm
                     interpretInternal t { vm = vm', stepper = (k r) }
           _ -> performQuery
+
+logQueryExprs :: MonadIO m => Query Symbolic -> m ()
+logQueryExprs = \case
+  PleaseAskSMT cond pathconds _ ->
+    Progress.emitExprs "branch-query" $ Progress.bigText "cond" (formatExpr cond) <> props pathconds
+  PleaseGetSols e numBytes pathconds _ ->
+    Progress.emitExprs "solutions-query" $
+      ["numBytes" .= numBytes] <> Progress.bigText "expr" (formatExpr e) <> props pathconds
+  _ -> pure ()
+  where
+    props ps = ["pathconds" .= map (JSON.object . Progress.bigText "prop" . formatProp) ps]
+
+stepName :: Stepper.Action Symbolic x -> Text
+stepName = \case
+  Stepper.Exec -> "exec"
+  Stepper.EVM _ -> "evm"
+  Stepper.Fork (PleaseRunAll vals _) -> "fork-" <> T.pack (show (length vals))
+  Stepper.Fork (PleaseRunBoth _) -> "fork-2"
+  Stepper.Wait q -> case q of
+    PleaseAskSMT {} -> "query-branch"
+    PleaseGetSols {} -> "query-solutions"
+    PleaseFetchContract {} -> "query-fetch-contract"
+    PleaseFetchSlot {} -> "query-fetch-slot"
+    PleaseDoFFI {} -> "query-ffi"
+    PleaseReadEnv {} -> "query-env"
 
 maxIterationsReached :: VM Symbolic -> Maybe Integer -> Maybe Bool
 maxIterationsReached _ Nothing = Nothing
@@ -982,8 +1035,8 @@ equivalenceCheck solvers sess bytecodeA bytecodeB opts calldata create = do
     False -> do
       when conf.debug $ liftIO $ do
         putStrLn "bytecodeA and bytecodeB are different, checking for equivalence"
-      branchesAorig <- getBranches bytecodeA
-      branchesBorig <- getBranches bytecodeB
+      branchesAorig <- explorePhase "A" $ getBranches bytecodeA
+      branchesBorig <- explorePhase "B" $ getBranches bytecodeB
       when conf.debug $ liftIO $ do
         liftIO $ putStrLn $ "branchesA props: " <> show (map extractProps branchesAorig)
         liftIO $ putStrLn $ "branchesB props: " <> show (map extractProps branchesBorig)
@@ -1004,6 +1057,115 @@ equivalenceCheck solvers sess bytecodeA bytecodeB opts calldata create = do
       prestate <- liftIO $ stToIO $ abstractVM calldata bytecode Nothing create
       interpret (Fetch.oracle solvers sess Fetch.noRpc) opts.iterConf prestate runExpr noopPathHandler
     filterQeds (EqIssues res partials) = EqIssues (filter (\(r, _) -> not . isQed $ r) res) partials
+    explorePhase :: Text -> m [Expr End] -> m [Expr End]
+    explorePhase prog = Progress.withPhase ("explore " <> prog) ["program" .= prog] $ \ends ->
+      ["paths" .= length ends, "partial" .= length (filter isPartial ends)]
+
+-- | The concrete calldata of a counterexample, if it has one.
+cexCalldata :: Expr Buf -> SMTCex -> Maybe ByteString
+cexCalldata cd cex = case Expr.concKeccakSimpExpr <$> defaultSymbolicValues (subModel cex cd) of
+  Right (ConcreteBuf bs) -> Just bs
+  _ -> Nothing
+
+data CexReplay
+  = Validated Text Text        -- ^ the concrete outcomes of A and B differ
+  | NotReproducible Text Text  -- ^ the concrete outcomes are the same
+  | CannotReplay Text
+  deriving (Show, Eq)
+
+replayTag :: CexReplay -> Text
+replayTag = \case
+  Validated {} -> "validated"
+  NotReproducible {} -> "not reproducible"
+  CannotReplay why -> "cannot replay: " <> why
+
+-- | Replays an equivalence counterexample on concrete VMs running A and B, set
+-- up like 'loadSymVM' with the model's values, and compares what they do:
+-- return data or error, and the final storage of the called contract.
+replayEqCex :: App m => SolverGroup -> Bool -> ByteString -> ByteString -> Expr Buf -> SMTCex -> m CexReplay
+replayEqCex solvers create codeA codeB cd cex
+  | create = pure $ CannotReplay "contract creation is not replayed"
+  | Just (_, len) <- Map.lookup cd cex.buffers >>= zeroTail = pure $ CannotReplay $ "calldata of " <> T.pack (show len) <> " bytes"
+  | otherwise = case cexCalldata cd cex of
+      Nothing -> pure $ CannotReplay "calldata is not concrete"
+      Just calldata -> do
+        a <- run codeA calldata
+        b <- run codeB calldata
+        pure $ case (a, b) of
+          (Left e, _) -> CannotReplay e
+          (_, Left e) -> CannotReplay e
+          (Right ra, Right rb) -> (if ra == rb then NotReproducible else Validated) (outcome ra) (outcome rb)
+  where
+    addr name def = maybe def LitAddr (Map.lookup (SymAddr name) cex.addrs)
+    entry = addr "entrypoint" (LitAddr 0xacab)
+    ctx k m = Map.findWithDefault 0 k m
+    store = ConcreteStore $ Map.findWithDefault mempty (SymAddr "entrypoint") cex.store
+    run code calldata = do
+      vm <- liftIO $ stToIO $ makeVm $ (defaultVMOpts @Concrete)
+        { contract = (initialContract (RuntimeCode (ConcreteRuntimeCode code))) { storage = store, origStorage = store }
+        , calldata = (ConcreteBuf calldata, [])
+        , value = Lit (ctx TxValue cex.txContext)
+        , address = entry
+        , caller = addr "caller" (LitAddr 0xcafe0001)
+        , origin = addr "origin" (LitAddr 0xcafe0002)
+        , coinbase = addr "coinbase" (LitAddr 0)
+        , timestamp = Lit (ctx Timestamp cex.blockContext)
+        , number = Lit (ctx BlockNumber cex.blockContext)
+        , gas = 0xffffffffffffffff
+        , gaslimit = 0xffffffffffffffff
+        , prevRandao = 42069
+        }
+      end <- Stepper.interpret (Fetch.oracle solvers Nothing Fetch.noRpc) vm Stepper.runFully
+      let finalStore = case (.storage) <$> Map.lookup entry end.env.contracts of
+            Just (ConcreteStore m) -> Right m
+            s -> Left (T.pack (show s))
+      pure $ case end.result of
+        Just (VMSuccess out) -> Right (Right out, finalStore)
+        Just (VMFailure e) -> Right (Left e, finalStore)
+        r -> Left $ "concrete run did not finish: " <> T.pack (show r)
+    outcome (res, st) = T.intercalate ", " $ case res of
+        Right (ConcreteBuf bs) -> ["Return " <> showBytes bs] <> storage
+        Right _ -> ["Return (symbolic data)"] <> storage
+        Left (Revert (ConcreteBuf bs)) -> ["Revert " <> showRevertData bs]
+        Left e -> [T.pack (show e)]
+      where
+        storage = case st of
+          Right m | Map.null m -> []
+                  | otherwise -> ["storage " <> T.intercalate " " [showW k <> "=" <> showW v | (k, v) <- take 8 (Map.toList m)]
+                                  <> (if Map.size m > 8 then " ..." else "")]
+          Left _ -> ["storage symbolic"]
+        showW :: W256 -> Text
+        showW = T.pack . show
+
+-- | Replays every counterexample, as a phase of its own in the progress log.
+replayEqCexes :: App m => SolverGroup -> Bool -> ByteString -> ByteString -> Expr Buf -> [(SMTCex, String)] -> m [(SMTCex, String, CexReplay)]
+replayEqCexes solvers create codeA codeB cd cexes =
+  Progress.withPhase "replay" ["cexes" .= length cexes] summary $ do
+    Progress.phaseTotal (length cexes)
+    forM (zip [(0 :: Int) ..] cexes) $ \(i, (c, d)) -> do
+      r <- replayEqCex solvers create codeA codeB cd c
+      Progress.emit "replay"
+        [ "cex" .= i, "kind" .= takeWhile (/= '\n') d, "result" .= replayTag r
+        , "selector" .= fmap (\bs -> "0x" <> T.pack (bsToHex (BS.take 4 bs))) (cexCalldata cd c) ]
+      Progress.phaseTick
+      pure (c, d, r)
+  where
+    summary rs =
+      [ "validated" .= length [() | (_, _, Validated {}) <- rs]
+      , "notReproducible" .= length [() | (_, _, NotReproducible {}) <- rs]
+      , "cannotReplay" .= length [() | (_, _, CannotReplay _) <- rs] ]
+
+showBytes :: ByteString -> Text
+showBytes bs = if BS.null bs then "(empty)" else "0x" <> T.pack (bsToHex bs)
+
+-- | Revert data in hex, decoded if it is an Error(string) or a Panic(uint256).
+showRevertData :: ByteString -> Text
+showRevertData bs = showBytes bs <> case BS.splitAt 4 bs of
+  ("\x08\xc3\x79\xa0", rest) | (CAbi [AbiString str], "") <- decodeBuf [AbiStringType] (ConcreteBuf rest) ->
+    " = Error(" <> T.pack (show str) <> ")"
+  ("\x4e\x48\x7b\x71", rest) | (CAbi [AbiUInt _ code], "") <- decodeBuf [AbiUIntType 256] (ConcreteBuf rest) ->
+    " = Panic(" <> T.pack (show code) <> ")"
+  _ -> ""
 
 rewriteFresh :: Text -> [Expr a] -> [Expr a]
 rewriteFresh prefix exprs = fmap (mapExpr mymap) exprs
@@ -1031,7 +1193,18 @@ equivalenceCheck' solvers sess branchesA branchesB create = do
         putStrLn $ "endstates in bytecodeA: " <> show (length branchesA)
                    <> "\nendstates in bytecodeB: " <> show (length branchesB)
 
-      ps <- forM allPairs $ uncurry distinct
+      let numPairs = length allPairs
+      ps <- Progress.withPhase "build-pairs" ["pairs" .= numPairs] (\r -> ["toCheck" .= length (mapMaybe (view _1) r)]) $ do
+        Progress.phaseTotal numPairs
+        forM (zip [(0::Int)..] allPairs) $ \(i, (a, b)) -> do
+          when (i `mod` 1000 == 0) $ do
+            Progress.setWorker ["phase" .= ("build-pairs" :: Text), "pair" .= i, "of" .= numPairs]
+            Progress.phaseAt i
+          r <- distinct a b
+          -- force the simplification here, or it would be timed as part of the next phase
+          _ <- liftIO $ evaluate $ maybe 0 (Set.size . fst) (fst r)
+          pure r
+      Progress.clearWorker
       let differingEndStates = sortBySize $ mapMaybe (view _1) ps
       let knownIssues = foldr ((<>) . (view _2)) mempty ps
       when conf.debug $ liftIO $ putStrLn $ "Asking the SMT solver for " <> (show $ length differingEndStates) <> " pairs"
@@ -1039,7 +1212,11 @@ equivalenceCheck' solvers sess branchesA branchesB create = do
         liftIO $ T.writeFile ("prop-checked-" <> show i <> ".prop") (T.pack $ show props <> msg))
 
       procs <- liftIO getNumProcessors
-      newDifferences <- checkAll differingEndStates procs
+      newDifferences <- Progress.withPhase "check-pairs" ["pairs" .= length differingEndStates]
+        (\r -> [ "sat" .= length (filter (isCex . fst) r), "unsat" .= length (filter (isQed . fst) r)
+               , "other" .= length (filter (\(x, _) -> not (isCex x || isQed x)) r) ]) $ do
+        Progress.phaseTotal (length differingEndStates)
+        checkAll differingEndStates procs
       let additionalIssues = EqIssues newDifferences mempty
       pure $ knownIssues <> additionalIssues
 
@@ -1056,10 +1233,16 @@ equivalenceCheck' solvers sess branchesA branchesB create = do
     checkAll :: (App m, MonadUnliftIO m) => [(Set Prop, String)] -> Int -> m [(EquivResult, String)]
     checkAll input numproc = withRunInIO $ \env -> do
        wrap <- pool numproc
-       parMapIO (runOne env wrap) input
+       parMapIO (runOne env wrap) (zip [(0::Int)..] input)
        where
-         runOne env wrap (props, meaning) = do
-           res <- wrap (env $ checkSatWithProps solvers (Set.toList props))
+         total = length input
+         runOne env wrap (i, (props, meaning)) = do
+           res <- wrap $ do
+             Progress.setWorker ["phase" .= ("check-pairs" :: Text), "pair" .= i, "of" .= total, "props" .= Set.size props]
+             r <- env $ checkSatWithProps solvers (Set.toList props)
+             Progress.clearWorker
+             Progress.phaseTick
+             pure r
            pure (res, meaning)
 
     -- Takes two branches and returns a set of props that will need to be
@@ -1070,8 +1253,7 @@ equivalenceCheck' solvers sess branchesA branchesB create = do
     distinct :: App m => Expr End -> Expr End -> m (Maybe (Set Prop, String), EqIssues)
     distinct aEnd bEnd = do
       (requireToDiff, issues) <- resultsDiffer aEnd bEnd
-      let newIssues = EqIssues [] (filter isPartial [aEnd, bEnd])
-      pure (collectReqs requireToDiff, issues <> newIssues)
+      pure (collectReqs requireToDiff, issues)
       where
         collectReqs (Just (reqToDiff, meaning)) = Just (Set.fromList $ Expr.simplifyProps (reqToDiff : extractProps aEnd <> extractProps bEnd), meaning)
         collectReqs Nothing  = Nothing
@@ -1281,7 +1463,8 @@ formatCex cd sig m@(SMTCex _ addrs _ store blockContext txContext) = T.unlines $
         go :: Expr EWord -> W256 -> Bool
         go (TxValue) _ = True
         go (Balance {}) _ = internalError "TODO: BALANCE"
-        go (Gas {}) _ = internalError "TODO: Gas"
+        -- gas readings are produced by the run, not part of its input
+        go (Gas {}) _ = False
         go _ _ = False
 
     blockCtx :: [Text]
@@ -1410,9 +1593,22 @@ subBufs model b = Map.foldlWithKey subBuf (Right b) model
   where
     subBuf :: Err (Expr a) -> Expr Buf -> BufModel -> Err (Expr a)
     subBuf x var val = case x of
+      -- too long to flatten, but zero past what was written (e.g. calldata whose
+      -- length the solver set to 2^64-1): substitute the written prefix, and
+      -- the length separately, which is exact as reads past a ConcreteBuf are 0
+      Right x' | Left _ <- forceFlattened val, Just (prefix, len) <- zeroTail val ->
+        mapExprM (go' (ConcreteBuf prefix)) (mapExpr (subLen len) x')
       Right x' -> mapExprM go x'
       Left err -> Left err
       where
+        go' :: Expr Buf -> Expr a -> Err (Expr a)
+        go' prefix = \case
+          c@(AbstractBuf _) | c == var -> Right prefix
+          e -> Right e
+        subLen :: W256 -> Expr a -> Expr a
+        subLen len = \case
+          BufLength c | c == var -> Lit len
+          e -> e
         go :: Expr a -> Err (Expr a)
         go = \case
           c@(AbstractBuf _) -> case c == var of
@@ -1426,6 +1622,22 @@ subBufs model b = Map.foldlWithKey subBuf (Right b) model
         forceFlattened buf@(EVM.Types.Comp _) =  case SMT.collapse buf of
           Just k -> forceFlattened k
           Nothing -> Left $ show buf
+
+-- | The written prefix and the length of a huge buffer model whose unwritten
+-- bytes are zero, if the prefix is small enough to materialise. Only for
+-- lengths that the simplifier never materialises (see 'Expr.copySlice').
+zeroTail :: BufModel -> Maybe (ByteString, W256)
+zeroTail (Flat _) = Nothing
+zeroTail (EVM.Types.Comp c) = go c []
+  where
+    go (Base 0 len) ws
+      | len >= 2 ^ (32 :: Int), all ((< len) . fst) ws, end <= 1_000_000 =
+          Just (BS.pack [Map.findWithDefault 0 i m | i <- [0 .. end - 1]], len)
+      where
+        m = Map.fromList ws
+        end = maybe 0 ((+ 1) . fst) (Map.lookupMax m)
+    go (Write byte idx next) ws = go next ((idx, byte) : ws)
+    go _ _ = Nothing
 
 subStores :: Map (Expr EAddr) (Map W256 W256) -> Expr a -> Expr a
 subStores model b = Map.foldlWithKey subStore b model
