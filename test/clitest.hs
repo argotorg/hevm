@@ -101,7 +101,7 @@ main = do
         (exitCode, stdout, stderr) <- readProcessWithExitCode "cabal" (["run", "exe:hevm", "--" ] ++ torun) ""
         stderr `shouldNotContain` "CallStack"
         stdout `shouldContain` "Balance (SymAddr \"entrypoint\")"
-        stdout `shouldContain` "Concrete replay: validated"
+        stdout `shouldContain` "[validated]"
         exitCode `shouldBe` ExitFailure 1
 
       it "hevm equivalence tutorial works -- PASS" $ do

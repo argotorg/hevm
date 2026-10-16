@@ -41,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error at startup if the selected solver is not installed.
 - The default `--max-buf-size` is now 24 (calldata and returndata of up to
   16 MB) instead of 64, which is still more than gas limits allow.
+- Counterexamples have bold section headings, and `hevm equivalence` shows the
+  result of replaying each one as a coloured tag, as `hevm test` does.
 
 ## Fixed
 - `hevm equivalence` no longer crashes printing a counterexample that sets the
