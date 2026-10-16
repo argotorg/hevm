@@ -39,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   16 MB) instead of 64, which is still more than gas limits allow.
 
 ## Fixed
+- Storage reads now skip writes at lower struct field offsets as well as higher
+  offsets. Unsigned subtraction previously left these reads unresolved.
 - The hash-consing tables are reset once they grow past a size limit, instead of
   growing without bound after exploration.
 - Symbolic `GAS` readings are now only ordered within a call frame, so a caller
