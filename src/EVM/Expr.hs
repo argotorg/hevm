@@ -853,13 +853,15 @@ readStorage w st = go (simplifyNoLitToKeccak w) (simplifyNoLitToKeccak st)
     go :: Expr EWord -> Expr Storage -> Maybe (Expr EWord)
     go _ (GVar _) = internalError "Can't read from a GVar"
     go slot s@(AbstractStore _ _) = Just $ SLoad slot s
-    go (Lit l) (ConcreteStore s) = Lit <$> Map.lookup l s
+    go slot (ConcreteStore s) | Just l <- concreteSlot slot = Lit <$> Map.lookup l s
     go slot store@(ConcreteStore _) = Just $ SLoad slot store
     go slot s@(SStore prevSlot val prev) = case (prevSlot, slot) of
       -- if address and slot match then we return the val in this write
       _ | prevSlot == slot -> Just val
       -- distinct literal slots never alias; skip the simplifier-backed checks below
       (Lit _, Lit _) -> go slot prev
+      (a, b) | Just x <- concreteSlot a, Just y <- concreteSlot b ->
+        if x == y then Just val else go slot prev
       (a, b) | surelyEqual a b -> Just val
       (a, b) | surelyNotEqual a b -> go slot prev
 
@@ -923,6 +925,22 @@ readStorage w st = go (simplifyNoLitToKeccak w) (simplifyNoLitToKeccak st)
 
       -- we are unable to determine statically whether or not we can safely move deeper in the write chain, so return an abstract term
       _ -> Just $ SLoad slot s
+
+    -- Evaluate known slots without changing the symbolic preimages used below.
+    concreteSlot :: Expr EWord -> Maybe W256
+    concreteSlot = \case
+      Lit x -> Just x
+      Add (Lit o) k -> (o +) <$> concreteSlot k
+      Keccak b -> do
+        ConcreteBuf bs <- concreteBuf b
+        pure $ keccak' bs
+      _ -> Nothing
+    concreteBuf :: Expr Buf -> Maybe (Expr Buf)
+    concreteBuf b@(ConcreteBuf _) = Just b
+    -- Only expand word writes within the first 256 bytes.
+    concreteBuf (WriteWord i@(Lit off) v b) | off <= 224 =
+      writeWord i . Lit <$> concreteSlot v <*> concreteBuf b
+    concreteBuf _ = Nothing
 
     maxW32 :: W256
     maxW32 = into (maxBound :: Word32)
