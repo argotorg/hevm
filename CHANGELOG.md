@@ -58,6 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1000 and more no longer make the query fail.
 - The simplifier rewrites modulo and division by a power of two to bit
   operations.
+- The simplifier composes nested shifts by literals into one shift and a mask.
 
 ## Fixed
 - The SMT encoding of a copy into a buffer named `src` no longer reads the
