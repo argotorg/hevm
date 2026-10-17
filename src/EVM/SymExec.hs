@@ -1133,7 +1133,7 @@ replayEqCex solvers create codeA codeB cd cex
       (steps, lastSteps, end) <- Stepper.interpret (Fetch.oracle solvers Nothing Fetch.noRpc) vm (runTraced conf 32)
       Progress.emit "replay-run"
         [ "program" .= label, "result" .= T.pack (show end.result), "steps" .= steps
-        , "trail" .= [(T.pack (show a), pc) | (a, pc) <- toList lastSteps] ]
+        , "trail" .= [(showAddr a, pc) | (a, pc) <- toList lastSteps] ]
       let finalStore = case (.storage) <$> Map.lookup entry end.env.contracts of
             Just (ConcreteStore m) -> Right m
             s -> Left (T.pack (show s))
@@ -1154,6 +1154,11 @@ replayEqCex solvers create codeA codeB cd cex
           Left _ -> ["storage symbolic"]
         showW :: W256 -> Text
         showW = T.pack . show
+
+    -- the derived Show of an Expr EAddr would print "LitAddr 0x..."
+    showAddr = \case
+      LitAddr a -> T.pack (show a)
+      a -> T.pack (show a)
 
 -- | 'Stepper.runFully' that also counts the steps and keeps the code address and
 -- pc of the last @n@ of them
