@@ -1107,32 +1107,14 @@ replayEqCex solvers create codeA codeB cd cex
           (_, Left e) -> CannotReplay e
           (Right ra, Right rb) -> (if ra == rb then NotReproducible else Validated) (outcome rb ra) (outcome ra rb)
   where
-    addr name def = maybe def LitAddr (Map.lookup (SymAddr name) cex.addrs)
-    entry = addr "entrypoint" (LitAddr 0xacab)
-    ctx k m = Map.findWithDefault 0 k m
-    store = ConcreteStore $ Map.findWithDefault mempty (SymAddr "entrypoint") cex.store
+    entry = eqCexEntry cex
     stubs = stubAccounts entry cex.unknownCalls
     logCall m = JSON.object
       [ "callee" .= T.pack (show m.callee), "calldata" .= showBytes (BS.take 256 m.calldata)
       , "success" .= m.success, "returndata" .= showBytes (BS.take 256 m.returndata), "returndataLength" .= m.returndataLength ]
     run :: App m => Text -> ByteString -> ByteString -> m (Either Text (Either EvmError (Expr Buf), Either Text (Map W256 W256), Map (Expr EAddr) W256))
     run label code calldata = do
-      vm <- liftIO $ stToIO $ makeVm $ (defaultVMOpts @Concrete)
-        { contract = set #balance (Lit (ctx (Balance (SymAddr "entrypoint")) cex.txContext))
-            (initialContract (RuntimeCode (ConcreteRuntimeCode code))) { storage = store, origStorage = store }
-        , otherContracts = fromRight [] stubs
-        , calldata = (ConcreteBuf calldata, [])
-        , value = Lit (ctx TxValue cex.txContext)
-        , address = entry
-        , caller = addr "caller" (LitAddr 0xcafe0001)
-        , origin = addr "origin" (LitAddr 0xcafe0002)
-        , coinbase = addr "coinbase" (LitAddr 0)
-        , timestamp = Lit (ctx Timestamp cex.blockContext)
-        , number = Lit (ctx BlockNumber cex.blockContext)
-        , gas = 0xffffffffffffffff
-        , gaslimit = 0xffffffffffffffff
-        , prevRandao = 42069
-        }
+      vm <- liftIO $ stToIO $ makeVm $ eqReplayVmOpts cex (fromRight [] stubs) code calldata
       conf <- readConfig
       (steps, lastSteps, end) <- Stepper.interpret (Fetch.oracle solvers Nothing Fetch.noRpc) vm (runTraced conf 32)
       Progress.emit "replay-run"
@@ -1166,6 +1148,32 @@ replayEqCex solvers create codeA codeB cd cex
     showAddr = \case
       LitAddr a -> T.pack (show a)
       a -> T.pack (show a)
+
+eqCexEntry :: SMTCex -> Expr EAddr
+eqCexEntry cex = maybe (LitAddr 0xacab) LitAddr (Map.lookup (SymAddr "entrypoint") cex.addrs)
+
+-- | The concrete VM 'replayEqCex' runs @code@ in, set up like 'loadSymVM' with the model's values
+eqReplayVmOpts :: SMTCex -> [(Expr EAddr, Contract)] -> ByteString -> ByteString -> VMOpts Concrete
+eqReplayVmOpts cex others code calldata = (defaultVMOpts @Concrete)
+  { contract = set #balance (Lit (ctx (Balance (SymAddr "entrypoint")) cex.txContext))
+      (initialContract (RuntimeCode (ConcreteRuntimeCode code))) { storage = store, origStorage = store }
+  , otherContracts = others
+  , calldata = (ConcreteBuf calldata, [])
+  , value = Lit (ctx TxValue cex.txContext)
+  , address = eqCexEntry cex
+  , caller = addr "caller" (LitAddr 0xcafe0001)
+  , origin = addr "origin" (LitAddr 0xcafe0002)
+  , coinbase = addr "coinbase" (LitAddr 0)
+  , timestamp = Lit (ctx Timestamp cex.blockContext)
+  , number = Lit (ctx BlockNumber cex.blockContext)
+  , gas = 0xffffffffffffffff
+  , gaslimit = 0xffffffffffffffff
+  , prevRandao = 42069
+  }
+  where
+    addr name def = maybe def LitAddr (Map.lookup (SymAddr name) cex.addrs)
+    ctx k m = Map.findWithDefault 0 k m
+    store = ConcreteStore $ Map.findWithDefault mempty (SymAddr "entrypoint") cex.store
 
 -- | 'Stepper.runFully' that also counts the steps and keeps the code address and
 -- pc of the last @n@ of them
