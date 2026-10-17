@@ -70,6 +70,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   xors and with its negation, and moves negation through literal operations.
 - The simplifier drops the writes and zeroes the concrete bytes a copy
   overwrites, and reads zero from all-zero concrete buffers at any offset.
+- The simplifier turns overflow checks of adding or subtracting a literal,
+  such as `x < x + c`, into comparisons of `x` against a literal.
 
 ## Fixed
 - The SMT encoding of a copy into a buffer named `src` no longer reads the

@@ -117,6 +117,12 @@ rewriteRuleTests = testGroup "Rewrite rules"
   , testCase "zero-buffer-reads" $ do
       assertEqual "word" (Lit 0) (Expr.simplify (ReadWord (Var "i") (ConcreteBuf (BS.replicate 10 0))))
       assertEqual "byte" (LitByte 0) (Expr.simplify (ReadByte (Var "i") (ConcreteBuf "")))
+  , testCase "overflow-checks" $ do
+      let x = Var "x"
+      assertEqual "add overflows" (LT (Lit (Expr.maxLit - 5)) x) (Expr.simplify (GT x (Add (Lit 5) x)))
+      assertEqual "sub underflows" (LT x (Lit 5)) (Expr.simplify (GT (Sub x (Lit 5)) x))
+      assertEqual "prop add no overflow" [PLEq x (Lit (Expr.maxLit - 5))] (Expr.simplifyProps [PLEq x (Add (Lit 5) x)])
+      assertEqual "prop sub no underflow" [PLEq (Lit 5) x] (Expr.simplifyProps [PLEq (Sub x (Lit 5)) x])
   , testCase "shift-composition" $ do
       let x = Var "x"
       assertEqual "shr shr" (SHR (Lit 12) x) (Expr.simplify (SHR (Lit 4) (SHR (Lit 8) x)))
