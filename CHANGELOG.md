@@ -59,6 +59,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The simplifier rewrites modulo and division by a power of two to bit
   operations.
 - The simplifier composes nested shifts by literals into one shift and a mask.
+- The simplifier tracks which bits of a word can be set, to drop redundant
+  masks and decide equalities and comparisons with literals.
 
 ## Fixed
 - The SMT encoding of a copy into a buffer named `src` no longer reads the
