@@ -1351,8 +1351,8 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
           | n+sz >= n
           , n+sz >= sz
           , n+sz <= maxBytes
-            = (CopySlice srcOff dstOff size
-                (WriteWord wOff value (ConcreteBuf simplifiedBuf)) dst)
+            = copySlice srcOff dstOff size
+                (WriteWord wOff value (ConcreteBuf simplifiedBuf)) dst
           | otherwise = orig
             where simplifiedBuf = BS.take (unsafeInto (n+sz)) buf
     go (CopySlice a b c d f) = copySlice a b c d f

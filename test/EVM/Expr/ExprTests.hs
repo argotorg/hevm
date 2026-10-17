@@ -14,7 +14,7 @@ import Test.Tasty.QuickCheck hiding (Failure, Success)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ReaderT)
 import Data.Bits (shiftL)
-import Data.ByteString qualified as BS (drop, length, pack, take)
+import Data.ByteString qualified as BS (drop, length, pack, replicate, take)
 import Data.Containers.ListUtils (nubOrd)
 import Data.List qualified as List (nub, sort, tails)
 import Data.Map.Strict qualified as Map
@@ -581,6 +581,12 @@ copySliceTests = testGroup "CopySlice tests"
         , (maxBound - 15, 64, src)
         , (0, Expr.maxBytes, src)
         ]
+  , testCase "copyslice-window-trim-in-simplify" $ do
+      let src = WriteWord (Lit 262) (Var "a") (WriteWord (Lit 196) (Lit 0xba) (ConcreteBuf ""))
+          dst = ConcreteBuf (BS.pack [1..100])
+          e = CopySlice (Lit 145) (Lit 45) (Lit 82) src dst
+      assertEqual "a write past the window does not survive simplification"
+        (ConcreteBuf (BS.pack [1..45] <> BS.replicate 82 0)) (Expr.simplify e)
   , adjustOption (\(QuickCheckTests n) -> QuickCheckTests (if n == 100 then 200 else n)) $
     testProperty "copyslice-window-trim-equivalence" $ forAll genTrimCase $ \c ->
       forAll (frequency [(4, fromIntegral <$> choose (0 :: Int, 64)), (1, elements [Expr.maxBytes, maxBound - 15])]) $ \dOff ->
