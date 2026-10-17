@@ -1372,6 +1372,9 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (Mod _ (Lit 1)) = Lit 0
     go (SMod _ (Lit 0)) = Lit 0
     go (SMod _ (Lit 1)) = Lit 0
+    -- by a power of two, as bit operations, which solvers handle much better
+    go (Mod a (Lit b)) | b > 1, popCount b == 1 = EVM.Expr.and (Lit (b - 1)) a
+    go (Div a (Lit b)) | b > 1, popCount b == 1 = shr (Lit (fromIntegral (countTrailingZeros b))) a
     go (Mod a b) | a == b = Lit 0
     go (SMod a b) | a == b = Lit 0
     go (Mod (Lit 0) _) = Lit 0
@@ -1564,6 +1567,10 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (Exp (Lit 0x100) offset@(Mul (Lit a) (Mod _ (Lit b))))
       | a * b <= 32 && (maxWord256 `Prelude.div` a) > b = shl (mul (Lit 8) offset) (Lit 1)
     go (Exp (Lit 0x100) offset@(Mod _ (Lit 32))) = (shl (mul (Lit 8) offset)) (Lit 1)
+    -- the same, for the masks that a modulo by a power of two becomes
+    go (Exp (Lit 0x100) offset@(Mul (Lit a) (And (Lit m) _)))
+      | a < 32 && m < 32 && a * m < 32 = shl (mul (Lit 8) offset) (Lit 1)
+    go (Exp (Lit 0x100) offset@(And (Lit m) _)) | m < 32 = shl (mul (Lit 8) offset) (Lit 1)
     go (Exp (Lit 2) k) = shl k (Lit 1)
     go (Exp a b) = EVM.Expr.exp a b
 

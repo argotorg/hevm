@@ -56,6 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   logs each replay to the progress log.
 - Exponentiation by a literal is encoded into SMT by squaring, and exponents of
   1000 and more no longer make the query fail.
+- The simplifier rewrites modulo and division by a power of two to bit
+  operations.
 
 ## Fixed
 - The SMT encoding of a copy into a buffer named `src` no longer reads the

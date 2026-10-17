@@ -51,6 +51,18 @@ unitTests = testGroup "Unit tests"
   , signExtendTests
   , concretizationTests
   , traversalTests
+  , rewriteRuleTests
+  ]
+
+rewriteRuleTests :: TestTree
+rewriteRuleTests = testGroup "Rewrite rules"
+  [ testCase "mod-div-power-of-two" $ do
+      let x = Var "x"
+      assertEqual "mod" (And (Lit 0xff) x) (Expr.simplify (Mod x (Lit 0x100)))
+      assertEqual "div" (SHR (Lit 8) x) (Expr.simplify (Div x (Lit 0x100)))
+      assertEqual "not a power of two" (Mod x (Lit 6)) (Expr.simplify (Mod x (Lit 6)))
+      assertEqual "byte offset exponentiation still becomes a shift"
+        (SHL (Mul (Lit 8) (And (Lit 31) x)) (Lit 1)) (Expr.simplify (Exp (Lit 0x100) (Mod x (Lit 32))))
   ]
 
 traversalTests :: TestTree
