@@ -420,9 +420,14 @@ genShapedByte n = frequency
   ]
 
 genShapedBuf :: Int -> Gen (Expr Buf)
-genShapedBuf 0 = oneof [ConcreteBuf <$> genBytes, AbstractBuf <$> elements ["src", "buf"]]
+genShapedBuf 0 = oneof
+  [ ConcreteBuf <$> genBytes
+  , AbstractBuf <$> elements ["src", "buf"]
+  , ConcreteBuf . flip BS.replicate 0 <$> choose (0, 80)
+  ]
 genShapedBuf n = frequency
   [ (2, genShapedBuf 0)
+  , (2, overwrite)
   , (2, WriteWord <$> idx <*> w <*> sub)
   , (1, WriteByte <$> idx <*> genShapedByte (n `div` 2) <*> sub)
   , (2, CopySlice <$> idx <*> idx <*> size <*> sub <*> sub)
@@ -431,6 +436,15 @@ genShapedBuf n = frequency
     w = genShapedWord (n `div` 2)
     idx = smallIdxWith w
     sub = genShapedBuf (n `div` 2)
+    -- a copy over writes in and around its window
+    overwrite = do
+      d <- choose (0, 64 :: Int)
+      sz <- choose (1, 80)
+      k <- choose (1, 4 :: Int)
+      offs <- vectorOf k $ frequency
+        [(3, choose (d, d + sz)), (1, choose (Prelude.max 0 (d - 32), d + sz + 32)), (1, elements [d, d + sz - 32, d + sz - 31, d + sz - 1])]
+      dst <- foldr (\o acc -> oneof [WriteWord (Lit (fromIntegral (Prelude.max 0 o))) <$> w <*> acc, WriteByte (Lit (fromIntegral (Prelude.max 0 o))) <$> genShapedByte 0 <*> acc]) sub offs
+      CopySlice <$> idx <*> pure (Lit (fromIntegral d)) <*> pure (Lit (fromIntegral sz)) <*> sub <*> pure dst
     size = frequency [(4, Lit . fromIntegral <$> choose (0 :: Int, 80)), (1, smallIdxWith w)]
 
 genBytes :: Gen ByteString

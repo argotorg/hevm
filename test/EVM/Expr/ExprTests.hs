@@ -108,6 +108,15 @@ rewriteRuleTests = testGroup "Rewrite rules"
       assertEqual "not add" (Sub (Lit (Expr.maxLit - 3)) x) (Expr.simplify (Not (Add (Lit 3) x)))
       assertEqual "mul add" (Add (Lit 96) (Mul (Lit 32) x)) (Expr.simplify (Mul (Lit 32) (Add (Lit 3) x)))
       assertEqual "max" x (Expr.simplify (Max x x))
+  , testCase "copy-overwrites-dst" $ do
+      let src = AbstractBuf "src"
+          dst = WriteWord (Lit 8) (Var "a") (WriteWord (Lit 100) (Var "b") (ConcreteBuf (BS.pack [1..60])))
+      assertEqual "the overwritten write and bytes go"
+        (CopySlice (Lit 0) (Lit 4) (Lit 40) src (WriteWord (Lit 100) (Var "b") (ConcreteBuf (BS.pack [1..4] <> BS.replicate 40 0 <> BS.pack [45..60]))))
+        (Expr.simplify (CopySlice (Lit 0) (Lit 4) (Lit 40) src dst))
+  , testCase "zero-buffer-reads" $ do
+      assertEqual "word" (Lit 0) (Expr.simplify (ReadWord (Var "i") (ConcreteBuf (BS.replicate 10 0))))
+      assertEqual "byte" (LitByte 0) (Expr.simplify (ReadByte (Var "i") (ConcreteBuf "")))
   , testCase "shift-composition" $ do
       let x = Var "x"
       assertEqual "shr shr" (SHR (Lit 12) x) (Expr.simplify (SHR (Lit 4) (SHR (Lit 8) x)))
