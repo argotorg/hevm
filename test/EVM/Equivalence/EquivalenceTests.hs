@@ -4,11 +4,15 @@
 module EVM.Equivalence.EquivalenceTests (tests) where
 
 import Control.Monad (when, unless, forM_)
+import Control.Monad.ST (stToIO)
+import Control.Monad.State.Strict (evalStateT)
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
 import Data.Either.Extra (fromRight)
 import Data.Functor ((<&>))
 import Data.Maybe (fromMaybe, mapMaybe, fromJust)
 import Data.List qualified as List (isInfixOf, nub)
+import Data.Map.Strict qualified as Map
 import Data.String.Here
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -23,7 +27,9 @@ import Text.RE.TDFA.String hiding (matches)
 import Text.RE.Replace (replaceAll, captureText, CaptureOrdinal(..), CaptureID(..))
 
 
+import EVM (makeVm, initialContract, defaultVMOpts)
 import EVM.Effects qualified as Effects
+import EVM.Exec (exec)
 import EVM.Expr qualified as Expr
 import EVM.Format (hexByteString)
 import EVM.Types
@@ -444,6 +450,43 @@ bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
     eq <- eqBytecode False (sCall "1234" "5f" <> sCall "1234" "5f" <> "1415" <> "5f52" <> "60205ff3")
                            (sCall "1234" "5f" <> pop <> "5f5f5260205ff3")
     assertEqual "identical calls must agree" [] (map fst eq.res)
+  , testCase "eq-staticcall-in-one-program" $ do
+    eq <- eqBytecode False (sCall "1234" "5f" <> pop) ""
+    assertBool "a view call whose result is unused changes nothing" (null eq.res)
+  , testCase "eq-transient-storage-starts-empty" $ do
+    -- tload(0) is zero, so this stops in both
+    eq <- eqBytecode False "5f5c15600757fe5b00" "00"
+    assertBool "transient storage must start empty" (null eq.res)
+  , testCase "eq-block-number-is-symbolic" $ do
+    -- sstore(1, 0) vs sstore(1, number())
+    eq <- eqBytecode False "5f600155" "43600155"
+    assertBool "the block number may be nonzero" (any (isCex . fst) eq.res)
+  , testCase "eq-timestamp-is-symbolic" $ do
+    -- sstore(1, 0) vs sstore(1, timestamp())
+    eq <- eqBytecode False "5f600155" "42600155"
+    assertBool "the timestamp may be nonzero" (any (isCex . fst) eq.res)
+  , testCase "eq-calldataload-near-max-offset-is-zero" $ do
+    -- sstore(0, calldataload(2^256-1)) vs sstore(0, 0)
+    eq <- eqBytecode False "7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff355f55" "5f5f55"
+    assertBool "reading past the end of calldata gives zero" (null eq.res)
+  , testCase "eq-calldataload-near-max-offset-does-not-wrap" $ do
+    -- sstore(0, calldataload(2^256-1)) vs sstore(0, shr(8, calldataload(0)))
+    eq <- eqBytecode False "7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff355f55" "5f3560081c5f55"
+    assertBool "the read must not wrap around to the start of calldata" (any (isCex . fst) eq.res)
+  , testCase "eq-call-moves-its-value" $ do
+    eq <- eqBytecode True (call "1234" <> pop) (callWithWei "1234" <> pop)
+    assertBool "the callee gets the value" (any (isCex . fst) eq.res)
+  , testCase "eq-replay-compares-balances" $ do
+    -- selfdestruct(0x1234) vs stop
+    replays <- replayAll "611234ff" "00"
+    assertBool "Must have a counterexample" (not (null replays))
+    forM_ replays $ \case
+      Validated {} -> pure ()
+      r -> assertFailure $ "Counterexample must replay as validated, got: " <> show r
+  , testCase "eq-call-may-send-ether-back" $ do
+    -- sstore(0, selfbalance()) after the call vs with the balance from before it
+    eq <- eqBytecode True (call "1234" <> pop <> "475f55") ("47" <> call "1234" <> pop <> "5f55")
+    assertBool "the callee may send the caller ether" (any (isCex . fst) eq.res)
   , testCase "eq-call-after-same-state-changing-call" $ do
     eq <- eqBytecode True (call "1234" <> pop <> sCall "5678" "5f" <> pop <> revertRet)
                           ("5b" <> call "1234" <> pop <> sCall "5678" "5f" <> pop <> revertRet)
@@ -467,6 +510,32 @@ bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
     forM_ replays $ \case
       Validated {} -> pure ()
       r -> assertFailure $ "The callee must answer as in the counterexample, got: " <> show r
+  , testCase "eq-replay-keeps-long-returndata-compact" $ do
+    -- the model makes the return data 16 MB long, with one nonzero byte
+    let out = AbstractBuf "out"
+        inputs = CallInputs (Lit 0) (Lit 0xfa) (Lit 0x1234) (Lit 0) (ConcreteBuf "") (Lit 0) (LitAddr 0xacab)
+          (AbstractStore (LitAddr 0xacab) Nothing) (ConcreteStore mempty) (Lit 0)
+        cex = (mempty :: SMTCex) { buffers = Map.singleton out (EVM.Types.Comp (Write 7 3 (Base 0 (2 ^ (24 :: Int))))) }
+    case modelUnknownCalls cex [PCall inputs (Lit 1) out Nothing] of
+      [Right m] -> do
+        assertEqual "only the bytes up to the last nonzero one are kept" (BS.pack [0, 0, 0, 7]) m.returndata
+        assertEqual "the length is kept" (2 ^ (24 :: Int)) m.returndataLength
+      r -> assertFailure $ "Must model the call, got: " <> show r
+  , testCase "eq-replay-stub-pads-returndata-with-zeros" $ do
+    -- the calldata is longer than the given part of the returndata
+    let input = BS.replicate 40 0xaa
+        code = stubCode [(input, (True, BS.pack [7], 64))]
+    res <- stToIO $ do
+      vm <- makeVm @Concrete $ (defaultVMOpts @Concrete)
+        { contract = initialContract (RuntimeCode (ConcreteRuntimeCode code))
+        , calldata = (ConcreteBuf input, [])
+        , gas = 0xffffffffffffffff
+        , gaslimit = 0xffffffffffffffff
+        }
+      evalStateT (exec Effects.defaultConfig) vm
+    case res of
+      VMSuccess (ConcreteBuf out) -> assertEqual "the rest of the returndata is zero" (BS.pack [7] <> BS.replicate 63 0) out
+      r -> assertFailure $ "The stub must return, got: " <> show r
   , testCase "eq-replay-equal-programs-not-reproducible" $ do
     -- sstore(0, 1), and the same after a JUMPDEST
     let a = fromJust (hexByteString "6001600055")
@@ -482,6 +551,8 @@ bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
     sCall addr size = "5f5f" <> size <> "5f61" <> addr <> "5afa"
     -- CALL(gas, addr, 0, 0, 0, 0, 0)
     call addr = "5f5f5f5f5f61" <> addr <> "5af1"
+    -- CALL(gas, addr, 1, 0, 0, 0, 0)
+    callWithWei addr = "5f5f5f5f600161" <> addr <> "5af1"
     pop = "50"
     -- revert with the last call's return data
     revertRet = "3d5f5f3e3d5ffd"

@@ -296,7 +296,7 @@ abstractContract :: ContractCode -> Expr EAddr -> Contract
 abstractContract code addr = Contract
   { code        = code
   , storage     = AbstractStore addr Nothing
-  , tStorage    = AbstractStore addr Nothing
+  , tStorage    = ConcreteStore mempty -- transient storage is empty when a transaction starts
   , origStorage = AbstractStore addr Nothing
   , balance     = Balance addr
   , nonce       = if isCreation code then Just 1 else Just 0
@@ -532,11 +532,12 @@ exec1 conf = do
             next >> pushSym vm.state.callvalue
 
         OpCalldataload -> {-# SCC "OpCalldataload" #-} stackOp1 g_verylow $
-        -- Reading past call data length should always return 0. We force this in the concrete case.
-        -- However, symbolic mode relies on `Expr.readWord` which has wrap-around semantics
+        -- Reading past call data length should always return 0, but `Expr.readWord` wraps
+        -- around: a word read from within 31 bytes of 2^256 would see the start of calldata
           \ind -> case (ind, vm.state.calldata) of
             (Lit i, ConcreteBuf bs) | i > (fromIntegral $ BS.length bs) -> Lit 0
-            _ -> Expr.readWord ind vm.state.calldata
+            _ | Just u <- Expr.upperBound ind, u <= maxBound - 31 -> Expr.readWord ind vm.state.calldata
+            _ -> Expr.mul (Expr.lt ind (Lit (maxBound - 30))) (Expr.readWord ind vm.state.calldata)
 
         OpCalldatasize -> {-# SCC "OpCalldatasize" #-}
           limitStack 1 . burn g_base $
@@ -1782,6 +1783,7 @@ freshBufFallback target value inOffset inSize outOffset outSize changesState xs 
   let freshReturndataExpr = AbstractBuf (opName <> "-result-data-fresh-" <> (pack . show) freshVar)
   modifying #constraints ((:) (PLEq (bufLength freshReturndataExpr) (Lit (2 ^ ?conf.maxBufSize))))
   let worldAfter = if changesState then Just (Var (opName <> "-world-fresh-" <> (pack . show) freshVar)) else Nothing
+      etherIn = Var (opName <> "-ether-fresh-" <> (pack . show) freshVar)
       inputs = CallInputs
         { world = world
         , callKind = Lit (into ?op)
@@ -1794,8 +1796,19 @@ freshBufFallback target value inOffset inSize outOffset outSize changesState xs 
         , callerTStorage = maybe (AbstractStore self Nothing) (.tStorage) callee
         , callerBalance = maybe (Balance self) (.balance) callee
         }
-  modifying #constraints ((:) (PCall inputs freshVarExpr freshReturndataExpr worldAfter))
+  modifying #constraints ((:) (PCall inputs freshVarExpr freshReturndataExpr ((, etherIn) <$> worldAfter)))
   mapM_ (assign (#env % #callWorld)) worldAfter
+  -- the callee gets the value if the call succeeds, and can send the caller ether
+  -- without running the caller's code, e.g. by self-destructing
+  when changesState $ do
+    let moved = Expr.mul value freshVarExpr
+    paid <- maybe (Balance caller) (.balance) <$> preuse (#env % #contracts % ix caller)
+    let left = Expr.sub paid moved
+    modifying #constraints ((:) (PLEq etherIn (Expr.sub (Lit maxBound) left)))
+    assign (#env % #contracts % ix caller % #balance) (Expr.add left etherIn)
+    case wordToAddr target of
+      Just a | a /= caller -> modifying (#env % #contracts % ix a % #balance) (Expr.add moved)
+      _ -> pure ()
   assign (#state % #returndata) freshReturndataExpr
   writeCallOutput freshReturndataExpr outSize outOffset
   next >> assign' (#state % #stack) (freshVarExpr:xs)

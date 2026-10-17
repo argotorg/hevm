@@ -682,9 +682,9 @@ propToSMTWith arithEnc = \case
     s <- encE success
     r <- encE retdata
     l <- encE (bufLength retdata)
-    w <- traverse encE world
+    w <- traverse (\(a, b) -> (,) <$> encE a <*> encE b) world
     pure $ "(and " <> def s "call_success" <> " " <> def r "call_retdata" <> " " <> def l "call_retlen"
-      <> maybe "" (\w' -> " " <> def w' "call_world") w <> ")"
+      <> maybe "" (\(w', e) -> " " <> def w' "call_world" <> " " <> def e "call_ether") w <> ")"
   where
     encE :: Expr x -> Err Builder
     encE = exprToSMTWith arithEnc

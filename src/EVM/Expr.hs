@@ -58,6 +58,7 @@ module EVM.Expr
   , readByte
   , readBytes
   , readWord
+  , upperBound
   , maxBytes
   , copySlice
   , writeByte

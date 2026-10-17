@@ -317,6 +317,8 @@ loadEmptySymVM x callvalue cd =
     , caller = SymAddr "caller"
     , origin = SymAddr "origin"
     , coinbase = SymAddr "coinbase"
+    , number = BlockNumber
+    , timestamp = Timestamp
     , blockGaslimit = 0
     , prevRandao = 42069
     })
@@ -338,6 +340,8 @@ loadSymVM x callvalue cd create =
     , caller = SymAddr "caller"
     , origin = SymAddr "origin"
     , coinbase = SymAddr "coinbase"
+    , number = BlockNumber
+    , timestamp = Timestamp
     , blockGaslimit = 0
     , prevRandao = 42069
     , create = create
@@ -1101,7 +1105,7 @@ replayEqCex solvers create codeA codeB cd cex
         pure $ case (a, b) of
           (Left e, _) -> CannotReplay e
           (_, Left e) -> CannotReplay e
-          (Right ra, Right rb) -> (if ra == rb then NotReproducible else Validated) (outcome ra) (outcome rb)
+          (Right ra, Right rb) -> (if ra == rb then NotReproducible else Validated) (outcome rb ra) (outcome ra rb)
   where
     addr name def = maybe def LitAddr (Map.lookup (SymAddr name) cex.addrs)
     entry = addr "entrypoint" (LitAddr 0xacab)
@@ -1110,8 +1114,8 @@ replayEqCex solvers create codeA codeB cd cex
     stubs = stubAccounts entry cex.unknownCalls
     logCall m = JSON.object
       [ "callee" .= T.pack (show m.callee), "calldata" .= showBytes (BS.take 256 m.calldata)
-      , "success" .= m.success, "returndata" .= showBytes (BS.take 256 m.returndata), "returndataLength" .= BS.length m.returndata ]
-    run :: App m => Text -> ByteString -> ByteString -> m (Either Text (Either EvmError (Expr Buf), Either Text (Map W256 W256)))
+      , "success" .= m.success, "returndata" .= showBytes (BS.take 256 m.returndata), "returndataLength" .= m.returndataLength ]
+    run :: App m => Text -> ByteString -> ByteString -> m (Either Text (Either EvmError (Expr Buf), Either Text (Map W256 W256), Map (Expr EAddr) W256))
     run label code calldata = do
       vm <- liftIO $ stToIO $ makeVm $ (defaultVMOpts @Concrete)
         { contract = set #balance (Lit (ctx (Balance (SymAddr "entrypoint")) cex.txContext))
@@ -1137,15 +1141,18 @@ replayEqCex solvers create codeA codeB cd cex
       let finalStore = case (.storage) <$> Map.lookup entry end.env.contracts of
             Just (ConcreteStore m) -> Right m
             s -> Left (T.pack (show s))
+          balances = Map.mapMaybe (\c -> case c.balance of Lit v -> Just v; _ -> Nothing) end.env.contracts
       pure $ case end.result of
-        Just (VMSuccess out) -> Right (Right out, finalStore)
-        Just (VMFailure e) -> Right (Left e, finalStore)
+        Just (VMSuccess out) -> Right (Right out, finalStore, balances)
+        Just (VMFailure e) -> Right (Left e, finalStore, balances)
         r -> Left $ "concrete run did not finish: " <> T.pack (show r)
-    outcome (res, st) = T.intercalate ", " $ case res of
+    -- the balances are shown where they differ from the other program's
+    outcome (_, _, otherBals) (res, st, bals) = T.intercalate ", " $ (case res of
         Right (ConcreteBuf bs) -> ["Return " <> showBytes bs] <> storage
         Right _ -> ["Return (symbolic data)"] <> storage
         Left (Revert (ConcreteBuf bs)) -> ["Revert " <> showRevertData bs]
-        Left e -> [T.pack (show e)]
+        Left e -> [T.pack (show e)])
+      <> ["balance " <> showAddr a <> "=" <> showW v | (a, v) <- Map.toList bals, Map.lookup a otherBals /= Just v]
       where
         storage = case st of
           Right m | Map.null m -> []
@@ -1192,8 +1199,8 @@ modelUnknownCalls cex = concatMap pcalls
       calldata <- concreteBytes "calldata" inLen i.callData
       okWord <- concreteWord "success flag" ok
       outLen <- concreteWord "returndata length" (Expr.bufLength out)
-      returndata <- concreteBytes "returndata" outLen out
-      pure UnknownCall { callee = truncateToAddr callee, calldata, success = okWord /= 0, returndata }
+      returndata <- compactBytes "returndata" outLen out
+      pure UnknownCall { callee = truncateToAddr callee, calldata, success = okWord /= 0, returndata, returndataLength = unsafeInto outLen }
     inModel :: Expr a -> Err (Expr a)
     inModel e = Expr.concKeccakSimpExpr <$> defaultSymbolicValues (subModel cex e)
     concreteWord :: Text -> Expr EWord -> Either Text W256
@@ -1208,13 +1215,25 @@ modelUnknownCalls cex = concatMap pcalls
         let n = unsafeInto len in Right $ BS.take n (bs <> BS.replicate (n - BS.length bs) 0)
       _ -> noModel what
     noModel what = Left $ "the " <> what <> " of a call to unknown code has no concrete model"
+    -- the solver often makes return data 16 MB long, too much to keep for every
+    -- call, so only what the model writes over a zero base is kept
+    compactBytes :: Text -> W256 -> Expr Buf -> Either Text ByteString
+    compactBytes what len = \case
+      b@(AbstractBuf _) | len <= 2 ^ (24 :: Int), Just (EVM.Types.Comp c) <- Map.lookup b cex.buffers, Just ws <- written mempty c ->
+        Right $ BS.dropWhileEnd (== 0) $ BS.pack [Map.findWithDefault 0 i ws | i <- takeWhile (< len) [0 .. maybe 0 fst (Map.lookupMax ws)]]
+      e -> BS.dropWhileEnd (== 0) <$> concreteBytes what len e
+    -- the outermost write to an index is the last one
+    written ws = \case
+      Write byte idx next -> written (Map.insertWith (\_ old -> old) idx byte ws) next
+      Base 0 _ -> Just ws
+      _ -> Nothing
 
 -- | Accounts at the callees of the unknown calls, whose code gives each call the
 -- answer the model gives it
 stubAccounts :: Expr EAddr -> [Either Text UnknownCall] -> Either Text [(Expr EAddr, Contract)]
 stubAccounts entry calls = do
   models <- sequence calls
-  let byCallee = Map.fromListWith (flip (<>)) [(m.callee, [(m.calldata, (m.success, m.returndata))]) | m <- models]
+  let byCallee = Map.fromListWith (flip (<>)) [(m.callee, [(m.calldata, (m.success, m.returndata, m.returndataLength))]) | m <- models]
   forM (Map.toList byCallee) $ \(a, answers) -> do
     when (isPrecompileAddr' a) $ Left $ "a call to unknown code goes to precompile " <> T.pack (show a)
     when (LitAddr a == entry) $ Left "a call to unknown code goes to the called contract itself"
@@ -1225,26 +1244,28 @@ stubAccounts entry calls = do
     pure (LitAddr a, initialContract (RuntimeCode (ConcreteRuntimeCode (stubCode answerByCalldata))))
 
 -- | Code that answers each calldata with its returndata, by RETURN if the call
--- succeeds and REVERT if not, and reverts on any other calldata. Calldata is
--- matched by its hash, which fits in one PUSH32 whatever its length. All jump
--- targets and offsets are PUSH4s, so every piece has a fixed size and they can
--- be computed before the code is assembled.
-stubCode :: [(ByteString, (Bool, ByteString))] -> ByteString
+-- succeeds and REVERT if not, and reverts on any other calldata. A returndata is
+-- given up to its last nonzero byte, and its length. Calldata is matched by its
+-- hash, which fits in one PUSH32 whatever its length. All jump targets and
+-- offsets are PUSH4s, so every piece has a fixed size and they can be computed
+-- before the code is assembled.
+stubCode :: [(ByteString, (Bool, ByteString, Int))] -> ByteString
 stubCode answers = mconcat $ [hashCalldata] <> zipWith dispatch answers answerPCs <> [noMatch]
-  <> zipWith answer answers returndataOffsets <> map (snd . snd) answers
+  <> zipWith answer answers returndataOffsets <> [out | (_, (_, out, _)) <- answers]
   where
     -- CALLDATACOPY(0, 0, CALLDATASIZE), KECCAK256(0, CALLDATASIZE)
     hashCalldata = BS.pack [0x36, 0x60, 0, 0x60, 0, 0x37, 0x36, 0x60, 0, 0x20]
     -- DUP1 PUSH32 hash EQ PUSH4 dest JUMPI: 41 bytes
     dispatch (i, _) dest = BS.pack [0x80, 0x7f] <> keccakBytes i <> BS.pack [0x14, 0x63] <> be32 dest <> BS.pack [0x57]
     noMatch = BS.pack [0x60, 0, 0x60, 0, 0xfd]
-    -- JUMPDEST, CODECOPY(0, off, len), RETURN(0, len) or REVERT(0, len): 22 bytes
-    answer (_, (ok, out)) off = BS.pack [0x5b, 0x63] <> be32 (BS.length out) <> BS.pack [0x63] <> be32 off
-      <> BS.pack [0x60, 0, 0x39, 0x63] <> be32 (BS.length out) <> BS.pack [0x60, 0, if ok then 0xf3 else 0xfd]
+    -- JUMPDEST, CODECOPY(CALLDATASIZE, off, size), RETURN(CALLDATASIZE, len) or
+    -- REVERT(CALLDATASIZE, len): 20 bytes. Past the copy of the calldata, memory is zero.
+    answer (_, (ok, out, len)) off = BS.pack [0x5b, 0x63] <> be32 (BS.length out) <> BS.pack [0x63] <> be32 off
+      <> BS.pack [0x36, 0x39, 0x63] <> be32 len <> BS.pack [0x36, if ok then 0xf3 else 0xfd]
     n = length answers
     answersStart = BS.length hashCalldata + 41 * n + BS.length noMatch
-    answerPCs = [answersStart + 22 * k | k <- [0 .. n - 1]]
-    returndataOffsets = scanl (+) (answersStart + 22 * n) (map (BS.length . snd . snd) answers)
+    answerPCs = [answersStart + 20 * k | k <- [0 .. n - 1]]
+    returndataOffsets = scanl (+) (answersStart + 20 * n) [BS.length out | (_, (_, out, _)) <- answers]
     be32 :: Int -> ByteString
     be32 x = BS.pack [fromIntegral (x `shiftR` k) | k <- [24, 16, 8, 0]]
 
@@ -1449,15 +1470,21 @@ equivalenceCheck' solvers sess branchesA branchesB create = do
         _ -> internalError $ "Symbolic code returned from constructor." <> " A: " <> show simpA <> " B: " <> show simpB
 
     statesDiffer :: Map (Expr EAddr) (Expr EContract) -> Map (Expr EAddr) (Expr EContract) -> Prop
-    statesDiffer aState bState =
-      case aState == bState of
-        True -> PBool False
-        False ->  if Set.fromList (Map.keys aState) /= Set.fromList (Map.keys bState)
+    statesDiffer aState bState
+      | aState == bState = PBool False
+      | otherwise = case sequence (Map.merge (Map.mapMissing (\_ c -> (c,) <$> untouched c))
+                                             (Map.mapMissing (\_ c -> (,c) <$> untouched c))
+                                             (Map.zipWithMatched (\_ x y -> Just (x, y))) aState bState) of
           -- TODO: consider possibility of aliased symbolic addresses
-          then PBool True
-          else let
-            merged = (Map.merge Map.dropMissing Map.dropMissing (Map.zipWithMatched (\_ x y -> (x,y))) aState bState)
-          in Map.foldl' (\a (ac, bc) -> a .|| contractsDiffer ac bc) (PBool False) merged
+          Nothing -> PBool True
+          Just merged -> Map.foldl' (\a (ac, bc) -> a .|| contractsDiffer ac bc) (PBool False) merged
+      where
+        -- a call to unknown code adds its callee to the state of only the program
+        -- that made it; the other program sees the callee as it was before
+        untouched :: Expr EContract -> Maybe (Expr EContract)
+        untouched = \case
+          C (UnknownCode k) _ _ _ _ -> Just (C (UnknownCode k) (AbstractStore k Nothing) (ConcreteStore mempty) (Balance k) Nothing)
+          _ -> Nothing
 
     contractsDiffer :: Expr EContract -> Expr EContract -> Prop
     contractsDiffer ac bc = let
