@@ -91,6 +91,7 @@ renameProbe = \case
 simplificationTests :: TestTree
 simplificationTests = testGroup "Expr-rewriting"
   [ storageTests
+  , keccakTests
   , copySliceTests
   , memoryTests
   , basicSimplificationTests
@@ -251,6 +252,80 @@ storageTests = testGroup "Storage tests"
     preImgBytes = BS.pack (replicate 31 0 ++ [0xaa] ++ replicate 32 0)
     preImgHash = keccak' preImgBytes
     preImgs = Map.fromList [(preImgHash, preImgBytes)]
+
+keccakTests :: TestTree
+keccakTests = testGroup "Keccak simplification"
+  [ testGroup "distinct inputs"
+      [ testCase name $ mapM_ (\(x, y) -> do
+          assertEqual "expression equality" (Lit 0) (Expr.simplify (Eq x y))
+          assertEqual "proposition equality" [PBool False] (Expr.simplifyProps [PEq x y]))
+          [(Keccak a, Keccak b), (Keccak b, Keccak a)]
+      | (name, a, b) <- inputs (Var "k") 1 1 ]
+  , localOption (mkTimeout 1_000_000) $ testCase "empty inputs terminate" $ do
+      let empty = Keccak (ConcreteBuf "")
+          wrapped = Keccak (WriteWord (Lit (maxBound - 31)) (Var "x") (ConcreteBuf ""))
+      assertEqual "identical empty inputs" (Lit 1) (Expr.simplify (Eq empty empty))
+      assertBool "zero length does not trigger a word scan" (Expr.simplify (Eq empty wrapped) /= Lit 0)
+  , testCase "uncertain inputs stay undecided" $ do
+      let pairs = [(AbstractBuf "a", AbstractBuf "b"), (mapping (Var "a") (Lit 5), mapping (Var "b") (Lit 5))]
+      mapM_ (\(a, b) -> do
+        assertBool "possible alias" (Expr.simplify (Eq (Keccak a) (Keccak b)) /= Lit 0)
+        assertBool "keep a possibly aliasing write" $ case Expr.readStorage' (slot 0 b) (store 0 0 a b) of
+          SLoad {} -> True
+          _ -> False) pairs
+  , testCase "word scan is bounded" $ do
+      let buf v = WriteWord (Lit 256) v (ConcreteBuf "")
+      assertBool "inputs longer than 256 bytes" $
+        Expr.simplify (Eq (Keccak (buf (Var "k"))) (Keccak (buf (Add (Lit 1) (Var "k"))))) /= Lit 0
+  , testCase "storage field offsets" $ mapM_ (\(r, w) -> do
+      let a = mapping (Var "k") (Lit 5)
+          b = mapping (Var "k") (Lit 6)
+      assertEqual "skip the unrelated write" (Var "old") (Expr.readStorage' (slot r b) (store r w a b)))
+      [(r, w) | r <- [0, 1, 255], w <- [0, 1, 255]]
+  , testCase "storage offset 256 may alias" $ do
+      let a = mapping (Var "k") (Lit 5)
+          b = mapping (Var "k") (Lit 6)
+      assertBool "keep the write" $ case Expr.readStorage' (slot 256 b) (store 256 0 a b) of
+        SLoad {} -> True
+        _ -> False
+      res <- checkSatWith equivConfig (PEq (slot 256 b) (slot 0 a))
+      assertBool (show res) (isSat res)
+  , testProperty "distinct inputs agree with SMT" $ withMaxSuccess 100 $
+      forAll (resize 8 (genBuf 64 1)) $ \a -> forAll (resize 8 (genBuf 64 1)) $ \b -> ioProperty $
+        case Expr.simplify (Eq (Keccak a) (Keccak b)) of
+          Lit 0 -> do
+            res <- checkSatWith equivConfig (PEq (Keccak a) (Keccak b))
+            pure $ label "distinct" $ counterexample (show res) (isQed res)
+          _ -> pure $ label "undecided" $ property True
+  , testProperty "storage skips agree with SMT" $ withMaxSuccess 100 $
+      forAll (elements [0, 1, maxBound - 1, maxBound]) $ \n ->
+      forAll (fromIntegral <$> chooseInt (1, 7)) $ \d ->
+      forAll (elements (inputs (Var "k") n d)) $ \(name, a, b) ->
+      forAll (elements [0, 1, 255]) $ \r -> forAll (elements [0, 1, 255]) $ \w -> ioProperty $ do
+        let simplified = Expr.readStorage' (slot r b) (store r w a b)
+            separated = PAnd (PGEq (Sub (Keccak a) (Keccak b)) (Lit 256))
+                             (PGEq (Sub (Keccak b) (Keccak a)) (Lit 256))
+        -- Prove the distance premise for offsets below 256 separately from the storage read.
+        res <- checkSatWith equivConfig (PNeg separated)
+        pure $ label name $ conjoin [simplified === Var "old", counterexample (show res) (isQed res)]
+  ]
+  where
+    mapping key idw = WriteWord (Lit 0) key (WriteWord (Lit 32) idw (ConcreteBuf ""))
+    slot off buf = if off == 0 then Keccak buf else Add (Lit off) (Keccak buf)
+    store r w a b = SStore (slot w a) (Var "new")
+      (SStore (slot r b) (Var "old") (AbstractStore (SymAddr "c") Nothing))
+    inputs key n d =
+      [ ("mapping slots", mapping key (Lit n), mapping key (Lit (n + d)))
+      , ("added keys", mapping (Add (Lit n) key) (Lit 5), mapping (Add (Lit (n + d)) key) (Lit 5))
+      , ("subtracted keys", mapping (Sub key (Lit n)) (Lit 5), mapping (Sub key (Lit (n + d))) (Lit 5))
+      , ("nested mapping", mapping key inner, mapping key (Lit 5))
+      , ("different lengths", WriteWord (Lit 0) key (ConcreteBuf ""), mapping key (Lit 5))
+      , ("partial last word", trailing 33 1, trailing 33 2)
+      , ("last word at 256 bytes", trailing 256 1, trailing 256 2)
+      ]
+      where
+        inner = Keccak (ConcreteBuf (word256Bytes n <> word256Bytes 5))
+        trailing len byte = WriteWord (Lit 0) key (ConcreteBuf (BS.pack (replicate (len - 1) 0 <> [byte])))
 
 copySliceTests :: TestTree
 copySliceTests = testGroup "CopySlice tests"

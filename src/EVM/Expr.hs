@@ -612,6 +612,31 @@ copySlice srcOff dstOff (Lit size) (WriteWord srcOff2 val base) dstBuff
 copySlice srcOffset dstOffset size src dst = CopySlice srcOffset dstOffset size src dst
 
 
+-- | Known differences in keccak inputs, checking lengths and at most eight words.
+keccakInputsDiffer :: Expr Buf -> Expr Buf -> Bool
+keccakInputsDiffer a b
+  | a == b = False
+  | otherwise = case (bufLength a, bufLength b) of
+      (Lit la, Lit lb)
+        | la /= lb -> True
+        | la > 0, la <= 256 -> any (differs la) [0, 32 .. la - 1]
+      _ -> False
+  where
+    differs len i =
+      let wordAt buf
+            | i + 32 <= len = readWord (Lit i) buf
+            | otherwise = readBytes (unsafeInto (len - i)) (Lit i) buf
+          (oa, xa) = offset (wordAt a)
+          (ob, xb) = offset (wordAt b)
+      in oa /= ob && xa == xb
+    offset :: Expr EWord -> (W256, Expr EWord)
+    offset (Lit n) = (n, Lit 0)
+    offset (Keccak (ConcreteBuf bs)) = (keccak' bs, Lit 0)
+    offset (Add (Lit n) x) = let (o, base) = offset x in (o + n, base)
+    offset (Sub x (Lit n)) = let (o, base) = offset x in (o - n, base)
+    offset x = (0, x)
+
+
 writeByte :: Expr EWord -> Expr Byte -> Expr Buf -> Expr Buf
 writeByte (Lit offset) (LitByte val) (ConcreteBuf "")
   | offset < maxBytes
@@ -861,6 +886,9 @@ readStorage w st = go (simplifyNoLitToKeccak w) (simplifyNoLitToKeccak st)
       _ | prevSlot == slot -> Just val
       -- distinct literal slots never alias; skip the simplifier-backed checks below
       (Lit _, Lit _) -> go slot prev
+      -- Distinct keccaks are at least 256 apart under keccakAssumptions.
+      (keccakBase -> Just a, keccakBase -> Just b)
+        | keccakInputsDiffer a b -> go slot prev
       (a, b) | surelyEqual a b -> Just val
       (a, b) | surelyNotEqual a b -> go slot prev
 
@@ -927,6 +955,10 @@ readStorage w st = go (simplifyNoLitToKeccak w) (simplifyNoLitToKeccak st)
 
     maxW32 :: W256
     maxW32 = into (maxBound :: Word32)
+    keccakBase :: Expr EWord -> Maybe (Expr Buf)
+    keccakBase (Keccak buf) = Just buf
+    keccakBase (Add (Lit off) (Keccak buf)) | off < 256 = Just buf
+    keccakBase _ = Nothing
     isArray :: ByteString -> Bool
     isArray b = BS.length b == 32
     isMap :: Expr Buf -> Bool
@@ -1284,6 +1316,7 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
       | b == c = iszero a
     go (Eq (Sub a b) c) | a == c = iszero b
 
+    go (Eq (Keccak a) (Keccak b)) | keccakInputsDiffer a b = Lit 0
     go (Eq (Lit 0) a) = iszero a
     go (Eq a b)
       | a == b = Lit 1
@@ -1619,6 +1652,7 @@ simplifyProp prop =
     go (PEq (Lit 0) (Eq a b)) = PNeg (peq a b)
     go (PEq (Lit 0) (LT a b)) = PLEq b a
 
+    go (PEq (Keccak a) (Keccak b)) | keccakInputsDiffer a b = PBool False
     go (PEq (Lit 0) (Sub a b)) = peq a b
     go (PEq (Lit 0) (Or a b)) = peq (Lit 0) a `PAnd` peq (Lit 0) b
     go (PEq a1 (Add a2 y)) | a1 == a2 = peq (Lit 0) y
