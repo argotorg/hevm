@@ -13,7 +13,7 @@ import Test.Tasty.QuickCheck hiding (Failure, Success)
 
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ReaderT)
-import Data.Bits (shiftL, shiftR)
+import Data.Bits (shiftL, shiftR, (.|.))
 import Data.ByteString qualified as BS (drop, length, pack, replicate, take)
 import Data.Containers.ListUtils (nubOrd)
 import Data.List qualified as List (nub, sort, tails)
@@ -75,6 +75,18 @@ rewriteRuleTests = testGroup "Rewrite rules"
       assertEqual "shifted out" (Lit 0) (Expr.simplify (SHR (Lit 8) (And (Lit 0xff) x)))
       assertEqual "prop: a bool is at most 1" [] (Expr.simplifyProps [PLEq (Eq x (Lit 3)) (Lit 1)])
       assertEqual "prop: wider than a byte" [PBool False] (Expr.simplifyProps [PEq (Lit 0x1ff) (And (Lit 0xff) x)])
+  , testProperty "odd-inverse" $ \(k :: W256) -> let o = k .|. 1 in o * Expr.oddInverse o === 1
+  , testCase "injective-cancellation" $ do
+      let x = Var "x"
+          y = Var "y"
+      assertEqual "add" (Eq (Lit 7) x) (Expr.simplify (Eq (Lit 10) (Add (Lit 3) x)))
+      assertEqual "xor" (Eq (Lit 6) x) (Expr.simplify (Eq (Lit 5) (Xor (Lit 3) x)))
+      assertEqual "not" (IsZero x) (Expr.simplify (Eq (Lit Expr.maxLit) (Not x)))
+      assertEqual "odd mul" (Eq (Lit 5) x) (Expr.simplify (Eq (Lit 15) (Mul (Lit 3) x)))
+      assertEqual "even mul stays" (Eq (Lit 16) (Mul (Lit 4) x)) (Expr.simplify (Eq (Lit 16) (Mul (Lit 4) x)))
+      assertEqual "two adds" (Eq x (Add (Lit 2) y)) (Expr.simplify (Eq (Add (Lit 3) y) (Add (Lit 1) x)))
+      assertEqual "prop add" [PEq (Lit 7) x] (Expr.simplifyProps [PEq (Lit 10) (Add (Lit 3) x)])
+      assertEqual "iszero of add" (Eq (Lit (0 - 3)) x) (Expr.simplify (IsZero (Add (Lit 3) x)))
   , testCase "shift-composition" $ do
       let x = Var "x"
       assertEqual "shr shr" (SHR (Lit 12) x) (Expr.simplify (SHR (Lit 4) (SHR (Lit 8) x)))

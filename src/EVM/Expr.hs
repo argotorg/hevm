@@ -28,6 +28,8 @@ module EVM.Expr
   , addmod
   , mulmod
   , exp
+  , oddInverse
+  , possibleOnes
   , sex
 
     -- * Comparisons / Booleans
@@ -485,6 +487,11 @@ possibleOnes = go (8 :: Int)
       _ -> maxLit
     -- every bit up to the highest set one: bounds any value whose bits are a subset
     fill v = if v == 0 then 0 else maxLit `shiftR` countLeadingZeros v
+
+-- | The inverse of an odd number mod 2^256, by Newton's iteration: each step doubles the
+-- correct low bits, starting from the 3 that an odd number is its own inverse in
+oddInverse :: W256 -> W256
+oddInverse k = iterate (\i -> i * (2 - k * i)) k !! 7
 
 -- | True if the WriteWord at @wIdx@ is provably disjoint from the 32-byte
 --   read at @i@. Sound mod 2^256: requires both windows to fit below 2^256.
@@ -1324,6 +1331,9 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (IsZero (Xor x y)) = eq x y
     go (IsZero (Sub a b)) = eq a b
     go (IsZero (Or a b)) = EVM.Expr.and (iszero a) (iszero b)
+    go (IsZero (Add (Lit c) x)) = eq (Lit (0 - c)) x
+    go (IsZero (Not x)) = eq (Lit maxLit) x
+    go (IsZero (Mul (Lit k) x)) | odd k = iszero x
     go (IsZero a) = iszero a
 
     -- ITE (if-then-else) simplification for path merging
@@ -1337,6 +1347,18 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     -- a literal with a bit the other side can not have
     go (Eq (Lit c) b)
       | c .&. complement (possibleOnes b) /= 0 = Lit 0
+    -- cancel injective operations
+    go (Eq (Lit c) (Add (Lit d) x)) = eq (Lit (c - d)) x
+    go (Eq (Lit c) (Sub (Lit d) x)) = eq (Lit (d - c)) x
+    go (Eq (Lit c) (Xor (Lit d) x)) = eq (Lit (Data.Bits.xor c d)) x
+    go (Eq (Lit c) (Not x)) = eq (Lit (complement c)) x
+    go (Eq (Lit c) (Mul (Lit k) x)) | odd k = eq (Lit (c * oddInverse k)) x
+    go (Eq (Add (Lit c) x) (Add (Lit d) y)) = eq (add (Lit (c - d)) x) y
+    go (Eq (Not a) (Not b)) = eq a b
+    go (Eq a (Add b c))
+      | a == b = iszero c
+      | a == c = iszero b
+    go (Eq a (Sub b c)) | a == b = iszero c
     go (Eq (Lit a) (Lit b))
       | a == b = Lit 1
       | otherwise = Lit 0
@@ -1713,6 +1735,13 @@ simplifyProp prop =
     go p@(PLEq {}) = p
 
     go (PEq (Lit c) b) | c .&. complement (possibleOnes b) /= 0 = PBool False
+    go (PEq (Lit c) (Add (Lit d) x)) = peq (Lit (c - d)) x
+    go (PEq (Lit c) (Sub (Lit d) x)) = peq (Lit (d - c)) x
+    go (PEq (Lit c) (Xor (Lit d) x)) = peq (Lit (Data.Bits.xor c d)) x
+    go (PEq (Lit c) (Not x)) = peq (Lit (complement c)) x
+    go (PEq (Lit c) (Mul (Lit k) x)) | odd k = peq (Lit (c * oddInverse k)) x
+    go (PEq (Add (Lit c) x) (Add (Lit d) y)) = peq (add (Lit (c - d)) x) y
+    go (PEq (Not a) (Not b)) = peq a b
     go (PEq (Lit 1) (Eq a b)) = peq a b
     go (PEq (Lit 1) (LT a b)) = PLT a b
     go (PEq (Lit 1) (IsZero e)) = PEq (Lit 0) e
