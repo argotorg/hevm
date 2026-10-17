@@ -123,6 +123,16 @@ rewriteRuleTests = testGroup "Rewrite rules"
       assertEqual "sub underflows" (LT x (Lit 5)) (Expr.simplify (GT (Sub x (Lit 5)) x))
       assertEqual "prop add no overflow" [PLEq x (Lit (Expr.maxLit - 5))] (Expr.simplifyProps [PLEq x (Add (Lit 5) x)])
       assertEqual "prop sub no underflow" [PLEq (Lit 5) x] (Expr.simplifyProps [PLEq (Sub x (Lit 5)) x])
+  , testCase "bounded-mul-overflow-checks" $ do
+      let x = Var "x"
+          d = Var "d"
+          bounded bd = [PLEq x (Lit (2 ^ (128 :: Int) - 1)), PLEq d (Lit bd)]
+          guard = Or (Eq x (Div (Mul d x) d)) (IsZero d)
+          small = bounded (2 ^ (128 :: Int) - 1)
+          big = bounded (2 ^ (129 :: Int))
+      assertEqual "holds" (Expr.simplifyProps small) (Expr.simplifyProps (PNeg (PEq (Lit 0) guard) : small))
+      assertEqual "cannot fail" [PBool False] (Expr.simplifyProps (PEq (Lit 0) guard : small))
+      assertBool "may overflow" (Expr.simplifyProps (PEq (Lit 0) guard : big) /= [PBool False])
   , testCase "same-base-offsets" $ do
       let p = Var "p"
           at o = Add (Lit o) p

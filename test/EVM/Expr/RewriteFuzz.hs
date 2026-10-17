@@ -478,6 +478,7 @@ genShapedProp n = frequency
   , (2, PLEq <$> w <*> w), (1, PGEq <$> w <*> w)
   , (2, PNeg <$> p), (2, PAnd <$> p <*> p), (2, POr <$> p <*> p), (1, PImpl <$> p <*> p)
   , (2, overflowCheck)
+  , (2, mulOverflowCheck)
   , (2, PEq <$> lit <*> ite), (1, PLT <$> lit <*> ite), (1, PLT <$> ite <*> lit)
   , (1, PLEq <$> lit <*> ite), (1, PLEq <$> ite <*> lit)
   ]
@@ -490,6 +491,20 @@ genShapedProp n = frequency
       op <- elements [PLT, PLEq, PGT, PGEq]
       e <- elements [Add c x, Sub x c]
       elements [op x e, op e x]
+    -- Solidity's checked multiplication under bounds, around where the product overflows
+    mulOverflowCheck = do
+      x <- oneof [Var <$> elements varNames, w]
+      d <- oneof [Var <$> elements varNames, w]
+      bx <- frequency [(3, Lit . (\k -> 2 ^ k - 1) <$> choose (0 :: Int, 256)), (1, lit)]
+      bd <- case bx of
+        Lit c | c > 0 -> frequency [(3, (\o -> Lit (Expr.maxLit `div` c + o)) <$> elements [-1, 0, 1]), (1, lit)]
+        _ -> lit
+      prod <- elements [Mul x d, Mul d x]
+      eq <- elements [PEq x (Div prod d), PEq (Div prod d) x]
+      let z = PEq (Lit 0) d
+          guardW = Or (Eq x (Div prod d)) (IsZero d)
+      g <- elements [POr eq z, POr z eq, eq, PNeg eq, PEq (Lit 0) guardW, PNeg (PEq (Lit 0) guardW)]
+      pure $ PAnd (PLEq x bx) (PAnd (PLEq d bd) g)
     w = genShapedWord (n `div` 2)
     p = genShapedProp (n `div` 2)
 

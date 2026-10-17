@@ -1939,7 +1939,7 @@ simplifyProps ps = if cannotBeSat then [PBool False] else simplified
     simplified = untilFixpoint goOne ps
     cannotBeSat = PBool False `elem` simplified
     goOne :: [Prop] -> [Prop]
-    goOne = remRedundantProps . map simplifyProp . constPropagate . flattenProps
+    goOne = remRedundantProps . map simplifyProp . boundedMulChecks . constPropagate . flattenProps
 
 
 -- | Evaluate the provided proposition down to its most concrete result
@@ -2591,6 +2591,33 @@ enumerateViaSmallSubterm limit props e0 = listToMaybe $ mapMaybe tryAtoms (map p
       _ -> x
 
 data Bounds = Bounds W256 W256 (Set.Set W256)
+
+-- | Decides Solidity's checked-multiplication guard @x == (x * d) / d || d == 0@
+-- where the bounds that @ps@ put on @x@ and @d@ rule out overflow. The props
+-- that give bounds are left alone, so the rewritten list is equivalent.
+boundedMulChecks :: [Prop] -> [Prop]
+boundedMulChecks ps = map (\p -> if Map.null (propBounds [p]) then go p else p) ps
+  where
+    bounds = propBounds ps
+    -- top-down, so that a whole guard is matched before its equality
+    go = \case
+      POr (PEq a b) (PEq (Lit 0) d) | Just (_, d') <- noOverflow a b, d == d' -> PBool True
+      POr (PEq (Lit 0) d) (PEq a b) | Just (_, d') <- noOverflow a b, d == d' -> PBool True
+      -- without overflow, (x * d) / d is x, or 0 if d is 0
+      PEq a b | Just (x, d) <- noOverflow a b -> POr (PNeg (PEq (Lit 0) d)) (PEq (Lit 0) x)
+      PNeg a -> PNeg (go a)
+      PAnd a b -> PAnd (go a) (go b)
+      POr a b -> POr (go a) (go b)
+      PImpl a b -> PImpl (go a) (go b)
+      p -> p
+    noOverflow :: Expr t -> Expr t -> Maybe (Expr EWord, Expr EWord)
+    noOverflow a b = case (a, b) of
+      (x, Div (Mul p q) d) | guarded x p q d -> Just (x, d)
+      (Div (Mul p q) d, x) | guarded x p q d -> Just (x, d)
+      _ -> Nothing
+    guarded x p q d = ((p == x && q == d) || (p == d && q == x)) && fits (upper x) (upper d)
+    fits u v = v == 0 || u <= maxLit `Prelude.div` v
+    upper t = Prelude.min (possibleOnes t) (maybe maxLit (\(Bounds _ ub _) -> ub) (Map.lookup t bounds))
 
 -- | Interval and excluded values that @props@ put on word subterms.
 propBounds :: [Prop] -> Map.Map (Expr EWord) Bounds
