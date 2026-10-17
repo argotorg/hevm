@@ -28,6 +28,7 @@ module EVM.Progress
   , setWorker
   , clearWorker
   , timedQuery
+  , fork
   ) where
 
 import Control.Concurrent (ThreadId, forkIO, killThread, myThreadId, threadDelay)
@@ -46,7 +47,9 @@ import Data.ByteString.Lazy.Char8 qualified as BL
 import Data.IORef
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.List (sortOn)
+import Data.Maybe (catMaybes, fromMaybe, isJust)
+import Data.Ord (Down(..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as T
@@ -72,8 +75,27 @@ data Worker = Worker
 
 data Query = Query
   { qFields :: [Pair]
-  , qPc :: Maybe Int
+  , qLoc :: Maybe Loc
   , qStart :: Double
+  , qSolveStart :: Maybe Double -- ^ when a solver took it up
+  }
+
+-- | Code address and pc
+type Loc = (Text, Int)
+
+data LocStats = LocStats
+  { lQueries :: !Int
+  , lSolveSecs :: !Double
+  , lForks :: !Int
+  }
+
+instance Semigroup LocStats where
+  LocStats a b c <> LocStats a' b' c' = LocStats (a + a') (b + b') (c + c')
+
+-- | Queries and forks of the current phase, for its summary
+data PhaseStats = PhaseStats
+  { byLoc :: Map Loc LocStats
+  , byResult :: Map (Text, Text) (Int, Double, Double) -- ^ by kind and result: count, wait and solve seconds
   }
 
 data Phase = Phase
@@ -91,7 +113,7 @@ data St = St
   , workers :: IORef (Map ThreadId Worker)
   , queries :: IORef (Map Int Query)
   , nextQuery :: IORef Int
-  , slowestDone :: IORef (Double, Maybe Int)
+  , phaseStats :: IORef PhaseStats
   , phase :: IORef Phase
   , paths :: IORef (Int, Int)
   , taskCounter :: IORef (IO Int)
@@ -115,7 +137,7 @@ withProgress opts act
       mapM_ (`hSetBuffering` BlockBuffering Nothing) h
       tty <- hSupportsANSI stderr
       st <- St h opts.logExprs tty
-        <$> newMVar () <*> getMonotonicTime <*> newIORef mempty <*> newIORef mempty <*> newIORef 0 <*> newIORef (0, Nothing)
+        <$> newMVar () <*> getMonotonicTime <*> newIORef mempty <*> newIORef mempty <*> newIORef 0 <*> newIORef (PhaseStats mempty mempty)
         <*> newIORef (Phase "starting" 0 0) <*> newIORef (0, 0) <*> newIORef (pure 0) <*> newIORef opts.statusLine <*> newIORef False
       writeIORef global (Just st)
       write st "start" []
@@ -128,6 +150,7 @@ withProgress opts act
       mapM_ killThread threads
       clearStatus st tty
       heartbeat st
+      writeSummary st
       write st "end" []
       writeIORef global Nothing
       -- threads that read the global before it was cleared may still write
@@ -187,9 +210,37 @@ withPhase name fs summary act = do
   emit "phase-start" (("phase" .= name) : fs)
   r <- act
   t1 <- liftIO getMonotonicTime
+  hot <- liftIO $ readIORef global >>= \case
+    Nothing -> pure []
+    Just st -> do
+      writeSummary st
+      ps <- readIORef st.phaseStats
+      pure [("hottest", JSON.String (showLoc l <> T.pack (printf " %.1fs/%dq" ls.lSolveSecs ls.lQueries))) | (l, ls) <- take 1 (hottest ps.byLoc), ls.lSolveSecs >= 1]
   emit "phase-end" (["phase" .= name, "secs" .= (t1 - t0)] <> fs <> summary r)
-  phaseDoneLine name (t1 - t0) (summary r)
+  phaseDoneLine name (t1 - t0) (summary r <> hot)
   pure r
+
+-- | The locations with the most solver time first
+hottest :: Map Loc LocStats -> [(Loc, LocStats)]
+hottest = sortOn (Down . (.lSolveSecs) . snd) . Map.toList
+
+showLoc :: Loc -> Text
+showLoc (_, pc) = "pc " <> T.pack (show pc)
+
+-- | Where the solver time and forks of the current phase went: the top
+-- locations by solver time and by forks, and the queries by kind and result.
+writeSummary :: St -> IO ()
+writeSummary st = do
+  ps <- readIORef st.phaseStats
+  let top = take 10 (hottest ps.byLoc)
+      forky = take 5 $ sortOn (Down . (.lForks) . snd) [x | x@(_, ls) <- Map.toList ps.byLoc, ls.lForks > 0]
+      locs = top <> [x | x@(l, _) <- forky, l `notElem` map fst top]
+  unless (Map.null ps.byLoc && Map.null ps.byResult) $ write st "summary"
+    [ "locations" .= [ JSON.object ["addr" .= a, "pc" .= pc, "queries" .= ls.lQueries, "solveSecs" .= ls.lSolveSecs, "forks" .= ls.lForks]
+                     | ((a, pc), ls) <- locs ]
+    , "queries" .= [ JSON.object ["kind" .= k, "result" .= res, "count" .= n, "waitSecs" .= w, "solveSecs" .= sv]
+                   | ((k, res), (n, w, sv)) <- sortOn (\(_, (_, _, sv)) -> Down sv) (Map.toList ps.byResult) ]
+    ]
 
 -- | Leaves a finished phase on the screen as a line of its own; the status
 -- line continues below it.
@@ -221,6 +272,7 @@ markPhase name fs = do
 startPhase :: MonadIO m => Text -> m ()
 startPhase n = liftIO $ readIORef global >>= mapM_ (\st -> do
   writeIORef st.phase (Phase n 0 0)
+  writeIORef st.phaseStats (PhaseStats mempty mempty)
   writeIORef st.paths (0, 0))
 
 -- | How many items the current phase works through, for the status line.
@@ -259,27 +311,51 @@ clearWorker = liftIO $ readIORef global >>= mapM_ (\st -> do
   atomicModifyIORef' st.workers $ \m -> (Map.delete tid m, ()))
 
 -- | Logs a solver query, tagged with the calling worker's context, together
--- with its duration and the result rendered by @showRes@.
-timedQuery :: Text -> [Pair] -> (r -> Text) -> IO r -> IO r
+-- with its duration and the result rendered by @showRes@. The query calls the
+-- action it is given when a solver takes it up, so that the time it waited for
+-- a free solver is told apart from the time it was solved for.
+timedQuery :: Text -> [Pair] -> (r -> Text) -> (IO () -> IO r) -> IO r
 timedQuery kind fs showRes act = readIORef global >>= \case
-  Nothing -> act
+  Nothing -> act (pure ())
   Just st -> do
     tid <- myThreadId
     ctx <- maybe [] (.fields) . Map.lookup tid <$> readIORef st.workers
     qid <- atomicModifyIORef' st.nextQuery $ \n -> (n + 1, n)
     t0 <- getMonotonicTime
     let qfs = ["query" .= qid, "kind" .= kind] <> fs <> ctx
-        pc = case lookup "pc" ctx of
-          Just (JSON.Number n) -> Just (round n)
-          _ -> Nothing
-    atomicModifyIORef' st.queries $ \m -> (Map.insert qid (Query qfs pc t0) m, ())
+        loc = (,) <$> textField "addr" ctx <*> intField "pc" ctx
+        started = do
+          t <- getMonotonicTime
+          atomicModifyIORef' st.queries $ \m -> (Map.adjust (\q -> q { qSolveStart = Just t }) qid m, ())
+    atomicModifyIORef' st.queries $ \m -> (Map.insert qid (Query qfs loc t0 Nothing) m, ())
     write st "query-start" qfs
-    r <- act
+    r <- act started
     t1 <- getMonotonicTime
-    atomicModifyIORef' st.queries $ \m -> (Map.delete qid m, ())
-    atomicModifyIORef' st.slowestDone $ \old -> (if t1 - t0 > fst old then (t1 - t0, pc) else old, ())
-    write st "query-end" ["query" .= qid, "kind" .= kind, "secs" .= (t1 - t0), "result" .= showRes r]
+    q <- atomicModifyIORef' st.queries $ \m -> (Map.delete qid m, Map.lookup qid m)
+    -- a query answered without a solver, e.g. from the cache, only waited
+    let solveStart = fromMaybe t1 (q >>= (.qSolveStart))
+        wait = solveStart - t0
+        solve = t1 - solveStart
+        res = showRes r
+    atomicModifyIORef' st.phaseStats $ \ps -> (ps
+      { byLoc = maybe id (\l -> Map.insertWith (<>) l (LocStats 1 solve 0)) loc ps.byLoc
+      , byResult = Map.insertWith (\(a, b, c) (a', b', c') -> (a + a', b + b', c + c')) (kind, T.takeWhile (/= ':') res) (1, wait, solve) ps.byResult
+      }, ())
+    write st "query-end" ["query" .= qid, "kind" .= kind, "secs" .= (t1 - t0), "waitSecs" .= wait, "solveSecs" .= solve, "result" .= res]
     pure r
+  where
+    textField k ctx = case lookup k ctx of
+      Just (JSON.String t) -> Just t
+      _ -> Nothing
+    intField k ctx = case lookup k ctx of
+      Just (JSON.Number n) -> Just (round n)
+      _ -> Nothing
+
+-- | Logs that execution forks at the given code address and pc
+fork :: MonadIO m => Text -> Int -> [Pair] -> m ()
+fork addr pc fs = liftIO $ readIORef global >>= mapM_ (\st -> do
+  atomicModifyIORef' st.phaseStats $ \ps -> (ps { byLoc = Map.insertWith (<>) (addr, pc) (LocStats 0 0 1) ps.byLoc }, ())
+  write st "fork" (["addr" .= addr, "pc" .= pc] <> fs))
 
 heartbeat :: St -> IO ()
 heartbeat st = do
@@ -343,13 +419,15 @@ statusSegments st = do
   nWorkers <- Map.size <$> readIORef st.workers
   qs <- Map.elems <$> readIORef st.queries
   qDone <- readIORef st.nextQuery
-  done <- readIORef st.slowestDone
-  let running = length qs
-      -- a query still running counts too, so a hanging one shows up
-      (slowSecs, slowPc) = maximumOn fst $ done : [(now - q.qStart, q.qPc) | q <- qs]
-      slowest
-        | slowSecs > 0 = T.pack (printf "%6.1fs" slowSecs) <> maybe "         " (\pc -> " @pc " <> pad 5 pc) slowPc
-        | otherwise = T.replicate 17 " "
+  ps <- readIORef st.phaseStats
+  let solving = length (filter (isJust . (.qSolveStart)) qs)
+      queued = length qs - solving
+      -- a query still being solved counts too, so a hanging one shows up
+      locs = foldr (\(l, s) -> Map.insertWith (<>) l (LocStats 1 s 0)) ps.byLoc
+               [(l, now - s) | q <- qs, Just l <- [q.qLoc], Just s <- [q.qSolveStart]]
+      hot = case hottest locs of
+        ((_, pc), ls) : _ | ls.lSolveSecs > 0 -> "@pc " <> pad 5 pc <> T.pack (printf " %6.1fs" ls.lSolveSecs) <> " " <> pad 4 ls.lQueries <> "q"
+        _ -> T.replicate 23 " "
       elapsed = now - st.start
       progress
         | p.total > 0 = pad (T.length (tshow p.total)) p.done <> "/" <> tshow p.total
@@ -357,9 +435,9 @@ statusSegments st = do
   pure
     [ (T.justifyLeft 11 ' ' p.name, [bold, fg Magenta], progress)
     , ("paths", [fg Green], pad 6 nPaths <> " (" <> pad 5 nPartial <> " partial)")
+    , ("SMT", [fg Blue], pad 7 (qDone - length qs) <> " done, " <> pad 3 solving <> " solving, " <> pad 3 queued <> " queued")
+    , ("hottest", [fg Yellow], hot)
     , ("tasks", [], pad 6 tasks <> ", " <> pad 3 nWorkers <> " busy")
-    , ("SMT", [fg Blue], pad 7 (qDone - running) <> " done, " <> pad 3 running <> " running")
-    , ("slowest", [fg Yellow], slowest)
     , ("", [], T.pack $ printf "%3d:%02d" (floor (elapsed / 60) :: Int) (floor elapsed `mod` 60 :: Int))
     ]
   where
@@ -369,7 +447,6 @@ statusSegments st = do
     tshow = T.pack . show
     pad :: Show a => Int -> a -> Text
     pad n = T.justifyRight n ' ' . tshow
-    maximumOn f = foldr1 (\a b -> if f a >= f b then a else b)
 
 -- | The segments, cut to @width@ columns, with colours.
 render :: Text -> Int -> [(Text, [SGR], Text)] -> String

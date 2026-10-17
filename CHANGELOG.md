@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (disable with `--no-progress`), and a JSONL log of interpreter and solver
   progress (`--progress-log FILE` or `--verb 3`; `--progress-exprs` or `--verb 4`
   also logs solver expressions).
+- The progress log tells the time a query waited for a solver apart from the
+  time it was solved for, gives the reason a query for multiple solutions gave
+  up, and ends each phase with a summary of where its solver time and forks
+  went. The status line shows queued queries and the program counter with the
+  most solver time.
 - Abstract arithmetic, on by default (disable with `--no-abstract-arith`):
   symbolic multiplication and division are encoded as uninterpreted functions
   constrained by sound algebraic lemmas, and are equated with the native bitvector operations only when the abstract query
