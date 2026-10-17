@@ -43,6 +43,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   16 MB) instead of 64, which is still more than gas limits allow.
 - Counterexamples have bold section headings, and `hevm equivalence` shows the
   result of replaying each one as a coloured tag, as `hevm test` does.
+- `hevm equivalence` replays counterexamples with calls to unknown code by
+  putting code at each callee that returns what the counterexample says, and
+  logs each replay to the progress log.
 
 ## Fixed
 - A call to unknown code now writes the data it returns to the output region
