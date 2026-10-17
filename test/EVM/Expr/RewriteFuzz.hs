@@ -336,6 +336,7 @@ genShapedWord :: Int -> Gen (Expr EWord)
 genShapedWord 0 = genLeaf
 genShapedWord n = frequency
   [ (3, genLeaf)
+  , (4, genTemplate s shiftAmt)
   , (2, Add <$> s <*> s), (2, Sub <$> s <*> s), (1, Mul <$> s <*> s)
   , (1, Div <$> s <*> s), (1, Mod <$> s <*> s), (1, SDiv <$> s <*> s), (1, SMod <$> s <*> s)
   , (1, AddMod <$> s <*> s <*> s), (1, MulMod <$> s <*> s <*> s)
@@ -364,6 +365,27 @@ genShapedWord n = frequency
 
 -- | A buffer offset or size. Kept bounded when concrete: the simplifier materializes concrete
 -- buffers up to 'Expr.maxBytes', and huge ones exhaust memory.
+-- | The shapes that rewrite rules match, built directly: random composition rarely puts a
+-- literal exactly where a rule needs it
+genTemplate :: Gen (Expr EWord) -> Gen (Expr EWord) -> Gen (Expr EWord)
+genTemplate s shiftAmt = oneof
+  [ Eq <$> lit <*> (litOp <*> lit <*> s)
+  , Eq <$> (Add <$> lit <*> s) <*> (Add <$> lit <*> s)
+  , Eq <$> lit <*> (Not <$> s)
+  , IsZero <$> (litOp <*> lit <*> s)
+  , And <$> lit <*> (shiftOp <*> shiftAmt <*> s)
+  , shiftOp <*> shiftAmt <*> (shiftOp <*> shiftAmt <*> s)
+  , SAR <$> shiftAmt <*> (SAR <$> shiftAmt <*> s)
+  , Mod <$> s <*> pow2, Div <$> s <*> pow2
+  , LT <$> (And <$> lit <*> s) <*> lit
+  , LT <$> lit <*> (And <$> lit <*> s)
+  ]
+  where
+    lit = Lit <$> genSpecialLit
+    pow2 = Lit . (2 ^) <$> choose (0 :: Int, 255)
+    litOp = elements [Add, Sub, Xor, Mul]
+    shiftOp = elements [SHL, SHR]
+
 smallIdxWith :: Gen (Expr EWord) -> Gen (Expr EWord)
 smallIdxWith s = frequency
   [ (8, Lit . fromIntegral <$> choose (0 :: Int, 100))
@@ -414,7 +436,12 @@ genShapedProp n = frequency
 genEnvFrom :: [W256] -> [Text] -> Gen FuzzEnv
 genEnvFrom lits names = do
   let near = nub $ concat [[l - 1, l, l + 1] | l <- lits]
-      val = frequency $ [(3, elements near) | Prelude.not (null near)] <> [(2, genSpecialLit), (1, arbitrary)]
+      -- values that solve equalities like c = d + x or c = k * x
+      few = take 8 lits
+      solving = nub $ [f a b | a <- few, b <- few, f <- [(+), (-), xor]]
+        <> [a * Expr.oddInverse b | a <- few, b <- few, odd b] <> map complement few
+      val = frequency $ [(3, elements near) | Prelude.not (null near)]
+        <> [(2, elements solving) | Prelude.not (null solving)] <> [(2, genSpecialLit), (1, arbitrary)]
   vs <- mapM (\v -> (v,) <$> val) varNames
   bs <- mapM (\b -> (b,) <$> genBytes) names
   pure $ FuzzEnv (Map.fromList vs) (Map.fromList bs)
