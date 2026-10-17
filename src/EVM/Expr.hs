@@ -415,6 +415,8 @@ readByte i@(Lit x) buf@(CopySlice _ (Lit dstOffset) (Lit size) _ dst)
     then readByte i dst
     else ReadByte (Lit x) buf
 
+readByte _ (ConcreteBuf b) | BS.all (== 0) b = LitByte 0
+
 -- fully abstract reads
 readByte i buf = ReadByte i buf
 
@@ -541,6 +543,7 @@ writeDisjointFromReadWord i = \case
 -- | Reads the word starting at idx from the given buf
 readWord :: Expr EWord -> Expr Buf -> Expr EWord
 readWord idx buf@(AbstractBuf _) = ReadWord idx buf
+readWord _ (ConcreteBuf b) | BS.all (== 0) b = Lit 0
 readWord idx b@(WriteWord idx' val buf)
   -- the word we are trying to read exactly matches a WriteWord
   | idx == idx' = val
@@ -667,6 +670,12 @@ copySlice s@(Lit srcOffset) d@(Lit _) sz@(Lit size) src@(WriteWord {}) dst
   | Just src' <- trimToWindow srcOffset size src, src' /= src
   = copySlice s d sz src' dst
 
+-- Drop what the copy overwrites in dst.
+copySlice s d@(Lit dstOffset) sz@(Lit size) src dst
+  | dstOffset < maxBytes, size < maxBytes
+  , dst' <- trimOverwritten dstOffset (dstOffset + size) dst, dst' /= dst
+  = copySlice s d sz src dst'
+
 -- concrete indices & abstract src (may produce a concrete result if we are
 -- copying from a concrete region of src)
 copySlice s@(Lit srcOffset) d@(Lit dstOffset) sz@(Lit size) src ds@(ConcreteBuf dst)
@@ -706,6 +715,29 @@ trimToWindow off size buf
       -- Preserve padding so zero-slot mapping preimages remain 64 bytes.
       in Just $ ConcreteBuf bytes
     go _ _ = Nothing
+
+-- | Drops the writes in a buffer that lie within [start, end), and zeroes the concrete
+-- bytes there, keeping the length: whatever is copied over that window replaces them.
+trimOverwritten :: W256 -> W256 -> Expr Buf -> Expr Buf
+trimOverwritten start end = go
+  where
+    go = \case
+      WriteWord i@(Lit idx) v rest
+        | idx >= start && idx <= end && end - idx >= 32 -> go rest
+        | otherwise -> WriteWord i v (go rest)
+      WriteWord i v rest -> WriteWord i v (go rest)
+      WriteByte i@(Lit idx) v rest
+        | idx >= start && idx < end -> go rest
+        | otherwise -> WriteByte i v (go rest)
+      WriteByte i v rest -> WriteByte i v (go rest)
+      b@(ConcreteBuf bs)
+        | start < end, unsafeInto start < BS.length bs, BS.any (/= 0) window ->
+            ConcreteBuf $ hd <> BS.replicate (BS.length window) 0 <> tl
+        | otherwise -> b
+        where
+          (hd, rest) = BS.splitAt (unsafeInto start) bs
+          (window, tl) = BS.splitAt (unsafeInto (end - start)) rest
+      b -> b
 
 writeByte :: Expr EWord -> Expr Byte -> Expr Buf -> Expr Buf
 writeByte (Lit offset) (LitByte val) (ConcreteBuf "")
