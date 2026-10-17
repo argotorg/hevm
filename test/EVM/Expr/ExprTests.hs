@@ -123,6 +123,13 @@ rewriteRuleTests = testGroup "Rewrite rules"
       assertEqual "sub underflows" (LT x (Lit 5)) (Expr.simplify (GT (Sub x (Lit 5)) x))
       assertEqual "prop add no overflow" [PLEq x (Lit (Expr.maxLit - 5))] (Expr.simplifyProps [PLEq x (Add (Lit 5) x)])
       assertEqual "prop sub no underflow" [PLEq (Lit 5) x] (Expr.simplifyProps [PLEq (Sub x (Lit 5)) x])
+  , testCase "same-base-offsets" $ do
+      let p = Var "p"
+          at o = Add (Lit o) p
+          buf = WriteWord (at 32) (Var "a") (WriteWord p (Var "b") (AbstractBuf "m"))
+      assertEqual "read the field written" (Var "b") (Expr.simplify (ReadWord p buf))
+      assertEqual "read under a disjoint write" (ReadWord (at 64) (AbstractBuf "m")) (Expr.simplify (ReadWord (at 64) buf))
+      assertEqual "byte of a field" (IndexWord (Lit 1) (Var "a")) (Expr.simplify (ReadByte (at 33) buf))
   , testCase "shift-composition" $ do
       let x = Var "x"
       assertEqual "shr shr" (SHR (Lit 12) x) (Expr.simplify (SHR (Lit 4) (SHR (Lit 8) x)))

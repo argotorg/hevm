@@ -87,6 +87,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overwrites, and reads zero from all-zero concrete buffers at any offset.
 - The simplifier turns overflow checks of adding or subtracting a literal,
   such as `x < x + c`, into comparisons of `x` against a literal.
+- Reads from buffers written at offsets from the same symbolic pointer skip
+  the writes they are disjoint from and resolve the writes they hit.
 
 ## Fixed
 - Buffer models from the solver drop bytes past the buffer's length, so a
