@@ -1257,6 +1257,7 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (SEx a b) = sex a b
 
     -- IsZero
+    go (IsZero (Keccak _)) = Lit 0
     go (IsZero (IsZero (IsZero a))) = iszero a
     go (IsZero (IsZero (LT x y))) = lt x y
     go (IsZero (IsZero (Eq x y))) = eq x y
@@ -1283,6 +1284,9 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
       | a == c = iszero b
       | b == c = iszero a
     go (Eq (Sub a b) c) | a == c = iszero b
+
+    -- Match keccakAssumptions: outputs exceed 256.
+    go (Eq (Lit a) (Keccak _)) | a <= 256 = Lit 0
 
     go (Eq (Lit 0) a) = iszero a
     go (Eq a b)
@@ -1619,6 +1623,7 @@ simplifyProp prop =
     go (PEq (Lit 0) (Eq a b)) = PNeg (peq a b)
     go (PEq (Lit 0) (LT a b)) = PLEq b a
 
+    go (PEq (Lit a) (Keccak _)) | a <= 256 = PBool False
     go (PEq (Lit 0) (Sub a b)) = peq a b
     go (PEq (Lit 0) (Or a b)) = peq (Lit 0) a `PAnd` peq (Lit 0) b
     go (PEq a1 (Add a2 y)) | a1 == a2 = peq (Lit 0) y

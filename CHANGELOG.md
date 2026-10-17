@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- Equality of a keccak hash with a literal at most 256 now simplifies to false,
+  matching the existing SMT assumption.
 - Symbolic execution now avoids forking when simplification shows that
   the path conditions imply the branch condition.
 - Symbolic jump targets and jump conditions that depend on a subterm with few
