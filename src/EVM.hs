@@ -1783,6 +1783,7 @@ freshBufFallback target value inOffset inSize outOffset outSize changesState xs 
   let freshReturndataExpr = AbstractBuf (opName <> "-result-data-fresh-" <> (pack . show) freshVar)
   modifying #constraints ((:) (PLEq (bufLength freshReturndataExpr) (Lit (2 ^ ?conf.maxBufSize))))
   let worldAfter = if changesState then Just (Var (opName <> "-world-fresh-" <> (pack . show) freshVar)) else Nothing
+      etherIn = Var (opName <> "-ether-fresh-" <> (pack . show) freshVar)
       inputs = CallInputs
         { world = world
         , callKind = Lit (into ?op)
@@ -1795,8 +1796,19 @@ freshBufFallback target value inOffset inSize outOffset outSize changesState xs 
         , callerTStorage = maybe (AbstractStore self Nothing) (.tStorage) callee
         , callerBalance = maybe (Balance self) (.balance) callee
         }
-  modifying #constraints ((:) (PCall inputs freshVarExpr freshReturndataExpr worldAfter))
+  modifying #constraints ((:) (PCall inputs freshVarExpr freshReturndataExpr ((, etherIn) <$> worldAfter)))
   mapM_ (assign (#env % #callWorld)) worldAfter
+  -- the callee gets the value if the call succeeds, and can send the caller ether
+  -- without running the caller's code, e.g. by self-destructing
+  when changesState $ do
+    let moved = Expr.mul value freshVarExpr
+    paid <- maybe (Balance caller) (.balance) <$> preuse (#env % #contracts % ix caller)
+    let left = Expr.sub paid moved
+    modifying #constraints ((:) (PLEq etherIn (Expr.sub (Lit maxBound) left)))
+    assign (#env % #contracts % ix caller % #balance) (Expr.add left etherIn)
+    case wordToAddr target of
+      Just a | a /= caller -> modifying (#env % #contracts % ix a % #balance) (Expr.add moved)
+      _ -> pure ()
   assign (#state % #returndata) freshReturndataExpr
   writeCallOutput freshReturndataExpr outSize outOffset
   next >> assign' (#state % #stack) (freshVarExpr:xs)

@@ -527,10 +527,11 @@ data Prop where
   POr :: Prop -> Prop -> Prop
   PImpl :: Prop -> Prop -> Prop
   PBool :: Bool -> Prop
-  -- | The fresh success flag and return data of a call to unknown code, and the
-  -- world after it if it can change state, are what uninterpreted functions of
-  -- the call's inputs give, so that calls with equal inputs get equal results
-  PCall :: CallInputs -> Expr EWord -> Expr Buf -> Maybe (Expr EWord) -> Prop
+  -- | The fresh success flag and return data of a call to unknown code, and if
+  -- it can change state, the world after it and the ether it sends the caller,
+  -- are what uninterpreted functions of the call's inputs give, so that calls
+  -- with equal inputs get equal results
+  PCall :: CallInputs -> Expr EWord -> Expr Buf -> Maybe (Expr EWord, Expr EWord) -> Prop
 deriving instance (Show Prop)
 
 -- | Everything the callee of a call to unknown code can observe

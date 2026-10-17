@@ -467,6 +467,13 @@ bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
     -- sstore(0, calldataload(2^256-1)) vs sstore(0, shr(8, calldataload(0)))
     eq <- eqBytecode False "7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff355f55" "5f3560081c5f55"
     assertBool "the read must not wrap around to the start of calldata" (any (isCex . fst) eq.res)
+  , testCase "eq-call-moves-its-value" $ do
+    eq <- eqBytecode True (call "1234" <> pop) (callWithWei "1234" <> pop)
+    assertBool "the callee gets the value" (any (isCex . fst) eq.res)
+  , testCase "eq-call-may-send-ether-back" $ do
+    -- sstore(0, selfbalance()) after the call vs with the balance from before it
+    eq <- eqBytecode True (call "1234" <> pop <> "475f55") ("47" <> call "1234" <> pop <> "5f55")
+    assertBool "the callee may send the caller ether" (any (isCex . fst) eq.res)
   , testCase "eq-call-after-same-state-changing-call" $ do
     eq <- eqBytecode True (call "1234" <> pop <> sCall "5678" "5f" <> pop <> revertRet)
                           ("5b" <> call "1234" <> pop <> sCall "5678" "5f" <> pop <> revertRet)
@@ -505,6 +512,8 @@ bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
     sCall addr size = "5f5f" <> size <> "5f61" <> addr <> "5afa"
     -- CALL(gas, addr, 0, 0, 0, 0, 0)
     call addr = "5f5f5f5f5f61" <> addr <> "5af1"
+    -- CALL(gas, addr, 1, 0, 0, 0, 0)
+    callWithWei addr = "5f5f5f5f600161" <> addr <> "5af1"
     pop = "50"
     -- revert with the last call's return data
     revertRet = "3d5f5f3e3d5ffd"

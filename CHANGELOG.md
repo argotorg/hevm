@@ -56,6 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of 0.
 - Symbolic `CALLDATALOAD` from within 31 bytes of 2^256 gives zero instead of
   wrapping around to the start of calldata.
+- A call to unknown code moves its value to the callee, and the callee may send
+  the caller ether, in symbolic execution.
 - A call to unknown code now writes the data it returns to the output region
   of the call in memory. Before, the region kept its old contents, so code that
   read the result from there could pass assertions it does not satisfy.
