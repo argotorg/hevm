@@ -31,6 +31,7 @@ import EVM.Effects qualified as Effects
 import EVM.Fetch qualified as Fetch
 import EVM.Format (formatBinary)
 import EVM.Op (intToOpName)
+import EVM.Progress qualified as Progress
 import EVM.Solvers (withSolvers, defMemLimit, Solver(..), SolverGroup)
 import EVM.Stepper (Stepper)
 import EVM.Stepper qualified as Stepper
@@ -268,7 +269,8 @@ genValue = frequency
 genCall :: Calls -> Gen Stmt
 genCall calls = Call
   <$> genKind calls
-  <*> frequency [(4, AtAddr <$> elements callees), (1, FromCd <$> elements [0, 32])]
+  -- a callee from calldata makes the explorer enumerate addresses on every path, which is slow
+  <*> frequency [(19, AtAddr <$> elements callees), (1, FromCd <$> elements [0, 32])]
   -- the model may answer equal calls differently, which the replay can't do, so mostly make them differ
   <*> frequency [(3, Just <$> genCallId), (1, pure Nothing)]
   <*> genOff <*> genSize <*> genOff <*> genSize
@@ -306,8 +308,9 @@ genHalt = Halt <$> elements [0x00, 0xf3, 0xfd] <*> genOff <*> genSize
 genBlocks :: Calls -> Int -> Gen [Stmt]
 genBlocks calls d = choose (1, 4) >>= \n -> vectorOf n (genBlock calls d)
 
+-- calls that move value fork every path they are on, so those programs nest less
 genProgram :: Calls -> Gen [Stmt]
-genProgram calls = choose (1, 6) >>= \n -> vectorOf n (genBlock calls 2)
+genProgram calls = choose (1, 6) >>= \n -> vectorOf n (genBlock calls (if calls == AllCalls then 1 else 2))
 
 -- * Mutations
 
@@ -553,7 +556,7 @@ type Replay = (SMTCex, CexReplay, Maybe (Run, Run))
 -- | Checks A and B for equivalence and replays each counterexample, also on
 -- traced runs that record what the replay executes
 checkAndReplay :: App m => SolverGroup -> ByteString -> ByteString -> m ([String], [Replay])
-checkAndReplay s codeA codeB = do
+checkAndReplay s codeA codeB = Progress.withProgressLogFromEnv "eq-fuzz" $ do
   (calldata, _) <- mkCalldata Nothing []
   eq <- if codeA == codeB then pure mempty else equivalenceCheck s Nothing codeA codeB defaultVeriOpts calldata False
   let verdicts = nub $ map (verdict . fst) eq.res
@@ -589,8 +592,13 @@ showPair a b =
   [ "A: " <> show a, "B: " <> show b
   , "A code: " <> T.unpack (formatBinary (assemble a)), "B code: " <> T.unpack (formatBinary (assemble b)) ]
 
+-- | A call to an address from calldata has unboundedly many targets; enumerating
+-- the default 100 of them one query at a time takes ~14s per program
+fuzzConfig :: Effects.Config
+fuzzConfig = Effects.defaultConfig { Effects.maxWidth = 5 }
+
 prop_eqReplay :: IO (IORef Coverage) -> Pair -> Property
-prop_eqReplay cov (Pair a b mutation) = ioProperty $ Effects.runApp $ withSolvers Bitwuzla 1 (Just 20) defMemLimit $ \s -> do
+prop_eqReplay cov (Pair a b mutation) = ioProperty $ Effects.runEnv (Effects.Env fuzzConfig) $ withSolvers Bitwuzla 1 (Just 20) defMemLimit $ \s -> do
   (verdicts, replays) <- checkAndReplay s codeA codeB
   random <- randomRuns s codeA codeB
   let equivalent = verdicts == ["equivalent"]
@@ -669,7 +677,7 @@ agreement :: Calls -> Variant -> Gen [Variant] -> IO (IORef Coverage) -> Propert
 agreement calls base0 genVariants cov = forAllShrink (genPair calls) shrink $ \(Pair a b mutation) -> forAll genVariants $ \vs -> ioProperty $ do
   let codeA = assemble a
       codeB = assemble b
-      check v = Effects.runEnv (Effects.Env { Effects.config = v.tweak Effects.defaultConfig }) $
+      check v = Effects.runEnv (Effects.Env { Effects.config = v.tweak fuzzConfig }) $
         withSolvers Bitwuzla 1 (Just 20) defMemLimit $ \s -> checkAndReplay s codeA codeB
       valueCalls = any isValueCall (allStmts (a <> b))
       -- the replay's stubs can't send ether back
@@ -677,7 +685,7 @@ agreement calls base0 genVariants cov = forAllShrink (genPair calls) shrink $ \(
       excuse v cex runs
         | keccakRan runs = Just "ran SHA3"
         | etherBack cex = Just "a callee sends ether back"
-        | valueCalls, not (v.tweak Effects.defaultConfig).promiseNoReent = Just "re-entrancy allowed"
+        | valueCalls, not (v.tweak fuzzConfig).promiseNoReent = Just "re-entrancy allowed"
         | otherwise = Nothing
       reason v cex r runs = case r of
         NotReproducible {} -> maybe "NOT REPRODUCIBLE" ("not reproducible, " <>) (excuse v cex runs)
