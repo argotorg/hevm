@@ -15,6 +15,7 @@ module EVM.Progress
   , withProgress
   , withProgressLogFromEnv
   , stopStatus
+  , printOut
   , emit
   , emitExprs
   , withPhase
@@ -96,6 +97,7 @@ instance Semigroup LocStats where
 data PhaseStats = PhaseStats
   { byLoc :: Map Loc LocStats
   , byResult :: Map (Text, Text) (Int, Double, Double) -- ^ by kind and result: count, wait and solve seconds
+  , slowest :: Maybe (Double, Maybe Loc) -- ^ the longest solve, and where it was issued
   }
 
 data Phase = Phase
@@ -137,7 +139,7 @@ withProgress opts act
       mapM_ (`hSetBuffering` BlockBuffering Nothing) h
       tty <- hSupportsANSI stderr
       st <- St h opts.logExprs tty
-        <$> newMVar () <*> getMonotonicTime <*> newIORef mempty <*> newIORef mempty <*> newIORef 0 <*> newIORef (PhaseStats mempty mempty)
+        <$> newMVar () <*> getMonotonicTime <*> newIORef mempty <*> newIORef mempty <*> newIORef 0 <*> newIORef (PhaseStats mempty mempty Nothing)
         <*> newIORef (Phase "starting" 0 0) <*> newIORef (0, 0) <*> newIORef (pure 0) <*> newIORef opts.statusLine <*> newIORef False
       writeIORef global (Just st)
       write st "start" []
@@ -178,6 +180,16 @@ stopStatus = liftIO $ readIORef global >>= mapM_ (\st -> do
   tty <- hSupportsANSI stderr
   clearStatus st tty)
 
+-- | Prints to stdout without garbling the status line, which is redrawn below
+-- the text on its next tick.
+printOut :: MonadIO m => Text -> m ()
+printOut t = liftIO $ readIORef global >>= \case
+  Nothing -> T.putStr t >> hFlush stdout
+  Just st -> withMVar st.lock $ \_ -> do
+    on <- readIORef st.statusOn
+    when (on && st.tty) $ hPutStr stderr ("\r" <> clearLineCode) >> hFlush stderr
+    T.putStr t >> hFlush stdout
+
 clearStatus :: St -> Bool -> IO ()
 clearStatus st tty = withMVar st.lock $ \_ -> do
   on <- atomicModifyIORef' st.statusOn (False,)
@@ -215,7 +227,8 @@ withPhase name fs summary act = do
     Just st -> do
       writeSummary st
       ps <- readIORef st.phaseStats
-      pure [("hottest", JSON.String (showLoc l <> T.pack (printf " %.1fs/%dq" ls.lSolveSecs ls.lQueries))) | (l, ls) <- take 1 (hottest ps.byLoc), ls.lSolveSecs >= 1]
+      pure $ [("hottest", JSON.String (showLoc l <> T.pack (printf " %.1fs/%dq" ls.lSolveSecs ls.lQueries))) | (l, ls) <- take 1 (hottest ps.byLoc), ls.lSolveSecs >= 1]
+          <> [("slowest", JSON.String (T.pack (printf "%.1fs" secs) <> maybe "" ((" @" <>) . showLoc) l)) | Just (secs, l) <- [ps.slowest], secs >= 1]
   emit "phase-end" (["phase" .= name, "secs" .= (t1 - t0)] <> fs <> summary r)
   phaseDoneLine name (t1 - t0) (summary r <> hot)
   pure r
@@ -272,7 +285,7 @@ markPhase name fs = do
 startPhase :: MonadIO m => Text -> m ()
 startPhase n = liftIO $ readIORef global >>= mapM_ (\st -> do
   writeIORef st.phase (Phase n 0 0)
-  writeIORef st.phaseStats (PhaseStats mempty mempty)
+  writeIORef st.phaseStats (PhaseStats mempty mempty Nothing)
   writeIORef st.paths (0, 0))
 
 -- | How many items the current phase works through, for the status line.
@@ -339,6 +352,7 @@ timedQuery kind fs showRes act = readIORef global >>= \case
         res = showRes r
     atomicModifyIORef' st.phaseStats $ \ps -> (ps
       { byLoc = maybe id (\l -> Map.insertWith (<>) l (LocStats 1 solve 0)) loc ps.byLoc
+      , slowest = if maybe True ((solve >) . fst) ps.slowest then Just (solve, loc) else ps.slowest
       , byResult = Map.insertWith (\(a, b, c) (a', b', c') -> (a + a', b + b', c + c')) (kind, T.takeWhile (/= ':') res) (1, wait, solve) ps.byResult
       }, ())
     write st "query-end" ["query" .= qid, "kind" .= kind, "secs" .= (t1 - t0), "waitSecs" .= wait, "solveSecs" .= solve, "result" .= res]

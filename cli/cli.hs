@@ -337,17 +337,17 @@ main = do
     Symbolic cFileOpts symbOpts cExecOpts cOpts -> do
       env <- makeEnv cOpts
       root <- getRoot cOpts
-      withCurrentDirectory root $ runEnv env $ withProgress (progressOpts env cOpts True) $ symbCheck cFileOpts symbOpts cExecOpts cOpts
+      withCurrentDirectory root $ runEnv env $ withProgress (progressOpts env cOpts) $ symbCheck cFileOpts symbOpts cExecOpts cOpts
     Equal eqOpts cOpts -> do
       env <- makeEnv cOpts
-      runEnv env $ withProgress (progressOpts env cOpts True) $ equivalence eqOpts cOpts
+      runEnv env $ withProgress (progressOpts env cOpts) $ equivalence eqOpts cOpts
     Test testOpts cOpts -> do
       env <- makeEnv cOpts
       root <- getRoot cOpts
       solver <- getSolver cOpts.solver
       cores <- liftIO $ unsafeInto <$> getNumProcessors
       let solverCount = fromMaybe cores cOpts.numSolvers
-      runEnv env $ withProgress (progressOpts env cOpts False) $ withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
+      runEnv env $ withProgress (progressOpts env cOpts) $ withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
         buildOut <- readBuildOutput root testOpts.projectType
         case buildOut of
           Left e -> liftIO $ do
@@ -357,6 +357,7 @@ main = do
             -- TODO: which functions here actually require a BuildOutput, and which can take it as a Maybe?
             unitTestOpts <- unitTestOptions testOpts cOpts solvers (Just out)
             res <- unitTest unitTestOpts out
+            Progress.stopStatus
             liftIO $ forM_ ((,) <$> cOpts.cacheDir <*> testOpts.number) $ \(dir, fetchedBlock) -> do
               cache <- readMVar (unitTestOpts.sess.sharedCache)
               Fetch.saveCache dir fetchedBlock cache
@@ -366,12 +367,11 @@ main = do
       runEnv env $ launchExec cFileOpts execOpts cExecOpts cOpts
     Version {} ->putStrLn getFullVersion
   where
-    -- the status line is only for commands that print their results at the end
-    progressOpts :: Env -> CommonOptions -> Bool -> ProgressOpts
-    progressOpts env cOpts printsAtEnd = ProgressOpts
+    progressOpts :: Env -> CommonOptions -> ProgressOpts
+    progressOpts env cOpts = ProgressOpts
       { logFile = env.config.progressLog
       , logExprs = env.config.progressExprs
-      , statusLine = printsAtEnd && Prelude.not cOpts.noProgress && Prelude.not cOpts.debug
+      , statusLine = Prelude.not cOpts.noProgress && Prelude.not cOpts.debug
       }
     makeEnv :: CommonOptions -> IO Env
     makeEnv cOpts = do
