@@ -328,15 +328,23 @@ copySliceTests = testGroup "CopySlice tests"
         , (maxBound - 15, 64, src)
         , (0, Expr.maxBytes, src)
         ]
-  , testProperty "copyslice-window-trim-equivalence" $ withMaxSuccess 200 $ forAll genTrimWriteChain $ \src ->
-      forAll (choose (0 :: Int, 160)) $ \so -> forAll (choose (1 :: Int, 96)) $ \sz ->
+  , adjustOption (\(QuickCheckTests n) -> QuickCheckTests (if n == 100 then 200 else n)) $
+    testProperty "copyslice-window-trim-equivalence" $ forAll genTrimCase $ \c ->
       forAll (frequency [(4, fromIntegral <$> choose (0 :: Int, 64)), (1, elements [Expr.maxBytes, maxBound - 15])]) $ \dOff ->
       forAll (elements [ConcreteBuf "", AbstractBuf "dst", ConcreteBuf (BS.pack [1..100])]) $ \dst -> ioProperty $ do
         let lit = Lit . fromIntegral
-            full = CopySlice (lit so) (Lit dOff) (lit sz) src dst
-            simp = Expr.copySlice (lit so) (Lit dOff) (lit sz) src dst
-        res <- checkSatWith equivConfig ((full ./= simp) .|| (Expr.bufLength full ./= Expr.bufLength simp))
-        pure $ counterexample (show res) $ isQed res
+            full = CopySlice (lit c.tcOff) (Lit dOff) (lit c.tcSize) (tcSrc c) dst
+            simp = Expr.copySlice (lit c.tcOff) (Lit dOff) (lit c.tcSize) (tcSrc c) dst
+            simpAll = Expr.simplify full
+            differ a = (full ./= a) .|| (Expr.bufLength full ./= Expr.bufLength a)
+        res <- checkSatWith equivConfig (differ simp .|| differ simpAll)
+        let result = case simp of
+              _ | simp == full -> "unchanged"
+              ConcreteBuf _ -> "concrete"
+              CopySlice _ _ _ s _ | s /= tcSrc c -> "source trimmed"
+              _ -> "other"
+        pure $ foldr (uncurry tabulate) (counterexample (show (c, simp, simpAll, res)) $ isUnsatOrUnknown res)
+          (("result", [result]) : ("solver", [takeWhile (/= ' ') (show res)]) : trimCaseLabels c)
   ]
 
 memoryTests :: TestTree
@@ -1758,7 +1766,7 @@ simplifierFuzzTests cfg = testGroup "SimplifierPropertyTests"
         let simplified = Expr.writeByte idx val buf
             full = WriteByte idx val buf
         proveEquivExprWith cfg full simplified
-    , testProperty "copySlice-equivalance" $ \(srcOff, GenCopySliceBuf src, GenCopySliceBuf dst, LitWord @300 size) -> ioProperty $ do
+    , testProperty "copySlice-equivalance" $ \(GenCopySliceOff srcOff, GenCopySliceBuf src, GenCopySliceBuf dst, LitWord @300 size) -> ioProperty $ do
         -- we bias buffers to be concrete more often than not
         dstOff <- generate (maybeBoundedLit 100_000)
         let simplified = Expr.copySlice srcOff dstOff size src dst
@@ -2097,11 +2105,63 @@ isSatOrUnknown res = isSat res || isUnknown res
 isUnsatOrUnknown :: SMTResult -> Bool
 isUnsatOrUnknown res = isQed res || isUnknown res
 
-genTrimWriteChain :: Gen (Expr Buf)
-genTrimWriteChain = do
-  n <- choose (1 :: Int, 6)
-  len <- choose (0 :: Int, 200)
-  base <- ConcreteBuf . BS.pack <$> vectorOf len arbitrary
-  writes <- vectorOf n $ (,) <$> (Lit . fromIntegral <$> choose (0 :: Int, 200))
-                             <*> oneof [Lit <$> arbitrary, elements [Var "a", Var "b", Var "c"]]
-  pure $ foldr (\(i, v) acc -> WriteWord i v acc) base writes
+-- | A copy window over a word-write chain, biased towards writes and base ends on the window edges
+data TrimCase = TrimCase
+  { tcOff :: Int, tcSize :: Int, tcWrites :: [(Int, Expr EWord)], tcBase :: Expr Buf }
+  deriving Show
+
+tcSrc :: TrimCase -> Expr Buf
+tcSrc c = foldr (\(i, v) acc -> WriteWord (Lit (fromIntegral i)) v acc) c.tcBase c.tcWrites
+
+genTrimCase :: Gen TrimCase
+genTrimCase = do
+  off <- frequency [(3, choose (0, 160)), (1, elements [0, 32, 64])]
+  -- size 32 is rewritten to a WriteWord before the trim is reached
+  size <- frequency [(1, choose (1, 31)), (2, choose (33, 96))]
+  let end = off + size
+      edges = filter (>= 0) [off - 32, off - 31, off - 1, off, end - 32, end - 31, end - 1, end]
+      genIdx prev = frequency $
+        [(2, choose (0, end + 40)), (2, elements edges)]
+        <> [(1, elements prev >>= \p -> (p +) <$> choose (-31, 31)) | not (null prev)]
+      genWrites 0 _ = pure []
+      genWrites k prev = do
+        i <- max 0 <$> genIdx prev
+        v <- oneof [Lit <$> arbitrary, Lit . fromIntegral <$> choose (0 :: Int, 255), elements [Var "a", Var "b", Var "c"]]
+        ((i, v) :) <$> genWrites (k - 1 :: Int) (i : prev)
+  writes <- choose (1, 6) >>= \n -> genWrites n []
+  len <- frequency [(1, pure 0), (2, choose (0, 200)), (2, elements (filter (>= 0) [end - 1, end, end + 1]))]
+  bytes <- BS.pack <$> vectorOf len (frequency [(1, pure 0), (3, choose (1, 255))])
+  base <- frequency
+    [ (8, pure $ ConcreteBuf bytes)
+    , (1, pure $ AbstractBuf "src")
+    , (1, pure $ WriteByte (Lit 3) (LitByte 1) (ConcreteBuf bytes))
+    ]
+  pure $ TrimCase off size writes base
+
+-- | What a case exercises, by the window semantics rather than by the implementation
+trimCaseLabels :: TrimCase -> [(String, [String])]
+trimCaseLabels c =
+  [ ("write vs window", go [] c.tcWrites)
+  , ("base", [baseKind])
+  , ("size", [if c.tcSize < 32 then "<32" else ">32"])
+  ]
+  where
+    off = c.tcOff
+    end = off + c.tcSize
+    hits i = i < end && i + 32 > off
+    go _ [] = []
+    go later ((i, _) : rest) = tag : go (i : later) rest
+      where
+        tag | i + 32 == off || i == end = "edge, outside"
+            | i + 31 == off || i + 1 == end = "edge, inside"
+            | not (hits i) = "outside"
+            | any (\j -> j < i + 32 && i < j + 32) later = "overlaps a later write"
+            | i < off || i + 32 > end = "straddles"
+            | otherwise = "inside"
+    baseKind = case c.tcBase of
+      ConcreteBuf bs
+        | BS.length bs < off -> "concrete, ends before window"
+        | BS.length bs < end -> "concrete, ends in window"
+        | otherwise -> "concrete, covers window"
+      AbstractBuf _ -> "abstract"
+      _ -> "WriteByte"
