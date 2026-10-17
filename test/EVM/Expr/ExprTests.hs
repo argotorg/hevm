@@ -333,6 +333,13 @@ copySliceTests = testGroup "CopySlice tests"
       let e = ReadByte (Lit 1) (CopySlice (Lit 0xc) (Lit 0x31) (Lit 0x32) (ConcreteBuf "") (AbstractBuf "src"))
       res <- checkSat (PEq e (LitByte 128))
       assertBool ("the byte can be 128: " <> show res) (isSat res)
+  , testCase "exp-literal-exponent-smt" $ do
+      let x = Var "x"
+          x13 = foldr1 Mul (replicate 13 x)
+      res <- checkSat (PNeg (PEq (Exp x (Lit 13)) x13))
+      assertBool ("x^13 is 13 multiplications: " <> show res) (isQed res)
+      res2 <- checkSat (PEq (Exp x (Lit (2 ^ (255 :: Int) + 1))) (Lit 3) .&& PEq x (Lit 3))
+      assertBool ("3^(2^255+1) is 3 mod 2^256: " <> show res2) (isSat res2)
   , testCase "copyslice-window-trim-in-simplify" $ do
       let src = WriteWord (Lit 262) (Var "a") (WriteWord (Lit 196) (Lit 0xba) (ConcreteBuf ""))
           dst = ConcreteBuf (BS.pack [1..100])
