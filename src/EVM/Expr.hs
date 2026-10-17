@@ -30,6 +30,10 @@ module EVM.Expr
   , exp
   , oddInverse
   , possibleOnes
+  , Bounds(..)
+  , propBounds
+  , upperWithBounds
+  , asWord
   , sex
 
     -- * Comparisons / Booleans
@@ -2457,9 +2461,10 @@ enumerateViaSmallSubterm limit props e0 = listToMaybe $ mapMaybe tryAtom candida
 
 data Bounds = Bounds W256 W256 (Set.Set W256)
 
--- | Decides Solidity's checked-multiplication guard @x == (x * d) / d || d == 0@
--- where the bounds that @ps@ put on @x@ and @d@ rule out overflow. The props
--- that give bounds are left alone, so the rewritten list is equivalent.
+-- | Decides @x == (x * d) / d@, as in Solidity's checked-multiplication guard
+-- @x == (x * d) / d || d == 0@ or in scaling by a literal and back, where the
+-- bounds that @ps@ put on the subterms of @x@ and @d@ rule out overflow. The
+-- props that give bounds are left alone, so the rewritten list is equivalent.
 boundedMulChecks :: [Prop] -> [Prop]
 boundedMulChecks ps = map (\p -> if Map.null (propBounds [p]) then go p else p) ps
   where
@@ -2482,7 +2487,27 @@ boundedMulChecks ps = map (\p -> if Map.null (propBounds [p]) then go p else p) 
       _ -> Nothing
     guarded x p q d = ((p == x && q == d) || (p == d && q == x)) && fits (upper x) (upper d)
     fits u v = v == 0 || u <= maxLit `Prelude.div` v
-    upper t = Prelude.min (possibleOnes t) (maybe maxLit (\(Bounds _ ub _) -> ub) (Map.lookup t bounds))
+    upper = upperWithBounds bounds
+
+-- | An upper bound on a word, from its structure and the bounds @bs@ put on its
+-- subterms, looking a few levels deep
+upperWithBounds :: Map.Map (Expr EWord) Bounds -> Expr EWord -> W256
+upperWithBounds bs = go (8 :: Int)
+  where
+    go 0 t = known t
+    go d t = Prelude.min (known t) $ let r = go (d - 1) in case t of
+      Add a b -> let x = r a; y = r b in if x <= maxLit - y then x + y else maxLit
+      Mul a b -> let x = r a; y = r b in if y == 0 || x <= maxLit `Prelude.div` y then x * y else maxLit
+      -- dividing by 0 gives 0, so a quotient or remainder is at most the dividend
+      Div a (Lit c) | c > 0 -> r a `Prelude.div` c
+      Div a _ -> r a
+      Mod a (Lit c) | c > 0 -> Prelude.min (c - 1) (r a)
+      Mod a _ -> r a
+      Min a b -> Prelude.min (r a) (r b)
+      Max a b -> Prelude.max (r a) (r b)
+      ITE _ a b -> Prelude.max (r a) (r b)
+      _ -> maxLit
+    known t = Prelude.min (possibleOnes t) (maybe maxLit (\(Bounds _ ub _) -> ub) (Map.lookup t bs))
 
 -- | Interval and excluded values that @props@ put on word subterms.
 propBounds :: [Prop] -> Map.Map (Expr EWord) Bounds
