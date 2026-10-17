@@ -4,11 +4,15 @@
 module EVM.Equivalence.EquivalenceTests (tests) where
 
 import Control.Monad (when, unless, forM_)
+import Control.Monad.ST (stToIO)
+import Control.Monad.State.Strict (evalStateT)
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
 import Data.Either.Extra (fromRight)
 import Data.Functor ((<&>))
 import Data.Maybe (fromMaybe, mapMaybe, fromJust)
 import Data.List qualified as List (isInfixOf, nub)
+import Data.Map.Strict qualified as Map
 import Data.String.Here
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -23,7 +27,9 @@ import Text.RE.TDFA.String hiding (matches)
 import Text.RE.Replace (replaceAll, captureText, CaptureOrdinal(..), CaptureID(..))
 
 
+import EVM (makeVm, initialContract, defaultVMOpts)
 import EVM.Effects qualified as Effects
+import EVM.Exec (exec)
 import EVM.Expr qualified as Expr
 import EVM.Format (hexByteString)
 import EVM.Types
@@ -504,6 +510,32 @@ bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
     forM_ replays $ \case
       Validated {} -> pure ()
       r -> assertFailure $ "The callee must answer as in the counterexample, got: " <> show r
+  , testCase "eq-replay-keeps-long-returndata-compact" $ do
+    -- the model makes the return data 16 MB long, with one nonzero byte
+    let out = AbstractBuf "out"
+        inputs = CallInputs (Lit 0) (Lit 0xfa) (Lit 0x1234) (Lit 0) (ConcreteBuf "") (Lit 0) (LitAddr 0xacab)
+          (AbstractStore (LitAddr 0xacab) Nothing) (ConcreteStore mempty) (Lit 0)
+        cex = (mempty :: SMTCex) { buffers = Map.singleton out (EVM.Types.Comp (Write 7 3 (Base 0 (2 ^ (24 :: Int))))) }
+    case modelUnknownCalls cex [PCall inputs (Lit 1) out Nothing] of
+      [Right m] -> do
+        assertEqual "only the bytes up to the last nonzero one are kept" (BS.pack [0, 0, 0, 7]) m.returndata
+        assertEqual "the length is kept" (2 ^ (24 :: Int)) m.returndataLength
+      r -> assertFailure $ "Must model the call, got: " <> show r
+  , testCase "eq-replay-stub-pads-returndata-with-zeros" $ do
+    -- the calldata is longer than the given part of the returndata
+    let input = BS.replicate 40 0xaa
+        code = stubCode [(input, (True, BS.pack [7], 64))]
+    res <- stToIO $ do
+      vm <- makeVm @Concrete $ (defaultVMOpts @Concrete)
+        { contract = initialContract (RuntimeCode (ConcreteRuntimeCode code))
+        , calldata = (ConcreteBuf input, [])
+        , gas = 0xffffffffffffffff
+        , gaslimit = 0xffffffffffffffff
+        }
+      evalStateT (exec Effects.defaultConfig) vm
+    case res of
+      VMSuccess (ConcreteBuf out) -> assertEqual "the rest of the returndata is zero" (BS.pack [7] <> BS.replicate 63 0) out
+      r -> assertFailure $ "The stub must return, got: " <> show r
   , testCase "eq-replay-equal-programs-not-reproducible" $ do
     -- sstore(0, 1), and the same after a JUMPDEST
     let a = fromJust (hexByteString "6001600055")

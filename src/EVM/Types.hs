@@ -1248,7 +1248,8 @@ data UnknownCall = UnknownCall
   { callee :: Addr
   , calldata :: ByteString
   , success :: Bool
-  , returndata :: ByteString
+  , returndata :: ByteString -- ^ up to its last nonzero byte, the rest of 'returndataLength' is zero
+  , returndataLength :: Int
   }
   deriving (Show, Eq)
 
