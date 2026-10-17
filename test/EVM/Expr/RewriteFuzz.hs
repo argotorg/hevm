@@ -383,8 +383,19 @@ genTemplate s shiftAmt = oneof
   , IsZero <$> ite, Not <$> ite
   , ITE <$> (IsZero <$> s) <*> s <*> s
   , ITE <$> s <*> elements [Lit 0, Lit 1] <*> elements [Lit 0, Lit 1]
+  , shared
+  , Not <$> (elements [Add, Sub, Xor] <*> lit <*> s)
+  , Mul <$> lit <*> (Add <$> lit <*> s)
   ]
   where
+    -- one operand twice, as cancellations need
+    shared = do
+      x <- s
+      y <- s
+      elements
+        [ Add x (Sub y x), Add (Sub y x) x, Sub x (Add x y), Sub x (Add y x), Sub x (Sub x y)
+        , Xor x (Xor x y), Xor (Xor y x) x, Or x (Or x y), And x (And y x)
+        , Or x (Not x), Xor (Not x) x, Add x (Not x), Max x x, Min x x, Eq x (Add x y), Eq x (Sub x y) ]
     -- literal branches, sharing a condition from a small set so that ITEs pair up
     ite = ITE <$> elements [Var "a", LT (Var "a") (Var "b"), IsZero (Var "c")] <*> lit <*> lit
     litOp' = elements [Add, Sub, Mul, Div, Mod, And, Or, Xor, Eq, LT, SLT, SHL, SHR, SAR]

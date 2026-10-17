@@ -66,6 +66,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The simplifier moves operations with literals into ITEs with literal
   branches, as path merging creates, and turns comparisons with them into
   conditions.
+- The simplifier cancels an operand against its inverse in sums, differences,
+  xors and with its negation, and moves negation through literal operations.
 
 ## Fixed
 - The SMT encoding of a copy into a buffer named `src` no longer reads the

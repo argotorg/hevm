@@ -97,6 +97,17 @@ rewriteRuleTests = testGroup "Rewrite rules"
       assertEqual "prop eq" [PNeg (PEq (Lit 0) c)] (Expr.simplifyProps [PEq (Lit 3) ite])
       assertEqual "prop lt both" [] (Expr.simplifyProps [PLT ite (Lit 6)])
       assertEqual "prop lt one" [PEq (Lit 0) c] (Expr.simplifyProps [PLT (Lit 4) ite])
+  , testCase "cancellation" $ do
+      let x = Var "x"
+          y = Var "y"
+      assertEqual "add sub" y (Expr.simplify (Add x (Sub y x)))
+      assertEqual "sub add" (Sub (Lit 0) y) (Expr.simplify (Sub x (Add x y)))
+      assertEqual "sub sub" y (Expr.simplify (Sub x (Sub x y)))
+      assertEqual "xor xor" y (Expr.simplify (Xor x (Xor y x)))
+      assertEqual "or not" (Lit Expr.maxLit) (Expr.simplify (Or x (Not x)))
+      assertEqual "not add" (Sub (Lit (Expr.maxLit - 3)) x) (Expr.simplify (Not (Add (Lit 3) x)))
+      assertEqual "mul add" (Add (Lit 96) (Mul (Lit 32) x)) (Expr.simplify (Mul (Lit 32) (Add (Lit 3) x)))
+      assertEqual "max" x (Expr.simplify (Max x x))
   , testCase "shift-composition" $ do
       let x = Var "x"
       assertEqual "shr shr" (SHR (Lit 12) x) (Expr.simplify (SHR (Lit 4) (SHR (Lit 8) x)))

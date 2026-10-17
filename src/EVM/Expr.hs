@@ -1540,6 +1540,29 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (Sub (Lit x) (Add (Lit y) orig)) = sub (Lit (x-y)) orig
     go (Sub (Add (Lit x) orig) (Lit y) ) = add (Lit (x-y)) orig
 
+    -- an operand and its inverse cancel
+    go (Add a (Sub b c)) | a == c = b
+    go (Add (Sub b c) a) | a == c = b
+    go (Sub a (Add b c))
+      | a == b = sub (Lit 0) c
+      | a == c = sub (Lit 0) b
+    go (Sub a (Sub b c)) | a == b = c
+    go (Xor a (Xor b c))
+      | a == b = c
+      | a == c = b
+    go (Xor (Xor a b) c)
+      | a == c = b
+      | b == c = a
+    go (Or a (Or b c))
+      | a == b || a == c = EVM.Expr.or b c
+    go (And a (And b c))
+      | a == b || a == c = EVM.Expr.and b c
+    go (Or a b) | b == EVM.Expr.not a || a == EVM.Expr.not b = Lit maxLit
+    go (Xor a b) | b == EVM.Expr.not a || a == EVM.Expr.not b = Lit maxLit
+    go (Add a b) | b == EVM.Expr.not a || a == EVM.Expr.not b = Lit maxLit
+    -- collect literals out of a product
+    go (Mul (Lit c) (Add (Lit d) x)) = add (Lit (c * d)) (mul (Lit c) x)
+
     -- Add+Add / Mul+Mul / Xor+Xor simplifications, taking
     --     advantage of associativity and commutativity
     -- Since Lit is smallest in the ordering, it will always be the first argument
@@ -1605,6 +1628,10 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
 
     -- Not simplification
     go (EVM.Types.Not (EVM.Types.Not a)) = a
+    -- not x is -x - 1
+    go (Not (Add (Lit c) x)) = sub (Lit (complement c)) x
+    go (Not (Sub (Lit c) x)) = add (Lit (complement c)) x
+    go (Not (Xor (Lit c) x)) = EVM.Expr.xor (Lit (complement c)) x
     go (Not a) = EVM.Expr.not a
 
     -- EqByte
@@ -1667,6 +1694,8 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
       | otherwise = EVM.Expr.or a b
 
 
+    go (Max a b) | a == b = a
+    go (Min a b) | a == b = a
     -- Some trivial min / max eliminations
     go (Max a b) = EVM.Expr.max a b
     go (Min a b) = case (a, b) of
