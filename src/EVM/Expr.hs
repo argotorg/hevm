@@ -1615,6 +1615,18 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     -- SHL / SHR / SAR
     go (SHL (Lit a) _) | a >= 256 = Lit 0
     go (SHR (Lit a) _) | a >= 256 = Lit 0
+    -- compose shifts by literals
+    go (SHR (Lit n) (SHR (Lit m) x)) | n < 256, m < 256 =
+      if n + m >= 256 then Lit 0 else shr (Lit (n + m)) x
+    go (SHL (Lit n) (SHL (Lit m) x)) | n < 256, m < 256 =
+      if n + m >= 256 then Lit 0 else shl (Lit (n + m)) x
+    go (SAR (Lit n) (SAR (Lit m) x)) | n < 256, m < 256 = sar (Lit (Prelude.min 255 (n + m))) x
+    go (SHL (Lit n) (SHR (Lit m) x)) | n < 256, m < 256, n /= m =
+      EVM.Expr.and (Lit (shiftL maxLit (fromIntegral n)))
+        (if n > m then shl (Lit (n - m)) x else shr (Lit (m - n)) x)
+    go (SHR (Lit n) (SHL (Lit m) x)) | n < 256, m < 256, n /= m =
+      EVM.Expr.and (Lit (shiftR maxLit (fromIntegral n)))
+        (if n > m then shr (Lit (n - m)) x else shl (Lit (m - n)) x)
     go (SHL (Lit n) (SHR (Lit m) x)) -- zero out LSB
       | n == m && n < 256 = EVM.Expr.and (Lit (shiftL maxLit (fromIntegral n))) x
     go (SHR (Lit n) (SHL (Lit m) x)) -- zero out MSB

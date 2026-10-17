@@ -13,7 +13,7 @@ import Test.Tasty.QuickCheck hiding (Failure, Success)
 
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ReaderT)
-import Data.Bits (shiftL)
+import Data.Bits (shiftL, shiftR)
 import Data.ByteString qualified as BS (drop, length, pack, replicate, take)
 import Data.Containers.ListUtils (nubOrd)
 import Data.List qualified as List (nub, sort, tails)
@@ -63,6 +63,15 @@ rewriteRuleTests = testGroup "Rewrite rules"
       assertEqual "not a power of two" (Mod x (Lit 6)) (Expr.simplify (Mod x (Lit 6)))
       assertEqual "byte offset exponentiation still becomes a shift"
         (SHL (Mul (Lit 8) (And (Lit 31) x)) (Lit 1)) (Expr.simplify (Exp (Lit 0x100) (Mod x (Lit 32))))
+  , testCase "shift-composition" $ do
+      let x = Var "x"
+      assertEqual "shr shr" (SHR (Lit 12) x) (Expr.simplify (SHR (Lit 4) (SHR (Lit 8) x)))
+      assertEqual "shl shl past the word" (Lit 0) (Expr.simplify (SHL (Lit 200) (SHL (Lit 56) x)))
+      assertEqual "sar sar saturates" (SAR (Lit 255) x) (Expr.simplify (SAR (Lit 200) (SAR (Lit 100) x)))
+      assertEqual "shr of shl" (And (Lit (Expr.maxLit `shiftR` 96)) (SHR (Lit 64) x))
+        (Expr.simplify (SHR (Lit 96) (SHL (Lit 32) x)))
+      assertEqual "shl of shr" (And (Lit (Expr.maxLit `shiftL` 8)) (SHR (Lit 24) x))
+        (Expr.simplify (SHL (Lit 8) (SHR (Lit 32) x)))
   ]
 
 traversalTests :: TestTree
