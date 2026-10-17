@@ -1602,6 +1602,14 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (EVM.Types.LT (Lit c) b)
       | possibleOnes b <= c = Lit 0
 
+    -- overflow checks: x + c and x - c wrap exactly past these bounds
+    go (EVM.Types.LT a (Add (Lit c) b)) | a == b, c /= 0 = lt a (Lit (0 - c))
+    go (EVM.Types.LT (Add (Lit c) a) b) | a == b, c /= 0 = lt (Lit (maxLit - c)) a
+    go (EVM.Types.LT a (Sub b (Lit c))) | a == b, c /= 0 = lt a (Lit c)
+    go (EVM.Types.LT (Sub a (Lit c)) b) | a == b, c /= 0 = iszero (lt a (Lit c))
+    go (EVM.Types.LT a b) | a == b = Lit 0
+    go (SLT a b) | a == b = Lit 0
+
     -- normalize all comparisons in terms of (S)LT
     go (EVM.Types.GT a b) = lt b a
     go (EVM.Types.GEq a b) = iszero (lt a b)
@@ -1953,6 +1961,16 @@ simplifyProp prop =
     go (PLEq (Sub a b) c) | a == c = PLEq b a
     go (PLEq a (Lit 0)) = peq (Lit 0) a
     go (PLT (Max (Lit a) b) (Lit c)) | a < c = PLT b (Lit c)
+
+    -- overflow checks: x + c and x - c wrap exactly past these bounds
+    go (PLT a (Add (Lit c) b)) | a == b, c /= 0 = PLT a (Lit (0 - c))
+    go (PLEq a (Add (Lit c) b)) | a == b = PLEq a (Lit (maxLit - c))
+    go (PLT (Add (Lit c) a) b) | a == b, c /= 0 = PLT (Lit (maxLit - c)) a
+    go (PLEq (Add (Lit c) a) b) | a == b, c /= 0 = PLT (Lit (maxLit - c)) a
+    go (PLT a (Sub b (Lit c))) | a == b, c /= 0 = PLT a (Lit c)
+    go (PLEq a (Sub b (Lit c))) | a == b, c /= 0 = PLT a (Lit c)
+    go (PLT (Sub a (Lit c)) b) | a == b, c /= 0 = PLEq (Lit c) a
+    go (PLEq (Sub a (Lit c)) b) | a == b = PLEq (Lit c) a
 
     go (PLT a (Lit c)) | possibleOnes a < c = PBool True
     go (PLT (Lit c) b) | possibleOnes b <= c = PBool False
