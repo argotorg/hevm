@@ -493,6 +493,34 @@ possibleOnes = go (8 :: Int)
 oddInverse :: W256 -> W256
 oddInverse k = iterate (\i -> i * (2 - k * i)) k !! 7
 
+-- | Moves an operation into the branches of ITEs with literal branches, where it folds
+liftLitITE :: Expr EWord -> Maybe (Expr EWord)
+liftLitITE = \case
+  Add a b -> two add a b
+  Sub a b -> two sub a b
+  Mul a b -> two mul a b
+  Div a b -> two EVM.Expr.div a b
+  Mod a b -> two EVM.Expr.mod a b
+  And a b -> two EVM.Expr.and a b
+  Or a b -> two EVM.Expr.or a b
+  Xor a b -> two EVM.Expr.xor a b
+  Eq a b -> two eq a b
+  LT a b -> two lt a b
+  SLT a b -> two slt a b
+  SHL a b -> two shl a b
+  SHR a b -> two shr a b
+  SAR a b -> two sar a b
+  IsZero (ITE c t@(Lit _) f@(Lit _)) -> Just (ITE c (iszero t) (iszero f))
+  Not (ITE c t@(Lit _) f@(Lit _)) -> Just (ITE c (EVM.Expr.not t) (EVM.Expr.not f))
+  _ -> Nothing
+  where
+    two :: (Expr EWord -> Expr EWord -> Expr EWord) -> Expr EWord -> Expr EWord -> Maybe (Expr EWord)
+    two op a b = case (a, b) of
+      (Lit _, ITE c t@(Lit _) f@(Lit _)) -> Just (ITE c (op a t) (op a f))
+      (ITE c t@(Lit _) f@(Lit _), Lit _) -> Just (ITE c (op t b) (op f b))
+      (ITE c t@(Lit _) f@(Lit _), ITE c' t'@(Lit _) f'@(Lit _)) | c == c' -> Just (ITE c (op t t') (op f f'))
+      _ -> Nothing
+
 -- | True if the WriteWord at @wIdx@ is provably disjoint from the 32-byte
 --   read at @i@. Sound mod 2^256: requires both windows to fit below 2^256.
 writeDisjointFromReadWord :: W256 -> Expr EWord -> Bool
@@ -1259,6 +1287,23 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (Partial a b c) = Partial (simplifyProps a) b c
     go (Success a b c d) = Success (simplifyProps a) b c d
 
+    go o@(Add {}) | Just r <- liftLitITE o = r
+    go o@(Sub {}) | Just r <- liftLitITE o = r
+    go o@(Mul {}) | Just r <- liftLitITE o = r
+    go o@(Div {}) | Just r <- liftLitITE o = r
+    go o@(Mod {}) | Just r <- liftLitITE o = r
+    go o@(And {}) | Just r <- liftLitITE o = r
+    go o@(Or {}) | Just r <- liftLitITE o = r
+    go o@(Xor {}) | Just r <- liftLitITE o = r
+    go o@(Eq {}) | Just r <- liftLitITE o = r
+    go o@(EVM.Types.LT {}) | Just r <- liftLitITE o = r
+    go o@(SLT {}) | Just r <- liftLitITE o = r
+    go o@(SHL {}) | Just r <- liftLitITE o = r
+    go o@(SHR {}) | Just r <- liftLitITE o = r
+    go o@(SAR {}) | Just r <- liftLitITE o = r
+    go o@(IsZero {}) | Just r <- liftLitITE o = r
+    go o@(Not {}) | Just r <- liftLitITE o = r
+
     -- redundant CopySlice
     go (CopySlice (Lit 0x0) (Lit 0x0) (Lit 0x0) _ dst) = dst
     -- We write over dst with data from src. As long as we read from where we write, and
@@ -1340,6 +1385,9 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (ITE (Lit 0) _ f) = f
     go (ITE (Lit _) t _) = t
     go (ITE _ t f) | t == f = t
+    go (ITE (IsZero c) t f) = ITE c f t
+    go (ITE c (Lit 0) (Lit 1)) = iszero c
+    go (ITE c (Lit 1) (Lit 0)) = iszero (iszero c)
     go (ITE c (ITE c' a _) d) | c == c' = ITE c a d -- nested same condition in then
     go (ITE c a (ITE c' _ d)) | c == c' = ITE c a d -- nested same condition in else
 
@@ -1727,6 +1775,13 @@ simplifyProp prop =
     go (PLEq a (Lit c)) | possibleOnes a <= c = PBool True
     go (PLEq (Lit c) b) | possibleOnes b < c = PBool False
 
+    -- a comparison with an ITE with literal branches is a condition on its ITE
+    go (PEq (Lit k) (ITE c (Lit a) (Lit b))) = onITE c (a == k) (b == k)
+    go (PLT (Lit k) (ITE c (Lit a) (Lit b))) = onITE c (k < a) (k < b)
+    go (PLT (ITE c (Lit a) (Lit b)) (Lit k)) = onITE c (a < k) (b < k)
+    go (PLEq (Lit k) (ITE c (Lit a) (Lit b))) = onITE c (k <= a) (k <= b)
+    go (PLEq (ITE c (Lit a) (Lit b)) (Lit k)) = onITE c (a <= k) (b <= k)
+
     go (PLT (Lit 0) e)
       | isBoolLike e = peq (Lit 1) e
 
@@ -1800,6 +1855,11 @@ simplifyProp prop =
 
     go p = p
 
+    onITE :: Expr EWord -> Bool -> Bool -> Prop
+    onITE c t f
+      | t == f = PBool t
+      | t = PNeg (PEq (Lit 0) c)
+      | otherwise = PEq (Lit 0) c
 
     -- Applies `simplify` to the inner part of a Prop, e.g.
     -- (PEq (Add (Lit 1) (Lit 2)) (Var "a")) becomes

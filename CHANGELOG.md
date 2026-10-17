@@ -63,6 +63,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   masks and decide equalities and comparisons with literals.
 - The simplifier cancels additions, subtractions, xors, negations and
   multiplications by odd literals in equalities.
+- The simplifier moves operations with literals into ITEs with literal
+  branches, as path merging creates, and turns comparisons with them into
+  conditions.
 
 ## Fixed
 - The SMT encoding of a copy into a buffer named `src` no longer reads the
