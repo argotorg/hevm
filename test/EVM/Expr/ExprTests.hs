@@ -133,6 +133,15 @@ rewriteRuleTests = testGroup "Rewrite rules"
       assertEqual "holds" (Expr.simplifyProps small) (Expr.simplifyProps (PNeg (PEq (Lit 0) guard) : small))
       assertEqual "cannot fail" [PBool False] (Expr.simplifyProps (PEq (Lit 0) guard : small))
       assertBool "may overflow" (Expr.simplifyProps (PEq (Lit 0) guard : big) /= [PBool False])
+      let a = Var "a"
+          b = Var "b"
+          scaled = Div (Mul a (Mod b (Lit (10 ^ (30 :: Int))))) (Lit (10 ^ (27 :: Int)))
+          roundTrip = Div (Mul (Lit (10 ^ (18 :: Int))) scaled) (Lit (10 ^ (18 :: Int)))
+          aBound = [PLEq a (Lit (2 ^ (128 :: Int) - 1))]
+      assertEqual "scale and back" (Expr.simplifyProps aBound) (Expr.simplifyProps (PEq roundTrip scaled : aBound))
+      let ab = Mul a b
+      assertBool "scale and back may overflow"
+        (Expr.simplifyProps [PNeg (PEq (Div (Mul (Lit (10 ^ (18 :: Int))) ab) (Lit (10 ^ (18 :: Int)))) ab)] /= [PBool False])
   , testCase "same-base-offsets" $ do
       let p = Var "p"
           at o = Add (Lit o) p

@@ -16,7 +16,7 @@ module EVM.Expr.RewriteFuzz
 
 import Prelude hiding (LT, GT)
 
-import Data.Bits (shiftL, shiftR, testBit, (.&.), (.|.), xor, complement)
+import Data.Bits (shiftL, shiftR, testBit, (.&.), (.|.), xor, complement, countLeadingZeros)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.List (nub)
@@ -44,6 +44,8 @@ tests = testGroup "Rewrite fuzzing"
   -- guards the reference semantics: with everything concrete, the simplifier folds to the same value
   , adjustOption (\(QuickCheckTests n) -> QuickCheckTests (if n == 100 then 10000 else n)) $
       testProperty "rewrite-fuzz-eval-matches-folding" prop_folding
+  , adjustOption (\(QuickCheckTests n) -> QuickCheckTests (if n == 100 then 10000 else n)) $
+      testProperty "bounds-fuzz" prop_bounds
   ]
 
 prop_word :: Property
@@ -67,6 +69,49 @@ prop_folding = forAll (sized $ \n -> genShapedWord (min n 40)) $ \e -> forAll (g
     (Just v, Lit v') -> counterexample ("env: " <> show env) $ v === v'
     (Just _, other) -> tabulate "folding" ["did not fold"] $ counterexample (show other) True
     (Nothing, _) -> tabulate "folding" ["not evaluable"] True
+
+-- | The bounds that the simplifier derives are sound: under bound props that
+-- hold in the environment, every subterm's value is within them
+prop_bounds :: Property
+prop_bounds = forAllShrink (sized $ \n -> genShapedWord (min n 40)) shrinkWord $ \e ->
+  forAll (genEnv e) $ \env ->
+    let vals = [(t, v) | t <- take 30 (nub (foldExpr (maybe [] pure . Expr.asWord) [] e)), Just v <- [evalWord env t]]
+    in forAll (genFacts vals) $ \facts ->
+      let bs = Expr.propBounds facts
+          inBounds = [ counterexample ("propBounds: " <> show t <> " = " <> show v <> " outside " <> show (lb, ub, ex)) $
+                         lb <= v && v <= ub && Prelude.not (v `elem` ex)
+                     | (t, v) <- vals, Just (Expr.Bounds lb ub ex) <- [Map.lookup t bs] ]
+          uppers = [ counterexample ("upperWithBounds: " <> show t <> " = " <> show v <> " > " <> show u) $ v <= u
+                   | (t, v) <- vals, let u = Expr.upperWithBounds bs t ]
+                <> [ counterexample ("upperBound: " <> show t <> " = " <> show v <> " > " <> show u) $ v <= u
+                   | (t, v) <- vals, Just u <- [Expr.upperBound t] ]
+                <> [ counterexample ("possibleOnes: " <> show t <> " = " <> show v) $ v .&. complement (Expr.possibleOnes t) == 0
+                   | (t, v) <- vals ]
+      in counterexample ("env: " <> show env <> "\nfacts: " <> show facts) $
+           tabulate "bounded subterms" [show (length inBounds)] $
+           conjoin (inBounds <> uppers)
+
+-- | Props that hold for subterms with these values, in the shapes that bounds are read from
+genFacts :: [(Expr EWord, W256)] -> Gen [Prop]
+genFacts [] = pure []
+genFacts vals = do
+  k <- choose (0, 4)
+  vectorOf k (elements vals >>= uncurry fact)
+  where
+    fact t v = frequency
+      [ (3, PLEq t . Lit <$> above v)
+      , (if v < maxBound then 2 else 0, (\u -> PLT t (Lit (u + 1))) <$> suchThat (above v) (< maxBound))
+      , (3, PLEq <$> (Lit <$> below v) <*> pure t)
+      , (if v > 0 then 2 else 0, (\l -> PLT (Lit (l - 1)) t) <$> suchThat (below v) (> 0))
+      , (2, elements [PEq (Lit v) t, PEq t (Lit v), PEq (Lit 0) (Xor (Lit v) t), PEq (Lit 0) (Xor t (Lit v))])
+      , (2, (\c f -> f c) <$> suchThat genSpecialLit (/= v)
+              <*> elements [PNeg . (`PEq` t) . Lit, PNeg . PEq t . Lit, \c -> PNeg (PEq (Lit 0) (Xor (Lit c) t))])
+      , (1, PAnd <$> fact t v <*> fact t v)
+      ]
+    above v = elements $ nub $ [v, maxBound, if v == 0 then 0 else maxBound `shiftR` countLeadingZeros v]
+      <> [v + d | d <- [1, 2, 3], v + d > v]
+    below v = elements $ nub $ [v, 0, if v == 0 then 0 else 1 `shiftL` (255 - countLeadingZeros v)]
+      <> [v - d | d <- [1, 2, 3], v - d < v]
 
 substitute :: FuzzEnv -> Expr a -> Expr a
 substitute env = mapExpr $ \case
@@ -493,18 +538,23 @@ genShapedProp n = frequency
       elements [op x e, op e x]
     -- Solidity's checked multiplication under bounds, around where the product overflows
     mulOverflowCheck = do
-      x <- oneof [Var <$> elements varNames, w]
-      d <- oneof [Var <$> elements varNames, w]
+      let var = Var <$> elements varNames
+          scaled = Div <$> (Mul <$> var <*> (Mod <$> var <*> lit)) <*> lit
+      x <- frequency [(2, var), (1, w), (1, scaled), (1, Add <$> lit <*> scaled)]
+      d <- frequency [(2, var), (1, w), (1, lit)]
       bx <- frequency [(3, Lit . (\k -> 2 ^ k - 1) <$> choose (0 :: Int, 256)), (1, lit)]
       bd <- case bx of
         Lit c | c > 0 -> frequency [(3, (\o -> Lit (Expr.maxLit `div` c + o)) <$> elements [-1, 0, 1]), (1, lit)]
         _ -> lit
+      -- bounds on the variables, which bound compound x and d through their structure
+      va <- var
+      ba <- frequency [(3, Lit . (\k -> 2 ^ k - 1) <$> choose (0 :: Int, 256)), (1, lit)]
       prod <- elements [Mul x d, Mul d x]
       eq <- elements [PEq x (Div prod d), PEq (Div prod d) x]
       let z = PEq (Lit 0) d
           guardW = Or (Eq x (Div prod d)) (IsZero d)
       g <- elements [POr eq z, POr z eq, eq, PNeg eq, PEq (Lit 0) guardW, PNeg (PEq (Lit 0) guardW)]
-      pure $ PAnd (PLEq x bx) (PAnd (PLEq d bd) g)
+      pure $ PAnd (PLEq va ba) (PAnd (PLEq x bx) (PAnd (PLEq d bd) g))
     w = genShapedWord (n `div` 2)
     p = genShapedProp (n `div` 2)
 
