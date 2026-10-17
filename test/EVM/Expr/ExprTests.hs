@@ -328,6 +328,11 @@ copySliceTests = testGroup "CopySlice tests"
         , (maxBound - 15, 64, src)
         , (0, Expr.maxBytes, src)
         ]
+  , testCase "copyslice-smt-dst-named-src" $ do
+      -- outside the copied window the byte is dst's, and dst may be any buffer, even one called src
+      let e = ReadByte (Lit 1) (CopySlice (Lit 0xc) (Lit 0x31) (Lit 0x32) (ConcreteBuf "") (AbstractBuf "src"))
+      res <- checkSat (PEq e (LitByte 128))
+      assertBool ("the byte can be 128: " <> show res) (isSat res)
   , testCase "copyslice-window-trim-in-simplify" $ do
       let src = WriteWord (Lit 262) (Var "a") (WriteWord (Lit 196) (Lit 0xba) (ConcreteBuf ""))
           dst = ConcreteBuf (BS.pack [1..100])

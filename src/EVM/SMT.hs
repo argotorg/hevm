@@ -701,7 +701,8 @@ propToSMTWith arithEnc = \case
 copySliceWith :: ArithEncoding -> Expr EWord -> Expr EWord -> Expr EWord -> Builder -> Builder -> Err Builder
 copySliceWith arithEnc srcOffset dstOffset (Lit size) src dst = do
   sz <- internal size
-  pure $ "(let ((src " <> src <> ")) " <> sz <> ")"
+  -- the binder must not be a possible buffer name, or it captures that buffer in dst
+  pure $ "(let ((copy!src " <> src <> ")) " <> sz <> ")"
   where
     internal 0 = pure dst
     internal idx = do
@@ -709,7 +710,7 @@ copySliceWith arithEnc srcOffset dstOffset (Lit size) src dst = do
       encDstOff <- offset idx' dstOffset
       encSrcOff <- offset idx' srcOffset
       child <- internal idx'
-      pure $ "(store " <> child `sp` encDstOff `sp` "(select src " <> encSrcOff <> "))"
+      pure $ "(store " <> child `sp` encDstOff `sp` "(select copy!src " <> encSrcOff <> "))"
     offset :: W256 -> Expr EWord -> Err Builder
     offset o (Lit b) = pure $ wordAsBV $ o + b
     offset o e = exprToSMTWith arithEnc $ Expr.add (Lit o) e
