@@ -292,7 +292,7 @@ symRun opts@UnitTestOptions{..} vm (nth, numTests) sig@(Sig testName types) sour
           ("paths" JSON..= length ends) : [k JSON..= n | (k, n) <-
             [ ("partial", length (filter Expr.isPartial ends)), ("cex", length (filter isCex results))
             , ("unknown", length (filter isUnknown results)), ("error", length (filter isError results)) ], n > 0]
-    (ends, results) <- Progress.withPhase testName ["test" JSON..= cs] summary $ do
+    (ends, results) <- Progress.withPhase "test" ["test" JSON..= cs] summary $ do
       Progress.phaseTotal numTests
       Progress.phaseAt nth
       verify solvers fetcherSym (makeVeriOpts opts) symVm postcondition (Just $ cexHandler cd fetcherConc)
