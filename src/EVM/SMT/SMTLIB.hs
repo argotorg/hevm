@@ -2,14 +2,32 @@
 module EVM.SMT.SMTLIB (
   prelude,
   toText,
-  hasDuplicateCommands
+  hasDuplicateCommands,
+  -- * Builder primitives
+  sp,
+  zero,
+  one,
+  wordAsBV
 ) where
 
 import Data.Containers.ListUtils (nubOrd)
 import Data.Text.Lazy (Text)
 import Data.Text.Lazy.Builder
+import qualified Data.Text.Lazy.Builder.Int
 
 import EVM.SMT.Types
+
+sp :: Builder -> Builder -> Builder
+a `sp` b = a <> " " <> b
+
+zero :: Builder
+zero = "(_ bv0 256)"
+
+one :: Builder
+one = "(_ bv1 256)"
+
+wordAsBV :: forall a. Integral a => a -> Builder
+wordAsBV w = "(_ bv" <> Data.Text.Lazy.Builder.Int.decimal w <> " 256)"
 
 prelude :: SMT2
 prelude =  SMT2 src mempty mempty
@@ -28,6 +46,12 @@ prelude =  SMT2 src mempty mempty
     "(define-sort Buf () (Array Word Byte))"
     ]) <> [(SMTComment "slot -> value"), SMTCommand "(define-sort Storage () (Array Word Word))"]
     <> (fmap SMTCommand [ "(declare-fun keccak (Buf Word) Word)" ])
+    -- results of calls to unknown code, as functions of what the callee can observe:
+    -- world, kind, target, value, calldata, calldata length, caller, its storage,
+    -- transient storage and balance (see PCall)
+    <> (fmap SMTCommand
+         [ "(declare-fun call_" <> f <> " (Word Word Word Word Buf Word Addr Storage Storage Word) " <> sort <> ")"
+         | (f, sort) <- [("success", "Word"), ("retdata", "Buf"), ("retlen", "Word"), ("world", "Word")] ])
   macros = fmap SMTCommand [
     "(define-fun max ((a (_ BitVec 256)) (b (_ BitVec 256))) (_ BitVec 256) (ite (bvult a b) b a))",
     "(define-fun indexWord31 ((w Word)) Byte ((_ extract 7 0) w))",

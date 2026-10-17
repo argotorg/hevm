@@ -8,7 +8,7 @@ import Data.ByteString (ByteString)
 import Data.Either.Extra (fromRight)
 import Data.Functor ((<&>))
 import Data.Maybe (fromMaybe, mapMaybe, fromJust)
-import Data.List qualified as List (isInfixOf)
+import Data.List qualified as List (isInfixOf, nub)
 import Data.String.Here
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -89,6 +89,26 @@ runtimeSolidityEquivalenceTests = testGroup "Solidity runtime equivalence"
       expectDifference 1 a b
   -- diverging gas overapproximations are caught
   -- previously, they had the same name (gas_...), so they compared equal
+  , testCase "eq-partials-not-duplicated" $ do
+    let a = [here|
+              contract C {
+                function stuff(uint n) public returns (uint256) {
+                  uint count = 0;
+                  for (uint i = 0; i < n; i++) count++;
+                  return count;
+                }
+              }
+           |]
+        b = replace $ "return count;" `with` "return count + 1;" `on` a
+    codeA <- compile a Solidity.Runtime
+    codeB <- compile b Solidity.Runtime
+    let opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 3 } }
+    eq <- Effects.runApp $ withSolvers Bitwuzla 3 Nothing defMemLimit $ \sg -> do
+      (calldata, _) <- mkCalldata Nothing []
+      equivalenceCheck sg Nothing codeA codeB opts calldata False
+    assertBool "Must have partial end states" (not (null eq.partials))
+    -- each partial end state used to be reported once per end state of the other program
+    assertEqual "Partial end states must not be duplicated" (List.nub eq.partials) eq.partials
   , testCase "eq-divergent-overapprox-gas" $ do
     let a = [here|
               contract C {
@@ -407,7 +427,72 @@ bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
     let def = fromRight (internalError "cannot be") $ defaultSymbolicValues $ subModel cex (AbstractBuf "txdata")
     let buf = prettyBuf $ Expr.concKeccakSimpExpr def
     assertBool "Must start with specific string" (T.isPrefixOf "0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe0c" buf)
+  -- calls to unknown code with the same inputs must give the same results (#1116)
+  , testCase "eq-call-same-inputs-same-result" $ do
+    eq <- eqBytecode False (sCall "1234" "5f" <> pop <> revertRet) ("5b" <> sCall "1234" "5f" <> pop <> revertRet)
+    assertEqual "must be equivalent" [] (map fst eq.res)
+  , testCase "eq-call-different-calldata" $ do
+    eq <- eqBytecode False (sCall "1234" "5f" <> pop <> revertRet) (sCall "1234" "6001" <> pop <> revertRet)
+    assertBool "different calldata may give different results" (any (isCex . fst) eq.res)
+  , testCase "eq-call-after-extra-view-call" $ do
+    eq <- eqBytecode False (sCall "1234" "5f" <> pop <> revertRet)
+                           (sCall "5678" "5f" <> pop <> sCall "1234" "5f" <> pop <> revertRet)
+    assertEqual "a view call does not change later results" [] (map fst eq.res)
+  , testCase "eq-call-twice-in-one-program" $ do
+    -- returns whether two identical calls succeeded differently, vs making the call once and
+    -- returning 0 (so that both touch the same accounts)
+    eq <- eqBytecode False (sCall "1234" "5f" <> sCall "1234" "5f" <> "1415" <> "5f52" <> "60205ff3")
+                           (sCall "1234" "5f" <> pop <> "5f5f5260205ff3")
+    assertEqual "identical calls must agree" [] (map fst eq.res)
+  , testCase "eq-call-after-same-state-changing-call" $ do
+    eq <- eqBytecode True (call "1234" <> pop <> sCall "5678" "5f" <> pop <> revertRet)
+                          ("5b" <> call "1234" <> pop <> sCall "5678" "5f" <> pop <> revertRet)
+    assertEqual "must be equivalent" [] (map fst eq.res)
+  , testCase "eq-call-after-state-changing-call-in-one-program" $ do
+    eq <- eqBytecode True (call "1234" <> pop <> sCall "5678" "5f" <> pop <> revertRet)
+                          (sCall "5678" "5f" <> pop <> revertRet)
+    assertBool "a state-changing call may change later results" (any (isCex . fst) eq.res)
+  , testCase "eq-replay-validates-storage-difference" $ do
+    -- sstore(0, 1) vs sstore(0, 2)
+    replays <- replayAll "6001600055" "6002600055"
+    assertBool "Must have a counterexample" (not (null replays))
+    forM_ replays $ \case
+      Validated ra rb -> assertBool "Replay must show the different stores" (ra /= rb)
+      r -> assertFailure $ "Counterexample must replay as validated, got: " <> show r
+  , testCase "eq-replay-equal-programs-not-reproducible" $ do
+    -- sstore(0, 1), and the same after a JUMPDEST
+    let a = fromJust (hexByteString "6001600055")
+        b = fromJust (hexByteString "5b6001600055")
+    r <- Effects.runApp $ withSolvers Bitwuzla 1 Nothing defMemLimit $ \s ->
+      replayEqCex s False a b (AbstractBuf "txdata") mempty
+    case r of
+      NotReproducible {} -> pure ()
+      _ -> assertFailure $ "Replay of equal programs must not reproduce, got: " <> show r
   ]
+  where
+    -- STATICCALL(gas, addr, 0, size, 0, 0), size pushed by the given op
+    sCall addr size = "5f5f" <> size <> "5f61" <> addr <> "5afa"
+    -- CALL(gas, addr, 0, 0, 0, 0, 0)
+    call addr = "5f5f5f5f5f61" <> addr <> "5af1"
+    pop = "50"
+    -- revert with the last call's return data
+    revertRet = "3d5f5f3e3d5ffd"
+    eqBytecode :: Bool -> ByteString -> ByteString -> IO EqIssues
+    eqBytecode noReent ha hb = do
+      let a = fromJust (hexByteString ha)
+          b = fromJust (hexByteString hb)
+          env = Effects.Env { config = Effects.defaultConfig { Effects.promiseNoReent = noReent } }
+      Effects.runEnv env $ withSolvers Bitwuzla 1 Nothing defMemLimit $ \s -> do
+        (calldata, _) <- mkCalldata Nothing []
+        equivalenceCheck s Nothing a b defaultVeriOpts calldata False
+    replayAll :: ByteString -> ByteString -> IO [CexReplay]
+    replayAll ha hb = do
+      let a = fromJust (hexByteString ha)
+          b = fromJust (hexByteString hb)
+      Effects.runApp $ withSolvers Bitwuzla 1 Nothing defMemLimit $ \s -> do
+        (calldata, _) <- mkCalldata Nothing []
+        eq <- equivalenceCheck s Nothing a b defaultVeriOpts calldata False
+        mapM (replayEqCex s False a b (AbstractBuf "txdata")) (mapMaybe (getCex . fst) eq.res)
 
 yulEquivalenceTests :: TestTree
 yulEquivalenceTests = testGroup "Yul equivalence"

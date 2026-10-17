@@ -14,6 +14,7 @@ import EVM.ABI
 import EVM.Expr (readStorage, concStoreContains, writeStorage, readByte, readWord, writeWord,
   writeByte, bufLength, indexWord, readBytes, copySlice, wordToAddr, maybeLitByteSimp, maybeLitWordSimp, maybeLitAddrSimp)
 import EVM.Expr qualified as Expr
+import EVM.HashCons qualified as HashCons
 import EVM.FeeSchedule (FeeSchedule (..))
 import EVM.FeeSchedule qualified as Fees (feeSchedule)
 import EVM.Merge qualified as Merge
@@ -120,6 +121,7 @@ blankState = do
     , static       = False
     , overrideCaller = Nothing
     , resetCaller  = False
+    , lastGasReading = Nothing
     }
 
 -- | An "external" view of a contract's bytecode, appropriate for
@@ -185,6 +187,7 @@ makeVm o = do
       , static = False
       , overrideCaller = Nothing
       , resetCaller = False
+      , lastGasReading = Nothing
       }
     , env = env
     , burned = initialGas
@@ -213,6 +216,7 @@ makeVm o = do
       , contracts = Map.fromList ((o.address,o.contract):o.otherContracts)
       , freshAddresses = o.freshAddresses
       , freshGasVals = 0
+      , callWorld = Lit 0
       }
     block = Block
       { coinbase = o.coinbase
@@ -496,7 +500,7 @@ exec1 conf = do
                             modifying' #keccakPreImgs (insert (bs, kc))
                           pure $ Lit kc
                         )
-                    buf -> pure $ Keccak buf
+                    buf -> pure $ HashCons.hashConsExpr (Keccak buf)
                   next
                   assign' (#state % #stack) (hash : xs)
             _ -> underrun
@@ -794,9 +798,9 @@ exec1 conf = do
 
                 symbolicRead :: EVM t () = if this.external
                   then accessStorage self x finalizeLoad
-                  else let slot = Expr.concKeccakOnePass x
+                  else let slot = HashCons.hashConsExpr (Expr.concKeccakOnePass x)
                            preMap = Map.fromList [ (h, bs) | (bs, h) <- toList vm.keccakPreImgs ]
-                       in finalizeLoad $ Expr.readStorage' slot (Expr.filterStoreByReadSlot preMap slot this.storage)
+                       in finalizeLoad $ HashCons.hashConsExpr (Expr.readStorage' slot (Expr.filterStoreByReadSlot preMap slot this.storage))
 
                 concreteRead :: EVM t () = do
                   acc <- accessStorageForGas self (forceLit x)
@@ -905,7 +909,7 @@ exec1 conf = do
                             let jumpSym :: Bool -> EVM Symbolic ()
                                 jumpSym False = assign' (#state % #stack) xs >> next
                                 jumpSym _    = checkJump jumpTarget xs
-                            branch conf.maxDepth cond jumpSym
+                            branchBounded conf cond jumpSym
                 in case eqT @t @Symbolic of
                      Just Refl -> symbolicMerge
                      Nothing -> branch conf.maxDepth cond jump
@@ -989,7 +993,7 @@ exec1 conf = do
                             touchAccount from'
                             touchAccount callee
                             transfer from' callee xValue
-              where fallback = freshBufFallback xs
+              where fallback = freshBufFallback xTo' xValue xInOffset xInSize xOutOffset xOutSize True xs
             _ -> underrun
 
         OpCallcode -> {-# SCC "OpCallcode" #-}
@@ -1095,7 +1099,7 @@ exec1 conf = do
                       touchAccount self
                       touchAccount callee
                 where
-                  fallback = freshBufFallback xs
+                  fallback = freshBufFallback xTo (Lit 0) xInOffset xInSize xOutOffset xOutSize False xs
             _ -> underrun
 
         OpSelfdestruct -> {-# SCC "OpSelfdestruct" #-}
@@ -1737,7 +1741,7 @@ forceAddr :: forall t . (?conf :: Config, VMOps t, Typeable t) =>
   -> (Expr EAddr -> EVM t ())
   -> EVM t ()
 forceAddr addrExpr fallback continue = case wordToAddr addrExpr of
-  Nothing -> manySolutions (?conf).maxDepth addrExpr 20 $ \case
+  Nothing -> manySolutions (?conf).maxDepth (?conf).maxWidth addrExpr 20 $ \case
     Just sol -> continue $ LitAddr (truncateToAddr sol)
     Nothing -> onlyDeployed addrExpr fallback continue
   Just c -> continue c
@@ -1756,12 +1760,20 @@ unexpectedSymArgW msg n = unexpectedSymArg msg [n]
 unknownCode :: VMOps t => Expr EAddr -> EVM t ()
 unknownCode n = unexpectedSymArg "call target has unknown code" [n]
 
-freshBufFallback :: (?conf :: Config, VMOps t, ?op :: Word8) => [Expr EWord] -> EVM t ()
-freshBufFallback xs = do
+-- | Overapproximates a call to unknown code with fresh results, defined as
+-- functions of the call's inputs (see 'PCall'), so that calls with equal
+-- inputs, e.g. in the two programs of an equivalence check, get equal results.
+freshBufFallback :: (?conf :: Config, VMOps t, ?op :: Word8)
+  => Expr EWord -> Expr EWord -> Expr EWord -> Expr EWord -> Expr EWord -> Expr EWord -> Bool -> [Expr EWord] -> EVM t ()
+freshBufFallback target value inOffset inSize outOffset outSize changesState xs = do
+  self <- use (#state % #contract)
+  caller <- fromMaybe self <$> use (#state % #overrideCaller)
+  callee <- use (#env % #contracts % at self)
+  calldata <- readMemory inOffset inSize
+  world <- use (#env % #callWorld)
   -- Reset caller if needed
   resetCaller <- use $ #state % #resetCaller
   when resetCaller $ assign (#state % #overrideCaller) Nothing
-  -- overapproximate by returning a symbolic value
   freshVar <- use #freshVar
   assign #freshVar (freshVar + 1)
   let opName = pack $ show $ getOp ?op
@@ -1769,8 +1781,42 @@ freshBufFallback xs = do
   modifying #constraints ((:) (PLEq freshVarExpr (Lit 1) ))
   let freshReturndataExpr = AbstractBuf (opName <> "-result-data-fresh-" <> (pack . show) freshVar)
   modifying #constraints ((:) (PLEq (bufLength freshReturndataExpr) (Lit (2 ^ ?conf.maxBufSize))))
+  let worldAfter = if changesState then Just (Var (opName <> "-world-fresh-" <> (pack . show) freshVar)) else Nothing
+      inputs = CallInputs
+        { world = world
+        , callKind = Lit (into ?op)
+        , target = target
+        , callValue = value
+        , callData = calldata
+        , callDataLen = inSize
+        , caller = caller
+        , callerStorage = maybe (AbstractStore self Nothing) (.storage) callee
+        , callerTStorage = maybe (AbstractStore self Nothing) (.tStorage) callee
+        , callerBalance = maybe (Balance self) (.balance) callee
+        }
+  modifying #constraints ((:) (PCall inputs freshVarExpr freshReturndataExpr worldAfter))
+  mapM_ (assign (#env % #callWorld)) worldAfter
   assign (#state % #returndata) freshReturndataExpr
+  writeCallOutput freshReturndataExpr outSize outOffset
   next >> assign' (#state % #stack) (freshVarExpr:xs)
+
+-- | Writes the first @min(outSize, length output)@ bytes of a call's output to
+-- memory, keeping the rest of the region, like 'copyCallBytesToMemory'. The length
+-- of a fresh output is symbolic, and the SMT encoding can't copy a region of
+-- symbolic size, so each word is merged instead: bytes of a buffer past its
+-- length read as zero, so the output only needs masking where the old memory stays.
+writeCallOutput :: Expr Buf -> Expr EWord -> Expr EWord -> EVM t ()
+writeCallOutput output outSize outOffset = case outSize of
+  Lit n | n <= 1024 -> flip mapM_ (takeWhile (< n) [0, 32 ..]) $ \k -> do
+    let size = Prelude.min 32 (n - k)
+        off = Expr.add outOffset (Lit k)
+        len = bufLength output
+        fromOutput = Expr.min (Lit size) (ITE (Expr.lt len (Lit k)) (Lit 0) (Expr.sub len (Lit k)))
+        keep = SHR (Expr.mul (Lit 8) fromOutput) (Lit maxBound)
+    old <- Expr.readWord (Lit 0) <$> readMemory off (Lit 32)
+    let merged = Or (And (Not keep) (Expr.readWord (Lit k) output)) (And keep old)
+    copyBytesToMemory (WriteWord (Lit 0) merged mempty) (Lit size) (Lit 0) off
+  _ -> copyCallBytesToMemory output outSize outOffset
 
 freshVarFallback:: (VMOps t, ?op :: Word8) => [Expr EWord] -> Expr a -> EVM t ()
 freshVarFallback xs _ = do
@@ -1784,18 +1830,54 @@ freshVarFallback xs _ = do
   let freshVarExpr = Var (opName <> "-result-stack-fresh-" <> (pack . show) freshVar)
   next >> assign' (#state % #stack) (freshVarExpr:xs)
 
+-- | A symbolic JUMPI whose condition is decided by a subterm with few possible
+-- values, e.g. a loop counter compared against a length that the path
+-- conditions bound. If all values agree, no solver call is needed. At a loop
+-- head it forks on each value, so the rest of the loop runs concretely instead
+-- of asking the solver once per iteration.
+branchBounded :: Config -> Expr EWord -> (Bool -> EVM Symbolic ()) -> EVM Symbolic ()
+branchBounded conf cond continue = do
+  pathconds <- use #constraints
+  loc <- codeloc
+  seen <- use (#iterations % at loc)
+  case Expr.enumerateViaSmallSubterm conf.maxWidth pathconds cond of
+    Just (_, [(v, _)]) -> branch conf.maxDepth (Lit v) continue
+    Just (atom, groups) | isJust seen ->
+      forkOnSubterm conf.maxDepth atom [(v, [k]) | (v, ks) <- groups, k <- ks] $ \v ->
+        branch conf.maxDepth (Lit v) continue
+    _ -> branch conf.maxDepth cond continue
+
+-- | Forks into one path per group, constraining @atom@ to that group's values.
+forkOnSubterm :: Maybe Int -> Expr EWord -> [(W256, [W256])] -> (W256 -> EVM Symbolic ()) -> EVM Symbolic ()
+forkOnSubterm maxDepth atom groups continue = do
+  pathconds <- use #constraints
+  vm <- get
+  let caseProp ks = Expr.simplifyProp $ foldr1 POr [atom .== Lit k | k <- ks]
+      feasible = [ (v, p) | (v, ks) <- groups, let p = caseProp ks
+                 , Expr.simplifyProps (p : pathconds) /= [PBool False] ]
+      runCase (v, p) = do
+        assign #result Nothing
+        pushTo #constraints p
+        continue v
+  case feasible of
+    [] -> finishAllFramesAndStop
+    [c] -> runCase c
+    _ -> fork maxDepth vm.exploreDepth $ PleaseRunAll (map Lit [0 .. fromIntegral (length feasible) - 1]) $ \case
+      Lit i -> runCase (feasible !! fromIntegral i)
+      _ -> internalError "forkOnSubterm: unexpected case index"
+
 forceConcrete :: (?conf :: Config, VMOps t) => Expr EWord -> String -> (W256 -> EVM t ()) -> EVM t ()
 forceConcrete n = forceConcreteLimitSz n 32
 
 forceConcreteLimitSz :: (?conf :: Config, VMOps t) => Expr EWord -> Int -> String -> (W256 -> EVM t ()) -> EVM t ()
 forceConcreteLimitSz n bytes msg continue = case maybeLitWordSimp n of
-  Nothing -> manySolutions (?conf).maxDepth n bytes $ maybe fallback continue
+  Nothing -> manySolutions (?conf).maxDepth (?conf).maxWidth n bytes $ maybe fallback continue
   Just c -> continue c
   where fallback = unexpectedSymArg msg [n]
 
 forceConcreteAddr :: (?conf :: Config, VMOps t) => Expr EAddr -> String -> (Addr -> EVM t ()) -> EVM t ()
 forceConcreteAddr n msg continue = case maybeLitAddrSimp n of
-  Nothing -> manySolutions (?conf).maxDepth (WAddr n) 20 $ maybe fallback $ \c -> continue (truncateToAddr c)
+  Nothing -> manySolutions (?conf).maxDepth (?conf).maxWidth (WAddr n) 20 $ maybe fallback $ \c -> continue (truncateToAddr c)
   Just c -> continue c
   where fallback = unexpectedSymArg msg [n]
 
@@ -1891,7 +1973,7 @@ cheat gas (inOffset, inSize) (outOffset, outSize) xs = do
                     }
   case maybeLitWordSimp abi of
     -- 4-byte function selector
-    Nothing -> manySolutions (?conf).maxDepth abi 4 $ \case
+    Nothing -> manySolutions (?conf).maxDepth (?conf).maxWidth abi 4 $ \case
       Just concAbi -> runCheat concAbi input
       Nothing -> unexpectedSymArg "symbolic cheatcode selector" [abi]
     Just concAbi -> runCheat concAbi input
@@ -3283,7 +3365,7 @@ stackOp1 cost f =
     x:xs ->
       burn cost $ do
         next
-        let !y = f x
+        let !y = HashCons.hashConsExpr (f x)
         assign' (#state % #stack) $ y : xs
     _ ->
       underrun
@@ -3298,7 +3380,7 @@ stackOp2 cost f =
     x:y:xs ->
       burn cost $ do
         next
-        assign' (#state % #stack) $ f x y : xs
+        assign' (#state % #stack) $ HashCons.hashConsExpr (f x y) : xs
     _ ->
       underrun
 
@@ -3312,7 +3394,7 @@ stackOp3 cost f =
     x:y:z:xs ->
       burn cost $ do
       next
-      assign' (#state % #stack) $ f x y z : xs
+      assign' (#state % #stack) $ HashCons.hashConsExpr (f x y z) : xs
     _ ->
       underrun
 
@@ -3629,7 +3711,12 @@ instance VMOps Symbolic where
   pushGas = do
     modifying (#env % #freshGasVals) (+ 1)
     n <- use (#env % #freshGasVals)
-    pushSym $ Expr.Gas "" n
+    let g = Expr.Gas "" n
+    -- GAS costs gas, so the readings within one call frame strictly decrease
+    prev <- use (#state % #lastGasReading)
+    mapM_ (\p -> pushTo #constraints (PGT p g)) prev
+    assign (#state % #lastGasReading) (Just g)
+    pushSym g
   enoughGas _ _ = True
   subGas _ _ = ()
   toGas _ = ()
@@ -3659,24 +3746,27 @@ instance VMOps Symbolic where
   -- numBytes allows us to specify how many bytes of the returned value is relevant
   -- if it's e.g.a JUMP, only 2 bytes can be relevant. This allows us to avoid
   -- getting solutions that are nonsensical
-  manySolutions maxDepth ewordExpr numBytes continue = do
+  manySolutions maxDepth maxWidth ewordExpr numBytes continue = do
     pathconds <- use #constraints
     vm <- get
-    query $ PleaseGetSols ewordExpr numBytes pathconds $ \case
-      Just concVals -> do
-        assign #result Nothing
-        case concVals of
-          -- zero solutions means that we are in a branch that's not possible
-          -- so revert all frames and stop all execution on this branch
-          [] -> finishAllFramesAndStop
-          [val] -> do
+    case Expr.enumerateViaSmallSubterm maxWidth pathconds ewordExpr of
+      Just (_, [(v, _)]) -> continue $ Just v
+      Just (atom, groups) -> forkOnSubterm maxDepth atom groups (continue . Just)
+      Nothing -> query $ PleaseGetSols ewordExpr numBytes pathconds $ \case
+          Just concVals -> do
             assign #result Nothing
-            pushTo #constraints $ Expr.simplifyProp (ewordExpr .== (Lit val))
-            continue $ Just val
-          _ -> fork maxDepth vm.exploreDepth $ PleaseRunAll (map Lit concVals) runAllPaths
-      Nothing -> do
-        assign #result Nothing
-        continue Nothing
+            case concVals of
+              -- zero solutions means that we are in a branch that's not possible
+              -- so revert all frames and stop all execution on this branch
+              [] -> finishAllFramesAndStop
+              [val] -> do
+                assign #result Nothing
+                pushTo #constraints $ Expr.simplifyProp (ewordExpr .== (Lit val))
+                continue $ Just val
+              _ -> fork maxDepth vm.exploreDepth $ PleaseRunAll (map Lit concVals) runAllPaths
+          Nothing -> do
+            assign #result Nothing
+            continue Nothing
     where
       runAllPaths val = do
         assign #result Nothing

@@ -1,4 +1,6 @@
 {-# LANGUAGE TypeAbstractions #-}
+{-# LANGUAGE StaticPointers #-}
+{-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -Wno-incomplete-uni-patterns #-} -- It's OK to crash in tests if the pattern does not match
 
 module EVM.Expr.ExprTests (tests) where
@@ -9,20 +11,29 @@ import Test.Tasty.ExpectedFailure (ignoreTest)
 import Test.Tasty.HUnit
 import Test.Tasty.QuickCheck hiding (Failure, Success)
 
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Reader (ReaderT)
 import Data.Bits (shiftL)
 import Data.ByteString qualified as BS (drop, length, pack, take)
 import Data.Containers.ListUtils (nubOrd)
-import Data.List qualified as List (nub, tails)
+import Data.List qualified as List (nub, sort, tails)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (isJust)
+import Data.Text (Text)
 import Data.Typeable
+import Numeric.Natural (Natural)
 
 import EVM.Effects
 import EVM.Expr qualified as Expr
 import EVM.Expr.Generator
+import EVM.Expr.Probe (probes, contract)
+import EVM.HashCons qualified as HC
 import EVM.Format (hexText)
+import EVM.SMT (AbstractQuery(..), SMT2(..), SMTScript(..), assertPropsAbstract)
 import EVM.Solvers hiding (checkSat)
+import EVM.Solvers qualified as Solvers (checkSat)
 import EVM.SymExec (subModel)
-import EVM.Traversals (foldExpr, mapExprM)
+import EVM.Traversals (foldExpr, foldProp, mapExpr, mapExprM, mapProp)
 import EVM.Types hiding (Env)
 
 
@@ -38,7 +49,44 @@ unitTests = testGroup "Unit tests"
   , comparisonTests
   , signExtendTests
   , concretizationTests
+  , traversalTests
   ]
+
+traversalTests :: TestTree
+traversalTests = testCase "every-field-is-traversed" $ assertBool (unlines missed) (null missed)
+  where
+    cases = $(probes [| SomeExpr |] ['GVar] ''Expr)
+      <> [ (SomeExpr (Failure [] mempty e), ms) | (e, ms) <- $(probes [| id |] [] ''EvmError) ]
+      <> [ (SomeExpr (Partial [] mempty p), ms) | (p, ms) <- $(probes [| id |] [] ''PartialExec) ]
+      <> [ (SomeExpr (contract c), ms) | (c, ms) <- $(probes [| id |] [] ''ContractCode) ]
+      <> [ (SomeExpr (Failure [p] mempty StackUnderrun), ms) | (p, ms) <- $(probes [| id |] [] ''Prop) ]
+    missed =
+      [ name <> " misses a field of " <> show e
+      | (SomeExpr e, ms) <- cases
+      , let renamed = List.sort (fmap (<> "'") ms)
+      , (name, ok) <-
+          [ ("foldExpr", List.sort (foldExpr probeName ["acc"] e) == List.sort ("acc" : ms))
+          , ("mapExpr", names (mapExpr renameProbe e) == renamed)
+          , ("memoFixTraverse", names (HC.memoFixTraverse (static (HC.Rewrite renameProbe)) e) == renamed)
+          ]
+      , not ok ]
+    names :: Expr a -> [Text]
+    names = List.sort . foldExpr probeName []
+    probeName :: Expr a -> [Text]
+    probeName = \case
+      Var n -> [n]; AbstractBuf n -> [n]; SymAddr n -> [n]; Gas n _ -> [n]
+      -- the address is part of this leaf, not a child
+      AbstractStore (SymAddr n) _ -> [n]
+      _ -> []
+
+renameProbe :: Expr a -> Expr a
+renameProbe = \case
+  Var n -> Var (n <> "'")
+  AbstractBuf n -> AbstractBuf (n <> "'")
+  SymAddr n -> SymAddr (n <> "'")
+  Gas n i -> Gas (n <> "'") i
+  AbstractStore (SymAddr n) w -> AbstractStore (SymAddr (n <> "'")) w
+  e -> e
 
 simplificationTests :: TestTree
 simplificationTests = testGroup "Expr-rewriting"
@@ -131,6 +179,25 @@ storageTests = testGroup "Storage tests"
         (Just $ SLoad (Lit 0) emptyStore)
         (Expr.decomposeStorage $ SLoad (mappingConcrete 1 0)
           (SStore (mappingRead 0 "k") (Lit 3) emptyStore))
+    -- an array and a mapping on one slot would end up in the same logical store
+    , testCase "decompose-props-declines-array-and-mapping-on-one-slot" $ assertEqual errorMsg
+        Nothing
+        (Expr.decomposeStorageProps
+          [PEq (Lit 0) (SLoad (mappingRead 2 "k") (SStore (arrElem 2 (Var "i")) (Lit 3) emptyStore))])
+    , testCase "decompose-props-declines-clash-across-props" $ assertEqual errorMsg
+        Nothing
+        (Expr.decomposeStorageProps
+          [ PEq (Lit 0) (SLoad (mappingRead 2 "k") emptyStore)
+          , PEq (Lit 0) (SLoad (arrElem 2 (Var "i")) emptyStore) ])
+    , testCase "decompose-props-mixes-array-and-mapping-on-different-slots" $ assertEqual errorMsg
+        (Just [PEq (Lit 0) (SLoad (Var "k") emptyStore)])
+        (Expr.decomposeStorageProps
+          [PEq (Lit 0) (SLoad (mappingRead 1 "k") (SStore (arrElem 2 (Var "i")) (Lit 3) emptyStore))])
+    , testCase "decompose-props-declines-unrecognized-key" $ assertEqual errorMsg
+        Nothing
+        (Expr.decomposeStorageProps
+          [ PEq (Lit 0) (SLoad (mappingRead 1 "k") emptyStore)
+          , PEq (Lit 0) (SLoad (Var "x") emptyStore) ])
     -- decomposition: keys of the read array become offsets, writes to other stores are dropped
     , testCase "decompose-array-read-rebases-keys" $ assertEqual errorMsg
         (Just $ SLoad (Var "i") (SStore (Lit 0) (Lit 1) emptyStore))
@@ -1491,24 +1558,91 @@ wrappingTests = testGroup "W256 wrapping edge cases"
           simplified = Expr.copySlice (Lit srcOff) (Lit 0) (Lit size) srcBuf dstBuf
       result <- proveEquivExpr full simplified
       assertBool "copySlice with wrapping srcOffset" result
+
+  , testCase "writeWord-wrapping-write-stays-on-top" $ do
+      let lower = WriteWord (Lit 0) (Var "x") (AbstractBuf "b")
+          full = ReadWord (Lit 0) (WriteWord (Lit maxBound) (Var "v") lower)
+          simplified = ReadWord (Lit 0) (Expr.writeWord (Lit maxBound) (Var "v") lower)
+          nested = WriteWord (Lit maxBound) (Var "v") (WriteWord (Lit 0x2a) (Var "x") (AbstractBuf "b"))
+      result <- proveEquivExpr full simplified
+      assertBool "writeWord with a wrapping offset over a lower write" result
+      assertEqual "simplify terminates" nested (Expr.simplify nested)
+
+  , testCase "copySlice-short-from-writeWord-terminates" $ do
+      let buf = CopySlice (Var "c") (Lit 0x26) (Lit 3) (WriteWord (Var "c") (Var "x") (AbstractBuf "b")) (AbstractBuf "b")
+          expected = CopySlice (Lit 0) (Lit 0x26) (Lit 3) (WriteWord (Lit 0) (Var "x") (ConcreteBuf "")) (AbstractBuf "b")
+      assertEqual "" expected (Expr.simplify buf)
+
+  , testCase "bufLength-copySlice-symbolic-size-zero" $ do
+      let len = Expr.bufLength (CopySlice (Lit 0x30) (Lit 0x4b) (Var "s") (AbstractBuf "b") (ConcreteBuf ""))
+          at :: W256 -> Expr EWord
+          at v = Expr.simplify (mapExpr (\case { Var "s" -> Lit v; e -> e }) len)
+      assertEqual "a copy of zero bytes does not grow the buffer" (Lit 0) (at 0)
+      assertEqual "" (Lit 0x50) (at 5)
+
+  , testCase "readWord-wrap-over-low-writeByte" $ do
+      let buf = WriteByte (Lit 5) (LitByte 0xAB) (ConcreteBuf (BS.pack [1..50]))
+          full = ReadWord (Lit maxBound) buf
+      result <- proveEquivExpr full (Expr.readWord (Lit maxBound) buf)
+      assertBool "readWord wrapping onto a WriteByte at a low index" result
+
+  , testCase "readWord-wrap-over-low-copySlice" $ do
+      let buf = CopySlice (Lit 0) (Lit 0) (Lit 3) (AbstractBuf "src") (AbstractBuf "dst")
+          full = ReadWord (Lit maxBound) buf
+      result <- proveEquivExpr full (Expr.readWord (Lit maxBound) buf)
+      assertBool "readWord wrapping onto a CopySlice at a low index" result
+
+  , testCase "show-addr-leaves-rest-alone" $
+      assertEqual "" "(0x0000000000000000000000000000000000001234,Just 1)" (show (Addr 0x1234, Just (1 :: Int)))
   ]
 
 fuzzTests :: TestTree
-fuzzTests = adjustOption (\(Test.Tasty.QuickCheck.QuickCheckTests n) -> Test.Tasty.QuickCheck.QuickCheckTests (div n 2)) $
-  testGroup "ExprFuzzTests" [equivalenceSanityChecks, simplifierFuzzTests]
+fuzzTests = testGroup "ExprFuzzTests"
+  [ halfQuickCheckTests $ testGroup "plain"
+      [ equivalenceSanityChecks equivConfig
+      , simplifierFuzzTests equivConfig
+      ]
+  , halfQuickCheckTests $ testGroup "abstract-arith"
+      [ equivalenceSanityChecks abstractConfig
+      , simplifierFuzzTests abstractConfig
+      ]
+  , abstractArithmeticFuzzTests
+  , enumerateFuzzTests
+  ]
+  where
+    halfQuickCheckTests = adjustOption $ \(Test.Tasty.QuickCheck.QuickCheckTests n) ->
+      Test.Tasty.QuickCheck.QuickCheckTests (div n 2)
 
-equivalenceSanityChecks :: TestTree
-equivalenceSanityChecks = testGroup "Expr equivalence sanity checks"
+-- | Every model of the path conditions must take a value of the subterm that is enumerated,
+-- and give the word the value enumerated with it: one left out drops a feasible path.
+enumerateFuzzTests :: TestTree
+enumerateFuzzTests = testGroup "enumerateViaSmallSubterm"
+  [ testProperty "enumerate-small-subterm-complete" $ \(SmallRange limit props e) -> ioProperty $
+      -- path conditions are stored simplified
+      case Expr.enumerateViaSmallSubterm limit (Expr.simplifyProps props) e of
+        Nothing -> pure $ label "nothing enumerated" True
+        Just (atom, groups) -> do
+          let ks = concatMap snd groups
+              covered = foldr POr (PBool False) [PAnd (PEq atom (Lit k)) (PEq e (Lit v)) | (v, vks) <- groups, k <- vks]
+          res <- checkSat $ foldr PAnd (PNeg covered) props
+          pure $ label (if null groups then "enumerated as infeasible" else "enumerated")
+               $ label (if isUnknown res then "solver gave up" else "solver answered")
+               $ counterexample ("subterm: " <> show atom <> "\ngroups: " <> show groups <> "\nresult: " <> show res)
+               $ length ks <= limit && length ks == length (nubOrd ks) && isUnsatOrUnknown res
+  ]
+
+equivalenceSanityChecks :: Config -> TestTree
+equivalenceSanityChecks cfg = testGroup "Expr equivalence sanity checks"
   [ testCase "read-beyond-bound (negative-test)" $ do
       let
         e1 = CopySlice (Lit 1) (Lit 0) (Lit 2) (ConcreteBuf "a") (ConcreteBuf "")
         e2 = ConcreteBuf "Definitely not the same!"
-      equal <- proveEquivExpr e1 e2
+      equal <- proveEquivExprWith cfg e1 e2
       assertBool "Should not be equivalent!" $ not equal
   , testProperty "expr equality is satisfiable" $ \(buf, idx) -> ioProperty $ do
         let simplified = Expr.readWord idx buf
             full = ReadWord idx buf
-        res <- checkSat (Expr.peq full simplified)
+        res <- checkSatWith cfg (Expr.peq full simplified)
         pure $ isSatOrUnknown res
   ]
 
@@ -1516,83 +1650,91 @@ equivalenceSanityChecks = testGroup "Expr equivalence sanity checks"
 -- applying some simplification rules, and then using the smt encoding to
 -- check that the simplified version is semantically equivalent to the
 -- unsimplified one
-simplifierFuzzTests :: TestTree
-simplifierFuzzTests = testGroup "SimplifierPropertyTests"
-    [ testProperty  "buffer-simplification" $ \(expr :: Expr Buf) -> ioProperty $ proveEquivExpr expr (Expr.simplify expr)
+simplifierFuzzTests :: Config -> TestTree
+simplifierFuzzTests cfg = testGroup "SimplifierPropertyTests"
+    [ testProperty  "buffer-simplification" $ \(expr :: Expr Buf) -> ioProperty $ proveEquivExprWith cfg expr (Expr.simplify expr)
     , testProperty  "buffer-simplification-len" $ \(expr :: Expr Buf) -> ioProperty $ do
         let buflen = BufLength expr
-        proveEquivExpr buflen (Expr.simplify buflen)
-    , testProperty "store-simplification" $ \(expr :: Expr Storage) -> ioProperty $ proveEquivExpr expr (Expr.simplify expr)
-    , testProperty "load-simplification" $ \(GenWriteStorageLoad expr) -> ioProperty $ proveEquivExpr expr (Expr.simplify expr)
+        proveEquivExprWith cfg buflen (Expr.simplify buflen)
+    , testProperty "store-simplification" $ \(expr :: Expr Storage) -> ioProperty $ proveEquivExprWith cfg expr (Expr.simplify expr)
+    , testProperty "load-simplification" $ \(GenWriteStorageLoad expr) -> ioProperty $ proveEquivExprWith cfg expr (Expr.simplify expr)
     , testProperty "folded-mapping-load" $ forAll genFoldedMappingLoad $ \(expr, expected) ->
         checkCoverage $ cover 30 (expected == Lit 0) "different mapping" $
           cover 30 (expected /= Lit 0) "same mapping" $ ioProperty $ do
-            res <- checkSat (expr ./= expected)
+            res <- checkSatWith cfg (expr ./= expected)
             pure $ counterexample (show res) (isQed res)
     -- decomposition must not change the loaded value, given its assumption that keys of different
     -- stores never alias
     , testProperty "load-decompose" $ \(GenDecomposableLoad expr) -> ioProperty $
         case mapExprM Expr.decomposeStorage expr of
           Nothing -> pure $ counterexample "decomposition failed" False
-          Just decomposed -> decomposeEquiv (storeKeys expr) expr decomposed
+          Just decomposed -> decomposeEquiv cfg (storeKeys expr) expr decomposed
     -- same, on the shapes the simplifier leaves behind. It may leave some that cannot be decomposed
     , testProperty "load-simplify-decompose" $ \(GenDecomposableLoad expr) -> ioProperty $ do
         let simp = Expr.simplify expr
         case mapExprM Expr.decomposeStorage simp of
           Nothing -> pure $ property Discard
-          Just decomposed -> decomposeEquiv (nubOrd $ storeKeys expr <> storeKeys simp) expr decomposed
-    , testProperty "byte-simplification" $ \(expr :: Expr Byte) -> ioProperty $ proveEquivExpr expr (Expr.simplify expr)
+          Just decomposed -> decomposeEquiv cfg (nubOrd $ storeKeys expr <> storeKeys simp) expr decomposed
+    -- the entry point the solver pipeline uses: it backs off, or the props keep their meaning
+    , testProperty "props-decompose" $ \(GenDecomposableProps props) -> ioProperty $
+        case Expr.decomposeStorageProps props of
+          Nothing -> pure $ label "declined" True
+          Just decomposed -> label "decomposed" <$> decomposeEquivProps cfg props decomposed
+    -- guards against the entry point backing off from what it is there for
+    , testProperty "props-decompose-accepts" $ \(GenDecomposableLoad a) (GenDecomposableLoad b) ->
+        isJust $ Expr.decomposeStorageProps [PEq a b]
+    , testProperty "byte-simplification" $ \(expr :: Expr Byte) -> ioProperty $ proveEquivExprWith cfg expr (Expr.simplify expr)
     , askOption $ \(QuickCheckTests n) -> testProperty "word-simplification" $ withMaxSuccess (min n 20) $ \(ZeroDepthWord expr) ->
-        ioProperty $ proveEquivExpr expr (Expr.simplify expr)
+        ioProperty $ proveEquivExprWith cfg expr (Expr.simplify expr)
     , testProperty "readStorage-equivalance" $ \(store, slot) -> ioProperty $ do
         let simplified = Expr.readStorage' slot store
             full = SLoad slot store
-        proveEquivExpr full simplified
+        proveEquivExprWith cfg full simplified
     , testProperty "writeStorage-equivalance" $ \(val, GenWriteStorageExpr (slot, store)) -> ioProperty $ do
         let simplified = Expr.writeStorage slot val store
             full = SStore slot val store
-        proveEquivExpr full simplified
+        proveEquivExprWith cfg full simplified
     , testProperty "readWord-equivalance" $ \(buf, idx) -> ioProperty $ do
         let simplified = Expr.readWord idx buf
             full = ReadWord idx buf
-        proveEquivExpr full simplified
+        proveEquivExprWith cfg full simplified
     , testProperty "writeWord-equivalance" $ \(idx, val, WriteWordBuf buf) -> ioProperty $ do
         let simplified = Expr.writeWord idx val buf
             full = WriteWord idx val buf
-        proveEquivExpr full simplified
+        proveEquivExprWith cfg full simplified
     , testProperty "arith-simplification" $ \(_ :: Int) -> ioProperty $ do
         expr <- generate . sized $ genWordArith 15
         let simplified = Expr.simplify expr
-        proveEquivExpr expr simplified
+        proveEquivExprWith cfg expr simplified
     , testProperty "readByte-equivalance" $ \(buf, idx) -> ioProperty $ do
         let simplified = Expr.readByte idx buf
             full = ReadByte idx buf
-        proveEquivExpr full simplified
+        proveEquivExprWith cfg full simplified
     -- we currently only simplify concrete writes over concrete buffers so that's what we test here
     , testProperty "writeByte-equivalance" $ \(LitOnly val, LitOnly buf, GenWriteByteIdx idx) -> ioProperty $ do
         let simplified = Expr.writeByte idx val buf
             full = WriteByte idx val buf
-        proveEquivExpr full simplified
+        proveEquivExprWith cfg full simplified
     , testProperty "copySlice-equivalance" $ \(srcOff, GenCopySliceBuf src, GenCopySliceBuf dst, LitWord @300 size) -> ioProperty $ do
         -- we bias buffers to be concrete more often than not
         dstOff <- generate (maybeBoundedLit 100_000)
         let simplified = Expr.copySlice srcOff dstOff size src dst
             full = CopySlice srcOff dstOff size src dst
-        proveEquivExpr full simplified
+        proveEquivExprWith cfg full simplified
     , testProperty "indexWord-equivalence" $ \(src, LitWord @50 idx) -> ioProperty $ do
         let simplified = Expr.indexWord idx src
             full = IndexWord idx src
-        proveEquivExpr full simplified
+        proveEquivExprWith cfg full simplified
     , testProperty "pow-base2-simp" $ \(_ :: Int) -> ioProperty $ do
         expo <- generate . sized $ genWordArith 15
         let full = Exp (Lit 2) expo
             simplified = Expr.simplify full
-        proveEquivExpr full simplified
+        proveEquivExprWith cfg full simplified
     , testProperty "pow-low-exponent-simp" $ \(LitWord @100 expo) -> ioProperty $ do
         base <- generate . sized $ genWordArith 15
         let full = Exp base expo
             simplified = Expr.simplify full
-        proveEquivExpr full simplified
+        proveEquivExprWith cfg full simplified
     , testProperty "indexWord-mask-equivalence" $ \(src :: Expr EWord, LitWord @35 idx) -> ioProperty $ do
         mask <- generate $ do
           pow <- arbitrary :: Gen Int
@@ -1604,7 +1746,7 @@ simplifierFuzzTests = testGroup "SimplifierPropertyTests"
           input = And mask src
           simplified = Expr.indexWord idx input
           full = IndexWord idx input
-        proveEquivExpr full simplified
+        proveEquivExprWith cfg full simplified
     , testProperty "toList-equivalance" $ \buf -> ioProperty $ do
         let
           -- transforms the input buffer to give it a known length
@@ -1632,24 +1774,24 @@ simplifierFuzzTests = testGroup "SimplifierPropertyTests"
             pure True -- ignore cases where the buf cannot be represented as a list
           Just asList -> do
             let asBuf = Expr.fromList asList
-            proveEquivExpr asBuf input
+            proveEquivExprWith cfg asBuf input
     , testProperty "simplifyProp-equivalence-lit" $ \(LitProp p) -> ioProperty $ do
         let simplified = Expr.simplifyProps [p]
         case simplified of
-          [] -> proveEquivProp (PBool True) p
-          [val@(PBool _)] -> proveEquivProp val p
+          [] -> proveEquivPropWith cfg (PBool True) p
+          [val@(PBool _)] -> proveEquivPropWith cfg val p
           _ -> assertFailure "must evaluate down to a literal bool"
-    , testProperty "simplifyProp-equivalence-sym" $ \(p) -> ioProperty $ proveEquivProp p (Expr.simplifyProp p)
+    , testProperty "simplifyProp-equivalence-sym" $ \(p) -> ioProperty $ proveEquivPropWith cfg p (Expr.simplifyProp p)
     , testProperty "simplify-joinbytes" $ \(SymbolicJoinBytes exprList) -> ioProperty $ do
         let x = joinBytesFromList exprList
         let simplified = Expr.simplify x
-        proveEquivExpr x simplified
+        proveEquivExprWith cfg x simplified
     , testProperty "simpProp-equivalence-sym-Prop" $ withMaxSuccess 20 $ \(ps :: [Prop]) -> ioProperty $ do
         let simplified = pand (Expr.simplifyProps ps)
-        proveEquivProp (pand ps) simplified
+        proveEquivPropWith cfg (pand ps) simplified
     , testProperty "simpProp-equivalence-sym-LitProp" $ \(LitProp p) -> ioProperty $ do
         let simplified = pand (Expr.simplifyProps [p])
-        proveEquivProp p simplified
+        proveEquivPropWith cfg p simplified
     , testProperty "storage-slot-simp-property" $ \(StorageExp s) -> ioProperty $ do
         -- we have to run `Expr.litToKeccak` on the unsimplified system, or
         -- we'd need some form of minimal simplifier for things to work out. As long as
@@ -1657,7 +1799,7 @@ simplifierFuzzTests = testGroup "SimplifierPropertyTests"
         -- and quite minimal
         let s2 = Expr.litToKeccak s
         let simplified = Expr.simplify s2
-        proveEquivExpr s2 simplified
+        proveEquivExprWith cfg s2 simplified
     , testProperty "expr-ordering" $ \(p) -> ioProperty $ do
       let simp = Expr.simplifyProp p
       pure $ Expr.checkLHSConstProp simp
@@ -1701,60 +1843,193 @@ simplifierFuzzTests = testGroup "SimplifierPropertyTests"
   ]
   -}
 
+abstractArithmeticFuzzTests :: TestTree
+abstractArithmeticFuzzTests = testGroup "AbstractArithmeticPropertyTests"
+  -- timeouts are discarded, but if over ~half the cases time out, QuickCheck gives up and the test fails
+  -- several kinds of broken lemma only show after more than the default number of cases
+  [ adjustOption (\(QuickCheckTests n) -> QuickCheckTests (2 * n)) $
+    localOption (QuickCheckMaxRatio 1) $
+    testProperty "targeted arithmetic shapes agree with concrete evaluation" $
+      \(AbstractArithCase kind parts expr _ bindings) ->
+        tabulate "arithmetic shape" [kind] $ tabulate "component shape" parts $ ioProperty $ do
+          let expected = evalWithBindings bindings expr
+              assignments = fmap (\(name, value) -> PEq (Var name) (Lit value)) bindings
+              counterexampleQuery rhs = PNeg (PEq expr (Lit rhs)) : assignments
+              nearbyQuery = counterexampleQuery (expected + 1)
+          ((exactResult, exactPhase), (nearbyResult, nearbyPhase), families, lemmaResult) <-
+            runAbstractArith abstractConfig 5 $ \solvers -> do
+              exact <- checkSatWithPropsPhase solvers Nothing (counterexampleQuery expected)
+              nearby <- checkSatWithPropsPhase solvers Nothing nearbyQuery
+              (families, lemmaResult) <- checkLemmasAtPoint solvers nearbyQuery
+              pure (exact, nearby, families, lemmaResult)
+          pure $ tabulate "lemma family" (nubOrd families)
+               $ tabulate "decided by" [show exactPhase, show nearbyPhase]
+               $ counterexample (unlines
+            [ "shape: " <> kind <> " " <> show parts
+            , "expression: " <> show expr
+            , "bindings: " <> show bindings
+            , "concrete value: " <> show expected
+            , "exact result: " <> show exactResult
+            , "nearby result: " <> show nearbyResult
+            , "lemmas over fully interpreted terms: " <> show lemmaResult
+            ]) $ not (any isUnknown [exactResult, nearbyResult, lemmaResult]) ==>
+              (isQed exactResult && isCex nearbyResult && isCex lemmaResult)
+  , looselyConstrained "loosely constrained queries have a valid model" abstractConfig
+  , looselyConstrained "loosely constrained queries have a valid model (simplified)" abstractConfig {simp = True}
+  ]
+  where
+    -- the production pipeline: variables left free or ranged, arithmetic
+    -- spread over several props, and a counterexample that has to check out
+    looselyConstrained name cfg = localOption (QuickCheckMaxRatio 3) $ testProperty name $
+      \c@(AbstractArithCase kind _ _ _ bindings) -> forAll (genLooseQuery c) $ \props ->
+        tabulate "arithmetic shape" [kind] $ ioProperty $ do
+          (result, phase) <- runAbstractArith cfg 1 $ \solvers -> checkSatWithPropsPhase solvers Nothing props
+          let outcome = case result of
+                Cex model | modelHolds bindings model props -> "valid model"
+                Cex _ -> "invalid model"
+                Qed -> "unsound Qed"
+                _ -> "unknown"
+          pure $ tabulate "decided by" [show phase] $ tabulate "outcome" [outcome]
+               $ counterexample (unlines
+            [ "props: " <> show props
+            , "satisfying bindings: " <> show bindings
+            , "result: " <> show result
+            ]) $ outcome /= "unknown" ==> outcome == "valid model"
 
-proveEquivProp :: Prop -> Prop -> IO Bool
-proveEquivProp a b
+-- | Props that hold at the case's bindings, so the query is satisfiable: a
+-- relation on the expression, relations on some of its components, and each
+-- variable pinned, ranged around its binding, or left free.
+genLooseQuery :: AbstractArithCase -> Gen [Prop]
+genLooseQuery (AbstractArithCase _ _ expr components bindings) = do
+  goal <- trueRelation expr
+  sides <- sublistOf components >>= mapM trueRelation
+  constraints <- concat <$> mapM constrain bindings
+  pure (goal : sides <> constraints)
+  where
+    trueRelation e = do
+      let v = evalWithBindings bindings e
+      elements $ [PEq e (Lit v), PLEq e (Lit v), PGEq e (Lit v), PNeg (PEq e (Lit (v + 1)))]
+        <> [PLT e (Lit (v + 1)) | v /= maxBound] <> [PGT e (Lit (v - 1)) | v /= 0]
+    constrain (name, v) = frequency
+      [ (2, pure [PEq (Var name) (Lit v)])
+      , (2, do
+          slack <- fromInteger <$> chooseInteger (0, 0xffff)
+          pure $ [PLEq (Var name) (Lit (v + slack)) | v <= maxBound - slack]
+              <> [PGEq (Var name) (Lit (v - slack)) | v >= slack])
+      , (1, pure [])
+      ]
+
+-- | Whether the props hold under the model. A variable the simplifier removed
+-- from the query is missing from the model; its binding is as good as any.
+modelHolds :: [(Text, W256)] -> SMTCex -> [Prop] -> Bool
+modelHolds bindings model = all holds
+  where
+    assignment = [(name, Map.findWithDefault v (Var name) model.vars) | (name, v) <- bindings]
+    holds p = Expr.simplifyProp (mapProp (substituteBindings assignment) p) == PBool True
+
+evalWithBindings :: [(Text, W256)] -> Expr EWord -> W256
+evalWithBindings bindings expr =
+  case Expr.simplify (mapExpr (substituteBindings bindings) expr) of
+    Lit value -> value
+    other -> internalError $ "targeted arithmetic expression did not concretize: " <> show other
+
+substituteBindings :: [(Text, W256)] -> Expr a -> Expr a
+substituteBindings bindings (Var name) = case lookup name bindings of
+  Just value -> Lit value
+  Nothing -> internalError $ "missing targeted arithmetic binding: " <> show name
+substituteBindings _ other = other
+
+runAbstractArith :: Config -> Natural -> (SolverGroup -> ReaderT Env IO a) -> IO a
+runAbstractArith cfg timeout = runEnv (Env {config = cfg}) . withSolvers Bitwuzla 1 (Just timeout) defMemLimit
+
+-- | The lemmas of the query with every abstract term they mention equated to
+-- the native op. The props hold at a point, so a Qed means some lemma instance
+-- is false there. The refinement cannot show this for a lemma about a
+-- synthesized term, which it leaves uninterpreted.
+checkLemmasAtPoint :: SolverGroup -> [Prop] -> ReaderT Env IO ([String], SMTResult)
+checkLemmasAtPoint solvers props = case assertPropsAbstract abstractConfig props of
+  Left e -> internalError $ "could not encode abstract query: " <> e
+  Right q -> do
+    res <- liftIO $ Solvers.checkSat solvers Nothing (Right (q.query <> SMT2 (SMTScript q.saturatedTruth) mempty mempty))
+    pure (q.lemmaFamilies, res)
+
+
+proveEquivPropWith :: Config -> Prop -> Prop -> IO Bool
+proveEquivPropWith cfg a b
   | a == b = pure True
   | otherwise = do
-      res <- checkSat $ PNeg ((PImpl a b) .&& (PImpl b a))
+      res <- checkSatWith cfg $ PNeg ((PImpl a b) .&& (PImpl b a))
       pure $ isUnsatOrUnknown res
 
 proveEquivExpr :: Typeable a => Expr a -> Expr a -> IO Bool
-proveEquivExpr a b
+proveEquivExpr = proveEquivExprWith equivConfig
+
+proveEquivExprWith :: Typeable a => Config -> Expr a -> Expr a -> IO Bool
+proveEquivExprWith cfg a b
   | a == b = pure True
   | otherwise = do
-      res <- (checkSat $ a ./= b)
+      res <- (checkSatWith cfg $ a ./= b)
       pure $ isUnsatOrUnknown res
 
 checkSat :: Prop -> IO SMTResult
-checkSat p = runEnv (Env {config = equivConfig}) $
+checkSat = checkSatWith equivConfig
+
+checkSatWith :: Config -> Prop -> IO SMTResult
+checkSatWith cfg p = runEnv (Env {config = cfg}) $
     withOneBitwuzla $ \solvers -> checkSatWithProps solvers [p]
 
 equivConfig :: Config
 equivConfig = defaultConfig {simp = False, dumpQueries = False}
+
+abstractConfig :: Config
+abstractConfig = equivConfig {abstractArith = True}
 
 withOneBitwuzla :: App m => (SolverGroup -> m a) -> m a
 withOneBitwuzla = withSolvers Bitwuzla 1 (Just 1) defMemLimit
 
 -- keccak is uninterpreted in SMT, so the no-aliasing assumption has to be asserted. A decomposed
 -- abstract base is a different SMT array per logical store, so tie each one to the original base
-decomposeEquiv :: [Expr EWord] -> Expr EWord -> Expr EWord -> IO Property
-decomposeEquiv keys expr decomposed = do
-  let noAlias = [PNeg (PEq a b) | (a:rest) <- List.tails keys, b <- rest, storeId a /= storeId b]
-      link = [ PEq (SLoad k (AbstractStore a Nothing)) (SLoad logicalKey (AbstractStore a (Just idx)))
-             | a <- abstractAddrs expr, k <- keys, Just (idx, logicalKey) <- [logicalLoc k] ]
-  res <- checkSat $ foldr PAnd (expr ./= decomposed) (noAlias <> link)
+decomposeAssumes :: [Expr EWord] -> [Expr EAddr] -> [Prop]
+decomposeAssumes keys addrs = noAlias <> link
+  where
+    noAlias = [PNeg (PEq a b) | (a:rest) <- List.tails keys, b <- rest, storeId a /= storeId b]
+    link = [ PEq (SLoad k (AbstractStore a Nothing)) (SLoad logicalKey (AbstractStore a (Just idx)))
+           | a <- addrs, k <- keys, Just (idx, logicalKey) <- [logicalLoc k] ]
+
+-- differ must be unsatisfiable under the assumptions
+checkDecomposed :: Show a => Config -> [Prop] -> Prop -> a -> IO Property
+checkDecomposed cfg assumes differ decomposed = do
+  res <- checkSatWith cfg $ foldr PAnd differ assumes
   -- a timeout proves nothing either way: discard it rather than count it as a pass
   pure $ counterexample ("decomposed: " <> show decomposed <> "\nresult: " <> show res) $
     not (isUnknown res) ==> isQed res
 
-storeKeys :: Expr a -> [Expr EWord]
-storeKeys = foldExpr go []
-  where
-    go :: Expr b -> [Expr EWord]
-    go = \case
-      SLoad k _ -> [k]
-      SStore k _ _ -> [k]
-      ConcreteStore m -> Lit <$> Map.keys m
-      _ -> []
+decomposeEquiv :: Config -> [Expr EWord] -> Expr EWord -> Expr EWord -> IO Property
+decomposeEquiv cfg keys expr decomposed =
+  checkDecomposed cfg (decomposeAssumes keys (nubOrd $ foldExpr abstractAddr [] expr)) (expr ./= decomposed) decomposed
 
-abstractAddrs :: Expr a -> [Expr EAddr]
-abstractAddrs = nubOrd . foldExpr go []
+decomposeEquivProps :: Config -> [Prop] -> [Prop] -> IO Property
+decomposeEquivProps cfg props decomposed = checkDecomposed cfg (decomposeAssumes keys addrs) differ decomposed
   where
-    go :: Expr b -> [Expr EAddr]
-    go = \case
-      AbstractStore a _ -> [a]
-      _ -> []
+    keys = nubOrd $ concatMap (foldProp storeKey []) props
+    addrs = nubOrd $ concatMap (foldProp abstractAddr []) props
+    (a, b) = (foldr PAnd (PBool True) props, foldr PAnd (PBool True) decomposed)
+    differ = POr (PAnd a (PNeg b)) (PAnd (PNeg a) b)
+
+storeKeys :: Expr a -> [Expr EWord]
+storeKeys = foldExpr storeKey []
+
+storeKey :: Expr a -> [Expr EWord]
+storeKey = \case
+  SLoad k _ -> [k]
+  SStore k _ _ -> [k]
+  ConcreteStore m -> Lit <$> Map.keys m
+  _ -> []
+
+abstractAddr :: Expr a -> [Expr EAddr]
+abstractAddr = \case
+  AbstractStore a _ -> [a]
+  _ -> []
 
 -- the logical store a key belongs to: Nothing for small slots
 storeId :: Expr EWord -> Maybe W256

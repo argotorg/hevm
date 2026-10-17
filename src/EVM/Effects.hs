@@ -49,6 +49,10 @@ data Config = Config
   , earlyAbort       :: Bool
   , mergeMaxBudget   :: Int        -- ^ Max instructions for speculative merge exploration
   , maxDynSize       :: Int        -- ^ Max byte length for concretized dynamic types (bytes, string)
+  , abstractArith    :: Bool
+  , hashConsExplore  :: Bool       -- ^ Share equal subterms (EVM.HashCons)
+  , progressLog      :: Maybe FilePath
+  , progressExprs    :: Bool
   }
   deriving (Show, Eq)
 
@@ -62,7 +66,7 @@ defaultConfig = Config
   , dumpTrace = False
   , decomposeStorage = True
   , promiseNoReent = False
-  , maxBufSize = 64
+  , maxBufSize = 24
   , maxWidth = 100
   , maxDepth = Nothing
   , verb = 0
@@ -71,6 +75,10 @@ defaultConfig = Config
   , earlyAbort = False
   , mergeMaxBudget = 100
   , maxDynSize = 64
+  , abstractArith = True
+  , hashConsExplore = True
+  , progressLog = Nothing
+  , progressExprs = False
   }
 
 -- Write to the console
