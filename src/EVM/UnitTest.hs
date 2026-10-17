@@ -29,7 +29,7 @@ import Control.Monad.State.Strict (execState, get, put, liftIO, runStateT)
 import Optics.Core
 import Optics.State
 import Optics.State.Operators
-import Data.Aeson ((.=))
+import Data.Aeson qualified as JSON
 import Data.Binary.Get (runGet)
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as BS
@@ -289,10 +289,10 @@ symRun opts@UnitTestOptions{..} vm (nth, numTests) sig@(Sig testName types) sour
     let fetcherSym = Fetch.oracle solvers (Just sess) rpcInfo
     let symVm = symbolify vm' & set #srcLookup (Just $ makeSrcLookup dapp sourceCache)
     let summary (ends, results) =
-          ("paths" .= length ends) : [k .= n | (k, n) <-
+          ("paths" JSON..= length ends) : [k JSON..= n | (k, n) <-
             [ ("partial", length (filter Expr.isPartial ends)), ("cex", length (filter isCex results))
             , ("unknown", length (filter isUnknown results)), ("error", length (filter isError results)) ], n > 0]
-    (ends, results) <- Progress.withPhase testName ["test" .= cs] summary $ do
+    (ends, results) <- Progress.withPhase testName ["test" JSON..= cs] summary $ do
       Progress.phaseTotal numTests
       Progress.phaseAt nth
       verify solvers fetcherSym (makeVeriOpts opts) symVm postcondition (Just $ cexHandler cd fetcherConc)
