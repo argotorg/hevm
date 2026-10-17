@@ -80,6 +80,7 @@ import EVM.Expr (maybeLitByteSimp)
 import EVM.Keccak (concreteKeccaks)
 
 import EVM.Expr.ExprTests qualified as ExprTests
+import EVM.Expr.RewriteFuzz qualified as RewriteFuzz
 import EVM.Expr.HashConsTests qualified as HashConsTests
 import EVM.ConcreteExecution.ConcreteExecutionTests qualified as ConcreteExecutionTests
 import EVM.Equivalence.EquivalenceTests qualified as EquivalenceTests
@@ -233,6 +234,7 @@ tests :: TestTree
 tests = testGroup "hevm"
   [ FuzzSymExec.tests
   , ExprTests.tests
+  , RewriteFuzz.tests
   , HashConsTests.tests
   , ConcreteExecutionTests.tests
   , SymExecTests.tests
