@@ -379,8 +379,15 @@ genTemplate s shiftAmt = oneof
   , Mod <$> s <*> pow2, Div <$> s <*> pow2
   , LT <$> (And <$> lit <*> s) <*> lit
   , LT <$> lit <*> (And <$> lit <*> s)
+  , litOp' <*> lit <*> ite, litOp' <*> ite <*> lit, litOp' <*> ite <*> ite
+  , IsZero <$> ite, Not <$> ite
+  , ITE <$> (IsZero <$> s) <*> s <*> s
+  , ITE <$> s <*> elements [Lit 0, Lit 1] <*> elements [Lit 0, Lit 1]
   ]
   where
+    -- literal branches, sharing a condition from a small set so that ITEs pair up
+    ite = ITE <$> elements [Var "a", LT (Var "a") (Var "b"), IsZero (Var "c")] <*> lit <*> lit
+    litOp' = elements [Add, Sub, Mul, Div, Mod, And, Or, Xor, Eq, LT, SLT, SHL, SHR, SAR]
     lit = Lit <$> genSpecialLit
     pow2 = Lit . (2 ^) <$> choose (0 :: Int, 255)
     litOp = elements [Add, Sub, Xor, Mul]
@@ -426,8 +433,12 @@ genShapedProp n = frequency
   [ (3, PEq <$> w <*> w), (2, PLT <$> w <*> w), (1, PGT <$> w <*> w)
   , (2, PLEq <$> w <*> w), (1, PGEq <$> w <*> w)
   , (2, PNeg <$> p), (2, PAnd <$> p <*> p), (2, POr <$> p <*> p), (1, PImpl <$> p <*> p)
+  , (2, PEq <$> lit <*> ite), (1, PLT <$> lit <*> ite), (1, PLT <$> ite <*> lit)
+  , (1, PLEq <$> lit <*> ite), (1, PLEq <$> ite <*> lit)
   ]
   where
+    lit = Lit <$> genSpecialLit
+    ite = ITE <$> w <*> lit <*> lit
     w = genShapedWord (n `div` 2)
     p = genShapedProp (n `div` 2)
 

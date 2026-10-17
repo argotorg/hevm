@@ -87,6 +87,16 @@ rewriteRuleTests = testGroup "Rewrite rules"
       assertEqual "two adds" (Eq x (Add (Lit 2) y)) (Expr.simplify (Eq (Add (Lit 3) y) (Add (Lit 1) x)))
       assertEqual "prop add" [PEq (Lit 7) x] (Expr.simplifyProps [PEq (Lit 10) (Add (Lit 3) x)])
       assertEqual "iszero of add" (Eq (Lit (0 - 3)) x) (Expr.simplify (IsZero (Add (Lit 3) x)))
+  , testCase "ite-literal-branches" $ do
+      let c = Var "c"
+          ite = ITE c (Lit 3) (Lit 5)
+      assertEqual "add moves in" (ITE c (Lit 4) (Lit 6)) (Expr.simplify (Add (Lit 1) ite))
+      assertEqual "same condition" (ITE c (Lit 6) (Lit 10)) (Expr.simplify (Add ite ite))
+      assertEqual "eq becomes the condition" (Expr.simplify (LT (Lit 0) c)) (Expr.simplify (Eq (Lit 3) ite))
+      assertEqual "negated condition" (ITE c (Lit 5) (Lit 3)) (Expr.simplify (ITE (IsZero c) (Lit 3) (Lit 5)))
+      assertEqual "prop eq" [PNeg (PEq (Lit 0) c)] (Expr.simplifyProps [PEq (Lit 3) ite])
+      assertEqual "prop lt both" [] (Expr.simplifyProps [PLT ite (Lit 6)])
+      assertEqual "prop lt one" [PEq (Lit 0) c] (Expr.simplifyProps [PLT (Lit 4) ite])
   , testCase "shift-composition" $ do
       let x = Var "x"
       assertEqual "shr shr" (SHR (Lit 12) x) (Expr.simplify (SHR (Lit 4) (SHR (Lit 8) x)))
