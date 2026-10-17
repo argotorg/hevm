@@ -264,8 +264,8 @@ main = do
              function stuff(uint x) public {
                  require(x < (1 << 128));
                  uint y;
-                 assembly { y := div(mul(x, 1000000000000000000), 1000000000000000000) }
-                 assert(y == x);
+                 assembly { y := div(mul(x, 1000000000000000000), 100000000000000000) }
+                 assert(y == x * 10);
              }
            }
           |])

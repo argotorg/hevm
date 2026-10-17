@@ -54,8 +54,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `hevm equivalence` replays counterexamples with calls to unknown code by
   putting code at each callee that returns what the counterexample says, and
   logs each replay to the progress log.
+- Exponentiation by a literal is encoded into SMT by squaring, and exponents of
+  1000 and more no longer make the query fail.
+- The simplifier rewrites modulo and division by a power of two to bit
+  operations.
+- The simplifier composes nested shifts by literals into one shift and a mask.
+- The simplifier tracks which bits of a word can be set, to drop redundant
+  masks and decide equalities and comparisons with literals.
+- The simplifier cancels additions, subtractions, xors, negations and
+  multiplications by odd literals in equalities.
+- The simplifier moves operations with literals into ITEs with literal
+  branches, as path merging creates, and turns comparisons with them into
+  conditions.
+- The simplifier cancels an operand against its inverse in sums, differences,
+  xors and with its negation, and moves negation through literal operations.
+- The simplifier drops the writes and zeroes the concrete bytes a copy
+  overwrites, and reads zero from all-zero concrete buffers at any offset.
+- The simplifier turns overflow checks of adding or subtracting a literal,
+  such as `x < x + c`, into comparisons of `x` against a literal.
+- The simplifier decides `x == (x * d) / d`, as in Solidity's
+  checked-multiplication guard or scaling by a literal and back, when bounds from
+  the path conditions and from the structure of `x` and `d` rule out overflow.
+- Reads from buffers written at offsets from the same symbolic pointer skip
+  the writes they are disjoint from and resolve the writes they hit.
 
 ## Fixed
+- The SMT encoding of a copy into a buffer named `src` no longer reads the
+  source of the copy in place of that buffer.
 - `hevm equivalence` no longer reports a difference only because one program
   made a call to unknown code that changed nothing.
 - Symbolic execution starts the transient storage of the called contract empty,
