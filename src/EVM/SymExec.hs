@@ -1095,7 +1095,7 @@ replayEqCex solvers create codeA codeB cd cex
   | otherwise = case cexCalldata cd cex of
       Nothing -> pure $ CannotReplay "calldata is not concrete"
       Just calldata -> do
-        Progress.emit "replay-stubs" [ "calls" .= map logCall (rights cex.calls) ]
+        Progress.emit "replay-stubs" [ "calls" .= map logCall (rights cex.unknownCalls) ]
         a <- run "A" codeA calldata
         b <- run "B" codeB calldata
         pure $ case (a, b) of
@@ -1107,12 +1107,12 @@ replayEqCex solvers create codeA codeB cd cex
     entry = addr "entrypoint" (LitAddr 0xacab)
     ctx k m = Map.findWithDefault 0 k m
     store = ConcreteStore $ Map.findWithDefault mempty (SymAddr "entrypoint") cex.store
-    stubs = callStubs entry cex.calls
+    stubs = stubAccounts entry cex.unknownCalls
     logCall m = JSON.object
-      [ "callee" .= T.pack (show m.callee), "input" .= showBytes (BS.take 256 m.input)
-      , "success" .= m.success, "output" .= showBytes (BS.take 256 m.output), "outputLength" .= BS.length m.output ]
+      [ "callee" .= T.pack (show m.callee), "calldata" .= showBytes (BS.take 256 m.calldata)
+      , "success" .= m.success, "returndata" .= showBytes (BS.take 256 m.returndata), "returndataLength" .= BS.length m.returndata ]
     run :: App m => Text -> ByteString -> ByteString -> m (Either Text (Either EvmError (Expr Buf), Either Text (Map W256 W256)))
-    run prog code calldata = do
+    run label code calldata = do
       vm <- liftIO $ stToIO $ makeVm $ (defaultVMOpts @Concrete)
         { contract = set #balance (Lit (ctx (Balance (SymAddr "entrypoint")) cex.txContext))
             (initialContract (RuntimeCode (ConcreteRuntimeCode code))) { storage = store, origStorage = store }
@@ -1130,10 +1130,10 @@ replayEqCex solvers create codeA codeB cd cex
         , prevRandao = 42069
         }
       conf <- readConfig
-      (steps, trail, end) <- Stepper.interpret (Fetch.oracle solvers Nothing Fetch.noRpc) vm (runTraced conf 32)
+      (steps, lastSteps, end) <- Stepper.interpret (Fetch.oracle solvers Nothing Fetch.noRpc) vm (runTraced conf 32)
       Progress.emit "replay-run"
-        [ "program" .= prog, "result" .= T.pack (show end.result), "steps" .= steps
-        , "trail" .= [(showAddr a, pc) | (a, pc) <- toList trail] ]
+        [ "program" .= label, "result" .= T.pack (show end.result), "steps" .= steps
+        , "trail" .= [(T.pack (show a), pc) | (a, pc) <- toList lastSteps] ]
       let finalStore = case (.storage) <$> Map.lookup entry end.env.contracts of
             Just (ConcreteStore m) -> Right m
             s -> Left (T.pack (show s))
@@ -1155,91 +1155,93 @@ replayEqCex solvers create codeA codeB cd cex
         showW :: W256 -> Text
         showW = T.pack . show
 
-    showAddr = \case
-      LitAddr a -> T.pack (show a)
-      a -> T.pack (show a)
-
 -- | 'Stepper.runFully' that also counts the steps and keeps the code address and
 -- pc of the last @n@ of them
 runTraced :: Config -> Int -> Stepper Concrete (Int, Seq (Expr EAddr, Int), VM Concrete)
 runTraced conf n = go 0 mempty
   where
-    go steps trail = do
-      (steps', trail', vm) <- Stepper.evm (stepAll steps trail)
+    go steps lastSteps = do
+      (steps', lastSteps', vm) <- Stepper.evm (stepAll steps lastSteps)
       case vm.result of
-        Just (HandleEffect (Query q)) -> Stepper.wait q >> go steps' trail'
-        _ -> pure (steps', trail', vm)
-    stepAll !steps !trail = do
+        Just (HandleEffect (Query q)) -> Stepper.wait q >> go steps' lastSteps'
+        _ -> pure (steps', lastSteps', vm)
+    stepAll !steps !lastSteps = do
       vm <- get
       case vm.result of
         Nothing -> do
           exec1 conf
-          stepAll (steps + 1) (Seq.drop (Seq.length trail + 1 - n) (trail Seq.|> (vm.state.codeContract, vm.state.pc)))
-        Just _ -> pure (steps, trail, vm)
+          stepAll (steps + 1) (Seq.drop (Seq.length lastSteps + 1 - n) (lastSteps Seq.|> (vm.state.codeContract, vm.state.pc)))
+        Just _ -> pure (steps, lastSteps, vm)
 
--- | The calls to unknown code in @props@, with the inputs and results the model gives them
-callModels :: SMTCex -> [Prop] -> [Either Text CallModel]
-callModels cex = concatMap go
+-- | The calls to unknown code in @props@, with the values the model gives them
+modelUnknownCalls :: SMTCex -> [Prop] -> [Either Text UnknownCall]
+modelUnknownCalls cex = concatMap pcalls
   where
-    go = \case
-      PAnd a b -> go a <> go b
-      PCall i ok out _ -> [model i ok out]
+    pcalls = \case
+      PAnd a b -> pcalls a <> pcalls b
+      PCall i ok out _ -> [modelCall i ok out]
       _ -> []
-    model i ok out = do
-      callee <- wordOf "target" i.target
-      inLen <- wordOf "calldata length" i.callDataLen
-      input <- bytes "calldata" inLen i.callData
-      okW <- wordOf "success flag" ok
-      outLen <- wordOf "returndata length" (Expr.bufLength out)
-      output <- bytes "returndata" outLen out
-      pure CallModel { callee = truncateToAddr callee, input, success = okW /= 0, output }
-    concrete :: Expr a -> Err (Expr a)
-    concrete e = Expr.concKeccakSimpExpr <$> defaultSymbolicValues (subModel cex e)
-    wordOf :: Text -> Expr EWord -> Either Text W256
-    wordOf what e = case concrete e of
+    modelCall i ok out = do
+      callee <- concreteWord "target" i.target
+      inLen <- concreteWord "calldata length" i.callDataLen
+      calldata <- concreteBytes "calldata" inLen i.callData
+      okWord <- concreteWord "success flag" ok
+      outLen <- concreteWord "returndata length" (Expr.bufLength out)
+      returndata <- concreteBytes "returndata" outLen out
+      pure UnknownCall { callee = truncateToAddr callee, calldata, success = okWord /= 0, returndata }
+    inModel :: Expr a -> Err (Expr a)
+    inModel e = Expr.concKeccakSimpExpr <$> defaultSymbolicValues (subModel cex e)
+    concreteWord :: Text -> Expr EWord -> Either Text W256
+    concreteWord what e = case inModel e of
       Right (Lit w) -> Right w
-      _ -> Left $ "the " <> what <> " of a call to unknown code has no concrete model"
-    bytes :: Text -> W256 -> Expr Buf -> Either Text ByteString
-    bytes what len e = case concrete e of
+      _ -> noModel what
+    concreteBytes :: Text -> W256 -> Expr Buf -> Either Text ByteString
+    concreteBytes what len e = case inModel e of
+      -- a model can pick lengths like 2^255; don't allocate them
       Right (ConcreteBuf bs) | len <= 2 ^ (24 :: Int) ->
+        -- a ConcreteBuf reads zero past its end
         let n = unsafeInto len in Right $ BS.take n (bs <> BS.replicate (n - BS.length bs) 0)
-      _ -> Left $ "the " <> what <> " of a call to unknown code has no concrete model"
+      _ -> noModel what
+    noModel what = Left $ "the " <> what <> " of a call to unknown code has no concrete model"
 
--- | Accounts at the callees of the calls to unknown code, whose code answers
--- them as the model does
-callStubs :: Expr EAddr -> [Either Text CallModel] -> Either Text [(Expr EAddr, Contract)]
-callStubs entry calls = do
+-- | Accounts at the callees of the unknown calls, whose code gives each call the
+-- answer the model gives it
+stubAccounts :: Expr EAddr -> [Either Text UnknownCall] -> Either Text [(Expr EAddr, Contract)]
+stubAccounts entry calls = do
   models <- sequence calls
-  let byCallee = Map.fromListWith (flip (<>)) [(m.callee, [(m.input, (m.success, m.output))]) | m <- models]
+  let byCallee = Map.fromListWith (flip (<>)) [(m.callee, [(m.calldata, (m.success, m.returndata))]) | m <- models]
   forM (Map.toList byCallee) $ \(a, answers) -> do
     when (isPrecompileAddr' a) $ Left $ "a call to unknown code goes to precompile " <> T.pack (show a)
     when (LitAddr a == entry) $ Left "a call to unknown code goes to the called contract itself"
     -- a state-changing call in between can give equal calls different results
-    unique <- forM (Map.toList (Map.fromListWith (flip (<>)) [(i, [r]) | (i, r) <- answers])) $ \case
+    answerByCalldata <- forM (Map.toList (Map.fromListWith (flip (<>)) [(i, [r]) | (i, r) <- answers])) $ \case
       (i, r : rest) | all (== r) rest -> Right (i, r)
       _ -> Left $ "the model answers the same call to " <> T.pack (show a) <> " differently"
-    pure (LitAddr a, initialContract (RuntimeCode (ConcreteRuntimeCode (callStub unique))))
+    pure (LitAddr a, initialContract (RuntimeCode (ConcreteRuntimeCode (stubCode answerByCalldata))))
 
--- | Code that returns the given output for each input, or reverts with it if the
--- call is to fail, and reverts on any other input. Inputs are told apart by their hash.
-callStub :: [(ByteString, (Bool, ByteString))] -> ByteString
-callStub answers = mconcat $ [hashInput] <> zipWith dispatch answers bodies <> [noMatch]
-  <> zipWith answer answers dataOffsets <> map (snd . snd) answers
+-- | Code that answers each calldata with its returndata, by RETURN if the call
+-- succeeds and REVERT if not, and reverts on any other calldata. Calldata is
+-- matched by its hash, which fits in one PUSH32 whatever its length. All jump
+-- targets and offsets are PUSH4s, so every piece has a fixed size and they can
+-- be computed before the code is assembled.
+stubCode :: [(ByteString, (Bool, ByteString))] -> ByteString
+stubCode answers = mconcat $ [hashCalldata] <> zipWith dispatch answers answerPCs <> [noMatch]
+  <> zipWith answer answers returndataOffsets <> map (snd . snd) answers
   where
     -- CALLDATACOPY(0, 0, CALLDATASIZE), KECCAK256(0, CALLDATASIZE)
-    hashInput = BS.pack [0x36, 0x60, 0, 0x60, 0, 0x37, 0x36, 0x60, 0, 0x20]
+    hashCalldata = BS.pack [0x36, 0x60, 0, 0x60, 0, 0x37, 0x36, 0x60, 0, 0x20]
     -- DUP1 PUSH32 hash EQ PUSH4 dest JUMPI: 41 bytes
-    dispatch (i, _) dest = BS.pack [0x80, 0x7f] <> keccakBytes i <> BS.pack [0x14, 0x63] <> push4Arg dest <> BS.pack [0x57]
+    dispatch (i, _) dest = BS.pack [0x80, 0x7f] <> keccakBytes i <> BS.pack [0x14, 0x63] <> be32 dest <> BS.pack [0x57]
     noMatch = BS.pack [0x60, 0, 0x60, 0, 0xfd]
     -- JUMPDEST, CODECOPY(0, off, len), RETURN(0, len) or REVERT(0, len): 22 bytes
-    answer (_, (ok, out)) off = BS.pack [0x5b, 0x63] <> push4Arg (BS.length out) <> BS.pack [0x63] <> push4Arg off
-      <> BS.pack [0x60, 0, 0x39, 0x63] <> push4Arg (BS.length out) <> BS.pack [0x60, 0, if ok then 0xf3 else 0xfd]
+    answer (_, (ok, out)) off = BS.pack [0x5b, 0x63] <> be32 (BS.length out) <> BS.pack [0x63] <> be32 off
+      <> BS.pack [0x60, 0, 0x39, 0x63] <> be32 (BS.length out) <> BS.pack [0x60, 0, if ok then 0xf3 else 0xfd]
     n = length answers
-    start = BS.length hashInput + 41 * n + BS.length noMatch
-    bodies = [start + 22 * k | k <- [0 .. n - 1]]
-    dataOffsets = scanl (+) (start + 22 * n) (map (BS.length . snd . snd) answers)
-    push4Arg :: Int -> ByteString
-    push4Arg x = BS.pack [fromIntegral (x `shiftR` k) | k <- [24, 16, 8, 0]]
+    answersStart = BS.length hashCalldata + 41 * n + BS.length noMatch
+    answerPCs = [answersStart + 22 * k | k <- [0 .. n - 1]]
+    returndataOffsets = scanl (+) (answersStart + 22 * n) (map (BS.length . snd . snd) answers)
+    be32 :: Int -> ByteString
+    be32 x = BS.pack [fromIntegral (x `shiftR` k) | k <- [24, 16, 8, 0]]
 
 -- | Replays every counterexample, as a phase of its own in the progress log.
 replayEqCexes :: App m => SolverGroup -> Bool -> ByteString -> ByteString -> Expr Buf -> [(SMTCex, String)] -> m [(SMTCex, String, CexReplay)]
@@ -1345,7 +1347,7 @@ equivalenceCheck' solvers sess branchesA branchesB create = do
              Progress.setWorker ["phase" .= ("check-pairs" :: Text), "pair" .= i, "of" .= total, "props" .= Set.size props]
              r <- env $ checkSatWithProps solvers (Set.toList props)
                     <&> \case
-                      Cex c -> Cex c { calls = callModels c (Set.toList props) }
+                      Cex c -> Cex c { unknownCalls = modelUnknownCalls c (Set.toList props) }
                       other -> other
              Progress.clearWorker
              Progress.phaseTick

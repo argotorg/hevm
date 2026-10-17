@@ -1238,16 +1238,16 @@ data SMTCex = SMTCex
   , store :: Map (Expr EAddr) (Map W256 W256)
   , blockContext :: Map (Expr EWord) W256
   , txContext :: Map (Expr EWord) W256
-  , calls :: [Either Text CallModel] -- ^ calls to unknown code, or why one has no concrete model
+  , unknownCalls :: [Either Text UnknownCall] -- ^ calls to unknown code, or why one has no concrete model
   }
   deriving (Show)
 
--- | A call to unknown code with the inputs and results a model gives it
-data CallModel = CallModel
+-- | A call to unknown code, with the values a model gives its calldata, success flag and returndata
+data UnknownCall = UnknownCall
   { callee :: Addr
-  , input :: ByteString
+  , calldata :: ByteString
   , success :: Bool
-  , output :: ByteString
+  , returndata :: ByteString
   }
   deriving (Show, Eq)
 
@@ -1872,7 +1872,7 @@ instance Semigroup SMTCex where
     , store = a.store <> b.store
     , blockContext = a.blockContext <> b.blockContext
     , txContext = a.txContext <> b.txContext
-    , calls = a.calls <> b.calls
+    , unknownCalls = a.unknownCalls <> b.unknownCalls
     }
 
 instance Monoid SMTCex where
@@ -1883,5 +1883,5 @@ instance Monoid SMTCex where
     , store = mempty
     , blockContext = mempty
     , txContext = mempty
-    , calls = mempty
+    , unknownCalls = mempty
     }
