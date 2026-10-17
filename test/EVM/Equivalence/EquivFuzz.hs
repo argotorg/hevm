@@ -15,7 +15,7 @@ import Data.Either (rights)
 import Data.List (nub)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (mapMaybe)
+import Data.Maybe (isNothing, mapMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text qualified as T
@@ -40,12 +40,15 @@ import EVM.Types
 tests :: TestTree
 tests = testGroup "Equivalence fuzzing"
   -- each case runs the solver, so the default of 100 cases is lowered; any other count is kept
-  [ withResource (newIORef mempty) (printCoverage "eq-fuzz-cex-replays" genOpcodes) $ \cov ->
+  [ withResource (newIORef mempty) (printCoverage "eq-fuzz-cex-replays" (filter (/= "CALL") genOpcodes)) $ \cov ->
       adjustOption (\(QuickCheckTests n) -> QuickCheckTests (if n == 100 then 20 else n)) $
         testProperty "eq-fuzz-cex-replays" (prop_eqReplay cov)
-  , withResource (newIORef mempty) (printCoverage "eq-fuzz-configs" (filter (/= "STATICCALL") genOpcodes)) $ \cov ->
+  , withResource (newIORef mempty) (printCoverage "eq-fuzz-configs" (filter (`notElem` ["STATICCALL", "CALL"]) genOpcodes)) $ \cov ->
       adjustOption (\(QuickCheckTests n) -> QuickCheckTests (if n == 100 then 10 else n)) $
         testProperty "eq-fuzz-configs" (prop_eqConfigs cov)
+  , withResource (newIORef mempty) (printCoverage "eq-fuzz-calls" genOpcodes) $ \cov ->
+      adjustOption (\(QuickCheckTests n) -> QuickCheckTests (if n == 100 then 10 else n)) $
+        testProperty "eq-fuzz-calls" (prop_eqCalls cov)
   , testProperty "eq-fuzz-stub-code" prop_stubCode
   ]
 
@@ -87,12 +90,19 @@ data Callee = AtAddr Addr | FromCd Int
 data Flag = FPop | FStore W256
   deriving (Show, Eq)
 
+data Kind = Static | WithValue W
+  deriving (Show, Eq)
+
+-- | Which calls to unknown code programs make
+data Calls = NoCalls | StaticCalls | AllCalls
+  deriving (Show, Eq)
+
 data Stmt
   = Sstore W W
   | Tstore W W
   | Mstore Int W
   | Mstore8 Int W
-  | Call Callee (Maybe W256) Int Int Int Int Flag -- ^ call id written at the start of the input, in offset, in size, out offset, out size
+  | Call Kind Callee (Maybe W256) Int Int Int Int Flag -- ^ call id written at the start of the input, in offset, in size, out offset, out size
   | RdCopy Int Int Int
   | CdCopy Int W Int
   | Stack [W] Bool Int -- ^ push the words, then DUPn (True) or SWAPn, store the top and pop
@@ -109,10 +119,14 @@ envOps = [0x30, 0x32, 0x33, 0x34, 0x36, 0x3d, 0x41, 0x42, 0x43, 0x47, 0x59]
 callees :: [Addr]
 callees = [0x1234, 0xabcd]
 
+-- | Where the contracts are that random callees call to send ether back
+senderBase :: Addr
+senderBase = 0x5e0d00
+
 -- | Every opcode the generator can emit
 genOpcodes :: [String]
 genOpcodes = map (intToOpName . fromIntegral) $ binOps <> unOps <> ternOps <> envOps
-  <> [0x00, 0x20, 0x35, 0x37, 0x3e, 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x5b, 0x5c, 0x5d, 0xf3, 0xfa, 0xfd]
+  <> [0x00, 0x20, 0x35, 0x37, 0x3e, 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x5b, 0x5c, 0x5d, 0xf1, 0xf3, 0xfa, 0xfd]
   <> [0x5f .. 0x7f] <> [0x80 .. 0x8f] <> [0x90 .. 0x9f]
 
 data Asm = Bytes [Word8] | PushLabel Int | Label Int
@@ -143,13 +157,14 @@ asmBlock = \case
   Tstore k v -> pure $ asmW v <> asmW k <> [Bytes [0x5d]]
   Mstore off v -> pure $ asmW v <> [pushI off, Bytes [0x52]]
   Mstore8 off v -> pure $ asmW v <> [pushI off, Bytes [0x53]]
-  Call c callId io is oo os flag -> pure $
+  Call k c callId io is oo os flag -> pure $
     maybe [] (\i -> [Bytes (pushW i), pushI io, Bytes [0x52]]) callId
     <> [pushI os, pushI oo, pushI is, pushI io]
+    <> (case k of Static -> []; WithValue v -> asmW v)
     <> (case c of
           AtAddr a -> [Bytes (pushW (fromIntegral a))]
           FromCd off -> [pushI off, Bytes [0x35]])
-    <> [Bytes (pushW 0xffffffff), Bytes [0xfa]]
+    <> [Bytes (pushW 0xffffffff), Bytes [case k of Static -> 0xfa; WithValue _ -> 0xf1]]
     <> (case flag of
           FPop -> [Bytes [0x50]]
           FStore slot -> [Bytes (pushW slot), Bytes [0x55]])
@@ -235,9 +250,25 @@ genSlot = fromIntegral <$> choose (0 :: Int, 3)
 genKey :: Gen W
 genKey = frequency [(4, Const <$> genSlot), (1, genW 1)]
 
-genCall :: Gen Stmt
-genCall = Call
-  <$> frequency [(4, AtAddr <$> elements callees), (1, FromCd <$> elements [0, 32])]
+genKind :: Calls -> Gen Kind
+genKind = \case
+  AllCalls -> frequency [(1, pure Static), (2, WithValue <$> genValue)]
+  _ -> pure Static
+
+-- often more than the random balance of the caller, so that some calls fail
+genValue :: Gen W
+genValue = frequency
+  [ (3, pure (Const 0))
+  , (3, Const . fromIntegral <$> choose (1 :: Int, 2000))
+  , (1, pure (EnvOp 0x34))
+  , (1, pure (EnvOp 0x47))
+  , (1, genW 1)
+  ]
+
+genCall :: Calls -> Gen Stmt
+genCall calls = Call
+  <$> genKind calls
+  <*> frequency [(4, AtAddr <$> elements callees), (1, FromCd <$> elements [0, 32])]
   -- the model may answer equal calls differently, which the replay can't do, so mostly make them differ
   <*> frequency [(3, Just <$> genCallId), (1, pure Nothing)]
   <*> genOff <*> genSize <*> genOff <*> genSize
@@ -255,13 +286,13 @@ genStack = do
   ws <- vectorOf m (genW 0)
   pure $ Stack ws dup n
 
-genBlock :: Bool -> Int -> Gen Stmt
+genBlock :: Calls -> Int -> Gen Stmt
 genBlock calls d = frequency
   [ (3, Sstore <$> genKey <*> genW 2)
   , (1, Tstore <$> genKey <*> genW 2)
   , (2, Mstore <$> genOff <*> genW 2)
   , (1, Mstore8 <$> genOff <*> genW 1)
-  , (if calls then 5 else 0, genCall)
+  , (if calls == NoCalls then 0 else 5, genCall calls)
   , (1, RdCopy <$> genOff <*> elements [0, 1, 31, 32] <*> genSize)
   , (1, CdCopy <$> genOff <*> frequency [(3, Const <$> elements [0, 4, 32]), (1, genW 1)] <*> genSize)
   , (2, genStack)
@@ -272,10 +303,10 @@ genBlock calls d = frequency
 genHalt :: Gen Stmt
 genHalt = Halt <$> elements [0x00, 0xf3, 0xfd] <*> genOff <*> genSize
 
-genBlocks :: Bool -> Int -> Gen [Stmt]
+genBlocks :: Calls -> Int -> Gen [Stmt]
 genBlocks calls d = choose (1, 4) >>= \n -> vectorOf n (genBlock calls d)
 
-genProgram :: Bool -> Gen [Stmt]
+genProgram :: Calls -> Gen [Stmt]
 genProgram calls = choose (1, 6) >>= \n -> vectorOf n (genBlock calls 2)
 
 -- * Mutations
@@ -314,21 +345,23 @@ mutW w = do
       _ -> fresh
     fresh = (, "replace subterm") <$> genW 1
 
-mutBlock :: Bool -> Stmt -> Gen (Stmt, String)
+mutBlock :: Calls -> Stmt -> Gen (Stmt, String)
 mutBlock calls = \case
   Sstore k v -> oneof [first' (`Sstore` v) <$> mutW k, first' (Sstore k) <$> mutW v]
   Tstore k v -> oneof [first' (`Tstore` v) <$> mutW k, first' (Tstore k) <$> mutW v]
   Mstore o v -> oneof [(\o' -> (Mstore o' v, "memory offset")) <$> genOff, first' (Mstore o) <$> mutW v]
   Mstore8 o v -> oneof [(\o' -> (Mstore8 o' v, "memory offset")) <$> genOff, first' (Mstore8 o) <$> mutW v]
-  Call c t io is oo os f -> oneof
-    [ (\c' -> (Call c' t io is oo os f, "call callee")) <$> frequency [(4, AtAddr <$> elements callees), (1, FromCd <$> elements [0, 32])]
-    , (\i' -> (Call c i' io is oo os f, "call id")) <$> frequency [(3, Just <$> genCallId), (1, pure Nothing)]
-    , (\x -> (Call c t x is oo os f, "call in offset")) <$> genOff
-    , (\x -> (Call c t io x oo os f, "call in size")) <$> genSize
-    , (\x -> (Call c t io is x os f, "call out offset")) <$> genOff
-    , (\x -> (Call c t io is oo x f, "call out size")) <$> genSize
-    , (\f' -> (Call c t io is oo os f', "call flag")) <$> frequency [(1, pure FPop), (2, FStore <$> genSlot)]
+  Call k c t io is oo os f -> oneof $
+    [ (\c' -> (Call k c' t io is oo os f, "call callee")) <$> frequency [(4, AtAddr <$> elements callees), (1, FromCd <$> elements [0, 32])]
+    , (\i' -> (Call k c i' io is oo os f, "call id")) <$> frequency [(3, Just <$> genCallId), (1, pure Nothing)]
+    , (\x -> (Call k c t x is oo os f, "call in offset")) <$> genOff
+    , (\x -> (Call k c t io x oo os f, "call in size")) <$> genSize
+    , (\x -> (Call k c t io is x os f, "call out offset")) <$> genOff
+    , (\x -> (Call k c t io is oo x f, "call out size")) <$> genSize
+    , (\f' -> (Call k c t io is oo os f', "call flag")) <$> frequency [(1, pure FPop), (2, FStore <$> genSlot)]
     ]
+    <> [(\k' -> (Call k' c t io is oo os f, "call kind")) <$> genKind calls | calls == AllCalls]
+    <> [first' (\v' -> Call (WithValue v') c t io is oo os f) <$> mutW v | WithValue v <- [k]]
   RdCopy d s z -> oneof [(\x -> (RdCopy d x z, "returndatacopy offset")) <$> elements [0, 1, 31, 32], (\x -> (RdCopy d s x, "returndatacopy size")) <$> genSize]
   CdCopy d s z -> oneof [first' (\s' -> CdCopy d s' z) <$> mutW s, (\x -> (CdCopy d s x, "calldatacopy size")) <$> genSize]
   Stack ws dup n -> do
@@ -347,7 +380,7 @@ mutBlock calls = \case
     ]
   where first' f (x, w) = (f x, w)
 
-mutBlocks :: Bool -> [Stmt] -> Gen ([Stmt], String)
+mutBlocks :: Calls -> [Stmt] -> Gen ([Stmt], String)
 mutBlocks calls bs = do
   i <- choose (0, length bs - 1)
   frequency
@@ -361,14 +394,14 @@ data Pair = Pair { progA :: [Stmt], progB :: [Stmt], mutation :: String }
   deriving (Show)
 
 -- | A program and a mutation of it, with or without calls to unknown code
-genPair :: Bool -> Gen Pair
+genPair :: Calls -> Gen Pair
 genPair calls = do
   a <- genProgram calls
   (b, m) <- mutBlocks calls a
   pure $ Pair a b m
 
 instance Arbitrary Pair where
-  arbitrary = genPair True
+  arbitrary = genPair StaticCalls
   shrink (Pair a b m) =
     [Pair a' b m | a' <- shrinkStmts a, not (null a')] <> [Pair a b' m | b' <- shrinkStmts b, not (null b')]
 
@@ -386,7 +419,9 @@ shrinkStmt = \case
   Mstore8 o v -> [Mstore8 o v' | v' <- shrinkW v]
   CdCopy d s z -> [CdCopy d s' z | s' <- shrinkW s]
   Stack ws dup n -> [Stack (take i ws <> [w'] <> drop (i + 1) ws) dup n | (i, w) <- zip [0 ..] ws, w' <- shrinkW w]
-  Call c (Just _) io is oo os f -> [Call c Nothing io is oo os f]
+  Call k c i io is oo os f ->
+    [Call k c Nothing io is oo os f | Just _ <- [i]]
+    <> [Call (WithValue v') c i io is oo os f | WithValue v <- [k], v' <- shrinkW v]
   _ -> []
 
 shrinkW :: W -> [W]
@@ -409,7 +444,14 @@ data Run = Run
   , stubRan :: Bool
   , outcome :: Either EvmError (Expr Buf)
   , store :: Maybe (Map W256 W256)
+  , balances :: Map (Expr EAddr) W256
   }
+
+sameRun :: Run -> Run -> Bool
+sameRun x y = (x.outcome, x.store, x.balances) == (y.outcome, y.store, y.balances)
+
+showRun :: Run -> String
+showRun x = show x.outcome <> " " <> show x.store <> " " <> show (Map.toList x.balances)
 
 runConcrete :: App m => SolverGroup -> VMOpts Concrete -> m Run
 runConcrete s opts = do
@@ -423,7 +465,8 @@ runConcrete s opts = do
         Just (VMSuccess out) -> Right out
         Just (VMFailure e) -> Left e
         r -> internalError $ "concrete run did not finish: " <> show r
-  pure $ Run ops stub outcome store
+      balances = Map.mapMaybe (\c -> case c.balance of Lit v -> Just v; _ -> Nothing) end.env.contracts
+  pure $ Run ops stub outcome store balances
   where
     traced :: Config -> Stepper Concrete (Set String, Bool, VM Concrete)
     traced conf = go mempty False
@@ -452,10 +495,15 @@ outcomeKind = \case
   Left (Revert _) -> "Revert"
   Left e -> takeWhile (/= ' ') (show e)
 
--- | Code that answers any call with words derived from the hash of its input
-hashStub :: W256 -> Bool -> Int -> ByteString
-hashStub salt ok len = BS.pack $
-  [0x36, 0x5f, 0x5f, 0x37, 0x36, 0x5f, 0x20, 0x7f] <> BS.unpack (word256Bytes salt) <> [0x18]
+-- | Code that answers any call with words derived from the hash of its input,
+-- and if @counting@, of how often it was called, which it keeps in its storage
+-- (so a STATICCALL to it reverts). With a @sender@, it first calls it, which sends
+-- ether to the caller without running the caller's code.
+hashStub :: Maybe Addr -> W256 -> Bool -> Bool -> Int -> ByteString
+hashStub sender salt counting ok len = BS.pack $
+  maybe [] (\a -> [0x5f, 0x5f, 0x5f, 0x5f, 0x5f] <> pushAddr a <> [0x5a, 0xf1, 0x50]) sender
+  <> [0x36, 0x5f, 0x5f, 0x37, 0x36, 0x5f, 0x20, 0x7f] <> BS.unpack (word256Bytes salt) <> [0x18]
+  <> (if counting then [0x5f, 0x54, 0x01, 0x5f, 0x54, 0x60, 0x01, 0x01, 0x5f, 0x55] else [])
   <> concat [[0x80, 0x60, fromIntegral i, 0x01, 0x61, fromIntegral (32 * i `div` 256), fromIntegral (32 * i `mod` 256), 0x52] | i <- [0 .. (len + 31) `div` 32 - 1]]
   <> [0x50] <> pushW (fromIntegral len) <> [0x5f, if ok then 0xf3 else 0xfd]
 
@@ -491,7 +539,8 @@ blockKinds depth = concatMap $ \case
   Tstore {} -> ["TSTORE"]
   Mstore {} -> ["MSTORE"]
   Mstore8 {} -> ["MSTORE8"]
-  Call c i _ _ _ _ f -> ["call " <> maybe "without id" (const "with id") i, "call to " <> (case c of AtAddr _ -> "fixed callee"; FromCd _ -> "callee from calldata")
+  Call k c i _ _ _ _ f -> [case k of Static -> "STATICCALL"; WithValue (Const 0) -> "CALL with value 0"; WithValue (Const _) -> "CALL with constant value"; WithValue _ -> "CALL with computed value"
+                          , "call " <> maybe "without id" (const "with id") i, "call to " <> (case c of AtAddr _ -> "fixed callee"; FromCd _ -> "callee from calldata")
                       , "call flag " <> (case f of FPop -> "popped"; FStore _ -> "stored")]
   RdCopy {} -> ["RETURNDATACOPY"]
   CdCopy {} -> ["CALLDATACOPY"]
@@ -548,7 +597,7 @@ prop_eqReplay cov (Pair a b mutation) = ioProperty $ Effects.runApp $ withSolver
       runs = concat [[ra, rb] | (_, _, Just (ra, rb)) <- replays] <> concatMap (\(x, y) -> [x, y]) random
       calls = rights (concat [c.unknownCalls | (c, _, _) <- replays])
       bad = [ (c, r) | (c, r, runs') <- replays, isBad r runs' ]
-      unsound = [ (x, y) | equivalent, (x, y) <- random, (x.outcome, x.store) /= (y.outcome, y.store) ]
+      unsound = [ (x, y) | equivalent, (x, y) <- random, not (sameRun x y) ]
       generated = Set.fromList (opcodesOf codeA <> opcodesOf codeB)
       executed = Set.unions (map (.ops) runs)
   liftIO $ addCoverage cov generated executed
@@ -573,7 +622,7 @@ prop_eqReplay cov (Pair a b mutation) = ioProperty $ Effects.runApp $ withSolver
     codeB = assemble b
     report bad unsound = unlines $ showPair a b
       <> concat [["cex: " <> show c, "replay: " <> show r] | (c, r) <- bad]
-      <> concat [["equivalent, but concretely: " <> show x.outcome <> " " <> show x.store <> " vs " <> show y.outcome <> " " <> show y.store] | (x, y) <- unsound]
+      <> ["equivalent, but concretely: " <> showRun x <> " vs " <> showRun y | (x, y) <- unsound]
 
 -- | Runs A and B in random concrete environments, with callees that answer by
 -- hashing their input. When hevm says A and B are equivalent, these must agree.
@@ -602,25 +651,49 @@ variants =
   , Variant "merging off" (\c -> c { Effects.mergeMaxBudget = 0 })
   ]
 
--- | Configurations must agree, on programs without calls: none may prove A and B
--- equivalent while another gives a counterexample that replays, random concrete
--- runs must agree when one proves them equivalent, and every counterexample must
--- replay as in 'prop_eqReplay'
 prop_eqConfigs :: IO (IORef Coverage) -> Property
-prop_eqConfigs cov = forAllShrink (genPair False) shrink $ \(Pair a b mutation) -> forAll (take 2 <$> shuffle variants) $ \vs -> ioProperty $ do
+prop_eqConfigs = agreement NoCalls baseline (take 2 <$> shuffle variants)
+
+-- | Programs with calls that may change state. With re-entrancy allowed, every
+-- path through such a call is partial, so the baseline promises no re-entrancy.
+prop_eqCalls :: IO (IORef Coverage) -> Property
+prop_eqCalls = agreement AllCalls
+  (Variant "promiseNoReent" (\c -> c { Effects.promiseNoReent = True }))
+  (pure [Variant "re-entrancy allowed" (\c -> c { Effects.promiseNoReent = False })])
+
+-- | Configurations must agree: none may prove A and B equivalent while another
+-- gives a counterexample that replays, random concrete runs must agree when one
+-- proves them equivalent, and every counterexample must replay unless there is
+-- a known reason why it can't
+agreement :: Calls -> Variant -> Gen [Variant] -> IO (IORef Coverage) -> Property
+agreement calls base0 genVariants cov = forAllShrink (genPair calls) shrink $ \(Pair a b mutation) -> forAll genVariants $ \vs -> ioProperty $ do
   let codeA = assemble a
       codeB = assemble b
       check v = Effects.runEnv (Effects.Env { Effects.config = v.tweak Effects.defaultConfig }) $
         withSolvers Bitwuzla 1 (Just 20) defMemLimit $ \s -> checkAndReplay s codeA codeB
-  baseRes <- check baseline
+      valueCalls = any isValueCall (allStmts (a <> b))
+      -- the replay's stubs can't send ether back
+      etherBack cex = or [v > 0 | (Var n, v) <- Map.toList cex.vars, "-ether-fresh-" `T.isInfixOf` n]
+      excuse v cex runs
+        | keccakRan runs = Just "ran SHA3"
+        | etherBack cex = Just "a callee sends ether back"
+        | valueCalls, not (v.tweak Effects.defaultConfig).promiseNoReent = Just "re-entrancy allowed"
+        | otherwise = Nothing
+      reason v cex r runs = case r of
+        NotReproducible {} -> maybe "NOT REPRODUCIBLE" ("not reproducible, " <>) (excuse v cex runs)
+        _ -> replayReason r runs
+      isBad' v cex r runs = case r of
+        NotReproducible {} -> isNothing (excuse v cex runs)
+        _ -> isBad r runs
+  baseRes <- check base0
   variantRes <- forM vs $ \v -> (v, ) <$> check v
   random <- Effects.runApp $ withSolvers Bitwuzla 1 (Just 20) defMemLimit $ \s -> randomRuns s codeA codeB
-  let results = (baseline, baseRes) : variantRes
+  let results = (base0, baseRes) : variantRes
       equivalent = [v | (v, (verdicts, _)) <- results, verdicts == ["equivalent"]]
       validated = [(v, c, r) | (v, (_, replays)) <- results, (c, r@Validated {}, _) <- replays]
-      bad = [(v, c, r) | (v, (_, replays)) <- results, (c, r, runs) <- replays, isBad r runs]
+      bad = [(v, c, r) | (v, (_, replays)) <- results, (c, r, runs) <- replays, isBad' v c r runs]
       clash = not (null equivalent) && not (null validated)
-      unsound = [(x, y) | not (null equivalent), (x, y) <- random, (x.outcome, x.store) /= (y.outcome, y.store)]
+      unsound = [(x, y) | not (null equivalent), (x, y) <- random, not (sameRun x y)]
       kind (verdicts, replays)
         | verdicts == ["equivalent"] = "equivalent"
         | any (\(_, r, _) -> case r of Validated {} -> True; _ -> False) replays = "validated cex"
@@ -636,7 +709,7 @@ prop_eqConfigs cov = forAllShrink (genPair False) shrink $ \(Pair a b mutation) 
         <> ["equivalent under: " <> show equivalent | clash || not (null unsound)]
         <> concat [["validated under " <> show v <> ": " <> show c, show r] | clash, (v, c, r) <- validated]
         <> concat [["bad replay under " <> show v <> ": " <> show c, show r] | (v, c, r) <- bad]
-        <> ["but concretely: " <> show x.outcome <> " " <> show x.store <> " vs " <> show y.outcome <> " " <> show y.store | (x, y) <- unsound])
+        <> ["but concretely: " <> showRun x <> " vs " <> showRun y | (x, y) <- unsound])
     $ tabulate "mutation" [mutation]
     $ tabulate "program size (bytes)" [bucket (BS.length codeA)]
     $ tabulate "blocks in A" (nub (blockKinds 0 a))
@@ -644,10 +717,32 @@ prop_eqConfigs cov = forAllShrink (genPair False) shrink $ \(Pair a b mutation) 
     $ tabulate "executed opcodes" (Set.toList executed)
     $ tabulate "baseline" [base]
     $ tabulate "variant vs baseline" [v.name <> ": " <> (if k == base then "agrees" else k <> " vs " <> base) | (v, res) <- variantRes, let k = kind res]
-    $ tabulate "replay" [v.name <> ": " <> replayReason r runs | (v, (_, replays)) <- results, (_, r, runs) <- replays]
+    $ tabulate "replay" [v.name <> ": " <> reason v c r runs | (v, (_, replays)) <- results, (c, r, runs) <- replays]
     $ tabulate "replay outcomes (A / B)" [outcomeKind ra.outcome <> " / " <> outcomeKind rb.outcome | (_, (_, replays)) <- results, (_, _, Just (ra, rb)) <- replays]
     $ tabulate ("random runs (A / B), " <> (if null equivalent then "not proved equivalent" else "proved equivalent")) [outcomeKind x.outcome <> " / " <> outcomeKind y.outcome | (x, y) <- random]
+    $ tabulate "random runs, balances of A and B" [if x.balances == y.balances then "equal" else "differ" | calls == AllCalls, (x, y) <- random]
+    $ tabulate "random runs, a callee sent ether back" [show (sentBack x || sentBack y) | calls == AllCalls, (x, y) <- random]
     $ not clash && null bad && null unsound
+
+sentBack :: Run -> Bool
+sentBack r = or [v == 0 | (LitAddr a, v) <- Map.toList r.balances, a >= senderBase, a < senderBase + fromIntegral (length callees)]
+
+allStmts :: [Stmt] -> [Stmt]
+allStmts = concatMap $ \case
+  s@(If _ t e) -> s : allStmts (t <> e)
+  s -> [s]
+
+isValueCall :: Stmt -> Bool
+isValueCall = \case
+  Call (WithValue _) _ _ _ _ _ _ _ -> True
+  _ -> False
+
+-- | Code that self-destructs, sending its balance to @to@
+etherSender :: Addr -> ByteString
+etherSender to = BS.pack $ pushAddr to <> [0xff]
+
+pushAddr :: Addr -> [Word8]
+pushAddr a = 0x73 : BS.unpack (BS.drop 12 (word256Bytes (fromIntegral a)))
 
 genEnv :: Gen (SMTCex, [(Expr EAddr, Contract)], ByteString)
 genEnv = do
@@ -659,11 +754,17 @@ genEnv = do
   ts <- fromIntegral <$> choose (0 :: Int, 2 ^ (40 :: Int))
   num <- fromIntegral <$> choose (0 :: Int, 2 ^ (30 :: Int))
   slots <- Map.fromList <$> listOf ((,) <$> (fromIntegral <$> choose (0 :: Int, 3)) <*> genConst)
-  stubs <- forM callees $ \c -> do
+  stubs <- fmap concat $ forM (zip [0 ..] callees) $ \(i, c) -> do
     salt <- genConst
+    counting <- frequency [(2, pure False), (1, pure True)]
     ok <- frequency [(3, pure True), (1, pure False)]
     len <- elements [0, 1, 31, 32, 33, 64, 100]
-    pure (LitAddr c, initialContract (RuntimeCode (ConcreteRuntimeCode (hashStub salt ok len))))
+    sends <- frequency [(2, pure False), (1, pure True)]
+    sent <- fromIntegral <$> choose (1 :: Int, 1000)
+    let sender = senderBase + i
+        code = RuntimeCode . ConcreteRuntimeCode
+    pure $ (LitAddr c, initialContract (code (hashStub (if sends then Just sender else Nothing) salt counting ok len)))
+      : [(LitAddr sender, (initialContract (code (etherSender entry))) { balance = Lit sent } :: Contract) | sends]
   let cex = (mempty :: SMTCex)
         { addrs = Map.fromList [(SymAddr "entrypoint", entry), (SymAddr "caller", caller), (SymAddr "origin", origin), (SymAddr "coinbase", coinbase)]
         , store = Map.singleton (SymAddr "entrypoint") slots
