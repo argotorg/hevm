@@ -1105,7 +1105,7 @@ replayEqCex solvers create codeA codeB cd cex
         pure $ case (a, b) of
           (Left e, _) -> CannotReplay e
           (_, Left e) -> CannotReplay e
-          (Right ra, Right rb) -> (if ra == rb then NotReproducible else Validated) (outcome ra) (outcome rb)
+          (Right ra, Right rb) -> (if ra == rb then NotReproducible else Validated) (outcome rb ra) (outcome ra rb)
   where
     addr name def = maybe def LitAddr (Map.lookup (SymAddr name) cex.addrs)
     entry = addr "entrypoint" (LitAddr 0xacab)
@@ -1115,7 +1115,7 @@ replayEqCex solvers create codeA codeB cd cex
     logCall m = JSON.object
       [ "callee" .= T.pack (show m.callee), "calldata" .= showBytes (BS.take 256 m.calldata)
       , "success" .= m.success, "returndata" .= showBytes (BS.take 256 m.returndata), "returndataLength" .= BS.length m.returndata ]
-    run :: App m => Text -> ByteString -> ByteString -> m (Either Text (Either EvmError (Expr Buf), Either Text (Map W256 W256)))
+    run :: App m => Text -> ByteString -> ByteString -> m (Either Text (Either EvmError (Expr Buf), Either Text (Map W256 W256), Map (Expr EAddr) W256))
     run label code calldata = do
       vm <- liftIO $ stToIO $ makeVm $ (defaultVMOpts @Concrete)
         { contract = set #balance (Lit (ctx (Balance (SymAddr "entrypoint")) cex.txContext))
@@ -1141,15 +1141,18 @@ replayEqCex solvers create codeA codeB cd cex
       let finalStore = case (.storage) <$> Map.lookup entry end.env.contracts of
             Just (ConcreteStore m) -> Right m
             s -> Left (T.pack (show s))
+          balances = Map.mapMaybe (\c -> case c.balance of Lit v -> Just v; _ -> Nothing) end.env.contracts
       pure $ case end.result of
-        Just (VMSuccess out) -> Right (Right out, finalStore)
-        Just (VMFailure e) -> Right (Left e, finalStore)
+        Just (VMSuccess out) -> Right (Right out, finalStore, balances)
+        Just (VMFailure e) -> Right (Left e, finalStore, balances)
         r -> Left $ "concrete run did not finish: " <> T.pack (show r)
-    outcome (res, st) = T.intercalate ", " $ case res of
+    -- the balances are shown where they differ from the other program's
+    outcome (_, _, otherBals) (res, st, bals) = T.intercalate ", " $ (case res of
         Right (ConcreteBuf bs) -> ["Return " <> showBytes bs] <> storage
         Right _ -> ["Return (symbolic data)"] <> storage
         Left (Revert (ConcreteBuf bs)) -> ["Revert " <> showRevertData bs]
-        Left e -> [T.pack (show e)]
+        Left e -> [T.pack (show e)])
+      <> ["balance " <> showAddr a <> "=" <> showW v | (a, v) <- Map.toList bals, Map.lookup a otherBals /= Just v]
       where
         storage = case st of
           Right m | Map.null m -> []

@@ -470,6 +470,13 @@ bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
   , testCase "eq-call-moves-its-value" $ do
     eq <- eqBytecode True (call "1234" <> pop) (callWithWei "1234" <> pop)
     assertBool "the callee gets the value" (any (isCex . fst) eq.res)
+  , testCase "eq-replay-compares-balances" $ do
+    -- selfdestruct(0x1234) vs stop
+    replays <- replayAll "611234ff" "00"
+    assertBool "Must have a counterexample" (not (null replays))
+    forM_ replays $ \case
+      Validated {} -> pure ()
+      r -> assertFailure $ "Counterexample must replay as validated, got: " <> show r
   , testCase "eq-call-may-send-ether-back" $ do
     -- sstore(0, selfbalance()) after the call vs with the balance from before it
     eq <- eqBytecode True (call "1234" <> pop <> "475f55") ("47" <> call "1234" <> pop <> "5f55")
