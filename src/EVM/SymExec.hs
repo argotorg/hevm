@@ -558,8 +558,8 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
         interpretInternal t { vm = vm', stepper = (k r) }
       Stepper.Fork (PleaseRunAll vals continue) -> do
         when (length vals < 2) $ internalError "PleaseRunAll requires at least 2 branches"
-        Progress.emit "fork" [ "pc" .= vm.state.pc, "addr" .= T.pack (show vm.state.contract)
-                             , "branches" .= length vals, "values" .= map (T.pack . show) (take 20 vals) ]
+        Progress.fork (T.pack (show vm.state.contract)) vm.state.pc
+          ["branches" .= length vals, "values" .= map (T.pack . show) (take 20 vals)]
         frozen <- liftIO $ stToIO $ freezeVM vm
         let newDepth = vm.exploreDepth+1
         runOne frozen newDepth vals
@@ -582,7 +582,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
             runOne frozen newDepth rest
           runOne _ _ [] = internalError "unreachable"
       Stepper.Fork (PleaseRunBoth continue) -> do
-        Progress.emit "fork" ["pc" .= vm.state.pc, "addr" .= T.pack (show vm.state.contract), "branches" .= (2 :: Int)]
+        Progress.fork (T.pack (show vm.state.contract)) vm.state.pc ["branches" .= (2 :: Int)]
         conf <- readConfig
         frozen <- liftIO $ stToIO $ freezeVM vm
         let newDepth = vm.exploreDepth+1
