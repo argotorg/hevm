@@ -1658,6 +1658,11 @@ simplifierFuzzTests cfg = testGroup "SimplifierPropertyTests"
         proveEquivExprWith cfg buflen (Expr.simplify buflen)
     , testProperty "store-simplification" $ \(expr :: Expr Storage) -> ioProperty $ proveEquivExprWith cfg expr (Expr.simplify expr)
     , testProperty "load-simplification" $ \(GenWriteStorageLoad expr) -> ioProperty $ proveEquivExprWith cfg expr (Expr.simplify expr)
+    , testProperty "folded-mapping-load" $ forAll genFoldedMappingLoad $ \(expr, expected) ->
+        checkCoverage $ cover 30 (expected == Lit 0) "different mapping" $
+          cover 30 (expected /= Lit 0) "same mapping" $ ioProperty $ do
+            res <- checkSatWith cfg (expr ./= expected)
+            pure $ counterexample (show res) (isQed res)
     -- decomposition must not change the loaded value, given its assumption that keys of different
     -- stores never alias
     , testProperty "load-decompose" $ \(GenDecomposableLoad expr) -> ioProperty $

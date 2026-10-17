@@ -19,7 +19,7 @@ import Test.QuickCheck.Arbitrary
 import Test.QuickCheck.Gen
 import Test.QuickCheck.Instances.ByteString()
 
-import EVM.Types (Expr(..), EType(..), W256(..), W64(..), internalError, Addr(..), Prop(..), ContractCode(..), RuntimeCode(..), EvmError(..))
+import EVM.Types (Expr(..), EType(..), W256(..), W64(..), internalError, Addr(..), Prop(..), ContractCode(..), RuntimeCode(..), EvmError(..), keccak', word256Bytes)
 import EVM.Expr qualified as Expr
 import EVM.Traversals (mapExpr)
 
@@ -53,11 +53,30 @@ genStorageKey = frequency
     , (4, Expr.ArraySlotZero <$> (genByteStringKey 32))
      -- mapping slot
     , (8, Expr.MappingSlot <$> (genByteStringKey 64) <*> (genLit 5))
+    , (4, Lit . (\(key, slot) -> keccak' (word256Bytes key <> word256Bytes slot)) <$> genMappingEntry)
      -- small slot
     , (4, genLit 20)
     -- unrecognized slot type
     , (1, genLit 5)
     ]
+
+genMappingEntry :: Gen (W256, W256)
+genMappingEntry = (,) <$> small <*> small
+  where small = fromIntegral <$> chooseInt (0, 255)
+
+-- A folded write and its expected symbolic read, without a concrete keccak term.
+genFoldedMappingLoad :: Gen (Expr EWord, Expr EWord)
+genFoldedMappingLoad = do
+  (key, slot) <- genMappingEntry
+  offset <- elements [0, 1, 5, 255]
+  same <- arbitrary
+  value <- fromIntegral <$> chooseInt (1, 255)
+  let folded = keccak' (word256Bytes key <> word256Bytes slot) + offset
+      readSlot = if same then slot else (slot + 1) `mod` 256
+      readKey = Add (Expr.MappingSlot (word256Bytes 0 <> word256Bytes readSlot) (Var "k")) (Lit offset)
+      expected = if same then ITE (Eq (Var "k") (Lit key)) (Lit value) (Lit 0) else Lit 0
+  store <- elements [ConcreteStore (Map.singleton folded value), SStore (Lit folded) (Lit value) (ConcreteStore mempty)]
+  pure (SLoad readKey store, expected)
 
 -- GenDecomposableLoad
 -- Loads over chains of writes that storage decomposition must handle: small slots, arrays and

@@ -5,6 +5,8 @@
 module EVM.Keccak (keccakAssumptions, concreteKeccaks, findKeccakPropsExprs) where
 
 import Control.Monad.State
+import Data.ByteString (ByteString)
+import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.List (tails)
@@ -81,8 +83,24 @@ concretizeKeccakParam _ = internalError "Cannot happen"
 
 type KeccakValue = (Expr Buf, W256)
 concreteKeccaks :: [Prop] -> Set KeccakValue
-concreteKeccaks ps = foldMap concreteKeccakProp ps
+concreteKeccaks ps = foldMap concreteKeccakProp ps <> recovered
   where
+  (slots, keys) = foldMap (foldProp literals mempty) ps
+  preimages = smallMappingPreimages <> mappingPreimages (Set.toList $ Set.filter (> 255) keys)
+  recovered = Set.fromList
+    [ (ConcreteBuf pre, h)
+    | slot <- Set.toList (Set.filter (>= 256) slots)
+    , Just (h, pre) <- [Map.lookupLE slot preimages]
+    , slot - h < 256
+    ]
+  literals :: forall a. Expr a -> (Set W256, Set W256)
+  literals = \case
+    SLoad (Lit k) _ -> (Set.singleton k, mempty)
+    SStore (Lit k) _ _ -> (Set.singleton k, mempty)
+    ConcreteStore m -> (Map.keysSet m, Set.fromList (Map.elems m))
+    Lit w -> (mempty, Set.singleton w)
+    _ -> mempty
+
   concreteKeccakProp :: Prop -> Set KeccakValue
   concreteKeccakProp p = foldProp compute Set.empty p
 
@@ -95,3 +113,13 @@ concreteKeccaks ps = foldMap concreteKeccakProp ps
         _ -> Set.empty
     _ -> Set.empty
 
+-- Shared across queries; compiler-folded mapping slots contain no keccak term.
+smallMappingPreimages :: Map.Map W256 ByteString
+smallMappingPreimages = mappingPreimages [0..255]
+
+mappingPreimages :: [W256] -> Map.Map W256 ByteString
+mappingPreimages keys = Map.fromList
+  [ (keccak' pre, pre)
+  | key <- keys, slot <- [0..255]
+  , let pre = word256Bytes key <> word256Bytes slot
+  ]

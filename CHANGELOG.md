@@ -45,6 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   result of replaying each one as a coloured tag, as `hevm test` does.
 
 ## Fixed
+- Recover compiler-folded mapping slot preimages when building keccak assumptions,
+  preventing spurious counterexamples ([#1103](https://github.com/argotorg/hevm/issues/1103)).
 - A call to unknown code now writes the data it returns to the output region
   of the call in memory. Before, the region kept its old contents, so code that
   read the result from there could pass assertions it does not satisfy.

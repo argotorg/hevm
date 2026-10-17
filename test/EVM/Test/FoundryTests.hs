@@ -150,6 +150,12 @@ tests = testGroup "Foundry tests"
     , test "Mapping-Decomposition-Fail" $ do
         let testFile = "test/contracts/fail/mappingDecomposition.sol"
         executeSingleMethod testFile "prove_written_is_zero" >>= assertEqualM "written mapping read must falsify" (False, True)
+    , test "Keccak-Literal-Slot" $ do
+        let testFile = "test/contracts/pass/keccakLiteralSlot.sol"
+        executeSingleMethod testFile "prove_other_mapping" >>= assertEqualM "folded slot literal must not alias another mapping" (True, True)
+    , test "Keccak-Literal-Slot-Fail" $ do
+        let testFile = "test/contracts/fail/keccakLiteralSlot.sol"
+        executeSingleMethod testFile "prove_same_mapping" >>= assertEqualM "folded slot literal of the same mapping must falsify" (False, True)
     , test "Array-Mapping-Same-Slot" $ do
         let testFile = "test/contracts/pass/arrayMappingSameSlot.sol"
         executeSingleMethod testFile "prove_array_write_not_read" >>= assertEqualM "array write is not a mapping write" (True, True)

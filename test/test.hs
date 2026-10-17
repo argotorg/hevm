@@ -4783,7 +4783,35 @@ tests = testGroup "hevm"
       assertBoolM ("Expected only counterexamples, got: " <> show res) (all isCex res)
   ]
   , testGroup "calling-solvers"
-  [ testMaxBuf64 "no-error-on-large-buf" $ do
+  [ testGroup "keccak-alias-of-folded-slot"
+      [ test (show solver) $ withSolvers solver 3 Nothing defMemLimit $ \s ->
+          forM_ [0, 5, 255] $ \offset -> do
+            let foldedSlot = keccak' (word256Bytes 3 <> word256Bytes 0) + offset
+                readAt slot = Add (Keccak (WriteWord (Lit 0) (Var "k") (ConcreteBuf (BS.replicate 32 0 <> word256Bytes slot)))) (Lit offset)
+                store = ConcreteStore (Map.singleton foldedSlot 2)
+                readQuery slot = [PNeg (PEq (SLoad (readAt slot) store) (Lit 0))]
+            other <- checkSatWithProps s (readQuery 1)
+            assertBoolM ("read of another mapping must be unsat, got " <> show other) (isQed other)
+            same <- checkSatWithProps s (readQuery 0)
+            case same of
+              Cex cex -> assertEqualM "same mapping must alias at k = 3" (Just 3) (Map.lookup (Var "k") cex.vars)
+              _ -> liftIO $ assertFailure $ "read of the same mapping must be sat, got " <> show same
+      | solver <- [Z3, Bitwuzla]
+      ]
+    , test "keccak-alias-multiple-slots" $ do
+      let foldedSlot key = keccak' (word256Bytes key <> word256Bytes 0)
+          readB = Keccak (WriteWord (Lit 0) (Var "k") (ConcreteBuf (BS.replicate 32 0 <> word256Bytes 1)))
+          store = ConcreteStore (Map.fromList [(foldedSlot 3, 2), (foldedSlot 4, 7)])
+      withDefaultSolver $ \s -> do
+        res <- checkSatWithProps s [PNeg (PEq (SLoad readB store) (Lit 0))]
+        assertBoolM ("all folded slots must be separated, got " <> show res) (isQed res)
+    , test "keccak-alias-unrecoverable-keeps-model" $ do
+      let readB = Keccak (WriteWord (Lit 0) (Var "k") (ConcreteBuf (BS.replicate 32 0 <> word256Bytes 1)))
+          store = ConcreteStore (Map.singleton 0xdeadbeef 2)
+      withDefaultSolver $ \s -> do
+        res <- checkSatWithProps s [PNeg (PEq (SLoad readB store) (Lit 0))]
+        assertBoolM ("unrecoverable literals must stay unconstrained, got " <> show res) (isCex res)
+    , testMaxBuf64 "no-error-on-large-buf" $ do
       -- These two tests generates a very large buffer that previously would cause an internalError when
       -- printed via "formatCex". We should be able to print it now.
       Just c <- solcRuntime "MyContract" [i|
@@ -4859,6 +4887,13 @@ tests = testGroup "hevm"
           props = [PEq (Keccak buf2) (Lit 0x123)]
           concrete = concreteKeccaks props
       assertEqualM "Must find two keccaks" 2 (length concrete)
+    , test "recover-folded-mapping-slot" $ do
+      let pre = word256Bytes 0x5eed1234 <> word256Bytes 255
+          h = keccak' pre
+          props value offset = [PEq (SLoad (Var "k") (ConcreteStore (Map.singleton (h + offset) value))) (Lit 0)]
+      assertEqualM "unknown key" mempty (concreteKeccaks $ props 2 0)
+      assertEqualM "candidate key and field offset" (Set.singleton (ConcreteBuf pre, h)) (concreteKeccaks $ props 0x5eed1234 255)
+      assertEqualM "offset outside recovery range" mempty (concreteKeccaks $ props 0x5eed1234 256)
     , testCase "store-over-concrete-buffer" $ runEnv (testEnv {config = testEnv.config {simp = False}}) $ do
       let
         as = AbstractStore (SymAddr "test") Nothing
