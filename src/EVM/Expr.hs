@@ -480,6 +480,40 @@ upperBound e = case (simplifyNoLitToKeccak e) of
     addBound a b = upperBound b >>= \ub ->
       if a <= (maxBound :: W256) - ub then Just (a + ub) else Nothing
 
+-- | The bits of a word expression that can be 1, looking a few levels deep
+possibleOnes :: Expr EWord -> W256
+possibleOnes = go (8 :: Int)
+  where
+    go 0 _ = maxLit
+    go d e = let r = go (d - 1) in case e of
+      Lit x -> x
+      And a b -> r a .&. r b
+      Or a b -> r a .|. r b
+      Xor a b -> r a .|. r b
+      SHR (Lit n) x -> if n >= 256 then 0 else r x `shiftR` fromIntegral n
+      SHL (Lit n) x -> if n >= 256 then 0 else r x `shiftL` fromIntegral n
+      LT {} -> 1
+      GT {} -> 1
+      LEq {} -> 1
+      GEq {} -> 1
+      SLT {} -> 1
+      SGT {} -> 1
+      Eq {} -> 1
+      IsZero {} -> 1
+      EqByte {} -> 1
+      CLZ {} -> 0x1ff
+      WAddr {} -> 0xffffffffffffffffffffffffffffffffffffffff
+      ITE _ t f -> r t .|. r f
+      Min a b -> fill (Prelude.min (r a) (r b))
+      Max a b -> fill (Prelude.max (r a) (r b))
+      Add a b -> let x = fill (r a); y = fill (r b)
+                 in if x <= maxLit - y then fill (x + y) else maxLit
+      Mul a b -> let x = fill (r a); y = fill (r b)
+                 in if x == 0 || y == 0 then 0 else if x <= maxLit `Prelude.div` y then fill (x * y) else maxLit
+      _ -> maxLit
+    -- every bit up to the highest set one: bounds any value whose bits are a subset
+    fill v = if v == 0 then 0 else maxLit `shiftR` countLeadingZeros v
+
 -- | True if the WriteWord at @wIdx@ is provably disjoint from the 32-byte
 --   read at @i@. Sound mod 2^256: requires both windows to fit below 2^256.
 writeDisjointFromReadWord :: W256 -> Expr EWord -> Bool
@@ -1423,6 +1457,9 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (ITE c a (ITE c' _ d)) | c == c' = ITE c a d -- nested same condition in else
 
     -- syntactic Eq reduction
+    -- a literal with a bit the other side can not have
+    go (Eq (Lit c) b)
+      | c .&. complement (possibleOnes b) /= 0 = Lit 0
     go (Eq (Lit a) (Lit b))
       | a == b = Lit 1
       | otherwise = Lit 0
@@ -1456,6 +1493,12 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go o@(LT (Max (Lit a) _) (Lit b))
       | a >= b = Lit 0
       | otherwise = o
+
+    -- every value of one side is below the other
+    go (EVM.Types.LT a (Lit c))
+      | possibleOnes a < c = Lit 1
+    go (EVM.Types.LT (Lit c) b)
+      | possibleOnes b <= c = Lit 0
 
     -- normalize all comparisons in terms of (S)LT
     go (EVM.Types.GT a b) = lt b a
@@ -1514,6 +1557,14 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (AddMod a (Lit 0) b) = Mod a b
     go (AddMod _ _ (Lit 0)) = Lit 0
     go (AddMod a b c) = addmod a b c
+
+    -- masks and operands whose possible bits decide the result
+    go (And a b)
+      | possibleOnes a .&. possibleOnes b == 0 = Lit 0
+    go (And (Lit m) b)
+      | possibleOnes b .&. m == possibleOnes b = b
+    go (Or (Lit m) b)
+      | possibleOnes b .&. m == possibleOnes b = Lit m
 
     -- Triple And (must be before 3-way sort below)
     go (And (Lit a) (And (Lit b) c)) = And (EVM.Expr.and (Lit a) (Lit b)) c
@@ -1613,6 +1664,8 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (EqByte a b) = eqByte a b
 
     -- SHL / SHR / SAR
+    go (SHL (Lit a) x) | a < 256, possibleOnes x `shiftL` fromIntegral a == 0 = Lit 0
+    go (SHR (Lit a) x) | a < 256, possibleOnes x `shiftR` fromIntegral a == 0 = Lit 0
     go (SHL (Lit a) _) | a >= 256 = Lit 0
     go (SHR (Lit a) _) | a >= 256 = Lit 0
     -- compose shifts by literals
@@ -1770,6 +1823,11 @@ simplifyProp prop =
     go (PLEq a (Lit 0)) = peq (Lit 0) a
     go (PLT (Max (Lit a) b) (Lit c)) | a < c = PLT b (Lit c)
 
+    go (PLT a (Lit c)) | possibleOnes a < c = PBool True
+    go (PLT (Lit c) b) | possibleOnes b <= c = PBool False
+    go (PLEq a (Lit c)) | possibleOnes a <= c = PBool True
+    go (PLEq (Lit c) b) | possibleOnes b < c = PBool False
+
     go (PLT (Lit 0) e)
       | isBoolLike e = peq (Lit 1) e
 
@@ -1777,6 +1835,7 @@ simplifyProp prop =
     go p@(PLT {}) = p
     go p@(PLEq {}) = p
 
+    go (PEq (Lit c) b) | c .&. complement (possibleOnes b) /= 0 = PBool False
     go (PEq (Lit 1) (Eq a b)) = peq a b
     go (PEq (Lit 1) (LT a b)) = PLT a b
     go (PEq (Lit 1) (IsZero e)) = PEq (Lit 0) e

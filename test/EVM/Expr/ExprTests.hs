@@ -63,6 +63,18 @@ rewriteRuleTests = testGroup "Rewrite rules"
       assertEqual "not a power of two" (Mod x (Lit 6)) (Expr.simplify (Mod x (Lit 6)))
       assertEqual "byte offset exponentiation still becomes a shift"
         (SHL (Mul (Lit 8) (And (Lit 31) x)) (Lit 1)) (Expr.simplify (Exp (Lit 0x100) (Mod x (Lit 32))))
+  , testCase "possible-bits" $ do
+      let x = Var "x"
+          addrMask = Lit 0xffffffffffffffffffffffffffffffffffffffff
+          selector = SHR (Lit 224) x
+      assertEqual "redundant mask" selector (Expr.simplify (And (Lit 0xffffffff) selector))
+      assertEqual "disjoint masks" (Lit 0) (Expr.simplify (And (Lit 0xff00) (And (Lit 0xff) x)))
+      assertEqual "an address fits its mask" (WAddr (SymAddr "a")) (Expr.simplify (And addrMask (WAddr (SymAddr "a"))))
+      assertEqual "too wide for a selector" (Lit 0) (Expr.simplify (Eq (Lit 0x100000000) selector))
+      assertEqual "a byte is below 256" (Lit 1) (Expr.simplify (LT (And (Lit 0xff) x) (Lit 0x100)))
+      assertEqual "shifted out" (Lit 0) (Expr.simplify (SHR (Lit 8) (And (Lit 0xff) x)))
+      assertEqual "prop: a bool is at most 1" [] (Expr.simplifyProps [PLEq (Eq x (Lit 3)) (Lit 1)])
+      assertEqual "prop: wider than a byte" [PBool False] (Expr.simplifyProps [PEq (Lit 0x1ff) (And (Lit 0xff) x)])
   , testCase "shift-composition" $ do
       let x = Var "x"
       assertEqual "shr shr" (SHR (Lit 12) x) (Expr.simplify (SHR (Lit 4) (SHR (Lit 8) x)))
