@@ -31,6 +31,7 @@ import Prelude hiding (LT, GT, Foldable(..))
 
 import Control.Monad
 import Control.Monad.Trans.Maybe (MaybeT(..))
+import Data.Bits (shiftR, testBit)
 import Data.Char (isDigit)
 import Data.Containers.ListUtils (nubOrd)
 import Data.ByteString (ByteString)
@@ -479,8 +480,7 @@ exprToSMTWith arithEnc = \case
         benc <- exprToSMT b
         pure $ "(bvshl " <> one `sp` benc <> ")"
     _ -> case b of
-      -- b is limited below, otherwise SMT query will be huge, and eventually Haskell stack overflows
-      Lit b' | b' < 1000 -> expandExpWith arithEnc a b'
+      Lit b' -> expandExpWith arithEnc a b'
       _ -> Left $ "Cannot encode symbolic exponent into SMT. Offending symbolic value: " <> show b
   Min a b -> do
     aenc <- exprToSMT a
@@ -722,9 +722,17 @@ expandExpWith arithEnc base expnt
   | expnt == 0 = pure one
   | expnt == 1 = exprToSMTWith arithEnc base
   | otherwise = do
+    -- by squaring, binding the base and each square once: inlining them repeats the base
+    -- expnt times, and nested exponentiations multiply that
     b <- exprToSMTWith arithEnc base
-    n <- expandExpWith arithEnc base (expnt - 1)
-    pure $ "(bvmul " <> b `sp` n <> ")"
+    let bits = takeWhile (> 0) (iterate (`shiftR` 1) expnt)
+        sq :: Int -> Builder
+        sq i = "exp!sq" <> fromString (show i)
+        squares = [ "(let ((" <> sq i <> " " <> (if i == 0 then b else "(bvmul " <> sq (i - 1) `sp` sq (i - 1) <> ")") <> ")) "
+                  | i <- [0 .. length bits - 1] ]
+        used = [sq i | (i, k) <- zip [0 ..] bits, testBit k 0]
+        prod = foldr1 (\x acc -> "(bvmul " <> x `sp` acc <> ")") used
+    pure $ mconcat squares <> prod <> mconcat (replicate (length bits) ")")
 
 concatBytesWith :: ArithEncoding -> [Expr Byte] -> Err Builder
 concatBytesWith arithEnc bytes = do

@@ -69,6 +69,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `hevm equivalence` replays counterexamples with calls to unknown code by
   putting code at each callee that returns what the counterexample says, and
   logs each replay to the progress log.
+- Exponentiation by a literal is encoded into SMT by squaring, and exponents of
+  1000 and more no longer make the query fail.
 
 ## Fixed
 - Buffer models from the solver drop bytes past the buffer's length, so a
