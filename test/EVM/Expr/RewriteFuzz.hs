@@ -405,9 +405,21 @@ genTemplate s shiftAmt = oneof
     litOp = elements [Add, Sub, Xor, Mul]
     shiftOp = elements [SHL, SHR]
 
+ptrOff :: Gen Int
+ptrOff = frequency
+  [ (1, choose (0, 96))
+  , (2, (\k e -> 32 * k + e) <$> choose (0, 2) <*> elements [-1, 0, 1, 31])
+  ]
+
+ptr :: Int -> Expr EWord
+ptr o | o < 0 = Sub (Var "p") (Lit (fromIntegral (negate o)))
+ptr 0 = Var "p"
+ptr o = Add (Lit (fromIntegral o)) (Var "p")
+
 smallIdxWith :: Gen (Expr EWord) -> Gen (Expr EWord)
 smallIdxWith s = frequency
   [ (8, Lit . fromIntegral <$> choose (0 :: Int, 100))
+  , (3, ptr <$> ptrOff)
   , (1, Var <$> elements varNames)
   , (1, Add <$> (Lit . fromIntegral <$> choose (0 :: Int, 64)) <*> (Var <$> elements varNames))
   , (1, And (Lit 0x3f) <$> s)
@@ -429,6 +441,7 @@ genShapedBuf 0 = oneof
 genShapedBuf n = frequency
   [ (2, genShapedBuf 0)
   , (2, overwrite)
+  , (2, pointerWrites)
   , (2, WriteWord <$> idx <*> w <*> sub)
   , (1, WriteByte <$> idx <*> genShapedByte (n `div` 2) <*> sub)
   , (2, CopySlice <$> idx <*> idx <*> size <*> sub <*> sub)
@@ -437,6 +450,11 @@ genShapedBuf n = frequency
     w = genShapedWord (n `div` 2)
     idx = smallIdxWith w
     sub = genShapedBuf (n `div` 2)
+    -- writes at offsets from a symbolic pointer, as reads from it need
+    pointerWrites = do
+      k <- choose (1, 4 :: Int)
+      offs <- vectorOf k ptrOff
+      foldr (\o acc -> oneof [WriteWord (ptr o) <$> w <*> acc, WriteByte (ptr o) <$> genShapedByte 0 <*> acc]) sub offs
     -- a copy over writes in and around its window
     overwrite = do
       d <- choose (0, 64 :: Int)
@@ -487,8 +505,9 @@ genEnvFrom lits names = do
       val = frequency $ [(3, elements near) | Prelude.not (null near)]
         <> [(2, elements solving) | Prelude.not (null solving)] <> [(2, genSpecialLit), (1, arbitrary)]
   vs <- mapM (\v -> (v,) <$> val) varNames
+  p <- frequency [(3, fromIntegral <$> choose (0 :: Int, 200)), (1, val)]
   bs <- mapM (\b -> (b,) <$> genBytes) names
-  pure $ FuzzEnv (Map.fromList vs) (Map.fromList bs)
+  pure $ FuzzEnv (Map.fromList (("p", p) : vs)) (Map.fromList bs)
 
 genEnv :: Expr a -> Gen FuzzEnv
 genEnv e = genEnvFrom (litsOf e) ["src", "buf"]

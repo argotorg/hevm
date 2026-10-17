@@ -416,6 +416,11 @@ readByte i@(Lit x) buf@(CopySlice _ (Lit dstOffset) (Lit size) _ dst)
     else ReadByte (Lit x) buf
 
 readByte _ (ConcreteBuf b) | BS.all (== 0) b = LitByte 0
+-- offsets from the same symbolic base
+readByte i (WriteWord j val src)
+  | Just d <- offsetDiff i j = if d < 32 then indexWord (Lit d) val else readByte i src
+readByte i (WriteByte j val src)
+  | Just d <- offsetDiff i j = if d == 0 then val else readByte i src
 
 -- fully abstract reads
 readByte i buf = ReadByte i buf
@@ -523,6 +528,17 @@ liftLitITE = \case
       (ITE c t@(Lit _) f@(Lit _), ITE c' t'@(Lit _) f'@(Lit _)) | c == c' -> Just (ITE c (op t t') (op f f'))
       _ -> Nothing
 
+-- | The difference of two offsets from the same base, mod 2^256
+offsetDiff :: Expr EWord -> Expr EWord -> Maybe W256
+offsetDiff i j = case (split i, split j) of
+  ((a, x), (b, y)) | x == y -> Just (a - b)
+  _ -> Nothing
+  where
+    split :: Expr EWord -> (W256, Maybe (Expr EWord))
+    split (Add (Lit c) x) = (c, Just x)
+    split (Lit c) = (c, Nothing)
+    split x = (0, Just x)
+
 -- | True if the WriteWord at @wIdx@ is provably disjoint from the 32-byte
 --   read at @i@. Sound mod 2^256: requires both windows to fit below 2^256.
 writeDisjointFromReadWord :: W256 -> Expr EWord -> Bool
@@ -549,6 +565,8 @@ readWord idx b@(WriteWord idx' val buf)
   | idx == idx' = val
   -- WriteWord provably disjoint via interval bounds (Add (Lit c) X, X bounded)
   | Lit i <- idx, writeDisjointFromReadWord i idx' = readWord idx buf
+  -- offsets from the same symbolic base that are at least a word apart, either way round
+  | Just d <- offsetDiff idx idx', d >= 32, d <= maxWord256 - 31 = readWord idx buf
   | otherwise = case (idx, idx') of
     (Lit i, Lit i') ->
       if i' - i >= 32 && i' - i <= (maxBound :: W256) - 31
@@ -561,6 +579,8 @@ readWord idx b@(WriteWord idx' val buf)
     _ -> readWordFromBytes idx b
 readWord i@(Lit idx) (WriteByte (Lit idx') _ buf)
   | idx' - idx >= 32 = readWord i buf
+readWord i (WriteByte j _ buf)
+  | Just d <- offsetDiff j i, d >= 32 = readWord i buf
 -- reading a Word that is before the CopySlice destination region, so just read from dst
 -- We must ensure x+32 and dstOffset+size do not wrap past maxBound.
 -- When size is symbolic, we bound dstOffset to ensure no wrapping is possible.
