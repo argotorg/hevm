@@ -595,7 +595,6 @@ genContract n = do
         , (10, pure OpBaseFee)
         , (10, pure OpPc)
         , (10, pure OpMsize)
-        , (10, pure OpGas)
         , (10, pure OpExtcodesize)
         , (10, pure OpCodecopy)
         , (10, pure OpExtcodecopy)
