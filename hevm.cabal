@@ -302,6 +302,7 @@ test-suite test
     EVM.Equivalence.EquivalenceTests
     EVM.Equivalence.EquivFuzz
     EVM.Expr.ExprTests
+    EVM.Expr.RewriteFuzz
     EVM.Expr.Generator
     EVM.Expr.HashConsTests
     EVM.Expr.Probe
