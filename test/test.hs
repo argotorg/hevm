@@ -82,6 +82,7 @@ import EVM.Expr.ExprTests qualified as ExprTests
 import EVM.Expr.HashConsTests qualified as HashConsTests
 import EVM.ConcreteExecution.ConcreteExecutionTests qualified as ConcreteExecutionTests
 import EVM.Equivalence.EquivalenceTests qualified as EquivalenceTests
+import EVM.Equivalence.EquivFuzz qualified as EquivFuzz
 import EVM.SymExec.SymExecTests qualified as SymExecTests
 import EVM.Test.FoundryTests qualified as FoundryTests
 
@@ -234,6 +235,7 @@ tests = testGroup "hevm"
   , ConcreteExecutionTests.tests
   , SymExecTests.tests
   , EquivalenceTests.tests
+  , EquivFuzz.tests
   , FoundryTests.tests
   , testGroup "Console log formatting"
     [ testCase "format-string" $ do

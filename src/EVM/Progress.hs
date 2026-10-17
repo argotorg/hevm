@@ -8,10 +8,12 @@ by `--verb 3` or `--progress-log FILE`; `--verb 4` or `--progress-exprs` also
 logs the expressions sent to the solver. Every event is one flushed JSON line,
 so a run that is killed still leaves a usable log. A heartbeat periodically
 snapshots what each worker thread and each in-flight solver query is doing.
+Tests get the log through 'withProgressLogFromEnv' and @HEVM_PROGRESS_LOG_DIR@.
 -}
 module EVM.Progress
   ( ProgressOpts(..)
   , withProgress
+  , withProgressLogFromEnv
   , stopStatus
   , emit
   , emitExprs
@@ -132,6 +134,20 @@ withProgress opts act
       withMVar st.lock $ \_ -> do
         writeIORef st.closed True
         mapM_ hClose st.logH
+
+-- | Writes a JSONL log of @act@ to a new file in @$HEVM_PROGRESS_LOG_DIR@, if it
+-- is set. The log state is global, so only one such @act@ may run at a time:
+-- pick a single test with @-p@.
+withProgressLogFromEnv :: MonadUnliftIO m => String -> m a -> m a
+withProgressLogFromEnv label act = liftIO (lookupEnv "HEVM_PROGRESS_LOG_DIR") >>= \case
+  Nothing -> act
+  Just dir -> do
+    n <- liftIO $ atomicModifyIORef' logCounter (\i -> (i + 1, i))
+    withProgress (ProgressOpts (Just (dir <> "/" <> label <> "-" <> show n <> ".jsonl")) False False) act
+
+{-# NOINLINE logCounter #-}
+logCounter :: IORef Int
+logCounter = unsafePerformIO $ newIORef 0
 
 -- | Stops and erases the status line, e.g. before printing results.
 stopStatus :: MonadIO m => m ()
