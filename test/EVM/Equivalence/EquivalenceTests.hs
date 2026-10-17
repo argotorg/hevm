@@ -459,6 +459,14 @@ bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
     -- sstore(1, 0) vs sstore(1, timestamp())
     eq <- eqBytecode False "5f600155" "42600155"
     assertBool "the timestamp may be nonzero" (any (isCex . fst) eq.res)
+  , testCase "eq-calldataload-near-max-offset-is-zero" $ do
+    -- sstore(0, calldataload(2^256-1)) vs sstore(0, 0)
+    eq <- eqBytecode False "7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff355f55" "5f5f55"
+    assertBool "reading past the end of calldata gives zero" (null eq.res)
+  , testCase "eq-calldataload-near-max-offset-does-not-wrap" $ do
+    -- sstore(0, calldataload(2^256-1)) vs sstore(0, shr(8, calldataload(0)))
+    eq <- eqBytecode False "7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff355f55" "5f3560081c5f55"
+    assertBool "the read must not wrap around to the start of calldata" (any (isCex . fst) eq.res)
   , testCase "eq-call-after-same-state-changing-call" $ do
     eq <- eqBytecode True (call "1234" <> pop <> sCall "5678" "5f" <> pop <> revertRet)
                           ("5b" <> call "1234" <> pop <> sCall "5678" "5f" <> pop <> revertRet)

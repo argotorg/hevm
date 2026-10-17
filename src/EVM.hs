@@ -532,11 +532,12 @@ exec1 conf = do
             next >> pushSym vm.state.callvalue
 
         OpCalldataload -> {-# SCC "OpCalldataload" #-} stackOp1 g_verylow $
-        -- Reading past call data length should always return 0. We force this in the concrete case.
-        -- However, symbolic mode relies on `Expr.readWord` which has wrap-around semantics
+        -- Reading past call data length should always return 0, but `Expr.readWord` wraps
+        -- around: a word read from within 31 bytes of 2^256 would see the start of calldata
           \ind -> case (ind, vm.state.calldata) of
             (Lit i, ConcreteBuf bs) | i > (fromIntegral $ BS.length bs) -> Lit 0
-            _ -> Expr.readWord ind vm.state.calldata
+            _ | Just u <- Expr.upperBound ind, u <= maxBound - 31 -> Expr.readWord ind vm.state.calldata
+            _ -> Expr.mul (Expr.lt ind (Lit (maxBound - 30))) (Expr.readWord ind vm.state.calldata)
 
         OpCalldatasize -> {-# SCC "OpCalldatasize" #-}
           limitStack 1 . burn g_base $
