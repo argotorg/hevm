@@ -451,6 +451,14 @@ bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
     -- tload(0) is zero, so this stops in both
     eq <- eqBytecode False "5f5c15600757fe5b00" "00"
     assertBool "transient storage must start empty" (null eq.res)
+  , testCase "eq-block-number-is-symbolic" $ do
+    -- sstore(1, 0) vs sstore(1, number())
+    eq <- eqBytecode False "5f600155" "43600155"
+    assertBool "the block number may be nonzero" (any (isCex . fst) eq.res)
+  , testCase "eq-timestamp-is-symbolic" $ do
+    -- sstore(1, 0) vs sstore(1, timestamp())
+    eq <- eqBytecode False "5f600155" "42600155"
+    assertBool "the timestamp may be nonzero" (any (isCex . fst) eq.res)
   , testCase "eq-call-after-same-state-changing-call" $ do
     eq <- eqBytecode True (call "1234" <> pop <> sCall "5678" "5f" <> pop <> revertRet)
                           ("5b" <> call "1234" <> pop <> sCall "5678" "5f" <> pop <> revertRet)

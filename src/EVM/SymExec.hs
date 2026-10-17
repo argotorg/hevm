@@ -317,6 +317,8 @@ loadEmptySymVM x callvalue cd =
     , caller = SymAddr "caller"
     , origin = SymAddr "origin"
     , coinbase = SymAddr "coinbase"
+    , number = BlockNumber
+    , timestamp = Timestamp
     , blockGaslimit = 0
     , prevRandao = 42069
     })
@@ -338,6 +340,8 @@ loadSymVM x callvalue cd create =
     , caller = SymAddr "caller"
     , origin = SymAddr "origin"
     , coinbase = SymAddr "coinbase"
+    , number = BlockNumber
+    , timestamp = Timestamp
     , blockGaslimit = 0
     , prevRandao = 42069
     , create = create
