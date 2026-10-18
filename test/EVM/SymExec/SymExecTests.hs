@@ -150,6 +150,32 @@ basicTests = testGroup "simple-checks"
     (_, [Cex (_, ctr)]) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
     let b = SMT.getVar ctr "arg2"
     assertBool "b must be 0" (b == 0)
+  , testCase "implied-branch-not-forked" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function f(uint a, uint bound) public pure returns (uint) {
+            require(a >= 7, "first");
+            return g(a, bound);
+          }
+          function g(uint a, uint bound) internal pure returns (uint) {
+            require(a >= bound, "again");
+            return a;
+          }
+        }
+      |]
+      let sig = Just (Sig "f(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])
+          revertData msg = ConcreteBuf $ abiMethod "Error(string)" (AbiTuple (pure (AbiString msg)))
+      -- Bound 7 is implied; bound 8 still needs both sides explored.
+      mapM_ (\(bound, expectedReverts) -> do
+        paths <- executeWithBitwuzla $ \s -> getExpr s c sig ["<symbolic>", bound] defaultVeriOpts
+        let returns = [Expr.readWord (Lit 0) buf | Success _ _ buf _ <- paths]
+            reverts = [buf | Failure _ _ (Revert buf) <- paths]
+        assertEqual ("second require reverts for bound " <> bound) expectedReverts
+          (length $ filter (== revertData "again") reverts)
+        assertEqual "successful path returns the argument" [Var "arg1"] returns
+        assertEqual "all paths return or revert" (length paths) (length returns + length reverts)
+        assertBool "the first require can still fail" (revertData "first" `elem` reverts)
+        ) [("7", 0), ("8", 1)]
   ]
 
 copySliceTests :: TestTree

@@ -51,7 +51,7 @@ prelude =  SMT2 src mempty mempty
     -- transient storage and balance (see PCall)
     <> (fmap SMTCommand
          [ "(declare-fun call_" <> f <> " (Word Word Word Word Buf Word Addr Storage Storage Word) " <> sort <> ")"
-         | (f, sort) <- [("success", "Word"), ("retdata", "Buf"), ("retlen", "Word"), ("world", "Word")] ])
+         | (f, sort) <- [("success", "Word"), ("retdata", "Buf"), ("retlen", "Word"), ("world", "Word"), ("ether", "Word")] ])
   macros = fmap SMTCommand [
     "(define-fun max ((a (_ BitVec 256)) (b (_ BitVec 256))) (_ BitVec 256) (ite (bvult a b) b a))",
     "(define-fun indexWord31 ((w Word)) Byte ((_ extract 7 0) w))",

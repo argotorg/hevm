@@ -45,6 +45,7 @@ instance Probe PartialExec where probe m = (MaxIterationsReached 0 (SymAddr m), 
 instance Probe ContractCode where probe m = (UnknownCode (SymAddr m), [m])
 instance Probe RuntimeCode where probe m = (SymbolicRuntimeCode (V.singleton (IndexWord (Lit 0) (Var m))), [m])
 instance Probe (Maybe (Expr EWord)) where probe m = (Just (Var m), [m])
+instance Probe (Maybe (Expr EWord, Expr EWord)) where probe m = (Just (Var (m <> ".0"), Var (m <> ".1")), [m <> ".0", m <> ".1"])
 instance Probe CallInputs where
   probe m = (CallInputs (Var (f 1)) (Var (f 2)) (Var (f 3)) (Var (f 4)) (AbstractBuf (f 5)) (Var (f 6))
                         (SymAddr (f 7)) (AbstractStore (SymAddr (f 8)) Nothing) (AbstractStore (SymAddr (f 9)) Nothing)

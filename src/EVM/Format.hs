@@ -894,7 +894,7 @@ formatProp x = T.stripEnd $ case x of
     , indent 2 $ T.unlines $
         [ "success: " <> formatExpr success
         , "returndata: " <> formatExpr retdata
-        ] <> maybe [] (\w -> ["world after: " <> formatExpr w]) world <>
+        ] <> maybe [] (\(w, e) -> ["world after: " <> formatExpr w, "ether to the caller: " <> formatExpr e]) world <>
         [ "world: " <> formatExpr i.world
         , "kind: " <> formatExpr i.callKind
         , "target: " <> formatExpr i.target

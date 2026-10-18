@@ -10,13 +10,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Added
 - Small, word-aligned keccak inputs are canonicalized so equivalent mapping
   keys built from memory writes or copies can resolve to the same storage entry.
+- Symbolic execution now avoids forking when simplification shows that
+  the path conditions imply the branch condition.
+- Symbolic jump targets and jump conditions that depend on a subterm with few
+  possible values, e.g. `selector mod n` in jumptable dispatchers or a loop bound
+  limited by an earlier check, are resolved by enumerating those values instead
+  of asking the SMT solver.
 - `hevm equivalence` replays every counterexample concretely and marks it as
   validated, not reproducible, or not replayable. It only reports that the
   contracts do not behave equivalently if a counterexample is validated.
-- A live status line on stderr for `hevm symbolic` and `hevm equivalence`
-  (disable with `--no-progress`), and a JSONL log of interpreter and solver
+- A live status line on stderr for `hevm symbolic`, `hevm equivalence` and
+  `hevm test` (disable with `--no-progress`), with a summary line per finished
+  phase or test that includes its slowest SMT query, and a JSONL log of interpreter and solver
   progress (`--progress-log FILE` or `--verb 3`; `--progress-exprs` or `--verb 4`
   also logs solver expressions).
+- The progress log tells the time a query waited for a solver apart from the
+  time it was solved for, gives the reason a query for multiple solutions gave
+  up, and ends each phase with a summary of where its solver time and forks
+  went. The status line shows queued queries and the program counter with the
+  most solver time.
 - Abstract arithmetic, on by default (disable with `--no-abstract-arith`):
   symbolic multiplication and division are encoded as uninterpreted functions
   constrained by sound algebraic lemmas, and are equated with the native bitvector operations only when the abstract query
@@ -37,8 +49,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error at startup if the selected solver is not installed.
 - The default `--max-buf-size` is now 24 (calldata and returndata of up to
   16 MB) instead of 64, which is still more than gas limits allow.
+- Counterexamples have bold section headings, and `hevm equivalence` shows the
+  result of replaying each one as a coloured tag, as `hevm test` does.
+- `hevm equivalence` replays counterexamples with calls to unknown code by
+  putting code at each callee that returns what the counterexample says, and
+  logs each replay to the progress log.
 
 ## Fixed
+- `hevm equivalence` no longer reports a difference only because one program
+  made a call to unknown code that changed nothing.
+- Symbolic execution starts the transient storage of the called contract empty,
+  instead of with arbitrary values.
+- Symbolic execution treats the block number and timestamp as symbolic instead
+  of 0.
+- Symbolic `CALLDATALOAD` from within 31 bytes of 2^256 gives zero instead of
+  wrapping around to the start of calldata.
+- A call to unknown code moves its value to the callee, and the callee may send
+  the caller ether, in symbolic execution.
+- The concrete replay of equivalence counterexamples compares final balances.
+- The concrete replay of equivalence counterexamples keeps long return data of
+  calls to unknown code compact, instead of running out of memory.
+- A call to unknown code now writes the data it returns to the output region
+  of the call in memory. Before, the region kept its old contents, so code that
+  read the result from there could pass assertions it does not satisfy.
+- `hevm equivalence` no longer crashes printing a counterexample that sets the
+  balance of the contract, and uses that balance when replaying it. The block
+  context of counterexamples is now printed instead of the transaction context.
+- The hash-consing tables are reset once they grow past a size limit, instead of
+  growing without bound after exploration.
 - Symbolic `GAS` readings are now only ordered within a call frame, so a caller
   can have more gas left after a call than its callee had.
 - Calls to unknown code with the same inputs now return the same results, also

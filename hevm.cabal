@@ -214,6 +214,8 @@ executable hevm
   main-is:
     cli.hs
   ghc-options: -threaded "-with-rtsopts=-N -A32m"
+  if flag(devel)
+    ghc-options: -rtsopts
   other-modules:
     Paths_hevm
   autogen-modules:
@@ -279,7 +281,7 @@ common test-common
   import: test-base
   default-language: GHC2021
   if flag(devel)
-    ghc-options: -threaded "-with-rtsopts=-N -A32m"
+    ghc-options: -threaded -rtsopts "-with-rtsopts=-N -A32m"
   build-depends:
     test-utils,
     vector,
@@ -298,6 +300,7 @@ test-suite test
     test.hs
   other-modules:
     EVM.Equivalence.EquivalenceTests
+    EVM.Equivalence.EquivFuzz
     EVM.Expr.ExprTests
     EVM.Expr.Generator
     EVM.Expr.HashConsTests

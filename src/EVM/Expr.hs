@@ -58,6 +58,7 @@ module EVM.Expr
   , readByte
   , readBytes
   , readWord
+  , upperBound
   , maxBytes
   , copySlice
   , canonKeccakBuf
@@ -132,6 +133,7 @@ module EVM.Expr
   , checkLHSConst
   , maybeLitByteSimp
   , maybeLitWordSimp
+  , enumerateViaSmallSubterm
   , maybeLitAddrSimp
   , maybeConcStoreSimp
   ) where
@@ -149,7 +151,7 @@ import Data.DoubleWord (Int256, Word256(Word256), Word128(Word128))
 import Data.List (sort, find)
 import Data.Map qualified as LMap
 import Data.Map.Strict qualified as Map
-import Data.Maybe (mapMaybe, isJust, fromMaybe)
+import Data.Maybe (mapMaybe, isJust, fromMaybe, listToMaybe)
 import Data.Semigroup (Any, Any(..), getAny)
 import Data.Set qualified as Set
 import Data.Typeable
@@ -2148,6 +2150,87 @@ maybeLitWordSimp e = case concKeccakSimpExpr e of
   Lit w -> Just w
   WAddr (LitAddr w) -> Just (into w)
   _ -> Nothing
+
+-- | Finds a subterm of @e@ with at most @limit@ possible values such that
+-- substituting each of them makes @e@ concrete. The values come from the shape
+-- of the subterm (e.g. @x mod n@, as in a jumptable indexed by the selector)
+-- and from bounds that @props@ put on it (e.g. a length checked against a
+-- maximum). Returns the subterm and, for each concrete value of @e@, the
+-- subterm values that produce it.
+enumerateViaSmallSubterm :: Int -> [Prop] -> Expr EWord -> Maybe (Expr EWord, [(W256, [W256])])
+enumerateViaSmallSubterm limit props e0 = listToMaybe $ mapMaybe tryAtom candidates
+  where
+    -- path conditions are stored simplified, so subterms only match the bounds
+    -- on them once @e0@ is in the same normal form
+    e = simplify e0
+    bounds = propBounds props
+    candidates = nubOrd $ foldExpr candidate [] e
+    candidate :: Expr a -> [Expr EWord]
+    candidate a = case asWord a of
+      Just w | Prelude.not (isLitWord w), Just vs <- values w, length vs <= limit -> [w]
+      _ -> []
+    values :: Expr EWord -> Maybe [W256]
+    values w = case (shapeRange w, Map.lookup w bounds) of
+      (Nothing, Nothing) -> Nothing
+      (sr, b) -> do
+        let Bounds lb ub excl = fromMaybe (Bounds 0 maxLit mempty) b
+            lb' = Prelude.max lb (maybe 0 fst sr)
+            ub' = Prelude.min ub (maybe maxLit snd sr)
+        if lb' > ub' then Just []
+        else if ub' - lb' >= fromIntegral limit then Nothing
+        else Just [v | v <- [lb' .. ub'], Prelude.not (Set.member v excl), shapeOk w v]
+    shapeRange :: Expr EWord -> Maybe (W256, W256)
+    shapeRange = \case
+      Mod _ (Lit n) | n > 0 -> Just (0, n - 1)
+      And (Lit m) _ -> Just (0, m)
+      SHR (Lit k) _ | k < 256 -> Just (0, 2 ^ (256 - k) - 1)
+      _ -> Nothing
+    shapeOk :: Expr EWord -> W256 -> Bool
+    shapeOk (And (Lit m) _) v = v .&. m == v
+    shapeOk _ _ = True
+    tryAtom atom = do
+      vs <- values atom
+      res <- mapM (\k -> (,[k]) <$> maybeLitWordSimp (mapExpr (subst atom (Lit k)) e)) vs
+      pure (atom, Map.toList $ Map.fromListWith (flip (++)) res)
+    subst :: Expr EWord -> Expr EWord -> Expr a -> Expr a
+    subst atom k x = case asWordRefl x of
+      Just Refl | x == atom -> k
+      _ -> x
+
+data Bounds = Bounds W256 W256 (Set.Set W256)
+
+-- | Interval and excluded values that @props@ put on word subterms.
+propBounds :: [Prop] -> Map.Map (Expr EWord) Bounds
+propBounds = foldl go mempty
+  where
+    upd t f = Map.alter (Just . f . fromMaybe (Bounds 0 maxLit mempty)) t
+    eqTo t c = upd t (\(Bounds lb ub ex) -> Bounds (Prelude.max lb c) (Prelude.min ub c) ex)
+    notEq t c = upd t (\(Bounds lb ub ex) -> Bounds lb ub (Set.insert c ex))
+    atMost t c = upd t (\(Bounds lb ub ex) -> Bounds lb (Prelude.min ub c) ex)
+    atLeast t c = upd t (\(Bounds lb ub ex) -> Bounds (Prelude.max lb c) ub ex)
+    go m = \case
+      PAnd a b -> go (go m a) b
+      PEq (Lit c) t | Prelude.not (isLitWord t) -> eqTo t c m
+      PEq t (Lit c) | Prelude.not (isLitWord t) -> eqTo t c m
+      PEq (Lit 0) (Xor (Lit c) t) -> eqTo t c m
+      PEq (Lit 0) (Xor t (Lit c)) -> eqTo t c m
+      PNeg (PEq (Lit c) t) | Prelude.not (isLitWord t) -> notEq t c m
+      PNeg (PEq t (Lit c)) | Prelude.not (isLitWord t) -> notEq t c m
+      PNeg (PEq (Lit 0) (Xor (Lit c) t)) -> notEq t c m
+      PNeg (PEq (Lit 0) (Xor t (Lit c))) -> notEq t c m
+      PLEq t (Lit c) -> atMost t c m
+      PLT t (Lit c) | c > 0 -> atMost t (c - 1) m
+      PLEq (Lit c) t -> atLeast t c m
+      PLT (Lit c) t | c < maxLit -> atLeast t (c + 1) m
+      _ -> m
+
+asWordRefl :: Expr a -> Maybe (a :~: EWord)
+asWordRefl e = case exprType e of
+  WordRep -> Just Refl
+  _ -> Nothing
+
+asWord :: Expr a -> Maybe (Expr EWord)
+asWord x = (\Refl -> x) <$> asWordRefl x
 
 maybeLitAddrSimp :: Expr EAddr -> Maybe Addr
 maybeLitAddrSimp (LitAddr a) = Just a

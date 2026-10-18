@@ -106,13 +106,15 @@ newtype CacheEntry = CacheEntry [Prop]
 data MultiData = MultiData
   SMT2
   MultiSol
-  (Chan (Maybe [W256])) -- result channel
+  (IO ()) -- called when a solver takes the query up
+  (Chan (Either TStrict.Text [W256])) -- result channel: the solutions, or why there are none
 
 data SingleData = SingleData
   SMT2
   SMTScript -- refinement: asserted in the same solver and re-checked if the query is sat; empty for none
   (Maybe [Prop])
   (Maybe (TVar Bool)) -- shared abort flag; if another thread sets it, the query is cancelled and its solver killed
+  (IO ()) -- called when a solver takes the query up
   (Chan (SMTResult, SolvePhase)) -- result channel
 
 -- | Which query produced an answer
@@ -168,12 +170,12 @@ supersetAny a bs = any (`isSubsetOf` a) bs
 checkMulti :: SolverGroup -> Err SMT2 -> MultiSol -> IO (Maybe [W256])
 checkMulti (SolverGroup taskq _) smt2 multiSol = do
   if isLeft smt2 then pure Nothing
-  else Progress.timedQuery "multi" ["numBytes" .= multiSol.numBytes, "maxSols" .= multiSol.maxSols]
-         (maybe "gave up" (\vs -> TStrict.pack (show (length vs)) <> " solutions")) $ do
+  else fmap (either (const Nothing) Just) $ Progress.timedQuery "multi" ["numBytes" .= multiSol.numBytes, "maxSols" .= multiSol.maxSols]
+         (either ("gave up: " <>) (\vs -> TStrict.pack (show (length vs)) <> " solutions")) $ \started -> do
     -- prepare result channel
     resChan <- newChan
     -- send task to solver group
-    writeChan taskq (TaskMulti (MultiData (getNonError smt2) multiSol resChan))
+    writeChan taskq (TaskMulti (MultiData (getNonError smt2) multiSol started resChan))
     -- collect result
     readChan resChan
 
@@ -214,11 +216,11 @@ checkSat sg props smt2 = fst <$> checkSat' sg props Nothing mempty smt2
 checkSat' :: SolverGroup -> Maybe [Prop] -> Maybe (TVar Bool) -> SMTScript -> Err SMT2 -> IO (SMTResult, SolvePhase)
 checkSat' (SolverGroup taskq _) props shouldAbort refinement smt2 = do
   if isLeft smt2 then pure (Error $ getError smt2, PhaseNone)
-  else Progress.timedQuery "sat" ["props" .= maybe 0 length props] showRes $ do
+  else Progress.timedQuery "sat" ["props" .= maybe 0 length props] showRes $ \started -> do
     -- prepare result channel
     resChan <- newChan
     -- send task to solver group
-    writeChan taskq (TaskSingle (SingleData (getNonError smt2) refinement props shouldAbort resChan))
+    writeChan taskq (TaskSingle (SingleData (getNonError smt2) refinement props shouldAbort started resChan))
     -- collect result
     readChan resChan
 
@@ -269,50 +271,48 @@ withSolvers solver count timeout maxMemory cont = do
         Nothing -> do
           task <- liftIO $ readChan taskq
           case task of
-            TaskSingle (SingleData _ _ props _ r) | isJust props && supersetAny (fromList (fromJust props)) knownUnsat -> do
+            TaskSingle (SingleData _ _ props _ _ r) | isJust props && supersetAny (fromList (fromJust props)) knownUnsat -> do
               liftIO $ writeChan r (Qed, PhaseNone)
               when conf.debug $ liftIO $ putStrLn "   Qed found via cache!"
               orchestrate taskq cacheq solverSlots knownUnsat fileCounter
             _ -> do
               runTask' <- case task of
-                TaskSingle (SingleData smt2 refinement props shouldAbort r) -> toIO $ getOneSol solver timeout maxMemory smt2 refinement props shouldAbort r cacheq solverSlots fileCounter
-                TaskMulti (MultiData smt2 multiSol r) -> toIO $ getMultiSol solver timeout maxMemory smt2 multiSol r solverSlots fileCounter
+                TaskSingle (SingleData smt2 refinement props shouldAbort started r) -> toIO $ getOneSol solver timeout maxMemory smt2 refinement props shouldAbort started r cacheq solverSlots fileCounter
+                TaskMulti (MultiData smt2 multiSol started r) -> toIO $ getMultiSol solver timeout maxMemory smt2 multiSol started r solverSlots fileCounter
               _ <- liftIO $ forkIO runTask'
               orchestrate taskq cacheq solverSlots knownUnsat (fileCounter + 1)
 
-getMultiSol :: forall m. (MonadIO m, ReadConfig m) => Solver -> Maybe Natural -> Natural -> SMT2 -> MultiSol -> Chan (Maybe [W256]) -> QSem -> Int -> m ()
-getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r solverSlots fileCounter = do
+getMultiSol :: forall m. (MonadIO m, ReadConfig m) => Solver -> Maybe Natural -> Natural -> SMT2 -> MultiSol -> IO () -> Chan (Either TStrict.Text [W256]) -> QSem -> Int -> m ()
+getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol started r solverSlots fileCounter = do
   conf <- readConfig
   let
     maskFromBytesCount k
       | k <= 32 = (2 ^ (8 * k) - 1)
       | otherwise = internalError "Byte length exceeds 256-bit capacity"
+    showN vals = TStrict.pack (show (length vals)) <> " solutions"
     subRun :: SolverInstance -> [W256] -> SMT2 -> Text -> IO ()
     subRun inst vals fullSmt sat = do
       case sat of
         "unsat" -> do
           when conf.debug $ putStrLn $ "No more solutions to query, returning: " <> show vals
-          writeChan r (Just vals)
+          writeChan r (Right vals)
         "timeout" -> do
            when conf.debug $ putStrLn "Timeout inside SMT solver."
-           Progress.emit "multi-stop" ["reason" .= ("timeout" :: TStrict.Text), "solutions" .= length vals]
-           writeChan r Nothing
+           writeChan r (Left $ "timeout after " <> showN vals)
         "unknown" -> do
            when conf.debug $ putStrLn "Unknown result by SMT solver."
-           Progress.emit "multi-stop" ["reason" .= ("unknown" :: TStrict.Text), "solutions" .= length vals]
            dumpUnsolved fullSmt fileCounter conf.dumpUnsolved
-           writeChan r Nothing
+           writeChan r (Left $ "unknown after " <> showN vals)
         "sat" -> do
           if length vals >= multiSol.maxSols then do
             when conf.debug $ putStrLn "Too many solutions to symbolic query."
-            Progress.emit "multi-stop" ["reason" .= ("too many solutions" :: TStrict.Text), "solutions" .= length vals]
-            writeChan r Nothing
+            writeChan r (Left $ "too many solutions (" <> TStrict.pack (show (length vals)) <> ")")
           else do
             mcex <- getModel inst cexvars
             case mcex of
               Nothing -> do
                 when conf.debug $ putStrLn "Solver died while extracting model."
-                writeChan r Nothing
+                writeChan r (Left "solver died while extracting a model")
               Just cex -> case Map.lookup (Var (TStrict.pack multiSol.var)) cex.vars of
                 Just v -> do
                   let hexMask = maskFromBytesCount multiSol.numBytes
@@ -331,20 +331,18 @@ getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r solve
                       subRun inst (maskedVal:vals) newSmt out2
                     err -> do
                       when conf.debug $ putStrLn $ "Error while writing SMT to solver: " <> (T.unpack err)
-                      Progress.emit "multi-stop" ["reason" .= ("solver error: " <> TStrict.take 300 (T.toStrict err)), "solutions" .= length vals]
-                      writeChan r Nothing
+                      writeChan r (Left $ "solver error: " <> TStrict.take 300 (T.toStrict err))
                 Nothing -> internalError $ "variable " <>  multiSol.var <> " not part of model (i.e. cex) ... that's not possible"
         err -> do
           when conf.debug $ putStrLn $ "Error while writing SMT to solver: " <> (T.unpack err)
-          Progress.emit "multi-stop" ["reason" .= ("solver error: " <> TStrict.take 300 (T.toStrict err)), "solutions" .= length vals]
-          writeChan r Nothing
+          writeChan r (Left $ "solver error: " <> TStrict.take 300 (T.toStrict err))
   liftIO $ bracket_
-    (waitQSem solverSlots)
+    (waitQSem solverSlots >> started)
     (signalQSem solverSlots)
     (do
       when conf.dumpQueries $ writeSMT2File smt2 "." (show fileCounter)
       case solver of
-        EmptySolver -> writeChan r Nothing
+        EmptySolver -> writeChan r (Left "no solver")
         _ -> bracket
           (spawnSolver solver timeout maxMemory)
           (stopSolver)
@@ -353,7 +351,7 @@ getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol r solve
             case out of
               Left err -> do
                 when conf.debug $ putStrLn $ "Issue while writing SMT to solver (maybe it got killed)?: " <> (T.unpack err)
-                writeChan r Nothing
+                writeChan r (Left $ "solver error: " <> TStrict.take 300 (T.toStrict err))
               Right _ -> do
                 sat <- sendCommand inst $ SMTCommand "(check-sat)"
                 when conf.dumpQueries $ writeSMT2File smt2 "." (show fileCounter <> "-origquery")
@@ -370,15 +368,16 @@ getOneSol
   -> SMTScript          -- ^ refinement, re-checked in the same solver if the query is sat
   -> Maybe [Prop]       -- ^ props for the UNSAT cache
   -> Maybe (TVar Bool)  -- ^ shared abort flag
+  -> IO ()              -- ^ called when a solver takes the query up
   -> Chan (SMTResult, SolvePhase) -- ^ result channel
   -> TChan CacheEntry   -- ^ UNSAT cache channel
   -> QSem               -- ^ limits concurrent solvers
   -> Int                -- ^ query counter, for dump file names
   -> m ()
-getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props shouldAbort r cacheq solverSlots fileCounter = do
+getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props shouldAbort started r cacheq solverSlots fileCounter = do
   conf <- readConfig
   res <- liftIO $ abortable shouldAbort (Unknown "Query aborted", phaseOf refinement) $ bracket_
-    (waitQSem solverSlots)
+    (waitQSem solverSlots >> started)
     (signalQSem solverSlots)
     (do
       when (conf.dumpQueries) $ do
@@ -466,7 +465,7 @@ getModel inst cexvars = runMaybeT $ do
       storage <- getStore (getValue inst) cexvars.storeReads
       blockctx <- getVars parseBlockCtx (getValue inst) (fmap T.toStrict cexvars.blockContext)
       txctx <- getVars parseTxCtx (getValue inst) (fmap T.toStrict cexvars.txContext)
-      pure $ SMTCex vars addrs buffers storage blockctx txctx
+      pure $ SMTCex vars addrs buffers storage blockctx txctx mempty
 
     -- sometimes the solver might give us back a model for the max read index
     -- that is too high to be a useful cex (e.g. in the case of reads from a

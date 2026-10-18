@@ -18,7 +18,7 @@ import qualified Data.ByteString.Lazy as BS
 import Data.ByteString.Builder (toLazyByteString)
 import qualified Data.ByteString.Char8 as BC
 import Data.DoubleWord (Word256)
-import Data.List (intersperse, intercalate)
+import Data.List (intercalate)
 import Data.Maybe (fromMaybe, mapMaybe, fromJust, isNothing, isJust)
 import Data.Text qualified as T
 import Data.Text.IO qualified as T
@@ -337,17 +337,17 @@ main = do
     Symbolic cFileOpts symbOpts cExecOpts cOpts -> do
       env <- makeEnv cOpts
       root <- getRoot cOpts
-      withCurrentDirectory root $ runEnv env $ withProgress (progressOpts env cOpts True) $ symbCheck cFileOpts symbOpts cExecOpts cOpts
+      withCurrentDirectory root $ runEnv env $ withProgress (progressOpts env cOpts) $ symbCheck cFileOpts symbOpts cExecOpts cOpts
     Equal eqOpts cOpts -> do
       env <- makeEnv cOpts
-      runEnv env $ withProgress (progressOpts env cOpts True) $ equivalence eqOpts cOpts
+      runEnv env $ withProgress (progressOpts env cOpts) $ equivalence eqOpts cOpts
     Test testOpts cOpts -> do
       env <- makeEnv cOpts
       root <- getRoot cOpts
       solver <- getSolver cOpts.solver
       cores <- liftIO $ unsafeInto <$> getNumProcessors
       let solverCount = fromMaybe cores cOpts.numSolvers
-      runEnv env $ withProgress (progressOpts env cOpts False) $ withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
+      runEnv env $ withProgress (progressOpts env cOpts) $ withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
         buildOut <- readBuildOutput root testOpts.projectType
         case buildOut of
           Left e -> liftIO $ do
@@ -357,6 +357,7 @@ main = do
             -- TODO: which functions here actually require a BuildOutput, and which can take it as a Maybe?
             unitTestOpts <- unitTestOptions testOpts cOpts solvers (Just out)
             res <- unitTest unitTestOpts out
+            Progress.stopStatus
             liftIO $ forM_ ((,) <$> cOpts.cacheDir <*> testOpts.number) $ \(dir, fetchedBlock) -> do
               cache <- readMVar (unitTestOpts.sess.sharedCache)
               Fetch.saveCache dir fetchedBlock cache
@@ -366,12 +367,11 @@ main = do
       runEnv env $ launchExec cFileOpts execOpts cExecOpts cOpts
     Version {} ->putStrLn getFullVersion
   where
-    -- the status line is only for commands that print their results at the end
-    progressOpts :: Env -> CommonOptions -> Bool -> ProgressOpts
-    progressOpts env cOpts printsAtEnd = ProgressOpts
+    progressOpts :: Env -> CommonOptions -> ProgressOpts
+    progressOpts env cOpts = ProgressOpts
       { logFile = env.config.progressLog
       , logExprs = env.config.progressExprs
-      , statusLine = printsAtEnd && Prelude.not cOpts.noProgress && Prelude.not cOpts.debug
+      , statusLine = Prelude.not cOpts.noProgress && Prelude.not cOpts.debug
       }
     makeEnv :: CommonOptions -> IO Env
     makeEnv cOpts = do
@@ -468,23 +468,29 @@ equivalence eqOpts cOpts = do
         when anyIssues exitFailure
         putStrLn "No discrepancies found"
       _ -> liftIO $ do
-        T.putStrLn . T.unlines $
-          [ if nValidated > 0
-              then "Not equivalent. The following inputs result in differing behaviours:"
-              else "Possibly not equivalent: none of these inputs could be confirmed by running A and B concretely:"
-          , "" , "-----", ""
-          ] <> (intersperse (T.unlines [ "", "-----" ]) $ fmap formatCexes cexes)
+        T.putStr . T.unlines $ cexHeader (length cexes) nValidated : concatMap (\c -> ["-----", formatCexes c]) cexes
         exitFailure
   where
     decipher = maybe Nothing (hexByteString . strip0x)
     getCexP :: (ProofResult a b, String) -> Maybe (a, String)
     getCexP (Cex c, reason) = Just (c, reason)
     getCexP _ = Nothing
-    formatCexes (cex, reason, replay) = formatCex (AbstractBuf "txdata") Nothing cex <> "Difference: " <> T.pack reason
-      <> "\nConcrete replay: " <> replayTag replay <> case replay of
+    cexHeader :: Int -> Int -> Text
+    cexHeader 1 1 = "Not equivalent. This input results in differing behaviours:"
+    cexHeader _ v | v > 0 = "Not equivalent. These inputs result in differing behaviours:"
+    cexHeader 1 _ = "Possibly not equivalent: the input below could not be confirmed by running A and B concretely:"
+    cexHeader n _ = "Possibly not equivalent: none of these " <> T.pack (show n) <> " inputs could be confirmed by running A and B concretely:"
+    bold t = "\x1b[1m" <> t <> "\x1b[0m"
+    formatCexes (cex, reason, replay) = formatCex (AbstractBuf "txdata") Nothing cex <> bold "Difference:" <> " " <> T.pack reason
+      <> "\n" <> bold "Concrete replay:" <> " " <> replayTagColoured replay <> case replay of
         Validated a b -> "\n  A: " <> a <> "\n  B: " <> b
         NotReproducible a b -> "\n  A: " <> a <> "\n  B: " <> b
         CannotReplay _ -> ""
+    -- as `hevm test` shows its counterexamples
+    replayTagColoured r = case r of
+      Validated {} -> "\x1b[90m[" <> replayTag r <> "]\x1b[0m"
+      NotReproducible {} -> "\x1b[31m[" <> replayTag r <> "]\x1b[0m"
+      CannotReplay _ -> "\x1b[33m[" <> replayTag r <> "]\x1b[0m"
 
 getSolver :: Text -> IO Solver
 getSolver s = case T.unpack s of
