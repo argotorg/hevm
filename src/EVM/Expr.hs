@@ -149,7 +149,7 @@ import Data.Bits qualified (xor)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.DoubleWord (Int256, Word256(Word256), Word128(Word128))
-import Data.List (sort, find)
+import Data.List (sort, sortOn, find)
 import Data.Map qualified as LMap
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe, isJust, fromMaybe, listToMaybe)
@@ -2167,8 +2167,8 @@ maybeLitWordSimp e = case concKeccakSimpExpr e of
 -- and from bounds that @props@ put on it (e.g. a length checked against a
 -- maximum). Returns the subterm and, for each concrete value of @e@, the
 -- subterm values that produce it.
-enumerateViaSmallSubterm :: Int -> [Prop] -> Expr EWord -> Maybe (Expr EWord, [(W256, [W256])])
-enumerateViaSmallSubterm limit props e0 = listToMaybe $ mapMaybe tryAtom candidates
+enumerateViaSmallSubterm :: Int -> [Prop] -> Expr EWord -> Maybe ([Expr EWord], [(W256, [[W256]])])
+enumerateViaSmallSubterm limit props e0 = listToMaybe $ mapMaybe tryAtoms (map pure candidates <> joint)
   where
     -- path conditions are stored simplified, so subterms only match the bounds
     -- on them once @e0@ is in the same normal form
@@ -2198,10 +2198,24 @@ enumerateViaSmallSubterm limit props e0 = listToMaybe $ mapMaybe tryAtom candida
     shapeOk :: Expr EWord -> W256 -> Bool
     shapeOk (And (Lit m) _) v = v .&. m == v
     shapeOk _ _ = True
-    tryAtom atom = do
-      vs <- values atom
-      res <- mapM (\k -> (,[k]) <$> maybeLitWordSimp (mapExpr (subst atom (Lit k)) e)) vs
-      pure (atom, Map.toList $ Map.fromListWith (flip (++)) res)
+    -- several atoms at once, e.g. the keys of a nested mapping slot. Each one's values cover its
+    -- feasible ones, so all combinations cover the feasible assignments; correlated atoms only add
+    -- infeasible combinations. None may occur in another, as substituting it would hide the other.
+    joint =
+      let sized = sortOn (length . snd) [(a, vs) | a <- candidates, Just vs <- [values a]]
+          unnested = [a | (a, _) <- sized, Prelude.not (any (\(b, _) -> b /= a && containsNode (isTerm a) b) sized)]
+      in [as | n <- [2 .. length unnested], let as = Prelude.take n unnested, combos as <= fromIntegral limit]
+    combos :: [Expr EWord] -> Integer
+    combos = product . map (maybe 0 (fromIntegral . length) . values)
+    isTerm :: Expr EWord -> Expr a -> Bool
+    isTerm a x = case asWordRefl x of
+      Just Refl -> x == a
+      _ -> False
+    tryAtoms atoms = do
+      vss <- mapM values atoms
+      res <- mapM (\ks -> (,[ks]) <$> maybeLitWordSimp (foldr (\(a, k) -> mapExpr (subst a (Lit k))) e (zip atoms ks)))
+        (sequence vss)
+      pure (atoms, Map.toList $ Map.fromListWith (flip (++)) res)
     subst :: Expr EWord -> Expr EWord -> Expr a -> Expr a
     subst atom k x = case asWordRefl x of
       Just Refl | x == atom -> k

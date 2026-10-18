@@ -1674,15 +1674,28 @@ enumerateFuzzTests = testGroup "enumerateViaSmallSubterm"
       -- path conditions are stored simplified
       case Expr.enumerateViaSmallSubterm limit (Expr.simplifyProps props) e of
         Nothing -> pure $ label "nothing enumerated" True
-        Just (atom, groups) -> do
-          let ks = concatMap snd groups
-              covered = foldr POr (PBool False) [PAnd (PEq atom (Lit k)) (PEq e (Lit v)) | (v, vks) <- groups, k <- vks]
+        Just (atoms, groups) -> do
+          -- keccak of a symbolic buffer is uninterpreted in SMT, so the values of hashing words
+          -- are checked by evaluation, and only the coverage of the assignments by the solver
+          let hashes = Expr.containsNode (\case Keccak _ -> True; _ -> False) e
+              ks = concatMap snd groups
+              assigned k = foldr PAnd (PBool True) (zipWith (\a v -> PEq a (Lit v)) atoms k)
+              covered = foldr POr (PBool False)
+                [PAnd (assigned k) (if hashes then PBool True else PEq e (Lit v)) | (v, vks) <- groups, k <- vks]
+              -- the subterms are those of the simplified word
+              evaluated = and [Expr.concKeccakSimpExpr (mapExpr (substAll (zip atoms k)) (Expr.simplify e)) == Lit v | (v, vks) <- groups, k <- vks]
           res <- checkSat $ foldr PAnd (PNeg covered) props
           pure $ label (if null groups then "enumerated as infeasible" else "enumerated")
                $ label (if isUnknown res then "solver gave up" else "solver answered")
-               $ counterexample ("subterm: " <> show atom <> "\ngroups: " <> show groups <> "\nresult: " <> show res)
-               $ length ks <= limit && length ks == length (nubOrd ks) && isUnsatOrUnknown res
+               $ label (show (length atoms) <> " subterm(s)" <> if hashes then ", hashed" else "")
+               $ counterexample ("subterms: " <> show atoms <> "\ngroups: " <> show groups <> "\nresult: " <> show res)
+               $ length ks <= limit && length ks == length (nubOrd ks) && isUnsatOrUnknown res && evaluated
   ]
+
+substAll :: [(Expr EWord, W256)] -> Expr a -> Expr a
+substAll m x = case exprType x of
+  WordRep | Just k <- lookup x m -> Lit k
+  _ -> x
 
 equivalenceSanityChecks :: Config -> TestTree
 equivalenceSanityChecks cfg = testGroup "Expr equivalence sanity checks"

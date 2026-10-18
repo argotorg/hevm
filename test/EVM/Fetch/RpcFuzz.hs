@@ -6,6 +6,7 @@ import Control.Concurrent.MVar (modifyMVar_)
 import Control.Monad (forM)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.ST (stToIO)
+import Data.Aeson ((.=))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.IORef (IORef, newIORef, readIORef, atomicModifyIORef')
@@ -23,6 +24,7 @@ import EVM.Effects (App, Env(..), defaultConfig, runEnv)
 import EVM.Expr qualified as Expr
 import EVM.Fetch qualified as Fetch
 import EVM.Format (formatBinary)
+import EVM.Progress qualified as Progress
 import EVM.Solvers (withSolvers, defMemLimit, Solver(..), SolverGroup)
 import EVM.Stepper qualified as Stepper
 import EVM.SymExec (interpret, defaultIterConf, runExpr, noopPathHandler)
@@ -275,16 +277,18 @@ prop_rpcStorage =
   forAllBlind (vectorOf 3 genCalldata) $ \cds -> ioProperty $ do
     unexpected <- newIORef []
     let code = assemble prog
-    runEnv (Env {config = defaultConfig}) $ withSolvers Bitwuzla 1 (Just 5) defMemLimit $ \solvers -> do
+    runEnv (Env {config = defaultConfig}) $ Progress.withProgressLogFromEnv "rpc-fuzz" $
+      withSolvers Bitwuzla 1 (Just 5) defMemLimit $ \solvers -> do
       sess <- mkCachedSession pre bal2
-      truths <- mapM (\cd -> runConcrete (Fetch.oracle solvers Nothing Fetch.noRpc)
+      truths <- Progress.withPhase "concrete" [] (const []) $ mapM (\cd -> runConcrete (Fetch.oracle solvers Nothing Fetch.noRpc)
         (contractWith code (storeOf pre remote) False) [knownRemote2 pre bal2] cd pre) cds
-      fetched <- mapM (\cd -> runConcrete (cachedOracle solvers sess unexpected)
+      fetched <- Progress.withPhase "concrete-rpc" [] (const []) $ mapM (\cd -> runConcrete (cachedOracle solvers sess unexpected)
         (contractWith code (ConcreteStore mempty) True) [] cd pre) cds
       symVm <- liftIO $ stToIO $ makeVm (defaultVMOpts @Symbolic)
         { contract = contractWith code (ConcreteStore mempty) True, address = LitAddr remote
         , calldata = (AbstractBuf "txdata", []) }
-      leaves <- interpret (cachedOracle solvers sess unexpected) defaultIterConf symVm runExpr noopPathHandler
+      leaves <- Progress.withPhase "symbolic" ["program" .= show prog] (\ls -> ["leaves" .= length ls]) $
+        interpret (cachedOracle solvers sess unexpected) defaultIterConf symVm runExpr noopPathHandler
       let symbolic = map (\cd -> sequence (evalSymbolic leaves cd pre)) cds
       unexp <- liftIO $ readIORef unexpected
       let partials = length [() | Nothing <- symbolic]
