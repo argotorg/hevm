@@ -54,6 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   logs each replay to the progress log.
 
 ## Fixed
+- A storage slot fetched via RPC no longer shadows symbolic writes made to it
+  earlier in the same execution.
 - `hevm equivalence` no longer reports a difference only because one program
   made a call to unknown code that changed nothing.
 - Symbolic execution starts the transient storage of the called contract empty,
