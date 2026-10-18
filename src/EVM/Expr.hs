@@ -1925,6 +1925,11 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (Exp (Lit 2) k) = shl k (Lit 1)
     go (Exp a b) = EVM.Expr.exp a b
 
+    -- scaling by literals: without overflow, a*x/b is (a/g)*x/(b/g)
+    go (Div (Mul (Lit a) x) (Lit b))
+      | a /= 0, g <- gcd a b, g > 1, upperWithBounds mempty x <= maxLit `Prelude.div` a
+      = go (Div (go (Mul (Lit (a `Prelude.div` g)) x)) (Lit (b `Prelude.div` g)))
+
     -- simple div/mod/add/sub
     go (Div  o1 o2) = EVM.Expr.div  o1 o2
     go (SDiv o1 o2) = EVM.Expr.sdiv o1 o2

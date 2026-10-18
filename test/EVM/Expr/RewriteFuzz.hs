@@ -431,8 +431,11 @@ genTemplate s shiftAmt = oneof
   , shared
   , Not <$> (elements [Add, Sub, Xor] <*> lit <*> s)
   , Mul <$> lit <*> (Add <$> lit <*> s)
+  , Div <$> (Mul <$> scaling <*> oneof [Mod <$> s <*> scaling, s]) <*> scaling
   ]
   where
+    -- with common factors, as decimal fixed-point scaling has
+    scaling = Lit <$> oneof [(10 ^) <$> choose (0 :: Int, 77), (\a b -> 2 ^ a * 5 ^ b) <$> choose (0 :: Int, 60) <*> choose (0 :: Int, 40)]
     -- one operand twice, as cancellations need
     shared = do
       x <- s

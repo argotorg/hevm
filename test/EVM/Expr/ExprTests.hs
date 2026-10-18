@@ -142,6 +142,15 @@ rewriteRuleTests = testGroup "Rewrite rules"
       let ab = Mul a b
       assertBool "scale and back may overflow"
         (Expr.simplifyProps [PNeg (PEq (Div (Mul (Lit (10 ^ (18 :: Int))) ab) (Lit (10 ^ (18 :: Int)))) ab)] /= [PBool False])
+  , testCase "literal-scaling-cancels" $ do
+      let m = Mod (Var "x") (Lit (10 ^ (18 :: Int)))
+          e = 10 ^ (27 :: Int)
+          down = Div (Mul (Lit e) m) (Lit (10 ^ (30 :: Int)))
+      assertEqual "scale down" (Div m (Lit 1000)) (Expr.simplify down)
+      assertEqual "scale up" (Mul (Lit (10 ^ (12 :: Int))) (Div m (Lit 1000)))
+        (Expr.simplify (Div (Mul (Lit (10 ^ (18 :: Int))) down) (Lit (10 ^ (6 :: Int)))))
+      assertEqual "may overflow" (Div (Mul (Lit e) (Var "x")) (Lit (10 ^ (30 :: Int))))
+        (Expr.simplify (Div (Mul (Lit e) (Var "x")) (Lit (10 ^ (30 :: Int)))))
   , testCase "same-base-offsets" $ do
       let p = Var "p"
           at o = Add (Lit o) p
