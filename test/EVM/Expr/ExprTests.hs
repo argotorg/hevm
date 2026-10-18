@@ -245,8 +245,12 @@ storageTests = testGroup "Storage tests"
         assertEqual "skips a lower field offset" (Var "wanted") (Expr.readStorage' (slot 3) (store 2 3))
         assertEqual "skips a higher field offset" (Var "wanted") (Expr.readStorage' (slot 2) (store 3 2))
     -- keys may be equal, so keccak(acc)+o and keccak(acc2)+o may alias, while distinct
-    -- keccaks are only assumed 256 apart: offsets cluster around that limit
-    , testProperty "readStorage-struct-offsets-equivalence" $ withMaxSuccess 50 $
+    -- keccaks are only assumed 256 apart: offsets cluster around that limit.
+    -- Some queries take about the 1s timeout: unknowns are discarded, but more of
+    -- them than proofs fail the test.
+    , adjustOption (\(QuickCheckMaxRatio _) -> QuickCheckMaxRatio 1) $
+      adjustOption (\(QuickCheckTests _) -> QuickCheckTests 50) $
+      testProperty "readStorage-struct-offsets-equivalence" $
         let genField = (,) <$> elements ["acc", "acc2" :: Text] <*> elements [0, 1, 2, 254, 255, 256, 257 :: W256]
         in forAll (listOf genField) $ \ws -> forAll genField $ \(rk, r) -> ioProperty $ do
           let slot (k, 0) = mappingRead 0 k
