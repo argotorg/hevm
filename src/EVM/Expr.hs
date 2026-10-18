@@ -342,6 +342,32 @@ sar = op2 SAR (\x y ->
 clz :: Expr EWord -> Expr EWord
 clz = op1 CLZ (\x -> if x == 0 then 256 else fromIntegral $ countLeadingZeros x)
 
+-- | Extract a field through masks, ORs and constant left shifts.
+packedField :: W256 -> Int -> Expr EWord -> Maybe (Expr EWord)
+packedField mask offset e
+  | mask /= 0, mask .&. (mask + 1) == 0, offset + width <= 256 = go offset e
+  | otherwise = Nothing
+  where
+    width = popCount mask
+    go :: Int -> Expr EWord -> Maybe (Expr EWord)
+    go k = \case
+      Lit c -> Just $ Lit (mask .&. shiftR c k)
+      Or a b -> or <$> go k a <*> go k b
+      And (Lit c) f ->
+        let visible = mask .&. shiftR c k
+        in if visible == 0 then Just (Lit 0) else and (Lit visible) <$> go k f
+      Mul (Lit c) f | Just j <- log2W c -> shifted k j f
+      SHL (Lit j) f | j < 256 -> shifted k (unsafeInto j) f
+      f | k == 0 -> Just $ and (Lit mask) f
+      _ -> Nothing
+    shifted k j f
+      | j >= k + width = Just (Lit 0)
+      | j <= k = go (k - j) f
+      | otherwise = Nothing
+
+log2W :: W256 -> Maybe Int
+log2W c = if c /= 0 && popCount c == 1 then Just (countTrailingZeros c) else Nothing
+
 -- Props
 
 peq :: (Typeable a) => Expr a -> Expr a -> Prop
@@ -1453,6 +1479,12 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (SLT _ (Lit a)) | a == minLitSigned = Lit 0
     go (SLT (Lit a) _) | a == maxLitSigned = Lit 0
     go (SLT a b) = slt a b
+
+    -- Read a field from a packed word.
+    go (And (Lit m) (Div x (Lit d)))
+      | Just k <- log2W d, Just r <- packedField m k x = r
+    go (And (Lit m) (SHR (Lit k) x))
+      | k < 256, Just r <- packedField m (unsafeInto k) x = r
 
     -- Masking as as per Solidity bit-packing of e.g. function parameters
     go (And (Lit mask1) (Or (And (Lit mask2) _) x)) | (mask1 .&. mask2 == 0)
