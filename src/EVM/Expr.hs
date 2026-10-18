@@ -1930,6 +1930,8 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (Exp (Lit 2) k) = shl k (Lit 1)
     go (Exp a b) = EVM.Expr.exp a b
 
+    go (Div (Div x (Lit a)) (Lit b))
+      | a /= 0, b /= 0 = if toInteger a * toInteger b > toInteger maxLit then Lit 0 else go (Div x (Lit (a * b)))
     -- scaling by literals: without overflow, a*x/b is (a/g)*x/(b/g)
     go (Div (Mul (Lit a) x) (Lit b))
       | a /= 0, g <- gcd a b, g > 1, upperWithBounds mempty x <= maxLit `Prelude.div` a
@@ -1953,7 +1955,7 @@ simplifyProps ps = if cannotBeSat then [PBool False] else simplified
     simplified = untilFixpoint goOne ps
     cannotBeSat = PBool False `elem` simplified
     goOne :: [Prop] -> [Prop]
-    goOne = remRedundantProps . map simplifyProp . boundedMulChecks . constPropagate . flattenProps
+    goOne = remRedundantProps . map simplifyProp . boundedScaling . boundedMulChecks . constPropagate . flattenProps
 
 
 -- | Evaluate the provided proposition down to its most concrete result
@@ -2640,6 +2642,38 @@ boundedMulChecks ps = map (\p -> if Map.null (propBounds [p]) then go p else p) 
     guarded x p q d = ((p == x && q == d) || (p == d && q == x)) && fits (upper x) (upper d)
     fits u v = v == 0 || u <= maxLit `Prelude.div` v
     upper = upperWithBounds bounds
+
+-- | Cancels common factors of the literals in @(a * x) / b@, as 'simplify'
+-- does, where the bounds that the other props put on the subterms of @x@ rule
+-- out overflow. One prop at a time, so the props each rewrite relies on are
+-- still there and the rewritten list is equivalent.
+boundedScaling :: [Prop] -> [Prop]
+boundedScaling = go []
+  where
+    go done [] = reverse done
+    go done (p : rest)
+      | getAny (foldProp (Any . isSite) mempty p) = go (mapProp (rewrite (bounds (done <> rest))) p : done) rest
+      | otherwise = go (p : done) rest
+    isSite :: Expr a -> Bool
+    isSite = \case
+      Div (Mul (Lit _) _) (Lit _) -> True
+      _ -> False
+    rewrite :: Map.Map (Expr EWord) Bounds -> Expr a -> Expr a
+    rewrite bs = \case
+      Div (Mul (Lit a) x) (Lit b)
+        | a /= 0, b /= 0, g <- gcd a b, g > 1, upperWithBounds bs x <= maxLit `Prelude.div` a
+        -> Div (mul (Lit (a `Prelude.div` g)) x) (Lit (b `Prelude.div` g))
+      e -> e
+    -- also through t <= u, a few steps deep
+    bounds ps = iterate (\m -> foldl through m (chains ps)) (propBounds ps) !! 3
+    chains ps = [c | p <- ps, c <- case p of
+                                      PLEq t u -> [(t, u, 0)]
+                                      PLT t u -> [(t, u, 1)]
+                                      _ -> []]
+    through m (t, u, k)
+      | ub <- upperWithBounds m u, ub < maxLit, ub >= k, Prelude.not (isLitWord t)
+      = Map.alter (Just . (\(Bounds lb ub' ex) -> Bounds lb (Prelude.min ub' (ub - k)) ex) . fromMaybe (Bounds 0 maxLit mempty)) t m
+      | otherwise = m
 
 -- | An upper bound on a word, from its structure and the bounds @bs@ put on its
 -- subterms, looking a few levels deep

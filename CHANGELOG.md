@@ -92,7 +92,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checked-multiplication guard or scaling by a literal and back, when bounds from
   the path conditions and from the structure of `x` and `d` rule out overflow.
 - The simplifier cancels common factors of the literals in `(a * x) / b` when
-  the structure of `x` rules out overflow.
+  the structure of `x`, or bounds from the path conditions, rule out overflow,
+  and folds nested divisions by literals.
 - The simplifier uses the condition of an ITE in its branches, and splits a
   comparison of an ITE with one literal branch into cases, so the bounds in
   Solidity's short-circuited `&&` and `||` reach the path conditions.

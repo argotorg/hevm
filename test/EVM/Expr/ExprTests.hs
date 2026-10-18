@@ -151,6 +151,13 @@ rewriteRuleTests = testGroup "Rewrite rules"
         (Expr.simplify (Div (Mul (Lit (10 ^ (18 :: Int))) down) (Lit (10 ^ (6 :: Int)))))
       assertEqual "may overflow" (Div (Mul (Lit e) (Var "x")) (Lit (10 ^ (30 :: Int))))
         (Expr.simplify (Div (Mul (Lit e) (Var "x")) (Lit (10 ^ (30 :: Int)))))
+  , testCase "bounded-literal-scaling" $ do
+      let [x, y, z] = map Var ["x", "y", "z"]
+          scaled = Div (Mul (Lit (10 ^ (18 :: Int))) x) (Lit (10 ^ (6 :: Int)))
+          bound = PLEq y (Lit (2 ^ (128 :: Int)))
+      assertBool "through a chain" $
+        PLT (Mul (Lit (10 ^ (12 :: Int))) x) z `elem` Expr.simplifyProps [bound, PLEq x y, PLT scaled z]
+      assertBool "unbounded" $ PLT scaled z `elem` Expr.simplifyProps [bound, PLT scaled z]
   , testCase "short-circuit-conditions" $ do
       let big v = LT (Lit (2 ^ (128 :: Int) - 1)) (Var v)
           -- require(a <= max && b <= max && c <= max), as solc compiles it

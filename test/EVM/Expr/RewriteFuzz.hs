@@ -527,6 +527,7 @@ genShapedProp n = frequency
   , (2, PNeg <$> p), (2, PAnd <$> p <*> p), (2, POr <$> p <*> p), (1, PImpl <$> p <*> p)
   , (2, overflowCheck)
   , (2, mulOverflowCheck)
+  , (2, scalingUnderBounds)
   , (2, PEq <$> lit <*> ite), (1, PLT <$> lit <*> ite), (1, PLT <$> ite <*> lit)
   , (1, PLEq <$> lit <*> ite), (1, PLEq <$> ite <*> lit)
   ]
@@ -558,6 +559,20 @@ genShapedProp n = frequency
           guardW = Or (Eq x (Div prod d)) (IsZero d)
       g <- elements [POr eq z, POr z eq, eq, PNeg eq, PEq (Lit 0) guardW, PNeg (PEq (Lit 0) guardW)]
       pure $ PAnd (PLEq va ba) (PAnd (PLEq x bx) (PAnd (PLEq d bd) g))
+    -- literal scaling of a variable bounded directly or through another one, around where it overflows
+    scalingUnderBounds = do
+      let var = Var <$> elements varNames
+          power = (10 ^) <$> choose (0 :: Int, 40)
+      x <- var
+      y <- var
+      a <- power
+      b <- power
+      bx <- frequency [(3, (\o -> Expr.maxLit `div` a + o) <$> elements [-1, 0, 1]), (1, (\k -> 2 ^ k - 1) <$> choose (0 :: Int, 256))]
+      op <- elements [PLT, PLEq, PEq]
+      other <- w
+      side <- elements [op (Div (Mul (Lit a) x) (Lit b)) other, op other (Div (Mul (Lit a) x) (Lit b))]
+      bound <- elements [PLEq x (Lit bx), PAnd (PLEq y (Lit bx)) (PLEq x y), PAnd (PLT y (Lit bx)) (PLT x y)]
+      pure $ PAnd bound side
     w = genShapedWord (n `div` 2)
     p = genShapedProp (n `div` 2)
 
