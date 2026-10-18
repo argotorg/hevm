@@ -451,7 +451,8 @@ data Run = Run
   }
 
 sameRun :: Run -> Run -> Bool
-sameRun x y = (x.outcome, x.store, x.balances) == (y.outcome, y.store, y.balances)
+sameRun x y = (x.outcome, nonZero x.store, x.balances) == (y.outcome, nonZero y.store, y.balances)
+  where nonZero = fmap (Map.filter (/= 0)) -- a slot written with 0 is the same as an unwritten one
 
 showRun :: Run -> String
 showRun x = show x.outcome <> " " <> show x.store <> " " <> show (Map.toList x.balances)
