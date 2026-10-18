@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keys built from memory writes or copies can resolve to the same storage entry.
 - Storage reads resolve concrete keccak slots, including nested hashes and
   literal offsets, when comparing writes or looking up a concrete store.
+- Keccak equality and storage reads now use known differences in input lengths
+  or words to rule out aliases, including struct offsets below 256, under the
+  existing keccak assumptions.
 - Symbolic execution now avoids forking when simplification shows that
   the path conditions imply the branch condition.
 - Symbolic jump targets and jump conditions that depend on a subterm with few
