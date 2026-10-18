@@ -238,6 +238,32 @@ storageTests = testGroup "Storage tests"
         (Expr.decomposeStorage $ SLoad (arrElem 2 (Var "i"))
           (SStore (Lit 0) (Var "a") (SStore (arrZero 2) (Lit 1) emptyStore)))
     , concreteKeccakStorageTests
+    , testCase "readStorage-struct-field-offsets" $ do
+        let slot o = Add (Lit o) (mappingRead 0 "acc")
+            store a b = SStore (slot a) (Var "other")
+              (SStore (slot b) (Var "wanted") (AbstractStore (SymAddr "c") Nothing))
+        assertEqual "skips a lower field offset" (Var "wanted") (Expr.readStorage' (slot 3) (store 2 3))
+        assertEqual "skips a higher field offset" (Var "wanted") (Expr.readStorage' (slot 2) (store 3 2))
+    -- keys may be equal, so keccak(acc)+o and keccak(acc2)+o may alias, while distinct
+    -- keccaks are only assumed 256 apart: offsets cluster around that limit
+    , testProperty "readStorage-struct-offsets-equivalence" $ withMaxSuccess 50 $
+        let genField = (,) <$> elements ["acc", "acc2" :: Text] <*> elements [0, 1, 2, 254, 255, 256, 257 :: W256]
+        in forAll (listOf genField) $ \ws -> forAll genField $ \(rk, r) -> ioProperty $ do
+          let slot (k, 0) = mappingRead 0 k
+              slot (k, o) = Add (Lit o) (mappingRead 0 k)
+              base = AbstractStore (SymAddr "c") Nothing
+              writes = zip ws [Var "v0", Var "v1", Var "v2", Var "v3", Var "v4", Var "v5"]
+              store = foldr (\(s, v) acc -> SStore (slot s) v acc) base writes
+              rslot = slot (rk, r)
+              simp = Expr.readStorage' rslot store
+              (above, rest) = break ((== (rk, r)) . fst) writes
+              expected = case rest of
+                (_, v) : _ -> v
+                [] -> SLoad rslot base
+              dist a b = if a > b then a - b else b - a
+              resolvable = all (\((_, o), _) -> o /= r && dist o r < 256) above
+          res <- checkSatWith equivConfig (SLoad rslot store ./= simp)
+          pure $ counterexample (show res) $ isQed res .&&. (not resolvable .||. simp === expected)
   ]
   where
     errorMsg = "Storage read expression not simplified correctly"
