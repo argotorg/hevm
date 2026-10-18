@@ -19,17 +19,21 @@ import Control.Exception (evaluate)
 import Control.Monad.IO.Unlift (MonadIO, MonadUnliftIO, toIO, withRunInIO)
 import Control.Monad.Operational qualified as Operational
 import Control.Monad.ST (RealWorld, stToIO, ST)
-import Control.Monad.State.Strict (liftIO, runStateT)
+import Control.Monad.State.Strict (liftIO, runStateT, get)
+import Data.Bits (shiftR)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.DoubleWord (Word256)
-import Data.Foldable (length, foldl', foldr)
+import Data.Either (fromRight, rights)
+import Data.Foldable (length, foldl', foldr, toList)
 import Data.List (sortBy, sort)
 import Data.List.NonEmpty qualified as NE
 import Data.Maybe (fromMaybe, listToMaybe, mapMaybe, catMaybes)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Map.Merge.Strict qualified as Map
+import Data.Sequence (Seq)
+import Data.Sequence qualified as Seq
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Aeson ((.=))
@@ -51,7 +55,7 @@ import Options.Generic (ParseField, ParseFields, ParseRecord)
 import Text.Printf (printf)
 import Witch (into, unsafeInto)
 
-import EVM (makeVm, abstractContract, initialContract, getCodeLocation, isValidJumpDest, defaultVMOpts)
+import EVM (makeVm, abstractContract, initialContract, getCodeLocation, isValidJumpDest, defaultVMOpts, exec1, isPrecompileAddr, isPrecompileAddr')
 import EVM.Exec (exec)
 import EVM.Fetch qualified as Fetch
 import EVM.ABI
@@ -313,6 +317,8 @@ loadEmptySymVM x callvalue cd =
     , caller = SymAddr "caller"
     , origin = SymAddr "origin"
     , coinbase = SymAddr "coinbase"
+    , number = BlockNumber
+    , timestamp = Timestamp
     , blockGaslimit = 0
     , prevRandao = 42069
     })
@@ -334,6 +340,8 @@ loadSymVM x callvalue cd create =
     , caller = SymAddr "caller"
     , origin = SymAddr "origin"
     , coinbase = SymAddr "coinbase"
+    , number = BlockNumber
+    , timestamp = Timestamp
     , blockGaslimit = 0
     , prevRandao = 42069
     , create = create
@@ -550,8 +558,8 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
         interpretInternal t { vm = vm', stepper = (k r) }
       Stepper.Fork (PleaseRunAll vals continue) -> do
         when (length vals < 2) $ internalError "PleaseRunAll requires at least 2 branches"
-        Progress.emit "fork" [ "pc" .= vm.state.pc, "addr" .= T.pack (show vm.state.contract)
-                             , "branches" .= length vals, "values" .= map (T.pack . show) (take 20 vals) ]
+        Progress.fork (T.pack (show vm.state.contract)) vm.state.pc
+          ["branches" .= length vals, "values" .= map (T.pack . show) (take 20 vals)]
         frozen <- liftIO $ stToIO $ freezeVM vm
         let newDepth = vm.exploreDepth+1
         runOne frozen newDepth vals
@@ -574,7 +582,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
             runOne frozen newDepth rest
           runOne _ _ [] = internalError "unreachable"
       Stepper.Fork (PleaseRunBoth continue) -> do
-        Progress.emit "fork" ["pc" .= vm.state.pc, "addr" .= T.pack (show vm.state.contract), "branches" .= (2 :: Int)]
+        Progress.fork (T.pack (show vm.state.contract)) vm.state.pc ["branches" .= (2 :: Int)]
         conf <- readConfig
         frozen <- liftIO $ stToIO $ freezeVM vm
         let newDepth = vm.exploreDepth+1
@@ -1086,48 +1094,47 @@ replayEqCex :: App m => SolverGroup -> Bool -> ByteString -> ByteString -> Expr 
 replayEqCex solvers create codeA codeB cd cex
   | create = pure $ CannotReplay "contract creation is not replayed"
   | Just (_, len) <- Map.lookup cd cex.buffers >>= zeroTail = pure $ CannotReplay $ "calldata of " <> T.pack (show len) <> " bytes"
+  | Left why <- stubs = pure $ CannotReplay why
+  | isPrecompileAddr entry = pure $ CannotReplay "the model puts the contract at a precompile address"
   | otherwise = case cexCalldata cd cex of
       Nothing -> pure $ CannotReplay "calldata is not concrete"
       Just calldata -> do
-        a <- run codeA calldata
-        b <- run codeB calldata
+        Progress.emit "replay-stubs" [ "calls" .= map logCall (rights cex.unknownCalls) ]
+        a <- run "A" codeA calldata
+        b <- run "B" codeB calldata
         pure $ case (a, b) of
           (Left e, _) -> CannotReplay e
           (_, Left e) -> CannotReplay e
-          (Right ra, Right rb) -> (if ra == rb then NotReproducible else Validated) (outcome ra) (outcome rb)
+          (Right ra, Right rb) -> (if ra == rb then NotReproducible else Validated) (outcome rb ra) (outcome ra rb)
   where
-    addr name def = maybe def LitAddr (Map.lookup (SymAddr name) cex.addrs)
-    entry = addr "entrypoint" (LitAddr 0xacab)
-    ctx k m = Map.findWithDefault 0 k m
-    store = ConcreteStore $ Map.findWithDefault mempty (SymAddr "entrypoint") cex.store
-    run code calldata = do
-      vm <- liftIO $ stToIO $ makeVm $ (defaultVMOpts @Concrete)
-        { contract = (initialContract (RuntimeCode (ConcreteRuntimeCode code))) { storage = store, origStorage = store }
-        , calldata = (ConcreteBuf calldata, [])
-        , value = Lit (ctx TxValue cex.txContext)
-        , address = entry
-        , caller = addr "caller" (LitAddr 0xcafe0001)
-        , origin = addr "origin" (LitAddr 0xcafe0002)
-        , coinbase = addr "coinbase" (LitAddr 0)
-        , timestamp = Lit (ctx Timestamp cex.blockContext)
-        , number = Lit (ctx BlockNumber cex.blockContext)
-        , gas = 0xffffffffffffffff
-        , gaslimit = 0xffffffffffffffff
-        , prevRandao = 42069
-        }
-      end <- Stepper.interpret (Fetch.oracle solvers Nothing Fetch.noRpc) vm Stepper.runFully
+    entry = eqCexEntry cex
+    stubs = stubAccounts entry cex.unknownCalls
+    logCall m = JSON.object
+      [ "callee" .= T.pack (show m.callee), "calldata" .= showBytes (BS.take 256 m.calldata)
+      , "success" .= m.success, "returndata" .= showBytes (BS.take 256 m.returndata), "returndataLength" .= m.returndataLength ]
+    run :: App m => Text -> ByteString -> ByteString -> m (Either Text (Either EvmError (Expr Buf), Either Text (Map W256 W256), Map (Expr EAddr) W256))
+    run label code calldata = do
+      vm <- liftIO $ stToIO $ makeVm $ eqReplayVmOpts cex (fromRight [] stubs) code calldata
+      conf <- readConfig
+      (steps, lastSteps, end) <- Stepper.interpret (Fetch.oracle solvers Nothing Fetch.noRpc) vm (runTraced conf 32)
+      Progress.emit "replay-run"
+        [ "program" .= label, "result" .= T.pack (show end.result), "steps" .= steps
+        , "trail" .= [(showAddr a, pc) | (a, pc) <- toList lastSteps] ]
       let finalStore = case (.storage) <$> Map.lookup entry end.env.contracts of
             Just (ConcreteStore m) -> Right m
             s -> Left (T.pack (show s))
+          balances = Map.mapMaybe (\c -> case c.balance of Lit v -> Just v; _ -> Nothing) end.env.contracts
       pure $ case end.result of
-        Just (VMSuccess out) -> Right (Right out, finalStore)
-        Just (VMFailure e) -> Right (Left e, finalStore)
+        Just (VMSuccess out) -> Right (Right out, finalStore, balances)
+        Just (VMFailure e) -> Right (Left e, finalStore, balances)
         r -> Left $ "concrete run did not finish: " <> T.pack (show r)
-    outcome (res, st) = T.intercalate ", " $ case res of
+    -- the balances are shown where they differ from the other program's
+    outcome (_, _, otherBals) (res, st, bals) = T.intercalate ", " $ (case res of
         Right (ConcreteBuf bs) -> ["Return " <> showBytes bs] <> storage
         Right _ -> ["Return (symbolic data)"] <> storage
         Left (Revert (ConcreteBuf bs)) -> ["Revert " <> showRevertData bs]
-        Left e -> [T.pack (show e)]
+        Left e -> [T.pack (show e)])
+      <> ["balance " <> showAddr a <> "=" <> showW v | (a, v) <- Map.toList bals, Map.lookup a otherBals /= Just v]
       where
         storage = case st of
           Right m | Map.null m -> []
@@ -1136,6 +1143,139 @@ replayEqCex solvers create codeA codeB cd cex
           Left _ -> ["storage symbolic"]
         showW :: W256 -> Text
         showW = T.pack . show
+
+    -- the derived Show of an Expr EAddr would print "LitAddr 0x..."
+    showAddr = \case
+      LitAddr a -> T.pack (show a)
+      a -> T.pack (show a)
+
+eqCexEntry :: SMTCex -> Expr EAddr
+eqCexEntry cex = maybe (LitAddr 0xacab) LitAddr (Map.lookup (SymAddr "entrypoint") cex.addrs)
+
+-- | The concrete VM 'replayEqCex' runs @code@ in, set up like 'loadSymVM' with the model's values
+eqReplayVmOpts :: SMTCex -> [(Expr EAddr, Contract)] -> ByteString -> ByteString -> VMOpts Concrete
+eqReplayVmOpts cex others code calldata = (defaultVMOpts @Concrete)
+  { contract = set #balance (Lit (ctx (Balance (SymAddr "entrypoint")) cex.txContext))
+      (initialContract (RuntimeCode (ConcreteRuntimeCode code))) { storage = store, origStorage = store }
+  , otherContracts = others
+  , calldata = (ConcreteBuf calldata, [])
+  , value = Lit (ctx TxValue cex.txContext)
+  , address = eqCexEntry cex
+  , caller = addr "caller" (LitAddr 0xcafe0001)
+  , origin = addr "origin" (LitAddr 0xcafe0002)
+  , coinbase = addr "coinbase" (LitAddr 0)
+  , timestamp = Lit (ctx Timestamp cex.blockContext)
+  , number = Lit (ctx BlockNumber cex.blockContext)
+  , gas = 0xffffffffffffffff
+  , gaslimit = 0xffffffffffffffff
+  , prevRandao = 42069
+  }
+  where
+    addr name def = maybe def LitAddr (Map.lookup (SymAddr name) cex.addrs)
+    ctx k m = Map.findWithDefault 0 k m
+    store = ConcreteStore $ Map.findWithDefault mempty (SymAddr "entrypoint") cex.store
+
+-- | 'Stepper.runFully' that also counts the steps and keeps the code address and
+-- pc of the last @n@ of them
+runTraced :: Config -> Int -> Stepper Concrete (Int, Seq (Expr EAddr, Int), VM Concrete)
+runTraced conf n = go 0 mempty
+  where
+    go steps lastSteps = do
+      (steps', lastSteps', vm) <- Stepper.evm (stepAll steps lastSteps)
+      case vm.result of
+        Just (HandleEffect (Query q)) -> Stepper.wait q >> go steps' lastSteps'
+        _ -> pure (steps', lastSteps', vm)
+    stepAll !steps !lastSteps = do
+      vm <- get
+      case vm.result of
+        Nothing -> do
+          exec1 conf
+          stepAll (steps + 1) (Seq.drop (Seq.length lastSteps + 1 - n) (lastSteps Seq.|> (vm.state.codeContract, vm.state.pc)))
+        Just _ -> pure (steps, lastSteps, vm)
+
+-- | The calls to unknown code in @props@, with the values the model gives them
+modelUnknownCalls :: SMTCex -> [Prop] -> [Either Text UnknownCall]
+modelUnknownCalls cex = concatMap pcalls
+  where
+    pcalls = \case
+      PAnd a b -> pcalls a <> pcalls b
+      PCall i ok out _ -> [modelCall i ok out]
+      _ -> []
+    modelCall i ok out = do
+      callee <- concreteWord "target" i.target
+      inLen <- concreteWord "calldata length" i.callDataLen
+      calldata <- concreteBytes "calldata" inLen i.callData
+      okWord <- concreteWord "success flag" ok
+      outLen <- concreteWord "returndata length" (Expr.bufLength out)
+      returndata <- compactBytes "returndata" outLen out
+      pure UnknownCall { callee = truncateToAddr callee, calldata, success = okWord /= 0, returndata, returndataLength = unsafeInto outLen }
+    inModel :: Expr a -> Err (Expr a)
+    inModel e = Expr.concKeccakSimpExpr <$> defaultSymbolicValues (subModel cex e)
+    concreteWord :: Text -> Expr EWord -> Either Text W256
+    concreteWord what e = case inModel e of
+      Right (Lit w) -> Right w
+      _ -> noModel what
+    concreteBytes :: Text -> W256 -> Expr Buf -> Either Text ByteString
+    concreteBytes what len e = case inModel e of
+      -- a model can pick lengths like 2^255; don't allocate them
+      Right (ConcreteBuf bs) | len <= 2 ^ (24 :: Int) ->
+        -- a ConcreteBuf reads zero past its end
+        let n = unsafeInto len in Right $ BS.take n (bs <> BS.replicate (n - BS.length bs) 0)
+      _ -> noModel what
+    noModel what = Left $ "the " <> what <> " of a call to unknown code has no concrete model"
+    -- the solver often makes return data 16 MB long, too much to keep for every
+    -- call, so only what the model writes over a zero base is kept
+    compactBytes :: Text -> W256 -> Expr Buf -> Either Text ByteString
+    compactBytes what len = \case
+      b@(AbstractBuf _) | len <= 2 ^ (24 :: Int), Just (EVM.Types.Comp c) <- Map.lookup b cex.buffers, Just ws <- written mempty c ->
+        Right $ BS.dropWhileEnd (== 0) $ BS.pack [Map.findWithDefault 0 i ws | i <- takeWhile (< len) [0 .. maybe 0 fst (Map.lookupMax ws)]]
+      e -> BS.dropWhileEnd (== 0) <$> concreteBytes what len e
+    -- the outermost write to an index is the last one
+    written ws = \case
+      Write byte idx next -> written (Map.insertWith (\_ old -> old) idx byte ws) next
+      Base 0 _ -> Just ws
+      _ -> Nothing
+
+-- | Accounts at the callees of the unknown calls, whose code gives each call the
+-- answer the model gives it
+stubAccounts :: Expr EAddr -> [Either Text UnknownCall] -> Either Text [(Expr EAddr, Contract)]
+stubAccounts entry calls = do
+  models <- sequence calls
+  let byCallee = Map.fromListWith (flip (<>)) [(m.callee, [(m.calldata, (m.success, m.returndata, m.returndataLength))]) | m <- models]
+  forM (Map.toList byCallee) $ \(a, answers) -> do
+    when (isPrecompileAddr' a) $ Left $ "a call to unknown code goes to precompile " <> T.pack (show a)
+    when (LitAddr a == entry) $ Left "a call to unknown code goes to the called contract itself"
+    -- a state-changing call in between can give equal calls different results
+    answerByCalldata <- forM (Map.toList (Map.fromListWith (flip (<>)) [(i, [r]) | (i, r) <- answers])) $ \case
+      (i, r : rest) | all (== r) rest -> Right (i, r)
+      _ -> Left $ "the model answers the same call to " <> T.pack (show a) <> " differently"
+    pure (LitAddr a, initialContract (RuntimeCode (ConcreteRuntimeCode (stubCode answerByCalldata))))
+
+-- | Code that answers each calldata with its returndata, by RETURN if the call
+-- succeeds and REVERT if not, and reverts on any other calldata. A returndata is
+-- given up to its last nonzero byte, and its length. Calldata is matched by its
+-- hash, which fits in one PUSH32 whatever its length. All jump targets and
+-- offsets are PUSH4s, so every piece has a fixed size and they can be computed
+-- before the code is assembled.
+stubCode :: [(ByteString, (Bool, ByteString, Int))] -> ByteString
+stubCode answers = mconcat $ [hashCalldata] <> zipWith dispatch answers answerPCs <> [noMatch]
+  <> zipWith answer answers returndataOffsets <> [out | (_, (_, out, _)) <- answers]
+  where
+    -- CALLDATACOPY(0, 0, CALLDATASIZE), KECCAK256(0, CALLDATASIZE)
+    hashCalldata = BS.pack [0x36, 0x60, 0, 0x60, 0, 0x37, 0x36, 0x60, 0, 0x20]
+    -- DUP1 PUSH32 hash EQ PUSH4 dest JUMPI: 41 bytes
+    dispatch (i, _) dest = BS.pack [0x80, 0x7f] <> keccakBytes i <> BS.pack [0x14, 0x63] <> be32 dest <> BS.pack [0x57]
+    noMatch = BS.pack [0x60, 0, 0x60, 0, 0xfd]
+    -- JUMPDEST, CODECOPY(CALLDATASIZE, off, size), RETURN(CALLDATASIZE, len) or
+    -- REVERT(CALLDATASIZE, len): 20 bytes. Past the copy of the calldata, memory is zero.
+    answer (_, (ok, out, len)) off = BS.pack [0x5b, 0x63] <> be32 (BS.length out) <> BS.pack [0x63] <> be32 off
+      <> BS.pack [0x36, 0x39, 0x63] <> be32 len <> BS.pack [0x36, if ok then 0xf3 else 0xfd]
+    n = length answers
+    answersStart = BS.length hashCalldata + 41 * n + BS.length noMatch
+    answerPCs = [answersStart + 20 * k | k <- [0 .. n - 1]]
+    returndataOffsets = scanl (+) (answersStart + 20 * n) [BS.length out | (_, (_, out, _)) <- answers]
+    be32 :: Int -> ByteString
+    be32 x = BS.pack [fromIntegral (x `shiftR` k) | k <- [24, 16, 8, 0]]
 
 -- | Replays every counterexample, as a phase of its own in the progress log.
 replayEqCexes :: App m => SolverGroup -> Bool -> ByteString -> ByteString -> Expr Buf -> [(SMTCex, String)] -> m [(SMTCex, String, CexReplay)]
@@ -1240,6 +1380,9 @@ equivalenceCheck' solvers sess branchesA branchesB create = do
            res <- wrap $ do
              Progress.setWorker ["phase" .= ("check-pairs" :: Text), "pair" .= i, "of" .= total, "props" .= Set.size props]
              r <- env $ checkSatWithProps solvers (Set.toList props)
+                    <&> \case
+                      Cex c -> Cex c { unknownCalls = modelUnknownCalls c (Set.toList props) }
+                      other -> other
              Progress.clearWorker
              Progress.phaseTick
              pure r
@@ -1335,15 +1478,21 @@ equivalenceCheck' solvers sess branchesA branchesB create = do
         _ -> internalError $ "Symbolic code returned from constructor." <> " A: " <> show simpA <> " B: " <> show simpB
 
     statesDiffer :: Map (Expr EAddr) (Expr EContract) -> Map (Expr EAddr) (Expr EContract) -> Prop
-    statesDiffer aState bState =
-      case aState == bState of
-        True -> PBool False
-        False ->  if Set.fromList (Map.keys aState) /= Set.fromList (Map.keys bState)
+    statesDiffer aState bState
+      | aState == bState = PBool False
+      | otherwise = case sequence (Map.merge (Map.mapMissing (\_ c -> (c,) <$> untouched c))
+                                             (Map.mapMissing (\_ c -> (,c) <$> untouched c))
+                                             (Map.zipWithMatched (\_ x y -> Just (x, y))) aState bState) of
           -- TODO: consider possibility of aliased symbolic addresses
-          then PBool True
-          else let
-            merged = (Map.merge Map.dropMissing Map.dropMissing (Map.zipWithMatched (\_ x y -> (x,y))) aState bState)
-          in Map.foldl' (\a (ac, bc) -> a .|| contractsDiffer ac bc) (PBool False) merged
+          Nothing -> PBool True
+          Just merged -> Map.foldl' (\a (ac, bc) -> a .|| contractsDiffer ac bc) (PBool False) merged
+      where
+        -- a call to unknown code adds its callee to the state of only the program
+        -- that made it; the other program sees the callee as it was before
+        untouched :: Expr EContract -> Maybe (Expr EContract)
+        untouched = \case
+          C (UnknownCode k) _ _ _ _ -> Just (C (UnknownCode k) (AbstractStore k Nothing) (ConcreteStore mempty) (Balance k) Nothing)
+          _ -> Nothing
 
     contractsDiffer :: Expr EContract -> Expr EContract -> Prop
     contractsDiffer ac bc = let
@@ -1400,8 +1549,8 @@ showBuffer buf cex = case Map.lookup buf cex.buffers of
     Just (EVM.Types.Comp _) -> internalError "CompressedBuf returned from collapse"
 
 formatCex :: Expr Buf -> Maybe Sig -> SMTCex -> Text
-formatCex cd sig m@(SMTCex _ addrs _ store blockContext txContext) = T.unlines $
-  [ "Calldata:", indent 2 cd' ]
+formatCex cd sig m@(SMTCex _ addrs _ store blockContext txContext _) = T.unlines $
+  [ bold "Calldata:", indent 2 cd' ]
   <> storeCex
   <> txCtx
   <> blockCtx
@@ -1424,7 +1573,7 @@ formatCex cd sig m@(SMTCex _ addrs _ store blockContext txContext) = T.unlines $
     storeCex
       | Map.null store = []
       | otherwise =
-          [ "Storage:"
+          [ bold "Storage:"
           , indent 2 $ T.unlines $ Map.foldrWithKey (\key val acc ->
               ("Addr " <> (T.pack . show $ key)
                 <> ": " <> (T.pack $ show (Map.toList val))) : acc
@@ -1435,7 +1584,7 @@ formatCex cd sig m@(SMTCex _ addrs _ store blockContext txContext) = T.unlines $
     txCtx
       | Map.null txContext = []
       | otherwise =
-        [ "Transaction Context:"
+        [ bold "Transaction Context:"
         , indent 2 $ T.unlines $ Map.foldrWithKey (\key val acc ->
             (showTxCtx key <> ": " <> (T.pack $ show val)) : acc
           ) mempty (filterSubCtx txContext)
@@ -1445,24 +1594,26 @@ formatCex cd sig m@(SMTCex _ addrs _ store blockContext txContext) = T.unlines $
     addrsCex
       | Map.null addrs = []
       | otherwise =
-          [ "Addrs:"
+          [ bold "Addrs:"
           , indent 2 $ T.unlines $ Map.foldrWithKey (\key val acc ->
               ((T.pack . show $ key) <> ": " <> (T.pack $ show val)) : acc
             ) mempty addrs
           ]
+
+    bold :: Text -> Text
+    bold t = "\x1b[1m" <> t <> "\x1b[0m"
 
     -- strips the frame arg from frame context vars to make them easier to read
     showTxCtx :: Expr EWord -> Text
     showTxCtx (TxValue) = "TxValue"
     showTxCtx x = T.pack $ show x
 
-    -- strips all frame context that doesn't come from the top frame
     filterSubCtx :: Map (Expr EWord) W256 -> Map (Expr EWord) W256
     filterSubCtx = Map.filterWithKey go
       where
         go :: Expr EWord -> W256 -> Bool
         go (TxValue) _ = True
-        go (Balance {}) _ = internalError "TODO: BALANCE"
+        go (Balance {}) _ = True
         -- gas readings are produced by the run, not part of its input
         go (Gas {}) _ = False
         go _ _ = False
@@ -1471,10 +1622,10 @@ formatCex cd sig m@(SMTCex _ addrs _ store blockContext txContext) = T.unlines $
     blockCtx
       | Map.null blockContext = []
       | otherwise =
-        [ "Block Context:"
+        [ bold "Block Context:"
         , indent 2 $ T.unlines $ Map.foldrWithKey (\key val acc ->
             (T.pack $ show key <> ": " <> show val) : acc
-          ) mempty txContext
+          ) mempty blockContext
         ]
 
 prettyBuf :: Expr Buf -> Text

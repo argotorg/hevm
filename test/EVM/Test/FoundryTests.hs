@@ -150,6 +150,9 @@ tests = testGroup "Foundry tests"
     , test "Mapping-Decomposition-Fail" $ do
         let testFile = "test/contracts/fail/mappingDecomposition.sol"
         executeSingleMethod testFile "prove_written_is_zero" >>= assertEqualM "written mapping read must falsify" (False, True)
+    , test "Packed-Storage-Fields" $ do
+        let testFile = "test/contracts/pass/packedStorageFields.sol"
+        executeSingleMethod testFile "prove_read_back" >>= assertEqualM "packed fields retain their values" (True, True)
     , test "Array-Mapping-Same-Slot" $ do
         let testFile = "test/contracts/pass/arrayMappingSameSlot.sol"
         executeSingleMethod testFile "prove_array_write_not_read" >>= assertEqualM "array write is not a mapping write" (True, True)

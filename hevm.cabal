@@ -300,6 +300,8 @@ test-suite test
     test.hs
   other-modules:
     EVM.Equivalence.EquivalenceTests
+    EVM.Equivalence.EquivFuzz
+    EVM.Fetch.RpcFuzz
     EVM.Expr.ExprTests
     EVM.Expr.Generator
     EVM.Expr.HashConsTests
