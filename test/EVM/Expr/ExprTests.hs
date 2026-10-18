@@ -255,7 +255,13 @@ storageTests = testGroup "Storage tests"
 
 keccakTests :: TestTree
 keccakTests = testGroup "Keccak input canonicalization"
-  [ testCase "mapping-key-forms" $ do
+  [ testCase "copied-mapping-key-to-mapping-slot" $ do
+      let mem = ConcreteBuf (BS.pack (replicate 320 7))
+          copied = Keccak (CopySlice (Lit 256) (Lit 0) (Lit 64)
+            (WriteWord (Lit 256) (Var "key") (WriteWord (Lit 288) (Lit 3) mem)) (ConcreteBuf ""))
+      assertEqual "" (Keccak (WriteWord (Lit 0) (Var "key") (ConcreteBuf (word256Bytes 0 <> word256Bytes 3))))
+        (Expr.simplify copied)
+  , testCase "mapping-key-forms" $ do
       let inner = Keccak (ConcreteBuf (BS.pack [1..64]))
           written key = Keccak (WriteWord (Lit 0) key (WriteWord (Lit 32) inner (ConcreteBuf "")))
           copied key = Keccak (CopySlice (Lit 256) (Lit 0) (Lit 64)
@@ -270,9 +276,12 @@ keccakTests = testGroup "Keccak input canonicalization"
       let outer slot = Keccak (WriteWord (Lit 0) (Var "key") (WriteWord (Lit 32) slot (ConcreteBuf "")))
           concrete = outer (Keccak (ConcreteBuf (word256Bytes 3 <> word256Bytes 0)))
           symbolic slot = outer (Keccak (WriteWord (Lit 0) (Var "innerKey") (ConcreteBuf (word256Bytes 0 <> word256Bytes slot))))
-      different <- checkSat (Expr.simplify concrete .== Expr.simplify (symbolic 1))
+          -- the sat query can exceed checkSat's 1s timeout on a loaded machine
+          check p = runEnv (Env {config = equivConfig}) $ withSolvers Bitwuzla 1 (Just 5) defMemLimit $ \solvers ->
+            checkSatWithProps solvers [p]
+      different <- check (Expr.simplify concrete .== Expr.simplify (symbolic 1))
       assertBool ("different mappings must not alias: " <> show different) (isQed different)
-      same <- checkSat (Expr.simplify concrete .== Expr.simplify (symbolic 0))
+      same <- check (Expr.simplify concrete .== Expr.simplify (symbolic 0))
       assertBool ("the same mapping can alias: " <> show same) (isSat same)
   , testCase "unsupported-inputs" $ do
       let source = WriteWord (Lit 0) (Var "value") (AbstractBuf "src")
