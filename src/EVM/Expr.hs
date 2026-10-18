@@ -61,6 +61,7 @@ module EVM.Expr
   , upperBound
   , maxBytes
   , copySlice
+  , canonKeccakBuf
   , writeByte
   , writeWord
   , bufLength
@@ -613,6 +614,42 @@ copySlice srcOff dstOff (Lit size) (WriteWord srcOff2 val base) dstBuff
 copySlice srcOffset dstOffset size src dst = CopySlice srcOffset dstOffset size src dst
 
 
+-- | Canonicalize resolved, word-aligned keccak inputs up to 256 bytes.
+-- E.g. a mapping key at slot 3 copied out of scratch memory,
+--   CopySlice (Lit 256) (Lit 0) (Lit 64) (WriteWord (Lit 256) key (WriteWord (Lit 288) (Lit 3) mem)) (ConcreteBuf "")
+-- becomes the 'MappingSlot' form
+--   WriteWord (Lit 0) key (ConcreteBuf (word256Bytes 0 <> word256Bytes 3))
+canonKeccakBuf :: Expr Buf -> Maybe (Expr Buf)
+canonKeccakBuf (ConcreteBuf _) = Nothing
+canonKeccakBuf buf = case bufLength buf of
+  Lit n | n >= 32, n <= 256, n `Prelude.mod` 32 == 0, noWrap buf ->
+    let ws = [(i, w, literal w) | i <- [0, 32 .. n - 32], let w = readWord (Lit i) buf]
+        base = ConcreteBuf $ BS.concat [maybe (word256Bytes 0) word256Bytes v | (_, _, v) <- ws]
+        writes = [(i, w) | (i, w, Nothing) <- ws]
+    in if any (\(_, w, _) -> containsNode unresolved w) ws
+       then Nothing
+       else Just $ foldr (\(i, w) b -> WriteWord (Lit i) w b) base writes
+  _ -> Nothing
+  where
+    -- Keep keccak terms: the solver needs their preimages for collision assumptions.
+    literal :: Expr EWord -> Maybe W256
+    literal (Lit v) = Just v
+    literal _ = Nothing
+    -- A wrapped length can hide bytes outside the reconstructed buffer.
+    noWrap :: Expr Buf -> Bool
+    noWrap (ConcreteBuf _) = True
+    noWrap (WriteWord (Lit i) _ b) = i <= maxBound - 32 && noWrap b
+    noWrap (WriteByte (Lit i) _ b) = i < maxBound && noWrap b
+    noWrap (CopySlice _ (Lit i) (Lit size) _ b) = i <= maxBound - size && noWrap b
+    noWrap _ = False
+    unresolved :: Expr a -> Bool
+    unresolved = \case
+      ReadWord _ (AbstractBuf _) -> False
+      ReadByte _ (AbstractBuf _) -> False
+      ReadWord _ _ -> True
+      ReadByte _ _ -> True
+      _ -> False
+
 writeByte :: Expr EWord -> Expr Byte -> Expr Buf -> Expr Buf
 writeByte (Lit offset) (LitByte val) (ConcreteBuf "")
   | offset < maxBytes
@@ -815,12 +852,10 @@ readStorage' loc store = case readStorage loc store of
                            Just v -> v
                            Nothing -> Lit 0
 
--- | The mapping slot (idx) of a symbolic mapping read keccak(key . idx), for both shapes hevm produces
+-- | The mapping slot (idx) of a symbolic mapping read keccak(key . idx)
 readMappingIdx :: Expr EWord -> Maybe W256
 readMappingIdx (MappingSlot idx _)
   | BS.length idx == 64 = Just (W256 (word256 (BS.takeEnd 32 idx)))
-readMappingIdx (Keccak (CopySlice (Lit 0) (Lit 0) (Lit 0x40) (WriteWord (Lit 0) _ (ConcreteBuf idx)) _))
-  | BS.length idx >= 64 = Just (W256 (word256 (BS.take 32 (BS.drop 32 idx))))
 readMappingIdx _ = Nothing
 
 -- | Drop ConcreteStore entries that cannot alias a symbolic mapping read: a concrete key whose
@@ -1201,6 +1236,8 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
       size1 == size2 && readOff == writeOff = CopySlice srcOff dstOff size1 src dst
     -- overwrite empty buf with a buf, return is the buf
     go (CopySlice (Lit 0) (Lit 0) (BufLength src1) src2 (ConcreteBuf "")) | src1 == src2 = src1
+
+    go (Keccak buf) | Just buf' <- canonKeccakBuf buf, buf' /= buf = Keccak buf'
 
     -- simplify storage
     go (SLoad slot store) = readStorage' slot store
@@ -2076,10 +2113,6 @@ concKeccakSimpProps orig = untilFixpoint (simplifyProps . map (mapProp concKecca
 -- Turns (Keccak ConcreteBuf) into a Lit
 concKeccakOnePass :: Expr a -> Expr a
 concKeccakOnePass (Keccak (ConcreteBuf bs)) = Lit (keccak' bs)
-concKeccakOnePass orig@(Keccak (CopySlice (Lit 0) (Lit 0) (Lit 64) orig2@(WriteWord (Lit 0) _ (ConcreteBuf bs)) (ConcreteBuf ""))) =
-  case (BS.length bs, (copySlice (Lit 0) (Lit 0) (Lit 64) (simplify orig2) (ConcreteBuf ""))) of
-    (64, ConcreteBuf a) -> Lit (keccak' a)
-    _ -> orig
 concKeccakOnePass x = x
 
 lhsConstHelper :: Expr a -> Maybe ()

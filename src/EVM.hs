@@ -500,7 +500,7 @@ exec1 conf = do
                             modifying' #keccakPreImgs (insert (bs, kc))
                           pure $ Lit kc
                         )
-                    buf -> pure $ HashCons.hashConsExpr (Keccak buf)
+                    buf -> pure $ HashCons.hashConsExpr (Keccak (fromMaybe buf (Expr.canonKeccakBuf buf)))
                   next
                   assign' (#state % #stack) (hash : xs)
             _ -> underrun

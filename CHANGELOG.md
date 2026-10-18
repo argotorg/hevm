@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- Small, word-aligned keccak inputs are canonicalized so equivalent mapping
+  keys built from memory writes or copies can resolve to the same storage entry.
 - Symbolic execution now avoids forking when simplification shows that
   the path conditions imply the branch condition.
 - Symbolic jump targets and jump conditions that depend on a subterm with few
