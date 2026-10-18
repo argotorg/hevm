@@ -80,6 +80,7 @@ module EVM.Expr
   , filterStoreByReadSlot
   , writeStorage
   , concStoreContains
+  , insertConcStoreBase
   , getAddr
   , getLogicalIdx
 
@@ -1069,6 +1070,15 @@ concStoreContains k@(Lit key) store = case store of
   AbstractStore _ _ -> internalError "cannot read deeply into an AbstractStore"
   GVar _ -> internalError "cannot read to a GVar"
 concStoreContains _ _ = internalError "readDeepStorage only supports concrete keys"
+
+-- | Records a slot fetched via RPC in the underlying concrete store. It is the pre-state value, so
+-- it goes below any writes made since: stacking it on top would shadow them.
+insertConcStoreBase :: W256 -> W256 -> Expr Storage -> Expr Storage
+insertConcStoreBase key val = \case
+  ConcreteStore s -> ConcreteStore (Map.insert key val s)
+  SStore k v s -> SStore k v (insertConcStoreBase key val s)
+  AbstractStore _ _ -> internalError "cannot insert into an AbstractStore"
+  GVar _ -> internalError "cannot insert into a GVar"
 
 getAddr :: Expr Storage -> Maybe (Expr EAddr)
 getAddr (SStore _ _ p) = getAddr p

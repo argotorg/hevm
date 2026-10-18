@@ -1540,7 +1540,7 @@ accessStorage addr slot continue = do
               -- At this point, we know the contract is external and the underlying storage
               -- is concrete. Check if the slot has already been fetched
               Just contr -> if concStoreContains (Lit slot') contr.storage
-                then continue $ SLoad (Lit slot') contr.storage
+                then continue $ readFetched slot' contr.storage
                 else mkQuery addr' slot'
         else do
           -- Symbolic address that cannot be cajoled/solved into a concrete one
@@ -1550,9 +1550,17 @@ accessStorage addr slot continue = do
           continue $ Lit 0
       mkQuery :: Addr -> W256 -> EVM t ()
       mkQuery a s = query $ PleaseFetchSlot a s $ \x -> do
-        modifying (#env % #contracts % ix (LitAddr a) % #storage) (writeStorage (Lit s) (Lit x))
+        modifying (#env % #contracts % ix (LitAddr a) % #storage) (Expr.insertConcStoreBase s x)
         assign #result Nothing
-        continue $ Lit x
+        use (#env % #contracts % at (LitAddr a)) >>= \case
+          Just c -> continue $ readFetched s c.storage
+          Nothing -> internalError $ "contract addr " <> show a <> " vanished during slot fetch"
+      -- Writes since the fork may store this slot under its unconcretized keccak, which only
+      -- the original slot expression matches.
+      readFetched :: W256 -> Expr Storage -> Expr EWord
+      readFetched s st = case readStorage (Lit s) st of
+        Just v@(Lit _) -> v
+        _ -> Expr.readStorage' slot st
 
 accessTStorage
   :: VMOps t => Expr EAddr

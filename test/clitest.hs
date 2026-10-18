@@ -312,3 +312,14 @@ main = do
           , "--number", "10307563", "--cache-dir", "test/contracts/fail/"]
         stdout `shouldContain` "[FAIL]"
         stderr `shouldNotContain` "CallStack"
+      it "rpc-cache-fork-storage" $ do
+        (_, stdout, stderr) <- runForge "test/contracts/fail/rpc-fork-storage.sol"
+          ["--rpc", "http://mock.mock", "--number", "16198552", "--cache-dir", "test/contracts/fail/"]
+        let result status name = any (\l -> status `isInfixOf` l && name `isInfixOf` l) (lines stdout)
+        stderr `shouldNotContain` "CallStack"
+        stdout `shouldNotContain` "partially explore"
+        mapM_ (\name -> (name, result "[PASS]" name) `shouldBe` (name, True))
+          [ "prove_concrete_mapping_read", "prove_account_fields", "prove_transfer_over_fetched_storage"
+          , "prove_nested_mapping_allowance", "prove_multiple_contracts_and_packed_slot" ]
+        result "[FAIL]" "prove_fail_overdraft_reverts" `shouldBe` True
+        stdout `shouldContain` "[validated]"
