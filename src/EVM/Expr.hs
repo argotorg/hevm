@@ -2198,12 +2198,13 @@ enumerateViaSmallSubterm limit props e0 = listToMaybe $ mapMaybe tryAtoms (map p
     shapeOk :: Expr EWord -> W256 -> Bool
     shapeOk (And (Lit m) _) v = v .&. m == v
     shapeOk _ _ = True
-    -- several atoms at once, e.g. the keys of a nested mapping slot; none may contain another,
-    -- as substituting one would hide the other
+    -- several atoms at once, e.g. the keys of a nested mapping slot. Each one's values cover its
+    -- feasible ones, so all combinations cover the feasible assignments; correlated atoms only add
+    -- infeasible combinations. None may occur in another, as substituting it would hide the other.
     joint =
       let sized = sortOn (length . snd) [(a, vs) | a <- candidates, Just vs <- [values a]]
-          indep = [a | (a, _) <- sized, Prelude.not (any (\(b, _) -> b /= a && containsNode (isTerm a) b) sized)]
-      in [as | n <- [2 .. length indep], let as = Prelude.take n indep, combos as <= fromIntegral limit]
+          unnested = [a | (a, _) <- sized, Prelude.not (any (\(b, _) -> b /= a && containsNode (isTerm a) b) sized)]
+      in [as | n <- [2 .. length unnested], let as = Prelude.take n unnested, combos as <= fromIntegral limit]
     combos :: [Expr EWord] -> Integer
     combos = product . map (maybe 0 (fromIntegral . length) . values)
     isTerm :: Expr EWord -> Expr a -> Bool
