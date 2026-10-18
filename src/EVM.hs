@@ -1863,17 +1863,17 @@ branchBounded conf cond continue = do
   seen <- use (#iterations % at loc)
   case Expr.enumerateViaSmallSubterm conf.maxWidth pathconds cond of
     Just (_, [(v, _)]) -> branch conf.maxDepth (Lit v) continue
-    Just (atom, groups) | isJust seen ->
-      forkOnSubterm conf.maxDepth atom [(v, [k]) | (v, ks) <- groups, k <- ks] $ \v ->
+    Just (atoms, groups) | isJust seen ->
+      forkOnSubterm conf.maxDepth atoms [(v, [ks]) | (v, kss) <- groups, ks <- kss] $ \v ->
         branch conf.maxDepth (Lit v) continue
     _ -> branch conf.maxDepth cond continue
 
--- | Forks into one path per group, constraining @atom@ to that group's values.
-forkOnSubterm :: Maybe Int -> Expr EWord -> [(W256, [W256])] -> (W256 -> EVM Symbolic ()) -> EVM Symbolic ()
-forkOnSubterm maxDepth atom groups continue = do
+-- | Forks into one path per group, constraining @atoms@ to one of that group's assignments.
+forkOnSubterm :: Maybe Int -> [Expr EWord] -> [(W256, [[W256]])] -> (W256 -> EVM Symbolic ()) -> EVM Symbolic ()
+forkOnSubterm maxDepth atoms groups continue = do
   pathconds <- use #constraints
   vm <- get
-  let caseProp ks = Expr.simplifyProp $ foldr1 POr [atom .== Lit k | k <- ks]
+  let caseProp kss = Expr.simplifyProp $ foldr1 POr [foldr1 PAnd (zipWith (\a k -> a .== Lit k) atoms ks) | ks <- kss]
       feasible = [ (v, p) | (v, ks) <- groups, let p = caseProp ks
                  , Expr.simplifyProps (p : pathconds) /= [PBool False] ]
       runCase (v, p) = do
@@ -3772,7 +3772,7 @@ instance VMOps Symbolic where
     vm <- get
     case Expr.enumerateViaSmallSubterm maxWidth pathconds ewordExpr of
       Just (_, [(v, _)]) -> continue $ Just v
-      Just (atom, groups) -> forkOnSubterm maxDepth atom groups (continue . Just)
+      Just (atoms, groups) -> forkOnSubterm maxDepth atoms groups (continue . Just)
       Nothing -> query $ PleaseGetSols ewordExpr numBytes pathconds $ \case
           Just concVals -> do
             assign #result Nothing

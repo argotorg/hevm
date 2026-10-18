@@ -1072,35 +1072,56 @@ instance Arbitrary SharedTerms where
       <*> vectorOf 6 (genPoolProp p 2)
       <*> vectorOf 3 (genPoolEnd p)
 
--- | A word that depends on a symbolic subterm only through a few values, with path conditions
--- that may bound it, for 'Expr.enumerateViaSmallSubterm'
+-- | A word that depends on one or two symbolic subterms only through a few values, with path
+-- conditions that may bound them, for 'Expr.enumerateViaSmallSubterm'. It may hash them as
+-- (nested) mapping slots do.
 data SmallRange = SmallRange Int [Prop] (Expr EWord)
   deriving (Show)
 
 instance Arbitrary SmallRange where
   arbitrary = do
-    limit <- chooseInt (1, 40)
-    base <- elements [Var "x", Add (Var "x") (Lit 7), Mul (Lit 3) (Var "x"), SHR (Lit 8) (Var "x")
-                     , Not (Var "x"), SAR (Lit 4) (Var "x"), BufLength (AbstractBuf "b"), TxValue]
-    atom <- frequency
-      [ (2, pure base)
-      , (2, Mod base . Lit <$> genEdge 1 (fromIntegral limit + 2))
-      , (2, (\m -> And (Lit m) base) <$> genEdge 0 (fromIntegral limit * 2))
-      , (1, (\k -> SHR (Lit k) base) <$> genEdge 250 256)
-      ]
-    e <- genOver atom 3
-    props <- chooseInt (0, 4) >>= \n -> replicateM n (genBound (fromIntegral limit + 8) [base, atom, atom, Var "x"])
+    two <- arbitrary
+    limit <- if two then chooseInt (16, 100) else chooseInt (1, 40)
+    (base, atom) <- genAtom two limit "x"
+    (base2, atom2) <- genAtom two limit "z"
+    let atoms = if two then [atom, atom2] else [atom]
+    e <- frequency $ [(3, genOver atoms 3), (2, genMapSlot atoms 2)]
+      <> [(2, elements [Add, Mul, Xor, LT] <*> genOver [atom] 2 <*> genOver [atom2] 2) | two]
+    props <- chooseInt (0, 4) >>= \n ->
+      replicateM n (genBound (fromIntegral limit + 8) ([base, atom, atom, Var "x"] <> [t | length atoms > 1, t <- [base2, atom2]]))
     pure $ SmallRange limit props e
     where
-      genOver :: Expr EWord -> Int -> Gen (Expr EWord)
-      genOver atom 0 = frequency [(3, pure atom), (1, Lit <$> genEdge 0 40), (1, pure (Var "y"))]
-      genOver atom n = let sub = genOver atom (n - 1) in frequency
-        [ (2, genOver atom 0)
+      -- with two atoms, mostly narrow ones, so that their combinations fit in the limit
+      genAtom :: Bool -> Int -> Text -> Gen (Expr EWord, Expr EWord)
+      genAtom two limit v = do
+        base <- elements [Var v, Add (Var v) (Lit 7), Mul (Lit 3) (Var v), SHR (Lit 8) (Var v)
+                         , Not (Var v), SAR (Lit 4) (Var v), BufLength (AbstractBuf (v <> "b")), TxValue]
+        atom <- frequency $
+          [ (2, pure base)
+          , (2, Mod base . Lit <$> genEdge 1 (fromIntegral limit + 2))
+          , (2, (\m -> And (Lit m) base) <$> genEdge 0 (fromIntegral limit * 2))
+          , (1, (\k -> SHR (Lit k) base) <$> genEdge 250 256)
+          ] <> [ (8, (\m -> And (Lit m) base) <$> elements [1, 3, 7]) | two ]
+            <> [ (4, Mod base . Lit <$> elements [2, 3, 5]) | two ]
+        pure (base, atom)
+      genOver :: [Expr EWord] -> Int -> Gen (Expr EWord)
+      genOver atoms 0 = frequency [(3, elements atoms), (1, Lit <$> genEdge 0 40), (1, pure (Var "y"))]
+      genOver atoms n = let sub = genOver atoms (n - 1) in frequency
+        [ (2, genOver atoms 0)
         , (1, Add <$> sub <*> sub), (1, Sub <$> sub <*> sub), (1, Mul <$> sub <*> sub)
         , (1, Div <$> sub <*> sub), (1, Mod <$> sub <*> sub), (1, And <$> sub <*> sub)
         , (1, SHL <$> sub <*> sub), (1, Eq <$> sub <*> sub), (1, LT <$> sub <*> sub)
         , (1, IsZero <$> sub), (1, ITE <$> sub <*> sub <*> sub)
         ]
+      -- keccak(key . idx), with the key over the atoms, possibly hashing a nested slot as idx
+      genMapSlot :: [Expr EWord] -> Int -> Gen (Expr EWord)
+      genMapSlot atoms n = do
+        key <- frequency [(2, elements atoms), (1, genOver atoms 1)]
+        idx <- if n > 1 then frequency [(1, Lit <$> genEdge 0 3), (2, genMapSlot atoms (n - 1))] else Lit <$> genEdge 0 3
+        off <- elements [0, 0x40]
+        let mem = WriteWord (Lit (off + 32)) idx (WriteWord (Lit off) key (ConcreteBuf ""))
+        elements [ Keccak (WriteWord (Lit 0) key (WriteWord (Lit 32) idx (ConcreteBuf "")))
+                 , Keccak (CopySlice (Lit off) (Lit 0) (Lit 64) mem (ConcreteBuf "")) ]
       genBound :: W256 -> [Expr EWord] -> Gen Prop
       genBound hi ts = do
         t <- elements ts

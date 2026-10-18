@@ -45,6 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   option); disable it with `--no-hash-cons`.
 
 ## Changed
+- A symbolic value that depends on several symbolic subterms with few possible
+  values each, such as the slot of a nested mapping with two such keys, is now
+  split into cases on all of them, instead of asking the solver for its values.
+  Reading such a slot from storage fetched via RPC now works.
 - The default SMT solver is now bitwuzla instead of z3. hevm now stops with an
   error at startup if the selected solver is not installed.
 - The default `--max-buf-size` is now 24 (calldata and returndata of up to
