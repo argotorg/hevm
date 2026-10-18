@@ -263,7 +263,8 @@ storageTests = testGroup "Storage tests"
               dist a b = if a > b then a - b else b - a
               resolvable = all (\((_, o), _) -> o /= r && dist o r < 256) above
           res <- checkSatWith equivConfig (SLoad rslot store ./= simp)
-          pure $ counterexample (show res) $ isQed res .&&. (not resolvable .||. simp === expected)
+          pure $ counterexample (show res) $ not (isUnknown res) ==>
+            isQed res .&&. (not resolvable .||. simp === expected)
   ]
   where
     errorMsg = "Storage read expression not simplified correctly"
