@@ -1945,7 +1945,7 @@ constPropagate ps =
     -- NOTE: will create PEq (Lit x) (Lit x) if x is a constant
     --       hence we need the fixVals function to add them back in
     substitute :: ConstState -> [Prop] -> [Prop]
-    substitute cs ps2 = map (mapProp (subsGo cs)) ps2
+    substitute cs ps2 = map (mapPropMemo (subsGo cs)) ps2
     subsGo :: ConstState -> Expr a -> Expr a
     subsGo cs (Var v) = case Map.lookup (Var v) cs.values of
       Just x -> Lit x
@@ -2065,11 +2065,11 @@ concKeccakSimpExpr orig = untilFixpoint (simplifyNoLitToKeccak . (mapExprShared 
 -- Needed because if it also simplified, we may not find some simplification errors, as
 -- simplification would always be ON
 concKeccakProps :: [Prop] -> [Prop]
-concKeccakProps orig = untilFixpoint (map (mapProp concKeccakOnePass)) orig
+concKeccakProps orig = untilFixpoint (map (mapPropShared (static (HC.Rewrite concKeccakOnePass)))) orig
 
 -- As above, but also simplify, to fixedpoint
 concKeccakSimpProps :: [Prop] -> [Prop]
-concKeccakSimpProps orig = untilFixpoint (simplifyProps . map (mapProp concKeccakOnePass)) orig
+concKeccakSimpProps orig = untilFixpoint (simplifyProps . map (mapPropShared (static (HC.Rewrite concKeccakOnePass)))) orig
 
 -- Simplifies in case the input to the Keccak is of specific array/map format and
 --            can be simplified into a concrete value

@@ -18,6 +18,7 @@ import Data.ByteString qualified as BS (drop, length, pack, take)
 import Data.Containers.ListUtils (nubOrd)
 import Data.List qualified as List (nub, sort, tails)
 import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Typeable
@@ -68,6 +69,8 @@ traversalTests = testCase "every-field-is-traversed" $ assertBool (unlines misse
           [ ("foldExpr", List.sort (foldExpr probeName ["acc"] e) == List.sort ("acc" : ms))
           , ("mapExpr", names (mapExpr renameProbe e) == renamed)
           , ("memoFixTraverse", names (HC.memoFixTraverse (static (HC.Rewrite renameProbe)) e) == renamed)
+          , ("mapExprMemo", names (HC.mapExprMemo renameProbe e) == renamed)
+          , ("collectExprs", HC.collectExprs (Set.fromList . probeName) [HC.AnyExpr e] == Set.fromList ms)
           ]
       , not ok ]
     names :: Expr a -> [Text]

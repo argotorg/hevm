@@ -12,7 +12,7 @@ import Data.Functor.Const (Const(..))
 import GHC.StaticPtr (StaticPtr, deRefStaticPtr)
 
 import EVM.Types
-import EVM.HashCons (Rewrite, runRewrite, hashConsExpr, memoFixTraverse, hashConsEnabled)
+import EVM.HashCons (Rewrite, runRewrite, hashConsExpr, memoFixTraverse, hashConsEnabled, mapExprMemo, AnyExpr(..))
 import EVM.Traversals.Children
 
 foldProp :: forall b . Monoid b => (forall a . Expr a -> b) -> b -> Prop -> b
@@ -26,6 +26,18 @@ foldExpr f acc expr = acc <> go expr
     go :: forall a . Expr a -> b
     go e = self <> getConst (mapChildrenM (Const . go) e)
       where self = case e of { C {} -> mempty; _ -> f e }
+
+-- | Expression roots, including those in nested propositions and calls.
+propExprs :: Prop -> [AnyExpr]
+propExprs = getConst . mapPropChildrenM (Const . pure . AnyExpr)
+
+-- | 'mapProp' using the shared cache for a static rewrite.
+mapPropShared :: StaticPtr Rewrite -> Prop -> Prop
+mapPropShared pass = runIdentity . mapPropChildrenM (Identity . mapExprShared pass . runRewrite (deRefStaticPtr pass))
+
+-- | 'mapProp' with a local cache for each expression root.
+mapPropMemo :: (forall a. Expr a -> Expr a) -> Prop -> Prop
+mapPropMemo f = runIdentity . mapPropChildrenM (Identity . mapExprMemo f . f)
 
 mapProp :: (forall a . Expr a -> Expr a) -> Prop -> Prop
 mapProp f = \case

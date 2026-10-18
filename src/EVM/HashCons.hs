@@ -24,6 +24,9 @@ module EVM.HashCons
   , resetHashCons
   , setHashConsLimit
   , memoFixTraverse
+  , mapExprMemo
+  , collectExprs
+  , AnyExpr(..)
   ) where
 
 import Prelude hiding (LT, GT)
@@ -31,7 +34,9 @@ import Data.IORef
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as M
 import Data.IntMap.Strict qualified as IM
-import Control.Monad (unless, when)
+import Data.IntSet qualified as IS
+import Data.Set (Set)
+import Control.Monad (forM_, unless, when)
 import Data.Word (Word8)
 import Data.Text (Text)
 import Data.ByteString (ByteString)
@@ -274,24 +279,34 @@ runRewrite (Rewrite f) = f
 -- original object when nothing changed, so 'untilFixpoint' sees convergence by pointer equality.
 -- Results are forced: a thunk never has the pointer identity of the node it evaluates to.
 memoFixTraverse :: StaticPtr Rewrite -> Expr b -> Expr b
-memoFixTraverse pass root = unsafePerformIO (goM root)
-  where
-    key = staticKey pass
+memoFixTraverse pass root = unsafePerformIO $
+  memoTraverse passMemos (staticKey pass) (deRefStaticPtr pass) root
+{-# NOINLINE memoFixTraverse #-}
 
+-- | Memoize a rewrite of canonical nodes for one call, allowing captured variables.
+mapExprMemo :: (forall a. Expr a -> Expr a) -> Expr b -> Expr b
+mapExprMemo f root = unsafePerformIO $ do
+  memos <- newIORef M.empty
+  memoTraverse memos () (Rewrite f) root
+{-# NOINLINE mapExprMemo #-}
+
+memoTraverse :: Ord k => IORef (Map k MemoTables) -> k -> Rewrite -> Expr b -> IO (Expr b)
+memoTraverse cache key pass root = goM root
+  where
     fi :: Expr x -> Expr x
-    fi x = hashConsExpr (runRewrite (deRefStaticPtr pass) x)
+    fi x = hashConsExpr (runRewrite pass x)
 
     goM :: Expr x -> IO (Expr x)
     goM n = do
       mid <- lookupSN n
       case (mid, memoTable n) of
         (Just i, Just tab) -> do
-          memos <- readIORef passMemos
+          memos <- readIORef cache
           case IM.lookup i (tab.memo (M.findWithDefault emptyMT key memos)) of
             Just r  -> pure r
             Nothing -> do
               r <- rebuild n
-              atomicModifyIORef' passMemos $ \ms ->
+              atomicModifyIORef' cache $ \ms ->
                 let mt = M.findWithDefault emptyMT key ms
                 in (M.insert key (tab.setMemo mt (IM.insert i r (tab.memo mt))) ms, ())
               pure r
@@ -313,4 +328,26 @@ memoFixTraverse pass root = unsafePerformIO (goM root)
         -- as in mapExprM, the rewrite is not applied to a contract itself
         C {} -> pure $! e
         _ -> pure $! fi e
-{-# NOINLINE memoFixTraverse #-}
+
+data AnyExpr = forall a. AnyExpr (Expr a)
+
+-- | Collect a set, visiting each canonical node once across all roots.
+collectExprs :: Ord b => (forall a. Expr a -> Set b) -> [AnyExpr] -> Set b
+collectExprs f roots = unsafePerformIO $ do
+  seen <- newIORef IS.empty
+  acc <- newIORef mempty
+  let visit :: Expr a -> IO (Expr a)
+      visit e = do
+        mid <- lookupSN e
+        visited <- maybe (pure False) (\i -> IS.member i <$> readIORef seen) mid
+        unless visited $ do
+          forM_ mid $ \i -> modifyIORef' seen (IS.insert i)
+          case e of
+            C {} -> pure ()
+            _ -> modifyIORef' acc (<> f e)
+          _ <- mapChildrenM visit e
+          pure ()
+        pure e
+  mapM_ (\(AnyExpr e) -> visit e >> pure ()) roots
+  readIORef acc
+{-# NOINLINE collectExprs #-}
