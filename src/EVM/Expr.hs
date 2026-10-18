@@ -1569,6 +1569,11 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (ITE c (Lit 1) (Lit 0)) = iszero (iszero c)
     go (ITE c (ITE c' a _) d) | c == c' = ITE c a d -- nested same condition in then
     go (ITE c a (ITE c' _ d)) | c == c' = ITE c a d -- nested same condition in else
+    -- the condition is nonzero in the then branch and zero in the else branch,
+    -- as in the short-circuit of Solidity's && and ||
+    go (ITE c (IsZero c') f) | c == c' = ITE c (Lit 0) f
+    go (ITE c t (IsZero c')) | c == c' = ITE c t (Lit 1)
+    go (ITE c t c') | c == c' = ITE c t (Lit 0)
 
     -- syntactic Eq reduction
     -- a literal with a bit the other side can not have
@@ -2012,6 +2017,13 @@ simplifyProp prop =
     go (PLT (ITE c (Lit a) (Lit b)) (Lit k)) = onITE c (a < k) (b < k)
     go (PLEq (Lit k) (ITE c (Lit a) (Lit b))) = onITE c (k <= a) (k <= b)
     go (PLEq (ITE c (Lit a) (Lit b)) (Lit k)) = onITE c (a <= k) (b <= k)
+    -- with one literal branch, a case split on the condition
+    go (PEq (Lit k) (ITE c (Lit a) f))
+      | a == k = POr (PNeg (PEq (Lit 0) c)) (PEq (Lit k) f)
+      | otherwise = PAnd (PEq (Lit 0) c) (PEq (Lit k) f)
+    go (PEq (Lit k) (ITE c t (Lit b)))
+      | b == k = POr (PEq (Lit 0) c) (PEq (Lit k) t)
+      | otherwise = PAnd (PNeg (PEq (Lit 0) c)) (PEq (Lit k) t)
 
     go (PLT (Lit 0) e)
       | isBoolLike e = peq (Lit 1) e

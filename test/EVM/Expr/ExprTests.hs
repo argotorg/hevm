@@ -151,6 +151,13 @@ rewriteRuleTests = testGroup "Rewrite rules"
         (Expr.simplify (Div (Mul (Lit (10 ^ (18 :: Int))) down) (Lit (10 ^ (6 :: Int)))))
       assertEqual "may overflow" (Div (Mul (Lit e) (Var "x")) (Lit (10 ^ (30 :: Int))))
         (Expr.simplify (Div (Mul (Lit e) (Var "x")) (Lit (10 ^ (30 :: Int)))))
+  , testCase "short-circuit-conditions" $ do
+      let big v = LT (Lit (2 ^ (128 :: Int) - 1)) (Var v)
+          -- require(a <= max && b <= max && c <= max), as solc compiles it
+          ab = ITE (big "a") (IsZero (big "a")) (IsZero (big "b"))
+          abc = ITE ab (IsZero (big "c")) ab
+          bounds = [PLEq (Var v) (Lit (2 ^ (128 :: Int) - 1)) | v <- ["a", "b", "c"]]
+      assertEqual "bounds" (Expr.simplifyProps bounds) (Expr.simplifyProps [PNeg (PEq (Lit 0) abc)])
   , testCase "same-base-offsets" $ do
       let p = Var "p"
           at o = Add (Lit o) p

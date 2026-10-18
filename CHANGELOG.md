@@ -93,6 +93,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the path conditions and from the structure of `x` and `d` rule out overflow.
 - The simplifier cancels common factors of the literals in `(a * x) / b` when
   the structure of `x` rules out overflow.
+- The simplifier uses the condition of an ITE in its branches, and splits a
+  comparison of an ITE with one literal branch into cases, so the bounds in
+  Solidity's short-circuited `&&` and `||` reach the path conditions.
 - Reads from buffers written at offsets from the same symbolic pointer skip
   the writes they are disjoint from and resolve the writes they hit.
 
