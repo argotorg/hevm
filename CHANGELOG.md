@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- Equality of a keccak hash with a literal at most 256 now simplifies to false,
+  matching the existing SMT assumption.
 - Masked `Div` and `SHR` reads now simplify through packed-word writes,
   allowing reads of Solidity-packed fields to reduce to the written value.
 - Small, word-aligned keccak inputs are canonicalized so equivalent mapping

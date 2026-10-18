@@ -1405,6 +1405,7 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (SEx a b) = sex a b
 
     -- IsZero
+    go (IsZero (Keccak _)) = Lit 0
     go (IsZero (IsZero (IsZero a))) = iszero a
     go (IsZero (IsZero (LT x y))) = lt x y
     go (IsZero (IsZero (Eq x y))) = eq x y
@@ -1432,6 +1433,7 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
       | b == c = iszero a
     go (Eq (Sub a b) c) | a == c = iszero b
 
+    go (Eq (Lit a) (Keccak _)) | a <= 256 = Lit 0
     go (Eq (Keccak a) (Keccak b)) | keccakInputsDiffer a b = Lit 0
     go (Eq (Lit 0) a) = iszero a
     go (Eq a b)
@@ -1774,6 +1776,7 @@ simplifyProp prop =
     go (PEq (Lit 0) (Eq a b)) = PNeg (peq a b)
     go (PEq (Lit 0) (LT a b)) = PLEq b a
 
+    go (PEq (Lit a) (Keccak _)) | a <= 256 = PBool False
     go (PEq (Keccak a) (Keccak b)) | keccakInputsDiffer a b = PBool False
     go (PEq (Lit 0) (Sub a b)) = peq a b
     go (PEq (Lit 0) (Or a b)) = peq (Lit 0) a `PAnd` peq (Lit 0) b
