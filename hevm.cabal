@@ -325,6 +325,7 @@ test-suite test
     tasty-quickcheck,
     template-haskell,
     text,
+    transformers,
     vector,
 
 -- these tests require network access so we split them into a separate test

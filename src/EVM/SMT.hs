@@ -898,7 +898,9 @@ getBufs getVal bufs = foldM getBuf mempty bufs
               pbase <- go env base
               let pidx = parseW256 idx
                   pval = parseW8 val
-              Just $ Write pval pidx pbase
+              -- bytes past the length read as zero, so the solver is free to
+              -- put anything at unread ones (even 2^256-1), which can't be flattened
+              Just $ if pidx >= len then pbase else Write pval pidx pbase
 
           -- binding a new name
           (TermLet ((VarBinding name' bound) :| []) term') -> do
