@@ -1,4 +1,6 @@
 {-# LANGUAGE TypeAbstractions #-}
+{-# LANGUAGE StaticPointers #-}
+{-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -Wno-incomplete-uni-patterns #-} -- It's OK to crash in tests if the pattern does not match
 
 module EVM.Expr.ExprTests (tests) where
@@ -12,9 +14,9 @@ import Test.Tasty.QuickCheck hiding (Failure, Success)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ReaderT)
 import Data.Bits (shiftL)
-import Data.ByteString qualified as BS (drop, length, pack, take)
+import Data.ByteString qualified as BS (drop, length, pack, replicate, take)
 import Data.Containers.ListUtils (nubOrd)
-import Data.List qualified as List (nub, tails)
+import Data.List qualified as List (nub, sort, tails)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust)
 import Data.Text (Text)
@@ -24,6 +26,8 @@ import Numeric.Natural (Natural)
 import EVM.Effects
 import EVM.Expr qualified as Expr
 import EVM.Expr.Generator
+import EVM.Expr.Probe (probes, contract)
+import EVM.HashCons qualified as HC
 import EVM.Format (hexText)
 import EVM.SMT (AbstractQuery(..), SMT2(..), SMTScript(..), assertPropsAbstract)
 import EVM.Solvers hiding (checkSat)
@@ -45,11 +49,50 @@ unitTests = testGroup "Unit tests"
   , comparisonTests
   , signExtendTests
   , concretizationTests
+  , traversalTests
   ]
+
+traversalTests :: TestTree
+traversalTests = testCase "every-field-is-traversed" $ assertBool (unlines missed) (null missed)
+  where
+    cases = $(probes [| SomeExpr |] ['GVar] ''Expr)
+      <> [ (SomeExpr (Failure [] mempty e), ms) | (e, ms) <- $(probes [| id |] [] ''EvmError) ]
+      <> [ (SomeExpr (Partial [] mempty p), ms) | (p, ms) <- $(probes [| id |] [] ''PartialExec) ]
+      <> [ (SomeExpr (contract c), ms) | (c, ms) <- $(probes [| id |] [] ''ContractCode) ]
+      <> [ (SomeExpr (Failure [p] mempty StackUnderrun), ms) | (p, ms) <- $(probes [| id |] [] ''Prop) ]
+    missed =
+      [ name <> " misses a field of " <> show e
+      | (SomeExpr e, ms) <- cases
+      , let renamed = List.sort (fmap (<> "'") ms)
+      , (name, ok) <-
+          [ ("foldExpr", List.sort (foldExpr probeName ["acc"] e) == List.sort ("acc" : ms))
+          , ("mapExpr", names (mapExpr renameProbe e) == renamed)
+          , ("memoFixTraverse", names (HC.memoFixTraverse (static (HC.Rewrite renameProbe)) e) == renamed)
+          ]
+      , not ok ]
+    names :: Expr a -> [Text]
+    names = List.sort . foldExpr probeName []
+    probeName :: Expr a -> [Text]
+    probeName = \case
+      Var n -> [n]; AbstractBuf n -> [n]; SymAddr n -> [n]; Gas n _ -> [n]
+      -- the address is part of this leaf, not a child
+      AbstractStore (SymAddr n) _ -> [n]
+      _ -> []
+
+renameProbe :: Expr a -> Expr a
+renameProbe = \case
+  Var n -> Var (n <> "'")
+  AbstractBuf n -> AbstractBuf (n <> "'")
+  SymAddr n -> SymAddr (n <> "'")
+  Gas n i -> Gas (n <> "'") i
+  AbstractStore (SymAddr n) w -> AbstractStore (SymAddr (n <> "'")) w
+  e -> e
 
 simplificationTests :: TestTree
 simplificationTests = testGroup "Expr-rewriting"
   [ storageTests
+  , keccakTests
+  , keccakInequalityTests
   , copySliceTests
   , memoryTests
   , basicSimplificationTests
@@ -194,6 +237,7 @@ storageTests = testGroup "Storage tests"
         (Just $ SLoad (Var "i") (SStore (Lit 0) (Lit 1) emptyStore))
         (Expr.decomposeStorage $ SLoad (arrElem 2 (Var "i"))
           (SStore (Lit 0) (Var "a") (SStore (arrZero 2) (Lit 1) emptyStore)))
+    , concreteKeccakStorageTests
   ]
   where
     errorMsg = "Storage read expression not simplified correctly"
@@ -210,6 +254,256 @@ storageTests = testGroup "Storage tests"
     preImgBytes = BS.pack (replicate 31 0 ++ [0xaa] ++ replicate 32 0)
     preImgHash = keccak' preImgBytes
     preImgs = Map.fromList [(preImgHash, preImgBytes)]
+
+keccakTests :: TestTree
+keccakTests = testGroup "Keccak input canonicalization"
+  [ testCase "copied-mapping-key-to-mapping-slot" $ do
+      let mem = ConcreteBuf (BS.pack (replicate 320 7))
+          copied = Keccak (CopySlice (Lit 256) (Lit 0) (Lit 64)
+            (WriteWord (Lit 256) (Var "key") (WriteWord (Lit 288) (Lit 3) mem)) (ConcreteBuf ""))
+      assertEqual "" (Keccak (WriteWord (Lit 0) (Var "key") (ConcreteBuf (word256Bytes 0 <> word256Bytes 3))))
+        (Expr.simplify copied)
+  , testCase "mapping-key-forms" $ do
+      let inner = Keccak (ConcreteBuf (BS.pack [1..64]))
+          written key = Keccak (WriteWord (Lit 0) key (WriteWord (Lit 32) inner (ConcreteBuf "")))
+          copied key = Keccak (CopySlice (Lit 256) (Lit 0) (Lit 64)
+            (WriteWord (Lit 256) key (WriteWord (Lit 288) inner (ConcreteBuf (BS.pack [7, 7])))) (ConcreteBuf ""))
+      mapM_ (\key -> do
+        assertEqual "same preimage" (Expr.simplify $ written key) (Expr.simplify $ copied key)
+        assertEqual "read through an equivalent key" (Var "value") $
+          Expr.simplify (SLoad (copied key) (SStore (written key) (Var "value") (AbstractStore (SymAddr "c") Nothing)))
+        ) [Lit 100, Var "acc"]
+      assertBool "different keys remain distinct" (Expr.simplify (written (Lit 100)) /= Expr.simplify (written (Var "acc")))
+  , testCase "nested-mapping-preimages" $ do
+      let outer slot = Keccak (WriteWord (Lit 0) (Var "key") (WriteWord (Lit 32) slot (ConcreteBuf "")))
+          concrete = outer (Keccak (ConcreteBuf (word256Bytes 3 <> word256Bytes 0)))
+          symbolic slot = outer (Keccak (WriteWord (Lit 0) (Var "innerKey") (ConcreteBuf (word256Bytes 0 <> word256Bytes slot))))
+          -- the sat query can exceed checkSat's 1s timeout on a loaded machine
+          check p = runEnv (Env {config = equivConfig}) $ withSolvers Bitwuzla 1 (Just 5) defMemLimit $ \solvers ->
+            checkSatWithProps solvers [p]
+      different <- check (Expr.simplify concrete .== Expr.simplify (symbolic 1))
+      assertBool ("different mappings must not alias: " <> show different) (isQed different)
+      same <- check (Expr.simplify concrete .== Expr.simplify (symbolic 0))
+      assertBool ("the same mapping can alias: " <> show same) (isSat same)
+  , testCase "unsupported-inputs" $ do
+      let source = WriteWord (Lit 0) (Var "value") (AbstractBuf "src")
+          slice n = CopySlice (Lit 16) (Lit 0) (Lit n) source (ConcreteBuf "")
+          base = ConcreteBuf (word256Bytes 0 <> word256Bytes 0)
+          wrapped = [ WriteByte (Lit maxBound) (LitByte 0xff) base
+                    , WriteWord (Lit maxBound) (Lit maxBound) base
+                    , CopySlice (Lit 0) (Lit maxBound) (Lit 1) (ConcreteBuf "x") base ]
+      mapM_ (\buf -> assertEqual "keep unresolved or unsupported buffers"
+        (Keccak $ Expr.simplify buf) (Expr.simplify $ Keccak buf))
+        (source : wrapped <> map slice [0, 31, 33, 64, 257, 288])
+  , testProperty "bytes-length-and-idempotence" $ withMaxSuccess 100 $ forAll genKeccakInput $ \buf -> ioProperty $ do
+      let simplified@(Keccak canonical) = Expr.simplify (Keccak buf)
+          -- Inputs fit in 256 bytes; compare every word without whole-array equality.
+          bytesDiffer = foldr POr (PBool False)
+            [ReadWord (Lit i) buf ./= ReadWord (Lit i) canonical | i <- [0, 32 .. 224]]
+      result <- runEnv (Env {config = equivConfig}) $ withSolvers Bitwuzla 1 (Just 5) defMemLimit $ \solvers ->
+        checkSatWithProps solvers [POr bytesDiffer (BufLength buf ./= BufLength canonical)]
+      pure $ label (if canonical == Expr.simplify buf then "unchanged" else "canonicalized") $
+        counterexample (show result) (isQed result)
+        .&&. Expr.simplify simplified === simplified
+  ]
+
+concreteKeccakStorageTests :: TestTree
+concreteKeccakStorageTests = testGroup "Concrete keccak storage"
+  [ testCase "read-through-write-chain" $ do
+      let base = ConcreteStore (Map.singleton h1 11)
+          store = SStore k2 (Var "v") (SStore (Lit 5) (Var "w") base)
+      assertEqual "skip a concrete-keccak write" (Var "w") (Expr.readStorage' (Lit 5) store)
+      assertEqual "reach the concrete base" (Lit 11) (Expr.readStorage' k1 store)
+      assertEqual "match a nested keccak by value" (Var "v") (Expr.readStorage' (Lit h2) store)
+  , testCase "lookup-and-cache-miss" $ mapM_ (\(slot, value) -> do
+      assertEqual "lookup" (Just (Lit 11))
+        (Expr.readStorage slot (ConcreteStore (Map.singleton value 11)))
+      let missing = SStore (Lit (value + 1)) (Var "v") (ConcreteStore mempty)
+      assertEqual "preserve RPC cache misses" Nothing (Expr.readStorage slot missing)
+      assertEqual "default to zero locally" (Lit 0) (Expr.readStorage' slot missing)
+    ) slots
+  , testCase "keep-unresolved-preimages" $ mapM_ (\slot -> do
+      let base = ConcreteStore (Map.singleton h1 11)
+          store = SStore (Lit h2) (Var "v") base
+      assertEqual "unknown lookup" (Just (SLoad slot base)) (Expr.readStorage slot base)
+      assertEqual "unknown write may alias" (Just (SLoad slot store)) (Expr.readStorage slot store)
+    ) [ Keccak (AbstractBuf "buf")
+      , Keccak (WriteWord (Lit 0) (Var "key") (ConcreteBuf bytes))
+      , Keccak (WriteWord (Lit 225) k1 (ConcreteBuf ""))
+      ]
+  -- All slots are concrete: check every four-write chain against a Map (6^5 reads).
+  , testCase "write-chain-equivalence" $ mapM_ (\writes -> do
+      let base = Map.singleton h1 9
+          entries = zip writes [100 ..]
+          store = foldr (\((s, _), v) acc -> SStore s (Lit v) acc) (ConcreteStore base) entries
+          concrete = foldr (\((_, s), v) -> Map.insert s v) base entries
+      mapM_ (\(slot, value) -> assertEqual (show (slot, writes))
+        (Lit (Map.findWithDefault 0 value concrete)) (Expr.readStorage' slot store)) slots
+    ) (sequence (replicate 4 slots))
+  ]
+  where
+    bytes = word256Bytes 0 <> word256Bytes 1
+    k1 = Keccak (ConcreteBuf bytes)
+    h1 = keccak' bytes
+    k2 = Keccak (WriteWord (Lit 32) k1 (ConcreteBuf (word256Bytes 100)))
+    h2 = keccak' (word256Bytes 100 <> word256Bytes h1)
+    slots =
+      [ (k1, h1), (k2, h2), (Lit h2, h2)
+      , (Add (Lit 1) k2, h2 + 1)
+      , (Add (Lit (negate h1)) k1, 0)
+      , (Keccak (WriteWord (Lit 224) k1 (ConcreteBuf "")),
+          keccak' (BS.pack (replicate 224 0) <> word256Bytes h1))
+      ]
+
+keccakInequalityTests :: TestTree
+keccakInequalityTests = testGroup "Keccak simplification"
+  [ testGroup "distinct inputs"
+      [ testCase name $ mapM_ (\(x, y) -> do
+          assertEqual "expression equality" (Lit 0) (Expr.simplify (Eq x y))
+          assertEqual "proposition equality" [PBool False] (Expr.simplifyProps [PEq x y]))
+          [(Keccak a, Keccak b), (Keccak b, Keccak a)]
+      | (name, a, b) <- inputs (Var "k") 1 1 ]
+  , localOption (mkTimeout 1_000_000) $ testCase "empty inputs terminate" $ do
+      let empty = Keccak (ConcreteBuf "")
+          wrapped = Keccak (WriteWord (Lit (maxBound - 31)) (Var "x") (ConcreteBuf ""))
+      assertEqual "identical empty inputs" (Lit 1) (Expr.simplify (Eq empty empty))
+      assertBool "zero length does not trigger a word scan" (Expr.simplify (Eq empty wrapped) /= Lit 0)
+  , testCase "uncertain inputs stay undecided" $ do
+      let pairs = [(AbstractBuf "a", AbstractBuf "b"), (mapping (Var "a") (Lit 5), mapping (Var "b") (Lit 5))]
+      mapM_ (\(a, b) -> do
+        assertBool "possible alias" (Expr.simplify (Eq (Keccak a) (Keccak b)) /= Lit 0)
+        assertBool "keep a possibly aliasing write" $ case Expr.readStorage' (slot 0 b) (store 0 0 a b) of
+          SLoad {} -> True
+          _ -> False) pairs
+  , testCase "word scan is bounded" $ do
+      let buf v = WriteWord (Lit 256) v (ConcreteBuf "")
+      assertBool "inputs longer than 256 bytes" $
+        Expr.simplify (Eq (Keccak (buf (Var "k"))) (Keccak (buf (Add (Lit 1) (Var "k"))))) /= Lit 0
+  , testCase "storage field offsets" $ mapM_ (\(r, w) -> do
+      let a = mapping (Var "k") (Lit 5)
+          b = mapping (Var "k") (Lit 6)
+      assertEqual "skip the unrelated write" (Var "old") (Expr.readStorage' (slot r b) (store r w a b)))
+      [(r, w) | r <- [0, 1, 255], w <- [0, 1, 255]]
+  , testCase "storage offset 256 may alias" $ do
+      let a = mapping (Var "k") (Lit 5)
+          b = mapping (Var "k") (Lit 6)
+      assertBool "keep the write" $ case Expr.readStorage' (slot 256 b) (store 256 0 a b) of
+        SLoad {} -> True
+        _ -> False
+      res <- checkSatWith equivConfig (PEq (slot 256 b) (slot 0 a))
+      assertBool (show res) (isSat res)
+  , testProperty "distinct inputs agree with SMT" $ withMaxSuccess 100 $
+      forAll (resize 8 (genBuf 64 1)) $ \a -> forAll (resize 8 (genBuf 64 1)) $ \b -> ioProperty $
+        case Expr.simplify (Eq (Keccak a) (Keccak b)) of
+          Lit 0 -> do
+            res <- checkSatWith equivConfig (PEq (Keccak a) (Keccak b))
+            pure $ label "distinct" $ counterexample (show res) (isQed res)
+          _ -> pure $ label "undecided" $ property True
+  , testProperty "storage skips agree with SMT" $ withMaxSuccess 100 $
+      forAll (elements [0, 1, maxBound - 1, maxBound]) $ \n ->
+      forAll (fromIntegral <$> chooseInt (1, 7)) $ \d ->
+      forAll (elements (inputs (Var "k") n d)) $ \(name, a, b) ->
+      forAll (elements [0, 1, 255]) $ \r -> forAll (elements [0, 1, 255]) $ \w -> ioProperty $ do
+        let simplified = Expr.readStorage' (slot r b) (store r w a b)
+            separated = PAnd (PGEq (Sub (Keccak a) (Keccak b)) (Lit 256))
+                             (PGEq (Sub (Keccak b) (Keccak a)) (Lit 256))
+        -- Prove the distance premise for offsets below 256 separately from the storage read.
+        res <- checkSatWith equivConfig (PNeg separated)
+        pure $ label name $ conjoin [simplified === Var "old", counterexample (show res) (isQed res)]
+  , testProperty "near keccak inputs agree with SMT" $ withMaxSuccess 100 $
+      forAll genNearKeccakInputs $ \(a, b) -> ioProperty $ do
+        let e = Expr.simplify (Eq (Keccak a) (Keccak b))
+            p = Expr.simplifyProps [PEq (Keccak a) (Keccak b)]
+        res <- checkSatLong (PEq (Keccak a) (Keccak b))
+        pure $ label (if e == Lit 0 then "decided" else "undecided") $ label (resultLabel res) $ conjoin
+          [ counterexample ("Eq decided, solver: " <> show res) (e /= Lit 0 || isQed res)
+          , counterexample ("PEq decided, solver: " <> show res) (p /= [PBool False] || isQed res)
+          ]
+  , testProperty "near keccak storage reads agree with SMT" $ withMaxSuccess 20 $
+      forAll genNearKeccakInputs $ \(a, b) ->
+      forAll (vectorOf 4 (elements [0, 1, 31, 255, 256, maxBound])) $ \offs ->
+      forAll (chooseInt (1, 4)) $ \n -> do
+        let pool = [slot o x | o <- offs, x <- [a, b]]
+        ws <- vectorOf n (elements pool)
+        r <- elements pool
+        let st = foldr (\(k, i) acc -> SStore k (Var (["v0", "v1", "v2", "v3"] !! i)) acc)
+                   (AbstractStore (SymAddr "c") Nothing) (zip ws [0 :: Int ..])
+            simplified = Expr.readStorage' r st
+        pure $ ioProperty $ do
+          res <- checkSatLong (SLoad r st ./= simplified)
+          pure $ label (resultLabel res) $
+            counterexample (show (r, st, simplified, res)) (Prelude.not (isSat res))
+  ]
+  where
+    mapping key idw = WriteWord (Lit 0) key (WriteWord (Lit 32) idw (ConcreteBuf ""))
+    slot off buf = if off == 0 then Keccak buf else Add (Lit off) (Keccak buf)
+    store r w a b = SStore (slot w a) (Var "new")
+      (SStore (slot r b) (Var "old") (AbstractStore (SymAddr "c") Nothing))
+    inputs key n d =
+      [ ("mapping slots", mapping key (Lit n), mapping key (Lit (n + d)))
+      , ("added keys", mapping (Add (Lit n) key) (Lit 5), mapping (Add (Lit (n + d)) key) (Lit 5))
+      , ("subtracted keys", mapping (Sub key (Lit n)) (Lit 5), mapping (Sub key (Lit (n + d))) (Lit 5))
+      , ("nested mapping", mapping key inner, mapping key (Lit 5))
+      , ("different lengths", WriteWord (Lit 0) key (ConcreteBuf ""), mapping key (Lit 5))
+      , ("partial last word", trailing 33 1, trailing 33 2)
+      , ("last word at 256 bytes", trailing 256 1, trailing 256 2)
+      ]
+      where
+        inner = Keccak (ConcreteBuf (word256Bytes n <> word256Bytes 5))
+        trailing len byte = WriteWord (Lit 0) key (ConcreteBuf (BS.pack (replicate (len - 1) 0 <> [byte])))
+    checkSatLong p = runEnv (Env {config = equivConfig}) $ withSolvers Bitwuzla 1 (Just 10) defMemLimit $ \solvers ->
+      checkSatWithProps solvers [p]
+    resultLabel res
+      | isQed res = "unsat"
+      | isSat res = "sat"
+      | otherwise = "unknown"
+
+-- Pairs of keccak inputs that are equal, or differ only slightly, in their length, bytes or words.
+genNearKeccakInputs :: Gen (Expr Buf, Expr Buf)
+genNearKeccakInputs = do
+  len <- elements [0, 1, 31, 32, 33, 63, 64, 65, 96, 224, 255, 256, 257, 288]
+  bytes <- vectorOf len (elements [0, 1, 0xff])
+  ws <- chooseInt (0, 3) >>= flip vectorOf ((,) <$> genOff len <*> genNearWord)
+  let build bs ws' = foldr (\(i, w) buf -> WriteWord (Lit i) w buf) (ConcreteBuf (BS.pack bs)) ws'
+      a = build bytes ws
+  b <- frequency $
+    [ (1, pure a)
+    , (2, do i <- chooseInt (0, max 0 (len - 1)); v <- elements [0, 1, 0xff]
+             pure $ build (take i bytes <> [v] <> drop (i + 1) bytes) ws)
+    , (1, do len' <- elements [max 0 (len - 1), len + 1, len - (len `mod` 32)]
+             pure $ build (take len' (bytes <> repeat 0)) ws)
+    ] <>
+    [ (5, do j <- chooseInt (0, length ws - 1)
+             let (i, w) = ws !! j
+             w' <- neighbour w
+             i' <- frequency [(4, pure i), (1, elements [i + 1, i - 1, i + 32])]
+             pure $ build bytes (take j ws <> [(i', w')] <> drop (j + 1) ws))
+    | Prelude.not (null ws) ]
+  pure (a, b)
+  where
+    genOff len = frequency
+      [ (4, elements (fromIntegral <$> [0, 32 .. max 0 (len - 1)]))
+      , (1, fromIntegral <$> chooseInt (0, len + 31))
+      ]
+    small = elements [1, 2, 31, 32, maxBound, maxBound - 1]
+    key = Var <$> elements ["k0", "k1"]
+    mapping k s = WriteWord (Lit 0) k (WriteWord (Lit 32) (Lit s) (ConcreteBuf ""))
+    genNearWord = oneof
+      [ Lit <$> small
+      , key
+      , Add <$> (Lit <$> small) <*> key
+      , Sub <$> key <*> (Lit <$> small)
+      , Keccak . ConcreteBuf . BS.pack <$> vectorOf 64 (elements [0, 1])
+      , Keccak <$> (mapping <$> key <*> elements [3, 4])
+      , Add <$> (Lit <$> small) <*> (Keccak <$> (mapping <$> key <*> elements [3, 4]))
+      ]
+    neighbour w = oneof
+      [ (\d -> Add (Lit d) w) <$> small
+      , (\d -> Sub w (Lit d)) <$> small
+      , (\d -> Add (Lit d) (Sub w (Lit d))) <$> small
+      , (\d -> Sub (Add (Lit d) w) (Lit d)) <$> small
+      , genNearWord
+      ]
 
 copySliceTests :: TestTree
 copySliceTests = testGroup "CopySlice tests"
@@ -248,6 +542,68 @@ copySliceTests = testGroup "CopySlice tests"
             e = CopySlice (Lit 0x3f) (Lit 0x0) (Lit 0x1) src (ConcreteBuf "")
         assertEqual "size-1 copy must read the correct (last) byte"
           (ConcreteBuf (BS.pack [0x89])) (Expr.simplify e)
+  , testCase "copyslice-window-trim-canonicalizes-mapping-keys" $ do
+      let key rest = Expr.simplify $ Keccak (CopySlice (Lit 0) (Lit 0) (Lit 64)
+                       (WriteWord (Lit 0) (Var "acc") (WriteWord (Lit 32) (Lit 7) rest)) (ConcreteBuf ""))
+          k1 = key (WriteWord (Lit 192) (Var "x") (ConcreteBuf (BS.pack [9, 9, 9])))
+          k2 = key (WriteWord (Lit 64) (Var "y") (WriteWord (Lit 320) (Lit 5) (ConcreteBuf "")))
+          k3 = Expr.simplify $ Keccak (CopySlice (Lit 0) (Lit 0) (Lit 64)
+                 (WriteWord (Lit 0) (Var "acc") (WriteWord (Lit 32) (Lit 8) (ConcreteBuf ""))) (ConcreteBuf ""))
+      assertEqual "same first 64 bytes give the same key" k1 k2
+      assertBool "a different second word gives a different key" (k1 /= k3)
+      assertEqual "the equivalent key resolves a storage read" (Var "value")
+        (Expr.readStorage' k2 (SStore k1 (Var "value") (AbstractStore (SymAddr "c") Nothing)))
+  , testCase "copyslice-window-trim-preserves-zero-mapping-slot" $ do
+      let src = WriteWord (Lit 0) (Var "acc") (WriteWord (Lit 32) (Lit 0)
+                  (WriteWord (Lit 192) (Var "scratch") (ConcreteBuf "")))
+          key = Expr.simplify $ Keccak (CopySlice (Lit 0) (Lit 0) (Lit 64) src (ConcreteBuf ""))
+      assertEqual "retains the 64-byte mapping preimage"
+        (Expr.MappingSlot (BS.pack (replicate 64 0)) (Var "acc")) key
+      assertEqual "slot zero still decomposes"
+        (Just $ SLoad (Var "acc") (AbstractStore (SymAddr "c") (Just 0)))
+        (Expr.decomposeStorage $ SLoad key (AbstractStore (SymAddr "c") Nothing))
+  , localOption (mkTimeout 5_000_000) $ testCase "copyslice-window-trim-short-copy" $ do
+      let src = WriteWord (Lit 192) (Var "other") (WriteWord (Lit 16) (Var "value") (ConcreteBuf ""))
+          dst = AbstractBuf "dst"
+          expected = CopySlice (Lit 0) (Lit 5) (Lit 3) (WriteWord (Lit 0) (Var "value") (ConcreteBuf "")) dst
+      assertEqual "short copies reach a stable result" expected (Expr.copySlice (Lit 16) (Lit 5) (Lit 3) src dst)
+  , testCase "copyslice-window-trim-unsupported" $ do
+      let base = ConcreteBuf ""
+          src = WriteWord (Lit 0) (Var "value") base
+          check (off, size, buf) =
+            assertEqual "unsupported windows and writes stay intact"
+              (CopySlice (Lit off) (Lit 0) (Lit size) buf (AbstractBuf "dst"))
+              (Expr.copySlice (Lit off) (Lit 0) (Lit size) buf (AbstractBuf "dst"))
+      mapM_ check
+        [ (0, 64, WriteWord (Var "offset") (Var "value") base)
+        , (0, 64, WriteWord (Lit (maxBound - 15)) (Var "value") base)
+        , (0, 64, WriteWord (Lit 0) (Var "value") (AbstractBuf "src"))
+        , (maxBound - 15, 64, src)
+        , (0, Expr.maxBytes, src)
+        ]
+  , testCase "copyslice-window-trim-in-simplify" $ do
+      let src = WriteWord (Lit 262) (Var "a") (WriteWord (Lit 196) (Lit 0xba) (ConcreteBuf ""))
+          dst = ConcreteBuf (BS.pack [1..100])
+          e = CopySlice (Lit 145) (Lit 45) (Lit 82) src dst
+      assertEqual "a write past the window does not survive simplification"
+        (ConcreteBuf (BS.pack [1..45] <> BS.replicate 82 0)) (Expr.simplify e)
+  , adjustOption (\(QuickCheckTests n) -> QuickCheckTests (if n == 100 then 200 else n)) $
+    testProperty "copyslice-window-trim-equivalence" $ forAll genTrimCase $ \c ->
+      forAll (frequency [(4, fromIntegral <$> choose (0 :: Int, 64)), (1, elements [Expr.maxBytes, maxBound - 15])]) $ \dOff ->
+      forAll (elements [ConcreteBuf "", AbstractBuf "dst", ConcreteBuf (BS.pack [1..100])]) $ \dst -> ioProperty $ do
+        let lit = Lit . fromIntegral
+            full = CopySlice (lit c.tcOff) (Lit dOff) (lit c.tcSize) (tcSrc c) dst
+            simp = Expr.copySlice (lit c.tcOff) (Lit dOff) (lit c.tcSize) (tcSrc c) dst
+            simpAll = Expr.simplify full
+            differ a = (full ./= a) .|| (Expr.bufLength full ./= Expr.bufLength a)
+        res <- checkSatWith equivConfig (differ simp .|| differ simpAll)
+        let result = case simp of
+              _ | simp == full -> "unchanged"
+              ConcreteBuf _ -> "concrete"
+              CopySlice _ _ _ s _ | s /= tcSrc c -> "source trimmed"
+              _ -> "other"
+        pure $ foldr (uncurry tabulate) (counterexample (show (c, simp, simpAll, res)) $ isUnsatOrUnknown res)
+          (("result", [result]) : ("solver", [takeWhile (/= ' ') (show res)]) : trimCaseLabels c)
   ]
 
 memoryTests :: TestTree
@@ -1545,6 +1901,42 @@ wrappingTests = testGroup "W256 wrapping edge cases"
           simplified = Expr.copySlice (Lit srcOff) (Lit 0) (Lit size) srcBuf dstBuf
       result <- proveEquivExpr full simplified
       assertBool "copySlice with wrapping srcOffset" result
+
+  , testCase "writeWord-wrapping-write-stays-on-top" $ do
+      let lower = WriteWord (Lit 0) (Var "x") (AbstractBuf "b")
+          full = ReadWord (Lit 0) (WriteWord (Lit maxBound) (Var "v") lower)
+          simplified = ReadWord (Lit 0) (Expr.writeWord (Lit maxBound) (Var "v") lower)
+          nested = WriteWord (Lit maxBound) (Var "v") (WriteWord (Lit 0x2a) (Var "x") (AbstractBuf "b"))
+      result <- proveEquivExpr full simplified
+      assertBool "writeWord with a wrapping offset over a lower write" result
+      assertEqual "simplify terminates" nested (Expr.simplify nested)
+
+  , testCase "copySlice-short-from-writeWord-terminates" $ do
+      let buf = CopySlice (Var "c") (Lit 0x26) (Lit 3) (WriteWord (Var "c") (Var "x") (AbstractBuf "b")) (AbstractBuf "b")
+          expected = CopySlice (Lit 0) (Lit 0x26) (Lit 3) (WriteWord (Lit 0) (Var "x") (ConcreteBuf "")) (AbstractBuf "b")
+      assertEqual "" expected (Expr.simplify buf)
+
+  , testCase "bufLength-copySlice-symbolic-size-zero" $ do
+      let len = Expr.bufLength (CopySlice (Lit 0x30) (Lit 0x4b) (Var "s") (AbstractBuf "b") (ConcreteBuf ""))
+          at :: W256 -> Expr EWord
+          at v = Expr.simplify (mapExpr (\case { Var "s" -> Lit v; e -> e }) len)
+      assertEqual "a copy of zero bytes does not grow the buffer" (Lit 0) (at 0)
+      assertEqual "" (Lit 0x50) (at 5)
+
+  , testCase "readWord-wrap-over-low-writeByte" $ do
+      let buf = WriteByte (Lit 5) (LitByte 0xAB) (ConcreteBuf (BS.pack [1..50]))
+          full = ReadWord (Lit maxBound) buf
+      result <- proveEquivExpr full (Expr.readWord (Lit maxBound) buf)
+      assertBool "readWord wrapping onto a WriteByte at a low index" result
+
+  , testCase "readWord-wrap-over-low-copySlice" $ do
+      let buf = CopySlice (Lit 0) (Lit 0) (Lit 3) (AbstractBuf "src") (AbstractBuf "dst")
+          full = ReadWord (Lit maxBound) buf
+      result <- proveEquivExpr full (Expr.readWord (Lit maxBound) buf)
+      assertBool "readWord wrapping onto a CopySlice at a low index" result
+
+  , testCase "show-addr-leaves-rest-alone" $
+      assertEqual "" "(0x0000000000000000000000000000000000001234,Just 1)" (show (Addr 0x1234, Just (1 :: Int)))
   ]
 
 fuzzTests :: TestTree
@@ -1558,10 +1950,42 @@ fuzzTests = testGroup "ExprFuzzTests"
       , simplifierFuzzTests abstractConfig
       ]
   , abstractArithmeticFuzzTests
+  , enumerateFuzzTests
   ]
   where
     halfQuickCheckTests = adjustOption $ \(Test.Tasty.QuickCheck.QuickCheckTests n) ->
       Test.Tasty.QuickCheck.QuickCheckTests (div n 2)
+
+-- | Every model of the path conditions must take a value of the subterm that is enumerated,
+-- and give the word the value enumerated with it: one left out drops a feasible path.
+enumerateFuzzTests :: TestTree
+enumerateFuzzTests = testGroup "enumerateViaSmallSubterm"
+  [ testProperty "enumerate-small-subterm-complete" $ \(SmallRange limit props e) -> ioProperty $
+      -- path conditions are stored simplified
+      case Expr.enumerateViaSmallSubterm limit (Expr.simplifyProps props) e of
+        Nothing -> pure $ label "nothing enumerated" True
+        Just (atoms, groups) -> do
+          -- keccak of a symbolic buffer is uninterpreted in SMT, so the values of hashing words
+          -- are checked by evaluation, and only the coverage of the assignments by the solver
+          let hashes = Expr.containsNode (\case Keccak _ -> True; _ -> False) e
+              ks = concatMap snd groups
+              assigned k = foldr PAnd (PBool True) (zipWith (\a v -> PEq a (Lit v)) atoms k)
+              covered = foldr POr (PBool False)
+                [PAnd (assigned k) (if hashes then PBool True else PEq e (Lit v)) | (v, vks) <- groups, k <- vks]
+              -- the subterms are those of the simplified word
+              evaluated = and [Expr.concKeccakSimpExpr (mapExpr (substAll (zip atoms k)) (Expr.simplify e)) == Lit v | (v, vks) <- groups, k <- vks]
+          res <- checkSat $ foldr PAnd (PNeg covered) props
+          pure $ label (if null groups then "enumerated as infeasible" else "enumerated")
+               $ label (if isUnknown res then "solver gave up" else "solver answered")
+               $ label (show (length atoms) <> " subterm(s)" <> if hashes then ", hashed" else "")
+               $ counterexample ("subterms: " <> show atoms <> "\ngroups: " <> show groups <> "\nresult: " <> show res)
+               $ length ks <= limit && length ks == length (nubOrd ks) && isUnsatOrUnknown res && evaluated
+  ]
+
+substAll :: [(Expr EWord, W256)] -> Expr a -> Expr a
+substAll m x = case exprType x of
+  WordRep | Just k <- lookup x m -> Lit k
+  _ -> x
 
 equivalenceSanityChecks :: Config -> TestTree
 equivalenceSanityChecks cfg = testGroup "Expr equivalence sanity checks"
@@ -1642,7 +2066,7 @@ simplifierFuzzTests cfg = testGroup "SimplifierPropertyTests"
         let simplified = Expr.writeByte idx val buf
             full = WriteByte idx val buf
         proveEquivExprWith cfg full simplified
-    , testProperty "copySlice-equivalance" $ \(srcOff, GenCopySliceBuf src, GenCopySliceBuf dst, LitWord @300 size) -> ioProperty $ do
+    , testProperty "copySlice-equivalance" $ \(GenCopySliceOff srcOff, GenCopySliceBuf src, GenCopySliceBuf dst, LitWord @300 size) -> ioProperty $ do
         -- we bias buffers to be concrete more often than not
         dstOff <- generate (maybeBoundedLit 100_000)
         let simplified = Expr.copySlice srcOff dstOff size src dst
@@ -2000,3 +2424,78 @@ genPackedFieldWord = do
           shifted = if shiftForm then SHL (Lit (fromIntegral j)) (And (Lit mask) f)
                                  else Mul (Lit (1 `shiftL` j)) (And (Lit mask) f)
       in Or shifted (And (Lit clear) acc)
+genKeccakInput :: Gen (Expr Buf)
+genKeccakInput = do
+  n <- elements [32, 64 .. 256 :: Int]
+  off <- elements [0, 16, 32, 256 :: Int]
+  base <- ConcreteBuf . BS.pack <$> vectorOf (off + n + 32) arbitrary
+  values <- vectorOf (n `div` 32) $ oneof
+    [ Lit <$> arbitrary
+    , elements [Var "a", Var "b", ReadWord (Lit 0) (AbstractBuf "input")]
+    , pure $ Keccak (ConcreteBuf (word256Bytes 3 <> word256Bytes 0))
+    , pure $ Add (Lit 5) (Keccak (ConcreteBuf (word256Bytes 4 <> word256Bytes 0)))
+    ]
+  writes <- shuffle (zip [off, off + 32 ..] values)
+  let source = foldr (\(i, w) b -> WriteWord (Lit $ fromIntegral i) w b) base writes
+  pure $ CopySlice (Lit $ fromIntegral off) (Lit 0) (Lit $ fromIntegral n) source (ConcreteBuf "")
+
+-- | A copy window over a word-write chain, biased towards writes and base ends on the window edges
+data TrimCase = TrimCase
+  { tcOff :: Int, tcSize :: Int, tcWrites :: [(Int, Expr EWord)], tcBase :: Expr Buf }
+  deriving Show
+
+tcSrc :: TrimCase -> Expr Buf
+tcSrc c = foldr (\(i, v) acc -> WriteWord (Lit (fromIntegral i)) v acc) c.tcBase c.tcWrites
+
+genTrimCase :: Gen TrimCase
+genTrimCase = do
+  off <- frequency [(3, choose (0, 160)), (1, elements [0, 32, 64])]
+  -- size 32 is rewritten to a WriteWord before the trim is reached
+  size <- frequency [(1, choose (1, 31)), (2, choose (33, 96))]
+  let end = off + size
+      edges = filter (>= 0) [off - 32, off - 31, off - 1, off, end - 32, end - 31, end - 1, end]
+      genIdx prev = frequency $
+        [(2, choose (0, end + 40)), (2, elements edges)]
+        <> [(1, elements prev >>= \p -> (p +) <$> choose (-31, 31)) | not (null prev)]
+      genWrites 0 _ = pure []
+      genWrites k prev = do
+        i <- max 0 <$> genIdx prev
+        v <- oneof [Lit <$> arbitrary, Lit . fromIntegral <$> choose (0 :: Int, 255), elements [Var "a", Var "b", Var "c"]]
+        ((i, v) :) <$> genWrites (k - 1 :: Int) (i : prev)
+  writes <- choose (1, 6) >>= \n -> genWrites n []
+  len <- frequency [(1, pure 0), (2, choose (0, 200)), (2, elements (filter (>= 0) [end - 1, end, end + 1]))]
+  bytes <- BS.pack <$> vectorOf len (frequency [(1, pure 0), (3, choose (1, 255))])
+  base <- frequency
+    [ (8, pure $ ConcreteBuf bytes)
+    , (1, pure $ AbstractBuf "src")
+    , (1, pure $ WriteByte (Lit 3) (LitByte 1) (ConcreteBuf bytes))
+    ]
+  pure $ TrimCase off size writes base
+
+-- | What a case exercises, by the window semantics rather than by the implementation
+trimCaseLabels :: TrimCase -> [(String, [String])]
+trimCaseLabels c =
+  [ ("write vs window", go [] c.tcWrites)
+  , ("base", [baseKind])
+  , ("size", [if c.tcSize < 32 then "<32" else ">32"])
+  ]
+  where
+    off = c.tcOff
+    end = off + c.tcSize
+    hits i = i < end && i + 32 > off
+    go _ [] = []
+    go later ((i, _) : rest) = tag : go (i : later) rest
+      where
+        tag | i + 32 == off || i == end = "edge, outside"
+            | i + 31 == off || i + 1 == end = "edge, inside"
+            | not (hits i) = "outside"
+            | any (\j -> j < i + 32 && i < j + 32) later = "overlaps a later write"
+            | i < off || i + 32 > end = "straddles"
+            | otherwise = "inside"
+    baseKind = case c.tcBase of
+      ConcreteBuf bs
+        | BS.length bs < off -> "concrete, ends before window"
+        | BS.length bs < end -> "concrete, ends in window"
+        | otherwise -> "concrete, covers window"
+      AbstractBuf _ -> "abstract"
+      _ -> "WriteByte"

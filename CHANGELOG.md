@@ -10,6 +10,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Added
 - Masked `Div` and `SHR` reads now simplify through packed-word writes,
   allowing reads of Solidity-packed fields to reduce to the written value.
+- Small, word-aligned keccak inputs are canonicalized so equivalent mapping
+  keys built from memory writes or copies can resolve to the same storage entry.
+- Storage reads resolve concrete keccak slots, including nested hashes and
+  literal offsets, when comparing writes or looking up a concrete store.
+- Keccak equality and storage reads now use known differences in input lengths
+  or words to rule out aliases, including struct offsets below 256, under the
+  existing keccak assumptions.
+- `copySlice` now trims irrelevant writes and base bytes from concrete source
+  windows, allowing mapping keys built over different scratch memory to compare equal.
+- Symbolic execution now avoids forking when simplification shows that
+  the path conditions imply the branch condition.
+- Symbolic jump targets and jump conditions that depend on a subterm with few
+  possible values, e.g. `selector mod n` in jumptable dispatchers or a loop bound
+  limited by an earlier check, are resolved by enumerating those values instead
+  of asking the SMT solver.
+- `hevm equivalence` replays every counterexample concretely and marks it as
+  validated, not reproducible, or not replayable. It only reports that the
+  contracts do not behave equivalently if a counterexample is validated.
+- A live status line on stderr for `hevm symbolic`, `hevm equivalence` and
+  `hevm test` (disable with `--no-progress`), with a summary line per finished
+  phase or test that includes its slowest SMT query, and a JSONL log of interpreter and solver
+  progress (`--progress-log FILE` or `--verb 3`; `--progress-exprs` or `--verb 4`
+  also logs solver expressions).
+- The progress log tells the time a query waited for a solver apart from the
+  time it was solved for, gives the reason a query for multiple solutions gave
+  up, and ends each phase with a summary of where its solver time and forks
+  went. The status line shows queued queries and the program counter with the
+  most solver time.
 - Abstract arithmetic, on by default (disable with `--no-abstract-arith`):
   symbolic multiplication and division are encoded as uninterpreted functions
   constrained by sound algebraic lemmas, and are equated with the native bitvector operations only when the abstract query
@@ -22,8 +50,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Traces are now built as `prettyprinter` documents with semantic annotations
   (`showTraceDoc`, `traceDocForest`, `TraceAnn`), so frontends can style them
   without parsing ANSI escape codes. Terminal output is unchanged.
+- Hash-consing of symbolic terms, on by default (`hashConsExplore` config
+  option); disable it with `--no-hash-cons`.
+
+## Changed
+- A symbolic value that depends on several symbolic subterms with few possible
+  values each, such as the slot of a nested mapping with two such keys, is now
+  split into cases on all of them, instead of asking the solver for its values.
+  Reading such a slot from storage fetched via RPC now works.
+- The default SMT solver is now bitwuzla instead of z3. hevm now stops with an
+  error at startup if the selected solver is not installed.
+- The default `--max-buf-size` is now 24 (calldata and returndata of up to
+  16 MB) instead of 64, which is still more than gas limits allow.
+- Counterexamples have bold section headings, and `hevm equivalence` shows the
+  result of replaying each one as a coloured tag, as `hevm test` does.
+- `hevm equivalence` replays counterexamples with calls to unknown code by
+  putting code at each callee that returns what the counterexample says, and
+  logs each replay to the progress log.
 
 ## Fixed
+- A storage slot fetched via RPC no longer shadows symbolic writes made to it
+  earlier in the same execution.
+- `hevm equivalence` no longer reports a difference only because one program
+  made a call to unknown code that changed nothing.
+- Symbolic execution starts the transient storage of the called contract empty,
+  instead of with arbitrary values.
+- Symbolic execution treats the block number and timestamp as symbolic instead
+  of 0.
+- Symbolic `CALLDATALOAD` from within 31 bytes of 2^256 gives zero instead of
+  wrapping around to the start of calldata.
+- A call to unknown code moves its value to the callee, and the callee may send
+  the caller ether, in symbolic execution.
+- The concrete replay of equivalence counterexamples compares final balances.
+- The concrete replay of equivalence counterexamples keeps long return data of
+  calls to unknown code compact, instead of running out of memory.
+- A call to unknown code now writes the data it returns to the output region
+  of the call in memory. Before, the region kept its old contents, so code that
+  read the result from there could pass assertions it does not satisfy.
+- `hevm equivalence` no longer crashes printing a counterexample that sets the
+  balance of the contract, and uses that balance when replaying it. The block
+  context of counterexamples is now printed instead of the transaction context.
+- The hash-consing tables are reset once they grow past a size limit, instead of
+  growing without bound after exploration.
+- Symbolic `GAS` readings are now only ordered within a call frame, so a caller
+  can have more gas left after a call than its callee had.
+- Calls to unknown code with the same inputs now return the same results, also
+  between the two programs of `hevm equivalence`, which no longer reports
+  differences that only come from such calls returning different results.
+- `hevm equivalence` no longer reports each partially explored path once per end
+  state of the other program, which inflated the counts in its warnings.
+- Simplification and the other `Expr` traversals now also reach revert data, the
+  terms in errors and partial executions, `BALANCE` addresses and log topics.
 - Storage decomposition no longer swaps key and slot for concrete mapping
   hashes, which caused spurious counterexamples and false proofs when concrete
   and symbolic mapping accesses were mixed ([#1099](https://github.com/argotorg/hevm/issues/1099)).
@@ -58,6 +135,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no longer crashes with an internal error during gas calculation; it now
   fails with `NonexistentPrecompile` (concrete) or a `PrecompileMissing`
   partial (symbolic) ([#1084](https://github.com/argotorg/hevm/issues/1084))
+- A `WriteWord` whose offset wraps past 2^256 is no longer moved below an
+  earlier `WriteWord` that it overlaps
+- `simplify` no longer loops forever on a `CopySlice` of fewer than 32 bytes
+  out of a `WriteWord` into an abstract buffer
+- `ReadWord` at an index that wraps past 2^256 no longer skips a `WriteByte` or
+  `CopySlice` at a low index
+- `BufLength` of a `CopySlice` with a symbolic size no longer counts the copy
+  when the size is zero
+- `Show Addr` no longer corrupts the text printed after the address
 
 ## [0.58.0] - 2026-06-26
 

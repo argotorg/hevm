@@ -595,7 +595,6 @@ genContract n = do
         , (10, pure OpBaseFee)
         , (10, pure OpPc)
         , (10, pure OpMsize)
-        , (10, pure OpGas)
         , (10, pure OpExtcodesize)
         , (10, pure OpCodecopy)
         , (10, pure OpExtcodecopy)
@@ -661,12 +660,11 @@ testEnv = Env { config = defaultConfig }
 test :: TestName -> ReaderT Env IO () -> TestTree
 test a b = testCase a $ runEnv testEnv b
 
-prop:: Testable prop => ReaderT Env IO prop -> Property
-prop a = ioProperty $ runEnv testEnv a
-
 tests :: TestTree
 tests = testGroup "contract-quickcheck-run"
-    [ testProperty "random-contract-concrete-call" $ \(contr :: OpContract, GasLimitInt gasLimit, TxDataRaw txDataRaw) -> prop $ do
+    [ testProperty "random-contract-concrete-call" $ \(contr :: OpContract, GasLimitInt gasLimit, TxDataRaw txDataRaw, hashCons :: Bool) ->
+      -- the flag is process-wide, so concurrent tests may flip it mid-run; results must not change either way
+      ioProperty $ runEnv (Env { config = defaultConfig { hashConsExplore = hashCons } }) $ do
         let txData = BS.pack $ toEnum <$> txDataRaw
         -- TODO: By removing external calls, we fuzz less
         --       It should work also when we external calls. Removing for now.

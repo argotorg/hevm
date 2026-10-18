@@ -493,8 +493,22 @@ instance Arbitrary GenCopySliceBuf where
           [ pure $ ConcreteBuf ""
           , fmap ConcreteBuf arbitrary
           , arbitrary
+          , wordWrites
           ]
+        -- literal word writes near a small window, as memory looks before a copy out of it
+        wordWrites = do
+          n <- choose (1, 5 :: Int)
+          writes <- vectorOf n $ WriteWord <$> (Lit . fromIntegral <$> choose (0, 160 :: Int)) <*> arbitrary
+          base <- ConcreteBuf <$> arbitrary
+          pure $ foldr ($) base writes
     fmap GenCopySliceBuf mkBuf
+
+-- GenCopySliceOff
+newtype GenCopySliceOff = GenCopySliceOff (Expr EWord)
+  deriving (Show, Eq)
+
+instance Arbitrary GenCopySliceOff where
+  arbitrary = GenCopySliceOff <$> oneof [arbitrary, Lit . fromIntegral <$> choose (0, 160 :: Int)]
 
 -- GenWriteByteIdx
 newtype GenWriteByteIdx = GenWriteByteIdx (Expr EWord)
@@ -924,3 +938,217 @@ genEnd sz = oneof
   where
     subBuf = defaultBuf (sz `div` 2)
     subProp = genProps False (sz `div` 2)
+
+-- | Subterms with their tree sizes, so that larger terms built from them share subterms
+data Pool = Pool
+  { pWords  :: [(Int, Expr EWord)]
+  , pBufs   :: [(Int, Expr Buf)]
+  , pStores :: [(Int, Expr Storage)]
+  , pBytes  :: [(Int, Expr Byte)]
+  , pAddrs  :: [Expr EAddr]
+  }
+
+poolVars :: [Text]
+poolVars = ["esc_word_a", "esc_word_b", "esc_word_c"]
+
+-- | Values that an offset, a size or a sum of the two carries past 2^256 (or past the sign bit)
+genWrapValue :: Gen W256
+genWrapValue = frequency
+  [ (6, negate . fromInteger <$> chooseInteger (1, 100))
+  , (1, (\d -> negate (Expr.maxBytes + 50 - fromInteger d)) <$> chooseInteger (0, 100))
+  -- never just below maxBytes: the simplifier would materialize a buffer of that size
+  , (1, (\d -> Expr.maxBytes + fromInteger d) <$> chooseInteger (0, 100))
+  , (2, (\d -> 2 ^ (255 :: Int) + 50 - fromInteger d) <$> chooseInteger (0, 100))
+  ]
+
+-- | Sharing makes the tree size exponential in the depth, so entries above @cap@ are dropped
+genPool :: Int -> Int -> Gen Pool
+genPool steps cap = do
+  lits <- (<>) <$> vectorOf 2 (fmap Lit arbitrary) <*> vectorOf 3 (Lit <$> genWrapValue)
+  keys <- vectorOf 3 genStorageKey
+  env <- elements [Origin, Coinbase, Timestamp, BlockNumber, PrevRandao, GasLimit, ChainId, BaseFee, TxValue]
+  buf <- ConcreteBuf <$> resize 40 arbitrary
+  store <- ConcreteStore . Map.fromList <$> listOf ((,) <$> (fromIntegral <$> chooseInt (0, 20)) <*> arbitrary)
+  byte <- LitByte <$> arbitrary
+  let leaf x = (1, x)
+      seed = Pool
+        { pWords = fmap leaf $ [Lit 0, Lit 1, Lit 32, Lit Expr.maxLit, env, Gas "esc_gas" 0, Gas "esc_gas" 1] <> fmap Var poolVars <> lits <> keys
+        , pBufs = fmap leaf [ConcreteBuf "", AbstractBuf "esc_buf_a", AbstractBuf "esc_buf_b", buf]
+        , pStores = fmap leaf [AbstractStore (SymAddr "esc_addr_a") Nothing, AbstractStore (SymAddr "esc_addr_a") (Just 1), AbstractStore (LitAddr 0x1234) Nothing, store]
+        , pBytes = fmap leaf [LitByte 0, LitByte 0xff, byte]
+        , pAddrs = [SymAddr "esc_addr_a", SymAddr "esc_addr_b", LitAddr 0x1234]
+        }
+  foldM (\p _ -> growPool cap p) seed [1 .. steps]
+
+growPool :: Int -> Pool -> Gen Pool
+growPool cap p = frequency
+  [ (10, (\x -> p { pWords = keep x p.pWords }) <$> word)
+  , (3, (\x -> p { pBufs = keep x p.pBufs }) <$> buf)
+  , (3, (\x -> p { pStores = keep x p.pStores }) <$> (n3 SStore <$> w <*> w <*> s))
+  , (2, (\x -> p { pBytes = keep x p.pBytes }) <$> oneof [n2 IndexWord <$> w <*> w, n2 ReadByte <$> idx <*> b])
+  ]
+  where
+    keep :: (Int, a) -> [(Int, a)] -> [(Int, a)]
+    keep x xs = if fst x <= cap then x : xs else xs
+    w = elements p.pWords
+    b = elements p.pBufs
+    s = elements p.pStores
+    y = elements p.pBytes
+    a = (\x -> (1, x)) <$> elements p.pAddrs
+    -- literal offsets are small or wrap around 2^256: the simplifier materializes concrete
+    -- buffers up to a literal one
+    idx = frequency
+      [ (5, (\n -> (1, Lit (fromIntegral n))) <$> chooseInt (0, 100))
+      , (3, (\x -> (1, Lit x)) <$> genWrapValue)
+      , (2, n2 And (1, Lit 0x3ff) <$> w)
+      , (1, n2 Sub <$> w <*> ((\n -> (1, Lit (fromIntegral n))) <$> chooseInt (1, 64)))
+      , (1, w)
+      ]
+    size = frequency
+      [ (5, (\n -> (1, Lit (fromIntegral n))) <$> chooseInt (0, 100))
+      , (1, (\x -> (1, Lit x)) <$> genWrapValue)
+      , (1, w)
+      ]
+    n1 f (sx, x) = (1 + sx, f x)
+    n2 f (sx, x) (sy, x') = (1 + sx + sy, f x x')
+    n3 f (sx, x) (sy, x') (sz, x'') = (1 + sx + sy + sz, f x x' x'')
+    word = frequency
+      [ (12, n2 <$> elements
+          [ Add, Sub, Mul, Div, SDiv, Mod, SMod, Exp, SEx, Min, Max, LT, GT, LEq, GEq, SLT, SGT, Eq
+          , And, Or, Xor, SHL, SHR, SAR ] <*> w <*> w)
+      , (3, n1 <$> elements [IsZero, Not, CLZ] <*> w)
+      , (2, n3 <$> elements [AddMod, MulMod, ITE] <*> w <*> w <*> w)
+      , (2, n1 Keccak <$> b)
+      , (1, n1 BufLength <$> b)
+      , (3, n2 ReadWord <$> idx <*> b)
+      , (3, n2 SLoad <$> w <*> s)
+      , (1, n2 EqByte <$> y <*> y)
+      , (1, (\ys -> (1 + sum (fmap fst ys), joinBytesFromList (fmap snd ys))) <$> vectorOf 32 y)
+      , (1, oneof [n1 BlockHash <$> w, n1 WAddr <$> a, n1 Balance <$> a, n1 CodeSize <$> a, n1 CodeHash <$> a])
+      ]
+    buf = oneof
+      [ n3 WriteWord <$> idx <*> w <*> b
+      , n3 WriteByte <$> idx <*> y <*> b
+      , (\(s1, so) (s2, d) (s3, sz) (s4, src) (s5, dst) -> (1 + s1 + s2 + s3 + s4 + s5, CopySlice so d sz src dst))
+          <$> idx <*> idx <*> size <*> b <*> b
+      ]
+
+genPoolProp :: Pool -> Int -> Gen Prop
+genPoolProp p 0 = elements [PEq, PLT, PGT, PLEq, PGEq] <*> w <*> w
+  where w = snd <$> elements p.pWords
+genPoolProp p depth = oneof
+  [ genPoolProp p 0
+  , PNeg <$> sub
+  , elements [PAnd, POr, PImpl] <*> sub <*> sub
+  ]
+  where sub = genPoolProp p (depth - 1)
+
+genPoolEnd :: Pool -> Gen (Expr End)
+genPoolEnd p = oneof
+  [ Failure <$> props <*> pure mempty <*> (Revert <$> b)
+  , Success <$> props <*> pure mempty <*> b <*> (Map.fromList <$> resize 2 (listOf ((,) <$> elements p.pAddrs <*> contract)))
+  ]
+  where
+    b = snd <$> elements p.pBufs
+    s = snd <$> elements p.pStores
+    props = resize 3 (listOf (genPoolProp p 1))
+    contract = C <$> code <*> s <*> s <*> (snd <$> elements p.pWords) <*> arbitrary
+    code = oneof
+      [ UnknownCode <$> elements p.pAddrs
+      , InitCode <$> resize 8 arbitrary <*> b
+      , RuntimeCode . ConcreteRuntimeCode <$> resize 8 arbitrary
+      , RuntimeCode . SymbolicRuntimeCode . V.fromList <$> resize 4 (listOf (snd <$> elements p.pBytes))
+      ]
+
+-- | A handful of terms of every type, all cut from one 'Pool' so they overlap heavily
+data SharedTerms = SharedTerms
+  { words  :: [Expr EWord]
+  , bufs   :: [Expr Buf]
+  , stores :: [Expr Storage]
+  , bytes  :: [Expr Byte]
+  , props  :: [Prop]
+  , ends   :: [Expr End]
+  }
+
+-- the property that fails prints the offending term
+instance Show SharedTerms where
+  show t = "<SharedTerms: " <> show (length t.words) <> " words>"
+
+instance Arbitrary SharedTerms where
+  arbitrary = sized $ \sz -> do
+    p <- genPool (10 + sz) 300
+    let pick n xs = take n . fmap snd <$> shuffle xs
+    SharedTerms
+      <$> pick 12 p.pWords
+      <*> pick 6 p.pBufs
+      <*> pick 6 p.pStores
+      <*> pick 6 p.pBytes
+      <*> vectorOf 6 (genPoolProp p 2)
+      <*> vectorOf 3 (genPoolEnd p)
+
+-- | A word that depends on one or two symbolic subterms only through a few values, with path
+-- conditions that may bound them, for 'Expr.enumerateViaSmallSubterm'. It may hash them as
+-- (nested) mapping slots do.
+data SmallRange = SmallRange Int [Prop] (Expr EWord)
+  deriving (Show)
+
+instance Arbitrary SmallRange where
+  arbitrary = do
+    two <- arbitrary
+    limit <- if two then chooseInt (16, 100) else chooseInt (1, 40)
+    (base, atom) <- genAtom two limit "x"
+    (base2, atom2) <- genAtom two limit "z"
+    let atoms = if two then [atom, atom2] else [atom]
+    e <- frequency $ [(3, genOver atoms 3), (2, genMapSlot atoms 2)]
+      <> [(2, elements [Add, Mul, Xor, LT] <*> genOver [atom] 2 <*> genOver [atom2] 2) | two]
+    props <- chooseInt (0, 4) >>= \n ->
+      replicateM n (genBound (fromIntegral limit + 8) ([base, atom, atom, Var "x"] <> [t | length atoms > 1, t <- [base2, atom2]]))
+    pure $ SmallRange limit props e
+    where
+      -- with two atoms, mostly narrow ones, so that their combinations fit in the limit
+      genAtom :: Bool -> Int -> Text -> Gen (Expr EWord, Expr EWord)
+      genAtom two limit v = do
+        base <- elements [Var v, Add (Var v) (Lit 7), Mul (Lit 3) (Var v), SHR (Lit 8) (Var v)
+                         , Not (Var v), SAR (Lit 4) (Var v), BufLength (AbstractBuf (v <> "b")), TxValue]
+        atom <- frequency $
+          [ (2, pure base)
+          , (2, Mod base . Lit <$> genEdge 1 (fromIntegral limit + 2))
+          , (2, (\m -> And (Lit m) base) <$> genEdge 0 (fromIntegral limit * 2))
+          , (1, (\k -> SHR (Lit k) base) <$> genEdge 250 256)
+          ] <> [ (8, (\m -> And (Lit m) base) <$> elements [1, 3, 7]) | two ]
+            <> [ (4, Mod base . Lit <$> elements [2, 3, 5]) | two ]
+        pure (base, atom)
+      genOver :: [Expr EWord] -> Int -> Gen (Expr EWord)
+      genOver atoms 0 = frequency [(3, elements atoms), (1, Lit <$> genEdge 0 40), (1, pure (Var "y"))]
+      genOver atoms n = let sub = genOver atoms (n - 1) in frequency
+        [ (2, genOver atoms 0)
+        , (1, Add <$> sub <*> sub), (1, Sub <$> sub <*> sub), (1, Mul <$> sub <*> sub)
+        , (1, Div <$> sub <*> sub), (1, Mod <$> sub <*> sub), (1, And <$> sub <*> sub)
+        , (1, SHL <$> sub <*> sub), (1, Eq <$> sub <*> sub), (1, LT <$> sub <*> sub)
+        , (1, IsZero <$> sub), (1, ITE <$> sub <*> sub <*> sub)
+        ]
+      -- keccak(key . idx), with the key over the atoms, possibly hashing a nested slot as idx
+      genMapSlot :: [Expr EWord] -> Int -> Gen (Expr EWord)
+      genMapSlot atoms n = do
+        key <- frequency [(2, elements atoms), (1, genOver atoms 1)]
+        idx <- if n > 1 then frequency [(1, Lit <$> genEdge 0 3), (2, genMapSlot atoms (n - 1))] else Lit <$> genEdge 0 3
+        off <- elements [0, 0x40]
+        let mem = WriteWord (Lit (off + 32)) idx (WriteWord (Lit off) key (ConcreteBuf ""))
+        elements [ Keccak (WriteWord (Lit 0) key (WriteWord (Lit 32) idx (ConcreteBuf "")))
+                 , Keccak (CopySlice (Lit off) (Lit 0) (Lit 64) mem (ConcreteBuf "")) ]
+      genBound :: W256 -> [Expr EWord] -> Gen Prop
+      genBound hi ts = do
+        t <- elements ts
+        c <- Lit <$> genEdge 0 hi
+        frequency
+          [ (2, pure (PLEq t c)), (2, pure (PLT t c)), (2, pure (PLEq c t)), (2, pure (PLT c t))
+          , (1, pure (PEq c t)), (1, pure (PEq t c)), (4, pure (PNeg (PEq c t)))
+          , (1, pure (PEq (Lit 0) (Xor c t))), (2, pure (PNeg (PEq (Lit 0) (Xor t c))))
+          , (1, pure (PGEq t c)), (1, PAnd <$> genBound hi ts <*> genBound hi ts)
+          ]
+      -- mostly in range, sometimes at the edges of the word
+      genEdge :: W256 -> W256 -> Gen W256
+      genEdge lo hi = frequency
+        [ (8, fromIntegral <$> chooseInteger (toInteger lo, toInteger hi))
+        , (1, elements [0, 1, Expr.maxLit - 1, Expr.maxLit])
+        ]

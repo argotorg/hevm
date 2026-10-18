@@ -95,6 +95,15 @@ main = do
         stdout `shouldContain` "FAIL"
         exitCode `shouldBe` ExitFailure 1
 
+      it "equivalence-cex-with-balance" $ do
+        -- A returns SELFBALANCE, B returns 0
+        let torun = splitOn " " "equivalence --code-a 4760005260206000f3 --code-b 600060005260206000f3"
+        (exitCode, stdout, stderr) <- readProcessWithExitCode "cabal" (["run", "exe:hevm", "--" ] ++ torun) ""
+        stderr `shouldNotContain` "CallStack"
+        stdout `shouldContain` "Balance (SymAddr \"entrypoint\")"
+        stdout `shouldContain` "[validated]"
+        exitCode `shouldBe` ExitFailure 1
+
       it "hevm equivalence tutorial works -- PASS" $ do
         Just a <- runApp $ solcRuntime (T.pack "MyContract") (T.pack [i|
           contract MyContract {
@@ -210,6 +219,7 @@ main = do
         stdout `shouldContain` "[FAIL]"
         stdout `shouldContain` "[validated]"
       it "dump unsolved" $ do
+        -- z3, as bitwuzla solves this within the timeout
         -- >>> (139487132679483*2347234698674) % 982374892374389278894734
         -- 278198683154907855159120
         Just c <- runApp $ solcRuntime (T.pack "C") (T.pack [i|
@@ -225,7 +235,7 @@ main = do
            }
           |])
         let hexStr = Types.bsToHex c
-        _ <- readProcessWithExitCode "cabal" ["run", "exe:hevm", "--", "symbolic", "--code", hexStr, "--smt-timeout", "1", "--dump-unsolved", "."] ""
+        _ <- readProcessWithExitCode "cabal" ["run", "exe:hevm", "--", "symbolic", "--code", hexStr, "--solver", "z3", "--smt-timeout", "1", "--dump-unsolved", "."] ""
         let filename = "query-unsolved-0.smt2"
         fileExists <- doesFileExist filename
         shouldBe fileExists True
@@ -302,3 +312,14 @@ main = do
           , "--number", "10307563", "--cache-dir", "test/contracts/fail/"]
         stdout `shouldContain` "[FAIL]"
         stderr `shouldNotContain` "CallStack"
+      it "rpc-cache-fork-storage" $ do
+        (_, stdout, stderr) <- runForge "test/contracts/fail/rpc-fork-storage.sol"
+          ["--rpc", "http://mock.mock", "--number", "16198552", "--cache-dir", "test/contracts/fail/"]
+        let result status name = any (\l -> status `isInfixOf` l && name `isInfixOf` l) (lines stdout)
+        stderr `shouldNotContain` "CallStack"
+        stdout `shouldNotContain` "partially explore"
+        mapM_ (\name -> (name, result "[PASS]" name) `shouldBe` (name, True))
+          [ "prove_concrete_mapping_read", "prove_account_fields", "prove_transfer_over_fetched_storage"
+          , "prove_nested_mapping_allowance", "prove_multiple_contracts_and_packed_slot" ]
+        result "[FAIL]" "prove_fail_overdraft_reverts" `shouldBe` True
+        stdout `shouldContain` "[validated]"

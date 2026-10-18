@@ -23,6 +23,10 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Base16 qualified as BS16
 import Data.ByteString.Lazy qualified as BSLazy
+import Data.Aeson qualified as JSON
+import Data.Aeson.KeyMap qualified as KeyMap
+import System.FilePath ((</>))
+import System.IO.Temp (withSystemTempDirectory)
 import Data.Binary.Put (runPut)
 import Data.Binary.Get (runGetOrFail)
 import Data.Either
@@ -58,7 +62,8 @@ import EVM.ConsoleLog (formatConsoleLog)
 import EVM.Exec
 import EVM.Expr qualified as Expr
 import EVM.Fetch qualified as Fetch
-import EVM.Format (hexText)
+import EVM.Format (hexText, hexByteString)
+import EVM.Progress (withProgress, ProgressOpts(..))
 import EVM.Precompiled
 import EVM.RLP
 import EVM.SMT
@@ -74,8 +79,11 @@ import EVM.Expr (maybeLitByteSimp)
 import EVM.Keccak (concreteKeccaks)
 
 import EVM.Expr.ExprTests qualified as ExprTests
+import EVM.Expr.HashConsTests qualified as HashConsTests
 import EVM.ConcreteExecution.ConcreteExecutionTests qualified as ConcreteExecutionTests
 import EVM.Equivalence.EquivalenceTests qualified as EquivalenceTests
+import EVM.Equivalence.EquivFuzz qualified as EquivFuzz
+import EVM.Fetch.RpcFuzz qualified as RpcFuzz
 import EVM.SymExec.SymExecTests qualified as SymExecTests
 import EVM.Test.FoundryTests qualified as FoundryTests
 
@@ -108,6 +116,10 @@ exactlyCex n results = let numcex = sum $ map (fromEnum . isCex) results
 test :: TestName -> ReaderT Env IO () -> TestTree
 test a b = testCase a $ runEnv testEnv b
 
+-- | For tests that need buffers larger than the default 2^24 bytes
+testMaxBuf64 :: TestName -> ReaderT Env IO () -> TestTree
+testMaxBuf64 a b = testCase a $ runEnv (Env { config = testEnv.config { maxBufSize = 64 } }) b
+
 testNoSimplify :: TestName -> ReaderT Env IO () -> TestTree
 testNoSimplify a b = let testEnvNoSimp = Env { config = testEnv.config { simp = False } }
   in testCase a $ runEnv testEnvNoSimp b
@@ -123,6 +135,20 @@ propNoSimp :: Testable prop => ReaderT Env IO prop -> Property
 propNoSimp a = let testEnvNoSimp = Env { config = testEnv.config { simp = False } }
   in ioProperty $ runEnv testEnvNoSimp a
 
+-- | Runs an action with the progress log on, and returns each logged event's
+-- name and phase. Fails if a line is not a JSON object with a time and a name.
+progressEvents :: ReaderT Env IO () -> ReaderT Env IO [(String, Maybe String)]
+progressEvents act = withRunInIO $ \runIO -> withSystemTempDirectory "progress" $ \dir -> do
+  let f = dir </> "progress.jsonl"
+  runIO $ withProgress (ProgressOpts (Just f) True False) act
+  ls <- BSLazy.split 10 <$> BSLazy.readFile f
+  forM (filter (not . BSLazy.null) ls) $ \l -> case JSON.decode l of
+    Just (JSON.Object o) | Just (JSON.String ev) <- KeyMap.lookup "ev" o, Just (JSON.Number _) <- KeyMap.lookup "t" o ->
+      pure (T.unpack ev, case KeyMap.lookup "phase" o of
+        Just (JSON.String ph) -> Just (T.unpack ph)
+        _ -> Nothing)
+    _ -> assertFailure $ "not a progress event: " <> show l
+
 withDefaultSolver :: App m => (SolverGroup -> m a) -> m a
 withDefaultSolver = withSolvers Z3 3 Nothing defMemLimit
 
@@ -136,7 +162,9 @@ withBitwuzlaSolver = withSolvers Bitwuzla 3 Nothing defMemLimit
 withHangingSolver :: App m => (SolverGroup -> m a) -> m a
 withHangingSolver cont = do
   self <- liftIO getExecutablePath
-  withSolvers (Custom (TL.pack self) [TL.pack hangingSolverFlag]) 1 Nothing defMemLimit cont
+  -- under -f devel the test binary starts one capability per core, each with its own nursery
+  -- and stacks, which does not fit in the address space a real solver is limited to
+  withSolvers (Custom (TL.pack self) [TL.pack hangingSolverFlag]) 1 Nothing (64 * defMemLimit) cont
 
 hangingProps :: [Prop]
 hangingProps = [PEq (Var "x") (Lit 1)]
@@ -204,9 +232,12 @@ tests :: TestTree
 tests = testGroup "hevm"
   [ FuzzSymExec.tests
   , ExprTests.tests
+  , HashConsTests.tests
   , ConcreteExecutionTests.tests
   , SymExecTests.tests
   , EquivalenceTests.tests
+  , EquivFuzz.tests
+  , RpcFuzz.tests
   , FoundryTests.tests
   , testGroup "Console log formatting"
     [ testCase "format-string" $ do
@@ -1988,7 +2019,35 @@ tests = testGroup "hevm"
         (e, []) <- withDefaultSolver $
           \s -> checkAssert s defaultPanicCodes c (Just (Sig "fun(uint256)" [AbiUIntType 256])) [] veriOpts
         assertBoolM "The expression MUST be partial" $ any (Expr.containsNode isPartial) e
+    , test "jumptable-without-solver" $ do
+        -- jumps to table[selector mod 3], read with CODECOPY as Vyper's dispatcher does;
+        -- the empty solver answers nothing, so the targets must be found without it
+        let c = fromJust $ hexByteString $ "5f3560e01c600260038206600" <> "11b61003301601e395f5156"
+              <> "5b60015f5260205ff3" <> "5b60025f5260205ff3" <> "5b60035f5260205ff3" <> "00180021002a"
+        (e, _) <- withSolvers EmptySolver 1 Nothing defMemLimit $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertBoolM "The expression must not be partial" $ not (any (Expr.containsNode isPartial) e)
+        assertEqualM "One path per table entry" 3 (length (filter Expr.isSuccess e))
     , test "inconsistent-paths" $ do
+        Just c <- solcRuntime "C"
+            [i|
+            contract C {
+              function fun(uint j) external payable returns (uint) {
+                require(j <= 1000);
+                uint count = 0;
+                for (uint i = 0; i < j; i++) count++;
+                return count;
+              }
+            }
+            |]
+        let sig = Just $ Sig "fun(uint256)" [AbiUIntType 256]
+            -- we don't ask the solver about the loop condition until we're
+            -- already in an inconsistent path (i == 5, j <= 1000, i < j), so we
+            -- will continue looping here until we hit max iterations
+            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 10, askSmtIters = 5 }}
+        (e, []) <- withDefaultSolver $
+          \s -> checkAssert s defaultPanicCodes c sig [] opts
+        assertBoolM "The expression MUST be partial" $ any (Expr.containsNode isPartial) e
+    , test "bounded-loop-fully-explored" $ do
         Just c <- solcRuntime "C"
             [i|
             contract C {
@@ -2001,13 +2060,13 @@ tests = testGroup "hevm"
             }
             |]
         let sig = Just $ Sig "fun(uint256)" [AbiUIntType 256]
-            -- we don't ask the solver about the loop condition until we're
-            -- already in an inconsistent path (i == 5, j <= 3, i < j), so we
-            -- will continue looping here until we hit max iterations
+            -- the loop condition is decided by j's bound, by simplification or by forking on j's 4 values
             opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 10, askSmtIters = 5 }}
         (e, []) <- withDefaultSolver $
           \s -> checkAssert s defaultPanicCodes c sig [] opts
-        assertBoolM "The expression MUST be partial" $ any (Expr.containsNode isPartial) e
+        assertBoolM "The bounded loop must not be partial" $ not (any (Expr.containsNode isPartial) e)
+        assertEqualM "All feasible iteration counts remain" (map Lit [0..3])
+          (List.sort [Expr.readWord (Lit 0) buf | Success _ _ buf _ <- e])
     , test "mem-tuple" $ do
         Just c <- solcRuntime "C"
           [i|
@@ -2500,6 +2559,48 @@ tests = testGroup "hevm"
       (res, []) <- withDefaultSolver $ \s ->
         checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
       putStrLnM $ "successfully explored " <> show (length res) <> " paths"
+    , test "call-to-unknown-code-writes-output-region" $ do
+      Just c <- solcRuntime "C"
+        [i|
+        contract C {
+            function f(address a) public view {
+                uint r;
+                assembly {
+                    mstore(0, 0x42)
+                    pop(staticcall(gas(), a, 0, 0, 0, 32))
+                    r := mload(0)
+                }
+                assert(r == 0x42);
+            }
+        }
+        |]
+      (_, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c (Just (Sig "f(address)" [AbiAddressType])) [] defaultVeriOpts
+      assertBoolM "the output of the callee must overwrite memory" (any isCex ret)
+    , test "call-to-unknown-code-short-output-keeps-memory" $ do
+      Just c <- solcRuntime "C"
+        [i|
+        contract C {
+            function f(address a) public view {
+                uint r;
+                uint first;
+                uint size;
+                assembly {
+                    mstore(0, 0x42)
+                    pop(staticcall(gas(), a, 0, 0, 0, 32))
+                    r := mload(0)
+                    size := returndatasize()
+                    if eq(size, 1) {
+                        returndatacopy(0x20, 0, 1)
+                        first := mload(0x20)
+                    }
+                }
+                if (size == 0) assert(r == 0x42);
+                if (size == 1) assert(r == first | 0x42);
+            }
+        }
+        |]
+      (_, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c (Just (Sig "f(address)" [AbiAddressType])) [] defaultVeriOpts
+      assertEqualM "only the bytes the callee returned are overwritten" [] ret
     , test "staticcall-check-orig" $ do
       Just c <- solcRuntime "C"
         [i|
@@ -4551,7 +4652,25 @@ tests = testGroup "hevm"
         assertEqualM "Merging should not cause issues with memory writes" [] ret
     ]
   , testGroup "SMT-encoding"
-  [ testCase "encodeConcreteStore-overwrite" $
+  [ testProperty "collapse-matches-writeByte" $ \(baseByte, NonNegative sz, ws) ->
+      let base = W256 (fromIntegral (sz `mod` 200 :: Int))
+          writes = [(W256 (fromIntegral (pos `mod` 300 :: Int)), b) | (NonNegative pos, b) <- take 20 ws]
+          model = foldr (\(pos, b) acc -> Write b pos acc) (Base baseByte base) writes
+          -- the definition: apply the writes, innermost first, with writeByte
+          reference = foldr (\(pos, b) acc -> Expr.writeByte (Lit pos) (LitByte b) acc)
+                            (ConcreteBuf (BS.replicate (fromIntegral base) baseByte)) writes
+      in case reference of
+           ConcreteBuf bs -> collapse (EVM.Types.Comp model) === Just (Flat bs)
+           _ -> property False
+  , testCase "parse-gas-names" $ do
+      -- gas readings appear in models when they are part of a path condition
+      assertEqual "plain" (Gas "" 2) (parseTxCtx "gas_2")
+      assertEqual "equivalence prefix" (Gas "A-" 13) (parseTxCtx "gas_A-13")
+  -- #1124: the encoder must not order gas readings by where they appear in the props
+  , test "gas-order-not-from-props" $ do
+      res <- withBitwuzlaSolver $ \s -> checkSatWithProps s [PLT (Gas "" 2) (Gas "" 1)]
+      assertBoolM "a later reading can be lower" (isCex res)
+  , testCase "encodeConcreteStore-overwrite" $
     assertEqual ""
       (pure "(store (store ((as const Storage) #x0000000000000000000000000000000000000000000000000000000000000000) (_ bv1 256) (_ bv2 256)) (_ bv3 256) (_ bv4 256))")
       (EVM.SMT.encodeConcreteStore ConcreteArith $ Map.fromList [(W256 1, W256 2), (W256 3, W256 4)])
@@ -4599,6 +4718,29 @@ tests = testGroup "hevm"
       assertBool ("lemma section missing:\n" <> someLemmas)
         (header `List.isInfixOf` someLemmas)
   ]
+  -- the progress log is process-wide, so these must not run concurrently
+  , sequentialTestGroup "progress-log" AllFinish
+    [ test "progress-log-is-valid-jsonl" $ do
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function fun(uint x) external pure {
+              if (x > 5) assert(x != 7);
+            }
+          } |]
+        evs <- progressEvents $
+          void $ withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        forM_ ["start", "path-end", "query-start", "query-end", "end"] $ \ev ->
+          assertBoolM ("missing event " <> ev) (ev `elem` map fst evs)
+    , test "eq-progress-log-phases" $ do
+        let a = fromJust (hexByteString "6001600055")
+            b = fromJust (hexByteString "6002600055")
+        evs <- progressEvents $ void $ withDefaultSolver $ \s -> do
+          (calldata, _) <- mkCalldata Nothing []
+          equivalenceCheck s Nothing a b defaultVeriOpts calldata False
+        forM_ ["explore A", "explore B", "build-pairs", "check-pairs"] $ \ph ->
+          forM_ ["phase-start", "phase-end"] $ \ev ->
+            assertBoolM ("missing " <> ev <> " of " <> ph) ((ev, Just ph) `elem` evs)
+    ]
   -- these test the abort itself: if it breaks, the fake solver never answers, so fail on a timeout instead of hanging
   , localOption (mkTimeout 20_000_000) $ testGroup "early-abort"
   [ test "abort-running-query" $ withHangingSolver $ \s -> do
@@ -4645,7 +4787,7 @@ tests = testGroup "hevm"
       assertBoolM ("Expected only counterexamples, got: " <> show res) (all isCex res)
   ]
   , testGroup "calling-solvers"
-  [ test "no-error-on-large-buf" $ do
+  [ testMaxBuf64 "no-error-on-large-buf" $ do
       -- These two tests generates a very large buffer that previously would cause an internalError when
       -- printed via "formatCex". We should be able to print it now.
       Just c <- solcRuntime "MyContract" [i|
@@ -4666,7 +4808,8 @@ tests = testGroup "hevm"
                          , buffers = bufs
                          , store = mempty
                          , blockContext = mempty
-                         , txContext = Map.fromList [(TxValue,0x0)]}
+                         , txContext = Map.fromList [(TxValue,0x0)]
+                         , unknownCalls = mempty}
       putStrLnM $ "Cex found:" <> T.unpack (formatCex (AbstractBuf "txdata") Nothing mycex)
     , test "correct-model-for-empty-buffer" $ do
       withDefaultSolver $ \s -> do
