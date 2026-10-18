@@ -26,7 +26,7 @@ import EVM.Expr.Generator
 import EVM.Expr.Probe (Variant(..), probes, variants)
 import EVM.HashCons
 import EVM.Keccak qualified as Keccak
-import EVM.Traversals (foldExpr, mapExpr, mapProp, mapPropMemo, mapPropShared)
+import EVM.Traversals (foldExpr, mapExpr, mapProp, mapPropMemo, mapPropShared, mapExprMemo, collectExprs, AnyExpr(..))
 import EVM.Types
 
 tests :: TestTree
@@ -104,6 +104,22 @@ tests = withResource (newMVar ()) (const (pure ())) $ \getLock ->
           Expr.constPropagate [PEq (Var "x") (Lit 7), PLT symbolic (Var "y")]
             == [PEq (Lit 7) (Lit 7), PLT replaced (Var "y"), PEq (Lit 7) (Var "x")]
       assertEqual "traversals must not expand the shared DAG into a tree" (Just ()) done
+  , testCase "local-caches-without-hash-consing" $ withHC False $ do
+      let k = Keccak (ConcreteBuf "abc")
+          root = iterate (\e -> Add e e) k !! 32
+      done <- timeout 5000000 $ do
+        assertEqual "collect shared nodes without canonical IDs" (Set.singleton k)
+          (Keccak.findKeccakPropsExprs [PLT root (Var "y")] [] [])
+        assertBool "an unchanged rewrite preserves its input" (same root (mapExprMemo id root))
+      assertEqual "local caches must also work without global tables" (Just ()) done
+  , testProperty "local-caches-agree-with-tree-traversals" $ \(t :: SharedTerms) -> ioProperty $
+      withHC False $ do
+        let roots = map AnyExpr t.words <> map AnyExpr t.bufs <> map AnyExpr t.stores <> map AnyExpr t.ends
+            mapped (AnyExpr e) = mapExpr bumpLiterals e == mapExprMemo bumpLiterals e
+            wordsOf :: Expr a -> Set.Set (Expr EWord)
+            wordsOf e = case exprType e of { WordRep -> Set.singleton e; _ -> mempty }
+            expected = foldMap (\(AnyExpr e) -> foldExpr wordsOf mempty e) roots
+        evaluate (all mapped roots && collectExprs wordsOf roots == expected)
   , testProperty "simplify-differential-trees" $
       \(b :: Expr Buf, s :: Expr Storage, y :: Expr Byte, GenWriteStorageLoad l, ps :: [Prop]) -> ioProperty $
         differential

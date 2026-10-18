@@ -34,7 +34,7 @@ import EVM.SMT (AbstractQuery(..), SMT2(..), SMTScript(..), assertPropsAbstract)
 import EVM.Solvers hiding (checkSat)
 import EVM.Solvers qualified as Solvers (checkSat)
 import EVM.SymExec (subModel)
-import EVM.Traversals (foldExpr, foldProp, mapExpr, mapExprM, mapProp)
+import EVM.Traversals (foldExpr, foldProp, mapExpr, mapExprM, mapProp, mapExprMemo, collectExprs, AnyExpr(..))
 import EVM.Types hiding (Env)
 
 
@@ -69,8 +69,8 @@ traversalTests = testCase "every-field-is-traversed" $ assertBool (unlines misse
           [ ("foldExpr", List.sort (foldExpr probeName ["acc"] e) == List.sort ("acc" : ms))
           , ("mapExpr", names (mapExpr renameProbe e) == renamed)
           , ("memoFixTraverse", names (HC.memoFixTraverse (static (HC.Rewrite renameProbe)) e) == renamed)
-          , ("mapExprMemo", names (HC.mapExprMemo renameProbe e) == renamed)
-          , ("collectExprs", HC.collectExprs (Set.fromList . probeName) [HC.AnyExpr e] == Set.fromList ms)
+          , ("mapExprMemo", names (mapExprMemo renameProbe e) == renamed)
+          , ("collectExprs", collectExprs (Set.fromList . probeName) [AnyExpr e] == Set.fromList ms)
           ]
       , not ok ]
     names :: Expr a -> [Text]

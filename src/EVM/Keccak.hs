@@ -9,7 +9,6 @@ import Data.Set qualified as Set
 import Data.List (tails)
 
 import EVM.Traversals
-import EVM.HashCons (collectExprs, AnyExpr(..))
 import EVM.Types
 import EVM.Expr
 
