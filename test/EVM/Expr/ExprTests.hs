@@ -410,6 +410,29 @@ keccakInequalityTests = testGroup "Keccak simplification"
         -- Prove the distance premise for offsets below 256 separately from the storage read.
         res <- checkSatWith equivConfig (PNeg separated)
         pure $ label name $ conjoin [simplified === Var "old", counterexample (show res) (isQed res)]
+  , testProperty "near keccak inputs agree with SMT" $ withMaxSuccess 100 $
+      forAll genNearKeccakInputs $ \(a, b) -> ioProperty $ do
+        let e = Expr.simplify (Eq (Keccak a) (Keccak b))
+            p = Expr.simplifyProps [PEq (Keccak a) (Keccak b)]
+        res <- checkSatLong (PEq (Keccak a) (Keccak b))
+        pure $ label (if e == Lit 0 then "decided" else "undecided") $ label (resultLabel res) $ conjoin
+          [ counterexample ("Eq decided, solver: " <> show res) (e /= Lit 0 || isQed res)
+          , counterexample ("PEq decided, solver: " <> show res) (p /= [PBool False] || isQed res)
+          ]
+  , testProperty "near keccak storage reads agree with SMT" $ withMaxSuccess 20 $
+      forAll genNearKeccakInputs $ \(a, b) ->
+      forAll (vectorOf 4 (elements [0, 1, 31, 255, 256, maxBound])) $ \offs ->
+      forAll (chooseInt (1, 4)) $ \n -> do
+        let pool = [slot o x | o <- offs, x <- [a, b]]
+        ws <- vectorOf n (elements pool)
+        r <- elements pool
+        let st = foldr (\(k, i) acc -> SStore k (Var (["v0", "v1", "v2", "v3"] !! i)) acc)
+                   (AbstractStore (SymAddr "c") Nothing) (zip ws [0 :: Int ..])
+            simplified = Expr.readStorage' r st
+        pure $ ioProperty $ do
+          res <- checkSatLong (SLoad r st ./= simplified)
+          pure $ label (resultLabel res) $
+            counterexample (show (r, st, simplified, res)) (Prelude.not (isSat res))
   ]
   where
     mapping key idw = WriteWord (Lit 0) key (WriteWord (Lit 32) idw (ConcreteBuf ""))
@@ -428,6 +451,59 @@ keccakInequalityTests = testGroup "Keccak simplification"
       where
         inner = Keccak (ConcreteBuf (word256Bytes n <> word256Bytes 5))
         trailing len byte = WriteWord (Lit 0) key (ConcreteBuf (BS.pack (replicate (len - 1) 0 <> [byte])))
+    checkSatLong p = runEnv (Env {config = equivConfig}) $ withSolvers Bitwuzla 1 (Just 10) defMemLimit $ \solvers ->
+      checkSatWithProps solvers [p]
+    resultLabel res
+      | isQed res = "unsat"
+      | isSat res = "sat"
+      | otherwise = "unknown"
+
+-- Pairs of keccak inputs that are equal, or differ only slightly, in their length, bytes or words.
+genNearKeccakInputs :: Gen (Expr Buf, Expr Buf)
+genNearKeccakInputs = do
+  len <- elements [0, 1, 31, 32, 33, 63, 64, 65, 96, 224, 255, 256, 257, 288]
+  bytes <- vectorOf len (elements [0, 1, 0xff])
+  ws <- chooseInt (0, 3) >>= flip vectorOf ((,) <$> genOff len <*> genNearWord)
+  let build bs ws' = foldr (\(i, w) buf -> WriteWord (Lit i) w buf) (ConcreteBuf (BS.pack bs)) ws'
+      a = build bytes ws
+  b <- frequency $
+    [ (1, pure a)
+    , (2, do i <- chooseInt (0, max 0 (len - 1)); v <- elements [0, 1, 0xff]
+             pure $ build (take i bytes <> [v] <> drop (i + 1) bytes) ws)
+    , (1, do len' <- elements [max 0 (len - 1), len + 1, len - (len `mod` 32)]
+             pure $ build (take len' (bytes <> repeat 0)) ws)
+    ] <>
+    [ (5, do j <- chooseInt (0, length ws - 1)
+             let (i, w) = ws !! j
+             w' <- neighbour w
+             i' <- frequency [(4, pure i), (1, elements [i + 1, i - 1, i + 32])]
+             pure $ build bytes (take j ws <> [(i', w')] <> drop (j + 1) ws))
+    | Prelude.not (null ws) ]
+  pure (a, b)
+  where
+    genOff len = frequency
+      [ (4, elements (fromIntegral <$> [0, 32 .. max 0 (len - 1)]))
+      , (1, fromIntegral <$> chooseInt (0, len + 31))
+      ]
+    small = elements [1, 2, 31, 32, maxBound, maxBound - 1]
+    key = Var <$> elements ["k0", "k1"]
+    mapping k s = WriteWord (Lit 0) k (WriteWord (Lit 32) (Lit s) (ConcreteBuf ""))
+    genNearWord = oneof
+      [ Lit <$> small
+      , key
+      , Add <$> (Lit <$> small) <*> key
+      , Sub <$> key <*> (Lit <$> small)
+      , Keccak . ConcreteBuf . BS.pack <$> vectorOf 64 (elements [0, 1])
+      , Keccak <$> (mapping <$> key <*> elements [3, 4])
+      , Add <$> (Lit <$> small) <*> (Keccak <$> (mapping <$> key <*> elements [3, 4]))
+      ]
+    neighbour w = oneof
+      [ (\d -> Add (Lit d) w) <$> small
+      , (\d -> Sub w (Lit d)) <$> small
+      , (\d -> Add (Lit d) (Sub w (Lit d))) <$> small
+      , (\d -> Sub (Add (Lit d) w) (Lit d)) <$> small
+      , genNearWord
+      ]
 
 copySliceTests :: TestTree
 copySliceTests = testGroup "CopySlice tests"
