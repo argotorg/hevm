@@ -39,7 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   time it was solved for, gives the reason a query for multiple solutions gave
   up, and ends each phase with a summary of where its solver time and forks
   went. The status line shows queued queries and the program counter with the
-  most solver time.
+  most solver time. With expressions logged, each `sat` query also logs the
+  props it was built from.
 - Abstract arithmetic, on by default (disable with `--no-abstract-arith`):
   symbolic multiplication and division are encoded as uninterpreted functions
   constrained by sound algebraic lemmas, and are equated with the native bitvector operations only when the abstract query

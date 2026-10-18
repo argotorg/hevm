@@ -327,9 +327,10 @@ clearWorker = liftIO $ readIORef global >>= mapM_ (\st -> do
 -- | Logs a solver query, tagged with the calling worker's context, together
 -- with its duration and the result rendered by @showRes@. The query calls the
 -- action it is given when a solver takes it up, so that the time it waited for
--- a free solver is told apart from the time it was solved for.
-timedQuery :: Text -> [Pair] -> (r -> Text) -> (IO () -> IO r) -> IO r
-timedQuery kind fs showRes act = readIORef global >>= \case
+-- a free solver is told apart from the time it was solved for. @exprFs@ is
+-- only added to the start event, and only evaluated, when expressions are logged.
+timedQuery :: Text -> [Pair] -> [Pair] -> (r -> Text) -> (IO () -> IO r) -> IO r
+timedQuery kind fs exprFs showRes act = readIORef global >>= \case
   Nothing -> act (pure ())
   Just st -> do
     tid <- myThreadId
@@ -342,7 +343,7 @@ timedQuery kind fs showRes act = readIORef global >>= \case
           t <- getMonotonicTime
           atomicModifyIORef' st.queries $ \m -> (Map.adjust (\q -> q { qSolveStart = Just t }) qid m, ())
     atomicModifyIORef' st.queries $ \m -> (Map.insert qid (Query qfs loc t0 Nothing) m, ())
-    write st "query-start" qfs
+    write st "query-start" (qfs <> if st.exprs then exprFs else [])
     r <- act started
     t1 <- getMonotonicTime
     q <- atomicModifyIORef' st.queries $ \m -> (Map.delete qid m, Map.lookup qid m)

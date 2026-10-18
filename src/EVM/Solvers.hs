@@ -52,12 +52,14 @@ import System.FilePath ((</>))
 import EVM.Effects
 import EVM.Progress qualified as Progress
 import Data.Aeson ((.=))
+import Data.Aeson qualified as JSON
 import Data.Bits ((.&.))
 import Numeric (showHex)
 import EVM.Expr (simplifyProps)
 
 import EVM.Keccak qualified as Keccak (concreteKeccaks)
 import EVM.SMT
+import EVM.Format (formatProp)
 import EVM.Types
 
 
@@ -170,7 +172,7 @@ supersetAny a bs = any (`isSubsetOf` a) bs
 checkMulti :: SolverGroup -> Err SMT2 -> MultiSol -> IO (Maybe [W256])
 checkMulti (SolverGroup taskq _) smt2 multiSol = do
   if isLeft smt2 then pure Nothing
-  else fmap (either (const Nothing) Just) $ Progress.timedQuery "multi" ["numBytes" .= multiSol.numBytes, "maxSols" .= multiSol.maxSols]
+  else fmap (either (const Nothing) Just) $ Progress.timedQuery "multi" ["numBytes" .= multiSol.numBytes, "maxSols" .= multiSol.maxSols] []
          (either ("gave up: " <>) (\vs -> TStrict.pack (show (length vs)) <> " solutions")) $ \started -> do
     -- prepare result channel
     resChan <- newChan
@@ -194,12 +196,12 @@ checkSatWithPropsPhase sg shouldAbort props = do
   else do
     let concreteKeccaks = fmap (\(buf,val) -> PEq (Lit val) (Keccak buf)) (toList $ Keccak.concreteKeccaks props)
     let allProps = if conf.simp then psSimp <> concreteKeccaks else psSimp
-        native = liftIO $ checkSat' sg (Just props) shouldAbort mempty (assertProps conf allProps)
+        native = liftIO $ checkSat' sg (Just props) (Just allProps) shouldAbort mempty (assertProps conf allProps)
     if not conf.abstractArith then native >>= answered []
     else case assertPropsAbstract conf allProps of
       Left err -> answered [] (Error err, PhaseNone)
       Right q -> do
-        (res, phase) <- liftIO $ checkSat' sg (Just props) shouldAbort (SMTScript q.refinement) (Right q.query)
+        (res, phase) <- liftIO $ checkSat' sg (Just props) (Just allProps) shouldAbort (SMTScript q.refinement) (Right q.query)
         aborted <- liftIO $ maybe (pure False) readTVarIO shouldAbort
         case res of
           -- the abstract path can be harder for the solver than the native
@@ -211,12 +213,13 @@ checkSatWithPropsPhase sg shouldAbort props = do
 
 -- When props is Nothing, the cache will not be filled or used
 checkSat :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> IO SMTResult
-checkSat sg props smt2 = fst <$> checkSat' sg props Nothing mempty smt2
+checkSat sg props smt2 = fst <$> checkSat' sg props Nothing Nothing mempty smt2
 
-checkSat' :: SolverGroup -> Maybe [Prop] -> Maybe (TVar Bool) -> SMTScript -> Err SMT2 -> IO (SMTResult, SolvePhase)
-checkSat' (SolverGroup taskq _) props shouldAbort refinement smt2 = do
+-- | @sent@ are the props the query was built from, for the progress log
+checkSat' :: SolverGroup -> Maybe [Prop] -> Maybe [Prop] -> Maybe (TVar Bool) -> SMTScript -> Err SMT2 -> IO (SMTResult, SolvePhase)
+checkSat' (SolverGroup taskq _) props sent shouldAbort refinement smt2 = do
   if isLeft smt2 then pure (Error $ getError smt2, PhaseNone)
-  else Progress.timedQuery "sat" ["props" .= maybe 0 length props] showRes $ \started -> do
+  else Progress.timedQuery "sat" ["props" .= maybe 0 length props] sentFs showRes $ \started -> do
     -- prepare result channel
     resChan <- newChan
     -- send task to solver group
@@ -225,6 +228,7 @@ checkSat' (SolverGroup taskq _) props shouldAbort refinement smt2 = do
     readChan resChan
 
     where
+      sentFs = ["sent" .= map (JSON.object . Progress.bigText "prop" . formatProp) (fromMaybe [] sent)]
       showRes :: (SMTResult, SolvePhase) -> TStrict.Text
       showRes (r, phase) = (<> " (" <> TStrict.pack (show phase) <> ")") $ case r of
         Qed -> "unsat"
