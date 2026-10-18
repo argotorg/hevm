@@ -161,14 +161,15 @@ withProgress opts act
         mapM_ hClose st.logH
 
 -- | Writes a JSONL log of @act@ to a new file in @$HEVM_PROGRESS_LOG_DIR@, if it
--- is set. The log state is global, so only one such @act@ may run at a time:
--- pick a single test with @-p@.
+-- is set, with the expressions sent to the solver if @$HEVM_PROGRESS_EXPRS@ is set too.
+-- The log state is global, so only one such @act@ may run at a time: pick a single test with @-p@.
 withProgressLogFromEnv :: MonadUnliftIO m => String -> m a -> m a
 withProgressLogFromEnv label act = liftIO (lookupEnv "HEVM_PROGRESS_LOG_DIR") >>= \case
   Nothing -> act
   Just dir -> do
     n <- liftIO $ atomicModifyIORef' logCounter (\i -> (i + 1, i))
-    withProgress (ProgressOpts (Just (dir <> "/" <> label <> "-" <> show n <> ".jsonl")) False False) act
+    exprs <- liftIO $ isJust <$> lookupEnv "HEVM_PROGRESS_EXPRS"
+    withProgress (ProgressOpts (Just (dir <> "/" <> label <> "-" <> show n <> ".jsonl")) exprs False) act
 
 {-# NOINLINE logCounter #-}
 logCounter :: IORef Int
