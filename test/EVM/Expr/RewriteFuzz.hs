@@ -429,6 +429,7 @@ genTemplate s shiftAmt = oneof
   , ITE <$> (IsZero <$> s) <*> s <*> s
   , ITE <$> s <*> elements [Lit 0, Lit 1] <*> elements [Lit 0, Lit 1]
   , shared
+  , sharedSums
   , Not <$> (elements [Add, Sub, Xor] <*> lit <*> s)
   , Mul <$> lit <*> (Add <$> lit <*> s)
   , Div <$> (Mul <$> scaling <*> oneof [Mod <$> s <*> scaling, s]) <*> scaling
@@ -445,6 +446,14 @@ genTemplate s shiftAmt = oneof
         , Xor x (Xor x y), Xor (Xor y x) x, Or x (Or x y), And x (And y x)
         , Or x (Not x), Xor (Not x) x, Add x (Not x), Max x x, Min x x, Eq x (Add x y), Eq x (Sub x y)
         , LT x (Add y x), LT (Add y x) x, LT x (Sub x y), LT (Sub x y) x, GT x (Add y x), LEq x (Sub x y) ]
+    -- sums sharing addends, in any order
+    sharedSums = do
+      common <- listOf1 s
+      xs <- (<> common) <$> listOf s
+      ys <- (<> common) <$> listOf s
+      xs' <- shuffle xs
+      ys' <- shuffle ys
+      pure $ Sub (foldr1 Add (take 6 xs')) (foldr1 Add (take 6 ys'))
     -- literal branches, sharing a condition from a small set so that ITEs pair up
     ite = ITE <$> elements [Var "a", LT (Var "a") (Var "b"), IsZero (Var "c")] <*> lit <*> lit
     litOp' = elements [Add, Sub, Mul, Div, Mod, And, Or, Xor, Eq, LT, SLT, SHL, SHR, SAR]

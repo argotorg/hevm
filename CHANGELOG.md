@@ -97,6 +97,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The simplifier uses the condition of an ITE in its branches, and splits a
   comparison of an ITE with one literal branch into cases, so the bounds in
   Solidity's short-circuited `&&` and `||` reach the path conditions.
+- The simplifier cancels addends common to both sides of a subtraction.
 - Reads from buffers written at offsets from the same symbolic pointer skip
   the writes they are disjoint from and resolve the writes they hit.
 

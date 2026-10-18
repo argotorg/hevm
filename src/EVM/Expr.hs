@@ -155,7 +155,7 @@ import Data.Bits qualified (xor)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.DoubleWord (Int256, Word256(Word256), Word128(Word128))
-import Data.List (sort, sortOn, find)
+import Data.List (sort, sortOn, find, (\\))
 import Data.Map qualified as LMap
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe, isJust, fromMaybe, listToMaybe)
@@ -1788,6 +1788,16 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (And a (And b c)) = an (l !! 0) (an (l !! 1) (l !! 2))
       where l = sort [a, b, c]
             an = EVM.Expr.and
+
+    -- addends common to both sides of a difference cancel
+    go (Sub a b)
+      | isAdd a || isAdd b, xs <- addends a, ys <- addends b, xs' <- xs \\ ys, length xs' < length xs
+      = sub (sumOf xs') (sumOf (ys \\ xs))
+      where
+        isAdd = \case Add {} -> True; _ -> False
+        addends = \case Add x y -> addends x <> addends y; x -> [x]
+        sumOf [] = Lit 0
+        sumOf zs = foldr1 add zs
 
     -- redundant add / sub
     go (Sub (Add a b) c)

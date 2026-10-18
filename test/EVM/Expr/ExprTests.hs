@@ -151,6 +151,12 @@ rewriteRuleTests = testGroup "Rewrite rules"
         (Expr.simplify (Div (Mul (Lit (10 ^ (18 :: Int))) down) (Lit (10 ^ (6 :: Int)))))
       assertEqual "may overflow" (Div (Mul (Lit e) (Var "x")) (Lit (10 ^ (30 :: Int))))
         (Expr.simplify (Div (Mul (Lit e) (Var "x")) (Lit (10 ^ (30 :: Int)))))
+  , testCase "common-addends-cancel" $ do
+      let [a, b, c, d] = map Var ["a", "b", "c", "d"]
+      assertEqual "both sides" (Expr.simplify (Sub c b))
+        (Expr.simplify (Sub (Add a (Add d c)) (Add a (Add b d))))
+      assertEqual "one side" (Expr.simplify (Sub (Lit 0) b))
+        (Expr.simplify (Sub (Add a d) (Add a (Add b d))))
   , testCase "bounded-literal-scaling" $ do
       let [x, y, z] = map Var ["x", "y", "z"]
           scaled = Div (Mul (Lit (10 ^ (18 :: Int))) x) (Lit (10 ^ (6 :: Int)))
