@@ -493,8 +493,22 @@ instance Arbitrary GenCopySliceBuf where
           [ pure $ ConcreteBuf ""
           , fmap ConcreteBuf arbitrary
           , arbitrary
+          , wordWrites
           ]
+        -- literal word writes near a small window, as memory looks before a copy out of it
+        wordWrites = do
+          n <- choose (1, 5 :: Int)
+          writes <- vectorOf n $ WriteWord <$> (Lit . fromIntegral <$> choose (0, 160 :: Int)) <*> arbitrary
+          base <- ConcreteBuf <$> arbitrary
+          pure $ foldr ($) base writes
     fmap GenCopySliceBuf mkBuf
+
+-- GenCopySliceOff
+newtype GenCopySliceOff = GenCopySliceOff (Expr EWord)
+  deriving (Show, Eq)
+
+instance Arbitrary GenCopySliceOff where
+  arbitrary = GenCopySliceOff <$> oneof [arbitrary, Lit . fromIntegral <$> choose (0, 160 :: Int)]
 
 -- GenWriteByteIdx
 newtype GenWriteByteIdx = GenWriteByteIdx (Expr EWord)

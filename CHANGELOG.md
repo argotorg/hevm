@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keccak equality and storage reads now use known differences in input lengths
   or words to rule out aliases, including struct offsets below 256, under the
   existing keccak assumptions.
+- `copySlice` now trims irrelevant writes and base bytes from concrete source
+  windows, allowing mapping keys built over different scratch memory to compare equal.
 - Symbolic execution now avoids forking when simplification shows that
   the path conditions imply the branch condition.
 - Symbolic jump targets and jump conditions that depend on a subterm with few
