@@ -1,4 +1,5 @@
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE StaticPointers #-}
 
 module EVM.Expr.HashConsTests (tests) where
 
@@ -9,7 +10,7 @@ import Test.Tasty.QuickCheck hiding (Failure, Success)
 
 import Control.Concurrent.MVar
 import Control.Exception (bracket, evaluate)
-import Control.Monad (forM)
+import Control.Monad (foldM, forM, forM_)
 import Data.IORef (newIORef, readIORef)
 import Data.ByteString (ByteString)
 import Data.List (sort, tails)
@@ -22,9 +23,10 @@ import System.Timeout (timeout)
 
 import EVM.Expr qualified as Expr
 import EVM.Expr.Generator
-import EVM.Expr.Probe (Variant(..), variants)
+import EVM.Expr.Probe (Variant(..), probes, variants)
 import EVM.HashCons
-import EVM.Traversals (foldExpr, mapExpr)
+import EVM.Keccak qualified as Keccak
+import EVM.Traversals (foldExpr, mapExpr, mapProp, mapPropMemo, mapPropShared, mapExprMemo, collectExprs, AnyExpr(..))
 import EVM.Types
 
 tests :: TestTree
@@ -72,6 +74,52 @@ tests = withResource (newMVar ()) (const (pure ())) $ \getLock ->
         pure ((same b b', same b b1), (same s s', same s s1))
       assertEqual "BufVar: equal index shared, other index not" (True, False) bufs
       assertEqual "StoreVar: equal index shared, other index not" (True, False) stores
+  , testCase "memoized-props-preserve-rewrite-order" $ withHC True $
+      forM_ $(probes [| id |] [] ''Prop) $ \(p, _) -> do
+        let expected = mapProp bumpLiterals p
+        assertEqual "local memo" expected (mapPropMemo bumpLiterals p)
+        assertEqual "shared memo" expected (mapPropShared (static (Rewrite bumpLiterals)) p)
+  , testCase "local-rewrite-cache-is-scoped" $ withHC True $ do
+      x <- hashConsExprIO (Var "x")
+      e <- hashConsExprIO (Add x x)
+      let replace :: W256 -> Expr a -> Expr a
+          replace n (Var _) = Lit n
+          replace _ t = t
+      forM_ [1, 2, 1] $ \n ->
+        assertEqual "captured substitution" (Add (Lit n) (Lit n)) (mapExprMemo (replace n) e)
+  , testCase "prop-passes-preserve-sharing" $ withHC True $ do
+      let dag leaf = hashConsExprIO leaf >>= \e -> foldM (\t _ -> hashConsExprIO (Add t t)) e [1 .. 32 :: Int]
+          k = Keccak (ConcreteBuf "abc")
+          h = keccak' "abc"
+      hashed <- dag k
+      concrete <- dag (Lit h)
+      symbolic <- dag (Var "x")
+      replaced <- dag (Lit 7)
+      let ps = [PLT hashed (Var "y")]
+      done <- timeout 5000000 $ do
+        assertEqual "find shared keccak" (Set.singleton k) (Keccak.findKeccakPropsExprs ps [] [])
+        assertEqual "compute shared keccak" (Set.singleton (ConcreteBuf "abc", h)) (Keccak.concreteKeccaks ps)
+        assertBool "concretize shared keccak" (Expr.concKeccakProps ps == [PLT concrete (Var "y")])
+        assertBool "substitute shared variable" $
+          Expr.constPropagate [PEq (Var "x") (Lit 7), PLT symbolic (Var "y")]
+            == [PEq (Lit 7) (Lit 7), PLT replaced (Var "y"), PEq (Lit 7) (Var "x")]
+      assertEqual "traversals must not expand the shared DAG into a tree" (Just ()) done
+  , testCase "local-caches-without-hash-consing" $ withHC False $ do
+      let k = Keccak (ConcreteBuf "abc")
+          root = iterate (\e -> Add e e) k !! 32
+      done <- timeout 5000000 $ do
+        assertEqual "collect shared nodes without canonical IDs" (Set.singleton k)
+          (Keccak.findKeccakPropsExprs [PLT root (Var "y")] [] [])
+        assertBool "an unchanged rewrite preserves its input" (same root (mapExprMemo id root))
+      assertEqual "local caches must also work without global tables" (Just ()) done
+  , testProperty "local-caches-agree-with-tree-traversals" $ \(t :: SharedTerms) -> ioProperty $
+      withHC False $ do
+        let roots = map AnyExpr t.words <> map AnyExpr t.bufs <> map AnyExpr t.stores <> map AnyExpr t.ends
+            mapped (AnyExpr e) = mapExpr bumpLiterals e == mapExprMemo bumpLiterals e
+            wordsOf :: Expr a -> Set.Set (Expr EWord)
+            wordsOf e = case exprType e of { WordRep -> Set.singleton e; _ -> mempty }
+            expected = foldMap (\(AnyExpr e) -> foldExpr wordsOf mempty e) roots
+        evaluate (all mapped roots && collectExprs wordsOf roots == expected)
   , testProperty "simplify-differential-trees" $
       \(b :: Expr Buf, s :: Expr Storage, y :: Expr Byte, GenWriteStorageLoad l, ps :: [Prop]) -> ioProperty $
         differential
@@ -188,10 +236,18 @@ sharedJobs t = concat
   , [ Job "simplify" Expr.simplify x | x <- t.ends ]
   , [ Job "simplifyProp" Expr.simplifyProp x | x <- t.props ]
   , [ Job "simplifyProps" Expr.simplifyProps t.props, Job "concKeccakProps" Expr.concKeccakProps t.props ]
+  , [ Job "constPropagate" Expr.constPropagate t.props
+    , Job "concKeccakSimpProps" Expr.concKeccakSimpProps t.props
+    , Job "concreteKeccaks" Keccak.concreteKeccaks t.props
+    , Job "findKeccakPropsExprs" (\ps -> Keccak.findKeccakPropsExprs ps t.bufs t.stores) t.props ]
   , [ Job "readStorage" (uncurry Expr.readStorage) (k, s) | (k, s) <- zip t.words (cycle t.stores) ]
   , [ Job "writeStorage" (\(a, b, c) -> Expr.writeStorage a b c) (k, v, s)
     | (k, v, s) <- zip3 t.words (reverse t.words) (cycle t.stores) ]
   ]
+
+bumpLiterals :: Expr a -> Expr a
+bumpLiterals (Lit n) = Lit (n + 1)
+bumpLiterals e = e
 
 data Job = forall a b . (Show a, Show b, Eq b) => Job String (a -> b) a
 data Ref = forall a b . (Show a, Show b, Eq b) => Ref String (a -> b) a b

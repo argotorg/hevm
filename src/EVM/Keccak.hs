@@ -4,7 +4,6 @@
 -}
 module EVM.Keccak (keccakAssumptions, concreteKeccaks, findKeccakPropsExprs) where
 
-import Control.Monad.State
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.List (tails)
@@ -14,28 +13,13 @@ import EVM.Types
 import EVM.Expr
 
 
-newtype KeccakStore = KeccakStore
-  { keccakExprs :: Set (Expr EWord) }
-  deriving (Show)
-
-keccakFinder :: forall a. Expr a -> State KeccakStore ()
-keccakFinder = \case
-  e@(Keccak _) -> modify (\s -> s{keccakExprs=Set.insert e s.keccakExprs})
-  _ -> pure ()
-
-findKeccakExpr :: forall a. Expr a -> State KeccakStore ()
-findKeccakExpr e = mapExprM_ keccakFinder e
-
-findKeccakProp :: Prop -> State KeccakStore ()
-findKeccakProp p = mapPropM_ keccakFinder p
-
 findKeccakPropsExprs :: [Prop] -> [Expr Buf] -> [Expr Storage] -> Set (Expr EWord)
-findKeccakPropsExprs ps bufs stores = (execState action (KeccakStore mempty)).keccakExprs
+findKeccakPropsExprs ps bufs stores =
+  collectExprs keccakOf (concatMap propExprs ps <> map AnyExpr bufs <> map AnyExpr stores)
   where
-    action = do
-      mapM_ findKeccakProp ps
-      mapM_ findKeccakExpr bufs
-      mapM_ findKeccakExpr stores
+    keccakOf :: Expr a -> Set (Expr EWord)
+    keccakOf e@(Keccak _) = Set.singleton e
+    keccakOf _ = mempty
 
 
 uniquePairs :: [a] -> [(a,a)]
@@ -81,11 +65,8 @@ concretizeKeccakParam _ = internalError "Cannot happen"
 
 type KeccakValue = (Expr Buf, W256)
 concreteKeccaks :: [Prop] -> Set KeccakValue
-concreteKeccaks ps = foldMap concreteKeccakProp ps
+concreteKeccaks ps = collectExprs compute (concatMap propExprs ps)
   where
-  concreteKeccakProp :: Prop -> Set KeccakValue
-  concreteKeccakProp p = foldProp compute Set.empty p
-
   compute :: forall a. Expr a -> Set KeccakValue
   compute = \case
     Keccak buf -> do
@@ -94,4 +75,3 @@ concreteKeccaks ps = foldMap concreteKeccakProp ps
         buff@(ConcreteBuf bs) -> Set.singleton (buff, keccak' bs)
         _ -> Set.empty
     _ -> Set.empty
-
