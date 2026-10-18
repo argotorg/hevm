@@ -1456,14 +1456,6 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go o@(LT (Max (Lit a) _) (Lit b))
       | a >= b = Lit 0
       | otherwise = o
-    go o@(SLT (Sub (Max (Lit a) _) (Lit b)) (Lit c))
-      = let sa, sb, sc :: Int256
-            sa = fromIntegral a
-            sb = fromIntegral b
-            sc = fromIntegral c
-        in if sa >= sb && sa - sb >= sc
-           then Lit 0
-           else o
 
     -- normalize all comparisons in terms of (S)LT
     go (EVM.Types.GT a b) = lt b a

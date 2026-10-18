@@ -789,6 +789,10 @@ basicSimplificationTests = testGroup "Basic simplification tests"
   , testCase "simp-PLT-max" $ do
       let simp = Expr.simplifyProp $ PLT (Max (Lit 5) (BufLength (AbstractBuf "txdata"))) (Lit 99)
       assertEqual "max-buflength rules" simp $ PLT (BufLength (AbstractBuf "txdata")) (Lit 99)
+  , testCase "simp-SLT-sub-max-unsigned" $ do
+      -- Max is unsigned, so it can be negative as a signed word
+      let e = SLT (Sub (Max (Lit 3) (Var "a")) (Lit Expr.maxLit)) (Lit 0)
+      assertBool "must not fold" (Expr.simplify e /= Lit 0)
   , testCase "simp-assoc-add1" $ do
       let simp = Expr.simplify $ Add (Add (Var "c") (Var "a")) (Var "b")
       assertEqual "assoc rules" simp $ Add (Var "a") (Add (Var "b") (Var "c"))
