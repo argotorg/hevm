@@ -17,6 +17,7 @@ import Data.String.Here
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (diffUTCTime, getCurrentTime)
+import Data.Vector qualified as V
 import System.Environment (lookupEnv)
 import System.FilePath (makeRelative, normalise)
 import System.FilePath.Find (find, always, filePath, fileType, (&&?), FileType(RegularFile))
@@ -28,6 +29,7 @@ import Text.RE.Replace (replaceAll, captureText, CaptureOrdinal(..), CaptureID(.
 
 
 import EVM (makeVm, initialContract, defaultVMOpts)
+import EVM.Assembler (assemble)
 import EVM.Effects qualified as Effects
 import EVM.Exec (exec)
 import EVM.Expr qualified as Expr
@@ -465,6 +467,12 @@ bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
     -- sstore(1, 0) vs sstore(1, timestamp())
     eq <- eqBytecode False "5f600155" "42600155"
     assertBool "the timestamp may be nonzero" (any (isCex . fst) eq.res)
+  , testCase "eq-revert-data-length-differs" $ do
+    eq <- uncurry eqOps (zerosOfLen32vs31 OpRevert)
+    assertBool "32 vs 31 bytes of revert data" (any (isCex . fst) eq.res)
+  , testCase "eq-return-data-length-differs" $ do
+    eq <- uncurry eqOps (zerosOfLen32vs31 OpReturn)
+    assertBool "32 vs 31 bytes of return data" (any (isCex . fst) eq.res)
   , testCase "eq-calldataload-near-max-offset-is-zero" $ do
     -- sstore(0, calldataload(2^256-1)) vs sstore(0, 0)
     eq <- eqBytecode False "7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff355f55" "5f5f55"
@@ -556,11 +564,20 @@ bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
     pop = "50"
     -- revert with the last call's return data
     revertRet = "3d5f5f3e3d5ffd"
+    -- both halt with all-zero data: the byte stored in B is byte(0, iszero(..)), i.e. always 0
+    zerosOfLen32vs31 :: Op -> ([Op], [Op])
+    zerosOfLen32vs31 halt =
+      ( [OpPush (Lit 32), OpPush (Lit 4), halt]
+      , [ OpPush0, OpCalldataload, OpIszero, OpPush0, OpByte, OpPush (Lit 31), OpMstore
+        , OpPush (Lit 31), OpPush (Lit 32), halt ] )
+    eqOps :: [Op] -> [Op] -> IO EqIssues
+    eqOps a b = eqCode False (asm a) (asm b)
+      where asm = BS.pack . mapMaybe Expr.maybeLitByteSimp . V.toList . assemble
     eqBytecode :: Bool -> ByteString -> ByteString -> IO EqIssues
-    eqBytecode noReent ha hb = do
-      let a = fromJust (hexByteString ha)
-          b = fromJust (hexByteString hb)
-          env = Effects.Env { config = Effects.defaultConfig { Effects.promiseNoReent = noReent } }
+    eqBytecode noReent ha hb = eqCode noReent (fromJust (hexByteString ha)) (fromJust (hexByteString hb))
+    eqCode :: Bool -> ByteString -> ByteString -> IO EqIssues
+    eqCode noReent a b = do
+      let env = Effects.Env { config = Effects.defaultConfig { Effects.promiseNoReent = noReent } }
       Effects.runEnv env $ withSolvers Bitwuzla 1 Nothing defMemLimit $ \s -> do
         (calldata, _) <- mkCalldata Nothing []
         equivalenceCheck s Nothing a b defaultVeriOpts calldata False
