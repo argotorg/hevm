@@ -342,6 +342,32 @@ sar = op2 SAR (\x y ->
 clz :: Expr EWord -> Expr EWord
 clz = op1 CLZ (\x -> if x == 0 then 256 else fromIntegral $ countLeadingZeros x)
 
+-- | Extract a field through masks, ORs and constant left shifts.
+packedField :: W256 -> Int -> Expr EWord -> Maybe (Expr EWord)
+packedField mask offset e
+  | mask /= 0, mask .&. (mask + 1) == 0, offset + width <= 256 = go offset e
+  | otherwise = Nothing
+  where
+    width = popCount mask
+    go :: Int -> Expr EWord -> Maybe (Expr EWord)
+    go k = \case
+      Lit c -> Just $ Lit (mask .&. shiftR c k)
+      Or a b -> or <$> go k a <*> go k b
+      And (Lit c) f ->
+        let visible = mask .&. shiftR c k
+        in if visible == 0 then Just (Lit 0) else and (Lit visible) <$> go k f
+      Mul (Lit c) f | Just j <- log2W c -> shifted k j f
+      SHL (Lit j) f | j < 256 -> shifted k (unsafeInto j) f
+      f | k == 0 -> Just $ and (Lit mask) f
+      _ -> Nothing
+    shifted k j f
+      | j >= k + width = Just (Lit 0)
+      | j <= k = go (k - j) f
+      | otherwise = Nothing
+
+log2W :: W256 -> Maybe Int
+log2W c = if c /= 0 && popCount c == 1 then Just (countTrailingZeros c) else Nothing
+
 -- Props
 
 peq :: (Typeable a) => Expr a -> Expr a -> Prop
@@ -595,6 +621,11 @@ copySlice a@(Lit srcOffset) b@(Lit dstOffset) c@(Lit size) d@(ConcreteBuf src) e
     in ConcreteBuf $ hd <> sl <> tl
   | otherwise = CopySlice a b c d e
 
+-- Drop source bytes that a concrete copy window cannot observe.
+copySlice s@(Lit srcOffset) d@(Lit _) sz@(Lit size) src@(WriteWord {}) dst
+  | Just src' <- trimToWindow srcOffset size src, src' /= src
+  = copySlice s d sz src' dst
+
 -- concrete indices & abstract src (may produce a concrete result if we are
 -- copying from a concrete region of src)
 copySlice s@(Lit srcOffset) d@(Lit dstOffset) sz@(Lit size) src ds@(ConcreteBuf dst)
@@ -675,6 +706,25 @@ keccakInputsDiffer a b
     offset (Sub x (Lit n)) = let (o, base) = offset x in (o - n, base)
     offset x = (0, x)
 
+-- | Keep only word writes and base bytes visible in a bounded window.
+trimToWindow :: W256 -> W256 -> Expr Buf -> Maybe (Expr Buf)
+trimToWindow off size buf
+  | off >= maxBytes || size >= maxBytes = Nothing
+  | otherwise = go [] buf
+  where
+    end = off + size
+    go :: [(W256, W256)] -> Expr Buf -> Maybe (Expr Buf)
+    go shadow (WriteWord i@(Lit idx) v rest)
+      | idx >= maxBytes = Nothing
+      | idx >= end || idx + 32 <= off = go shadow rest
+      | otherwise = writeWord i v <$> go ((idx, idx + 32) : shadow) rest
+    go shadow (ConcreteBuf bs) =
+      let keep j = j >= off && j < end && all (\(a, b) -> j < a || j >= b) shadow
+          bytes = BS.pack [ if keep (unsafeInto j) then b else 0
+                          | (j, b) <- zip [0 :: Int ..] (BS.unpack (BS.take (unsafeInto end) bs)) ]
+      -- Preserve padding so zero-slot mapping preimages remain 64 bytes.
+      in Just $ ConcreteBuf bytes
+    go _ _ = Nothing
 
 writeByte :: Expr EWord -> Expr Byte -> Expr Buf -> Expr Buf
 writeByte (Lit offset) (LitByte val) (ConcreteBuf "")
@@ -960,7 +1010,7 @@ readStorage w st = go (simplifyNoLitToKeccak w) (simplifyNoLitToKeccak st)
 
       -- Finding two Keccaks that are < 256 away from each other should be VERY hard
       -- This simplification allows us to deal with maps of structs
-      (Add (Lit a2) (Keccak _), Add (Lit b2) (Keccak _)) | a2 /= b2, abs (a2-b2) < 256 -> go slot prev
+      (Add (Lit a2) (Keccak _), Add (Lit b2) (Keccak _)) | a2 /= b2, (if a2 > b2 then a2 - b2 else b2 - a2) < 256 -> go slot prev
       (Add (Lit a2) (Keccak _), (Keccak _)) | a2 > 0, a2 < 256 -> go slot prev
       ((Keccak _), Add (Lit b2) (Keccak _)) | b2 > 0, b2 < 256 -> go slot prev
 
@@ -1327,8 +1377,8 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
           | n+sz >= n
           , n+sz >= sz
           , n+sz <= maxBytes
-            = (CopySlice srcOff dstOff size
-                (WriteWord wOff value (ConcreteBuf simplifiedBuf)) dst)
+            = copySlice srcOff dstOff size
+                (WriteWord wOff value (ConcreteBuf simplifiedBuf)) dst
           | otherwise = orig
             where simplifiedBuf = BS.take (unsafeInto (n+sz)) buf
     go (CopySlice a b c d f) = copySlice a b c d f
@@ -1355,6 +1405,7 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (SEx a b) = sex a b
 
     -- IsZero
+    go (IsZero (Keccak _)) = Lit 0
     go (IsZero (IsZero (IsZero a))) = iszero a
     go (IsZero (IsZero (LT x y))) = lt x y
     go (IsZero (IsZero (Eq x y))) = eq x y
@@ -1382,6 +1433,7 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
       | b == c = iszero a
     go (Eq (Sub a b) c) | a == c = iszero b
 
+    go (Eq (Lit a) (Keccak _)) | a <= 256 = Lit 0
     go (Eq (Keccak a) (Keccak b)) | keccakInputsDiffer a b = Lit 0
     go (Eq (Lit 0) a) = iszero a
     go (Eq a b)
@@ -1404,14 +1456,6 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go o@(LT (Max (Lit a) _) (Lit b))
       | a >= b = Lit 0
       | otherwise = o
-    go o@(SLT (Sub (Max (Lit a) _) (Lit b)) (Lit c))
-      = let sa, sb, sc :: Int256
-            sa = fromIntegral a
-            sb = fromIntegral b
-            sc = fromIntegral c
-        in if sa >= sb && sa - sb >= sc
-           then Lit 0
-           else o
 
     -- normalize all comparisons in terms of (S)LT
     go (EVM.Types.GT a b) = lt b a
@@ -1429,6 +1473,12 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (SLT _ (Lit a)) | a == minLitSigned = Lit 0
     go (SLT (Lit a) _) | a == maxLitSigned = Lit 0
     go (SLT a b) = slt a b
+
+    -- Read a field from a packed word.
+    go (And (Lit m) (Div x (Lit d)))
+      | Just k <- log2W d, Just r <- packedField m k x = r
+    go (And (Lit m) (SHR (Lit k) x))
+      | k < 256, Just r <- packedField m (unsafeInto k) x = r
 
     -- Masking as as per Solidity bit-packing of e.g. function parameters
     go (And (Lit mask1) (Or (And (Lit mask2) _) x)) | (mask1 .&. mask2 == 0)
@@ -1718,6 +1768,7 @@ simplifyProp prop =
     go (PEq (Lit 0) (Eq a b)) = PNeg (peq a b)
     go (PEq (Lit 0) (LT a b)) = PLEq b a
 
+    go (PEq (Lit a) (Keccak _)) | a <= 256 = PBool False
     go (PEq (Keccak a) (Keccak b)) | keccakInputsDiffer a b = PBool False
     go (PEq (Lit 0) (Sub a b)) = peq a b
     go (PEq (Lit 0) (Or a b)) = peq (Lit 0) a `PAnd` peq (Lit 0) b

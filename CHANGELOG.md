@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- Equality of a keccak hash with a literal at most 256 now simplifies to false,
+  matching the existing SMT assumption.
+- Masked `Div` and `SHR` reads now simplify through packed-word writes,
+  allowing reads of Solidity-packed fields to reduce to the written value.
 - Small, word-aligned keccak inputs are canonicalized so equivalent mapping
   keys built from memory writes or copies can resolve to the same storage entry.
 - Storage reads resolve concrete keccak slots, including nested hashes and
@@ -15,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keccak equality and storage reads now use known differences in input lengths
   or words to rule out aliases, including struct offsets below 256, under the
   existing keccak assumptions.
+- `copySlice` now trims irrelevant writes and base bytes from concrete source
+  windows, allowing mapping keys built over different scratch memory to compare equal.
 - Symbolic execution now avoids forking when simplification shows that
   the path conditions imply the branch condition.
 - Symbolic jump targets and jump conditions that depend on a subterm with few
@@ -67,6 +73,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Fixed
 - Buffer models from the solver drop bytes past the buffer's length, so a
   counterexample with such bytes can be replayed.
+- Removed an unsound simplification that folded `SLT (Sub (Max (Lit a) x) (Lit b)) (Lit c)`
+  to false, ignoring that the unsigned `Max` can be negative as a signed word.
 - A storage slot fetched via RPC no longer shadows symbolic writes made to it
   earlier in the same execution.
 - `hevm equivalence` no longer reports a difference only because one program
@@ -99,6 +107,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   state of the other program, which inflated the counts in its warnings.
 - Simplification and the other `Expr` traversals now also reach revert data, the
   terms in errors and partial executions, `BALANCE` addresses and log topics.
+- Storage reads now skip writes at lower struct field offsets as well as higher
+  offsets. Unsigned subtraction previously left these reads unresolved.
 - Storage decomposition no longer swaps key and slot for concrete mapping
   hashes, which caused spurious counterexamples and false proofs when concrete
   and symbolic mapping accesses were mixed ([#1099](https://github.com/argotorg/hevm/issues/1099)).
