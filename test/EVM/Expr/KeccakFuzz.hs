@@ -11,7 +11,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Test.QuickCheck
 import Test.Tasty
-import Test.Tasty.QuickCheck (testProperty)
+import Test.Tasty.QuickCheck (testProperty, QuickCheckTests(..))
 
 import EVM.Effects (Env(..), Config(..), defaultConfig, runEnv)
 import EVM.Expr qualified as Expr
@@ -38,8 +38,10 @@ data Case = Case
   }
   deriving Show
 
+-- each case costs about a second of solver time; pass --quickcheck-tests to fuzz longer
 tests :: TestTree
-tests = testGroup "keccak-slot-fuzz"
+tests = adjustOption (\(QuickCheckTests n) -> QuickCheckTests (if n == 100 then 10 else n)) $
+  testGroup "keccak-slot-fuzz"
   [ testProperty "keccak-slot-no-spurious-cex" $ forAllShrink genCase shrinkCase $ \c -> forAll arbitrary $ \simp -> ioProperty $ do
       let p = loaded c ./= expected c
       res <- checkSat ((if simp then Expr.simplifyProp p else p) : keyWitnesses c)
