@@ -1617,6 +1617,11 @@ packNibbles [] = mempty
 packNibbles (n1:n2:ns) = BS.singleton (toByte n1 n2) <> packNibbles ns
 packNibbles _ = internalError "can't pack odd number of nibbles"
 
+-- | Memory offsets and sizes from here on fail: no transaction has the gas for them, and
+-- materializing them would exhaust hevm's own memory
+memoryAccessLimit :: Word64
+memoryAccessLimit = 0x0fffffff
+
 toWord64 :: W256 -> Maybe Word64
 toWord64 n =
   if n <= into (maxBound :: Word64)

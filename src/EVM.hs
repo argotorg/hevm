@@ -3243,11 +3243,7 @@ accessMemoryRange (Lit offs) (Lit sz) continue =
     Just (offs64, sz64) ->
       if offs64 + sz64 < sz64
         then vmError IllegalOverflow
-        -- we need to limit these to <256MB because otherwise we could run out of memory
-        -- in e.g. OpCalldatacopy and subsequent memory allocation when running with abstract gas.
-        -- In these cases, the system would try to allocate a large (but <2**64 bytes) memory
-        -- that leads to out-of-heap. Real-world scenarios cannot allocate 256MB of memory due to gas
-        else if offs64 >= 0x0fffffff || sz64 >= 0x0fffffff
+        else if offs64 >= memoryAccessLimit || sz64 >= memoryAccessLimit
              then vmError IllegalOverflow
              else accessUnboundedMemoryRange offs64 sz64 continue
 -- we just ignore gas if we get symbolic inputs

@@ -4912,6 +4912,11 @@ tests = testGroup "hevm"
       assertEqualM "unknown key" mempty (concreteKeccaks $ props 2 0)
       assertEqualM "candidate key and field offset" (Set.singleton (ConcreteBuf pre, h)) (concreteKeccaks $ props 0x5eed1234 255)
       assertEqualM "offset outside recovery range" mempty (concreteKeccaks $ props 0x5eed1234 256)
+    -- the size is symbolic during execution, and a literal near 2^256 once the keccak is concretized
+    , testCase "copy-sized-by-concrete-keccak" $ runEnv (testEnv {config = testEnv.config {simp = False}}) $ do
+      let copied = CopySlice (Lit 0) (Lit 0) (Keccak (ConcreteBuf (BS.replicate 9 0))) (AbstractBuf "calldata") (ConcreteBuf "")
+      res <- withDefaultSolver $ \s -> checkSatWithProps s [PEq (ReadWord (Lit 0) copied) (Lit 1)]
+      assertBoolM ("copy beyond the memory access limit must be unsupported, got " <> show res) (isError res)
     , testCase "store-over-concrete-buffer" $ runEnv (testEnv {config = testEnv.config {simp = False}}) $ do
       let
         as = AbstractStore (SymAddr "test") Nothing

@@ -110,6 +110,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the writes they are disjoint from and resolve the writes they hit.
 
 ## Fixed
+- Encoding a copy whose size becomes a literal at or beyond the 256MB memory
+  access limit, e.g. a keccak, is reported as unsupported instead of exhausting
+  memory.
 - A path whose conditions became unsatisfiable at a solver-checked branch now
   ends there, instead of continuing down one side of the branch, e.g. until the
   loop iteration limit.
