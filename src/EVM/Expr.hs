@@ -97,7 +97,6 @@ module EVM.Expr
   , pattern ArraySlotZero
   , idsDontMatch
   , slotPos
-  , litToArrayPreimage
   , litToKeccak
 
     -- * Decomposition
@@ -130,7 +129,6 @@ module EVM.Expr
   , max
   , containsNode
   , inRange
-  , preImages
   , constPropagate
   , concKeccakSimpExpr
   , concKeccakProps
@@ -173,6 +171,7 @@ import Witch (unsafeInto, into, tryInto)
 import Data.Containers.ListUtils (nubOrd)
 
 import EVM.HashCons qualified as HC
+import EVM.Keccak.Preimages (Preimage(..), Table, fromBytes, lookupSlot, smallArrays, keccakMin, keccakMax)
 import EVM.Traversals
 import EVM.Traversals.Children (mapPropChildrenM)
 import Data.Functor.Identity (Identity(..))
@@ -1056,17 +1055,17 @@ readStorage' loc store = case readStorage loc store of
 -- | The mapping slot (idx) of a symbolic mapping read keccak(key . idx)
 readMappingIdx :: Expr EWord -> Maybe W256
 readMappingIdx (MappingSlot idx _)
-  | BS.length idx == 64 = Just (W256 (word256 (BS.takeEnd 32 idx)))
+  | MappingPre _ parent <- fromBytes idx = Just parent
 readMappingIdx _ = Nothing
 
 -- | Drop ConcreteStore entries that cannot alias a symbolic mapping read: a concrete key whose
 -- recorded keccak preimage identifies a different mapping slot cannot equal keccak(key . idx),
--- by injectivity. Keys with unknown preimage are kept. `preMap` maps hash -> preimage.
-filterStoreByReadSlot :: Map.Map W256 ByteString -> Expr EWord -> Expr Storage -> Expr Storage
+-- by injectivity. Keys with unknown preimage are kept.
+filterStoreByReadSlot :: Table -> Expr EWord -> Expr Storage -> Expr Storage
 filterStoreByReadSlot preMap slot (ConcreteStore m)
   | Just readSlot <- readMappingIdx slot =
       let keep k = case Map.lookup k preMap of
-                     Just bs | BS.length bs == 64 -> W256 (word256 (BS.takeEnd 32 bs)) == readSlot
+                     Just (MappingPre _ parent) -> parent == readSlot
                      _ -> True
       in ConcreteStore (Map.filterWithKey (\k _ -> keep k) m)
 filterStoreByReadSlot _ _ st = st
@@ -1231,36 +1230,12 @@ idsDontMatch a b = BS.length a >= 64 && BS.length b >= 64 && diff32to64Byte a b
 slotPos :: Word8 -> ByteString
 slotPos pos = BS.replicate 31 0 <> BS.singleton pos
 
--- Optimized litToArrayPreimage using the pre-computed map
-litToArrayPreimage :: W256 -> Maybe (Word8, W256)
-litToArrayPreimage val =
-  -- Find the largest 'imageHashKey' in our map such that 'imageHashKey <= val'.
-  case Map.lookupLE val preImageLookupMap of
-    Just (foundImageHashKey, array_id) ->
-      -- 'foundImageHashKey' is one of the keccak hashes from preImagesSource.
-      -- 'array_id' is the original Word8 (0-255) that produced this hash.
-
-      -- We have found an 'foundImageHashKey' such that 'foundImageHashKey <= val'.
-      -- Now we must check if 'val' is also within the 256-byte range starting at 'foundImageHashKey',
-      -- i.e., 'val <= foundImageHashKey + 255'.
-      if val <= foundImageHashKey + 255 then
-        Just (array_id, val - foundImageHashKey) -- Return the id and the offset from the hash
-      else
-        -- 'val' is greater than the upper bound for 'foundImageHashKey'.
-        -- Since 'foundImageHashKey' was the largest key <= 'val', no other
-        -- (smaller) key in the map could satisfy the condition for its interval if this one doesn't.
-        Nothing
-    Nothing ->
-      -- No key in 'preImageLookupMap' is less than or equal to 'val'.
-      -- This implies 'val' is smaller than all computed 'image' hashes.
-      Nothing
-
 litToKeccak :: Expr a -> Expr a
 litToKeccak e = mapExprShared (static (HC.Rewrite go)) e
   where
     go :: Expr a -> Expr a
-    go orig@(Lit key) = case litToArrayPreimage key of
-      Just (array, offset) -> ArraySlotWithOffs (slotPos array) (Lit offset)
+    go orig@(Lit key) = case lookupSlot smallArrays key of
+      Just (ArrayPre parent, _, offset) -> ArraySlotWithOffs (word256Bytes parent) (Lit offset)
       _ -> orig
     go otherNode = otherNode
 
@@ -1601,7 +1576,7 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
       | b == c = iszero a
     go (Eq (Sub a b) c) | a == c = iszero b
 
-    go (Eq (Lit a) (Keccak _)) | a <= 256 = Lit 0
+    go (Eq (Lit a) (Keccak _)) | a < keccakMin || a > keccakMax = Lit 0
     go (Eq (Keccak a) (Keccak b)) | keccakInputsDiffer a b = Lit 0
     go (Eq (Lit 0) a) = iszero a
     go (Eq a b)
@@ -2059,7 +2034,7 @@ simplifyProp prop =
     go (PEq (Lit 0) (Eq a b)) = PNeg (peq a b)
     go (PEq (Lit 0) (LT a b)) = PLEq b a
 
-    go (PEq (Lit a) (Keccak _)) | a <= 256 = PBool False
+    go (PEq (Lit a) (Keccak _)) | a < keccakMin || a > keccakMax = PBool False
     go (PEq (Keccak a) (Keccak b)) | keccakInputsDiffer a b = PBool False
     go (PEq (Lit 0) (Sub a b)) = peq a b
     go (PEq (Lit 0) (Or a b)) = peq (Lit 0) a `PAnd` peq (Lit 0) b
@@ -2359,14 +2334,6 @@ containsNode p = getAny . foldExpr go (Any False)
 
 inRange :: Int -> Expr EWord -> Prop
 inRange sz e = if sz == 256 then PBool True else PLEq e (Lit $ 2 ^ sz - 1)
-
--- | images of keccak(bytes32(x)) where 0 <= x < 256
-preImages :: [(W256, Word8)]
-preImages = [(keccak' (word256Bytes . into $ i), i) | i <- [0..255]]
-
--- | images of keccak(bytes32(x)) where 0 <= x < 256
-preImageLookupMap :: Map.Map W256 Word8
-preImageLookupMap = Map.fromList preImages
 
 data ConstState = ConstState
   { values :: Map.Map (Expr EWord) W256

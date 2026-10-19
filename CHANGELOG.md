@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   opcode coverage.
 - Equality of a keccak hash with a literal at most 256 now simplifies to false,
   matching the existing SMT assumption.
+- Equality of a keccak hash with a literal above 2^256 - 257 also simplifies to
+  false, matching the SMT assumption.
 - Masked `Div` and `SHR` reads now simplify through packed-word writes,
   allowing reads of Solidity-packed fields to reduce to the written value.
 - Small, word-aligned keccak inputs are canonicalized so equivalent mapping
@@ -61,6 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   option); disable it with `--no-hash-cons`.
 
 ## Changed
+- Solver queries for branch conditions and symbolic values also get the keccak
+  preimages recorded during concrete execution, as the final queries do.
 - A symbolic value that depends on several symbolic subterms with few possible
   values each, such as the slot of a nested mapping with two such keys, is now
   split into cases on all of them, instead of asking the solver for its values.
@@ -106,6 +110,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the writes they are disjoint from and resolve the writes they hit.
 
 ## Fixed
+- Words parsed from JSON, e.g. RPC responses, no longer keep their text alive
+  until they are used.
+- Encoding a copy whose size becomes a literal at or beyond the 256MB memory
+  access limit, e.g. a keccak, is reported as unsupported instead of exhausting
+  memory.
+- A path whose conditions became unsatisfiable at a solver-checked branch now
+  ends there, instead of continuing down one side of the branch, e.g. until the
+  loop iteration limit.
 - Buffer models from the solver drop bytes past the buffer's length, so a
   counterexample with such bytes can be replayed.
 - CALLDATACOPY, CODECOPY and EXTCODECOPY with a literal source range past 2^256

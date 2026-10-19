@@ -688,8 +688,8 @@ data BranchContext where
   PleaseRunBoth :: (Bool -> EVM Symbolic ()) -> BranchContext
   PleaseRunAll  :: [Expr EWord] -> (Expr EWord -> EVM Symbolic ()) -> BranchContext
 
--- | The possible return values of a SMT query
-data BranchCondition = Case Bool | UnknownBranch
+-- | The possible return values of a SMT query. Infeasible: neither direction can be taken
+data BranchCondition = Case Bool | UnknownBranch | Infeasible
   deriving Show
 
 instance Show (Query t) where
@@ -1393,13 +1393,14 @@ instance JSON.FromJSON W256 where
   parseJSON v = do
     s <- T.unpack <$> JSON.parseJSON v
     case reads s of
-      [(x, "")]  -> pure x
+      -- forced, or the word holds on to its string, which can add up to GBs in a large trace
+      [(x, "")]  -> x `seq` pure x
       _          -> fail $ "invalid hex word (" ++ s ++ ")"
 
 instance JSON.FromJSONKey W256 where
   fromJSONKey = JSON.FromJSONKeyTextParser $ \s ->
     case reads (T.unpack s) of
-      [(x, "")]  -> pure x
+      [(x, "")]  -> x `seq` pure x
       _          -> fail $ "invalid word (" ++ T.unpack s ++ ")"
 
 wordField :: JSON.Object -> JSON.Key -> JSON.Parser W256
@@ -1435,7 +1436,7 @@ instance JSON.FromJSON W64 where
   parseJSON v = do
     s <- T.unpack <$> JSON.parseJSON v
     case reads s of
-      [(x, "")]  -> pure x
+      [(x, "")]  -> x `seq` pure x
       _          -> fail $ "invalid hex word (" ++ s ++ ")"
 
 
@@ -1616,6 +1617,11 @@ packNibbles :: [Nibble] -> ByteString
 packNibbles [] = mempty
 packNibbles (n1:n2:ns) = BS.singleton (toByte n1 n2) <> packNibbles ns
 packNibbles _ = internalError "can't pack odd number of nibbles"
+
+-- | Memory offsets and sizes from here on fail: no transaction has the gas for them, and
+-- materializing them would exhaust hevm's own memory
+memoryAccessLimit :: Word64
+memoryAccessLimit = 0x0fffffff
 
 toWord64 :: W256 -> Maybe Word64
 toWord64 n =

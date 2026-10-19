@@ -632,7 +632,7 @@ genSlot = frequency [ (1, do
                      ,(2, do
                         arrayNum :: Int <- arbitrary
                         offs :: W256 <- arbitrary
-                        pure $ Lit $ fst (Expr.preImages !! (arrayNum `mod` 3)) + (offs `mod` 3))
+                        pure $ Lit $ keccak' (word256Bytes (fromIntegral (arrayNum `mod` 3))) + (offs `mod` 3))
                      -- random stuff
                      ,(1, pure $ Lit (maxBound :: W256))
                      ]

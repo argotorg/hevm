@@ -165,6 +165,10 @@ tests = testGroup "Foundry tests"
     , test "Keccak-Literal-Slot-Fail" $ do
         let testFile = "test/contracts/fail/keccakLiteralSlot.sol"
         executeSingleMethod testFile "prove_same_mapping" >>= assertEqualM "folded slot literal of the same mapping must falsify" (False, True)
+    , test "Recorded-Preimage-Loop" $ do
+        let testFile = "test/contracts/pass/recordedPreimageLoop.sol"
+        runForgeTestResultsCustom testFile (\(TestMethodInfo _ (Sig name _)) -> name == "prove_loop_bound_from_other_key") Nothing (Just 5) False Fetch.noRpc
+          >>= assertEqualM "the loop must not be entered, so not explored up to the bound" [(True, True)]
     , test "AssertApproxEqAbs-Pass" $ do
         let testFile = "test/contracts/pass/assertApproxEqAbs.sol"
         assertAllMethodsWithPrefix testFile "prove" (True, True)

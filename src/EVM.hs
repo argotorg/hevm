@@ -14,6 +14,7 @@ import EVM.ABI
 import EVM.Expr (readStorage, concStoreContains, writeStorage, readByte, readWord, writeWord,
   writeByte, bufLength, indexWord, readBytes, copySlice, wordToAddr, maybeLitByteSimp, maybeLitWordSimp, maybeLitAddrSimp)
 import EVM.Expr qualified as Expr
+import EVM.Keccak.Preimages qualified as Preimages
 import EVM.HashCons qualified as HashCons
 import EVM.FeeSchedule (FeeSchedule (..))
 import EVM.FeeSchedule qualified as Fees (feeSchedule)
@@ -43,7 +44,7 @@ import Data.ByteString.Char8 qualified as Char8
 import Data.DoubleWord (Int256, Word256)
 import Data.Either (partitionEithers)
 import Data.Either.Extra (maybeToEither)
-import Data.Foldable (toList, Foldable(..))
+import Data.Foldable (Foldable(..))
 import Data.List (find, isPrefixOf)
 import Data.List.Split (splitOn)
 import Data.Map.Strict (Map)
@@ -803,7 +804,7 @@ exec1 conf = do
                 symbolicRead :: EVM t () = if this.external
                   then accessStorage self x finalizeLoad
                   else let slot = HashCons.hashConsExpr (Expr.concKeccakOnePass x)
-                           preMap = Map.fromList [ (h, bs) | (bs, h) <- toList vm.keccakPreImgs ]
+                           preMap = Preimages.fromRecorded vm.keccakPreImgs
                        in finalizeLoad $ HashCons.hashConsExpr (Expr.readStorage' slot (Expr.filterStoreByReadSlot preMap slot this.storage))
 
                 concreteRead :: EVM t () = do
@@ -3242,11 +3243,7 @@ accessMemoryRange (Lit offs) (Lit sz) continue =
     Just (offs64, sz64) ->
       if offs64 + sz64 < sz64
         then vmError IllegalOverflow
-        -- we need to limit these to <256MB because otherwise we could run out of memory
-        -- in e.g. OpCalldatacopy and subsequent memory allocation when running with abstract gas.
-        -- In these cases, the system would try to allocate a large (but <2**64 bytes) memory
-        -- that leads to out-of-heap. Real-world scenarios cannot allocate 256MB of memory due to gas
-        else if offs64 >= 0x0fffffff || sz64 >= 0x0fffffff
+        else if offs64 >= memoryAccessLimit || sz64 >= memoryAccessLimit
              then vmError IllegalOverflow
              else accessUnboundedMemoryRange offs64 sz64 continue
 -- we just ignore gas if we get symbolic inputs
@@ -3769,7 +3766,7 @@ instance VMOps Symbolic where
     loc <- codeloc
     pathconds <- use #constraints
     vm <- get
-    query $ PleaseAskSMT cond pathconds (runBothPaths loc vm.exploreDepth)
+    query $ PleaseAskSMT cond (pathconds <> Preimages.recordedProps vm.keccakPreImgs) (runBothPaths loc vm.exploreDepth)
     where
       runBothPaths loc _ (Case v) = do
         assign #result Nothing
@@ -3781,6 +3778,10 @@ instance VMOps Symbolic where
         assign (#pathsVisited % at (loc, iteration)) (Just v)
         assign (#iterations % at loc) (Just (iteration + 1, stack))
         continue v
+      -- ends like a failed vm.assume: the leaf is skipped without a solver query
+      runBothPaths _ _ Infeasible = do
+        pushTo #constraints (PBool False)
+        terminateVMWithError AssumeCheatFailed
       -- Both paths are possible
       runBothPaths loc exploreDepth UnknownBranch =
         (fork depthLimit exploreDepth ) . PleaseRunBoth $ (runBothPaths loc exploreDepth) . Case
@@ -3794,7 +3795,7 @@ instance VMOps Symbolic where
     case Expr.enumerateViaSmallSubterm maxWidth pathconds ewordExpr of
       Just (_, [(v, _)]) -> continue $ Just v
       Just (atoms, groups) -> forkOnSubterm maxDepth atoms groups (continue . Just)
-      Nothing -> query $ PleaseGetSols ewordExpr numBytes pathconds $ \case
+      Nothing -> query $ PleaseGetSols ewordExpr numBytes (pathconds <> Preimages.recordedProps vm.keccakPreImgs) $ \case
           Just concVals -> do
             assign #result Nothing
             case concVals of

@@ -57,7 +57,7 @@ import Data.Text.Lazy.Builder
 import qualified Data.Text.Lazy.Builder.Int (decimal)
 import Language.SMT2.Parser (getValueRes, parseCommentFreeFileMsg, parseString, specConstant)
 import Language.SMT2.Syntax (Symbol, SpecConstant(..), GeneralRes(..), Term(..), QualIdentifier(..), Identifier(..), Sort(..), Index(..), VarBinding(..))
-import Numeric (readHex, readBin)
+import Numeric (readHex, readBin, showHex)
 import Witch (into, unsafeInto)
 import EVM.Format (formatProp)
 
@@ -700,6 +700,9 @@ propToSMTWith arithEnc = \case
 
 copySliceWith :: ArithEncoding -> Expr EWord -> Expr EWord -> Expr EWord -> Builder -> Builder -> Err Builder
 copySliceWith arithEnc srcOffset dstOffset (Lit size) src dst = do
+  -- a symbolic size, e.g. a keccak, can become this large only once concretized for encoding
+  when (size >= into memoryAccessLimit) $
+    Left $ "CopySlice of 0x" <> showHex size "" <> " bytes not currently implemented, it is beyond the memory access limit"
   sz <- internal size
   -- the binder must not be a possible buffer name, or it captures that buffer in dst
   pure $ "(let ((copy!src " <> src <> ")) " <> sz <> ")"

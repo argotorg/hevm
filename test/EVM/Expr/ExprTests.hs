@@ -29,6 +29,7 @@ import EVM.Expr.Generator
 import EVM.Expr.RewriteFuzz (genShapedWord, genShapedProp, shrinkWord, shrinkProp)
 import EVM.Expr.Probe (probes, contract)
 import EVM.HashCons qualified as HC
+import EVM.Keccak.Preimages (fromBytes)
 import EVM.Format (hexText)
 import EVM.SMT (AbstractQuery(..), SMT2(..), SMTScript(..), assertPropsAbstract)
 import EVM.Solvers hiding (checkSat)
@@ -421,7 +422,7 @@ storageTests = testGroup "Storage tests"
     -- recorded preimage of a write to the mapping at slot 0 with key 0xaa
     preImgBytes = BS.pack (replicate 31 0 ++ [0xaa] ++ replicate 32 0)
     preImgHash = keccak' preImgBytes
-    preImgs = Map.fromList [(preImgHash, preImgBytes)]
+    preImgs = Map.fromList [(preImgHash, fromBytes preImgBytes)]
 
 keccakTests :: TestTree
 keccakTests = testGroup "Keccak input canonicalization"
@@ -1065,6 +1066,17 @@ basicSimplificationTests = testGroup "Basic simplification tests"
       assertEqual "257 remains undecided in props" [PEq (Lit 257) k] (Expr.simplifyProps [PEq k (Lit 257)])
       res <- checkSatWith equivConfig (PEq (Lit 257) k)
       assertBool ("257 is allowed by the SMT assumptions: " <> show res) (isSat res)
+  , testCase "keccak-large-literal-boundary" $ do
+      let k = Keccak (AbstractBuf "buf")
+          largest = maxBound - 256
+      mapM_ (\c -> do
+        assertEqual "above the largest keccak" [PBool False] (Expr.simplifyProps [PEq k (Lit c)])
+        res <- checkSatWith equivConfig (PEq (Lit c) k)
+        assertBool ("excluded by the SMT assumptions: " <> show res) (isQed res))
+        [largest + 1, maxBound]
+      assertEqual "largest keccak remains undecided" [PEq (Lit largest) k] (Expr.simplifyProps [PEq k (Lit largest)])
+      res <- checkSatWith equivConfig (PEq (Lit largest) k)
+      assertBool ("largest keccak is allowed by the SMT assumptions: " <> show res) (isSat res)
   , testProperty "keccak-small-literal-matches-smt" $ withMaxSuccess 100 $
       forAll (resize 8 (genBuf 64 1)) $ \buf ->
       forAll (Lit . fromIntegral <$> chooseInt (0, 256)) $ \c -> ioProperty $ do

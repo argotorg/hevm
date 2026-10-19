@@ -679,9 +679,10 @@ checkBranch :: App m => SolverGroup -> Prop -> Prop -> m BranchCondition
 checkBranch solvers branchcondition pathconditions = do
   let props = [pathconditions .&& branchcondition]
   checkSatWithProps solvers props >>= \case
-    -- the condition is unsatisfiable
-    Qed -> -- if pathconditions are consistent then the condition must be false
-      pure $ Case False
+    -- the condition is unsatisfiable: it is false, unless the path conditions are too
+    Qed -> checkSatWithProps solvers [pathconditions .&& PNeg branchcondition] <&> \case
+      Qed -> Infeasible
+      _ -> Case False
     -- Sat means its possible for condition to hold
     Cex {} -> do -- is its negation also possible?
       let propsNeg = [pathconditions .&& (PNeg branchcondition)]
