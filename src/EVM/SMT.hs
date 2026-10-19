@@ -78,9 +78,9 @@ import EVM.SMT.AbstractBase (DivModKind(..), abstFnName, concFnName, mulSMT, sha
 
 
 -- | Attempts to collapse a compressed buffer representation down to a flattened one
--- | Flattens a buffer model, with the semantics of applying its writes with
--- 'writeByte'. Builds the bytes in one pass: applying the writes one by one
--- copies the whole buffer for every write.
+-- | Flattens a buffer model to its length, with the semantics of applying its
+-- writes with 'writeByte'. Builds the bytes in one pass: applying the writes
+-- one by one copies the whole buffer for every write.
 collapse :: BufModel -> Maybe BufModel
 collapse (Flat b) = Just (Flat b)
 collapse (Comp c) = Flat <$> go c []
@@ -88,16 +88,16 @@ collapse (Comp c) = Flat <$> go c []
     -- collected innermost first, so the outermost write to an index wins in 'Map.fromList'
     go (Write byte idx next) ws = go next ((idx, byte) : ws)
     go (Base byte sz) ws
-      | sz <= 120_000_000, all ((< Expr.maxBytes) . fst) ws = Just $ vectorToByteString $ VS.create $ do
-          -- writes past the base pad it with zeros, as 'writeByte' does
-          v <- VSM.replicate (Prelude.max base (maybe 0 ((+ 1) . unsafeInto . fst) (Map.lookupMax writes))) 0
-          VSM.set (VSM.slice 0 base v) byte
+      | sz <= 120_000_000 = Just $ vectorToByteString $ VS.create $ do
+          v <- VSM.replicate base byte
           forM_ (Map.toList writes) $ \(i, b) -> VSM.write v (unsafeInto i) b
           pure v
       | otherwise = Nothing
       where
         base = unsafeInto sz
-        writes = Map.fromList ws
+        -- the length is the solver's, past it a buffer reads as zero; the solver
+        -- writes there e.g. to satisfy the assertion that such reads are zero
+        writes = Map.filterWithKey (\i _ -> i < sz) (Map.fromList ws)
 
 getVar :: SMTCex -> TS.Text -> W256
 getVar cex name = fromJust $ Map.lookup (Var name) cex.vars

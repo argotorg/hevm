@@ -128,6 +128,7 @@ checkNoSideEffects vm0 vmAfter =
         (SymbolicMemory m1, SymbolicMemory m2) -> m1 == m2
         _ -> False
       memorySizeUnchanged = vm0.state.memorySize == vmAfter.state.memorySize
+                            && vm0.state.symMemorySize == vmAfter.state.symMemorySize
       returndataUnchanged = vm0.state.returndata == vmAfter.state.returndata
       storageUnchanged = vm0.env.contracts == vmAfter.env.contracts
       logsUnchanged = vm0.logs == vmAfter.logs

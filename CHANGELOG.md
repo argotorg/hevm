@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- The symbolic execution fuzzer runs random programs with abstract calldata,
+  storage, callvalue and timestamp, checks the leaf the concrete inputs reach
+  against geth, replays solver models of other leaves in geth, and reports
+  opcode coverage.
 - Equality of a keccak hash with a literal at most 256 now simplifies to false,
   matching the existing SMT assumption.
 - Masked `Div` and `SHR` reads now simplify through packed-word writes,
@@ -104,6 +108,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Fixed
 - Buffer models from the solver drop bytes past the buffer's length, so a
   counterexample with such bytes can be replayed.
+- CALLDATACOPY, CODECOPY and EXTCODECOPY with a literal source range past 2^256
+  now copy zeros instead of wrapping around to the start of the source.
+- BLOBBASEFEE returns 1, the minimum blob base fee, instead of 0.
+- Logs emitted by a call or creation that reverts or fails are discarded.
+- MSIZE accounts for memory accessed at a symbolic offset or size.
+- Counterexample buffers have the length the solver gave them, instead of
+  being extended by bytes the model sets past that length.
+- Precompile calls copy at most their output into memory, instead of
+  zero-filling the rest of the return buffer, and clear the return data when
+  they fail.
+- Partial leaves for reaching the maximum number of loop iterations now carry
+  their path conditions.
+- Execution traces are built in linear time in their length.
 - Removed an unsound simplification that folded `SLT (Sub (Max (Lit a) x) (Lit b)) (Lit c)`
   to false, ignoring that the unsigned `Max` can be negative as a signed word.
 - A storage slot fetched via RPC no longer shadows symbolic writes made to it

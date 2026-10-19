@@ -613,7 +613,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
                 case (maxIterationsReached vm iterConf.maxIter, isLoopHead iterConf.loopHeuristic vm) of
                   -- Yes. return a partial leaf
                   (Just _, Just True) ->
-                    pure $ Partial [] (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) $ MaxIterationsReached vm.state.pc vm.state.contract
+                    pure $ Partial vm.constraints (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) $ MaxIterationsReached vm.state.pc vm.state.contract
                   -- No. keep executing
                   _ -> do
                     (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case (c > 0))) vm
@@ -627,7 +627,8 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
                   (Just True, _, Just n) -> do
                     -- continue execution down the opposite branch than the one that
                     -- got us to this point and queue a task to return a partial leaf for the other side
-                    let partialLeaf = Partial [] (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) (MaxIterationsReached vm.state.pc vm.state.contract)
+                    let taken = Expr.simplifyProp $ if n then Lit 0 ./= cond else Lit 0 .== cond
+                        partialLeaf = Partial (taken : vm.constraints) (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) (MaxIterationsReached vm.state.pc vm.state.contract)
                     liftIO $ atomically $ modifyTVar numTasks (+1)
                     liftIO $ writeChan taskQ $ t { vm = vm, stepper = pure partialLeaf }
                     (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case $ not n)) vm

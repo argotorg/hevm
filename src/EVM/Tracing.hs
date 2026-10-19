@@ -73,7 +73,18 @@ instance JSON.ToJSON VMTraceStepResult where
 type TraceState = (VM Concrete, [VMTraceStep])
 
 execWithTrace :: App m => StateT (TraceState) m (VMResult Concrete)
-execWithTrace = do
+execWithTrace = newestFirst execWithTrace'
+
+-- | Runs with the trace newest first, so that steps are consed rather than appended
+newestFirst :: Monad m => StateT TraceState m a -> StateT TraceState m a
+newestFirst act = do
+  State.modify' (over _2 reverse)
+  r <- act
+  State.modify' (over _2 reverse)
+  pure r
+
+execWithTrace' :: App m => StateT (TraceState) m (VMResult Concrete)
+execWithTrace' = do
   _ <- runWithTrace
   fromJust <$> use (_1 % #result)
 
@@ -85,16 +96,15 @@ runWithTrace = do
   vm0 <- use _1
   case vm0.result of
     Nothing -> do
-      State.modify' (\(a, b) -> (a, b ++ [vmTraceStep vm0]))
+      State.modify' (\(a, b) -> (a, vmTraceStep vm0 : b))
       vm' <- liftIO $ stToIO $ State.execStateT (exec1 conf) vm0
       assign _1 vm'
       runWithTrace
     Just (VMFailure _) -> do
       -- Update error text for last trace element
-      (a, b) <- State.get
-      let updatedElem = (last b) {error = (vmTraceStep vm0).error}
-          updatedTraces = take (length b - 1) b ++ [updatedElem]
-      State.put (a, updatedTraces)
+      State.modify' $ \(a, b) -> case b of
+        lastStep : rest -> (a, lastStep {error = (vmTraceStep vm0).error} : rest)
+        [] -> (a, b)
       pure vm0
     Just _ -> pure vm0
 
@@ -103,7 +113,14 @@ interpretWithTrace
   => Fetch.Fetcher Concrete m
   -> Stepper Concrete a
   -> StateT TraceState m a
-interpretWithTrace fetcher =
+interpretWithTrace fetcher = newestFirst . interpretWithTrace' fetcher
+
+interpretWithTrace'
+  :: forall m a . App m
+  => Fetch.Fetcher Concrete m
+  -> Stepper Concrete a
+  -> StateT TraceState m a
+interpretWithTrace' fetcher =
   eval . Operational.view
   where
     eval
@@ -114,18 +131,18 @@ interpretWithTrace fetcher =
     eval (action Operational.:>>= k) =
       case action of
         Exec ->
-          execWithTrace >>= interpretWithTrace fetcher . k
+          execWithTrace' >>= interpretWithTrace' fetcher . k
         Wait q -> do
           m <- State.lift $ fetcher q
           vm <- use _1
           vm' <- liftIO $ stToIO $ State.execStateT m vm
           assign _1 vm'
-          interpretWithTrace fetcher (k ())
+          interpretWithTrace' fetcher (k ())
         EVM m -> do
           vm <- use _1
           (r, vm') <- liftIO $ stToIO $ State.runStateT m vm
           assign _1 vm'
-          interpretWithTrace fetcher (k r)
+          interpretWithTrace' fetcher (k r)
 
 vmTraceStep :: VM Concrete -> VMTraceStep
 vmTraceStep vm =
