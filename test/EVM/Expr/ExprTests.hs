@@ -1066,6 +1066,17 @@ basicSimplificationTests = testGroup "Basic simplification tests"
       assertEqual "257 remains undecided in props" [PEq (Lit 257) k] (Expr.simplifyProps [PEq k (Lit 257)])
       res <- checkSatWith equivConfig (PEq (Lit 257) k)
       assertBool ("257 is allowed by the SMT assumptions: " <> show res) (isSat res)
+  , testCase "keccak-large-literal-boundary" $ do
+      let k = Keccak (AbstractBuf "buf")
+          largest = maxBound - 256
+      mapM_ (\c -> do
+        assertEqual "above the largest keccak" [PBool False] (Expr.simplifyProps [PEq k (Lit c)])
+        res <- checkSatWith equivConfig (PEq (Lit c) k)
+        assertBool ("excluded by the SMT assumptions: " <> show res) (isQed res))
+        [largest + 1, maxBound]
+      assertEqual "largest keccak remains undecided" [PEq (Lit largest) k] (Expr.simplifyProps [PEq k (Lit largest)])
+      res <- checkSatWith equivConfig (PEq (Lit largest) k)
+      assertBool ("largest keccak is allowed by the SMT assumptions: " <> show res) (isSat res)
   , testProperty "keccak-small-literal-matches-smt" $ withMaxSuccess 100 $
       forAll (resize 8 (genBuf 64 1)) $ \buf ->
       forAll (Lit . fromIntegral <$> chooseInt (0, 256)) $ \c -> ioProperty $ do

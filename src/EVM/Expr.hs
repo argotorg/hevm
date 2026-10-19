@@ -171,7 +171,7 @@ import Witch (unsafeInto, into, tryInto)
 import Data.Containers.ListUtils (nubOrd)
 
 import EVM.HashCons qualified as HC
-import EVM.Keccak.Preimages (Preimage(..), Table, fromBytes, lookupSlot, smallArrays)
+import EVM.Keccak.Preimages (Preimage(..), Table, fromBytes, lookupSlot, smallArrays, keccakMin, keccakMax)
 import EVM.Traversals
 import EVM.Traversals.Children (mapPropChildrenM)
 import Data.Functor.Identity (Identity(..))
@@ -1576,7 +1576,7 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
       | b == c = iszero a
     go (Eq (Sub a b) c) | a == c = iszero b
 
-    go (Eq (Lit a) (Keccak _)) | a <= 256 = Lit 0
+    go (Eq (Lit a) (Keccak _)) | a < keccakMin || a > keccakMax = Lit 0
     go (Eq (Keccak a) (Keccak b)) | keccakInputsDiffer a b = Lit 0
     go (Eq (Lit 0) a) = iszero a
     go (Eq a b)
@@ -2034,7 +2034,7 @@ simplifyProp prop =
     go (PEq (Lit 0) (Eq a b)) = PNeg (peq a b)
     go (PEq (Lit 0) (LT a b)) = PLEq b a
 
-    go (PEq (Lit a) (Keccak _)) | a <= 256 = PBool False
+    go (PEq (Lit a) (Keccak _)) | a < keccakMin || a > keccakMax = PBool False
     go (PEq (Keccak a) (Keccak b)) | keccakInputsDiffer a b = PBool False
     go (PEq (Lit 0) (Sub a b)) = peq a b
     go (PEq (Lit 0) (Or a b)) = peq (Lit 0) a `PAnd` peq (Lit 0) b
