@@ -81,6 +81,7 @@ import EVM.Keccak (concreteKeccaks)
 
 import EVM.Expr.ExprTests qualified as ExprTests
 import EVM.Expr.RewriteFuzz qualified as RewriteFuzz
+import EVM.Expr.KeccakFuzz qualified as KeccakFuzz
 import EVM.Expr.HashConsTests qualified as HashConsTests
 import EVM.ConcreteExecution.ConcreteExecutionTests qualified as ConcreteExecutionTests
 import EVM.Equivalence.EquivalenceTests qualified as EquivalenceTests
@@ -235,6 +236,7 @@ tests = testGroup "hevm"
   [ FuzzSymExec.tests
   , ExprTests.tests
   , RewriteFuzz.tests
+  , KeccakFuzz.tests
   , HashConsTests.tests
   , ConcreteExecutionTests.tests
   , SymExecTests.tests
