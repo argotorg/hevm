@@ -71,6 +71,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   logs each replay to the progress log.
 
 ## Fixed
+- Buffer models from the solver drop bytes past the buffer's length, so a
+  counterexample with such bytes can be replayed.
 - Removed an unsound simplification that folded `SLT (Sub (Max (Lit a) x) (Lit b)) (Lit c)`
   to false, ignoring that the unsigned `Max` can be negative as a signed word.
 - A storage slot fetched via RPC no longer shadows symbolic writes made to it

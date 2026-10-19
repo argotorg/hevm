@@ -17,6 +17,7 @@ import Control.Monad.ST (stToIO)
 import Control.Monad.State.Strict
 import Control.Monad.IO.Unlift
 import Control.Monad.Reader (ReaderT)
+import Control.Monad.Trans.Maybe (runMaybeT)
 import Data.Bits hiding (And, Xor)
 import Data.Char (isSpace)
 import Data.ByteString (ByteString)
@@ -4662,6 +4663,13 @@ tests = testGroup "hevm"
       in case reference of
            ConcreteBuf bs -> collapse (EVM.Types.Comp model) === Just (Flat bs)
            _ -> property False
+  , testCase "buffer-model-drops-writes-past-length" $ do
+      let getVal = \case
+            "b_length " -> pure "((b_length #x000000000000000000000000000000000000000000000000000000000000001f))"
+            _ -> pure $ "((b (store (store ((as const (Array (_ BitVec 256) (_ BitVec 8))) #x00) #x0000000000000000000000000000000000000000000000000000000000000000 #xff) "
+                     <> "#xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff #xff)))"
+      bufs <- runMaybeT $ getBufs getVal ["b"]
+      assertEqual "" (Just (Map.singleton (AbstractBuf "b") (EVM.Types.Comp (Write 0xff 0 (Base 0 0x1f))))) bufs
   , testCase "parse-gas-names" $ do
       -- gas readings appear in models when they are part of a path condition
       assertEqual "plain" (Gas "" 2) (parseTxCtx "gas_2")
