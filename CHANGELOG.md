@@ -110,6 +110,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the writes they are disjoint from and resolve the writes they hit.
 
 ## Fixed
+- Words parsed from JSON, e.g. RPC responses, no longer keep their text alive
+  until they are used.
 - Encoding a copy whose size becomes a literal at or beyond the 256MB memory
   access limit, e.g. a keccak, is reported as unsupported instead of exhausting
   memory.

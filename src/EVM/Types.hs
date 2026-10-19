@@ -1393,13 +1393,14 @@ instance JSON.FromJSON W256 where
   parseJSON v = do
     s <- T.unpack <$> JSON.parseJSON v
     case reads s of
-      [(x, "")]  -> pure x
+      -- forced, or the word holds on to its string, which can add up to GBs in a large trace
+      [(x, "")]  -> x `seq` pure x
       _          -> fail $ "invalid hex word (" ++ s ++ ")"
 
 instance JSON.FromJSONKey W256 where
   fromJSONKey = JSON.FromJSONKeyTextParser $ \s ->
     case reads (T.unpack s) of
-      [(x, "")]  -> pure x
+      [(x, "")]  -> x `seq` pure x
       _          -> fail $ "invalid word (" ++ T.unpack s ++ ")"
 
 wordField :: JSON.Object -> JSON.Key -> JSON.Parser W256
@@ -1435,7 +1436,7 @@ instance JSON.FromJSON W64 where
   parseJSON v = do
     s <- T.unpack <$> JSON.parseJSON v
     case reads s of
-      [(x, "")]  -> pure x
+      [(x, "")]  -> x `seq` pure x
       _          -> fail $ "invalid hex word (" ++ s ++ ")"
 
 

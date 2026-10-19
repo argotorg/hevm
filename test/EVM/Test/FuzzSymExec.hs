@@ -557,9 +557,10 @@ runGeth dir c i = do
           [r] -> (,) <$> r .: "transactionHash" <*> (fromMaybe [] <$> r .:? "logs")
           _ -> fail "expected one receipt"
   (txHash, logs) <- maybe (assertFailure $ "cannot parse evm result: " <> show result) pure receipt
-  traceLines <- lines <$> readFile (dir </> ("trace-0-" <> txHash <> ".jsonl"))
-  let decode :: JSON.FromJSON a => String -> Maybe a
-      decode = JSON.decodeStrict . Char8.pack
+  -- as a String, a trace with deep stacks on every line takes tens of GB
+  traceLines <- Char8.lines <$> BS.readFile (dir </> ("trace-0-" <> txHash <> ".jsonl"))
+  let decode :: JSON.FromJSON a => ByteString -> Maybe a
+      decode = JSON.decodeStrict
       -- every call, including to precompiles, ends with an output line of its own
       step l = maybe (Left <$> (decode l :: Maybe EVMToolOutput)) (Just . Right) (decode l)
       steps = mapM step (init traceLines) <&> \xs -> [t | Right t <- xs]
