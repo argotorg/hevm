@@ -20,6 +20,7 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Word (Word8)
+import System.Environment (lookupEnv)
 import Test.QuickCheck
 import Test.Tasty
 import Test.Tasty.QuickCheck (testProperty, QuickCheckTests(..))
@@ -558,6 +559,9 @@ type Replay = (SMTCex, CexReplay, Maybe (Run, Run))
 -- traced runs that record what the replay executes
 checkAndReplay :: App m => SolverGroup -> ByteString -> ByteString -> m ([String], [Replay])
 checkAndReplay s codeA codeB = Progress.withProgressLogFromEnv "eq-fuzz" $ do
+  -- to find a case that crashes or runs out of memory
+  liftIO $ lookupEnv "HEVM_FUZZ_CASE_FILE" >>= mapM_ (\f -> writeFile f $
+    "a: " <> T.unpack (formatBinary codeA) <> "\nb: " <> T.unpack (formatBinary codeB) <> "\n")
   (calldata, _) <- mkCalldata Nothing []
   eq <- if codeA == codeB then pure mempty else equivalenceCheck s Nothing codeA codeB defaultVeriOpts calldata False
   let verdicts = nub $ map (verdict . fst) eq.res

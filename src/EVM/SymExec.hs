@@ -1077,9 +1077,9 @@ cexCalldata cd cex = case Expr.concKeccakSimpExpr <$> defaultSymbolicValues (sub
   _ -> Nothing
 
 data CexReplay
-  = Validated Text Text        -- ^ the concrete outcomes of A and B differ
-  | NotReproducible Text Text  -- ^ the concrete outcomes are the same
-  | CannotReplay Text
+  = Validated !Text !Text        -- ^ the concrete outcomes of A and B differ
+  | NotReproducible !Text !Text  -- ^ the concrete outcomes are the same
+  | CannotReplay !Text
   deriving (Show, Eq)
 
 replayTag :: CexReplay -> Text
@@ -1103,7 +1103,8 @@ replayEqCex solvers create codeA codeB cd cex
         Progress.emit "replay-stubs" [ "calls" .= map logCall (rights cex.unknownCalls) ]
         a <- run "A" codeA calldata
         b <- run "B" codeB calldata
-        pure $ case (a, b) of
+        -- forced, or the replay keeps both final VMs alive
+        pure $! case (a, b) of
           (Left e, _) -> CannotReplay e
           (_, Left e) -> CannotReplay e
           (Right ra, Right rb) -> (if ra == rb then NotReproducible else Validated) (outcome rb ra) (outcome ra rb)
