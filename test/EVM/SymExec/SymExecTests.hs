@@ -8,7 +8,9 @@ import Test.Tasty.ExpectedFailure
 
 import Control.Monad.IO.Unlift (MonadUnliftIO)
 import Control.Monad.Reader (ReaderT)
+import Control.Monad (filterM)
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
 import Data.List qualified as List (isInfixOf)
 import Data.Maybe (isJust, mapMaybe)
 import Data.Monoid (Any(..))
@@ -20,7 +22,7 @@ import EVM.Expr qualified as Expr
 import EVM.Types
 import EVM.SMT qualified as SMT (getVar)
 import EVM.Solidity (solcRuntime)
-import EVM.Solvers (withSolvers, defMemLimit, Solver(..), SolverGroup)
+import EVM.Solvers (withSolvers, defMemLimit, Solver(..), SolverGroup, checkSatWithProps)
 import EVM.SymExec
 import EVM.Traversals
 
@@ -42,7 +44,17 @@ solidityExplorationTests = testGroup "Exploration of Solidity"
 
 basicTests :: TestTree
 basicTests = testGroup "simple-checks"
-  [ testCase "simple-stores" $ do
+  [ testCase "symbolic-jump-high-bytes" $ do
+    -- jumps to calldata[0:32]: 0x10005 has the JUMPDEST at 5 in its low bytes, but is invalid
+    let c = BS.pack [0x60, 0x00, 0x35, 0x56, 0x00, 0x5b, 0x00]
+        hits l = PEq (ReadWord (Lit 0) (AbstractBuf "txdata")) (Lit 0x10005) : extractProps l
+    reached <- executeWithBitwuzla $ \s -> do
+      paths <- getExprEmptyStore s c Nothing [] defaultVeriOpts
+      filterM (fmap isCex . checkSatWithProps s . hits) paths
+    case reached of
+      [Failure _ _ BadJumpDestination] -> pure ()
+      _ -> assertFailure $ "the target must reach exactly one invalid jump leaf, got " <> show reached
+  , testCase "simple-stores" $ do
     Just c <- solcRuntime "MyContract"
       [i|
       contract MyContract {

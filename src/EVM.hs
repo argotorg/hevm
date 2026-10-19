@@ -877,15 +877,20 @@ exec1 conf = do
         OpJump -> {-# SCC "OpJump" #-}
           case stk of
             x:xs ->
-              burn g_mid $ forceConcreteLimitSz x 2 "JUMP: symbolic jumpdest" $ \x' ->
-                case tryInto x' of
-                  Left _ -> vmError BadJumpDestination
-                  Right i -> checkJump i xs
+              burn g_mid $ withJumpTargetInRange conf x (vmError BadJumpDestination) $
+                forceConcreteLimitSz x 2 "JUMP: symbolic jumpdest" $ \x' ->
+                  case tryInto x' of
+                    Left _ -> vmError BadJumpDestination
+                    Right i -> checkJump i xs
             _ -> underrun
 
         OpJumpi -> {-# SCC "OpJumpi" #-}
           case stk of
-            x:cond:xs -> forceConcreteLimitSz x 2 "JUMPI: symbolic jumpdest" $ \maybeTarget ->
+            x:cond:xs -> withJumpTargetInRange conf x
+              (burn g_high $ branch conf.maxDepth cond $ \case
+                False -> assign' (#state % #stack) xs >> next
+                True -> vmError BadJumpDestination) $
+              forceConcreteLimitSz x 2 "JUMPI: symbolic jumpdest" $ \maybeTarget ->
               burn g_high $
                 let jump :: Bool -> EVM t ()
                     jump False = assign' (#state % #stack) xs >> next
@@ -1892,6 +1897,18 @@ forkOnSubterm maxDepth atoms groups continue = do
     _ -> fork maxDepth vm.exploreDepth $ PleaseRunAll (map Lit [0 .. fromIntegral (length feasible) - 1]) $ \case
       Lit i -> runCase (feasible !! fromIntegral i)
       _ -> internalError "forkOnSubterm: unexpected case index"
+
+-- | A jump destination must be inside the code, which EIP-170 limits to 24,576 bytes
+-- deployed and EIP-3860 to 49,152 bytes as initcode, so a target of 2^16 or more is
+-- an invalid jump. Such targets get a path of their own, as the solutions for a
+-- symbolic target only cover its low 2 bytes. hevm doesn't enforce these limits on
+-- raw bytecode, where code longer than 64KB could jump past 2^16.
+withJumpTargetInRange :: VMOps t => Config -> Expr EWord -> EVM t () -> EVM t () -> EVM t ()
+withJumpTargetInRange conf x outOfRange inRange = case maybeLitWordSimp x of
+  Just _ -> inRange
+  Nothing -> branch conf.maxDepth (Expr.lt x (Lit 0x10000)) $ \case
+    True -> inRange
+    False -> outOfRange
 
 forceConcrete :: (?conf :: Config, VMOps t) => Expr EWord -> String -> (W256 -> EVM t ()) -> EVM t ()
 forceConcrete n = forceConcreteLimitSz n 32
