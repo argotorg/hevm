@@ -848,6 +848,7 @@ data RuntimeConfig = RuntimeConfig
 data Frame (t :: VMType) = Frame
   { context :: FrameContext
   , state   :: FrameState t
+  , logs    :: [Expr Log] -- ^ the logs when the frame was entered, restored if it fails
   }
 
 deriving instance Show (Frame Symbolic)
@@ -895,6 +896,7 @@ data FrameState (t :: VMType) = FrameState
   , stack        :: [Expr EWord]
   , memory       :: Memory
   , memorySize   :: Word64
+  , symMemorySize :: Maybe (Expr EWord) -- ^ the memory size, once an access had a symbolic offset or size
   , calldata     :: Expr Buf
   , callvalue    :: Expr EWord
   , caller       :: Expr EAddr
