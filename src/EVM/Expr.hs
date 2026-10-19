@@ -1844,11 +1844,9 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (SHR (Lit a) x) | a < 256, possibleOnes x `shiftR` fromIntegral a == 0 = Lit 0
     go (SHL (Lit a) _) | a >= 256 = Lit 0
     go (SHR (Lit a) _) | a >= 256 = Lit 0
-    -- compose shifts by literals
-    go (SHR (Lit n) (SHR (Lit m) x)) | n < 256, m < 256 =
-      if n + m >= 256 then Lit 0 else shr (Lit (n + m)) x
-    go (SHL (Lit n) (SHL (Lit m) x)) | n < 256, m < 256 =
-      if n + m >= 256 then Lit 0 else shl (Lit (n + m)) x
+    -- compose shifts by literals; past 256 the possibleOnes rules above already gave 0
+    go (SHR (Lit n) (SHR (Lit m) x)) | n < 256, m < 256, n + m < 256 = shr (Lit (n + m)) x
+    go (SHL (Lit n) (SHL (Lit m) x)) | n < 256, m < 256, n + m < 256 = shl (Lit (n + m)) x
     go (SAR (Lit n) (SAR (Lit m) x)) | n < 256, m < 256 = sar (Lit (Prelude.min 255 (n + m))) x
     go (SHL (Lit n) (SHR (Lit m) x)) | n < 256, m < 256, n /= m =
       EVM.Expr.and (Lit (shiftL maxLit (fromIntegral n)))
@@ -2016,7 +2014,6 @@ simplifyProp prop =
     go (PLT a (Sub b (Lit c))) | a == b, c /= 0 = PLT a (Lit c)
     go (PLEq a (Sub b (Lit c))) | a == b, c /= 0 = PLT a (Lit c)
     go (PLT (Sub a (Lit c)) b) | a == b, c /= 0 = PLEq (Lit c) a
-    go (PLEq (Sub a (Lit c)) b) | a == b = PLEq (Lit c) a
 
     go (PLT a (Lit c)) | possibleOnes a < c = PBool True
     go (PLT (Lit c) b) | possibleOnes b <= c = PBool False
