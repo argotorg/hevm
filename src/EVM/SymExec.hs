@@ -61,6 +61,7 @@ import EVM.Fetch qualified as Fetch
 import EVM.ABI
 import EVM.Effects
 import EVM.Expr qualified as Expr
+import EVM.Keccak.Preimages qualified as Preimages
 import EVM.Progress qualified as Progress
 import EVM.Format (formatExpr, formatPartial, formatPartialDetailed, showVal, indent, formatBinary, formatProp, formatState, formatError)
 import EVM.SMT qualified as SMT
@@ -986,10 +987,9 @@ verifyInputsWithHandler solvers opts fetcher preState post cexHandler = do
     getCallPrefix _ = "unknown"
     toProps leaf keccakPreImgs post' = let
       postCondition = post' preState leaf
-      keccakConstraints = map (\(bs, k)-> PEq (Keccak (ConcreteBuf bs)) (Lit k)) (Set.toList keccakPreImgs)
      in case postCondition of
       PBool True -> [PBool False]
-      _ -> PNeg postCondition : extractProps leaf <> keccakConstraints
+      _ -> PNeg postCondition : extractProps leaf <> Preimages.recordedProps keccakPreImgs
 
     canBeSat (a, _) = case a of
         [PBool False] -> False

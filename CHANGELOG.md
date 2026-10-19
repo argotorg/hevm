@@ -63,6 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   option); disable it with `--no-hash-cons`.
 
 ## Changed
+- Solver queries for branch conditions and symbolic values also get the keccak
+  preimages recorded during concrete execution, as the final queries do.
 - A symbolic value that depends on several symbolic subterms with few possible
   values each, such as the slot of a nested mapping with two such keys, is now
   split into cases on all of them, instead of asking the solver for its values.

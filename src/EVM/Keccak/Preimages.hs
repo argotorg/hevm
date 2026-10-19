@@ -17,6 +17,7 @@ module EVM.Keccak.Preimages
   , parentSlot
   , Table
   , fromRecorded
+  , recordedProps
   , lookupSlot
   , smallArrays
   , recoverSlots
@@ -63,6 +64,10 @@ type Table = Map.Map W256 Preimage
 
 fromRecorded :: Set (ByteString, W256) -> Table
 fromRecorded s = Map.fromList [(h, fromBytes bs) | (bs, h) <- Set.toList s]
+
+-- | Preimages recorded by concrete execution, as facts for the solver
+recordedProps :: Set (ByteString, W256) -> [Prop]
+recordedProps s = [PEq (Keccak (ConcreteBuf bs)) (Lit h) | (bs, h) <- Set.toList s]
 
 -- | The preimage, hash and offset of a slot that is a hash in the table plus a field offset
 lookupSlot :: Table -> W256 -> Maybe (Preimage, W256, W256)

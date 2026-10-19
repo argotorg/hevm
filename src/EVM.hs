@@ -3770,7 +3770,7 @@ instance VMOps Symbolic where
     loc <- codeloc
     pathconds <- use #constraints
     vm <- get
-    query $ PleaseAskSMT cond pathconds (runBothPaths loc vm.exploreDepth)
+    query $ PleaseAskSMT cond (pathconds <> Preimages.recordedProps vm.keccakPreImgs) (runBothPaths loc vm.exploreDepth)
     where
       runBothPaths loc _ (Case v) = do
         assign #result Nothing
@@ -3795,7 +3795,7 @@ instance VMOps Symbolic where
     case Expr.enumerateViaSmallSubterm maxWidth pathconds ewordExpr of
       Just (_, [(v, _)]) -> continue $ Just v
       Just (atoms, groups) -> forkOnSubterm maxDepth atoms groups (continue . Just)
-      Nothing -> query $ PleaseGetSols ewordExpr numBytes pathconds $ \case
+      Nothing -> query $ PleaseGetSols ewordExpr numBytes (pathconds <> Preimages.recordedProps vm.keccakPreImgs) $ \case
           Just concVals -> do
             assign #result Nothing
             case concVals of
