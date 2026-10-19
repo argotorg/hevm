@@ -54,6 +54,8 @@ import Data.Text.Lazy (Text)
 import Data.Text qualified as TS
 import Data.Text.Lazy qualified as T
 import Data.Text.Lazy.Builder
+import Data.Type.Equality ((:~:)(..))
+import Data.Typeable (eqT)
 import qualified Data.Text.Lazy.Builder.Int (decimal)
 import Language.SMT2.Parser (getValueRes, parseCommentFreeFileMsg, parseString, specConstant)
 import Language.SMT2.Syntax (Symbol, SpecConstant(..), GeneralRes(..), Term(..), QualIdentifier(..), Identifier(..), Sort(..), Index(..), VarBinding(..))
@@ -652,6 +654,11 @@ exprToSMTWith arithEnc = \case
 
 propToSMTWith :: ArithEncoding -> Prop -> Err Builder
 propToSMTWith arithEnc = \case
+  -- array equality alone ignores length: all-zero buffers of different lengths would be equal
+  PEq (a :: Expr x) b | Just Refl <- eqT @x @Buf -> do
+    arrEq <- op2 "=" a b
+    lenEq <- op2 "=" (BufLength a) (BufLength b)
+    pure $ "(and " <> arrEq <> " " <> lenEq <> ")"
   PEq a b -> op2 "=" a b
   PLT a b -> op2 "bvult" a b
   PGT a b -> op2 "bvugt" a b

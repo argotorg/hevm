@@ -110,6 +110,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the writes they are disjoint from and resolve the writes they hit.
 
 ## Fixed
+- Buffer equality in SMT queries now also compares lengths, so the equivalence
+  checker no longer misses return or revert data that differs only in length.
 - Replaying equivalence counterexamples no longer keeps the final VMs of every
   replay alive until the results are shown.
 - Words parsed from JSON, e.g. RPC responses, no longer keep their text alive
