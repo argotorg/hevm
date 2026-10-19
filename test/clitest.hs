@@ -261,11 +261,12 @@ main = do
       it "abstract-arith" $ do
         Just c <- runApp $ solcRuntime (T.pack "C") (T.pack [i|
            contract C {
-             function stuff(uint x) public {
-                 require(x < (1 << 128));
-                 uint y;
-                 assembly { y := div(mul(x, 1000000000000000000), 1000000000000000000) }
-                 assert(y == x);
+             function stuff(uint a, uint b, uint d) public {
+                 require(a <= b);
+                 uint p;
+                 uint q;
+                 assembly { p := div(a, d) q := div(b, d) }
+                 assert(p <= q);
              }
            }
           |])

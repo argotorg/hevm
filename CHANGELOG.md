@@ -39,7 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   time it was solved for, gives the reason a query for multiple solutions gave
   up, and ends each phase with a summary of where its solver time and forks
   went. The status line shows queued queries and the program counter with the
-  most solver time.
+  most solver time. With expressions logged, each `sat` query also logs the
+  props it was built from.
 - Abstract arithmetic, on by default (disable with `--no-abstract-arith`):
   symbolic multiplication and division are encoded as uninterpreted functions
   constrained by sound algebraic lemmas, and are equated with the native bitvector operations only when the abstract query
@@ -69,6 +70,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `hevm equivalence` replays counterexamples with calls to unknown code by
   putting code at each callee that returns what the counterexample says, and
   logs each replay to the progress log.
+- Exponentiation by a literal is encoded into SMT by squaring, and exponents of
+  1000 and more no longer make the query fail.
+- The simplifier rewrites modulo and division by a power of two to bit
+  operations.
+- The simplifier composes nested shifts by literals into one shift and a mask.
+- The simplifier tracks which bits of a word can be set, to drop redundant
+  masks and decide equalities and comparisons with literals.
+- The simplifier cancels additions, subtractions, xors, negations and
+  multiplications by odd literals in equalities.
+- The simplifier moves operations with literals into ITEs with literal
+  branches, as path merging creates, and turns comparisons with them into
+  conditions.
+- The simplifier cancels an operand against its inverse in sums, differences,
+  xors and with its negation, and moves negation through literal operations.
+- The simplifier drops the writes and zeroes the concrete bytes a copy
+  overwrites, and reads zero from all-zero concrete buffers at any offset.
+- The simplifier turns overflow checks of adding or subtracting a literal,
+  such as `x < x + c`, into comparisons of `x` against a literal.
+- The simplifier decides `x == (x * d) / d`, as in Solidity's
+  checked-multiplication guard or scaling by a literal and back, when bounds from
+  the path conditions and from the structure of `x` and `d` rule out overflow.
+- The simplifier cancels common factors of the literals in `(a * x) / b` when
+  the structure of `x`, or bounds from the path conditions, rule out overflow,
+  and folds nested divisions by literals.
+- The simplifier uses the condition of an ITE in its branches, and splits a
+  comparison of an ITE with one literal branch into cases, so the bounds in
+  Solidity's short-circuited `&&` and `||` reach the path conditions.
+- The simplifier cancels addends common to both sides of a subtraction.
+- Reads from buffers written at offsets from the same symbolic pointer skip
+  the writes they are disjoint from and resolve the writes they hit.
 
 ## Fixed
 - Buffer models from the solver drop bytes past the buffer's length, so a
@@ -77,6 +108,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to false, ignoring that the unsigned `Max` can be negative as a signed word.
 - A storage slot fetched via RPC no longer shadows symbolic writes made to it
   earlier in the same execution.
+- The SMT encoding of a copy into a buffer named `src` no longer reads the
+  source of the copy in place of that buffer.
 - `hevm equivalence` no longer reports a difference only because one program
   made a call to unknown code that changed nothing.
 - Symbolic execution starts the transient storage of the called contract empty,

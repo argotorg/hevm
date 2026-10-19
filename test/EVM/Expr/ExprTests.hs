@@ -13,7 +13,7 @@ import Test.Tasty.QuickCheck hiding (Failure, Success)
 
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ReaderT)
-import Data.Bits (shiftL)
+import Data.Bits (shiftL, shiftR, (.|.))
 import Data.ByteString qualified as BS (drop, length, pack, replicate, take)
 import Data.Containers.ListUtils (nubOrd)
 import Data.List qualified as List (nub, sort, tails)
@@ -26,6 +26,7 @@ import Numeric.Natural (Natural)
 import EVM.Effects
 import EVM.Expr qualified as Expr
 import EVM.Expr.Generator
+import EVM.Expr.RewriteFuzz (genShapedWord, genShapedProp, shrinkWord, shrinkProp)
 import EVM.Expr.Probe (probes, contract)
 import EVM.HashCons qualified as HC
 import EVM.Format (hexText)
@@ -50,6 +51,142 @@ unitTests = testGroup "Unit tests"
   , signExtendTests
   , concretizationTests
   , traversalTests
+  , rewriteRuleTests
+  ]
+
+rewriteRuleTests :: TestTree
+rewriteRuleTests = testGroup "Rewrite rules"
+  [ testCase "mod-div-power-of-two" $ do
+      let x = Var "x"
+      assertEqual "mod" (And (Lit 0xff) x) (Expr.simplify (Mod x (Lit 0x100)))
+      assertEqual "div" (SHR (Lit 8) x) (Expr.simplify (Div x (Lit 0x100)))
+      assertEqual "not a power of two" (Mod x (Lit 6)) (Expr.simplify (Mod x (Lit 6)))
+      assertEqual "byte offset exponentiation still becomes a shift"
+        (SHL (Mul (Lit 8) (And (Lit 31) x)) (Lit 1)) (Expr.simplify (Exp (Lit 0x100) (Mod x (Lit 32))))
+  , testCase "possible-bits" $ do
+      let x = Var "x"
+          addrMask = Lit 0xffffffffffffffffffffffffffffffffffffffff
+          selector = SHR (Lit 224) x
+      assertEqual "redundant mask" selector (Expr.simplify (And (Lit 0xffffffff) selector))
+      assertEqual "disjoint masks" (Lit 0) (Expr.simplify (And (Lit 0xff00) (And (Lit 0xff) x)))
+      assertEqual "an address fits its mask" (WAddr (SymAddr "a")) (Expr.simplify (And addrMask (WAddr (SymAddr "a"))))
+      assertEqual "too wide for a selector" (Lit 0) (Expr.simplify (Eq (Lit 0x100000000) selector))
+      assertEqual "a byte is below 256" (Lit 1) (Expr.simplify (LT (And (Lit 0xff) x) (Lit 0x100)))
+      assertEqual "shifted out" (Lit 0) (Expr.simplify (SHR (Lit 8) (And (Lit 0xff) x)))
+      assertEqual "prop: a bool is at most 1" [] (Expr.simplifyProps [PLEq (Eq x (Lit 3)) (Lit 1)])
+      assertEqual "prop: wider than a byte" [PBool False] (Expr.simplifyProps [PEq (Lit 0x1ff) (And (Lit 0xff) x)])
+  , testProperty "odd-inverse" $ \(k :: W256) -> let o = k .|. 1 in o * Expr.oddInverse o === 1
+  , testCase "injective-cancellation" $ do
+      let x = Var "x"
+          y = Var "y"
+      assertEqual "add" (Eq (Lit 7) x) (Expr.simplify (Eq (Lit 10) (Add (Lit 3) x)))
+      assertEqual "xor" (Eq (Lit 6) x) (Expr.simplify (Eq (Lit 5) (Xor (Lit 3) x)))
+      assertEqual "not" (IsZero x) (Expr.simplify (Eq (Lit Expr.maxLit) (Not x)))
+      assertEqual "odd mul" (Eq (Lit 5) x) (Expr.simplify (Eq (Lit 15) (Mul (Lit 3) x)))
+      assertEqual "even mul stays" (Eq (Lit 16) (Mul (Lit 4) x)) (Expr.simplify (Eq (Lit 16) (Mul (Lit 4) x)))
+      assertEqual "two adds" (Eq x (Add (Lit 2) y)) (Expr.simplify (Eq (Add (Lit 3) y) (Add (Lit 1) x)))
+      assertEqual "prop add" [PEq (Lit 7) x] (Expr.simplifyProps [PEq (Lit 10) (Add (Lit 3) x)])
+      assertEqual "iszero of add" (Eq (Lit (0 - 3)) x) (Expr.simplify (IsZero (Add (Lit 3) x)))
+  , testCase "ite-literal-branches" $ do
+      let c = Var "c"
+          ite = ITE c (Lit 3) (Lit 5)
+      assertEqual "add moves in" (ITE c (Lit 4) (Lit 6)) (Expr.simplify (Add (Lit 1) ite))
+      assertEqual "same condition" (ITE c (Lit 6) (Lit 10)) (Expr.simplify (Add ite ite))
+      assertEqual "eq becomes the condition" (Expr.simplify (LT (Lit 0) c)) (Expr.simplify (Eq (Lit 3) ite))
+      assertEqual "negated condition" (ITE c (Lit 5) (Lit 3)) (Expr.simplify (ITE (IsZero c) (Lit 3) (Lit 5)))
+      assertEqual "prop eq" [PNeg (PEq (Lit 0) c)] (Expr.simplifyProps [PEq (Lit 3) ite])
+      assertEqual "prop lt both" [] (Expr.simplifyProps [PLT ite (Lit 6)])
+      assertEqual "prop lt one" [PEq (Lit 0) c] (Expr.simplifyProps [PLT (Lit 4) ite])
+  , testCase "cancellation" $ do
+      let x = Var "x"
+          y = Var "y"
+      assertEqual "add sub" y (Expr.simplify (Add x (Sub y x)))
+      assertEqual "sub add" (Sub (Lit 0) y) (Expr.simplify (Sub x (Add x y)))
+      assertEqual "sub sub" y (Expr.simplify (Sub x (Sub x y)))
+      assertEqual "xor xor" y (Expr.simplify (Xor x (Xor y x)))
+      assertEqual "or not" (Lit Expr.maxLit) (Expr.simplify (Or x (Not x)))
+      assertEqual "not add" (Sub (Lit (Expr.maxLit - 3)) x) (Expr.simplify (Not (Add (Lit 3) x)))
+      assertEqual "mul add" (Add (Lit 96) (Mul (Lit 32) x)) (Expr.simplify (Mul (Lit 32) (Add (Lit 3) x)))
+      assertEqual "max" x (Expr.simplify (Max x x))
+  , testCase "copy-overwrites-dst" $ do
+      let src = AbstractBuf "src"
+          dst = WriteWord (Lit 8) (Var "a") (WriteWord (Lit 100) (Var "b") (ConcreteBuf (BS.pack [1..60])))
+      assertEqual "the overwritten write and bytes go"
+        (CopySlice (Lit 0) (Lit 4) (Lit 40) src (WriteWord (Lit 100) (Var "b") (ConcreteBuf (BS.pack [1..4] <> BS.replicate 40 0 <> BS.pack [45..60]))))
+        (Expr.simplify (CopySlice (Lit 0) (Lit 4) (Lit 40) src dst))
+  , testCase "zero-buffer-reads" $ do
+      assertEqual "word" (Lit 0) (Expr.simplify (ReadWord (Var "i") (ConcreteBuf (BS.replicate 10 0))))
+      assertEqual "byte" (LitByte 0) (Expr.simplify (ReadByte (Var "i") (ConcreteBuf "")))
+  , testCase "overflow-checks" $ do
+      let x = Var "x"
+      assertEqual "add overflows" (LT (Lit (Expr.maxLit - 5)) x) (Expr.simplify (GT x (Add (Lit 5) x)))
+      assertEqual "sub underflows" (LT x (Lit 5)) (Expr.simplify (GT (Sub x (Lit 5)) x))
+      assertEqual "prop add no overflow" [PLEq x (Lit (Expr.maxLit - 5))] (Expr.simplifyProps [PLEq x (Add (Lit 5) x)])
+      assertEqual "prop sub no underflow" [PLEq (Lit 5) x] (Expr.simplifyProps [PLEq (Sub x (Lit 5)) x])
+  , testCase "bounded-mul-overflow-checks" $ do
+      let x = Var "x"
+          d = Var "d"
+          bounded bd = [PLEq x (Lit (2 ^ (128 :: Int) - 1)), PLEq d (Lit bd)]
+          guard = Or (Eq x (Div (Mul d x) d)) (IsZero d)
+          small = bounded (2 ^ (128 :: Int) - 1)
+          big = bounded (2 ^ (129 :: Int))
+      assertEqual "holds" (Expr.simplifyProps small) (Expr.simplifyProps (PNeg (PEq (Lit 0) guard) : small))
+      assertEqual "cannot fail" [PBool False] (Expr.simplifyProps (PEq (Lit 0) guard : small))
+      assertBool "may overflow" (Expr.simplifyProps (PEq (Lit 0) guard : big) /= [PBool False])
+      let a = Var "a"
+          b = Var "b"
+          scaled = Div (Mul a (Mod b (Lit (10 ^ (30 :: Int))))) (Lit (10 ^ (27 :: Int)))
+          roundTrip = Div (Mul (Lit (10 ^ (18 :: Int))) scaled) (Lit (10 ^ (18 :: Int)))
+          aBound = [PLEq a (Lit (2 ^ (128 :: Int) - 1))]
+      assertEqual "scale and back" (Expr.simplifyProps aBound) (Expr.simplifyProps (PEq roundTrip scaled : aBound))
+      let ab = Mul a b
+      assertBool "scale and back may overflow"
+        (Expr.simplifyProps [PNeg (PEq (Div (Mul (Lit (10 ^ (18 :: Int))) ab) (Lit (10 ^ (18 :: Int)))) ab)] /= [PBool False])
+  , testCase "literal-scaling-cancels" $ do
+      let m = Mod (Var "x") (Lit (10 ^ (18 :: Int)))
+          e = 10 ^ (27 :: Int)
+          down = Div (Mul (Lit e) m) (Lit (10 ^ (30 :: Int)))
+      assertEqual "scale down" (Div m (Lit 1000)) (Expr.simplify down)
+      assertEqual "scale up" (Mul (Lit (10 ^ (12 :: Int))) (Div m (Lit 1000)))
+        (Expr.simplify (Div (Mul (Lit (10 ^ (18 :: Int))) down) (Lit (10 ^ (6 :: Int)))))
+      assertEqual "may overflow" (Div (Mul (Lit e) (Var "x")) (Lit (10 ^ (30 :: Int))))
+        (Expr.simplify (Div (Mul (Lit e) (Var "x")) (Lit (10 ^ (30 :: Int)))))
+  , testCase "common-addends-cancel" $ do
+      let [a, b, c, d] = map Var ["a", "b", "c", "d"]
+      assertEqual "both sides" (Expr.simplify (Sub c b))
+        (Expr.simplify (Sub (Add a (Add d c)) (Add a (Add b d))))
+      assertEqual "one side" (Expr.simplify (Sub (Lit 0) b))
+        (Expr.simplify (Sub (Add a d) (Add a (Add b d))))
+  , testCase "bounded-literal-scaling" $ do
+      let [x, y, z] = map Var ["x", "y", "z"]
+          scaled = Div (Mul (Lit (10 ^ (18 :: Int))) x) (Lit (10 ^ (6 :: Int)))
+          bound = PLEq y (Lit (2 ^ (128 :: Int)))
+      assertBool "through a chain" $
+        PLT (Mul (Lit (10 ^ (12 :: Int))) x) z `elem` Expr.simplifyProps [bound, PLEq x y, PLT scaled z]
+      assertBool "unbounded" $ PLT scaled z `elem` Expr.simplifyProps [bound, PLT scaled z]
+  , testCase "short-circuit-conditions" $ do
+      let big v = LT (Lit (2 ^ (128 :: Int) - 1)) (Var v)
+          -- require(a <= max && b <= max && c <= max), as solc compiles it
+          ab = ITE (big "a") (IsZero (big "a")) (IsZero (big "b"))
+          abc = ITE ab (IsZero (big "c")) ab
+          bounds = [PLEq (Var v) (Lit (2 ^ (128 :: Int) - 1)) | v <- ["a", "b", "c"]]
+      assertEqual "bounds" (Expr.simplifyProps bounds) (Expr.simplifyProps [PNeg (PEq (Lit 0) abc)])
+  , testCase "same-base-offsets" $ do
+      let p = Var "p"
+          at o = Add (Lit o) p
+          buf = WriteWord (at 32) (Var "a") (WriteWord p (Var "b") (AbstractBuf "m"))
+      assertEqual "read the field written" (Var "b") (Expr.simplify (ReadWord p buf))
+      assertEqual "read under a disjoint write" (ReadWord (at 64) (AbstractBuf "m")) (Expr.simplify (ReadWord (at 64) buf))
+      assertEqual "byte of a field" (IndexWord (Lit 1) (Var "a")) (Expr.simplify (ReadByte (at 33) buf))
+  , testCase "shift-composition" $ do
+      let x = Var "x"
+      assertEqual "shr shr" (SHR (Lit 12) x) (Expr.simplify (SHR (Lit 4) (SHR (Lit 8) x)))
+      assertEqual "shl shl past the word" (Lit 0) (Expr.simplify (SHL (Lit 200) (SHL (Lit 56) x)))
+      assertEqual "sar sar saturates" (SAR (Lit 255) x) (Expr.simplify (SAR (Lit 200) (SAR (Lit 100) x)))
+      assertEqual "shr of shl" (And (Lit (Expr.maxLit `shiftR` 96)) (SHR (Lit 64) x))
+        (Expr.simplify (SHR (Lit 96) (SHL (Lit 32) x)))
+      assertEqual "shl of shr" (And (Lit (Expr.maxLit `shiftL` 8)) (SHR (Lit 24) x))
+        (Expr.simplify (SHL (Lit 8) (SHR (Lit 32) x)))
   ]
 
 traversalTests :: TestTree
@@ -612,6 +749,18 @@ copySliceTests = testGroup "CopySlice tests"
         , (maxBound - 15, 64, src)
         , (0, Expr.maxBytes, src)
         ]
+  , testCase "copyslice-smt-dst-named-src" $ do
+      -- outside the copied window the byte is dst's, and dst may be any buffer, even one called src
+      let e = ReadByte (Lit 1) (CopySlice (Lit 0xc) (Lit 0x31) (Lit 0x32) (ConcreteBuf "") (AbstractBuf "src"))
+      res <- checkSat (PEq e (LitByte 128))
+      assertBool ("the byte can be 128: " <> show res) (isSat res)
+  , testCase "exp-literal-exponent-smt" $ do
+      let x = Var "x"
+          x13 = foldr1 Mul (replicate 13 x)
+      res <- checkSat (PNeg (PEq (Exp x (Lit 13)) x13))
+      assertBool ("x^13 is 13 multiplications: " <> show res) (isQed res)
+      res2 <- checkSat (PEq (Exp x (Lit (2 ^ (255 :: Int) + 1))) (Lit 3) .&& PEq x (Lit 3))
+      assertBool ("3^(2^255+1) is 3 mod 2^256: " <> show res2) (isSat res2)
   , testCase "copyslice-window-trim-in-simplify" $ do
       let src = WriteWord (Lit 262) (Var "a") (WriteWord (Lit 196) (Lit 0xba) (ConcreteBuf ""))
           dst = ConcreteBuf (BS.pack [1..100])
@@ -2071,6 +2220,10 @@ simplifierFuzzTests cfg = testGroup "SimplifierPropertyTests"
     , testProperty  "buffer-simplification-len" $ \(expr :: Expr Buf) -> ioProperty $ do
         let buflen = BufLength expr
         proveEquivExprWith cfg buflen (Expr.simplify buflen)
+    , testProperty "shaped-word-simplification" $ forAllShrink (sized $ \n -> genShapedWord (min n 20)) shrinkWord $ \e' ->
+        let e = smtEncodable e' in within 20_000_000 $ ioProperty $ proveEquivExprWith cfg e (Expr.simplify e)
+    , testProperty "shaped-prop-simplification" $ forAllShrink (sized $ \n -> genShapedProp (min n 16)) shrinkProp $ \p' ->
+        let p = mapProp smtEncodable p' in within 20_000_000 $ ioProperty $ proveEquivPropWith cfg p (Expr.simplifyProp p)
     , testProperty "store-simplification" $ \(expr :: Expr Storage) -> ioProperty $ proveEquivExprWith cfg expr (Expr.simplify expr)
     , testProperty "load-simplification" $ \(GenWriteStorageLoad expr) -> ioProperty $ proveEquivExprWith cfg expr (Expr.simplify expr)
     -- decomposition must not change the loaded value, given its assumption that keys of different
@@ -2454,6 +2607,17 @@ logicalLoc = \case
   Expr.ArraySlotWithOffs2 idx offs1 offs2 -> Just (word idx, Add (Lit offs1) offs2)
   Expr.ArraySlotZero idx -> Just (word idx, Lit 0)
   _ -> Nothing
+
+-- | The SMT encoding only supports CopySlice with a literal size, and a symbolic
+-- exponent only for bases 0, 1 and 2
+smtEncodable :: Expr a -> Expr a
+smtEncodable = mapExpr $ \case
+  CopySlice a b sz src dst | not (isLit sz) -> CopySlice a b (Lit 7) src dst
+  Exp a b | not (isLit b), a `notElem` [Lit 0, Lit 1, Lit 2] -> Exp a (Lit 3)
+  e -> e
+  where
+    isLit :: Expr EWord -> Bool
+    isLit = \case Lit _ -> True; _ -> False
 
 isSat :: SMTResult -> Bool
 isSat = isCex

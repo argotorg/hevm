@@ -28,6 +28,12 @@ module EVM.Expr
   , addmod
   , mulmod
   , exp
+  , oddInverse
+  , possibleOnes
+  , Bounds(..)
+  , propBounds
+  , upperWithBounds
+  , asWord
   , sex
 
     -- * Comparisons / Booleans
@@ -149,7 +155,7 @@ import Data.Bits qualified (xor)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.DoubleWord (Int256, Word256(Word256), Word128(Word128))
-import Data.List (sort, sortOn, find)
+import Data.List (sort, sortOn, find, (\\))
 import Data.Map qualified as LMap
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe, isJust, fromMaybe, listToMaybe)
@@ -441,6 +447,13 @@ readByte i@(Lit x) buf@(CopySlice _ (Lit dstOffset) (Lit size) _ dst)
     then readByte i dst
     else ReadByte (Lit x) buf
 
+readByte _ (ConcreteBuf b) | BS.all (== 0) b = LitByte 0
+-- offsets from the same symbolic base
+readByte i (WriteWord j val src)
+  | Just d <- offsetDiff i j = if d < 32 then indexWord (Lit d) val else readByte i src
+readByte i (WriteByte j val src)
+  | Just d <- offsetDiff i j = if d == 0 then val else readByte i src
+
 -- fully abstract reads
 readByte i buf = ReadByte i buf
 
@@ -480,6 +493,84 @@ upperBound e = case (simplifyNoLitToKeccak e) of
     addBound a b = upperBound b >>= \ub ->
       if a <= (maxBound :: W256) - ub then Just (a + ub) else Nothing
 
+-- | The bits of a word expression that can be 1, looking a few levels deep
+possibleOnes :: Expr EWord -> W256
+possibleOnes = go (8 :: Int)
+  where
+    go 0 _ = maxLit
+    go d e = let r = go (d - 1) in case e of
+      Lit x -> x
+      And a b -> r a .&. r b
+      Or a b -> r a .|. r b
+      Xor a b -> r a .|. r b
+      SHR (Lit n) x -> if n >= 256 then 0 else r x `shiftR` fromIntegral n
+      SHL (Lit n) x -> if n >= 256 then 0 else r x `shiftL` fromIntegral n
+      LT {} -> 1
+      GT {} -> 1
+      LEq {} -> 1
+      GEq {} -> 1
+      SLT {} -> 1
+      SGT {} -> 1
+      Eq {} -> 1
+      IsZero {} -> 1
+      EqByte {} -> 1
+      CLZ {} -> 0x1ff
+      WAddr {} -> 0xffffffffffffffffffffffffffffffffffffffff
+      ITE _ t f -> r t .|. r f
+      Min a b -> fill (Prelude.min (r a) (r b))
+      Max a b -> fill (Prelude.max (r a) (r b))
+      Add a b -> let x = fill (r a); y = fill (r b)
+                 in if x <= maxLit - y then fill (x + y) else maxLit
+      Mul a b -> let x = fill (r a); y = fill (r b)
+                 in if x == 0 || y == 0 then 0 else if x <= maxLit `Prelude.div` y then fill (x * y) else maxLit
+      _ -> maxLit
+    -- every bit up to the highest set one: bounds any value whose bits are a subset
+    fill v = if v == 0 then 0 else maxLit `shiftR` countLeadingZeros v
+
+-- | The inverse of an odd number mod 2^256, by Newton's iteration: each step doubles the
+-- correct low bits, starting from the 3 that an odd number is its own inverse in
+oddInverse :: W256 -> W256
+oddInverse k = iterate (\i -> i * (2 - k * i)) k !! 7
+
+-- | Moves an operation into the branches of ITEs with literal branches, where it folds
+liftLitITE :: Expr EWord -> Maybe (Expr EWord)
+liftLitITE = \case
+  Add a b -> two add a b
+  Sub a b -> two sub a b
+  Mul a b -> two mul a b
+  Div a b -> two EVM.Expr.div a b
+  Mod a b -> two EVM.Expr.mod a b
+  And a b -> two EVM.Expr.and a b
+  Or a b -> two EVM.Expr.or a b
+  Xor a b -> two EVM.Expr.xor a b
+  Eq a b -> two eq a b
+  LT a b -> two lt a b
+  SLT a b -> two slt a b
+  SHL a b -> two shl a b
+  SHR a b -> two shr a b
+  SAR a b -> two sar a b
+  IsZero (ITE c t@(Lit _) f@(Lit _)) -> Just (ITE c (iszero t) (iszero f))
+  Not (ITE c t@(Lit _) f@(Lit _)) -> Just (ITE c (EVM.Expr.not t) (EVM.Expr.not f))
+  _ -> Nothing
+  where
+    two :: (Expr EWord -> Expr EWord -> Expr EWord) -> Expr EWord -> Expr EWord -> Maybe (Expr EWord)
+    two op a b = case (a, b) of
+      (Lit _, ITE c t@(Lit _) f@(Lit _)) -> Just (ITE c (op a t) (op a f))
+      (ITE c t@(Lit _) f@(Lit _), Lit _) -> Just (ITE c (op t b) (op f b))
+      (ITE c t@(Lit _) f@(Lit _), ITE c' t'@(Lit _) f'@(Lit _)) | c == c' -> Just (ITE c (op t t') (op f f'))
+      _ -> Nothing
+
+-- | The difference of two offsets from the same base, mod 2^256
+offsetDiff :: Expr EWord -> Expr EWord -> Maybe W256
+offsetDiff i j = case (split i, split j) of
+  ((a, x), (b, y)) | x == y -> Just (a - b)
+  _ -> Nothing
+  where
+    split :: Expr EWord -> (W256, Maybe (Expr EWord))
+    split (Add (Lit c) x) = (c, Just x)
+    split (Lit c) = (c, Nothing)
+    split x = (0, Just x)
+
 -- | True if the WriteWord at @wIdx@ is provably disjoint from the 32-byte
 --   read at @i@. Sound mod 2^256: requires both windows to fit below 2^256.
 writeDisjointFromReadWord :: W256 -> Expr EWord -> Bool
@@ -500,11 +591,14 @@ writeDisjointFromReadWord i = \case
 -- | Reads the word starting at idx from the given buf
 readWord :: Expr EWord -> Expr Buf -> Expr EWord
 readWord idx buf@(AbstractBuf _) = ReadWord idx buf
+readWord _ (ConcreteBuf b) | BS.all (== 0) b = Lit 0
 readWord idx b@(WriteWord idx' val buf)
   -- the word we are trying to read exactly matches a WriteWord
   | idx == idx' = val
   -- WriteWord provably disjoint via interval bounds (Add (Lit c) X, X bounded)
   | Lit i <- idx, writeDisjointFromReadWord i idx' = readWord idx buf
+  -- offsets from the same symbolic base that are at least a word apart, either way round
+  | Just d <- offsetDiff idx idx', d >= 32, d <= maxWord256 - 31 = readWord idx buf
   | otherwise = case (idx, idx') of
     (Lit i, Lit i') ->
       if i' - i >= 32 && i' - i <= (maxBound :: W256) - 31
@@ -517,6 +611,8 @@ readWord idx b@(WriteWord idx' val buf)
     _ -> readWordFromBytes idx b
 readWord i@(Lit idx) (WriteByte (Lit idx') _ buf)
   | idx' - idx >= 32 = readWord i buf
+readWord i (WriteByte j _ buf)
+  | Just d <- offsetDiff j i, d >= 32 = readWord i buf
 -- reading a Word that is before the CopySlice destination region, so just read from dst
 -- We must ensure x+32 and dstOffset+size do not wrap past maxBound.
 -- When size is symbolic, we bound dstOffset to ensure no wrapping is possible.
@@ -626,6 +722,12 @@ copySlice s@(Lit srcOffset) d@(Lit _) sz@(Lit size) src@(WriteWord {}) dst
   | Just src' <- trimToWindow srcOffset size src, src' /= src
   = copySlice s d sz src' dst
 
+-- Drop what the copy overwrites in dst.
+copySlice s d@(Lit dstOffset) sz@(Lit size) src dst
+  | dstOffset < maxBytes, size < maxBytes
+  , dst' <- trimOverwritten dstOffset (dstOffset + size) dst, dst' /= dst
+  = copySlice s d sz src dst'
+
 -- concrete indices & abstract src (may produce a concrete result if we are
 -- copying from a concrete region of src)
 copySlice s@(Lit srcOffset) d@(Lit dstOffset) sz@(Lit size) src ds@(ConcreteBuf dst)
@@ -725,6 +827,29 @@ trimToWindow off size buf
       -- Preserve padding so zero-slot mapping preimages remain 64 bytes.
       in Just $ ConcreteBuf bytes
     go _ _ = Nothing
+
+-- | Drops the writes in a buffer that lie within [start, end), and zeroes the concrete
+-- bytes there, keeping the length: whatever is copied over that window replaces them.
+trimOverwritten :: W256 -> W256 -> Expr Buf -> Expr Buf
+trimOverwritten start end = go
+  where
+    go = \case
+      WriteWord i@(Lit idx) v rest
+        | idx >= start && idx <= end && end - idx >= 32 -> go rest
+        | otherwise -> WriteWord i v (go rest)
+      WriteWord i v rest -> WriteWord i v (go rest)
+      WriteByte i@(Lit idx) v rest
+        | idx >= start && idx < end -> go rest
+        | otherwise -> WriteByte i v (go rest)
+      WriteByte i v rest -> WriteByte i v (go rest)
+      b@(ConcreteBuf bs)
+        | start < end, unsafeInto start < BS.length bs, BS.any (/= 0) window ->
+            ConcreteBuf $ hd <> BS.replicate (BS.length window) 0 <> tl
+        | otherwise -> b
+        where
+          (hd, rest) = BS.splitAt (unsafeInto start) bs
+          (window, tl) = BS.splitAt (unsafeInto (end - start)) rest
+      b -> b
 
 writeByte :: Expr EWord -> Expr Byte -> Expr Buf -> Expr Buf
 writeByte (Lit offset) (LitByte val) (ConcreteBuf "")
@@ -1338,6 +1463,23 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (Partial a b c) = Partial (simplifyProps a) b c
     go (Success a b c d) = Success (simplifyProps a) b c d
 
+    go o@(Add {}) | Just r <- liftLitITE o = r
+    go o@(Sub {}) | Just r <- liftLitITE o = r
+    go o@(Mul {}) | Just r <- liftLitITE o = r
+    go o@(Div {}) | Just r <- liftLitITE o = r
+    go o@(Mod {}) | Just r <- liftLitITE o = r
+    go o@(And {}) | Just r <- liftLitITE o = r
+    go o@(Or {}) | Just r <- liftLitITE o = r
+    go o@(Xor {}) | Just r <- liftLitITE o = r
+    go o@(Eq {}) | Just r <- liftLitITE o = r
+    go o@(EVM.Types.LT {}) | Just r <- liftLitITE o = r
+    go o@(SLT {}) | Just r <- liftLitITE o = r
+    go o@(SHL {}) | Just r <- liftLitITE o = r
+    go o@(SHR {}) | Just r <- liftLitITE o = r
+    go o@(SAR {}) | Just r <- liftLitITE o = r
+    go o@(IsZero {}) | Just r <- liftLitITE o = r
+    go o@(Not {}) | Just r <- liftLitITE o = r
+
     -- redundant CopySlice
     go (CopySlice (Lit 0x0) (Lit 0x0) (Lit 0x0) _ dst) = dst
     -- We write over dst with data from src. As long as we read from where we write, and
@@ -1413,16 +1555,42 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (IsZero (Xor x y)) = eq x y
     go (IsZero (Sub a b)) = eq a b
     go (IsZero (Or a b)) = EVM.Expr.and (iszero a) (iszero b)
+    go (IsZero (Add (Lit c) x)) = eq (Lit (0 - c)) x
+    go (IsZero (Not x)) = eq (Lit maxLit) x
+    go (IsZero (Mul (Lit k) x)) | odd k = iszero x
     go (IsZero a) = iszero a
 
     -- ITE (if-then-else) simplification for path merging
     go (ITE (Lit 0) _ f) = f
     go (ITE (Lit _) t _) = t
     go (ITE _ t f) | t == f = t
+    go (ITE (IsZero c) t f) = ITE c f t
+    go (ITE c (Lit 0) (Lit 1)) = iszero c
+    go (ITE c (Lit 1) (Lit 0)) = iszero (iszero c)
     go (ITE c (ITE c' a _) d) | c == c' = ITE c a d -- nested same condition in then
     go (ITE c a (ITE c' _ d)) | c == c' = ITE c a d -- nested same condition in else
+    -- the condition is nonzero in the then branch and zero in the else branch,
+    -- as in the short-circuit of Solidity's && and ||
+    go (ITE c (IsZero c') f) | c == c' = ITE c (Lit 0) f
+    go (ITE c t (IsZero c')) | c == c' = ITE c t (Lit 1)
+    go (ITE c t c') | c == c' = ITE c t (Lit 0)
 
     -- syntactic Eq reduction
+    -- a literal with a bit the other side can not have
+    go (Eq (Lit c) b)
+      | c .&. complement (possibleOnes b) /= 0 = Lit 0
+    -- cancel injective operations
+    go (Eq (Lit c) (Add (Lit d) x)) = eq (Lit (c - d)) x
+    go (Eq (Lit c) (Sub (Lit d) x)) = eq (Lit (d - c)) x
+    go (Eq (Lit c) (Xor (Lit d) x)) = eq (Lit (Data.Bits.xor c d)) x
+    go (Eq (Lit c) (Not x)) = eq (Lit (complement c)) x
+    go (Eq (Lit c) (Mul (Lit k) x)) | odd k = eq (Lit (c * oddInverse k)) x
+    go (Eq (Add (Lit c) x) (Add (Lit d) y)) = eq (add (Lit (c - d)) x) y
+    go (Eq (Not a) (Not b)) = eq a b
+    go (Eq a (Add b c))
+      | a == b = iszero c
+      | a == c = iszero b
+    go (Eq a (Sub b c)) | a == b = iszero c
     go (Eq (Lit a) (Lit b))
       | a == b = Lit 1
       | otherwise = Lit 0
@@ -1456,6 +1624,20 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go o@(LT (Max (Lit a) _) (Lit b))
       | a >= b = Lit 0
       | otherwise = o
+
+    -- every value of one side is below the other
+    go (EVM.Types.LT a (Lit c))
+      | possibleOnes a < c = Lit 1
+    go (EVM.Types.LT (Lit c) b)
+      | possibleOnes b <= c = Lit 0
+
+    -- overflow checks: x + c and x - c wrap exactly past these bounds
+    go (EVM.Types.LT a (Add (Lit c) b)) | a == b, c /= 0 = lt a (Lit (0 - c))
+    go (EVM.Types.LT (Add (Lit c) a) b) | a == b, c /= 0 = lt (Lit (maxLit - c)) a
+    go (EVM.Types.LT a (Sub b (Lit c))) | a == b, c /= 0 = lt a (Lit c)
+    go (EVM.Types.LT (Sub a (Lit c)) b) | a == b, c /= 0 = iszero (lt a (Lit c))
+    go (EVM.Types.LT a b) | a == b = Lit 0
+    go (SLT a b) | a == b = Lit 0
 
     -- normalize all comparisons in terms of (S)LT
     go (EVM.Types.GT a b) = lt b a
@@ -1495,6 +1677,9 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (Mod _ (Lit 1)) = Lit 0
     go (SMod _ (Lit 0)) = Lit 0
     go (SMod _ (Lit 1)) = Lit 0
+    -- by a power of two, as bit operations, which solvers handle much better
+    go (Mod a (Lit b)) | b > 1, popCount b == 1 = EVM.Expr.and (Lit (b - 1)) a
+    go (Div a (Lit b)) | b > 1, popCount b == 1 = shr (Lit (fromIntegral (countTrailingZeros b))) a
     go (Mod a b) | a == b = Lit 0
     go (SMod a b) | a == b = Lit 0
     go (Mod (Lit 0) _) = Lit 0
@@ -1511,6 +1696,14 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (AddMod a (Lit 0) b) = Mod a b
     go (AddMod _ _ (Lit 0)) = Lit 0
     go (AddMod a b c) = addmod a b c
+
+    -- masks and operands whose possible bits decide the result
+    go (And a b)
+      | possibleOnes a .&. possibleOnes b == 0 = Lit 0
+    go (And (Lit m) b)
+      | possibleOnes b .&. m == possibleOnes b = b
+    go (Or (Lit m) b)
+      | possibleOnes b .&. m == possibleOnes b = Lit m
 
     -- Triple And (must be before 3-way sort below)
     go (And (Lit a) (And (Lit b) c)) = And (EVM.Expr.and (Lit a) (Lit b)) c
@@ -1538,6 +1731,29 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     -- sub + add NOTE: every combination of Sub is needed (2)
     go (Sub (Lit x) (Add (Lit y) orig)) = sub (Lit (x-y)) orig
     go (Sub (Add (Lit x) orig) (Lit y) ) = add (Lit (x-y)) orig
+
+    -- an operand and its inverse cancel
+    go (Add a (Sub b c)) | a == c = b
+    go (Add (Sub b c) a) | a == c = b
+    go (Sub a (Add b c))
+      | a == b = sub (Lit 0) c
+      | a == c = sub (Lit 0) b
+    go (Sub a (Sub b c)) | a == b = c
+    go (Xor a (Xor b c))
+      | a == b = c
+      | a == c = b
+    go (Xor (Xor a b) c)
+      | a == c = b
+      | b == c = a
+    go (Or a (Or b c))
+      | a == b || a == c = EVM.Expr.or b c
+    go (And a (And b c))
+      | a == b || a == c = EVM.Expr.and b c
+    go (Or a b) | b == EVM.Expr.not a || a == EVM.Expr.not b = Lit maxLit
+    go (Xor a b) | b == EVM.Expr.not a || a == EVM.Expr.not b = Lit maxLit
+    go (Add a b) | b == EVM.Expr.not a || a == EVM.Expr.not b = Lit maxLit
+    -- collect literals out of a product
+    go (Mul (Lit c) (Add (Lit d) x)) = add (Lit (c * d)) (mul (Lit c) x)
 
     -- Add+Add / Mul+Mul / Xor+Xor simplifications, taking
     --     advantage of associativity and commutativity
@@ -1573,6 +1789,16 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
       where l = sort [a, b, c]
             an = EVM.Expr.and
 
+    -- addends common to both sides of a difference cancel
+    go (Sub a b)
+      | isAdd a || isAdd b, xs <- addends a, ys <- addends b, xs' <- xs \\ ys, length xs' < length xs
+      = sub (sumOf xs') (sumOf (ys \\ xs))
+      where
+        isAdd = \case Add {} -> True; _ -> False
+        addends = \case Add x y -> addends x <> addends y; x -> [x]
+        sumOf [] = Lit 0
+        sumOf zs = foldr1 add zs
+
     -- redundant add / sub
     go (Sub (Add a b) c)
       | a == c = b
@@ -1604,14 +1830,30 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
 
     -- Not simplification
     go (EVM.Types.Not (EVM.Types.Not a)) = a
+    -- not x is -x - 1
+    go (Not (Add (Lit c) x)) = sub (Lit (complement c)) x
+    go (Not (Sub (Lit c) x)) = add (Lit (complement c)) x
+    go (Not (Xor (Lit c) x)) = EVM.Expr.xor (Lit (complement c)) x
     go (Not a) = EVM.Expr.not a
 
     -- EqByte
     go (EqByte a b) = eqByte a b
 
     -- SHL / SHR / SAR
+    go (SHL (Lit a) x) | a < 256, possibleOnes x `shiftL` fromIntegral a == 0 = Lit 0
+    go (SHR (Lit a) x) | a < 256, possibleOnes x `shiftR` fromIntegral a == 0 = Lit 0
     go (SHL (Lit a) _) | a >= 256 = Lit 0
     go (SHR (Lit a) _) | a >= 256 = Lit 0
+    -- compose shifts by literals; past 256 the possibleOnes rules above already gave 0
+    go (SHR (Lit n) (SHR (Lit m) x)) | n < 256, m < 256, n + m < 256 = shr (Lit (n + m)) x
+    go (SHL (Lit n) (SHL (Lit m) x)) | n < 256, m < 256, n + m < 256 = shl (Lit (n + m)) x
+    go (SAR (Lit n) (SAR (Lit m) x)) | n < 256, m < 256 = sar (Lit (Prelude.min 255 (n + m))) x
+    go (SHL (Lit n) (SHR (Lit m) x)) | n < 256, m < 256, n /= m =
+      EVM.Expr.and (Lit (shiftL maxLit (fromIntegral n)))
+        (if n > m then shl (Lit (n - m)) x else shr (Lit (m - n)) x)
+    go (SHR (Lit n) (SHL (Lit m) x)) | n < 256, m < 256, n /= m =
+      EVM.Expr.and (Lit (shiftR maxLit (fromIntegral n)))
+        (if n > m then shr (Lit (n - m)) x else shl (Lit (m - n)) x)
     go (SHL (Lit n) (SHR (Lit m) x)) -- zero out LSB
       | n == m && n < 256 = EVM.Expr.and (Lit (shiftL maxLit (fromIntegral n))) x
     go (SHR (Lit n) (SHL (Lit m) x)) -- zero out MSB
@@ -1652,6 +1894,8 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
       | otherwise = EVM.Expr.or a b
 
 
+    go (Max a b) | a == b = a
+    go (Min a b) | a == b = a
     -- Some trivial min / max eliminations
     go (Max a b) = EVM.Expr.max a b
     go (Min a b) = case (a, b) of
@@ -1687,8 +1931,19 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (Exp (Lit 0x100) offset@(Mul (Lit a) (Mod _ (Lit b))))
       | a * b <= 32 && (maxWord256 `Prelude.div` a) > b = shl (mul (Lit 8) offset) (Lit 1)
     go (Exp (Lit 0x100) offset@(Mod _ (Lit 32))) = (shl (mul (Lit 8) offset)) (Lit 1)
+    -- the same, for the masks that a modulo by a power of two becomes
+    go (Exp (Lit 0x100) offset@(Mul (Lit a) (And (Lit m) _)))
+      | a < 32 && m < 32 && a * m < 32 = shl (mul (Lit 8) offset) (Lit 1)
+    go (Exp (Lit 0x100) offset@(And (Lit m) _)) | m < 32 = shl (mul (Lit 8) offset) (Lit 1)
     go (Exp (Lit 2) k) = shl k (Lit 1)
     go (Exp a b) = EVM.Expr.exp a b
+
+    go (Div (Div x (Lit a)) (Lit b))
+      | a /= 0, b /= 0 = if toInteger a * toInteger b > toInteger maxLit then Lit 0 else go (Div x (Lit (a * b)))
+    -- scaling by literals: without overflow, a*x/b is (a/g)*x/(b/g)
+    go (Div (Mul (Lit a) x) (Lit b))
+      | a /= 0, g <- gcd a b, g > 1, upperWithBounds mempty x <= maxLit `Prelude.div` a
+      = go (Div (go (Mul (Lit (a `Prelude.div` g)) x)) (Lit (b `Prelude.div` g)))
 
     -- simple div/mod/add/sub
     go (Div  o1 o2) = EVM.Expr.div  o1 o2
@@ -1708,7 +1963,7 @@ simplifyProps ps = if cannotBeSat then [PBool False] else simplified
     simplified = untilFixpoint goOne ps
     cannotBeSat = PBool False `elem` simplified
     goOne :: [Prop] -> [Prop]
-    goOne = remRedundantProps . map simplifyProp . constPropagate . flattenProps
+    goOne = remRedundantProps . map simplifyProp . boundedScaling . boundedMulChecks . constPropagate . flattenProps
 
 
 -- | Evaluate the provided proposition down to its most concrete result
@@ -1751,6 +2006,34 @@ simplifyProp prop =
     go (PLEq a (Lit 0)) = peq (Lit 0) a
     go (PLT (Max (Lit a) b) (Lit c)) | a < c = PLT b (Lit c)
 
+    -- overflow checks: x + c and x - c wrap exactly past these bounds
+    go (PLT a (Add (Lit c) b)) | a == b, c /= 0 = PLT a (Lit (0 - c))
+    go (PLEq a (Add (Lit c) b)) | a == b = PLEq a (Lit (maxLit - c))
+    go (PLT (Add (Lit c) a) b) | a == b, c /= 0 = PLT (Lit (maxLit - c)) a
+    go (PLEq (Add (Lit c) a) b) | a == b, c /= 0 = PLT (Lit (maxLit - c)) a
+    go (PLT a (Sub b (Lit c))) | a == b, c /= 0 = PLT a (Lit c)
+    go (PLEq a (Sub b (Lit c))) | a == b, c /= 0 = PLT a (Lit c)
+    go (PLT (Sub a (Lit c)) b) | a == b, c /= 0 = PLEq (Lit c) a
+
+    go (PLT a (Lit c)) | possibleOnes a < c = PBool True
+    go (PLT (Lit c) b) | possibleOnes b <= c = PBool False
+    go (PLEq a (Lit c)) | possibleOnes a <= c = PBool True
+    go (PLEq (Lit c) b) | possibleOnes b < c = PBool False
+
+    -- a comparison with an ITE with literal branches is a condition on its ITE
+    go (PEq (Lit k) (ITE c (Lit a) (Lit b))) = onITE c (a == k) (b == k)
+    go (PLT (Lit k) (ITE c (Lit a) (Lit b))) = onITE c (k < a) (k < b)
+    go (PLT (ITE c (Lit a) (Lit b)) (Lit k)) = onITE c (a < k) (b < k)
+    go (PLEq (Lit k) (ITE c (Lit a) (Lit b))) = onITE c (k <= a) (k <= b)
+    go (PLEq (ITE c (Lit a) (Lit b)) (Lit k)) = onITE c (a <= k) (b <= k)
+    -- with one literal branch, a case split on the condition
+    go (PEq (Lit k) (ITE c (Lit a) f))
+      | a == k = POr (PNeg (PEq (Lit 0) c)) (PEq (Lit k) f)
+      | otherwise = PAnd (PEq (Lit 0) c) (PEq (Lit k) f)
+    go (PEq (Lit k) (ITE c t (Lit b)))
+      | b == k = POr (PEq (Lit 0) c) (PEq (Lit k) t)
+      | otherwise = PAnd (PNeg (PEq (Lit 0) c)) (PEq (Lit k) t)
+
     go (PLT (Lit 0) e)
       | isBoolLike e = peq (Lit 1) e
 
@@ -1758,6 +2041,14 @@ simplifyProp prop =
     go p@(PLT {}) = p
     go p@(PLEq {}) = p
 
+    go (PEq (Lit c) b) | c .&. complement (possibleOnes b) /= 0 = PBool False
+    go (PEq (Lit c) (Add (Lit d) x)) = peq (Lit (c - d)) x
+    go (PEq (Lit c) (Sub (Lit d) x)) = peq (Lit (d - c)) x
+    go (PEq (Lit c) (Xor (Lit d) x)) = peq (Lit (Data.Bits.xor c d)) x
+    go (PEq (Lit c) (Not x)) = peq (Lit (complement c)) x
+    go (PEq (Lit c) (Mul (Lit k) x)) | odd k = peq (Lit (c * oddInverse k)) x
+    go (PEq (Add (Lit c) x) (Add (Lit d) y)) = peq (add (Lit (c - d)) x) y
+    go (PEq (Not a) (Not b)) = peq a b
     go (PEq (Lit 1) (Eq a b)) = peq a b
     go (PEq (Lit 1) (LT a b)) = PLT a b
     go (PEq (Lit 1) (IsZero e)) = PEq (Lit 0) e
@@ -1818,6 +2109,11 @@ simplifyProp prop =
 
     go p = p
 
+    onITE :: Expr EWord -> Bool -> Bool -> Prop
+    onITE c t f
+      | t == f = PBool t
+      | t = PNeg (PEq (Lit 0) c)
+      | otherwise = PEq (Lit 0) c
 
     -- Applies `simplify` to the inner part of a Prop, e.g.
     -- (PEq (Add (Lit 1) (Lit 2)) (Var "a")) becomes
@@ -2325,6 +2621,86 @@ enumerateViaSmallSubterm limit props e0 = listToMaybe $ mapMaybe tryAtoms (map p
       _ -> x
 
 data Bounds = Bounds W256 W256 (Set.Set W256)
+
+-- | Decides @x == (x * d) / d@, as in Solidity's checked-multiplication guard
+-- @x == (x * d) / d || d == 0@ or in scaling by a literal and back, where the
+-- bounds that @ps@ put on the subterms of @x@ and @d@ rule out overflow. The
+-- props that give bounds are left alone, so the rewritten list is equivalent.
+boundedMulChecks :: [Prop] -> [Prop]
+boundedMulChecks ps = map (\p -> if Map.null (propBounds [p]) then go p else p) ps
+  where
+    bounds = propBounds ps
+    -- top-down, so that a whole guard is matched before its equality
+    go = \case
+      POr (PEq a b) (PEq (Lit 0) d) | Just (_, d') <- noOverflow a b, d == d' -> PBool True
+      POr (PEq (Lit 0) d) (PEq a b) | Just (_, d') <- noOverflow a b, d == d' -> PBool True
+      -- without overflow, (x * d) / d is x, or 0 if d is 0
+      PEq a b | Just (x, d) <- noOverflow a b -> POr (PNeg (PEq (Lit 0) d)) (PEq (Lit 0) x)
+      PNeg a -> PNeg (go a)
+      PAnd a b -> PAnd (go a) (go b)
+      POr a b -> POr (go a) (go b)
+      PImpl a b -> PImpl (go a) (go b)
+      p -> p
+    noOverflow :: Expr t -> Expr t -> Maybe (Expr EWord, Expr EWord)
+    noOverflow a b = case (a, b) of
+      (x, Div (Mul p q) d) | guarded x p q d -> Just (x, d)
+      (Div (Mul p q) d, x) | guarded x p q d -> Just (x, d)
+      _ -> Nothing
+    guarded x p q d = ((p == x && q == d) || (p == d && q == x)) && fits (upper x) (upper d)
+    fits u v = v == 0 || u <= maxLit `Prelude.div` v
+    upper = upperWithBounds bounds
+
+-- | Cancels common factors of the literals in @(a * x) / b@, as 'simplify'
+-- does, where the bounds that the other props put on the subterms of @x@ rule
+-- out overflow. One prop at a time, so the props each rewrite relies on are
+-- still there and the rewritten list is equivalent.
+boundedScaling :: [Prop] -> [Prop]
+boundedScaling = go []
+  where
+    go done [] = reverse done
+    go done (p : rest)
+      | getAny (foldProp (Any . isSite) mempty p) = go (mapProp (rewrite (bounds (done <> rest))) p : done) rest
+      | otherwise = go (p : done) rest
+    isSite :: Expr a -> Bool
+    isSite = \case
+      Div (Mul (Lit _) _) (Lit _) -> True
+      _ -> False
+    rewrite :: Map.Map (Expr EWord) Bounds -> Expr a -> Expr a
+    rewrite bs = \case
+      Div (Mul (Lit a) x) (Lit b)
+        | a /= 0, b /= 0, g <- gcd a b, g > 1, upperWithBounds bs x <= maxLit `Prelude.div` a
+        -> Div (mul (Lit (a `Prelude.div` g)) x) (Lit (b `Prelude.div` g))
+      e -> e
+    -- also through t <= u, a few steps deep
+    bounds ps = iterate (\m -> foldl through m (chains ps)) (propBounds ps) !! 3
+    chains ps = [c | p <- ps, c <- case p of
+                                      PLEq t u -> [(t, u, 0)]
+                                      PLT t u -> [(t, u, 1)]
+                                      _ -> []]
+    through m (t, u, k)
+      | ub <- upperWithBounds m u, ub < maxLit, ub >= k, Prelude.not (isLitWord t)
+      = Map.alter (Just . (\(Bounds lb ub' ex) -> Bounds lb (Prelude.min ub' (ub - k)) ex) . fromMaybe (Bounds 0 maxLit mempty)) t m
+      | otherwise = m
+
+-- | An upper bound on a word, from its structure and the bounds @bs@ put on its
+-- subterms, looking a few levels deep
+upperWithBounds :: Map.Map (Expr EWord) Bounds -> Expr EWord -> W256
+upperWithBounds bs = go (8 :: Int)
+  where
+    go 0 t = known t
+    go d t = Prelude.min (known t) $ let r = go (d - 1) in case t of
+      Add a b -> let x = r a; y = r b in if x <= maxLit - y then x + y else maxLit
+      Mul a b -> let x = r a; y = r b in if y == 0 || x <= maxLit `Prelude.div` y then x * y else maxLit
+      -- dividing by 0 gives 0, so a quotient or remainder is at most the dividend
+      Div a (Lit c) | c > 0 -> r a `Prelude.div` c
+      Div a _ -> r a
+      Mod a (Lit c) | c > 0 -> Prelude.min (c - 1) (r a)
+      Mod a _ -> r a
+      Min a b -> Prelude.min (r a) (r b)
+      Max a b -> Prelude.max (r a) (r b)
+      ITE _ a b -> Prelude.max (r a) (r b)
+      _ -> maxLit
+    known t = Prelude.min (possibleOnes t) (maybe maxLit (\(Bounds _ ub _) -> ub) (Map.lookup t bs))
 
 -- | Interval and excluded values that @props@ put on word subterms.
 propBounds :: [Prop] -> Map.Map (Expr EWord) Bounds
