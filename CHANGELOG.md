@@ -110,6 +110,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the writes they are disjoint from and resolve the writes they hit.
 
 ## Fixed
+- A path whose conditions became unsatisfiable at a solver-checked branch now
+  ends there, instead of continuing down one side of the branch, e.g. until the
+  loop iteration limit.
 - Buffer models from the solver drop bytes past the buffer's length, so a
   counterexample with such bytes can be replayed.
 - CALLDATACOPY, CODECOPY and EXTCODECOPY with a literal source range past 2^256

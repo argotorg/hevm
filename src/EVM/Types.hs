@@ -688,8 +688,8 @@ data BranchContext where
   PleaseRunBoth :: (Bool -> EVM Symbolic ()) -> BranchContext
   PleaseRunAll  :: [Expr EWord] -> (Expr EWord -> EVM Symbolic ()) -> BranchContext
 
--- | The possible return values of a SMT query
-data BranchCondition = Case Bool | UnknownBranch
+-- | The possible return values of a SMT query. Infeasible: neither direction can be taken
+data BranchCondition = Case Bool | UnknownBranch | Infeasible
   deriving Show
 
 instance Show (Query t) where
