@@ -2221,9 +2221,9 @@ simplifierFuzzTests cfg = testGroup "SimplifierPropertyTests"
         let buflen = BufLength expr
         proveEquivExprWith cfg buflen (Expr.simplify buflen)
     , testProperty "shaped-word-simplification" $ forAllShrink (sized $ \n -> genShapedWord (min n 20)) shrinkWord $ \e' ->
-        let e = litCopySizes e' in within 20_000_000 $ ioProperty $ proveEquivExprWith cfg e (Expr.simplify e)
+        let e = smtEncodable e' in within 20_000_000 $ ioProperty $ proveEquivExprWith cfg e (Expr.simplify e)
     , testProperty "shaped-prop-simplification" $ forAllShrink (sized $ \n -> genShapedProp (min n 16)) shrinkProp $ \p' ->
-        let p = mapProp litCopySizes p' in within 20_000_000 $ ioProperty $ proveEquivPropWith cfg p (Expr.simplifyProp p)
+        let p = mapProp smtEncodable p' in within 20_000_000 $ ioProperty $ proveEquivPropWith cfg p (Expr.simplifyProp p)
     , testProperty "store-simplification" $ \(expr :: Expr Storage) -> ioProperty $ proveEquivExprWith cfg expr (Expr.simplify expr)
     , testProperty "load-simplification" $ \(GenWriteStorageLoad expr) -> ioProperty $ proveEquivExprWith cfg expr (Expr.simplify expr)
     -- decomposition must not change the loaded value, given its assumption that keys of different
@@ -2608,10 +2608,12 @@ logicalLoc = \case
   Expr.ArraySlotZero idx -> Just (word idx, Lit 0)
   _ -> Nothing
 
--- | The SMT encoding only supports CopySlice with a literal size
-litCopySizes :: Expr a -> Expr a
-litCopySizes = mapExpr $ \case
+-- | The SMT encoding only supports CopySlice with a literal size, and a symbolic
+-- exponent only for bases 0, 1 and 2
+smtEncodable :: Expr a -> Expr a
+smtEncodable = mapExpr $ \case
   CopySlice a b sz src dst | not (isLit sz) -> CopySlice a b (Lit 7) src dst
+  Exp a b | not (isLit b), a `notElem` [Lit 0, Lit 1, Lit 2] -> Exp a (Lit 3)
   e -> e
   where
     isLit :: Expr EWord -> Bool

@@ -417,7 +417,9 @@ genTemplate s shiftAmt = oneof
   [ Eq <$> lit <*> (litOp <*> lit <*> s)
   , Eq <$> (Add <$> lit <*> s) <*> (Add <$> lit <*> s)
   , Eq <$> lit <*> (Not <$> s)
+  , Eq <$> (Not <$> s) <*> (Not <$> s)
   , IsZero <$> (litOp <*> lit <*> s)
+  , IsZero . Not <$> s
   , And <$> lit <*> (shiftOp <*> shiftAmt <*> s)
   , shiftOp <*> shiftAmt <*> (shiftOp <*> shiftAmt <*> s)
   , SAR <$> shiftAmt <*> (SAR <$> shiftAmt <*> s)
@@ -433,8 +435,22 @@ genTemplate s shiftAmt = oneof
   , Not <$> (elements [Add, Sub, Xor] <*> lit <*> s)
   , Mul <$> lit <*> (Add <$> lit <*> s)
   , Div <$> (Mul <$> scaling <*> oneof [Mod <$> s <*> scaling, s]) <*> scaling
+  , Div <$> (Div <$> s <*> oneof [lit, scaling]) <*> oneof [lit, scaling]
+  , shortCircuit
+  -- symbolic exponents, as Solidity's byte-offset masks have
+  , Exp (Lit 0x100) <$> (And <$> byteIdx <*> s)
+  , do a <- choose (1, 31 :: Int)
+       m <- choose (0, 31 `div` a)
+       Exp (Lit 0x100) . Mul (Lit (fromIntegral a)) . And (Lit (fromIntegral m)) <$> s
+  , Exp (Lit 2) <$> s
   ]
   where
+    byteIdx = Lit . fromIntegral <$> choose (0 :: Int, 40)
+    -- the condition again in a branch, as in the short-circuit of && and ||
+    shortCircuit = do
+      c <- s
+      t <- s
+      elements [ITE c (IsZero c) t, ITE c t (IsZero c), ITE c t c, ITE c c t]
     -- with common factors, as decimal fixed-point scaling has
     scaling = Lit <$> oneof [(10 ^) <$> choose (0 :: Int, 77), (\a b -> 2 ^ a * 5 ^ b) <$> choose (0 :: Int, 60) <*> choose (0 :: Int, 40)]
     -- one operand twice, as cancellations need
@@ -444,7 +460,8 @@ genTemplate s shiftAmt = oneof
       elements
         [ Add x (Sub y x), Add (Sub y x) x, Sub x (Add x y), Sub x (Add y x), Sub x (Sub x y)
         , Xor x (Xor x y), Xor (Xor y x) x, Or x (Or x y), And x (And y x)
-        , Or x (Not x), Xor (Not x) x, Add x (Not x), Max x x, Min x x, Eq x (Add x y), Eq x (Sub x y)
+        , Or x (Not x), Xor (Not x) x, Add x (Not x), Max x x, Min x x, LT x x, SLT x x
+        , Eq x (Add x y), Eq x (Add y x), Eq x (Sub x y)
         , LT x (Add y x), LT (Add y x) x, LT x (Sub x y), LT (Sub x y) x, GT x (Add y x), LEq x (Sub x y) ]
     -- sums sharing addends, in any order
     sharedSums = do
@@ -539,10 +556,22 @@ genShapedProp n = frequency
   , (2, scalingUnderBounds)
   , (2, PEq <$> lit <*> ite), (1, PLT <$> lit <*> ite), (1, PLT <$> ite <*> lit)
   , (1, PLEq <$> lit <*> ite), (1, PLEq <$> ite <*> lit)
+  , (2, oneLitBranch)
+  , (2, PEq <$> lit <*> (elements [Add, Sub, Xor, Mul] <*> lit <*> w))
+  , (1, PEq <$> lit <*> (Not <$> w))
+  , (1, PEq <$> (Not <$> w) <*> (Not <$> w))
+  , (1, PEq <$> (Add <$> lit <*> w) <*> (Add <$> lit <*> w))
   ]
   where
     lit = Lit <$> genSpecialLit
     ite = ITE <$> w <*> lit <*> lit
+    -- the literal compared against is often the literal branch
+    oneLitBranch = do
+      k <- genSpecialLit
+      a <- frequency [(1, pure k), (1, genSpecialLit)]
+      c <- w
+      f <- w
+      PEq (Lit k) <$> elements [ITE c (Lit a) f, ITE c f (Lit a)]
     overflowCheck = do
       x <- w
       c <- lit
