@@ -171,7 +171,7 @@ import Witch (unsafeInto, into, tryInto)
 import Data.Containers.ListUtils (nubOrd)
 
 import EVM.HashCons qualified as HC
-import EVM.Keccak.Preimages (Preimage(..), lookupSlot, smallArrays)
+import EVM.Keccak.Preimages (Preimage(..), Table, fromBytes, lookupSlot, smallArrays)
 import EVM.Traversals
 import EVM.Traversals.Children (mapPropChildrenM)
 import Data.Functor.Identity (Identity(..))
@@ -1055,17 +1055,17 @@ readStorage' loc store = case readStorage loc store of
 -- | The mapping slot (idx) of a symbolic mapping read keccak(key . idx)
 readMappingIdx :: Expr EWord -> Maybe W256
 readMappingIdx (MappingSlot idx _)
-  | BS.length idx == 64 = Just (W256 (word256 (BS.takeEnd 32 idx)))
+  | MappingPre _ parent <- fromBytes idx = Just parent
 readMappingIdx _ = Nothing
 
 -- | Drop ConcreteStore entries that cannot alias a symbolic mapping read: a concrete key whose
 -- recorded keccak preimage identifies a different mapping slot cannot equal keccak(key . idx),
--- by injectivity. Keys with unknown preimage are kept. `preMap` maps hash -> preimage.
-filterStoreByReadSlot :: Map.Map W256 ByteString -> Expr EWord -> Expr Storage -> Expr Storage
+-- by injectivity. Keys with unknown preimage are kept.
+filterStoreByReadSlot :: Table -> Expr EWord -> Expr Storage -> Expr Storage
 filterStoreByReadSlot preMap slot (ConcreteStore m)
   | Just readSlot <- readMappingIdx slot =
       let keep k = case Map.lookup k preMap of
-                     Just bs | BS.length bs == 64 -> W256 (word256 (BS.takeEnd 32 bs)) == readSlot
+                     Just (MappingPre _ parent) -> parent == readSlot
                      _ -> True
       in ConcreteStore (Map.filterWithKey (\k _ -> keep k) m)
 filterStoreByReadSlot _ _ st = st

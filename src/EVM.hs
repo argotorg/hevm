@@ -14,6 +14,7 @@ import EVM.ABI
 import EVM.Expr (readStorage, concStoreContains, writeStorage, readByte, readWord, writeWord,
   writeByte, bufLength, indexWord, readBytes, copySlice, wordToAddr, maybeLitByteSimp, maybeLitWordSimp, maybeLitAddrSimp)
 import EVM.Expr qualified as Expr
+import EVM.Keccak.Preimages qualified as Preimages
 import EVM.HashCons qualified as HashCons
 import EVM.FeeSchedule (FeeSchedule (..))
 import EVM.FeeSchedule qualified as Fees (feeSchedule)
@@ -43,7 +44,7 @@ import Data.ByteString.Char8 qualified as Char8
 import Data.DoubleWord (Int256, Word256)
 import Data.Either (partitionEithers)
 import Data.Either.Extra (maybeToEither)
-import Data.Foldable (toList, Foldable(..))
+import Data.Foldable (Foldable(..))
 import Data.List (find, isPrefixOf)
 import Data.List.Split (splitOn)
 import Data.Map.Strict (Map)
@@ -803,7 +804,7 @@ exec1 conf = do
                 symbolicRead :: EVM t () = if this.external
                   then accessStorage self x finalizeLoad
                   else let slot = HashCons.hashConsExpr (Expr.concKeccakOnePass x)
-                           preMap = Map.fromList [ (h, bs) | (bs, h) <- toList vm.keccakPreImgs ]
+                           preMap = Preimages.fromRecorded vm.keccakPreImgs
                        in finalizeLoad $ HashCons.hashConsExpr (Expr.readStorage' slot (Expr.filterStoreByReadSlot preMap slot this.storage))
 
                 concreteRead :: EVM t () = do

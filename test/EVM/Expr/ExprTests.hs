@@ -29,6 +29,7 @@ import EVM.Expr.Generator
 import EVM.Expr.RewriteFuzz (genShapedWord, genShapedProp, shrinkWord, shrinkProp)
 import EVM.Expr.Probe (probes, contract)
 import EVM.HashCons qualified as HC
+import EVM.Keccak.Preimages (fromBytes)
 import EVM.Format (hexText)
 import EVM.SMT (AbstractQuery(..), SMT2(..), SMTScript(..), assertPropsAbstract)
 import EVM.Solvers hiding (checkSat)
@@ -421,7 +422,7 @@ storageTests = testGroup "Storage tests"
     -- recorded preimage of a write to the mapping at slot 0 with key 0xaa
     preImgBytes = BS.pack (replicate 31 0 ++ [0xaa] ++ replicate 32 0)
     preImgHash = keccak' preImgBytes
-    preImgs = Map.fromList [(preImgHash, preImgBytes)]
+    preImgs = Map.fromList [(preImgHash, fromBytes preImgBytes)]
 
 keccakTests :: TestTree
 keccakTests = testGroup "Keccak input canonicalization"
