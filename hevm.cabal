@@ -304,6 +304,7 @@ test-suite test
     EVM.Fetch.RpcFuzz
     EVM.Expr.ExprTests
     EVM.Expr.RewriteFuzz
+    EVM.Expr.KeccakFuzz
     EVM.Expr.Generator
     EVM.Expr.HashConsTests
     EVM.Expr.Probe

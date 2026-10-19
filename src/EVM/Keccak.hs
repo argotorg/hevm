@@ -5,6 +5,9 @@
 module EVM.Keccak (keccakAssumptions, concreteKeccaks, findKeccakPropsExprs) where
 
 import Control.Monad.State
+import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
+import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.List (tails)
@@ -48,9 +51,10 @@ injProp _ = internalError "expected keccak expression"
 
 
 -- Takes a list of props, find all keccak occurrences and generates two kinds of assumptions:
---   1. Minimum output value: That the output of the invocation is greater than
---      256 (needed to avoid spurious counterexamples due to storage collisions
---      with solidity mappings & value type storage slots)
+--   1. Output range: That the output of the invocation is greater than 256 and
+--      at most 2^256 - 257, so that adding a field offset does not wrap (needed to
+--      avoid spurious counterexamples due to storage collisions with solidity
+--      mappings & value type storage slots)
 --   2. Injectivity: That keccak is an injective function (we avoid quantifiers
 --      here by making this claim for each unique pair of keccak invocations
 --      discovered in the input expressions)
@@ -63,7 +67,7 @@ keccakAssumptions keccaks = injectivity <> minValue <> minDiffOfPairs
     minValue = map minProp ks
       where
         minProp :: Expr EWord -> Prop
-        minProp k@(Keccak _) = PGT k (Lit 256)
+        minProp k@(Keccak _) = PAnd (PGT k (Lit 256)) (PLT k (Lit (maxBound - 255)))
         minProp _ = internalError "expected keccak expression"
     minDiffOfPairs = map minDistance keccakPairs
      where
@@ -81,8 +85,21 @@ concretizeKeccakParam _ = internalError "Cannot happen"
 
 type KeccakValue = (Expr Buf, W256)
 concreteKeccaks :: [Prop] -> Set KeccakValue
-concreteKeccaks ps = foldMap concreteKeccakProp ps
+concreteKeccaks ps = direct <> recoverSlots (Set.filter (>= 256) slots) bigKeys direct
   where
+  direct = foldMap concreteKeccakProp ps
+  (slots, keys) = foldMap (foldProp literals mempty) ps
+  bigKeys = Set.toList $ Set.filter (> 255) keys
+  literals :: forall a. Expr a -> (Set W256, Set W256)
+  literals = \case
+    SLoad (Lit k) _ -> (Set.singleton k, mempty)
+    SStore (Lit k) _ _ -> (Set.singleton k, mempty)
+    ConcreteStore m -> (Map.keysSet m, Set.fromList (Map.elems m))
+    Lit w -> (mempty, Set.singleton w)
+    -- a hash written as the parent slot of a mapping or array is only bytes in the input
+    Keccak buf -> (Set.fromList [w | off <- [0, 32], Lit w <- [readWord (Lit off) buf]], mempty)
+    _ -> mempty
+
   concreteKeccakProp :: Prop -> Set KeccakValue
   concreteKeccakProp p = foldProp compute Set.empty p
 
@@ -95,3 +112,58 @@ concreteKeccaks ps = foldMap concreteKeccakProp ps
         _ -> Set.empty
     _ -> Set.empty
 
+-- | Preimages of compiler-folded slots, which contain no keccak term. A slot recovered as
+-- keccak(pre) + o, o < 256, has its parent slot (the last word of pre) recovered too, so that
+-- symbolic hashes over the parent can be related to it. Parents beyond the shared tables are
+-- known or recovered hashes plus a small offset, searched for a bounded number of levels.
+recoverSlots :: Set W256 -> [W256] -> Set KeccakValue -> Set KeccakValue
+recoverSlots targets0 bigKeys direct = go recoveryDepth table0 (Set.map snd direct) mempty mempty targets0
+  where
+    keys = [0..255] <> bigKeys
+    table0 = smallPreimages <> mappingPreimages bigKeys [0..255]
+      <> Map.fromList [(h, bs) | (ConcreteBuf bs, h) <- Set.toList direct]
+    go :: Int -> Map.Map W256 ByteString -> Set W256 -> Set W256 -> Set W256 -> Set W256 -> Set KeccakValue
+    go depth table bases expanded done targets
+      | Set.null targets = mempty
+      | otherwise = Set.fromList [(ConcreteBuf pre, h) | (_, h, pre) <- hits] <> rest
+      where
+        hits = [ (t, h, pre) | t <- Set.toList targets
+               , Just (h, pre) <- [Map.lookupLE t table], t - h < 256 ]
+        done' = done <> Set.fromList [t | (t, _, _) <- hits]
+        parents = Set.fromList [p | (_, _, pre) <- hits, let p = word (BS.takeEnd 32 pre), p >= 256]
+          `Set.difference` done'
+        unresolved = targets `Set.difference` done'
+        newBases = (bases <> Set.fromList [h | (_, h, _) <- hits]) `Set.difference` expanded
+        derived = Set.toList newBases >>= \b -> map (b +) [0 .. derivedOffsets - 1]
+        rest
+          -- out of levels: only finish the parent chains of what was recovered
+          | depth == 0 || Set.null newBases = go 0 table mempty expanded done' parents
+          | otherwise = go (depth - 1)
+              (table <> mappingPreimages keys derived <> arrayPreimages derived)
+              mempty (expanded <> newBases) done' (unresolved <> parents)
+
+recoveryDepth :: Int
+recoveryDepth = 3
+
+-- | Field offsets and array indices tried on top of hashes that become parent slots
+derivedOffsets :: W256
+derivedOffsets = 16
+
+-- Shared across queries: mappings with small keys at small slots or held directly in an
+-- array at a small slot, and arrays at small slots or held directly in such mappings
+smallPreimages :: Map.Map W256 ByteString
+smallPreimages = smallMapping <> smallArray
+  <> arrayPreimages (Map.keys smallMapping) <> mappingPreimages [0..255] (Map.keys smallArray)
+  where
+    smallMapping = mappingPreimages [0..255] [0..255]
+    smallArray = arrayPreimages [0..255]
+
+mappingPreimages :: [W256] -> [W256] -> Map.Map W256 ByteString
+mappingPreimages keys parents = Map.fromList
+  [ (keccak' pre, pre)
+  | key <- keys, parent <- parents
+  , let pre = word256Bytes key <> word256Bytes parent
+  ]
+
+arrayPreimages :: [W256] -> Map.Map W256 ByteString
+arrayPreimages parents = Map.fromList [(keccak' pre, pre) | parent <- parents, let pre = word256Bytes parent]
