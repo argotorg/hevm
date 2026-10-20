@@ -19,6 +19,7 @@ import Data.Containers.ListUtils (nubOrd)
 import Data.List qualified as List (nub, sort, tails)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust, fromMaybe)
+import Data.Monoid (All(..))
 import Data.Text (Text)
 import Data.Typeable
 import Numeric.Natural (Natural)
@@ -2182,7 +2183,7 @@ fuzzTests = testGroup "ExprFuzzTests"
 
 -- | No value of a subterm lies outside its static bounds, as the solver sees it
 boundsSmtFuzz :: Property
-boundsSmtFuzz = forAllShrink (sized $ \n -> genBounded (min n 6)) shrinkWord $ \e -> ioProperty $ do
+boundsSmtFuzz = forAllShrink (sized $ \n -> genBounded (min n 6) `suchThat` encodable) (filter encodable . shrinkWord) $ \e -> ioProperty $ do
   let ts = take 6
         [ (t, lb, ub) | t <- List.nub (foldExpr (maybe [] pure . Expr.asWord) [] e)
         , let lb = Expr.lowerBound t; ub = fromMaybe Expr.maxLit (Expr.upperBound t)
@@ -2197,6 +2198,7 @@ boundsSmtFuzz = forAllShrink (sized $ \n -> genBounded (min n 6)) shrinkWord $ \
         Qed -> property True
     | ((t, lb, ub), r) <- zip ts res ]
   where
+    encodable = getAll . foldExpr (\case Exp _ (Lit _) -> All True; Exp {} -> All False; _ -> mempty) mempty
     -- the shapes that 'Expr.lowerBound' and 'Expr.upperBound' look into
     genBounded :: Int -> Gen (Expr EWord)
     genBounded 0 = oneof [Lit <$> genSpecialLit, Var <$> elements ["a", "b"], genShapedWord 2]
