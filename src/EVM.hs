@@ -292,6 +292,7 @@ unknownContract addr = Contract
   , codehash    = hashcode (UnknownCode addr)
   , opIxMap     = mempty
   , external    = False
+  , chainStorage = False
   }
 
 -- | Initialize an abstract contract with known code
@@ -306,6 +307,7 @@ abstractContract code addr = Contract
   , codehash    = hashcode code
   , opIxMap     = mkOpIxMap code
   , external    = False
+  , chainStorage = False
   }
 
 -- | Initialize an empty contract without code
@@ -324,6 +326,7 @@ initialContract code = Contract
   , codehash    = hashcode code
   , opIxMap     = mkOpIxMap code
   , external    = False
+  , chainStorage = False
   }
 
 isCreation :: ContractCode -> Bool
@@ -826,12 +829,27 @@ exec1 conf = do
                   assign' (#state % #stack) xs
                   modifying (#env % #contracts % ix self % #storage) (writeStorage x new)
 
-                concreteSstore :: EVM t () = do
+                -- the gas depends on the slot's value before the transaction, which a contract
+                -- fetched via RPC may not have yet
+                concreteSstore :: EVM t () = case self of
+                  LitAddr a | this.external, not (Expr.concStoreContains x this.origStorage) ->
+                    query $ PleaseFetchSlot a (forceLit x) $ \v -> do
+                      modifying (#env % #contracts % ix self % #origStorage) (Expr.insertConcStoreBase (forceLit x) v)
+                      unless (Expr.concStoreContains x this.storage) $
+                        modifying (#env % #contracts % ix self % #storage) (Expr.insertConcStoreBase (forceLit x) v)
+                      assign #result Nothing
+                      use (#env % #contracts % at self) >>= \case
+                        Just c -> knownSstore c
+                        Nothing -> internalError $ "contract " <> show a <> " vanished during slot fetch"
+                  _ -> knownSstore this
+
+                knownSstore :: Contract -> EVM t ()
+                knownSstore c0 = do
                   let
                     slot = forceLit x
-                    currentVal = accessConcreteStorage this.storage slot
+                    currentVal = accessConcreteStorage c0.storage slot
                     newVal = forceLit new
-                    originalVal = accessConcreteStorage this.origStorage slot
+                    originalVal = accessConcreteStorage c0.origStorage slot
                   ensureGas g_callstipend $ do
                     let storage_cost
                           | (currentVal == newVal) = g_sload
@@ -1117,13 +1135,14 @@ exec1 conf = do
           case stk of
             [] -> underrun
             (xTo':_) -> forceAddr xTo' (unexpectedSymArgW "SELFDESTRUCT") $ \case
-              xTo@(LitAddr _) -> do
+              -- whether the beneficiary exists may only be known on chain
+              xTo@(LitAddr _) -> fetchAccount xTo $ \_ -> do
                 cc <- gets (.tx.subState.createdContracts)
                 let createdThisTr = self `member` cc
                 acc <- accessAccountForGas xTo
+                recipientExists <- gets (accountExists xTo)
                 let cost = if acc then 0 else g_cold_account_access
                     funds = this.balance
-                    recipientExists = accountExists xTo vm
                 branch conf.maxDepth (Expr.iszero $ Expr.eq funds (Lit 0)) $ \hasFunds -> do
                   let c_new = if (not recipientExists) && hasFunds
                               then g_selfdestruct_newaccount
@@ -1203,7 +1222,18 @@ callChecks
   -- continuation with gas available for call
   -> (Gas t -> EVM t ())
   -> EVM t ()
-callChecks this xGas xContext xTo xValue xInOffset xInSize xOutOffset xOutSize xs continue = do
+callChecks this xGas xContext xTo xValue xInOffset xInSize xOutOffset xOutSize xs continue =
+  -- the new account cost depends on whether the recipient exists, which may only be known on chain
+  use (#env % #contracts % at xContext) >>= \case
+    Nothing | LitAddr _ <- xContext -> fetchAccount xContext $ \_ -> checks
+    _ -> checks
+  where checks = callChecks' this xGas xContext xTo xValue xInOffset xInSize xOutOffset xOutSize xs continue
+
+callChecks'
+  :: forall (t :: VMType). (?op :: Word8, ?conf :: Config, VMOps t)
+  => Contract -> Gas t -> Expr EAddr -> Expr EAddr -> Expr EWord -> Expr EWord -> Expr EWord
+  -> Expr EWord -> Expr EWord -> [Expr EWord] -> (Gas t -> EVM t ()) -> EVM t ()
+callChecks' this xGas xContext xTo xValue xInOffset xInSize xOutOffset xOutSize xs continue = do
   vm <- get
   let fees = vm.block.schedule
   accessMemoryRange xInOffset xInSize $
@@ -2818,7 +2848,7 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
 -- EIP-684 and EIP-7610: collision if nonce != 0, code is non-empty, or storage is non-empty
 collision :: Maybe Contract -> Bool
 collision c' = case c' of
-  Just c -> c.nonce /= Just 0 || not (isStorageEmpty c.storage) || case c.code of
+  Just c -> c.nonce /= Just 0 || c.chainStorage || not (isStorageEmpty c.storage) || case c.code of
     RuntimeCode (ConcreteRuntimeCode "") -> False
     RuntimeCode (SymbolicRuntimeCode b) -> not $ null b
     _ -> True
@@ -2840,7 +2870,7 @@ create self this xSize xGas xValue xs newAddr initCode = do
     -- the address may hold an account on chain, which the collision check and the balance need;
     -- with no chain to ask, the oracle answers with an empty account, which is left out
     (Nothing, LitAddr a) -> query $ PleaseFetchContract a EmptyBase $ \c -> do
-      unless (accountEmpty c) $
+      unless (accountEmpty c && not c.chainStorage) $
         assign (#env % #contracts % at newAddr) (Just c)
       assign #result Nothing
       create' self this xSize xGas xValue xs newAddr initCode

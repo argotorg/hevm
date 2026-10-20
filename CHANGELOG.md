@@ -68,7 +68,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   delegated and static calls, and CREATEs and CREATE2s onto existing accounts.
 - The symbolic execution fuzzer generates BALANCE, EXTCODESIZE, EXTCODEHASH,
   EXTCODECOPY, CREATE and CREATE2, over a pre-state with EOAs, an empty
-  account and accounts at the addresses the program creates.
+  account and accounts at the addresses the program creates. Each case also
+  runs with all state but the contract's code fetched from a mock RPC node.
 
 ## Changed
 - Solver queries for branch conditions and symbolic values also get the keccak
@@ -123,7 +124,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - With `--rpc`, accounts at addresses up to 0xdeadbeef, such as the burn
   address and the precompiles, are fetched instead of treated as empty.
 - With `--rpc`, CREATE and CREATE2 fetch the account at the new address, so
-  they keep its balance and detect collisions with accounts on chain.
+  they keep its balance and detect collisions with accounts on chain,
+  including ones with only storage (EIP-7610), via `eth_getProof`.
+- With `--rpc`, SSTORE gas and refunds use the slot's value on chain, and
+  CALL and SELFDESTRUCT only charge the new account cost when the recipient
+  does not exist on chain.
 - Buffer equality in SMT queries now also compares lengths, so the equivalence
   checker no longer misses return or revert data that differs only in length.
 - Replaying equivalence counterexamples no longer keeps the final VMs of every

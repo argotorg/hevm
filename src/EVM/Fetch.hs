@@ -145,6 +145,7 @@ data RpcQuery a where
   QueryNonce   :: Addr         -> RpcQuery W64
   QuerySlot    :: Addr -> W256 -> RpcQuery W256
   QueryChainId ::                 RpcQuery W256
+  QueryStorageRoot :: Addr     -> RpcQuery W256
 
 data BlockNumber = Latest | BlockNumber W256
   deriving (Show, Eq)
@@ -155,6 +156,8 @@ data RPCContract = RPCContract
   { code    :: ByteStringS
   , nonce   :: W64
   , balance :: W256
+  -- | Only fetched for accounts without code and nonce, where it decides CREATE collisions (EIP-7610)
+  , storageRoot :: Maybe W256
   }
   deriving (Eq, Show, Generic)
 
@@ -226,6 +229,9 @@ fetchQuery n f q =
     QueryChainId -> do
         m <- f (rpc "eth_chainId" [toRPC n])
         pure $ m >>= \v -> maybeToRight "Parse error" (readText <$> preview _String v)
+    QueryStorageRoot addr -> do
+        m <- f (rpc "eth_getProof" [toRPC addr, Array mempty, toRPC n])
+        pure $ m >>= \v -> maybeToRight "Parse error" (readText <$> v ^? key "storageHash" % _String)
 
 maybeToRight :: b -> Maybe a -> Either b a
 maybeToRight _ (Just x) = Right x
@@ -381,7 +387,11 @@ fetchAccountWithSession conf sess nPre url addr = do
 
       case (codeRes, nonceRes, balRes) of
         (Right c, Right no, Right ba) -> do
-          let contr = RPCContract (ByteStringS c) no ba
+          -- nodes without eth_getProof are taken to report empty storage
+          root <- if BS.null c && no == 0
+            then either (const Nothing) Just <$> fetch (QueryStorageRoot addr)
+            else pure Nothing
+          let contr = RPCContract (ByteStringS c) no ba root
           modifyMVar_ sess.sharedCache $ \x -> pure $ x { contractCache = Map.insert addr contr x.contractCache }
           pure (FetchSuccess contr Fresh)
         (Left e, _, _) -> pure (FetchError e)
@@ -409,11 +419,16 @@ getLatestBlockNum conf sess n url =
    _ -> pure n
 
 makeContractFromRPC :: RPCContract -> Contract
-makeContractFromRPC (RPCContract (ByteStringS code) nonce balance) =
+makeContractFromRPC (RPCContract (ByteStringS code) nonce balance root) =
     initialContract (RuntimeCode (ConcreteRuntimeCode code))
       & set #nonce    (Just nonce)
       & set #balance  (Lit balance)
       & set #external True
+      & set #chainStorage (maybe False (/= emptyStorageRoot) root)
+
+-- | The root of an empty storage trie: keccak256(rlp(""))
+emptyStorageRoot :: W256
+emptyStorageRoot = 0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421
 
 -- Needed for Echidna only
 fetchSlotWithCache :: Config -> Session -> BlockNumber -> Text -> Addr -> W256 -> IO (FetchResult W256)

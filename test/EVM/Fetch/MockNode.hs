@@ -132,6 +132,19 @@ answer blk world reqs body = case JSON.decodeStrict body of
         acc <- account <$> addr a
         slot <- hex s
         pure $ String $ formatBinary $ word256Bytes $ Map.findWithDefault 0 slot acc.storage
+      -- the root is a stand-in for the trie's: only whether storage is empty is meaningful
+      ("eth_getProof", [a, _, b]) -> atBlock b $ do
+        acc <- account <$> addr a
+        let root = if Map.null (Map.filter (/= 0) acc.storage) then emptyStorageRoot
+                   else keccak' (BS.concat [word256Bytes k <> word256Bytes v | (k, v) <- Map.toList acc.storage])
+        pure $ object
+          [ "balance" .= quantity acc.balance
+          , "nonce" .= quantity (fromIntegral acc.nonce)
+          , "codeHash" .= String (formatBinary (word256Bytes (keccak' acc.code)))
+          , "storageHash" .= String (formatBinary (word256Bytes root))
+          , "accountProof" .= ([] :: [Value])
+          , "storageProof" .= ([] :: [Value])
+          ]
       ("eth_getBlockByNumber", [b, _]) -> atBlock b $ Right $ object
         [ "number" .= quantity blk
         , "timestamp" .= quantity (1_700_000_000 + blk * 12)
@@ -152,6 +165,9 @@ answer blk world reqs body = case JSON.decodeStrict body of
     hex = \case
       String t | Just h <- T.stripPrefix "0x" t, [(n, "")] <- readHex (T.unpack h) -> Right (fromInteger n)
       v -> Left ("not a hex quantity: " <> T.pack (show v))
+
+emptyStorageRoot :: W256
+emptyStorageRoot = 0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421
 
 -- | Hex without leading zeros, as JSON-RPC encodes quantities
 quantity :: W256 -> Value

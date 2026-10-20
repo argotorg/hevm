@@ -273,6 +273,8 @@ genWorld = do
     , (2, (\b -> [(a, Account mempty 0 b mempty)]) <$> genBalance)
     , (1, (\n b -> [(a, Account mempty n b mempty)]) <$> (fromIntegral <$> choose (1 :: Int, 5)) <*> genBalance)
     , (1, (\b -> [(a, Account targetCode 1 b mempty)]) <$> genBalance)
+    -- storage alone makes a collision (EIP-7610)
+    , (1, (\b v -> [(a, Account mempty 0 b (Map.singleton 0 v))]) <$> genBalance <*> (genWord `suchThat` (/= 0)))
     ]
   st <- genStorage remote
   pure $ Map.fromList $ (remote, Account mempty 1 remoteBalance st) : concat others <> concat preCreated
@@ -381,7 +383,7 @@ evalSymbolic w leaves cd = case filter (taken . props) leaves of
 unexpected :: Request -> Maybe String
 unexpected (Request m ps) = case (m, map hex ps) of
   ("eth_getStorageAt", Just a : Just s : _) | (fromIntegral a, s) `notElem` domain -> bad
-  (_, Just a : _) | m `elem` ["eth_getCode", "eth_getBalance", "eth_getTransactionCount"]
+  (_, Just a : _) | m `elem` ["eth_getCode", "eth_getBalance", "eth_getTransactionCount", "eth_getProof"]
                   , fromIntegral a `notElem` (targets <> created) -> bad
   _ -> Nothing
   where

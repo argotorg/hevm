@@ -35,6 +35,7 @@ import Data.Monoid (Any(..))
 import Data.Maybe (fromJust, fromMaybe, isJust, isNothing)
 import Data.Set (Set)
 import Data.Set qualified as Set
+import Data.Text (Text)
 import Data.Vector qualified as Vector
 import Data.Word (Word8)
 import GHC.Clock (getMonotonicTime)
@@ -60,6 +61,7 @@ import EVM.Concrete qualified as Concrete
 import EVM.Expr qualified as Expr
 import EVM.Exec (ethrunAddress)
 import EVM.Fetch qualified as Fetch
+import EVM.Fetch.MockNode (Account(..), World, Node(..), withMockNode)
 import EVM.FeeSchedule
 import EVM.Format (hexByteString)
 import EVM.Op (intToOpName)
@@ -564,18 +566,22 @@ coinbaseAddr = 0xff
 prevRandaoVal :: W256
 prevRandaoVal = 42
 
+-- | The state before the transaction, as geth gets it and as the mock node serves it
+preState :: TestCase -> Inputs -> World
+preState c i = Map.fromList $
+  [ (fromAddress, Account mempty 0xac 0x5ffd4878be161d74 mempty)
+  , (contractAddr, Account (assembleItems c.prog.main) 0x48 contractBalance i.store)
+  , (calleeAddr, Account (assembleItems c.prog.callee) 1 0 mempty) ]
+  <> [(a, Account mempty (unsafeInto n) b st) | (a, b, n, st) <- extraAccounts]
+
 runGeth :: FilePath -> TestCase -> Inputs -> IO GethRun
 runGeth dir c i = do
-  let account bal code nonce st = JSON.object
-        [ ("balance", JSON.toJSON (hexW bal))
-        , ("code", JSON.toJSON (ByteStringS code))
-        , ("nonce", JSON.toJSON (hexW nonce))
-        , ("storage", JSON.toJSON (Map.fromList [(hexHash k, hexHash v) | (k, v) <- Map.toList st])) ]
-      alloc = Map.fromList
-        [ (fromAddress, account 0x5ffd4878be161d74 mempty 0xac mempty)
-        , (contractAddr, account contractBalance (assembleItems c.prog.main) 0x48 i.store)
-        , (calleeAddr, account 0 (assembleItems c.prog.callee) 1 mempty) ]
-        <> Map.fromList [(a, account b mempty n st) | (a, b, n, st) <- extraAccounts]
+  let account acc = JSON.object
+        [ ("balance", JSON.toJSON (hexW acc.balance))
+        , ("code", JSON.toJSON (ByteStringS acc.code))
+        , ("nonce", JSON.toJSON (hexW (into acc.nonce)))
+        , ("storage", JSON.toJSON (Map.fromList [(hexHash k, hexHash v) | (k, v) <- Map.toList acc.storage])) ]
+      alloc = fmap account (preState c i)
       oldest = if c.number > 256 then c.number - 256 else 0
       hashes = Map.fromList [(into n :: Integer, blockHash n) | c.number > 0, n <- [oldest .. c.number - 1]]
       env = JSON.object
@@ -656,24 +662,29 @@ symCalldataBuf = AbstractBuf "calldata"
 symbolicVMInputs :: VMInputs
 symbolicVMInputs = VMInputs symCalldataBuf (AbstractStore (LitAddr contractAddr) Nothing) TxValue Timestamp
 
-mkVm :: forall t . VMOps t => Gas t -> TestCase -> VMInputs -> ST RealWorld (VM t)
-mkVm gas c i = do
-  let contract = initialContract (RuntimeCode (ConcreteRuntimeCode (assembleItems c.prog.main)))
+-- | When fetching, only the code and balance of the contract are known up front: its storage
+-- and every other account come from the mock node
+mkVm :: forall t . VMOps t => Bool -> Gas t -> TestCase -> VMInputs -> ST RealWorld (VM t)
+mkVm fetching gas c i = do
+  let store = if fetching then ConcreteStore mempty else i.store
+      contract = initialContract (RuntimeCode (ConcreteRuntimeCode (assembleItems c.prog.main)))
         & set #balance (Expr.add (Lit contractBalance) i.callvalue)
-        & set #storage i.store
-        & set #origStorage i.store
+        & set #storage store
+        & set #origStorage store
         & set #nonce (Just 0x48)
+        & set #external fetching
       calleeContract = initialContract (RuntimeCode (ConcreteRuntimeCode (assembleItems c.prog.callee)))
         & set #nonce (Just 1)
   vm <- makeVm $ (defaultVMOpts :: VMOpts t)
     { contract = contract
     , otherContracts =
-        [ (LitAddr calleeAddr, calleeContract)
-        , (LitAddr ethrunAddress, initialContract (RuntimeCode (ConcreteRuntimeCode BS.empty))) ]
-        <> [ (LitAddr a, initialContract (RuntimeCode (ConcreteRuntimeCode BS.empty))
-               & set #balance (Lit b) & set #nonce (Just (unsafeInto n))
-               & set #storage (ConcreteStore st) & set #origStorage (ConcreteStore st))
-           | (a, b, n, st) <- extraAccounts ]
+        (LitAddr ethrunAddress, initialContract (RuntimeCode (ConcreteRuntimeCode BS.empty)))
+        : if fetching then [] else
+          (LitAddr calleeAddr, calleeContract)
+          : [ (LitAddr a, initialContract (RuntimeCode (ConcreteRuntimeCode BS.empty))
+                & set #balance (Lit b) & set #nonce (Just (unsafeInto n))
+                & set #storage (ConcreteStore st) & set #origStorage (ConcreteStore st))
+            | (a, b, n, st) <- extraAccounts ]
     , calldata = (i.calldata, [])
     , value = i.callvalue
     , address = LitAddr contractAddr
@@ -702,16 +713,23 @@ data HevmRun = HevmRun
   , logs :: [Expr Log]
   }
 
-runHevm :: App m => SolverGroup -> TestCase -> Inputs -> m HevmRun
-runHevm solvers c i = do
+-- | With a node's URL, everything but the contract's code and balance is fetched from it
+runHevm :: App m => SolverGroup -> Maybe Text -> TestCase -> Inputs -> m HevmRun
+runHevm solvers url c i = do
   let txn = mkTx c i
       gas = unsafeInto c.gasLimit - EVM.Transaction.txGasCost feeSchedule txn
-      fetcher = Fetch.oracle solvers Nothing Fetch.noRpc
-  vm0 <- liftIO $ stToIO $ mkVm gas c (concreteVMInputs i)
+  fetcher <- case url of
+    Nothing -> pure $ Fetch.oracle solvers Nothing Fetch.noRpc
+    Just u -> do
+      sess <- Fetch.mkSessionWithoutCache
+      pure $ Fetch.oracle solvers (Just sess) (Fetch.RpcInfo (Just (Fetch.BlockNumber c.number, u)))
+  vm0 <- liftIO $ stToIO $ mkVm (isJust url) gas c (concreteVMInputs i)
   (res, (vm, trace)) <- runStateT (interpretWithTrace fetcher Stepper.execFully) (vm0, [])
-  let storageOf a = case (.storage) <$> Map.lookup (LitAddr a) vm.env.contracts of
-        Just (ConcreteStore s) -> nonZero s
-        Nothing -> mempty
+  -- slots never read or written were never fetched
+  let pre a = if isJust url then (.storage) (Map.findWithDefault (Account mempty 0 0 mempty) a (preState c i)) else mempty
+      storageOf a = case (.storage) <$> Map.lookup (LitAddr a) vm.env.contracts of
+        Just (ConcreteStore s) -> nonZero (Map.union s (pre a))
+        Nothing -> nonZero (pre a)
         Just s -> internalError $ "non-concrete storage in concrete run: " <> show s
       out = case res of
         Right (ConcreteBuf b) -> Right b
@@ -736,7 +754,7 @@ symProps =
 runSymbolic :: App m => SolverGroup -> TestCase -> m (Maybe ([Expr End], Set String))
 runSymbolic solvers c = do
   conf <- readConfig
-  vm0 <- liftIO $ stToIO $ mkVm () c symbolicVMInputs
+  vm0 <- liftIO $ stToIO $ mkVm False () c symbolicVMInputs
   ref <- liftIO $ newIORef mempty
   let vm = vm0 & set #constraints symProps
   leaves <- withRunInIO $ \runInIO ->
@@ -846,11 +864,11 @@ failWith c i msg = assertFailure $ msg
   <> "\nmain: " <> bsToHex (assembleItems c.prog.main)
   <> "\ncallee: " <> bsToHex (assembleItems c.prog.callee)
 
--- | Concrete hevm against geth
-checkConcrete :: TestCase -> Inputs -> GethRun -> HevmRun -> IO ()
-checkConcrete c i g h = do
+-- | Concrete hevm against geth, howling failures with how hevm ran
+checkConcrete :: String -> TestCase -> Inputs -> GethRun -> HevmRun -> IO ()
+checkConcrete how c i g h = do
   let fails :: String -> IO a
-      fails = failWith c i
+      fails = failWith c i . ((how <> ": ") <>)
       ops :: [(Int, String)] -> String
       ops xs = unwords (map (\(p, o) -> show p <> ":" <> o) (take 40 xs))
         <> (if length xs > 40 then " ... " <> unwords (map (\(p, o) -> show p <> ":" <> o) (lastN 15 xs)) else "")
@@ -991,8 +1009,12 @@ checkCase maxReplays c = Progress.withProgressLogFromEnv "fuzz-symexec" $
         phase "geth"
         g <- liftIO $ withDir $ \dir -> runGeth dir c i
         phase "hevm"
-        h <- runHevm solvers c i
-        liftIO $ checkConcrete c i g h
+        h <- runHevm solvers Nothing c i
+        liftIO $ checkConcrete "hevm" c i g h
+        phase "hevm via RPC"
+        hr <- withRunInIO $ \run -> withMockNode c.number (preState c i) $ \node ->
+          run (runHevm solvers (Just node.url) c i)
+        liftIO $ checkConcrete "hevm via RPC" c i g hr
         pure g
       ran g = Set.fromList [intToOpName t.op | t <- g.trace]
       generated = codeOps (assembleItems c.prog.main) <> codeOps (assembleItems c.prog.callee)
