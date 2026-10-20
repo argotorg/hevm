@@ -1,6 +1,7 @@
 
 module EVM.Fetch
   ( fetchContractWithSession
+  , fetchAccountWithSession
   , fetchBlockWithSession
   , fetchQuery
   , oracle
@@ -38,7 +39,7 @@ import EVM.SMT
 import EVM.Solvers
 import EVM.Types hiding (ByteStringS)
 import EVM.Types (ByteStringS(..))
-import EVM (emptyContract)
+import EVM (emptyContract, cheatCode, consoleAddr)
 
 import Optics.Core
 import GHC.Generics (Generic)
@@ -144,6 +145,7 @@ data RpcQuery a where
   QueryNonce   :: Addr         -> RpcQuery W64
   QuerySlot    :: Addr -> W256 -> RpcQuery W256
   QueryChainId ::                 RpcQuery W256
+  QueryStorageRoot :: Addr     -> RpcQuery W256
 
 data BlockNumber = Latest | BlockNumber W256
   deriving (Show, Eq)
@@ -154,6 +156,8 @@ data RPCContract = RPCContract
   { code    :: ByteStringS
   , nonce   :: W64
   , balance :: W256
+  -- | Only fetched for accounts without code and nonce, where it decides CREATE collisions (EIP-7610)
+  , storageRoot :: Maybe W256
   }
   deriving (Eq, Show, Generic)
 
@@ -225,6 +229,9 @@ fetchQuery n f q =
     QueryChainId -> do
         m <- f (rpc "eth_chainId" [toRPC n])
         pure $ m >>= \v -> maybeToRight "Parse error" (readText <$> preview _String v)
+    QueryStorageRoot addr -> do
+        m <- f (rpc "eth_getProof" [toRPC addr, Array mempty, toRPC n])
+        pure $ m >>= \v -> maybeToRight "Parse error" (readText <$> v ^? key "storageHash" % _String)
 
 maybeToRight :: b -> Maybe a -> Either b a
 maybeToRight _ (Just x) = Right x
@@ -351,45 +358,45 @@ fetchWithSession url sess x = do
       Just err -> pure $ Left $ pack $ show err
       Nothing -> pure $ Left "Unknown RPC error"
 
+-- | Like 'fetchAccountWithSession', but an account without code is a 'FetchFailure'
 fetchContractWithSession :: Config -> Session -> BlockNumber -> Text -> Addr -> IO (FetchResult RPCContract)
-fetchContractWithSession conf sess nPre url addr = do
+fetchContractWithSession conf sess nPre url addr =
+  fetchAccountWithSession conf sess nPre url addr >>= \case
+    FetchSuccess c status | c.code == ByteStringS BS.empty -> do
+      modifyMVar_ sess.failedContracts $ pure . Set.insert addr
+      pure (FetchFailure status)
+    r -> pure r
+
+-- | Fetches any account, including ones without code (EOAs and nonexistent accounts)
+fetchAccountWithSession :: Config -> Session -> BlockNumber -> Text -> Addr -> IO (FetchResult RPCContract)
+fetchAccountWithSession conf sess nPre url addr = do
   n <- getLatestBlockNum conf sess nPre url
-  -- Check successful cache first
   cache <- readMVar sess.sharedCache
   case Map.lookup addr cache.contractCache of
     Just c -> do
-      when (conf.debug) $ putStrLn $ "-> Using cached contract at " ++ show addr
+      when (conf.debug) $ putStrLn $ "-> Using cached account at " ++ show addr
       pure (FetchSuccess c Cached)
     Nothing -> do
-      -- Check failure cache
-      failures <- readMVar sess.failedContracts
-      if Set.member addr failures
-      then do
-        when (conf.debug) $ putStrLn $ "-> Skipping previously failed contract " ++ show addr
-        pure (FetchFailure Cached)
-      else do
-        -- Attempt fetch
-        when (conf.debug) $ putStrLn $ "-> Fetching contract at " ++ show addr
-        let fetch :: Show a => RpcQuery a -> IO (Either Text a)
-            fetch = fetchQuery n (fetchWithRetry conf.debug url sess)
+      when (conf.debug) $ putStrLn $ "-> Fetching account at " ++ show addr
+      let fetch :: Show a => RpcQuery a -> IO (Either Text a)
+          fetch = fetchQuery n (fetchWithRetry conf.debug url sess)
 
-        codeRes <- fetch (QueryCode addr)
-        nonceRes <- fetch (QueryNonce addr)
-        balRes <- fetch (QueryBalance addr)
+      codeRes <- fetch (QueryCode addr)
+      nonceRes <- fetch (QueryNonce addr)
+      balRes <- fetch (QueryBalance addr)
 
-        case (codeRes, nonceRes, balRes) of
-          (Right c, Right no, Right ba) -> do
-            let contr = RPCContract (ByteStringS c) no ba
-            if c /= BS.empty 
-              then do
-                modifyMVar_ sess.sharedCache $ \x -> pure $ x { contractCache = Map.insert addr contr x.contractCache }
-                pure (FetchSuccess contr Fresh)
-              else do
-                modifyMVar_ sess.failedContracts $ \f -> pure $ Set.insert addr f
-                pure (FetchFailure Fresh)
-          (Left e, _, _) -> pure (FetchError e)
-          (_, Left e, _) -> pure (FetchError e)
-          (_, _, Left e) -> pure (FetchError e)
+      case (codeRes, nonceRes, balRes) of
+        (Right c, Right no, Right ba) -> do
+          -- nodes without eth_getProof are taken to report empty storage
+          root <- if BS.null c && no == 0
+            then either (const Nothing) Just <$> fetch (QueryStorageRoot addr)
+            else pure Nothing
+          let contr = RPCContract (ByteStringS c) no ba root
+          modifyMVar_ sess.sharedCache $ \x -> pure $ x { contractCache = Map.insert addr contr x.contractCache }
+          pure (FetchSuccess contr Fresh)
+        (Left e, _, _) -> pure (FetchError e)
+        (_, Left e, _) -> pure (FetchError e)
+        (_, _, Left e) -> pure (FetchError e)
 
 -- In case the user asks for Latest, and we have not yet established what Latest is,
 -- we fetch the block to find out. Otherwise, we update Latest to the value we have stored
@@ -412,11 +419,17 @@ getLatestBlockNum conf sess n url =
    _ -> pure n
 
 makeContractFromRPC :: RPCContract -> Contract
-makeContractFromRPC (RPCContract (ByteStringS code) nonce balance) =
+makeContractFromRPC (RPCContract (ByteStringS code) nonce balance root) =
     initialContract (RuntimeCode (ConcreteRuntimeCode code))
       & set #nonce    (Just nonce)
       & set #balance  (Lit balance)
       & set #external True
+      -- for accounts that do not exist, nodes report a zero storage hash rather than the empty root
+      & set #chainStorage (maybe False (`notElem` [0, emptyStorageRoot]) root)
+
+-- | The root of an empty storage trie: keccak256(rlp(""))
+emptyStorageRoot :: W256
+emptyStorageRoot = 0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421
 
 -- Needed for Echidna only
 fetchSlotWithCache :: Config -> Session -> BlockNumber -> Text -> Addr -> W256 -> IO (FetchResult W256)
@@ -461,7 +474,8 @@ getCacheState sess = do
   failedSlots <- readMVar sess.failedSlots
 
   -- Convert contract cache
-  let successfulContracts = fmap (Just . makeContractFromRPC) cache.contractCache
+  let successfulContracts = fmap (Just . makeContractFromRPC) $
+        Map.filter (\c -> c.code /= ByteStringS BS.empty) cache.contractCache
   let allContracts = successfulContracts
                   <> Map.fromSet (const Nothing) failedContracts
 
@@ -610,7 +624,7 @@ oracle solvers preSess rpcInfo q = do
           Nothing -> do
             when (conf.debug) $ liftIO $ putStrLn $ "Fetching contract at " ++ show addr
             let (block, url) = fromJust rpcInfo.blockNumURL
-            res <- liftIO $ fetchContractWithSession conf sess block url addr
+            res <- liftIO $ fetchAccountWithSession conf sess block url addr
             case res of
               FetchSuccess x _ -> pure $ continue (makeContractFromRPC x)
               FetchFailure _ -> internalError $ "oracle error: " ++ show q
@@ -648,8 +662,8 @@ oracle solvers preSess rpcInfo q = do
       pure . continue $ fromMaybe "" value
 
     where
-      -- special values such as 0, 0xdeadbeef, 0xacab, hevm cheatcodes, and the precompile addresses
-      isAddressSpecial addr = addr <= 0xdeadbeef || addr == 0x7109709ECfa91a80626fF3989D68f67F5b1DD12D
+      -- accounts that only exist in hevm
+      isAddressSpecial addr = LitAddr addr == cheatCode || LitAddr addr == consoleAddr
 
 
 getSolutions :: forall m . App m => SolverGroup -> Expr EWord -> Int -> Prop -> m (Maybe [W256])

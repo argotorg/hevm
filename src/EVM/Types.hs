@@ -970,6 +970,8 @@ data Contract = Contract
   , codehash    :: Expr EWord
   , opIxMap     :: VS.Vector Int -- ^ map from byte index to op index
   , external    :: Bool
+  -- | Fetched via RPC with a non-empty storage root, whose slots may not be fetched yet
+  , chainStorage :: Bool
   }
   deriving (Show)
 
