@@ -119,6 +119,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the writes they are disjoint from and resolve the writes they hit.
 
 ## Fixed
+- Storage reads return cached concrete values immediately when folding keccaks
+  in the slot resolves the lookup.
 - With `--rpc`, accessing an account without code (an EOA) no longer aborts
   with an oracle error.
 - With `--rpc`, accounts at addresses up to 0xdeadbeef, such as the burn

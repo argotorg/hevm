@@ -1565,7 +1565,7 @@ accessStorage addr slot continue = do
       --     However, without concretization, it may not find things that are actually in the storage
       case readStorage slot c.storage of
         Just x -> case readStorage slotConc c.storage of
-          Just (Lit _) -> continue x
+          Just v@(Lit _) -> continue v
           Just _ | not c.external -> continue x
           _ -> rpcCall c slotConc
         Nothing -> rpcCall c slotConc

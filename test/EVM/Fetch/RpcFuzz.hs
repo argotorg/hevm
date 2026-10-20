@@ -2,7 +2,7 @@
 -- front as with it fetched from a mock node, concretely and symbolically.
 module EVM.Fetch.RpcFuzz (tests) where
 
-import Control.Monad (forM)
+import Control.Monad (forM, forM_)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.ST (stToIO)
 import Data.Aeson ((.=))
@@ -21,10 +21,11 @@ import Data.Word (Word8)
 import Numeric (readHex)
 import Test.QuickCheck hiding (Success, Failure)
 import Test.Tasty
-import Test.Tasty.HUnit (testCase, (@?=))
+import Test.Tasty.HUnit (testCase, (@?=), assertFailure)
 import Test.Tasty.QuickCheck (testProperty, QuickCheckTests(..))
 
 import EVM (makeVm, initialContract, defaultVMOpts)
+import EVM.ABI (abiMethod, AbiValue(..))
 import EVM.Assembler qualified as Assembler
 import EVM.Concrete qualified as Concrete
 import EVM.Effects (App, Env(..), defaultConfig, runEnv)
@@ -34,6 +35,7 @@ import EVM.Fetch.MockNode (Account(..), World, Node(..), Request(..), withMockNo
 import EVM.Format (formatBinary)
 import EVM.Progress qualified as Progress
 import EVM.Solvers (withSolvers, defMemLimit, Solver(..))
+import EVM.Solidity (solcRuntime)
 import EVM.Stepper qualified as Stepper
 import EVM.SymExec (interpret, defaultIterConf, runExpr, noopPathHandler)
 import EVM.Traversals (mapExpr, mapProp)
@@ -55,6 +57,32 @@ tests = testGroup "RPC fuzzing"
           let rpcInfo = Fetch.RpcInfo (Just (Fetch.BlockNumber 16, node.url))
           runConcrete (Fetch.oracle solvers (Just sess) rpcInfo) mempty (initialContract (RuntimeCode (ConcreteRuntimeCode code))) [] mempty
       fmap (\(o, _, _) -> o) res @?= Right (Right (word256Bytes 0x1234))
+  , testCase "rpc-cached-concrete-slot" $ do
+      Just code <- solcRuntime "C" $ T.unlines
+        [ "contract C {"
+        , "  uint256[256] values;"
+        , "  function read(uint256 x) public view returns (uint256) {"
+        , "    return values[uint256(keccak256(abi.encode(x))) & 255];"
+        , "  }"
+        , "}"
+        ]
+      let slot = And (Lit 255) (Keccak (ConcreteBuf (word256Bytes 1)))
+          cached v = ConcreteStore (Map.singleton (keccak' (word256Bytes 1) `mod` 256) v)
+          cd = ConcreteBuf $ abiMethod "read(uint256)" (AbiTuple (V.singleton (AbiUInt 256 1)))
+          cases = [(cached v, Lit v) | v <- [0, 1337]]
+            <> [(SStore slot (Var "newValue") (cached 1337), Var "newValue")]
+      runEnv (Env {config = defaultConfig}) $ withSolvers Bitwuzla 1 (Just 5) defMemLimit $ \solvers ->
+        forM_ cases $ \(st, expected) -> do
+          vm <- liftIO $ stToIO $ makeVm (defaultVMOpts @Symbolic)
+            { contract = (initialContract (RuntimeCode (ConcreteRuntimeCode code))) { storage = st, external = True }
+            , address = LitAddr remote, calldata = (cd, []) }
+          let fetcher q = case q of
+                PleaseFetchSlot {} -> liftIO $ assertFailure "cached reads must not fetch storage"
+                _ -> Fetch.oracle solvers Nothing Fetch.noRpc q
+          leaves <- interpret fetcher defaultIterConf vm runExpr noopPathHandler
+          liftIO $ case leaves of
+            [Success _ _ out _] -> Expr.readWord (Lit 0) out @?= expected
+            _ -> assertFailure $ "expected one successful read, got " <> show leaves
   ]
 
 asmOps :: [Op] -> ByteString
