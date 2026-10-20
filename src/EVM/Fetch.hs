@@ -39,7 +39,7 @@ import EVM.SMT
 import EVM.Solvers
 import EVM.Types hiding (ByteStringS)
 import EVM.Types (ByteStringS(..))
-import EVM (emptyContract)
+import EVM (emptyContract, cheatCode, consoleAddr)
 
 import Optics.Core
 import GHC.Generics (Generic)
@@ -646,8 +646,8 @@ oracle solvers preSess rpcInfo q = do
       pure . continue $ fromMaybe "" value
 
     where
-      -- special values such as 0, 0xdeadbeef, 0xacab, hevm cheatcodes, and the precompile addresses
-      isAddressSpecial addr = addr <= 0xdeadbeef || addr == 0x7109709ECfa91a80626fF3989D68f67F5b1DD12D
+      -- accounts that only exist in hevm
+      isAddressSpecial addr = LitAddr addr == cheatCode || LitAddr addr == consoleAddr
 
 
 getSolutions :: forall m . App m => SolverGroup -> Expr EWord -> Int -> Prop -> m (Maybe [W256])

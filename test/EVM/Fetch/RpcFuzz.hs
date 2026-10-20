@@ -84,7 +84,9 @@ remote = 0x1234567890abcdef1234567890abcdef12345678
 
 -- | Accounts the program can touch besides 'remote', each a contract, an EOA or absent
 targets :: [Addr]
-targets = [0x2234567890abcdef1234567890abcdef12345678, 0x3234567890abcdef1234567890abcdef12345678, 0x4234567890abcdef1234567890abcdef12345678]
+-- the burn address and a precompile, as low addresses, hold ether on chain too
+targets = [0x2234567890abcdef1234567890abcdef12345678, 0x3234567890abcdef1234567890abcdef12345678, 0x4234567890abcdef1234567890abcdef12345678
+  , 0xdead, 0x1]
 
 remoteBalance :: W256
 remoteBalance = 1000
@@ -214,7 +216,7 @@ genWorld = do
   others <- forM targets $ \t -> do
     st <- genStorage t
     frequency
-      [ (2, (\n b -> [(t, Account targetCode n b st)]) <$> genNonce <*> genBalance)
+      [ (if t <= 0x11 then 0 else 2, (\n b -> [(t, Account targetCode n b st)]) <$> genNonce <*> genBalance)
       , (2, (\n b -> [(t, Account mempty n b mempty)]) <$> genNonce <*> genBalance)
       , (1, pure [])
       ]
