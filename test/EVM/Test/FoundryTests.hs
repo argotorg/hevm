@@ -58,6 +58,7 @@ tests = testGroup "Foundry tests"
               -- bad cheatcode detected, hence the warning
               , ("test/contracts/fail/bad-cheatcode.sol", ".*", (False, False))
               , ("test/contracts/fail/failCall.sol",      ".*", (False, True))
+              , ("test/contracts/fail/selectForkMissing.sol", ".*", (False, True))
               -- cheatcodes that cannot handle their symbolic arguments must leave the path partial
               , ("test/contracts/fail/symbolicCheatArgs.sol", ".*", (True, False))
               -- symbolic failures -- either the text or the selector is symbolic

@@ -72,6 +72,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs with all state but the contract's code fetched from a mock RPC node.
 
 ## Changed
+- Results that revert with `Error(string)` show the decoded message instead of hex.
 - Solver queries for branch conditions and symbolic values also get the keccak
   preimages recorded during concrete execution, as the final queries do.
 - A symbolic value that depends on several symbolic subterms with few possible
@@ -130,6 +131,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In `hevm test`, a cheatcode that cannot handle its symbolic arguments, and
   `expectRevert` with symbolic revert data, leave the path partially explored
   instead of reverting, which made the test pass.
+- In `hevm test`, `vm.selectFork` with a nonexistent fork fails the test instead
+  of ending the path in an error that counted as passing.
 - With `--rpc`, accessing an account without code (an EOA) no longer aborts
   with an oracle error.
 - With `--rpc`, accounts at addresses up to 0xdeadbeef, such as the burn

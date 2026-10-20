@@ -2234,7 +2234,7 @@ cheatActions = Map.fromList
                       }
                   doStop
               Nothing ->
-                vmError (NonexistentFork forkId')
+                frameRevert $ "assertion failed: selectFork: fork " <> Char8.pack (show forkId') <> " does not exist"
         _ -> vmError (BadCheatCode "selectFork(uint256) parameter decoding failed" sig)
 
   , action "activeFork()" $

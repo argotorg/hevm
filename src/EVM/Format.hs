@@ -48,7 +48,7 @@ module EVM.Format
 
 import Prelude hiding (LT, GT)
 
-import EVM (traceForest, traceForest', traceContext, cheatCode)
+import EVM (traceForest, traceForest', traceContext, cheatCode, stripErrorPrefix)
 import EVM.ABI (getAbiSeq, parseTypeName, AbiValue(..), AbiType(..), SolError(..), Indexed(..), Event(..))
 import EVM.ConsoleLog (formatConsoleLog)
 import EVM.Dapp (DappContext(..), DappInfo(..), findSrc, showTraceLocation)
@@ -464,7 +464,9 @@ prettyError = \case
   StackUnderrun -> "Stack underrun"
   BalanceTooLow a b -> "Balance too low. value: " <> show a <> " balance: " <> show b
   UnrecognizedOpcode a -> "Unrecognized opcode: " <> show a
-  Revert (ConcreteBuf msg) -> "Revert: " <> (T.unpack $ formatBinary msg)
+  Revert (ConcreteBuf msg) -> "Revert: " <> case stripErrorPrefix msg of
+    Just s -> "Error(" <> show (T.decodeUtf8Lenient s) <> ")"
+    Nothing -> T.unpack $ formatBinary msg
   Revert _ -> "Revert: <symbolic>"
   OutOfGas a b -> "Out of gas: have: " <> show a <> " need: " <> show b
   StateChangeWhileStatic -> "State change while static"
@@ -477,7 +479,6 @@ prettyError = \case
   ReturnDataOutOfBounds -> "Return data out of bounds"
   NonceOverflow -> "Nonce overflow"
   BadCheatCode reason a -> "Bad cheat code: " <>  reason <> " sig: " <> show a
-  NonexistentFork a -> "Fork ID does not exist: " <> show a
   AssumeCheatFailed -> "Assume failed"
 
 prettyvmresult :: Expr End -> String

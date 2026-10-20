@@ -621,7 +621,6 @@ data EvmError
   | ReturnDataOutOfBounds
   | NonceOverflow
   | BadCheatCode String FunctionSelector
-  | NonexistentFork Int
   | AssumeCheatFailed
   deriving (Show)
 
@@ -646,7 +645,6 @@ evmErrToString = \case
   StackLimitExceeded      -> "Stack limit reached"
   InvalidMemoryAccess     -> "Write protection"
   (BadCheatCode err fun)  -> err <> " Cheatcode function selector: " <> show fun
-  NonexistentFork fork    -> "Nonexistent fork: " <> show fork
   PrecompileFailure       -> "Precompile failure"
   err                     -> "hevm error: " <> show err
 
