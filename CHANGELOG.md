@@ -65,7 +65,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   simplify using the lower bound of the difference.
 - The RPC fuzzer fetches all state from a mock JSON-RPC node, with EOAs and
   nonexistent accounts, symbolic addresses, value transfers, reverting,
-  delegated and static calls, and CREATEs onto existing accounts.
+  delegated and static calls, and CREATEs and CREATE2s onto existing accounts.
+- The symbolic execution fuzzer generates BALANCE, EXTCODESIZE, EXTCODEHASH,
+  EXTCODECOPY, CREATE and CREATE2, over a pre-state with EOAs, an empty
+  account and accounts at the addresses the program creates.
 
 ## Changed
 - Solver queries for branch conditions and symbolic values also get the keccak

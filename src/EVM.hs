@@ -2840,7 +2840,7 @@ create self this xSize xGas xValue xs newAddr initCode = do
     -- the address may hold an account on chain, which the collision check and the balance need;
     -- with no chain to ask, the oracle answers with an empty account, which is left out
     (Nothing, LitAddr a) -> query $ PleaseFetchContract a EmptyBase $ \c -> do
-      unless (accountEmpty c && c.nonce == Just 0 && c.balance == Lit 0) $
+      unless (accountEmpty c) $
         assign (#env % #contracts % at newAddr) (Just c)
       assign #result Nothing
       create' self this xSize xGas xValue xs newAddr initCode

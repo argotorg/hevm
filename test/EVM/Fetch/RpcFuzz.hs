@@ -76,8 +76,8 @@ data Val = VLit W256 | VCd Int | VLoad Slot | VAdd Val Val
   deriving (Show, Eq)
 
 -- | 'Call' passes a key, a value, a key to read and a revert flag to a target, sending the
--- given wei along. 'Create' deploys an empty contract with the given wei.
-data Stmt = Store Slot Val | Load Slot | Call CallKind Target Key Val Key Key Key | Create Key
+-- given wei along. 'Create' deploys an empty contract with the given wei, and with a salt, by CREATE2.
+data Stmt = Store Slot Val | Load Slot | Call CallKind Target Key Val Key Key Key | Create (Maybe W256) Key
   deriving (Show, Eq)
 
 -- | Pre-state storage of all accounts
@@ -96,9 +96,21 @@ targets = [targetBase + i | i <- [0 .. 3]] <> [0xdead, 0x4]
 targetBase :: Addr
 targetBase = 0x2234567890abcdef1234567890abcdef12345678
 
--- | Where the CREATEs of 'remote' deploy, which may already hold an account on chain
+-- | Where the CREATEs and CREATE2s of 'remote' deploy, which may already hold an account on chain
 created :: [Addr]
 created = [a | n <- [1 .. 8], LitAddr a <- [Concrete.createAddress remote n]]
+  <> [a | s <- salts, LitAddr a <- [Concrete.create2Address remote s initCode]]
+
+-- | The first two CREATE addresses and the CREATE2 ones
+preCreatable :: [Addr]
+preCreatable = take 2 created <> drop 8 created
+
+salts :: [W256]
+salts = [0, 1]
+
+-- | The init code that 'Create' deploys: a single STOP
+initCode :: ByteString
+initCode = BS.singleton 0
 
 accounts :: [Addr]
 accounts = remote : targets <> created
@@ -194,7 +206,8 @@ assemble prog = BS.pack $ concat (zipWith asm [0 ..] prog) <> pushI (32 * loads)
                          KStatic -> pushT t <> pushW 0xffffffff <> [0xfa])
         <> pushI (outOffs !! i) <> [0x51, 0x01] <> pushI (outOffs !! i) <> [0x52]
       -- memory at 0x1f0 is never written, so the init code is a single STOP
-      Create wei -> pushI 1 <> pushI 0x1f0 <> asmKey wei <> [0xf0] <> pushI (outOffs !! i) <> [0x52]
+      Create salt wei -> maybe [] pushW salt <> pushI 1 <> pushI 0x1f0 <> asmKey wei
+        <> [maybe 0xf0 (const 0xf5) salt] <> pushI (outOffs !! i) <> [0x52]
 
 -- * Generators
 
@@ -229,7 +242,7 @@ genStmt :: Gen Stmt
 genStmt = frequency
   [ (3, Store <$> genSlot <*> genVal 2), (3, Load <$> genSlot)
   , (2, Call <$> genKind <*> genTarget <*> genKey <*> genVal 1 <*> genKey <*> genRevert <*> genWei)
-  , (1, Create <$> genWei) ]
+  , (1, Create <$> oneof [pure Nothing, Just <$> elements salts] <*> genWei) ]
   where
     genKind = frequency [(3, pure KCall), (1, pure KDelegate), (1, pure KStatic)]
     genRevert = frequency [(3, pure (KLit 0)), (1, pure (KLit 1)), (1, KCd <$> elements cdOffs)]
@@ -247,7 +260,7 @@ genWorld = do
       , (1, pure [])
       ]
   -- funded before the deployment, or taken: then the CREATE collides
-  preCreated <- forM (take 2 created) $ \a -> frequency
+  preCreated <- forM preCreatable $ \a -> frequency
     [ (3, pure [])
     , (2, (\b -> [(a, Account mempty 0 b mempty)]) <$> genBalance)
     , (1, (\n b -> [(a, Account mempty n b mempty)]) <$> (fromIntegral <$> choose (1 :: Int, 5)) <*> genBalance)
@@ -277,7 +290,7 @@ shrinkStmt = \case
     <> [Call kind t k v rk (KLit 0) wei | rev /= KLit 0]
     <> [Call kind t k v rk rev (KLit 0) | wei /= KLit 0]
     <> [Call kind t k v' rk rev wei | v' <- shrinkVal v]
-  Create wei -> [Create (KLit 0) | wei /= KLit 0]
+  Create salt wei -> [Create Nothing wei | salt /= Nothing] <> [Create salt (KLit 0) | wei /= KLit 0]
   where
     shrinkVal = \case
       VAdd a b -> [a, b]
@@ -418,7 +431,7 @@ prop_rpc =
         $ tabulate "statements" [show (length prog)]
         $ tabulate "statement kinds" [takeWhile (/= ' ') (show st) | st <- prog]
         $ tabulate "target kinds" [kind (Map.lookup t world) | t <- targets]
-        $ tabulate "pre-created kinds" [kind (Map.lookup t world) | t <- take 2 created]
+        $ tabulate "pre-created kinds" [kind (Map.lookup t world) | t <- preCreatable]
         $ tabulate "symbolic leaves" [show (length leaves)]
         $ tabulate "partial paths" [show partials]
         $ tabulate "partial reasons" [case r of UnexpectedSymbolicArg { opcode, msg } -> opcode <> ": " <> msg; _ -> takeWhile (/= ' ') (show r) | Partial _ _ r <- leaves]
