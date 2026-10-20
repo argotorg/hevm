@@ -40,7 +40,6 @@ import Data.String.Here
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Tuple.Extra
-import Data.Tree (flatten)
 import Data.Vector qualified as V
 import Test.Tasty
 import Test.Tasty.QuickCheck hiding (Failure, Success)
@@ -2326,10 +2325,9 @@ tests = testGroup "hevm"
               }
             }
           |]
-        -- NOTE: we have a postcondition here, not just a regular verification
-        (_, [Cex _]) <- withDefaultSolver $ \s ->
-          verifyContract s c Nothing [] defaultVeriOpts Nothing (checkBadCheatCode "load(address,bytes32)")
-        pure ()
+        (paths, _) <- withDefaultSolver $ \s ->
+          verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
+        assertBoolM "the cheatcode must leave the path partial" (hasCheatCodeFailed "load(address,bytes32)" paths)
     , test "vm.store fails for a potentially aliased address" $ do
         Just c <- solcRuntime "C"
           [i|
@@ -2343,10 +2341,9 @@ tests = testGroup "hevm"
               }
             }
           |]
-        -- NOTE: we have a postcondition here, not just a regular verification
-        (_, [Cex _]) <- withDefaultSolver $ \s ->
-          verifyContract s c Nothing [] defaultVeriOpts Nothing (checkBadCheatCode "store(address,bytes32,bytes32)")
-        pure ()
+        (paths, _) <- withDefaultSolver $ \s ->
+          verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
+        assertBoolM "the cheatcode must leave the path partial" (hasCheatCodeFailed "store(address,bytes32,bytes32)" paths)
     -- TODO: make this work properly
     , test "transfering-eth-does-not-dealias" $ do
         Just c <- solcRuntime "C"
@@ -5123,17 +5120,10 @@ bothM f (a, a') = do
 applyPattern :: String -> TestTree  -> TestTree
 applyPattern p = localOption (TestPattern (parseExpr p))
 
-checkBadCheatCode :: Text -> Postcondition
-checkBadCheatCode sig _ = \case
-  (Failure _ c (Revert _)) -> case mapMaybe findBadCheatCode (concatMap flatten c.traces) of
-    (s:_) -> (ConcreteBuf $ into s.unFunctionSelector) ./= (ConcreteBuf $ selector sig)
-    _ -> PBool True
-  _ -> PBool True
-  where
-    findBadCheatCode :: Trace -> Maybe FunctionSelector
-    findBadCheatCode Trace { tracedata = td } = case td of
-      ErrorTrace (BadCheatCode _ s) -> Just s
-      _ -> Nothing
+hasCheatCodeFailed :: Text -> [Expr End] -> Bool
+hasCheatCodeFailed sig = any $ \case
+  Partial _ _ (CheatCodeFailed _ _ s _) -> into s.unFunctionSelector == selector sig
+  _ -> False
 
 reachableUserAsserts :: App m => ByteString -> Maybe Sig -> m (Either [SMTCex] [Expr End])
 reachableUserAsserts = checkPost (checkAssertions [0x01])

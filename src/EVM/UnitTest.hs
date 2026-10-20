@@ -234,17 +234,17 @@ runUnitTestContract
       forM (zip [1..] testSigs) $ \(i, s) -> symRun opts vm1 (i, length testSigs) s buildOut.sources
     _ -> internalError "setUp() did not end with a result"
 
-dsTestFailedSym :: Map (Expr 'EAddr) (Expr EContract) -> VM t -> Prop
-dsTestFailedSym store vm =
-  let testContract = fromMaybe (internalError "test contract not found in state") (Map.lookup vm.state.contract store)
-  in case Map.lookup cheatCode store of
-    Just cheatContract -> Expr.readStorage' (Lit 0x6661696c65640000000000000000000000000000000000000000000000000000) cheatContract.storage .== Lit 1
-    Nothing -> And (Expr.readStorage' (Lit 0) testContract.storage) (Lit 2) .== Lit 2
+-- | forge-std's and ds-test's fail() set the "failed" slot of the cheat code
+-- address, so without that account nothing failed
+dsTestFailedSym :: Map (Expr 'EAddr) (Expr EContract) -> Prop
+dsTestFailedSym store = case Map.lookup cheatCode store of
+  Just cheatContract -> Expr.readStorage' (Lit 0x6661696c65640000000000000000000000000000000000000000000000000000) cheatContract.storage .== Lit 1
+  Nothing -> PBool False
 
 dsTestFailedConc :: Map (Expr 'EAddr) Contract -> Bool
 dsTestFailedConc store = case Map.lookup cheatCode store of
   Just cheatContract -> Expr.readStorage' (Lit 0x6661696c65640000000000000000000000000000000000000000000000000000) cheatContract.storage == Lit 1
-  Nothing -> internalError "dsTestFailedConc: expected a cheatCode in the store"
+  Nothing -> False
 
 -- Define the thread spawner for symbolic tests
 -- Returns tuple of (No Cex, No warnings)
@@ -260,10 +260,10 @@ symRun opts@UnitTestOptions{..} vm (nth, numTests) sig@(Sig testName types) sour
     let
         postcondition = curry $ case shouldFail of
           True -> \(_, post) -> case post of
-            Success _ _ _ store -> if opts.checkFailBit then (dsTestFailedSym store vm) else PBool False
+            Success _ _ _ store -> if opts.checkFailBit then dsTestFailedSym store else PBool False
             _ -> PBool True
           False -> \(_, post) -> case post of
-            Success _ _ _ store -> if opts.checkFailBit then PNeg (dsTestFailedSym store vm) else PBool True
+            Success _ _ _ store -> if opts.checkFailBit then PNeg (dsTestFailedSym store) else PBool True
             Failure _ _ (UnrecognizedOpcode 0xfe) -> PBool False
             Failure _ _ (Revert msg) -> case msg of
               ConcreteBuf b ->

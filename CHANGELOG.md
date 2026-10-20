@@ -74,6 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs with all state but the contract's code fetched from a mock RPC node.
 
 ## Changed
+- Results that revert with `Error(string)` show the decoded message instead of hex.
 - Solver queries for branch conditions and symbolic values also get the keccak
   preimages recorded during concrete execution, as the final queries do.
 - A symbolic value that depends on several symbolic subterms with few possible
@@ -123,6 +124,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Fixed
 - Enumerating symbolic values no longer shrinks buffer models and silently drops
   possible values, which could leave symbolic jump paths unexplored.
+- `hevm symbolic` no longer prints QED when some paths were only partially
+  explored; it prints the partial-exploration warning and exits with an error.
+- `hevm symbolic --create` and `hevm exec --create` run the init code instead of
+  treating the contract being created as an address collision.
+- Calls to unknown code no longer return equal results just because their other
+  inputs are equal: the callee gets unknown gas, which differs between calls.
+- `hevm test` checks the fail flag that forge-std's `fail()` sets in its default
+  mode too; `--assertion-type` has no effect anymore.
+- In `hevm test`, a cheatcode that cannot handle its symbolic arguments, and
+  `expectRevert` with symbolic revert data, leave the path partially explored
+  instead of reverting, which made the test pass.
+- In `hevm test`, `vm.selectFork` with a nonexistent fork fails the test instead
+  of ending the path in an error that counted as passing.
 - With `--rpc`, accessing an account without code (an EOA) no longer aborts
   with an oracle error.
 - With `--rpc`, accounts at addresses up to 0xdeadbeef, such as the burn

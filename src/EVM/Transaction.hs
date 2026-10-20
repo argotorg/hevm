@@ -18,6 +18,7 @@ import Data.ByteString qualified as BS
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Maybe (fromMaybe, isNothing, fromJust)
+import Control.Monad (mfilter)
 import Data.Word (Word64)
 import GHC.Generics (Generic)
 import Numeric (showHex)
@@ -321,7 +322,11 @@ initTx vm =
     oldBalance = view (accountAt toAddr % #balance) preState
     creation = vm.tx.isCreate
     -- Check for collision at target address for CREATE transactions
-    hasCollision = creation && collision (Map.lookup toAddr preState)
+    -- makeVm already put the contract being created at toAddr, with its init code
+    hasCollision = creation && collision (mfilter (not . isInitCode . (.code)) $ Map.lookup toAddr preState)
+    isInitCode = \case
+      InitCode _ _ -> True
+      _ -> False
     -- For collision: don't transfer value, don't create contract
     initState = if hasCollision
       then touchAccount toAddr preState

@@ -49,7 +49,7 @@ instance Probe (Maybe (Expr EWord, Expr EWord)) where probe m = (Just (Var (m <>
 instance Probe CallInputs where
   probe m = (CallInputs (Var (f 1)) (Var (f 2)) (Var (f 3)) (Var (f 4)) (AbstractBuf (f 5)) (Var (f 6))
                         (SymAddr (f 7)) (AbstractStore (SymAddr (f 8)) Nothing) (AbstractStore (SymAddr (f 9)) Nothing)
-                        (Var (f 10)), map f [1 .. 10])
+                        (Var (f 10)) (Var (f 11)), map f [1 .. 11])
     where f :: Int -> Text
           f i = m <> "/" <> T.pack (show i)
 instance Probe (Map (Expr EAddr) (Expr EContract)) where

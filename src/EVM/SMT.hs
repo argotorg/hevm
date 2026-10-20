@@ -683,7 +683,7 @@ propToSMTWith arithEnc = \case
   PCall i success retdata world -> do
     args <- sequence
       [ encE i.world, encE i.callKind, encE i.target, encE i.callValue, encE i.callData, encE i.callDataLen
-      , encE i.caller, encE i.callerStorage, encE i.callerTStorage, encE i.callerBalance ]
+      , encE i.caller, encE i.callerStorage, encE i.callerTStorage, encE i.callerBalance, encE i.callGas ]
     let app f = "(" <> f <> " " <> mconcat (List.intersperse " " args) <> ")"
         def v f = "(= " <> v <> " " <> app f <> ")"
     s <- encE success

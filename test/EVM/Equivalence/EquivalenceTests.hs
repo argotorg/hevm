@@ -451,7 +451,11 @@ bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
     -- returning 0 (so that both touch the same accounts)
     eq <- eqBytecode False (sCall "1234" "5f" <> sCall "1234" "5f" <> "1415" <> "5f52" <> "60205ff3")
                            (sCall "1234" "5f" <> pop <> "5f5f5260205ff3")
-    assertEqual "identical calls must agree" [] (map fst eq.res)
+    assertBool "the callee can read GAS, so identical calls may disagree (#1201)" (any (isCex . fst) eq.res)
+  , testCase "eq-call-twice-in-both-programs" $ do
+    let twice = sCall "1234" "5f" <> sCall "1234" "5f" <> "1415" <> "5f52" <> "60205ff3"
+    eq <- eqBytecode False twice ("5b" <> twice)
+    assertEqual "the n-th identical call of A and B must agree" [] (map fst eq.res)
   , testCase "eq-staticcall-in-one-program" $ do
     eq <- eqBytecode False (sCall "1234" "5f" <> pop) ""
     assertBool "a view call whose result is unused changes nothing" (null eq.res)
@@ -522,7 +526,7 @@ bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
     -- the model makes the return data 16 MB long, with one nonzero byte
     let out = AbstractBuf "out"
         inputs = CallInputs (Lit 0) (Lit 0xfa) (Lit 0x1234) (Lit 0) (ConcreteBuf "") (Lit 0) (LitAddr 0xacab)
-          (AbstractStore (LitAddr 0xacab) Nothing) (ConcreteStore mempty) (Lit 0)
+          (AbstractStore (LitAddr 0xacab) Nothing) (ConcreteStore mempty) (Lit 0) (Lit 0)
         cex = (mempty :: SMTCex) { buffers = Map.singleton out (EVM.Types.Comp (Write 7 3 (Base 0 (2 ^ (24 :: Int))))) }
     case modelUnknownCalls cex [PCall inputs (Lit 1) out Nothing] of
       [Right m] -> do
