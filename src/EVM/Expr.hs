@@ -424,6 +424,7 @@ readByte i@(Lit x) (WriteWord (Lit idx) val src)
   = if x - idx < 32
     then case val of
            (Lit _) -> indexWord (Lit $ x - idx) val
+           ReadWord {} -> indexWord (Lit $ x - idx) val
            _ -> IndexWord (Lit $ x - idx) val
     else readByte i src
 -- reading a byte that is before the CopySlice destination region, so just read from dst
@@ -2249,6 +2250,9 @@ indexWord i@(Lit idx) e@(And (Lit mask) w)
 -- indexWord takes the MSB i-th byte when called with (indexWord i).
 indexWord (Lit a) (Or funSel (And (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffff) _)) | a < 4 =
   indexWord (Lit a) funSel
+-- Read a byte directly from the source of a non-wrapping word read.
+indexWord (Lit idx) (ReadWord (Lit off) buf)
+  | idx <= 31, off <= maxBound - 31 = readByte (Lit (off + idx)) buf
 indexWord (Lit idx) (Lit w)
   | idx <= 31 = LitByte . fromIntegral $ shiftR w (248 - unsafeInto idx * 8)
   | otherwise = LitByte 0

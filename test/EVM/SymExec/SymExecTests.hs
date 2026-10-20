@@ -44,7 +44,25 @@ solidityExplorationTests = testGroup "Exploration of Solidity"
 
 basicTests :: TestTree
 basicTests = testGroup "simple-checks"
-  [ testCase "symbolic-jump-high-bytes" $ do
+  [ testCase "read-byte-from-word-mapping-key" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          mapping(address => uint256) balances;
+          function read(address dst, uint256 amount) external returns (uint256) {
+            balances[dst] = 7;
+            // The word includes dst's 20 bytes and 12 bytes of the symbolic amount.
+            bytes memory packed = abi.encodePacked(bytes12(0), bytes32(msg.data[16:48]));
+            return balances[address(uint160(uint256(bytes32(packed))))];
+          }
+        }
+      |]
+      let sig = Just (Sig "read(address,uint256)" [AbiAddressType, AbiUIntType 256])
+      paths <- executeWithBitwuzla $ \s ->
+        getExprEmptyStore s c sig ["0x1234567890123456789012345678901234567890"] defaultVeriOpts
+      assertBool "execution finishes" (not (any isPartial paths))
+      assertEqual "the copied address resolves the mapping read" [Lit 7]
+        [Expr.readWord (Lit 0) buf | Success _ _ buf _ <- paths]
+  , testCase "symbolic-jump-high-bytes" $ do
     -- jumps to calldata[0:32]: 0x10005 has the JUMPDEST at 5 in its low bytes, but is invalid
     let c = BS.pack [0x60, 0x00, 0x35, 0x56, 0x00, 0x5b, 0x00]
         hits l = PEq (ReadWord (Lit 0) (AbstractBuf "txdata")) (Lit 0x10005) : extractProps l

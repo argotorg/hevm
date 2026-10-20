@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- Byte reads through a word read at a concrete offset now resolve against its
+  source buffer, allowing unaligned copies to preserve concrete mapping keys.
 - The symbolic execution fuzzer runs random programs with abstract calldata,
   storage, callvalue and timestamp, checks the leaf the concrete inputs reach
   against geth, replays solver models of other leaves in geth, and reports
