@@ -120,6 +120,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the writes they are disjoint from and resolve the writes they hit.
 
 ## Fixed
+- Forward jumps whose conditions become concrete after folding keccak hashes
+  skip speculative merging, keeping their results concrete.
 - `hevm symbolic` no longer prints QED when some paths were only partially
   explored; it prints the partial-exploration warning and exits with an error.
 - `hevm symbolic --create` and `hevm exec --create` run the init code instead of

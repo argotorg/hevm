@@ -63,6 +63,7 @@ import EVM.Exec
 import EVM.Expr qualified as Expr
 import EVM.Fetch qualified as Fetch
 import EVM.Format (hexText, hexByteString)
+import EVM.Merge qualified as Merge
 import EVM.Progress (withProgress, ProgressOpts(..))
 import EVM.Precompiled
 import EVM.RLP
@@ -4443,7 +4444,38 @@ tests = testGroup "hevm"
   , testGroup "state-merging"
     -- Tests for ITE-based state merging during symbolic execution
     -- State merging combines multiple execution paths into a single path with ITE expressions
-    [ testCase "merge-simple-branches" $ do
+    [ testCase "merge-skips-folded-keccak-conditions" $ do
+        vm <- stToIO $ loadEmptySymVM (RuntimeCode (ConcreteRuntimeCode "")) (Lit 0) (ConcreteBuf "", []) >>= freezeVM
+        let bytes = word256Bytes 0x5eed1234
+            h = Keccak (ConcreteBuf bytes)
+            stack = [Lit 7]
+            initial = vm & set (#state % #stack) stack
+            step = error "concrete conditions must not trigger speculation"
+        forM_ [Lit 0, Lit 1, h, Eq h (Lit (keccak' bytes)), Eq h (Lit (keccak' bytes + 1))] $ \cond -> do
+          (merged, result) <- stToIO $
+            runStateT (Merge.tryMergeForwardJump testEnv.config step 0 2 cond stack) initial
+          assertBool "leave concrete branches to the executor" (not merged)
+          assertEqual "PC is unchanged" initial.state.pc result.state.pc
+          assertEqual "stack is unchanged" stack result.state.stack
+    , test "merge-folded-keccak-keeps-concrete-results" $ do
+        let input = 0x5eed1234 :: W256
+            digest = T.pack $ show (keccak' (word256Bytes input))
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function f(uint256 x) external pure returns (uint256 result) {
+              result = 7;
+              if (keccak256(abi.encode(x)) != bytes32(${digest})) result = 42;
+            }
+          }
+        |]
+        let sig = Just (Sig "f(uint256)" [AbiUIntType 256])
+        forM_ [(input, 7), (input + 1, 42)] $ \(arg, expected) -> do
+          paths <- withDefaultSolver $ \s ->
+            getExpr s c sig [show (into arg :: Integer)] defaultVeriOpts
+          assertBoolM "execution finishes" (not (any Expr.isPartial paths))
+          assertEqualM "the selected branch returns a literal" [Lit expected]
+            [Expr.readWord (Lit 0) buf | Success _ _ buf _ <- paths]
+    , testCase "merge-simple-branches" $ do
         -- Simple branching pattern that should be merged
         Just c <- solcRuntime "C"
           [i|
