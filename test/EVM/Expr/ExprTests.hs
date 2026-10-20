@@ -807,6 +807,32 @@ memoryTests = testGroup "Memory tests"
       -- Same as above, but offset not 0
       (LitByte 0x12)
       (Expr.readByte (Lit 0x20) (WriteWord (Lit 0x1) (Lit 0x12) mempty))
+  , testCase "read-byte-from-word" $ do
+      let src = AbstractBuf "src"
+          w = ReadWord (Lit 4) src
+      assertEqual "first byte" (ReadByte (Lit 4) src) (Expr.indexWord (Lit 0) w)
+      assertEqual "last byte through a write" (ReadByte (Lit 35) src)
+        (Expr.readByte (Lit 43) (WriteWord (Lit 12) w mempty))
+      assertEqual "last non-wrapping word" (ReadByte (Lit maxBound) src)
+        (Expr.indexWord (Lit 31) (ReadWord (Lit (maxBound - 31)) src))
+  , testCase "read-byte-from-word-guards" $ do
+      let src = AbstractBuf "src"
+      mapM_ (\(idx, off) ->
+        assertEqual "unsupported reads stay unchanged"
+          (IndexWord idx (ReadWord off src)) (Expr.indexWord idx (ReadWord off src)))
+        [(Lit 32, Lit 0), (Lit maxBound, Lit 0), (Var "i", Lit 4),
+         (Lit 0, Var "off"), (Lit 31, Lit (maxBound - 30)), (Lit 0, Lit maxBound)]
+  , testProperty "read-byte-from-word-equivalence" $
+      forAll (oneof [elements [0, 4, maxBound - 31], arbitrary `suchThat` (<= maxBound - 31)]) $ \off ->
+      forAll (elements [0 .. 31 :: W256]) $ \idx -> ioProperty $ do
+        let src = WriteWord (Var "p") (Var "v") (AbstractBuf "src")
+            w = ReadWord (Lit off) src
+            dst = WriteWord (Lit 12) w (AbstractBuf "dst")
+            byte = Expr.indexWord (Lit idx) w
+            copied = Expr.readByte (Lit (12 + idx)) dst
+        res <- checkSatWith equivConfig $
+          (IndexWord (Lit idx) w ./= byte) .|| (ReadByte (Lit (12 + idx)) dst ./= copied)
+        pure $ counterexample (show res) (isQed res)
   , testCase "read-write-with-offset" $ assertEqual ""
       -- 0x3F = 63 decimal, 0x20 = 32. 0x12 = 18
       --    We write 128bits (32 Bytes), representing 18 at offset 32.
