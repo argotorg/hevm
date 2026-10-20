@@ -1104,11 +1104,40 @@ basicSimplificationTests = testGroup "Basic simplification tests"
           packed = Or (SHL (Lit 255) field) (And (Lit clear) (Var "old"))
       assertEqual "top bit, Div" field (Expr.simplify (And (Lit 1) (Div packed (Lit (1 `shiftL` 255)))))
       assertEqual "top bit, SHR" field (Expr.simplify (And (Lit 1) (SHR (Lit 255) packed)))
+  , testCase "simp-packed-field-offset-zero" $ do
+      let mask = (1 `shiftL` 128) - 1
+          low = And (Lit mask) (Var "low")
+          high = And (Lit mask) (Var "high")
+          shifted = SHL (Lit 128) high
+      assertEqual "SHL packing" low (Expr.simplify (And (Lit mask) (Or low shifted)))
+      assertEqual "Mul packing" low
+        (Expr.simplify (And (Lit mask) (Or (Mul (Lit (1 `shiftL` 128)) high) low)))
+      assertEqual "after upper write" (And (Lit mask) (Var "old"))
+        (Expr.simplify (And (Lit mask) (Or shifted (And (Lit mask) (Var "old")))))
+  , testCase "simp-masked-or-keeps-one-mask" $ do
+      let visible = Or (Var "a") (Or (Var "b") (Var "c"))
+          masked = And (Lit 0xff) visible
+          hidden = SHL (Lit 8) (Var "high")
+      assertEqual "plain operands are unchanged" (And (Lit 0xff) (Or (Var "a") (Var "b")))
+        (Expr.simplify (And (Lit 0xff) (Or (Var "a") (Var "b"))))
+      assertEqual "removing a nested operand does not distribute the mask"
+        (Expr.simplify masked) (Expr.simplify (And (Lit 0xff) (Or (Var "a") (Or hidden (Or (Var "b") (Var "c"))))))
+  , testCase "simp-masked-or-boundaries" $ do
+      let hidden = SHL (Lit 16) (Var "high")
+          lowShift = SHL (Lit 4) (Var "low")
+      assertEqual "partially overlapping field keeps its mask" (And (Lit 0xff) lowShift)
+        (Expr.simplify (And (Lit 0xff) (Or hidden lowShift)))
+      assertEqual "noncontiguous mask" (And (Lit 0x0f0f) (Var "low"))
+        (Expr.simplify (And (Lit 0x0f0f) (Or hidden (Var "low"))))
   , testProperty "simp-packed-field-equivalence" $ withMaxSuccess 300 $ forAll genPackedFieldWord $ \w ->
       forAll (elements [0, 1, 8, 32, 64, 96, 128, 160, 200, 224, 255, 256]) $ \k ->
-      forAll (elements [0, 1, 8, 32, 64, 128, 255, 256]) $ \n -> forAll arbitrary $ \useShr -> ioProperty $ do
+      forAll (elements [0, 1, 8, 32, 64, 128, 255, 256]) $ \n ->
+      forAll (elements [Nothing, Just False, Just True]) $ \shiftForm -> ioProperty $ do
         let mask = (1 `shiftL` n) - 1 :: W256
-            inner = if useShr then SHR (Lit (fromIntegral k)) w else Div w (Lit (1 `shiftL` k))
+            inner = case shiftForm of
+              Nothing -> w
+              Just True -> SHR (Lit (fromIntegral k)) w
+              Just False -> Div w (Lit (1 `shiftL` k))
             full = And (Lit mask) inner
             simp = Expr.simplify full
         res <- if full == simp then pure Qed

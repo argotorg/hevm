@@ -520,6 +520,7 @@ possibleOnes = go (8 :: Int)
       Max a b -> fill (Prelude.max (r a) (r b))
       Add a b -> let x = fill (r a); y = fill (r b)
                  in if x <= maxLit - y then fill (x + y) else maxLit
+      Mul (Lit c) x | Just k <- log2W c -> r x `shiftL` k
       Mul a b -> let x = fill (r a); y = fill (r b)
                  in if x == 0 || y == 0 then 0 else if x <= maxLit `Prelude.div` y then fill (x * y) else maxLit
       _ -> maxLit
@@ -1637,9 +1638,17 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (And (Lit m) (SHR (Lit k) x))
       | k < 256, Just r <- packedField m (unsafeInto k) x = r
 
-    -- Masking as as per Solidity bit-packing of e.g. function parameters
-    go (And (Lit mask1) (Or (And (Lit mask2) _) x)) | (mask1 .&. mask2 == 0)
-         = And (Lit mask1) x
+    -- Drop OR terms hidden by the mask without distributing it.
+    go (And m@(Lit mask) x@(Or _ _))
+      | terms <- orTerms x
+      , kept <- filter (\t -> mask .&. possibleOnes t /= 0) terms
+      , length kept < length terms
+      = EVM.Expr.and m $ case kept of
+          [] -> Lit 0
+          _ -> foldr1 EVM.Expr.or kept
+      where
+        orTerms (Or a b) = orTerms a <> orTerms b
+        orTerms t = [t]
 
     -- address masking
     go (And (Lit 0xffffffffffffffffffffffffffffffffffffffff) a@(WAddr _)) = a
