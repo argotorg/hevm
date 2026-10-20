@@ -2526,6 +2526,35 @@ tests = testGroup "hevm"
           Just (Left (ErrorCall msg)) -> assertEqualM "rethrown error" "worker boom" msg
           Just (Right _) -> liftIO $ assertFailure "expected the worker's exception"
           Nothing -> liftIO $ assertFailure "interpret hung after a worker exception"
+    , test "address-sized-memory-access-charges-gas" $ do
+        -- deploys ADDRESS PUSH0 RETURN: the return size is the address, as a WAddr
+        Just vm <- loadVM (fromJust $ hexByteString "62305ff35f526003601df3")
+        res <- Stepper.interpret (Fetch.zero 0 Nothing 1024) vm Stepper.execFully
+        case res of
+          Left _ -> pure ()
+          r -> liftIO $ assertFailure $ "returning 2^160 bytes must fail, got " <> show r
+    , test "decomposed-cex-storage-replays" $ do
+        Just c <- solcRuntime "C" [i|
+            contract C {
+              mapping(uint256 => uint256) m;
+              mapping(uint256 => uint256) n;
+              function f(uint256 x) external view { assert(!(m[x] == 3 && n[x] == 4)); }
+            } |]
+        ((cd, cdProps), _) <- mkCalldata (Just (Sig "f(uint256)" [AbiUIntType 256])) []
+        vm <- liftIO $ stToIO $ abstractVM (cd, cdProps) c Nothing False
+        let post = checkAssertions defaultPanicCodes
+        withDefaultSolver $ \s -> do
+          (_, res) <- verify s (Fetch.oracle s Nothing Fetch.noRpc) defaultVeriOpts vm post Nothing
+          case mapMaybe getCex res of
+            [(leaf, cex)] -> do
+              let x = maybe 0 (word . BS.take 32 . BS.drop 4) (cexCalldata cd cex)
+                  slot p = keccak' (word256Bytes x <> word256Bytes p)
+                  st = Map.findWithDefault mempty (SymAddr "entrypoint") cex.store
+              assertEqualM "m[x] at its real slot" (Just 3) (Map.lookup (slot 0) st)
+              assertEqualM "n[x] at its real slot" (Just 4) (Map.lookup (slot 1) st)
+              replayed <- replaySymCex s post vm leaf cex
+              assertEqualM "replay" (Right True) replayed
+            r -> liftIO $ assertFailure $ "expected one counterexample, got " <> show r
     , test "require-test" $ do
         Just c <- solcRuntime "MyContract"
             [i|
@@ -5058,7 +5087,7 @@ tests = testGroup "hevm"
         e1 = SLoad (Lit 0x1) (SStore (Lit 0x8) (SLoad (Lit 0x40) as) cs)
         eq = PEq e1 (Lit 0x0)
       conf <- readConfig
-      let SMT2 _ (CexVars _ _ _ storeReads _ _) _ = fromRight (internalError "Must succeed") (assertProps conf [eq])
+      let SMT2 _ (CexVars _ _ _ storeReads _ _ _) _ = fromRight (internalError "Must succeed") (assertProps conf [eq])
       let expected = StorageReads $ Map.singleton (SymAddr "test", Nothing) (Set.singleton (Lit 0x40))
       assertEqualM "Reads must be properly collected" storeReads expected
     , test "all-abstract-reads-detected" $ do

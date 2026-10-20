@@ -133,10 +133,16 @@ declareIntermediatesWith enc bufs stores = do
       storage <- exprToSMTWith enc expr
       pure [SMTCommand ("(define-fun store" <> (Data.Text.Lazy.Builder.Int.decimal n) <> " () Storage " <> storage <> ")")]
 
-decompose :: Config -> [Prop] -> [Prop]
-decompose conf props = if conf.decomposeStorage
-                    then fromMaybe props (Expr.decomposeStorageProps props)
-                    else props
+decompose :: Config -> [Prop] -> ([Prop], CexVars)
+decompose conf props = case Expr.decomposeStorageProps props of
+  Just decomposed | conf.decomposeStorage ->
+    (decomposed, mempty { logicalStores = Map.fromList [(i, s) | s <- Expr.accessedLogicalStores props, i <- storeIdx s] })
+  _ -> (props, mempty)
+  where
+    storeIdx = \case
+      MapStore i -> [i]
+      ArrayStore i -> [i]
+      SmallSlots -> []
 
 -- simplify to rewrite sload/sstore combos
 -- notice: it is VERY important not to concretize early, because Keccak assumptions
@@ -144,7 +150,8 @@ decompose conf props = if conf.decomposeStorage
 assertProps :: Config -> [Prop] -> Err SMT2
 assertProps conf ps =
   if not conf.simp then assertPropsHelperWith ConcreteArith False [] ps
-  else assertPropsHelperWith ConcreteArith True [] (decompose conf ps)
+  else let (decomposed, stores) = decompose conf ps
+       in (<> SMT2 mempty stores mempty) <$> assertPropsHelperWith ConcreteArith True [] decomposed
 
 data AbstractQuery = AbstractQuery
   { query :: SMT2
@@ -160,7 +167,7 @@ data AbstractQuery = AbstractQuery
 -- | Assert props with abstract div/mod/mul (uninterpreted functions + lemmas).
 assertPropsAbstract :: Config -> [Prop] -> Err AbstractQuery
 assertPropsAbstract conf ps = do
-  base@(SMT2 _ _ goalPs) <- assertPropsHelperWith AbstractArith conf.simp divModAbstractDecls psDecomp
+  base@(SMT2 _ _ goalPs) <- (<> SMT2 mempty decompStores mempty) <$> assertPropsHelperWith AbstractArith conf.simp divModAbstractDecls psDecomp
   -- Lemmas and ground truth come from the helper's concretized props, the ones
   -- the goal is encoded from: raw props can keep storage reads that simplify
   -- away in the goal, so their terms would not match.
@@ -179,7 +186,7 @@ assertPropsAbstract conf ps = do
     , lemmaFamilies = families
     }
   where
-    psDecomp = if conf.simp then decompose conf ps else ps
+    (psDecomp, decompStores) = if conf.simp then decompose conf ps else (ps, mempty)
     defineTerm (name, body) = do
       encoded <- exprToSMTWith AbstractArith body
       pure $ SMTCommand $ "(define-fun " <> fromText name <> " () (_ BitVec 256) " <> encoded <> ")"
@@ -937,9 +944,10 @@ getBufs getVal bufs = foldM getBuf mempty bufs
 -- concretized storage
 getStore
   :: ValGetter
+  -> Map W256 LogicalStore
   -> StorageReads
   -> MaybeIO (Map (Expr EAddr) (Map W256 W256))
-getStore getVal (StorageReads innerMap) = do
+getStore getVal stores (StorageReads innerMap) = do
   results <- forM (Map.toList innerMap) $ \((addr, idx), slots) -> do
     let name = toLazyText (storeName addr idx)
     raw <- getVal name
@@ -951,9 +959,17 @@ getStore getVal (StorageReads innerMap) = do
     -- create a map by adding only the locations that are read by the program
     store <- foldM (\m slot -> do
       slot' <- queryValue getVal slot
-      pure $ Map.insert slot' (fun slot') m) Map.empty (Set.toList slots)
+      real <- hoistMaybe $ realSlot idx slot'
+      pure $ Map.insert real (fun slot') m) Map.empty (Set.toList slots)
     pure (addr, store)
-  pure $ Map.fromList results
+  pure $ Map.fromListWith Map.union results
+  where
+    -- a decomposed store is indexed by the key within its mapping or array
+    realSlot Nothing key = Just key
+    realSlot (Just idx) key = case Map.lookup idx stores of
+      Just (MapStore p) -> Just $ keccak' (word256Bytes key <> word256Bytes p)
+      Just (ArrayStore p) -> Just $ keccak' (word256Bytes p) + key
+      _ -> Nothing
 
 -- | Ask the solver to give us the concrete value of an arbitrary abstract word
 queryValue :: ValGetter -> Expr EWord -> MaybeIO W256

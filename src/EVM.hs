@@ -3355,6 +3355,14 @@ accessMemoryRange (Lit offs) (Lit sz) continue =
         else if offs64 >= memoryAccessLimit || sz64 >= memoryAccessLimit
              then vmError IllegalOverflow
              else accessUnboundedMemoryRange offs64 sz64 continue
+-- e.g. an address pushed by CREATE or CALLER is a WAddr, not a Lit
+accessMemoryRange offs sz continue
+  | Just o <- lit offs, Just s <- lit sz = accessMemoryRange (Lit o) (Lit s) continue
+  where
+    lit = \case
+      Lit w -> Just w
+      WAddr (LitAddr a) -> Just (into a)
+      _ -> Nothing
 -- we just ignore gas if we get symbolic inputs
 accessMemoryRange offs sz continue = do
   m0 <- gets (.state.memorySize)

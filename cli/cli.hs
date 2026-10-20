@@ -7,7 +7,7 @@
 
 module Main where
 
-import Control.Monad (when, forM_, unless)
+import Control.Monad (when, forM, forM_, unless)
 import Control.Monad.State.Strict (runStateT)
 import Control.Monad.ST (stToIO)
 import Control.Monad.IO.Unlift
@@ -597,14 +597,22 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = do
         liftIO $ printCaveats caveats
         showExtras solvers sOpts calldata expr
       _ -> do
-        let cexs = snd <$> mapMaybe getCex res
-            counterexamples
+        let cexs = mapMaybe getCex res
+        replays <- forM cexs $ \(leaf, cex) -> case cExecOpts.rpc of
+          Just _ -> pure $ Left "state fetched over RPC is not replayed"
+          Nothing -> replaySymCex solvers (checkAssertions errCodes) preState leaf cex
+        let counterexamples
               | null cexs = []
               | otherwise =
                  [ ""
                  , ("Discovered the following " <> (T.pack $ show (length cexs)) <> " counterexample(s):")
                  , ""
-                 ] <> fmap (formatCex (fst calldata) Nothing) cexs
+                 ] <> zipWith (\(_, cex) r -> formatCex (fst calldata) Nothing cex <> "\x1b[1mConcrete replay:\x1b[0m " <> replayText r <> "\n") cexs replays
+            -- as `hevm test` shows its counterexamples
+            replayText = \case
+              Right True -> "\x1b[90m[validated]\x1b[0m"
+              Right False -> "\x1b[31m[not reproducible]\x1b[0m"
+              Left why -> "\x1b[33m[cannot replay: " <> why <> "]\x1b[0m"
         liftIO $ T.putStrLn $ T.unlines counterexamples
         liftIO $ printWarnings Nothing mempty expr res "symbolically"
         liftIO $ printCaveats caveats
