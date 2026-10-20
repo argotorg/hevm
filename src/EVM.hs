@@ -1893,6 +1893,9 @@ freshBufFallback target value inOffset inSize outOffset outSize changesState xs 
     paid <- maybe (Balance caller) (.balance) <$> preuse (#env % #contracts % ix caller)
     let left = Expr.sub paid moved
     modifying #constraints ((:) (PLEq etherIn (Expr.sub (Lit maxBound) left)))
+    -- a call with more value than the caller has fails before reaching the callee
+    when (value /= Lit 0) $ modifying #constraints ((:) (PImpl (PGT value paid)
+      (PAnd (PEq freshVarExpr (Lit 0)) (PEq (bufLength freshReturndataExpr) (Lit 0)))))
     assign (#env % #contracts % ix caller % #balance) (Expr.add left etherIn)
     case wordToAddr target of
       Just a | a /= caller -> modifying (#env % #contracts % ix a % #balance) (Expr.add moved)
@@ -3373,29 +3376,37 @@ copyBytesToMemory bs size srcOffset memOffset
       let k = 0 - s
       copyBytesToMemory mempty (Lit (sz - k)) (Lit 0) (Expr.add memOffset (Lit k))
       copyBytesToMemory bs (Lit k) srcOffset memOffset
-  | otherwise =
-  if size == Lit 0 then noop
-  else do
-    gets (.state.memory) >>= \case
-      ConcreteMemory mem ->
-        case (bs, size, srcOffset, memOffset) of
-          (ConcreteBuf b, Lit size', Lit srcOffset', Lit memOffset') -> do
-            let src =
-                  if srcOffset' >= unsafeInto (BS.length b) then
-                    BS.replicate (unsafeInto size') 0
-                  else
-                    BS.take (unsafeInto size') $
-                    padRight (unsafeInto size') $
-                    BS.drop (unsafeInto srcOffset') b
+  -- a symbolic offset may wrap too: then read from just below 2^256, past the end of any buffer
+  | Lit sz <- size, sz > 0, wraps <- Expr.lt (Lit (0 - sz)) srcOffset, wraps /= Lit 0 =
+      copyNoWrap (ITE wraps (Lit (0 - sz)) srcOffset)
+  | (case size of Lit _ -> False; _ -> True), srcOffset /= Lit 0
+  , wraps <- Expr.lt (Expr.add srcOffset size) srcOffset, wraps /= Lit 0 =
+      copyNoWrap (ITE wraps (Expr.sub (Lit 0) size) srcOffset)
+  | otherwise = copyNoWrap srcOffset
+  where
+    copyNoWrap off =
+      if size == Lit 0 then noop
+      else do
+        gets (.state.memory) >>= \case
+          ConcreteMemory mem ->
+            case (bs, size, off, memOffset) of
+              (ConcreteBuf b, Lit size', Lit off', Lit memOffset') -> do
+                let src =
+                      if off' >= unsafeInto (BS.length b) then
+                        BS.replicate (unsafeInto size') 0
+                      else
+                        BS.take (unsafeInto size') $
+                        padRight (unsafeInto size') $
+                        BS.drop (unsafeInto off') b
 
-            writeMemory mem (unsafeInto memOffset') src
-          _ -> do
-            -- copy out and move to symbolic memory
-            buf <- freezeMemory mem
-            assign (#state % #memory) $
-              SymbolicMemory $ copySlice srcOffset memOffset size bs buf
-      SymbolicMemory mem ->
-        assign (#state % #memory) $ SymbolicMemory $ copySlice srcOffset memOffset size bs mem
+                writeMemory mem (unsafeInto memOffset') src
+              _ -> do
+                -- copy out and move to symbolic memory
+                buf <- freezeMemory mem
+                assign (#state % #memory) $
+                  SymbolicMemory $ copySlice off memOffset size bs buf
+          SymbolicMemory mem ->
+            assign (#state % #memory) $ SymbolicMemory $ copySlice off memOffset size bs mem
 
 copyCallBytesToMemory
   :: Expr Buf -> Expr EWord -> Expr EWord -> EVM t ()

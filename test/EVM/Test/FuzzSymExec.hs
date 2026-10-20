@@ -892,9 +892,18 @@ hevmErrorKind = errorKind . evmErrToString
 
 -- | Symbolic execution does not track gas, so its outcome is unknown when gas ran out anywhere
 gasDependent :: GethRun -> Bool
-gasDependent g = any isGas (g.error : map (.error) g.trace)
+gasDependent g = any isGas (g.error : map (.error) g.trace) || any lowGasPrecompile (zip g.trace (drop 1 g.trace)) || callsModexp g
   where
     isGas = maybe False (\e -> "out of gas" `isInfixOf` e || "gas uint64 overflow" `isInfixOf` e)
+    -- geth does not trace precompiles, and one that fails burns its gas whether it ran out or not.
+    -- Generated precompile calls get plenty of gas, so a failing one with little may have run out.
+    lowGasPrecompile (a, b) = case reverse a.stack of
+      gas : target : _ -> a.op `elem` [0xf1, 0xf2, 0xf4, 0xfa] && target >= 1 && target <= 0x11
+        && b.depth == a.depth && headMay (reverse b.stack) == Just 0 && min gas a.gas < 0x100000
+      _ -> False
+
+callsModexp :: GethRun -> Bool
+callsModexp g = any (\t -> t.op `elem` [0xf1, 0xf2, 0xf4, 0xfa] && take 1 (drop 1 (reverse t.stack)) == [5]) g.trace
 
 compareTraces :: [VMTraceStep] -> [EVMToolTrace] -> Either String ()
 compareTraces hs gs = go hs (dedup gs)
@@ -957,15 +966,17 @@ checkConcrete how c i g h = do
             <> "\ngeth trace: "
             <> ops [(t.pc, intToOpName t.op <> maybe "" withParens t.error) | t <- g.trace]
       withParens e = "(" <> e <> ")"
-  either (fails . (<> traces)) pure (compareTraces h.trace g.trace)
-  let ho = hevmOutcome h
-      go = gethOutcome g
-  unless (ho == go || gasDependent g && failed ho && failed go) $
-    fails $ "concrete outcome mismatch\nhevm: " <> show ho <> "\ngeth: " <> show go
-  when (succeeded go && not (logsMatch h.logs g.logs)) $
-    fails $ "logs mismatch\nhevm: " <> show h.logs <> "\ngeth: " <> show g.logs
-  when (h.gasUsed /= g.gasUsed) $
-    fails $ "gas used mismatch\nhevm: " <> show h.gasUsed <> "\ngeth: " <> show g.gasUsed
+  -- geth 1.16.1 prices modexp before EIP-7883 was final, so gas and what depends on it differ
+  unless (callsModexp g) $ do
+    either (fails . (<> traces)) pure (compareTraces h.trace g.trace)
+    let ho = hevmOutcome h
+        go = gethOutcome g
+    unless (ho == go || gasDependent g && failed ho && failed go) $
+      fails $ "concrete outcome mismatch\nhevm: " <> show ho <> "\ngeth: " <> show go
+    when (succeeded go && not (logsMatch h.logs g.logs)) $
+      fails $ "logs mismatch\nhevm: " <> show h.logs <> "\ngeth: " <> show g.logs
+    when (h.gasUsed /= g.gasUsed) $
+      fails $ "gas used mismatch\nhevm: " <> show h.gasUsed <> "\ngeth: " <> show g.gasUsed
   where
     failed = \case OSuccess {} -> False; _ -> True
     succeeded = \case OSuccess {} -> True; _ -> False
@@ -1025,14 +1036,24 @@ checkLeaves c i leaves expected g = do
       undecided = [n | (n, Nothing) <- zip [0 :: Int ..] evals]
       taken = [n | (n, Just True) <- zip [0 :: Int ..] evals]
   -- past where gas runs out, the symbolic paths can e.g. hash huge buffers
-  if gasDependent g && not (null undecided) && length taken <= 1 then pure "gas-dependent, undecided path" else do
+      unknownCall = any (\case PCall {} -> True; _ -> False) . extractProps
+  if gasDependent g && not (null undecided) && length taken <= 1 then pure "gas-dependent, undecided path"
+  -- a call to a symbolic target gets fresh results, which the inputs cannot decide
+  else if not (null undecided) && all (unknownCall . (leaves !!)) undecided && length taken <= 1
+    then pure "call to unknown code, undecided path" else do
     unless (null undecided) $ fails $ "path conditions of leaves " <> show undecided <> " did not concretize: "
       <> show [concProps (extractProps (leaves !! n)) | n <- undecided]
     n <- case taken of
       [n] -> pure n
       _ -> fails $ "concrete inputs reach leaves " <> show taken <> " instead of exactly one"
-    forM_ expected $ \e -> when (e /= n) $ fails $ "model of leaf " <> show e <> " reaches leaf " <> show n
-    if gasDependent g then pure "gas-dependent" else case leafOutcome c i (leaves !! n) of
+    -- keccak of a symbolic buffer is only bounded, so a model may pick a hash no input has
+    let spurious = maybe False (\e -> e /= n && hashesSymbolic (leaves !! e)) expected
+        hashesSymbolic l = getAny $ foldMap (foldProp symKeccak mempty) (extractProps l)
+        symKeccak :: Expr b -> Any
+        symKeccak = \case Keccak (ConcreteBuf _) -> Any False; Keccak _ -> Any True; _ -> Any False
+    forM_ expected $ \e -> when (e /= n && not spurious) $ fails $ "model of leaf " <> show e <> " reaches leaf " <> show n
+    if spurious then pure "model via symbolic keccak reaches another leaf"
+    else if gasDependent g then pure "gas-dependent" else case leafOutcome c i (leaves !! n) of
       Left err -> fails err
       Right Nothing -> pure $ leafKind (leaves !! n)
       Right (Just o)
@@ -1235,7 +1256,14 @@ tests = testGroup "contract-quickcheck-run"
               ]
         _ <- checkCase 0 (fixedCase items (BS.pack [1, 2, 3, 4, 5]))
         pure ()
-      , after AllFinish "calldata-wraparound-2" $ test "calldata-overwrite-with-0-if-oversized" $ do
+      , after AllFinish "calldata-wraparound-2" $ test "codecopy-symbolic-offset-wraparound" $ do
+        let items = concat
+              [ pushOps [4] <> [IOp OpCallvalue, IOp OpNot] <> pushOps [6] <> [IOp OpCodecopy] -- size, ~callvalue, destOffs
+              , pushOps [0x60, 0] <> [IOp OpReturn]
+              ]
+        _ <- checkCase 0 (fixedCase items mempty)
+        pure ()
+      , after AllFinish "codecopy-symbolic-offset-wraparound" $ test "calldata-overwrite-with-0-if-oversized" $ do
         -- supposed to copy 1...6 and then 0s, overwriting the 0xff with 0
         let items = concat
               [ pushOps [0xff, 1] <> [IOp OpMstore8]
