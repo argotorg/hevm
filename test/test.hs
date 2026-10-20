@@ -813,6 +813,57 @@ tests = testGroup "hevm"
         assertEqualM "should not find cex (bug requires 128 bytes, bound is 64)" 0 numCexes
     ]
 
+  , testGroup "Concrete-args"
+    [ testProperty "arg-roundtrip" $ forAll (arbitrary >>= \t -> (,) t <$> genAbiValue t) $
+      \(t, v) -> makeAbiValue t (renderArg v) === v
+    , testProperty "concrete-args-calldata" $ forAll genArgs $ \vs -> prop $ do
+        let types = map abiValueType vs
+            sig = "f(" <> T.intercalate "," (map abiTypeSolidity types) <> ")"
+            expected = selector sig <> encodeAbiValue (AbiTuple (V.fromList vs))
+        (cd, _, _) <- symCalldata sig types (map renderArg vs) (AbstractBuf "txdata")
+        let got = [Expr.readByte (Lit (unsafeInto k)) cd | k <- [0 .. BS.length expected - 1]]
+        assertEqualM "calldata mismatch" (map LitByte (BS.unpack expected)) got
+    , test "negative-int-arg" $ do
+        Just c <- solcRuntime "C" [i|
+            contract C {
+              function g(int8 x) external pure { assert(x >= 0); }
+            } |]
+        let sig = Just $ Sig "g(int8)" [AbiIntType 8]
+        (_, neg) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig ["-1"] defaultVeriOpts
+        assertEqualM "-1 must violate the assertion" 1 (sum $ map (fromEnum . isCex) neg)
+        (_, pos) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig ["5"] defaultVeriOpts
+        assertEqualM "5 must not violate the assertion" 0 (sum $ map (fromEnum . isCex) pos)
+    , test "int-arg-out-of-range" $ do
+        let parses v = not . null $ [x | (x, "") <- readP_to_S (parseAbiValue (AbiIntType 8)) v]
+        assertBoolM "-128 is an int8" $ parses "-128"
+        assertBoolM "127 is an int8" $ parses "127"
+        assertBoolM "-129 is not an int8" $ not (parses "-129")
+        assertBoolM "0xff is not an int8" $ not (parses "0xff")
+    , test "dynamic-and-static-args" $ do
+        Just c <- solcRuntime "C" [i|
+            contract C {
+              function t(bytes memory a, uint256 y, string memory b, uint8[2] memory c) external pure {
+                assert(!(a.length == 33 && a[32] == 0x42 && bytes(b).length == 2 && bytes(b)[1] == "z" && c[1] == 7 && y > 100));
+              }
+            } |]
+        let sig = Just $ Sig "t(bytes,uint256,string,uint8[2])"
+                    [AbiBytesDynamicType, AbiUIntType 256, AbiStringType, AbiArrayType 2 (AbiUIntType 8)]
+            a = "0x" <> concat (replicate 32 "00") <> "42"
+            check args = fmap snd $ withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig args defaultVeriOpts
+        symY <- check [a, "<symbolic>", "\"yz\"", "[0,7]"]
+        assertEqualM "symbolic y must reach the assertion" 1 (sum $ map (fromEnum . isCex) symY)
+        concY <- check [a, "50", "\"yz\"", "[0,7]"]
+        assertEqualM "y = 50 must not reach the assertion" 0 (sum $ map (fromEnum . isCex) concY)
+    , test "bytesN-arg" $ do
+        Just c <- solcRuntime "C" [i|
+            contract C {
+              function h(bytes32 x, uint256 y) external pure { assert(x != bytes32(y)); }
+            } |]
+        let sig = Just $ Sig "h(bytes32,uint256)" [AbiBytesType 32, AbiUIntType 256]
+        (_, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig ["0x" <> replicate 63 '0' <> "1"] defaultVeriOpts
+        assertEqualM "y = 1 must violate the assertion" 1 (sum $ map (fromEnum . isCex) ret)
+    ]
+
   , testGroup "Precompiled contracts"
       [ testGroup "Example (reverse)"
           [ test "success" $
@@ -2454,7 +2505,15 @@ tests = testGroup "hevm"
     ]
   , testGroup "Symbolic execution"
       [
-     test "require-test" $ do
+     test "create-returns-symbolic-size" $ do
+        -- initcode returns and(callvalue, 0xf) bytes; the parent asserts the
+        -- created code is not 5 bytes long
+        let c = fromJust $ hexByteString
+                  "7f600f34165ff300000000000000000000000000000000000000000000000000005f5260065f5f35f03b600514603157005bfe"
+        (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertBoolM "unexpected partial execution" $ not (any isPartial e)
+        assertBoolM "5-byte code must be reachable" $ any isCex ret
+    , test "require-test" $ do
         Just c <- solcRuntime "MyContract"
             [i|
             contract MyContract {
@@ -5165,6 +5224,19 @@ bothM f (a, a') = do
   b  <- f a
   b' <- f a'
   return (b, b')
+
+-- | An '--arg' string that 'makeAbiValue' parses back to the value
+renderArg :: AbiValue -> String
+renderArg = \case
+  AbiString s -> show (map (toEnum . fromIntegral) (BS.unpack s) :: String)
+  AbiArrayDynamic _ v -> "[" <> List.intercalate "," (renderArg <$> V.toList v) <> "]"
+  AbiArray _ _ v -> "[" <> List.intercalate "," (renderArg <$> V.toList v) <> "]"
+  v -> show v
+
+genArgs :: Gen [AbiValue]
+genArgs = do
+  n <- chooseInt (1, 4)
+  vectorOf n (scale (`div` 2) arbitrary)
 
 applyPattern :: String -> TestTree  -> TestTree
 applyPattern p = localOption (TestPattern (parseExpr p))

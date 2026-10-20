@@ -519,8 +519,10 @@ makeAbiValue typ str = case readP_to_S (parseAbiValue typ) (padStr str) of
 parseAbiValue :: AbiType -> ReadP AbiValue
 parseAbiValue (AbiUIntType n) = do W256 w <- readS_to_P reads
                                    pure $ AbiUInt n w
-parseAbiValue (AbiIntType n) = do W256 w <- readS_to_P reads
-                                  pure $ AbiInt n (unsafeInto w)
+parseAbiValue (AbiIntType n) = do i <- readS_to_P (reads :: ReadS Integer)
+                                  if -(2 ^ (n - 1)) <= i && i < 2 ^ (n - 1)
+                                    then pure $ AbiInt n (fromInteger i)
+                                    else pfail
 parseAbiValue AbiAddressType = AbiAddress <$> readS_to_P reads
 parseAbiValue AbiBoolType = (do W256 w <- readS_to_P reads
                                 pure $ AbiBool (w /= 0))

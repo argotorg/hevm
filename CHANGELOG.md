@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   storage, callvalue and timestamp, checks the leaf the concrete inputs reach
   against geth, replays solver models of other leaves in geth, and reports
   opcode coverage.
+- The symbolic execution fuzzer also creates contracts whose deployed code size
+  depends on a symbolic CREATE value.
+- Property tests check that `--arg` values parse back to the generated ABI
+  value and encode to the canonical calldata.
 - Equality of a keccak hash with a literal at most 256 now simplifies to false,
   matching the existing SMT assumption.
 - Equality of a keccak hash with a literal above 2^256 - 257 also simplifies to
@@ -125,6 +129,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the writes they are disjoint from and resolve the writes they hit.
 
 ## Fixed
+- `--arg` accepts negative values for `int<N>` arguments, encoding them
+  sign-extended, and rejects values outside the type's range.
+- `--arg` now works for `bytesN`, `bytes`, `string` and array arguments.
+- A constructor returning deployed code of symbolic size no longer crashes; the
+  size is resolved by the solver, or the path is reported as partial.
 - CALLDATACOPY, CODECOPY and EXTCODECOPY with a symbolic source offset or size
   reaching past 2^256 no longer wrap around to the start of the source buffer.
 - Concrete copies whose source range ends exactly at 2^256 now simplify.
