@@ -120,6 +120,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the writes they are disjoint from and resolve the writes they hit.
 
 ## Fixed
+- Enumerating symbolic values no longer shrinks buffer models and silently drops
+  possible values, which could leave symbolic jump paths unexplored.
 - Forward jumps whose conditions become concrete after folding keccak hashes
   skip speculative merging, keeping their results concrete.
 - `hevm symbolic` no longer prints QED when some paths were only partially
