@@ -244,6 +244,9 @@ genW d
       , (1, Sload . Const <$> genSlot)
       , (1, Tload . Const <$> genSlot)
       , (1, Sha3 <$> genOff <*> genSize)
+      -- symbolic addresses must not take precompile values
+      , (1, Bin 0x14 <$> (EnvOp <$> elements [0x30, 0x32, 0x33, 0x41])
+                     <*> (Const <$> elements ([1 .. 0x11] <> [0x100])))
       ]
 
 genSlot :: Gen W256
@@ -525,7 +528,7 @@ bucket n
 -- the replay can't reproduce these, and says so
 expectedCannot :: T.Text -> Bool
 expectedCannot why = any (`T.isInfixOf` why)
-  [ "goes to precompile", "goes to the called contract itself", "answers the same call", "precompile address", "calldata of " ]
+  [ "goes to precompile", "goes to the called contract itself", "answers the same call", "calldata of " ]
 
 -- the solver may give keccak of symbolic data any value, which the replay then can't reproduce
 keccakRan :: Maybe (Run, Run) -> Bool

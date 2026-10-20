@@ -253,26 +253,27 @@ are:
 - 0x41: If you allocate too much memory or create an array that is too large.
 - 0x51: If you call a zero-initialized variable of internal function type.
 
-Of these, `hevm test` will only report counterexamples for 0x1, or for custom errors that
-developers define, such as:
+Of these, `hevm test` only reports counterexamples for 0x01. A test also fails
+on a failed forge-std `assert*` (an `Error(string)` revert starting with
+"assertion failed") and on the `INVALID` opcode. Every other revert, including
+a custom error such as the one below, is treated like a failed `require`: the
+path is assumed unreachable and gives no counterexample.
 ```solidity
 error InsufficientBalance(uint256 requested, uint256 available);
 ....
-uint reqested = ...;
-uint available = ...;
 if (requested > available) {
     revert InsufficientBalance(requested, available);
 }
 ```
 
-Notice that for panic codes, the returned counterexample will produce
-a return whose first 4 bytes will be:
+For panic codes, the counterexample's return data starts with the selector of
+`Panic(uint256)`:
 ```plain
 $ cast keccak "Panic(uint256)" | cut -c 1-10
 0x4e487b71
 ```
 
-And if it's a custom error, the first 4 bytes will be:
+For a failed forge-std assertion, it starts with the selector of `Error(string)`:
 ```plain
 $ cast keccak "Error(string)" | cut -c 1-10
 0x08c379a0

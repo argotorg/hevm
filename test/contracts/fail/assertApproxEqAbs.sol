@@ -31,4 +31,10 @@ contract AssertApproxEqAbsFailTest is Test {
         // a vs 0 with delta 0 means a must be 0, but a is unconstrained -> should fail
         assertApproxEqAbs(a, uint256(0), 0);
     }
+
+    function prove_approx_eq_abs_int_symbolic_min_max(int256 a) public pure {
+        // |min - max| = 2^256 - 1
+        vm.assume(a == type(int256).min);
+        assertApproxEqAbs(a, type(int256).max, 1);
+    }
 }

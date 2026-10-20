@@ -710,6 +710,10 @@ copySlice :: Expr EWord -> Expr EWord -> Expr EWord -> Expr Buf -> Expr Buf -> E
 -- Copying zero bytes is a no-op
 copySlice _ _ (Lit 0) _ dst = dst
 
+-- An empty source reads as zeros at any offset
+copySlice srcOffset dstOffset size src@(ConcreteBuf "") dst
+  | srcOffset /= Lit 0 = copySlice (Lit 0) dstOffset size src dst
+
 -- copying 32 bytes can be rewritten to a WriteWord on dst (e.g. CODECOPY of args during constructors)
 copySlice srcOffset dstOffset (Lit 32) src dst = writeWord dstOffset (readWord srcOffset src) dst
 
@@ -717,7 +721,7 @@ copySlice srcOffset dstOffset (Lit 32) src dst = writeWord dstOffset (readWord s
 copySlice a@(Lit srcOffset) b@(Lit dstOffset) c@(Lit size) d@(ConcreteBuf src) e@(ConcreteBuf dst)
   | dstOffset < maxBytes
   , size < maxBytes
-  , srcOffset + size >= srcOffset -- srcOffset must not wrap
+  , srcOffset + (size - 1) >= srcOffset -- srcOffset must not wrap; size 0 is handled above
   = let hd = padRight (unsafeInto dstOffset) $ BS.take (unsafeInto dstOffset) dst
         sl = if srcOffset > unsafeInto (BS.length src)
           then BS.replicate (unsafeInto size) 0
@@ -1970,6 +1974,12 @@ simplifyProp prop =
       LEq{} -> internalError "Should not encounter LEq at this point!"
       GEq{} -> internalError "Should not encounter GEq at this point!"
       _ -> False
+    concWord :: Expr EWord -> Maybe W256
+    concWord = \case
+      Lit v -> Just v
+      Keccak (ConcreteBuf bs) -> Just (keccak' bs)
+      Add (Lit o) (Keccak (ConcreteBuf bs)) -> Just (o + keccak' bs)
+      _ -> Nothing
     go :: Prop -> Prop
 
     -- Rewrite PGT/GEq to PLT/PLEq
@@ -1987,6 +1997,11 @@ simplifyProp prop =
     go (PLT (Lit l) (Lit r)) = PBool (l < r)
     go (PLEq a b) | a == b = PBool True
     go (PLEq (Lit l) (Lit r)) = PBool (l <= r)
+    -- litToKeccak turns some literals back into concrete keccaks, so evaluate those here
+    go (PLT a b) | Just l <- concWord a, Just r <- concWord b = PBool (l < r)
+    go (PLEq a b) | Just l <- concWord a, Just r <- concWord b = PBool (l <= r)
+    go (PEq (Lit l) b) | Just r <- concWord b = PBool (l == r)
+    go (PEq a (Lit r)) | Just l <- concWord a = PBool (l == r)
     go (PLEq a (Max b _)) | a == b = PBool True
     go (PLEq a (Max _ b)) | a == b = PBool True
     go (PLEq (Sub a b) c) | a == c = PLEq b a

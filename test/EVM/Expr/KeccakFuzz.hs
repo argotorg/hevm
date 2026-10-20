@@ -11,6 +11,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Test.QuickCheck
 import Test.Tasty
+import Test.Tasty.ExpectedFailure (expectFailBecause)
 import Test.Tasty.QuickCheck (testProperty, QuickCheckTests(..))
 
 import EVM.Effects (Env(..), Config(..), defaultConfig, runEnv)
@@ -50,6 +51,16 @@ tests = adjustOption (\(QuickCheckTests n) -> QuickCheckTests (if n == 100 then 
         Qed -> property True
         Unknown _ -> label "unknown" True
         Error e -> counterexample e False
+  , expectFailBecause "keccak's SMT encoding depends on bytes past the hashed length (#1188)" $
+    testProperty "keccak-equal-prefix-same-hash" $ forAll genPrefixCase $ \c -> forAll arbitrary $ \simp -> ioProperty $ do
+      let p = PNeg (PEq (Keccak c.bufA) (Keccak c.bufB))
+      -- bitwuzla answers unknown: it does not support equality over constant arrays
+      res <- checkSatWith Z3 ((if simp then Expr.simplifyProp p else p) : c.lenProps)
+      pure $ classify simp "simplified" $ case res of
+        Cex cex -> counterexample ("spurious counterexample: " <> show cex.buffers <> "\n" <> show c) False
+        Qed -> property True
+        Unknown u -> label ("unknown: " <> take 80 (show u)) True
+        Error e -> counterexample (e <> "\n" <> show c) False
   , testProperty "keccak-slot-no-false-proof" $ forAllShrink genConcreteBaseCase shrinkCase $ \c -> forAll (genEnv c) $ \env -> ioProperty $ do
       let pins = [PEq (Var v) (Lit w) | (v, w) <- Map.toList env]
       res <- checkSat (PEq (loaded c) (Lit (refLoad env c)) : pins <> keyWitnesses c)
@@ -59,8 +70,11 @@ tests = adjustOption (\(QuickCheckTests n) -> QuickCheckTests (if n == 100 then 
   ]
 
 checkSat :: [Prop] -> IO SMTResult
-checkSat ps = runEnv (Env {config = defaultConfig {simp = False}}) $
-  withSolvers Bitwuzla 1 (Just 5) defMemLimit $ \s -> checkSatWithProps s ps
+checkSat = checkSatWith Bitwuzla
+
+checkSatWith :: Solver -> [Prop] -> IO SMTResult
+checkSatWith solver ps = runEnv (Env {config = defaultConfig {simp = False}}) $
+  withSolvers solver 1 (Just 5) defMemLimit $ \s -> checkSatWithProps s ps
 
 -- | Recovering a folded slot needs its keys above 255 to occur in the query, as when the
 -- program compares against them
@@ -240,3 +254,31 @@ genEnv c = Map.fromList <$> mapM (\v -> (v,) <$> val) vars
   where
     vars = nub $ concatMap slotVars (c.readSlot : [s | (s, _, _) <- c.writes])
     val = frequency [(3, elements [0, 1, 3, 0x5eed1234, maxBound]), (1, arbitrary)]
+
+-- | Two buffers with the same length and the same bytes up to it, built differently
+data PrefixCase = PrefixCase
+  { bufA :: Expr Buf
+  , bufB :: Expr Buf
+  , lenProps :: [Prop]
+  }
+  deriving Show
+
+genPrefixCase :: Gen PrefixCase
+genPrefixCase = do
+  let a = AbstractBuf "a"
+  -- concrete lengths only: the SMT encoding cannot copy a symbolically sized region
+  n <- elements [0, 1, 4, 31, 32, 33, 64]
+  let len = Lit n
+      lenProps = [PEq (BufLength a) (Lit n)]
+  junk <- BS.pack <$> (choose (0, 32) >>= flip vectorOf arbitrary)
+  copy <- elements $
+    [ CopySlice (Lit 0) (Lit 0) len a (ConcreteBuf "")
+    -- staged in memory after a junk prefix, then copied back to the start
+    , CopySlice (Lit 32) (Lit 0) len (CopySlice (Lit 0) (Lit 32) len a (ConcreteBuf junk)) (ConcreteBuf "")
+    ] <>
+    [ foldr (\i -> WriteWord (Lit i) (ReadWord (Lit i) a)) (ConcreteBuf "") [0, 32 .. n - 32]
+    | n > 0, n `mod` 32 == 0 ] <>
+    [ foldr (\i -> WriteByte (Lit i) (ReadByte (Lit i) a)) (ConcreteBuf "") [0 .. n - 1]
+    | n > 0 ]
+  swap <- arbitrary
+  pure $ if swap then PrefixCase copy a lenProps else PrefixCase a copy lenProps

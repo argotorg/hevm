@@ -73,4 +73,9 @@ contract AssertApproxEqAbsTest is Test {
         // any two uint256 values are within type(uint256).max of each other
         assertApproxEqAbs(a, b, type(uint256).max);
     }
+
+    function prove_approx_eq_abs_int_symbolic_opposite_signs(int256 a) public pure {
+        vm.assume(a == -1);
+        assertApproxEqAbs(a, int256(1), 2);
+    }
 }

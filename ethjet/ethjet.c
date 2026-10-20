@@ -75,7 +75,8 @@ ethjet_ecrecover (secp256k1_context *ctx,
   if (memcmp (z31, in + 32, 31))
     return 0;
 
-  if (recid < 0 || recid > 3)
+  /* only v = 27 or 28 is valid; libsecp256k1 would also accept recovery ids 2, 3 */
+  if (recid < 0 || recid > 1)
     return 0;
 
   if (!secp256k1_ecdsa_recoverable_signature_parse_compact
