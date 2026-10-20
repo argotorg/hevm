@@ -31,6 +31,8 @@ import Data.IORef
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as M
 import Data.IntMap.Strict qualified as IM
+import Control.Concurrent (yield)
+import Control.Exception (evaluate, mask_)
 import Control.Monad (unless, when)
 import Data.Word (Word8)
 import Data.Text (Text)
@@ -199,10 +201,31 @@ hashConsExprIO e = do
   en <- readIORef hcEnabled
   if en then fst <$> go e else pure e
 
+-- GHC's makeStableName# reads the stable name table after releasing its lock, so a
+-- concurrent call that grows (reallocates) the table makes it read freed memory,
+-- see https://gitlab.haskell.org/ghc/ghc/-/work_items/28003
+-- A spinlock, as threads parking on an MVar made hash-consing several times slower
+{-# NOINLINE snLock #-}
+snLock :: IORef Bool
+snLock = unsafePerformIO (newIORef False)
+
+-- The argument is forced outside the lock, so evaluating it can't hash-cons under it
+stableName :: Expr a -> IO (StableName (Expr a))
+stableName e = do
+  e' <- evaluate e
+  mask_ $ do
+    let acquire = do
+          held <- atomicModifyIORef' snLock (True,)
+          when held (yield >> acquire)
+    acquire
+    sn <- makeStableName e'
+    atomicWriteIORef snLock False
+    pure sn
+
 -- A hit means the node is already canonical
 lookupSN :: Expr a -> IO (Maybe Int)
 lookupSN e = do
-  sn <- makeStableName $! e
+  sn <- stableName e
   st <- readIORef hcState
   pure $ case IM.lookup (hashStableName sn) st.hcSns of
     Nothing -> Nothing
@@ -216,7 +239,7 @@ lookupSN e = do
 
 recordSN :: Expr a -> Int -> IO ()
 recordSN e i = do
-  sn <- makeStableName $! e
+  sn <- stableName e
   atomicModifyIORef' hcState $ \st ->
     (st { hcSns = IM.insertWith (++) (hashStableName sn) [(SomeSN sn, i)] st.hcSns }, ())
 
