@@ -479,6 +479,7 @@ prettyError = \case
   ReturnDataOutOfBounds -> "Return data out of bounds"
   NonceOverflow -> "Nonce overflow"
   BadCheatCode reason a -> "Bad cheat code: " <>  reason <> " sig: " <> show a
+  NonexistentFork a -> "Fork ID does not exist: " <> show a
   AssumeCheatFailed -> "Assume failed"
 
 prettyvmresult :: Expr End -> String
