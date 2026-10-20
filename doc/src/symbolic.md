@@ -66,6 +66,11 @@ bytes, followed by the bytestring
 hevm symbolic --sig "transfer(address,uint256)" --arg "<symbolic>" --arg 0 --code $(<dstoken.bin-runtime)
 ```
 
+Values are written as: decimal or `0x` hex numbers (negative ones like `-1` for
+`int<N>`), `true`/`false`, `0x` hex for `bytesN` and `bytes`, a double-quoted
+string for `string`, and `[a,b,...]` for arrays. Tuple arguments cannot be given
+concretely.
+
 If the `--get-models` flag is given, example input values will be returned for
 each possible execution path. This can be useful for automatic test case
 generation.

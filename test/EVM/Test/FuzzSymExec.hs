@@ -170,6 +170,11 @@ extraAccounts =
 createInitCode :: ByteString
 createInitCode = BS.singleton 0
 
+-- | RETURNs and(callvalue, 0xf) bytes: the deployed code size is symbolic when
+-- the CREATE value is
+sizedInitCode :: ByteString
+sizedInitCode = BS.pack [0x60, 0x0f, 0x34, 0x16, 0x5f, 0xf3]
+
 -- | Addresses the account opcodes query, including one that does not exist. No 0x100:
 -- the evm in nixpkgs (1.16.1) predates its P256VERIFY precompile (EIP-7951).
 accountTargets :: [Addr]
@@ -365,15 +370,19 @@ genAccountOp = do
       (args <>) <$> ((<>) <$> push (into a) <*> op 4 0 OpExtcodecopy)
     _ -> (<>) <$> push (into a) <*> op 1 1 kind
 
--- | CREATE or CREATE2 of 'createInitCode', written to memory first
+-- | CREATE or CREATE2 of 'createInitCode' or 'sizedInitCode', written to memory first
 genCreate :: G [Item]
 genCreate = do
   off <- liftG $ elements [0, 0x20, 0x41]
   value <- liftG $ frequency [(3, pure 0), (1, elements [1, 7])]
   salt <- liftG $ oneof [pure Nothing, Just <$> elements [0, 1]]
-  initCode <- concat <$> sequence [push 0, push off, op 2 0 OpMstore8]
+  code <- liftG $ elements [createInitCode, sizedInitCode]
+  initCode <- concat <$> sequence
+    [ concat <$> sequence [push (into b), push (off + fromIntegral i), op 2 0 OpMstore8]
+    | (i, b) <- zip [0 :: Int ..] (BS.unpack code) ]
   saltItems <- maybe (pure []) push salt
-  args <- concat <$> mapM push [1, off, value]
+  valueItems <- maybeFromCalldata value
+  args <- (<>) <$> (concat <$> mapM push [fromIntegral (BS.length code), off]) <*> pure valueItems
   create <- maybe (op 3 1 OpCreate) (const (op 4 1 OpCreate2)) salt
   pure (initCode <> saltItems <> args <> create)
 

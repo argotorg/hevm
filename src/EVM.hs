@@ -1053,8 +1053,6 @@ exec1 conf = do
               accessMemoryRange xOffset xSize $ do
                 output <- readMemory xOffset xSize
                 let
-                  codesize = fromMaybe (internalError "processing opcode RETURN. Cannot return dynamically sized abstract data")
-                               . maybeLitWordSimp . bufLength $ output
                   maxsize = vm.block.maxCodeSize
                   creation = case vm.frames of
                     [] -> vm.tx.isCreate
@@ -1062,15 +1060,16 @@ exec1 conf = do
                        CreationContext {} -> True
                        CallContext {} -> False
                 if creation
-                then
+                then forceConcrete xSize "RETURN of deployed code with symbolic size" $ \codesize ->
                   if codesize > maxsize
                   then
                     finishFrame (FrameErrored (MaxCodeSizeExceeded maxsize codesize))
                   else do
+                    code <- readMemory xOffset (Lit codesize)
                     let frameReturned = burn (g_codedeposit * unsafeInto codesize) $
-                                          finishFrame (FrameReturned output)
+                                          finishFrame (FrameReturned code)
                         frameErrored = finishFrame $ FrameErrored InvalidFormat
-                    case readByte (Lit 0) output of
+                    case readByte (Lit 0) code of
                       LitByte 0xef -> frameErrored
                       LitByte _ -> frameReturned
                       y -> branch conf.maxDepth (Expr.eqByte y (LitByte 0xef)) $ \case

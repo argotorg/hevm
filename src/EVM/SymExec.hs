@@ -159,6 +159,7 @@ symAbiArg maxDynSize name = \case
 data CalldataFragment
   = St [Prop] (Expr EWord)
   | Dy [Prop] (Expr EWord) -- ^ props, symbolic length
+  | DyConc ByteString -- ^ tail encoding of a concrete dynamic argument
   | Comp [CalldataFragment]
   deriving (Show, Eq)
 
@@ -174,12 +175,11 @@ symCalldata sig typesignature concreteArgs base = do
     mkArg :: AbiType -> String -> Int -> CalldataFragment
     mkArg typ "<symbolic>" n = symAbiArg conf.maxDynSize (T.pack $ "arg" <> show n) typ
     mkArg typ arg _ =
-      case makeAbiValue typ arg of
-        AbiUInt _ w -> St [] . Lit . into $ w
-        AbiInt _ w -> St [] . Lit . unsafeInto $ w
-        AbiAddress w -> St [] . Lit . into $ w
-        AbiBool w -> St [] . Lit $ if w then 1 else 0
-        _ -> internalError "TODO"
+      let enc = encodeAbiValue (makeAbiValue typ arg)
+      in case abiKind typ of
+        Static -> Comp [St [] (Lit (word w)) | w <- chunks32 enc]
+        Dynamic -> DyConc enc
+    chunks32 bs = if BS.null bs then [] else let (h, t) = BS.splitAt 32 bs in h : chunks32 t
     calldatas = zipWith3 mkArg typesignature args [1..]
     (cdBuf, props) = combineFragments calldatas base
     withSelector = writeSelector cdBuf sig
@@ -199,6 +199,7 @@ cdLen frags = Expr.add (Expr.add (Lit 4) (countHeadBytes frags)) (tailLen frags)
   where
     tailLen = foldl' (\acc f -> case f of
                          Dy _ len -> Expr.add acc (dynTailSize len)
+                         DyConc bs -> Expr.add acc (Lit (unsafeInto (BS.length bs)))
                          _ -> acc) (Lit 0)
 
 -- | Bytes a dynamic argument takes in the tail: the length word and the
@@ -212,6 +213,7 @@ countHeadBytes = foldl' countFrag (Lit 0)
   where
     countFrag acc (St _ _)  = Expr.add acc (Lit 32)
     countFrag acc (Dy {})   = Expr.add acc (Lit 32)
+    countFrag acc (DyConc _) = Expr.add acc (Lit 32)
     countFrag acc (Comp xs) | all isSt xs = foldl' countFrag acc xs
     countFrag _ s = internalError $ "unsupported cd fragment: " <> show s
 
@@ -244,6 +246,12 @@ combineFragments fragments base =
               buf2 = Expr.writeWord (Expr.add (Lit 4) offset) len buf1
           in go headSz (Expr.add idx (Lit 32)) (Expr.add tailAcc (dynTailSize len)) rest
                (buf2, p <> ps)
+        DyConc bs ->
+          let offset = Expr.add headSz tailAcc
+              sz = Lit (unsafeInto (BS.length bs))
+              buf1 = Expr.writeWord idx offset buf
+              buf2 = Expr.copySlice (Lit 0) (Expr.add (Lit 4) offset) sz (ConcreteBuf bs) buf1
+          in go headSz (Expr.add idx (Lit 32)) (Expr.add tailAcc sz) rest (buf2, ps)
         s -> internalError $ "unsupported cd fragment: " <> show s
 
 isSt :: CalldataFragment -> Bool
