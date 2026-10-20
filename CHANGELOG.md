@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- KECCAK256 folds memory that becomes concrete after simplification, including
+  CREATE2 preimages containing concrete hashes, while retaining nested preimages
+  for the solver's keccak assumptions.
 - The symbolic execution fuzzer runs random programs with abstract calldata,
   storage, callvalue and timestamp, checks the leaf the concrete inputs reach
   against geth, replays solver models of other leaves in geth, and reports

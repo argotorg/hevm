@@ -34,6 +34,7 @@ tests = testGroup "Symbolic execution"
 solidityExplorationTests :: TestTree
 solidityExplorationTests = testGroup "Exploration of Solidity"
     [ basicTests
+    , keccakTests
     , maxDepthTests
     , copySliceTests
     , storageTests
@@ -188,6 +189,61 @@ basicTests = testGroup "simple-checks"
         assertEqual "all paths return or revert" (length paths) (length returns + length reverts)
         assertBool "the first require can still fail" (revertData "first" `elem` reverts)
         ) [("7", 0), ("8", 1)]
+  ]
+
+keccakTests :: TestTree
+keccakTests = testGroup "Keccak execution"
+  [ testCase "concrete-create2-preimage" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function pairFor(uint256 a, uint256 b) public pure returns (address) {
+            bytes32 salt = keccak256(abi.encode(a, b));
+            return address(uint160(uint256(keccak256(abi.encodePacked(
+              bytes1(0xff), address(1), salt, bytes32(uint256(3))
+            )))));
+          }
+        }
+      |]
+      let sig = Just (Sig "pairFor(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])
+          salt = keccak' (word256Bytes 1 <> word256Bytes 2)
+          preimage = BS.singleton 0xff <> BS.drop 12 (word256Bytes 1) <> word256Bytes salt <> word256Bytes 3
+          unresolved :: Expr a -> Any
+          unresolved (Keccak (ConcreteBuf _)) = mempty
+          unresolved (Keccak _) = Any True
+          unresolved _ = mempty
+      paths <- executeWithBitwuzla $ \s -> getExpr s c sig ["1", "2"] defaultVeriOpts
+      case [out | Success _ _ out _ <- paths] of
+        [out] -> do
+          assertEqual "CREATE2 address" (Lit (keccak' preimage `mod` 2 ^ (160 :: Int)))
+            (Expr.concKeccakSimpExpr (Expr.readWord (Lit 0) out))
+          assertBool "constant hashes have concrete inputs"
+            (not $ getAny $ foldExpr unresolved mempty out)
+        _ -> assertFailure $ "expected one successful path, got " <> show paths
+  , testCase "nested-concrete-keccak-keeps-assumptions" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function hash(uint256 x) internal pure returns (bytes32) {
+            return keccak256(abi.encode(keccak256(abi.encode(x))));
+          }
+          function different(uint256 fixedKey, uint256 key) public pure {
+            require(key != fixedKey);
+            assert(hash(fixedKey) != hash(key));
+          }
+          function same(uint256 fixedKey, uint256 key) public pure {
+            assert(hash(fixedKey) != hash(key));
+          }
+        }
+      |]
+      let sig name = Just (Sig name [AbiUIntType 256, AbiUIntType 256])
+          args = ["1592594996", "<symbolic>"]
+      (_, distinct) <- executeWithShortBitwuzla $ \s ->
+        checkAssert s defaultPanicCodes c (sig "different(uint256,uint256)") args defaultVeriOpts
+      assertEqual "distinct nested hashes must be proved" [] distinct
+      (_, same) <- executeWithShortBitwuzla $ \s ->
+        checkAssert s defaultPanicCodes c (sig "same(uint256,uint256)") args defaultVeriOpts
+      case same of
+        [Cex (_, cex)] -> assertEqual "equal inputs still alias" 1592594996 (SMT.getVar cex "arg2")
+        _ -> assertFailure $ "expected a counterexample, got " <> show same
   ]
 
 copySliceTests :: TestTree
