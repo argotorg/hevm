@@ -173,10 +173,18 @@ validateCex :: forall m . App m
   => UnitTestOptions
   -> Fetch.Fetcher Concrete m
   -> VM Concrete
+  -> Map (Expr EAddr) Addr
   -> ReproducibleCex
   -> m Bool
-validateCex uTestOpts fetcher vm repCex = do
-  let utoConc = uTestOpts { testParams = uTestOpts.testParams { caller = LitAddr 0xdeadbeef}}
+validateCex uTestOpts fetcher vm0 cexAddrs repCex = do
+  let concAddr dflt a = case a of
+        SymAddr _ -> LitAddr $ Map.findWithDefault dflt a cexAddrs
+        _ -> a
+      params = uTestOpts.testParams
+      utoConc = uTestOpts { testParams = params { caller = concAddr 0xdeadbeef params.caller
+                                                , origin = concAddr 0xdeadbeef params.origin }}
+      vm = vm0 & set (#tx % #origin) utoConc.testParams.origin
+               & over (#block % #coinbase) (concAddr 0)
   conf <- readConfig
   when conf.debug $ liftIO $ putStrLn $ "Repro running function: " <> show utoConc.testParams.address <>
     " with caller: " <> show utoConc.testParams.caller <> ", gas: " <> show utoConc.testParams.gasCall <>
@@ -351,7 +359,7 @@ symRun opts@UnitTestOptions{..} vm (nth, numTests) sig@(Sig testName types) sour
             Nothing -> internalError "cexHandler: expected a cex"
             Just (cexEnd, smtCex) -> do
               failsToRepro <- getReproFailure (Sig testName types) (fst cd) smtCex
-              validation <- traverse (validateCex opts fetcherConc vm) failsToRepro
+              validation <- traverse (validateCex opts fetcherConc vm smtCex.addrs) failsToRepro
               txtFail <- symFailure opts testName (fst cd) types (cexEnd, smtCex, validation)
               Progress.printOut txtFail
 

@@ -46,7 +46,7 @@ import Data.DoubleWord (Int256, Word256)
 import Data.Either (partitionEithers)
 import Data.Either.Extra (maybeToEither)
 import Data.Foldable (Foldable(..))
-import Data.List (find, isPrefixOf)
+import Data.List (delete, find, isPrefixOf)
 import Data.List.Split (splitOn)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -151,7 +151,7 @@ makeVm o = do
       txtoAddr = o.address
       initialAccessedAddrs = fromList $
            [txorigin, txtoAddr, o.coinbase]
-        ++ (fmap LitAddr [1..9])
+        ++ (fmap LitAddr ([1..0x11] ++ [0x100]))
         ++ (Map.keys txaccessList)
       initialAccessedStorageKeys = fromList $ foldMap (uncurry (map . (,))) (Map.toList txaccessList)
       touched = if o.create then [txorigin] else [txorigin, txtoAddr]
@@ -1304,20 +1304,39 @@ precompiledContract
 precompiledContract this xGas precompileAddr recipient xValue inOffset inSize outOffset outSize xs
   = callChecks this xGas (LitAddr recipient) (LitAddr precompileAddr) xValue inOffset inSize outOffset outSize xs $ \gas' ->
     do
+      -- a precompile call is the "next call" for a pending prank or expectRevert
+      resetCaller <- use $ #state % #resetCaller
+      when resetCaller $ assign (#state % #overrideCaller) Nothing
       executePrecompile precompileAddr gas' inOffset inSize outOffset outSize xs
       self <- use (#state % #contract)
       stk <- use (#state % #stack)
-      result' <- use #result
-      case result' of
+      vm <- get
+      let expected = case vm.expectedRevert of
+            Just e | length vm.frames + 1 == e.depth -> Just e
+            _ -> Nothing
+          setResult success out = do
+            assign' (#state % #stack) (Lit (if success then 1 else 0) : drop 1 stk)
+            assign (#state % #returndata) out
+            copyCallBytesToMemory out outSize outOffset
+      case vm.result of
         Nothing -> case stk of
-          x:_ -> case maybeLitWordSimp x of
-            Just 0 ->
+          x:_ -> case (maybeLitWordSimp x, expected) of
+            (Just 0, Nothing) ->
               pure ()
-            Just 1 ->
+            (Just 0, Just e) -> do
+              assign #expectedRevert Nothing
+              case matchExpectedRevert e mempty (LitAddr precompileAddr) of
+                Match -> setResult True dummySuccessReturn
+                Mismatch -> setResult False (assertionFailedBuf "expected revert did not match")
+                Indeterminate reason -> unexpectedSymArg ("expectRevert: " <> reason) [x]
+            (Just 1, Nothing) ->
               fetchAccount (LitAddr recipient) $ \_ -> do
                 touchAccount self
                 touchAccount (LitAddr recipient)
                 transfer self (LitAddr recipient) xValue
+            (Just 1, Just _) -> do
+              assign #expectedRevert Nothing
+              setResult False (assertionFailedBuf "expected call did not revert")
             _ -> unexpectedSymArg "unexpected return value from precompile" [x]
           _ -> underrun
         _ -> pure ()
@@ -1999,8 +2018,7 @@ unRefund :: Word64 -> EVM t ()
 unRefund n = do
   self <- use (#state % #contract)
   refs <- use (#tx % #subState % #refunds)
-  assign (#tx % #subState % #refunds)
-    (filter (\(a,b) -> not (a == self && b == n)) refs)
+  assign (#tx % #subState % #refunds) (delete (self, n) refs)
 
 touchAccount :: Expr EAddr -> EVM t ()
 touchAccount = pushTo ((#tx % #subState) % #touchedAccounts)
@@ -2574,11 +2592,9 @@ cheatActions = Map.fromList
                " (max delta: " <> BS8.pack (show maxDelta) <>
                ", real delta: " <> BS8.pack (show delta) <> ")"
         (SAbi [ew1, ew2, ew3],"") ->
-          -- For symbolic int256, compute unsigned delta via:
-          -- if sameSign(a,b) then |a-b| else |a|+|b|
-          -- We approximate with unsigned sub of max/min which works for same-sign
-          -- but for full correctness with symbolic int256, we use the uint comparison
-          let delta = Expr.sub (Expr.max ew1 ew2) (Expr.min ew1 ew2)
+          -- |a - b| always fits in a uint256, so the larger minus the smaller
+          -- (signed order) modulo 2^256 is exact
+          let delta = ITE (Expr.slt ew1 ew2) (Expr.sub ew2 ew1) (Expr.sub ew1 ew2)
           in case Expr.simplify (Expr.iszero $ Expr.leq delta ew3) of
             Lit 0 -> doStop
             Lit _ -> frameRevert "assertion failed: assertApproxEqAbs (symbolic)"
@@ -3125,41 +3141,45 @@ finishFrame how = do
           let isCreate = case oldVm.frames of
                 Frame { context = CreationContext {} } : _ -> True
                 _ -> False
+          let
+            matchRevert actual reverterAddr = case matchExpectedRevert e actual reverterAddr of
+              Match
+                -- if the expected revert occured, then in order to match
+                -- foundry, we need to add some sentinel values to the stack
+                -- and pretend the actual call/create succeeded.
+                | isCreate -> do
+                    finishFrameNoExpectation (FrameReverted actual)
+                    -- drop the prev return value
+                    modifying (#state % #stack) (drop 1)
+                    -- add our sentinel
+                    pushAddr dummyCreateAddress
+                    -- empty returndata
+                    assign (#state % #returndata) mempty
+                | otherwise -> do
+                    -- process the revert with our dummy returndata
+                    finishFrameNoExpectation (FrameReverted dummySuccessReturn)
+                    -- drop the prev return value
+                    modifying (#state % #stack) (drop 1)
+                    -- pretend the call succeeded
+                    push 1
+              Mismatch ->
+                finishFrameNoExpectation
+                  (FrameReverted (assertionFailedBuf "expected revert did not match"))
+              Indeterminate reason ->
+                unexpectedSymArg ("expectRevert: " <> reason) [actual]
           case how of
             FrameReverted actual ->
-              let reverterAddr =
-                    fromMaybe
-                      (internalError "expectRevert: missing actualReverter for FrameReverted")
-                      e.actualReverter
-              in case matchExpectedRevert e actual reverterAddr of
-                Match
-                  -- if the expected revert occured, then in order to match
-                  -- foundry, we need to add some sentinel values to the stack
-                  -- and pretend the actual call/create succeeded.
-                  | isCreate -> do
-                      finishFrameNoExpectation (FrameReverted actual)
-                      -- drop the prev return value
-                      modifying (#state % #stack) (drop 1)
-                      -- add our sentinel
-                      pushAddr dummyCreateAddress
-                      -- empty returndata
-                      assign (#state % #returndata) mempty
-                  | otherwise -> do
-                      -- process the revert with our dummy returndata
-                      finishFrameNoExpectation (FrameReverted dummySuccessReturn)
-                      -- drop the prev return value
-                      modifying (#state % #stack) (drop 1)
-                      -- pretend the call succeeded
-                      push 1
-                Mismatch ->
-                  finishFrameNoExpectation
-                    (FrameReverted (assertionFailedBuf "expected revert did not match"))
-                Indeterminate reason ->
-                  unexpectedSymArg ("expectRevert: " <> reason) [actual]
+              matchRevert actual $ fromMaybe
+                (internalError "expectRevert: missing actualReverter for FrameReverted")
+                e.actualReverter
             FrameReturned _ ->
               finishFrameNoExpectation
                 (FrameReverted (assertionFailedBuf "expected call did not revert"))
-            FrameErrored _ -> finishFrameNoExpectation how
+            -- foundry treats an exceptional halt as a revert with empty data;
+            -- the halted frame keeps none of its gas
+            FrameErrored _ -> do
+              assign (#state % #gas) (toGas 0)
+              matchRevert mempty (fromMaybe oldVm.state.contract e.actualReverter)
 
       -- we have popped out past the start depth of the expected revert (i.e. returned without a revert occuring)
       | length oldVm.frames < e.depth

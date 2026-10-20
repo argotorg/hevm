@@ -170,9 +170,10 @@ extraAccounts =
 createInitCode :: ByteString
 createInitCode = BS.singleton 0
 
--- | Addresses the account opcodes query, including one that does not exist
+-- | Addresses the account opcodes query, including one that does not exist. No 0x100:
+-- the evm in nixpkgs (1.16.1) predates its P256VERIFY precompile (EIP-7951).
 accountTargets :: [Addr]
-accountTargets = [a | (a, _, _, _) <- extraAccounts] <> [0xe0a5, contractAddr, calleeAddr, coinbaseAddr, 4]
+accountTargets = [a | (a, _, _, _) <- extraAccounts] <> [0xe0a5, contractAddr, calleeAddr, coinbaseAddr, 1, 4, 0x0a, 0x11]
 
 -- * Generators
 
@@ -395,12 +396,74 @@ genCall = do
                <*> (concat <$> mapM push [addr, gas])
   (args <>) <$> op (if withValue then 7 else 6) 1 kind
 
+-- | A call to a precompile with well-formed or nearly well-formed input, then
+-- RETURNDATASIZE and the first output word, so that the result shows on the stack
+genPrecompileCall :: G [Item]
+genPrecompileCall = do
+  (addr, ws, size) <- liftG $ oneof
+    [ do h <- elements [0, 1, sigHash]
+         v <- elements [27, 28, 29, 30, 0, 27 + 256]
+         r <- elements [0, 1, 2, sigR, secpN - 1, secpN]
+         s' <- elements [1, sigS, secpN - 1, secpN]
+         pure (1, [h, v, r, s'], 0x80)
+    , do ws <- vectorOf 2 genWord
+         (,ws,) <$> elements [2, 3, 4] <*> elements [0, 1, 0x20, 0x21, 0x40]
+    , do lens' <- vectorOf 3 (elements [0, 1, 0x20])
+         vals <- vectorOf 3 genWord
+         pure (5, lens' <> vals, 0x60 + sum lens')
+    , do p1 <- elements bnPoints
+         p2 <- elements bnPoints
+         pure (6, p1 <> p2, 0x80)
+    , do p <- elements bnPoints
+         k <- elements [0, 1, 2, bnP, maxBound]
+         pure (7, p <> [k], 0x60)
+    , do size <- elements [0, 0xc0, 0xbf]
+         pure (8, replicate 6 0, size)
+    , do rounds <- elements [0, 1, 12]
+         ws <- vectorOf 6 genWord
+         f <- elements [0, 1, 2]
+         -- the final-block flag is byte 212, byte 20 of the last word
+         let flagUnit = 256 ^ (11 :: Int)
+             w = ws !! 5
+             lastWord = w - (w `div` flagUnit `mod` 256) * flagUnit + f * flagUnit
+         pure (9, rounds * 256 ^ (28 :: Int) : take 5 ws <> [lastWord], 0xd5)
+    ]
+  let argOff = 0x100
+      retOff = 0x400
+  stores <- concat <$> sequence
+    [ (<>) <$> ((<>) <$> push w <*> push (argOff + 0x20 * unsafeInto j)) <*> op 2 0 OpMstore
+    | (j, w) <- zip [0 :: Int ..] ws ]
+  call <- concat <$> mapM push [0x40, retOff, size, argOff, addr, 0xffffff]
+  callOp <- op 6 1 OpStaticcall
+  results <- concat <$> sequence [op 0 1 OpReturndatasize, push retOff, op 1 1 OpMload]
+  pure (stores <> call <> callOp <> results)
+  where
+    secpN = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141
+    bnP = 0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47
+    sigHash = 0x513954cf30af6638cb8f626bd3f8c39183c26784ce826084d9d267868a18fb31
+    sigR = 0xc84e55cee2032ea541a32bf6749e10c8b9344c92061724c4e751600f886f4732
+    sigS = 0x1542b6457e91098682138856165381453b3d0acae2470286fd8c8a09914b1b5d
+    bnPoints = [[0, 0], [1, 2], [1, 3], [bnP, 0]]
+
+-- | Clear two slots and restore the first, which earns refunds and then takes
+-- one back (EIP-2200)
+genRefund :: G [Item]
+genRefund = do
+  k1 <- liftG $ chooseBoundedIntegral (0, 3)
+  k2 <- liftG $ chooseBoundedIntegral (0, 3)
+  concat <$> sequence
+    [ push k1, op 1 1 OpSload
+    , push 0, push k1, op 2 0 OpSstore
+    , push 0, push k2, op 2 0 OpSstore
+    , push k1, op 2 0 OpSstore ]
+
 genBlock :: Bool -> G [Item]
 genBlock isMain = do
   inner <- liftG $ frequency $
     [ (10, pure genStraight), (4, pure genBranch), (1, pure (pure [IJumpFwd False])), (1, pure genHalt)
     , (1, pure genDeepStack) ] <>
-    (if isMain then [(2, pure genLoop), (2, pure genCall), (2, pure genAccountOp), (1, pure genCreate)] else [])
+    (if isMain then [ (2, pure genLoop), (2, pure genCall), (2, pure genAccountOp), (1, pure genCreate)
+                    , (1, pure genPrecompileCall), (1, pure genRefund) ] else [])
   items <- inner
   addLabel <- liftG $ chooseInt (0, 1)
   if addLabel == 0 then pure items else do
@@ -434,7 +497,7 @@ genInputs = do
   len <- frequency [(1, pure 0), (3, chooseInt (1, 40)), (3, elements [4, 32, 36, 64, 68, 100])]
   cd <- BS.pack <$> vectorOf len (frequency [(3, pure 0), (3, chooseBoundedIntegral (0, 10)), (4, chooseAny)])
   nslots <- chooseInt (0, 4)
-  slots <- Map.fromList <$> vectorOf nslots ((,) <$> chooseBoundedIntegral (0, 10) <*> genWord)
+  slots <- Map.fromList <$> vectorOf nslots ((,) <$> frequency [(3, chooseBoundedIntegral (0, 3)), (1, chooseBoundedIntegral (0, 10))] <*> genWord)
   cv <- frequency [(1, pure 0), (1, chooseBoundedIntegral (1, 1000))]
   ts <- chooseBoundedIntegral (1, 2 ^ (40 :: Int))
   pure $ Inputs cd slots cv ts
@@ -517,6 +580,7 @@ data GethRun = GethRun
   , error :: Maybe String
   , storage :: Map Addr (Map W256 W256)
   , logs :: [GethLog]
+  , gasUsed :: W256
   } deriving (Show)
 
 headMay :: [a] -> Maybe a
@@ -538,6 +602,9 @@ secretKey = 0xDC38EE117CAE37750EB1ECC5CFD3DE8E85963B481B93E732C5D0CB66EE6B0C9D
 
 fromAddress :: Addr
 fromAddress = fromJust $ deriveAddr secretKey
+
+originBalance :: W256
+originBalance = 0x5ffd4878be161d74
 
 mkTx :: TestCase -> Inputs -> EVM.Transaction.Transaction
 mkTx c i = EVM.Transaction.Transaction
@@ -569,7 +636,7 @@ prevRandaoVal = 42
 -- | The state before the transaction, as geth gets it and as the mock node serves it
 preState :: TestCase -> Inputs -> World
 preState c i = Map.fromList $
-  [ (fromAddress, Account mempty 0xac 0x5ffd4878be161d74 mempty)
+  [ (fromAddress, Account mempty 0xac originBalance mempty)
   , (contractAddr, Account (assembleItems c.prog.main) 0x48 contractBalance i.store)
   , (calleeAddr, Account (assembleItems c.prog.callee) 1 0 mempty) ]
   <> [(a, Account mempty (unsafeInto n) b st) | (a, b, n, st) <- extraAccounts]
@@ -611,13 +678,14 @@ runGeth dir c i = do
   (exitCode, out, err) <- readCreateProcessWithExitCode cmd ""
   when (exitCode /= ExitSuccess) $ assertFailure $ "evm failed: " <> show exitCode <> "\n" <> out <> err
   result <- fromJust <$> JSON.decodeFileStrict (dir </> "result.json")
-  let receipt :: Maybe (String, [GethLog])
+  let receipt :: Maybe (String, [GethLog], W256)
       receipt = flip JSON.parseMaybe result $ JSON.withObject "result" $ \v -> do
         rs <- v .: "receipts"
+        gasUsed <- v .: "gasUsed"
         case rs of
-          [r] -> (,) <$> r .: "transactionHash" <*> (fromMaybe [] <$> r .:? "logs")
+          [r] -> (,,) <$> r .: "transactionHash" <*> (fromMaybe [] <$> r .:? "logs") <*> pure gasUsed
           _ -> fail "expected one receipt"
-  (txHash, logs) <- maybe (assertFailure $ "cannot parse evm result: " <> show result) pure receipt
+  (txHash, logs, gasUsed) <- maybe (assertFailure $ "cannot parse evm result: " <> show result) pure receipt
   -- as a String, a trace with deep stacks on every line takes tens of GB
   traceLines <- Char8.lines <$> BS.readFile (dir </> ("trace-0-" <> txHash <> ".jsonl"))
   let decode :: JSON.FromJSON a => ByteString -> Maybe a
@@ -635,7 +703,7 @@ runGeth dir c i = do
       readStore = Map.fromList . map (\(k, v) -> (read k, v)) . Map.toList
   case (steps, final) of
     (Just s, Just f) -> pure $ GethRun s (bssToBs f.output) f.error
-      (Map.fromList [(a, nonZero (readStore (storageOf a))) | a <- [contractAddr, calleeAddr]]) logs
+      (Map.fromList [(a, nonZero (readStore (storageOf a))) | a <- [contractAddr, calleeAddr]]) logs gasUsed
     _ -> assertFailure $ "cannot parse evm trace: "
            <> show [l | l <- traceLines, isNothing (decode l :: Maybe EVMToolTrace)]
 
@@ -679,6 +747,9 @@ mkVm fetching gas c i = do
     { contract = contract
     , otherContracts =
         (LitAddr ethrunAddress, initialContract (RuntimeCode (ConcreteRuntimeCode BS.empty)))
+        -- finalize pays the unused gas and the refund back to the origin
+        : (LitAddr fromAddress, initialContract (RuntimeCode (ConcreteRuntimeCode BS.empty))
+            & set #balance (Lit originBalance) & set #nonce (Just 0xac))
         : if fetching then [] else
           (LitAddr calleeAddr, calleeContract)
           : [ (LitAddr a, initialContract (RuntimeCode (ConcreteRuntimeCode BS.empty))
@@ -703,6 +774,10 @@ mkVm fetching gas c i = do
     , maxCodeSize = 0xfffff
     , schedule = feeSchedule
     , chainId = 1
+    -- only the concrete run tracks gas
+    , txdataFloorGas = case i.calldata of
+        ConcreteBuf cd -> EVM.Transaction.txdataFloorGas feeSchedule (mkTx c (Inputs cd mempty 0 0))
+        _ -> 0
     }
   pure $ vm & set (#state % #calldata) i.calldata
 
@@ -711,6 +786,7 @@ data HevmRun = HevmRun
   , result :: Either EvmError ByteString
   , storage :: Map Addr (Map W256 W256)
   , logs :: [Expr Log]
+  , gasUsed :: W256
   }
 
 -- | With a node's URL, everything but the contract's code and balance is fetched from it
@@ -736,7 +812,11 @@ runHevm solvers url c i = do
         Right b -> internalError $ "non-concrete return data: " <> show b
         Left e -> Left e
       stores = Map.fromList [(a, storageOf a) | a <- [contractAddr, calleeAddr]]
-  pure $ HevmRun trace out stores (reverse vm.logs)
+      -- the run starts after the gas purchase, so the origin only gets the unused gas back
+      gasUsed = case (.balance) <$> Map.lookup (LitAddr fromAddress) vm.env.contracts of
+        Just (Lit b) -> unsafeInto c.gasLimit - (b - originBalance)
+        b -> internalError $ "origin balance: " <> show b
+  pure $ HevmRun trace out stores (reverse vm.logs) gasUsed
 
 symIterConf :: IterConfig
 symIterConf = IterConfig { maxIter = Just 6, askSmtIters = 1, loopHeuristic = Naive }
@@ -884,6 +964,8 @@ checkConcrete how c i g h = do
     fails $ "concrete outcome mismatch\nhevm: " <> show ho <> "\ngeth: " <> show go
   when (succeeded go && not (logsMatch h.logs g.logs)) $
     fails $ "logs mismatch\nhevm: " <> show h.logs <> "\ngeth: " <> show g.logs
+  when (h.gasUsed /= g.gasUsed) $
+    fails $ "gas used mismatch\nhevm: " <> show h.gasUsed <> "\ngeth: " <> show g.gasUsed
   where
     failed = \case OSuccess {} -> False; _ -> True
     succeeded = \case OSuccess {} -> True; _ -> False

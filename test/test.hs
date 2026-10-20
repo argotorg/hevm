@@ -308,6 +308,17 @@ tests = testGroup "hevm"
         case decodeAbiValues [AbiIntType 24] withSelector of
           [AbiInt 24 val] -> assertEqualM "Incorrectly decoded int24 value" (-42) val
           _ -> internalError "Error in decoding function"
+    , test "ABI-decode-follows-offsets" $ do
+        let w :: Integer -> BS.ByteString
+            w n = word256Bytes (fromInteger n)
+            pad b = b <> BS.replicate (32 - BS.length b) 0
+            -- tails are not back to back: a junk word sits between the head and them
+            enc = w 0x60 <> w 0xa0 <> w 0xdead
+               <> w 1 <> pad (hex "00")
+               <> w 2 <> pad (hex "1122")
+        assertEqualM "decoded"
+          (AbiTuple $ V.fromList [AbiBytesDynamic (hex "00"), AbiBytesDynamic (hex "1122")])
+          (decodeAbiValue (AbiTupleType $ V.fromList [AbiBytesDynamicType, AbiBytesDynamicType]) (BSLazy.fromStrict enc))
     , test "ABI-function-roundtrip" $ do
         -- Test that AbiFunction encodes/decodes correctly
         let addr = 0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef
@@ -823,6 +834,13 @@ tests = testGroup "hevm"
               assertEqualM "successful recovery"
                 (Just a)
                 (execute 1 (h <> v <> r <> s) 32)
+          , test "fail on v other than 27 or 28" $ forM_ [0x1d, 0x1e] $ \v -> do
+              let
+                h = BS.replicate 31 0 <> BS.singleton 1
+                vw = BS.replicate 31 0 <> BS.singleton v
+                r = BS.replicate 31 0 <> BS.singleton 2
+                s = BS.replicate 31 0 <> BS.singleton 1
+              assertEqualM "v must be rejected" Nothing (execute 1 (h <> vw <> r <> s) 32)
           , test "fail on made up values" $ do
               let
                 r = hex "c84e55cee2032ea541a32bf6749e10c8b9344c92061724c4e751600f886f4731"
@@ -2378,7 +2396,7 @@ tests = testGroup "hevm"
         -- TODO: this should work one day
         assertBoolM "should be partial" (any isPartial e)
     , test "symbolic-addresses-cannot-be-zero-or-precompiles" $ do
-        let addrs = [T.pack . show . Addr $ a | a <- [0x0..0x09]]
+        let addrs = [T.pack . show . Addr $ a | a <- [0x0..0x11] ++ [0x100]]
             mkC a = fromJust <$> solcRuntime "A"
               [i|
                 contract A {
@@ -2396,7 +2414,7 @@ tests = testGroup "hevm"
           [i|
             contract A {
               function f() external {
-                assert(msg.sender != address(0x10));
+                assert(msg.sender != address(0x12));
               }
             }
           |]
@@ -2404,7 +2422,7 @@ tests = testGroup "hevm"
           [i|
             contract B {
               function f() external {
-                assert(block.coinbase != address(0x11));
+                assert(block.coinbase != address(0x13));
               }
             }
           |]
@@ -2412,7 +2430,7 @@ tests = testGroup "hevm"
           [i|
             contract C {
               function f() external {
-                assert(tx.origin != address(0x12));
+                assert(tx.origin != address(0x14));
               }
             }
           |]
@@ -2420,7 +2438,7 @@ tests = testGroup "hevm"
           [i|
             contract D {
               function f() external {
-                assert(address(this) != address(0x13));
+                assert(address(this) != address(0x15));
               }
             }
           |]
@@ -2429,11 +2447,10 @@ tests = testGroup "hevm"
           assertEqualM "wrong number of addresses" 1 (length (Map.keys cex.addrs))
           pure cex
 
-        -- Lowest allowed address is 0x10 due to reserved addresses up to 0x9
-        assertEqualM "wrong model for a" (Addr 0x10) (fromJust $ Map.lookup (SymAddr "caller") acex.addrs)
-        assertEqualM "wrong model for b" (Addr 0x11) (fromJust $ Map.lookup (SymAddr "coinbase") bcex.addrs)
-        assertEqualM "wrong model for c" (Addr 0x12) (fromJust $ Map.lookup (SymAddr "origin") ccex.addrs)
-        assertEqualM "wrong model for d" (Addr 0x13) (fromJust $ Map.lookup (SymAddr "entrypoint") dcex.addrs)
+        assertEqualM "wrong model for a" (Addr 0x12) (fromJust $ Map.lookup (SymAddr "caller") acex.addrs)
+        assertEqualM "wrong model for b" (Addr 0x13) (fromJust $ Map.lookup (SymAddr "coinbase") bcex.addrs)
+        assertEqualM "wrong model for c" (Addr 0x14) (fromJust $ Map.lookup (SymAddr "origin") ccex.addrs)
+        assertEqualM "wrong model for d" (Addr 0x15) (fromJust $ Map.lookup (SymAddr "entrypoint") dcex.addrs)
     ]
   , testGroup "Symbolic execution"
       [

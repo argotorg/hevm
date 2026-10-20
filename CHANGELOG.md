@@ -146,6 +146,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   low 20 bytes. Addresses with higher bytes set were on no path.
 - Calls to unknown code with a symbolic target expand the memory over their
   input and output ranges.
+- `vm.expectRevert` is satisfied by a call that ends in an exceptional halt
+  (e.g. INVALID or out-of-gas), as in forge.
+- A call to a precompile consumes a pending `vm.prank` or `vm.expectRevert`.
+- `assertApproxEqAbs(int256,int256,uint256)` with symbolic operands uses the
+  signed difference.
+- `hevm test` replays counterexamples that depend on `tx.origin` or
+  `block.coinbase` instead of crashing, and replays them with the model's caller.
+- Counterexample decoding follows the ABI offsets of dynamic arguments.
+- `hevm test` skips, with a warning, non-test contracts that use unlinked
+  external libraries, instead of rejecting the whole project.
+- ECRECOVER rejects `v` other than 27 and 28.
+- Restoring a cleared storage slot takes back one refund, not every equal
+  refund of the contract.
+- Precompiles 0x0a-0x11 and 0x100 are pre-warmed, and symbolic addresses can no
+  longer take their values.
 - `hevm symbolic` no longer prints QED when some paths were only partially
   explored; it prints the partial-exploration warning and exits with an error.
 - `hevm symbolic --create` and `hevm exec --create` run the init code instead of

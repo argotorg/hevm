@@ -407,7 +407,7 @@ declareConstrainAddrs names = SMT2 (SMTScript ([SMTComment "concrete and symboli
   where
     declare n = SMTCommand $ "(declare-fun " <> n <> " () Addr)"
     -- assume that symbolic addresses do not collide with the zero address or precompiles
-    assume n = SMTCommand $ "(assert (bvugt " <> n <> " (_ bv9 160)))"
+    assume n = SMTCommand $ "(assert (and (bvugt " <> n <> " (_ bv17 160)) (distinct " <> n <> " (_ bv256 160))))"
     cexvars = (mempty :: CexVars){ addrs = fmap toLazyText names }
 
 declareFrameContext :: [(Builder, [Prop])] -> Err SMT2
