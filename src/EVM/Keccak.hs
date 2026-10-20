@@ -2,7 +2,7 @@
     Module: EVM.Keccak
     Description: Expr passes to determine Keccak assumptions
 -}
-module EVM.Keccak (keccakAssumptions, concreteKeccaks, findKeccakPropsExprs) where
+module EVM.Keccak (keccakAssumptions, concreteKeccaks, concreteKeccakValues, findKeccakPropsExprs) where
 
 import Control.Monad.State
 import Data.Map.Strict qualified as Map
@@ -85,7 +85,7 @@ type KeccakValue = (Expr Buf, W256)
 concreteKeccaks :: [Prop] -> Set KeccakValue
 concreteKeccaks ps = direct <> Set.map (\(pre, h) -> (ConcreteBuf (toBytes pre), h)) recovered
   where
-  direct = foldMap concreteKeccakProp ps
+  direct = foldMap concreteKeccakValues ps
   known = Map.fromList [(h, fromBytes bs) | (ConcreteBuf bs, h) <- Set.toList direct]
   recovered = recoverSlots (Set.filter (>= 256) slots) bigKeys known
   (slots, keys) = foldMap (foldProp literals mempty) ps
@@ -100,9 +100,10 @@ concreteKeccaks ps = direct <> Set.map (\(pre, h) -> (ConcreteBuf (toBytes pre),
     Keccak buf -> (Set.fromList [w | off <- [0, 32], Lit w <- [readWord (Lit off) buf]], mempty)
     _ -> mempty
 
-  concreteKeccakProp :: Prop -> Set KeccakValue
-  concreteKeccakProp p = foldProp compute Set.empty p
-
+-- | Concrete hashes present in a term, without recovering preimages of literals.
+concreteKeccakValues :: TraversableTerm a => a -> Set KeccakValue
+concreteKeccakValues = foldTerm compute Set.empty
+  where
   compute :: forall a. Expr a -> Set KeccakValue
   compute = \case
     Keccak buf -> do

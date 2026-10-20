@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Added
 - Byte reads through a word read at a concrete offset now resolve against its
   source buffer, allowing unaligned copies to preserve concrete mapping keys.
+- KECCAK256 folds memory that becomes concrete after simplification, including
+  CREATE2 preimages containing concrete hashes, while retaining nested preimages
+  for the solver's keccak assumptions.
 - The symbolic execution fuzzer runs random programs with abstract calldata,
   storage, callvalue and timestamp, checks the leaf the concrete inputs reach
   against geth, replays solver models of other leaves in geth, and reports
@@ -138,6 +141,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of reverting, which made the test pass.
 - In `hevm test`, `vm.selectFork` with a nonexistent fork fails the test instead
   of ending the path in an error that counted as passing.
+- Hash-consing no longer segfaults intermittently with several capabilities: GHC's
+  `makeStableName` races with growing the stable name table, so calls are serialized.
 - With `--rpc`, accessing an account without code (an EOA) no longer aborts
   with an oracle error.
 - With `--rpc`, accounts at addresses up to 0xdeadbeef, such as the burn
