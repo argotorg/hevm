@@ -955,9 +955,9 @@ data Block = Block
   { coinbase    :: Expr EAddr
   , timestamp   :: Expr EWord
   , number      :: Expr EWord
-  , prevRandao  :: W256
+  , prevRandao  :: Expr EWord
   , gaslimit    :: Word64
-  , baseFee     :: W256
+  , baseFee     :: Expr EWord
   , maxCodeSize :: W256
   , schedule    :: FeeSchedule Word64
   } deriving (Show, Generic)
@@ -1106,11 +1106,11 @@ data VMOpts (t :: VMType) = VMOpts
   , number :: Expr EWord
   , timestamp :: Expr EWord
   , coinbase :: Expr EAddr
-  , prevRandao :: W256
+  , prevRandao :: Expr EWord
   , maxCodeSize :: W256
   , blockGaslimit :: Word64
   , gasprice :: W256
-  , baseFee :: W256
+  , baseFee :: Expr EWord
   , schedule :: FeeSchedule Word64
   , chainId :: W256
   , create :: Bool

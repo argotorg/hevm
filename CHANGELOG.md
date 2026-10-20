@@ -130,6 +130,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   possible values, which could leave symbolic jump paths unexplored.
 - Forward jumps whose conditions become concrete after folding keccak hashes
   skip speculative merging, keeping their results concrete.
+- `--sig` with `bytes` or `string` arguments lays out the calldata by their
+  symbolic lengths, instead of assuming each takes `--max-dyn-size` bytes. Shorter
+  inputs were missed.
+- Without `--rpc`, `hevm symbolic` treats the block number, base fee and
+  prevrandao as symbolic instead of 0. `hevm equivalence` and the library's
+  symbolic VMs treat the base fee and prevrandao as symbolic too.
+- `--basefee` is no longer ignored.
+- BLOCKHASH with a symbolic block number or argument is 0 outside the 256 most
+  recent blocks.
+- State merging no longer merges code that reads GAS, creates a contract or
+  calls unknown code; it reused the variable of that GAS reading, address or
+  call result for the next one.
+- When hevm enumerates the values of a symbolic address, it constrains only its
+  low 20 bytes. Addresses with higher bytes set were on no path.
+- Calls to unknown code with a symbolic target expand the memory over their
+  input and output ranges.
 - `hevm symbolic` no longer prints QED when some paths were only partially
   explored; it prints the partial-exploration warning and exits with an error.
 - `hevm symbolic --create` and `hevm exec --create` run the init code instead of

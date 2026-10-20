@@ -23,7 +23,7 @@ vmForEthrunCreation creationCode =
     , caller = LitAddr ethrunAddress
     , origin = LitAddr ethrunAddress
     , blockGaslimit = 0
-    , prevRandao = 42069
+    , prevRandao = Lit 42069
     }) <&> set (#env % #contracts % at (LitAddr ethrunAddress))
              (Just (initialContract (RuntimeCode (ConcreteRuntimeCode ""))))
 

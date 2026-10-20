@@ -564,10 +564,10 @@ initialUnitTestVm (UnitTestOptions {..}) theContract = do
            , timestamp = Lit testParams.timestamp
            , blockGaslimit = testParams.gaslimit
            , gasprice = testParams.gasprice
-           , baseFee = testParams.baseFee
+           , baseFee = Lit testParams.baseFee
            , priorityFee = testParams.priorityFee
            , maxCodeSize = testParams.maxCodeSize
-           , prevRandao = testParams.prevrandao
+           , prevRandao = Lit testParams.prevrandao
            , chainId = testParams.chainId
            , create = True
            , allowFFI = ffiAllowed
@@ -601,7 +601,7 @@ makeSrcLookup dapp srcCache = SrcLookup $ \contracts addr pc ->
 paramsFromRpc :: forall m . App m => Fetch.RpcInfo -> Fetch.Session -> m TestVMParams
 paramsFromRpc rpcInfo sess = do
   (miner,ts,blockNum,ran,limit,base) <- case rpcInfo.blockNumURL of
-    Nothing -> pure (SymAddr "miner", Lit 0, Lit 0, 0, 0, 0)
+    Nothing -> pure (SymAddr "miner", Lit 0, Lit 0, Lit 0, 0, Lit 0)
     Just (Fetch.Latest, url) -> fetch Fetch.Latest url
     Just (Fetch.BlockNumber block, url) -> fetch (Fetch.BlockNumber block) url
   let ts' = fromMaybe (internalError "received unexpected symbolic timestamp via rpc") (maybeLitWordSimp ts)
@@ -613,7 +613,7 @@ paramsFromRpc rpcInfo sess = do
     , origin = SymAddr "origin"
     , gasCreate = defaultGasForCreating
     , gasCall = defaultGasForInvoking
-    , baseFee = base
+    , baseFee = forceLit base
     , priorityFee = 0
     , balanceCreate = defaultBalanceForTestContract
     , coinbase = miner
@@ -622,7 +622,7 @@ paramsFromRpc rpcInfo sess = do
     , gaslimit = limit
     , gasprice = 0
     , maxCodeSize = defaultMaxCodeSize
-    , prevrandao = ran
+    , prevrandao = forceLit ran
     , chainId = 99
     }
   where

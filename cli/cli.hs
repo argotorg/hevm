@@ -692,7 +692,7 @@ vmFromCommand :: App m => CommonOptions -> CommonExecOptions -> CommonFileOption
 vmFromCommand cOpts cExecOpts cFileOpts execOpts sess = do
   conf <- readConfig
   (miner,ts,baseFee,blockNum,prevRan) <- case cExecOpts.rpc of
-    Nothing -> pure (LitAddr 0,Lit 0,0,Lit 0,0)
+    Nothing -> pure (LitAddr 0,Lit 0,Lit 0,Lit 0,Lit 0)
     Just url -> liftIO $ Fetch.fetchBlockWithSession conf sess block url >>= \case
       Nothing -> do
         putStrLn $ "Error, Could not fetch block" <> show block <> " from URL: " <> show url
@@ -780,7 +780,7 @@ vmFromCommand cOpts cExecOpts cFileOpts execOpts sess = do
           , caller         = caller
           , origin         = origin
           , gas            = word64 (.gas) 0xffffffffffffffff
-          , baseFee        = baseFee
+          , baseFee        = maybe baseFee Lit cExecOpts.basefee
           , priorityFee    = word (.priorityFee) 0
           , gaslimit       = word64 (.gaslimit) 0xffffffffffffffff
           , coinbase       = addr (.coinbase) miner
@@ -789,7 +789,7 @@ vmFromCommand cOpts cExecOpts cFileOpts execOpts sess = do
           , blockGaslimit  = word64 (.gaslimit) 0xffffffffffffffff
           , gasprice       = word (.gasprice) 0
           , maxCodeSize    = word (.maxcodesize) 0xffffffff
-          , prevRandao     = word (.prevRandao) prevRan
+          , prevRandao     = maybe prevRan Lit cExecOpts.prevRandao
           , chainId        = word (.chainid) 1
           , create         = (.create) execOpts
           }
@@ -804,7 +804,7 @@ symvmFromCommand :: App m =>
 symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
   conf <- readConfig
   (miner,blockNum,baseFee,prevRan) <- case cExecOpts.rpc of
-    Nothing -> pure (SymAddr "miner",Lit 0,0,0)
+    Nothing -> pure (SymAddr "miner",BlockNumber,BaseFee,PrevRandao)
     Just url -> liftIO $ Fetch.fetchBlockWithSession conf sess block url >>= \case
       Nothing -> do
         putStrLn $ "Error, Could not fetch block" <> show block <> " from URL: " <> show url
@@ -880,7 +880,7 @@ symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
       , caller         = caller
       , origin         = origin
       , gaslimit       = word64 (.gaslimit) 0xffffffffffffffff
-      , baseFee        = baseFee
+      , baseFee        = maybe baseFee Lit cExecOpts.basefee
       , priorityFee    = word (.priorityFee) 0
       , coinbase       = eaddr (.coinbase) miner
       , number         = maybe blockNum Lit cExecOpts.number
@@ -888,7 +888,7 @@ symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
       , blockGaslimit  = word64 (.gaslimit) 0xffffffffffffffff
       , gasprice       = word (.gasprice) 0
       , maxCodeSize    = word (.maxcodesize) 0xffffffff
-      , prevRandao     = word (.prevRandao) prevRan
+      , prevRandao     = maybe prevRan Lit cExecOpts.prevRandao
       , chainId        = word (.chainid) 1
       , create         = (.create) sOpts
       , baseState      = baseState

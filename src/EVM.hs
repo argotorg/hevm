@@ -83,7 +83,7 @@ defaultVMOpts = VMOpts
   , origin         = LitAddr 0
   , gas            = toGas maxBound
   , gaslimit       = maxBound
-  , baseFee        = 0
+  , baseFee        = Lit 0
   , priorityFee    = 0
   , coinbase       = LitAddr 0
   , number         = Lit 0
@@ -91,7 +91,7 @@ defaultVMOpts = VMOpts
   , blockGaslimit  = maxBound
   , gasprice       = 0
   , maxCodeSize    = 0xffffffff
-  , prevRandao     = 0
+  , prevRandao     = Lit 0
   , schedule       = Fees.feeSchedule
   , chainId        = 1
   , create         = False
@@ -665,21 +665,16 @@ exec1 conf = do
               underrun
 
         OpBlockhash -> {-# SCC "OpBlockhash" #-} do
-          stackOp1 g_blockhash $ \case
-            Lit i -> case vm.block.number of
-              Lit vmBlockNumber ->
-                if i + 256 < vmBlockNumber || i >= vmBlockNumber
-                -- blockhash is 0 if block is too old or too new as per EVM spec
-                then Lit 0
-                -- We adopt the fake block hash scheme of the VMTests,
-                -- so that blockhash(i) is the hash of i as decimal ASCII.
-                else fakeBlockHash i
-              -- For symbolic block numbers, we don't know if it's too old or too new,
-              -- so we return fake block hash
-              _ -> fakeBlockHash i
-            i -> BlockHash i
-            where
-              fakeBlockHash i = (into i :: Integer) & show & Char8.pack & keccak' & Lit
+          stackOp1 g_blockhash $ \i ->
+            -- blockhash is 0 unless i is one of the 256 blocks before the current one
+            let num = vm.block.number
+                inRange = Expr.and (Expr.lt i num) (Expr.leq (Expr.sub num i) (Lit 256))
+                hash = case i of
+                  -- We adopt the fake block hash scheme of the VMTests,
+                  -- so that blockhash(i) is the hash of i as decimal ASCII.
+                  Lit l -> (into l :: Integer) & show & Char8.pack & keccak' & Lit
+                  _ -> BlockHash i
+            in Expr.simplify $ ITE inRange hash (Lit 0)
 
         OpCoinbase -> {-# SCC "OpCoinbase" #-}
           limitStack 1 . burn g_base $
@@ -695,7 +690,7 @@ exec1 conf = do
 
         OpPrevRandao -> {-# SCC "OpPrevRandao" #-} do
           limitStack 1 . burn g_base $
-            next >> push vm.block.prevRandao
+            next >> pushSym vm.block.prevRandao
 
         OpGaslimit -> {-# SCC "OpGaslimit" #-}
           limitStack 1 . burn g_base $
@@ -711,7 +706,7 @@ exec1 conf = do
 
         OpBaseFee -> {-# SCC "OpBaseFee" #-}
           limitStack 1 . burn g_base $
-            next >> push vm.block.baseFee
+            next >> pushSym vm.block.baseFee
 
         OpBlobhash -> {-# SCC "OpBlobhash" #-}
           stackOp1 g_verylow $ \_ -> Lit 0
@@ -1012,7 +1007,7 @@ exec1 conf = do
           case stk of
             xGas:xTo':xValue:xInOffset:xInSize:xOutOffset:xOutSize:xs ->
               branch conf.maxDepth (Expr.gt xValue (Lit 0)) $ \gt0 -> do
-                let addrFallback = if conf.promiseNoReent then const fallback
+                let addrFallback = if conf.promiseNoReent then const expandingFallback
                                    else unexpectedSymArgW "unable to determine a call target"
                 (if gt0 then notStatic else id) $
                   forceAddr xTo' addrFallback $ \xTo ->
@@ -1033,6 +1028,8 @@ exec1 conf = do
                             touchAccount callee
                             transfer from' callee xValue
               where fallback = freshBufFallback xTo' xValue xInOffset xInSize xOutOffset xOutSize True xs
+                    -- without a target, callChecks doesn't run to expand the memory
+                    expandingFallback = accessMemoryRange xInOffset xInSize $ accessMemoryRange xOutOffset xOutSize fallback
             _ -> underrun
 
         OpCallcode -> {-# SCC "OpCallcode" #-}
@@ -1124,7 +1121,7 @@ exec1 conf = do
         OpStaticcall -> {-# SCC "OpStaticcall" #-}
           case stk of
             xGas:xTo:xInOffset:xInSize:xOutOffset:xOutSize:xs ->
-              forceAddr xTo (const fallback) $ \xTo' -> case gasTryFrom xGas of
+              forceAddr xTo (const expandingFallback) $ \xTo' -> case gasTryFrom xGas of
                 Left _ -> vmError IllegalOverflow
                 Right gas -> do
                   overrideC <- use $ #state % #overrideCaller
@@ -1139,6 +1136,8 @@ exec1 conf = do
                       touchAccount callee
                 where
                   fallback = freshBufFallback xTo (Lit 0) xInOffset xInSize xOutOffset xOutSize False xs
+                  -- without a target, callChecks doesn't run to expand the memory
+                  expandingFallback = accessMemoryRange xInOffset xInSize $ accessMemoryRange xOutOffset xOutSize fallback
             _ -> underrun
 
         OpSelfdestruct -> {-# SCC "OpSelfdestruct" #-}
@@ -1793,8 +1792,9 @@ onlyDeployed addrExpr fallback continue = do
         _ -> Nothing
     runAllPaths val = do
         assign #result Nothing
-        pushTo #constraints $ Expr.simplifyProp (addrExpr .== val)
+        pushTo #constraints $ Expr.simplifyProp (Expr.and (Lit maxAddrWord) addrExpr .== val)
         continue (forceEWordToEAddr val)
+    maxAddrWord = 2 ^ (160 :: Int) - 1
 
 forceAddr :: forall t . (?conf :: Config, VMOps t, Typeable t) =>
   Expr EWord
@@ -3891,16 +3891,19 @@ instance VMOps Symbolic where
               [] -> finishAllFramesAndStop
               [val] -> do
                 assign #result Nothing
-                pushTo #constraints $ Expr.simplifyProp (ewordExpr .== (Lit val))
+                pushTo #constraints $ Expr.simplifyProp (masked .== (Lit val))
                 continue $ Just val
               _ -> fork maxDepth vm.exploreDepth $ PleaseRunAll (map Lit concVals) runAllPaths
           Nothing -> do
             assign #result Nothing
             continue Nothing
     where
+      -- the solutions are only for the low numBytes bytes, so pin only those
+      masked = if numBytes >= 32 then ewordExpr
+               else Expr.and (Lit (2 ^ (8 * numBytes) - 1)) ewordExpr
       runAllPaths val = do
         assign #result Nothing
-        pushTo #constraints $ Expr.simplifyProp (ewordExpr .== val)
+        pushTo #constraints $ Expr.simplifyProp (masked .== val)
         case val of
           Lit v -> continue $ Just v
           _ -> internalError "runAllPaths can only get concrete values here"

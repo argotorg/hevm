@@ -146,26 +146,19 @@ symAbiArg maxDynSize name = \case
     Comp . V.toList . V.imap (\(T.pack . show -> i) tp -> symAbiArg maxDynSize (name <> "-a-" <> i) tp) $ (V.replicate sz tps)
   AbiTupleType tps ->
     Comp . V.toList . V.imap (\(T.pack . show -> i) tp -> symAbiArg maxDynSize (name <> "-t-" <> i) tp) $ tps
-  -- Dynamic bytes/string: concretize with bounded symbolic length + abstract buffer
-  AbiBytesDynamicType ->
-    let bufName = AbstractBuf (name <> "-bytes")
-        len = Var (name <> "-bytes-length")
-        maxLit = Lit (fromIntegral maxDynSize)
-        sizeBound = [PLEq len maxLit]
-    in Dy sizeBound len maxDynSize bufName
-  AbiStringType ->
-    let bufName = AbstractBuf (name <> "-string")
-        len = Var (name <> "-string-length")
-        maxLit = Lit (fromIntegral maxDynSize)
-        sizeBound = [PLEq len maxLit]
-    in Dy sizeBound len maxDynSize bufName
+  -- Dynamic bytes/string: a symbolic length bounded by maxDynSize, the contents
+  -- are the calldata bytes that follow the length word
+  AbiBytesDynamicType -> dyn (name <> "-bytes-length")
+  AbiStringType -> dyn (name <> "-string-length")
   t -> internalError $ "TODO: symbolic abi encoding for " <> show t
   where
     v = Var name
+    dyn lenName = let len = Var lenName
+                  in Dy [PLEq len (Lit (fromIntegral maxDynSize))] len
 
 data CalldataFragment
   = St [Prop] (Expr EWord)
-  | Dy [Prop] (Expr EWord) Int (Expr Buf) -- ^ props, symbolic length, max concrete size, buffer
+  | Dy [Prop] (Expr EWord) -- ^ props, symbolic length
   | Comp [CalldataFragment]
   deriving (Show, Eq)
 
@@ -202,29 +195,25 @@ symCalldata sig typesignature concreteArgs base = do
   pure (withSelector, sizeConstraints : props, caveats)
 
 cdLen :: [CalldataFragment] -> Expr EWord
-cdLen frags = Expr.add (headLen frags) (tailLen frags)
+cdLen frags = Expr.add (Expr.add (Lit 4) (countHeadBytes frags)) (tailLen frags)
   where
-    -- Head: 4 bytes selector + 32 bytes per top-level arg (static or dynamic pointer)
-    headLen = go (Lit 4)
-      where
-        go acc = \case
-          [] -> acc
-          (hd:tl) -> case hd of
-            St _ _  -> go (Expr.add acc (Lit 32)) tl
-            Dy {}   -> go (Expr.add acc (Lit 32)) tl
-            Comp xs | all isSt xs -> go acc (xs <> tl)
-            _ -> internalError "unsupported"
-    -- Tail: for each Dy fragment, 32 bytes (length word) + padded data
-    tailLen = go (Lit 0)
-      where
-        go acc = \case
-          [] -> acc
-          (hd:tl) -> case hd of
-            Dy _ _ maxSz _ ->
-              let paddedMax = ((maxSz + 31) `Prelude.div` 32) * 32
-              in go (Expr.add acc (Lit (fromIntegral (32 + paddedMax)))) tl
-            Comp xs | all isSt xs -> go acc (xs <> tl)
-            _ -> go acc tl
+    tailLen = foldl' (\acc f -> case f of
+                         Dy _ len -> Expr.add acc (dynTailSize len)
+                         _ -> acc) (Lit 0)
+
+-- | Bytes a dynamic argument takes in the tail: the length word and the
+-- contents, padded to a multiple of 32
+dynTailSize :: Expr EWord -> Expr EWord
+dynTailSize len = Expr.add (Lit 32) (Expr.mul (Expr.div (Expr.add len (Lit 31)) (Lit 32)) (Lit 32))
+
+-- | Each top-level fragment occupies 32 bytes in the head (value or offset pointer)
+countHeadBytes :: [CalldataFragment] -> Expr EWord
+countHeadBytes = foldl' countFrag (Lit 0)
+  where
+    countFrag acc (St _ _)  = Expr.add acc (Lit 32)
+    countFrag acc (Dy {})   = Expr.add acc (Lit 32)
+    countFrag acc (Comp xs) | all isSt xs = foldl' countFrag acc xs
+    countFrag _ s = internalError $ "unsupported cd fragment: " <> show s
 
 writeSelector :: Expr Buf -> Text -> Expr Buf
 writeSelector buf sig =
@@ -233,49 +222,28 @@ writeSelector buf sig =
     sel = ConcreteBuf $ selector sig
     writeSel idx = Expr.writeByte idx (Expr.readByte idx sel)
 
+-- | Writes the arguments in the canonical ABI layout. The tail offset of each
+-- dynamic argument depends on the symbolic lengths of the ones before it.
 combineFragments :: [CalldataFragment] -> Expr Buf -> (Expr Buf, [Prop])
 combineFragments fragments base =
   let headBytes = countHeadBytes fragments
-      tailStart = Expr.add (Lit 4) headBytes
-  in go headBytes (Lit 4) tailStart (Lit 0) fragments (base, [])
+  in go headBytes (Lit 4) (Lit 0) fragments (base, [])
   where
-    -- Each top-level fragment occupies 32 bytes in the head (value or offset pointer)
-    countHeadBytes :: [CalldataFragment] -> Expr EWord
-    countHeadBytes = foldl' countFrag (Lit 0)
-      where
-        countFrag acc (St _ _)  = Expr.add acc (Lit 32)
-        countFrag acc (Dy {})   = Expr.add acc (Lit 32)
-        countFrag acc (Comp xs) | all isSt xs = foldl' countFrag acc xs
-        countFrag _ s = internalError $ "unsupported cd fragment: " <> show s
-
-    go :: Expr EWord -> Expr EWord -> Expr EWord -> Expr EWord
+    go :: Expr EWord -> Expr EWord -> Expr EWord
        -> [CalldataFragment] -> (Expr Buf, [Prop]) -> (Expr Buf, [Prop])
-    go _ _ _ _ [] acc = acc
-    go headSz idx tailBase tailAcc (f:rest) (buf, ps) =
+    go _ _ _ [] acc = acc
+    go headSz idx tailAcc (f:rest) (buf, ps) =
       case f of
-        -- static fragments get written as a word in place
-        St p w -> go headSz (Expr.add idx (Lit 32)) tailBase tailAcc rest
+        St p w -> go headSz (Expr.add idx (Lit 32)) tailAcc rest
                     (Expr.writeWord idx w buf, p <> ps)
-        -- compound fragments that contain only static fragments get written in place
-        Comp xs | all isSt xs -> go headSz idx tailBase tailAcc (xs <> rest) (buf, ps)
-        -- dynamic fragments: write offset pointer in head, data in tail
-        Dy p len maxSz dynBuf ->
-          let paddedMax = ((maxSz + 31) `Prelude.div` 32) * 32
-              -- ABI offset is relative to the start of the args (byte 4)
-              offset = Expr.add headSz tailAcc
-              -- Write the offset pointer in the head area
+        Comp xs | all isSt xs -> go headSz idx tailAcc (xs <> rest) (buf, ps)
+        Dy p len ->
+          -- ABI offsets are relative to the start of the args (byte 4)
+          let offset = Expr.add headSz tailAcc
               buf1 = Expr.writeWord idx offset buf
-              -- Write the length word at the tail position
-              dynPos = Expr.add tailBase tailAcc
-              buf2 = Expr.writeWord dynPos len buf1
-              -- Copy maxDynSize bytes from the abstract buffer using concrete
-              -- size to avoid symbolic CopySlice issues
-              dataPos = Expr.add dynPos (Lit 32)
-              buf3 = Expr.copySlice (Lit 0) dataPos (Lit (fromIntegral maxSz)) dynBuf buf2
-              -- Advance tail by 32 (length word) + paddedMax
-              newTailAcc = Expr.add tailAcc (Lit (fromIntegral (32 + paddedMax)))
-          in go headSz (Expr.add idx (Lit 32)) tailBase newTailAcc rest
-               (buf3, p <> ps)
+              buf2 = Expr.writeWord (Expr.add (Lit 4) offset) len buf1
+          in go headSz (Expr.add idx (Lit 32)) (Expr.add tailAcc (dynTailSize len)) rest
+               (buf2, p <> ps)
         s -> internalError $ "unsupported cd fragment: " <> show s
 
 isSt :: CalldataFragment -> Bool
@@ -321,7 +289,8 @@ loadEmptySymVM x callvalue cd =
     , number = BlockNumber
     , timestamp = Timestamp
     , blockGaslimit = 0
-    , prevRandao = 42069
+    , prevRandao = PrevRandao
+    , baseFee = BaseFee
     })
 
 -- Creates a symbolic VM that has symbolic storage, unlike loadEmptySymVM
@@ -344,7 +313,8 @@ loadSymVM x callvalue cd create =
     , number = BlockNumber
     , timestamp = Timestamp
     , blockGaslimit = 0
-    , prevRandao = 42069
+    , prevRandao = PrevRandao
+    , baseFee = BaseFee
     , create = create
     })
 
@@ -1170,7 +1140,8 @@ eqReplayVmOpts cex others code calldata = (defaultVMOpts @Concrete)
   , number = Lit (ctx BlockNumber cex.blockContext)
   , gas = 0xffffffffffffffff
   , gaslimit = 0xffffffffffffffff
-  , prevRandao = 42069
+  , prevRandao = Lit (ctx PrevRandao cex.blockContext)
+  , baseFee = Lit (ctx BaseFee cex.blockContext)
   }
   where
     addr name def = maybe def LitAddr (Map.lookup (SymAddr name) cex.addrs)
