@@ -851,22 +851,23 @@ encoding, or if the ABI decoder fails to decode a value.</li>
 <li>0x41: If you allocate too much memory or create an array that is too large.</li>
 <li>0x51: If you call a zero-initialized variable of internal function type.</li>
 </ul>
-<p>Of these, <code>hevm test</code> will only report counterexamples for 0x1, or for custom errors that
-developers define, such as:</p>
+<p>Of these, <code>hevm test</code> only reports counterexamples for 0x01. A test also fails
+on a failed forge-std <code>assert*</code> (an <code>Error(string)</code> revert starting with
+"assertion failed") and on the <code>INVALID</code> opcode. Every other revert, including
+a custom error such as the one below, is treated like a failed <code>require</code>: the
+path is assumed unreachable and gives no counterexample.</p>
 <pre><code class="language-solidity">error InsufficientBalance(uint256 requested, uint256 available);
 ....
-uint reqested = ...;
-uint available = ...;
 if (requested &gt; available) {
     revert InsufficientBalance(requested, available);
 }
 </code></pre>
-<p>Notice that for panic codes, the returned counterexample will produce
-a return whose first 4 bytes will be:</p>
+<p>For panic codes, the counterexample's return data starts with the selector of
+<code>Panic(uint256)</code>:</p>
 <pre><code class="language-plain">$ cast keccak "Panic(uint256)" | cut -c 1-10
 0x4e487b71
 </code></pre>
-<p>And if it's a custom error, the first 4 bytes will be:</p>
+<p>For a failed forge-std assertion, it starts with the selector of <code>Error(string)</code>:</p>
 <pre><code class="language-plain">$ cast keccak "Error(string)" | cut -c 1-10
 0x08c379a0
 </code></pre>
