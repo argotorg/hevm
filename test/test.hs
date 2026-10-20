@@ -4800,7 +4800,23 @@ tests = testGroup "hevm"
       assertBoolM ("Expected only counterexamples, got: " <> show res) (all isCex res)
   ]
   , testGroup "calling-solvers"
-  [ testGroup "keccak-alias-of-folded-slot"
+  [ testGroup "enumerate-buffer-lengths"
+      [ test (show solver) $ withSolvers solver 1 (Just 10) defMemLimit $ \s -> do
+          conf <- readConfig
+          let len = BufLength (AbstractBuf "buf")
+              smt = assertProps conf
+                [ PEq (Var "multiQueryVar") len
+                , POr (PEq len (Lit 33)) (PEq len (Lit 65))
+                ]
+              options = MultiSol { maxSols = 2, numBytes = 2, var = "multiQueryVar" }
+          -- Shrinking a buffer model to 64 bytes would silently exclude 65.
+          vals <- liftIO $ checkMulti s smt options
+          assertEqualM "all lengths remain possible" (Just (Set.fromList [33, 65])) (Set.fromList <$> vals)
+          limited <- liftIO $ checkMulti s smt options { maxSols = 1 }
+          assertEqualM "the width limit must not return an incomplete list" Nothing limited
+      | solver <- [Z3, Bitwuzla]
+      ]
+    , testGroup "keccak-alias-of-folded-slot"
       [ test (show solver) $ withSolvers solver 3 Nothing defMemLimit $ \s ->
           forM_ [0, 5, 255] $ \offset -> do
             let foldedSlot = keccak' (word256Bytes 3 <> word256Bytes 0) + offset
