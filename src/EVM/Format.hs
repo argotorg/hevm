@@ -547,6 +547,14 @@ formatPartial = \case
       , "function selector: " <> T.pack (show selector)
       ]
     ]
+  CheatCodeFailed pc addr selector msg -> T.unlines
+    [ "Cheat code failed: " <> T.pack msg
+    , indent 2 $ T.unlines
+      [ "contract addr: " <> T.pack (show addr)
+      , "program counter: " <> T.pack (show pc)
+      , "function selector: " <> T.pack (show selector)
+      ]
+    ]
   BranchTooDeep pc addr -> T.unlines
     ["Branch too deep."
     , indent 2 $ T.unlines
@@ -577,6 +585,7 @@ formatPartialDetailed srcLookupM contracts p =
     MaxIterationsReached {..}  -> "Max iterations reached" <> toTxt addr pc
     JumpIntoSymbolicCode {..}  -> "Encountered a jump into a symbolic code" <> toTxt addr pc
     CheatCodeMissing {..}      -> "Cheat code not recognized: " <> T.pack (show selector) <> toTxt addr pc
+    CheatCodeFailed {..}       -> "Cheat code failed: " <> T.pack msg <> toTxt addr pc
     PrecompileMissing {..}     -> "Precompile at address " <> pack (show preAddr) <> " does not exist, called from" <> toTxt addr pc
     BranchTooDeep {..}         -> "Branches too deep" <> toTxt addr pc
 
@@ -905,6 +914,7 @@ formatProp x = T.stripEnd $ case x of
         , "caller storage: " <> formatExpr i.callerStorage
         , "caller transient storage: " <> formatExpr i.callerTStorage
         , "caller balance: " <> formatExpr i.callerBalance
+        , "gas: " <> formatExpr i.callGas
         ]
     , ")"
     ]

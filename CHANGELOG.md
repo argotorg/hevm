@@ -119,6 +119,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the writes they are disjoint from and resolve the writes they hit.
 
 ## Fixed
+- `hevm symbolic` no longer prints QED when some paths were only partially
+  explored; it prints the partial-exploration warning and exits with an error.
+- `hevm symbolic --create` and `hevm exec --create` run the init code instead of
+  treating the contract being created as an address collision.
+- Calls to unknown code no longer return equal results just because their other
+  inputs are equal: the callee gets unknown gas, which differs between calls.
+- `hevm test` checks the fail flag that forge-std's `fail()` sets in its default
+  mode too; `--assertion-type` has no effect anymore.
+- In `hevm test`, a cheatcode that cannot handle its symbolic arguments, and
+  `expectRevert` with symbolic revert data, leave the path partially explored
+  instead of reverting, which made the test pass.
 - With `--rpc`, accessing an account without code (an EOA) no longer aborts
   with an oracle error.
 - With `--rpc`, accounts at addresses up to 0xdeadbeef, such as the burn

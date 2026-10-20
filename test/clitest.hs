@@ -22,6 +22,9 @@ import System.Directory (doesFileExist, listDirectory, removeFile)
 
 import EVM.Solidity
 import EVM.Types qualified as Types
+import EVM.Types (Op, GenericOp(..), Expr(Lit, LitByte))
+import EVM.Assembler (assemble)
+import Text.Printf (printf)
 import EVM.Effects
 import EVM.Test.Utils
 
@@ -294,6 +297,27 @@ main = do
           Just c <- runApp $ solcRuntime (T.pack "C") (T.pack "contract C { function stuff(uint x, uint y) public { unchecked { assert(x + y != 5); } } }")
           readProcessWithExitCode "cabal" ["run", "exe:hevm", "--", "symbolic", "--code", Types.bsToHex c] ""
         quietOut `shouldNotContain` "Queries answered:"
+      it "symbolic-partial-is-not-qed" $ do
+        -- loops 10 times before INVALID, more than the default max iterations;
+        -- OpPush assembles to PUSH32, so the loop head is at 33 and the body at 104
+        let loop = asmHex
+              [ OpPush (Lit 0), OpJumpdest
+              , OpDup 1, OpPush (Lit 10), OpGt, OpPush (Lit 104), OpJumpi
+              , OpUnknown 0xfe
+              , OpJumpdest, OpPush (Lit 1), OpAdd, OpPush (Lit 33), OpJump ]
+        (exitCode, stdout, _) <- readProcessWithExitCode "cabal"
+          ["run", "exe:hevm", "--", "symbolic", "--code", loop] ""
+        exitCode `shouldBe` ExitFailure 1
+        stdout `shouldNotContain` "QED"
+        stdout `shouldContain` "[WARNING]"
+      it "symbolic-create-runs-initcode" $ do
+        (symCode, symOut, _) <- readProcessWithExitCode "cabal"
+          ["run", "exe:hevm", "--", "symbolic", "--create", "--code", asmHex [OpUnknown 0xfe]] ""
+        symCode `shouldBe` ExitFailure 1
+        symOut `shouldNotContain` "QED"
+        (_, execOut, _) <- readProcessWithExitCode "cabal"
+          ["run", "exe:hevm", "--", "exec", "--create", "--code", asmHex [OpUnknown 0xfe]] ""
+        execOut `shouldContain` "UnrecognizedOpcode"
       it "early-abort" $ do
         (exitCode, stdout, stderr) <- runForge "test/contracts/pass/early-abort.sol" ["--max-iterations", "1000", "--early-abort"]
         stderr `shouldNotContain` "CallStack"
@@ -324,3 +348,9 @@ main = do
           , "prove_nested_mapping_allowance", "prove_multiple_contracts_and_packed_slot" ]
         result "[FAIL]" "prove_fail_overdraft_reverts" `shouldBe` True
         stdout `shouldContain` "[validated]"
+
+asmHex :: [Op] -> String
+asmHex = concatMap byte . assemble
+  where
+    byte (LitByte b) = printf "%02x" b
+    byte b = error $ "symbolic byte: " <> show b

@@ -546,6 +546,7 @@ data CallInputs = CallInputs
   , callerStorage :: Expr Storage
   , callerTStorage :: Expr Storage
   , callerBalance :: Expr EWord
+  , callGas :: Expr EWord -- ^ unknown, as hevm does not model gas
   }
 deriving instance Show CallInputs
 
@@ -657,6 +658,7 @@ data PartialExec
   | JumpIntoSymbolicCode  { pc :: Int, addr :: Expr EAddr, jumpDst :: Int }
   | PrecompileMissing     { pc :: Int, addr :: Expr EAddr, preAddr :: Addr }
   | CheatCodeMissing      { pc :: Int, addr :: Expr EAddr, selector :: FunctionSelector }
+  | CheatCodeFailed       { pc :: Int, addr :: Expr EAddr, selector :: FunctionSelector, msg :: String }
   | BranchTooDeep         { pc :: Int, addr :: Expr EAddr}
   deriving (Show)
 
@@ -944,6 +946,7 @@ data Env = Env
   , freshAddresses :: Int
   , freshGasVals :: Int
   , callWorld :: Expr EWord -- ^ token for the state calls to unknown code have left behind, see 'PCall'
+  , callCounts :: Map W256 Int -- ^ how many calls to unknown code with the same inputs this path made, by their hash
   }
   deriving (Show, Generic)
 
