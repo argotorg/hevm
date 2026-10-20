@@ -202,7 +202,8 @@ hashConsExprIO e = do
   if en then fst <$> go e else pure e
 
 -- GHC's makeStableName# reads the stable name table after releasing its lock, so a
--- concurrent call that grows (reallocates) the table makes it read freed memory
+-- concurrent call that grows (reallocates) the table makes it read freed memory,
+-- see https://gitlab.haskell.org/ghc/ghc/-/work_items/28003
 -- A spinlock, as threads parking on an MVar made hash-consing several times slower
 {-# NOINLINE snLock #-}
 snLock :: IORef Bool
