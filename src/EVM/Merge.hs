@@ -19,6 +19,7 @@ module EVM.Merge
 
 import Control.Monad (when)
 import Control.Monad.State.Strict (get, put)
+import Data.Maybe (isJust)
 import Debug.Trace (traceM)
 import Optics.Core
 import Optics.State
@@ -79,9 +80,9 @@ tryMergeForwardJump
   -> [Expr EWord]     -- ^ Stack after popping JUMPI args
   -> EVM Symbolic Bool
 tryMergeForwardJump conf exec1Step currentPC jumpTarget cond stackAfterPop = do
-  -- Only handle forward jumps (skip block pattern)
-  if jumpTarget <= currentPC
-  then pure False  -- Not a forward jump
+  -- Only merge forward jumps whose conditions remain symbolic.
+  if jumpTarget <= currentPC || isJust (Expr.maybeLitWordSimp cond)
+  then pure False
   else do
     vm0 <- get
 
