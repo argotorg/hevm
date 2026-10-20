@@ -162,6 +162,7 @@ mapErrorChildrenM g = \case
   e@ReturnDataOutOfBounds -> pure e
   e@NonceOverflow -> pure e
   e@BadCheatCode{} -> pure e
+  e@NonexistentFork{} -> pure e
   e@AssumeCheatFailed -> pure e
 
 mapPartialChildrenM :: Applicative m => (forall a . Expr a -> m (Expr a)) -> PartialExec -> m PartialExec
