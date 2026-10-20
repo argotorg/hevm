@@ -2198,7 +2198,12 @@ boundsSmtFuzz = forAllShrink (sized $ \n -> genBounded (min n 6) `suchThat` enco
         Qed -> property True
     | ((t, lb, ub), r) <- zip ts res ]
   where
-    encodable = getAll . foldExpr (\case Exp _ (Lit _) -> All True; Exp {} -> All False; _ -> mempty) mempty
+    encodable = getAll . foldExpr (\case
+      Exp _ (Lit _) -> All True
+      Exp {} -> All False
+      CopySlice _ _ (Lit n) _ _ -> All (n <= 4096)
+      CopySlice {} -> All False
+      _ -> mempty) mempty
     -- the shapes that 'Expr.lowerBound' and 'Expr.upperBound' look into
     genBounded :: Int -> Gen (Expr EWord)
     genBounded 0 = oneof [Lit <$> genSpecialLit, Var <$> elements ["a", "b"], genShapedWord 2]
