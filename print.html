@@ -1331,6 +1331,9 @@ an assertion violation is defined as either an execution of the invalid opcode
 <code>abi.encodeWithSelector('Panic(uint256)', errCode)</code> with <code>errCode</code> being one of
 the predefined solc assertion codes defined
 <a href="https://docs.soliditylang.org/en/latest/control-structures.html#panic-via-assert-and-error-via-require">here</a>.</p>
+<p>Each counterexample is replayed on a concrete EVM, and marked <code>[validated]</code> if the
+replay violates the assertion too, or <code>[not reproducible]</code> if it does not. Runs
+that fetch state over RPC, and contract creation, are not replayed.</p>
 <h2 id="arithmetic-overflow"><a class="header" href="#arithmetic-overflow">Arithmetic overflow</a></h2>
 <p>By default hevm ignores assertion violations that result from arithmetic
 overflow (<code>Panic(0x11)</code>), although this behaviour can be customised via the
