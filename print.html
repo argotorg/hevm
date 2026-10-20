@@ -1338,7 +1338,10 @@ arithmetic overflow (<code>0x11</code>) and user defined assertions (<code>0x01<
 <pre><code>hevm symbolic --code $CODE --assertions '[0x01, 0x11]'
 </code></pre>
 <p>The default value for <code>calldata</code> and <code>caller</code> are symbolic values, but can be
-specialized to concrete functions with their corresponding flags.</p>
+specialized to concrete functions with their corresponding flags. So is the
+timestamp (<code>--timestamp</code>), and, unless <code>--rpc</code> is given, the block number, base
+fee and prevrandao (<code>--number</code>, <code>--basefee</code>, <code>--prev-randao</code>). The gas price is
+0 unless <code>--gasprice</code> is given.</p>
 <h2 id="specializing-calldata"><a class="header" href="#specializing-calldata">Specializing calldata</a></h2>
 <p>One can also specialize specific arguments to a function signature, while
 leaving others abstract. If <code>--sig</code> is given, calldata is assumed to be of the
