@@ -46,7 +46,25 @@ solidityExplorationTests = testGroup "Exploration of Solidity"
 
 basicTests :: TestTree
 basicTests = testGroup "simple-checks"
-  [ testCase "unknown-calls-with-different-gas-may-differ" $ do
+  [ testCase "read-byte-from-word-mapping-key" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          mapping(address => uint256) balances;
+          function read(address dst, uint256 amount) external returns (uint256) {
+            balances[dst] = 7;
+            // The word includes dst's 20 bytes and 12 bytes of the symbolic amount.
+            bytes memory packed = abi.encodePacked(bytes12(0), bytes32(msg.data[16:48]));
+            return balances[address(uint160(uint256(bytes32(packed))))];
+          }
+        }
+      |]
+      let sig = Just (Sig "read(address,uint256)" [AbiAddressType, AbiUIntType 256])
+      paths <- executeWithBitwuzla $ \s ->
+        getExprEmptyStore s c sig ["0x1234567890123456789012345678901234567890"] defaultVeriOpts
+      assertBool "execution finishes" (not (any isPartial paths))
+      assertEqual "the copied address resolves the mapping read" [Lit 7]
+        [Expr.readWord (Lit 0) buf | Success _ _ buf _ <- paths]
+  , testCase "unknown-calls-with-different-gas-may-differ" $ do
     -- staticcall(1000, t) and staticcall(2000, t) to unknown t, INVALID if their results differ (#1201)
     let c = fromJust $ hexByteString "5f5f5f5f5f356103e8fa5f5f5f5f5f356107d0fa14601957fe5b00"
     (_, res) <- executeWithBitwuzla $ \s -> verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])

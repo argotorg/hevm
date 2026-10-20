@@ -287,7 +287,7 @@ withSolvers solver count timeout maxMemory cont = do
               orchestrate taskq cacheq solverSlots knownUnsat (fileCounter + 1)
 
 getMultiSol :: forall m. (MonadIO m, ReadConfig m) => Solver -> Maybe Natural -> Natural -> SMT2 -> MultiSol -> IO () -> Chan (Either TStrict.Text [W256]) -> QSem -> Int -> m ()
-getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol started r solverSlots fileCounter = do
+getMultiSol solver timeout maxMemory smt2@(SMT2 cmds _ _) multiSol started r solverSlots fileCounter = do
   conf <- readConfig
   let
     maskFromBytesCount k
@@ -312,12 +312,13 @@ getMultiSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) multiSol started
             when conf.debug $ putStrLn "Too many solutions to symbolic query."
             writeChan r (Left $ "too many solutions (" <> TStrict.pack (show (length vals)) <> ")")
           else do
-            mcex <- getModel inst cexvars
-            case mcex of
+            -- Full model extraction may shrink buffers, excluding other solutions.
+            mvars <- runMaybeT $ getVars parseVar (getValue inst) [TStrict.pack multiSol.var]
+            case mvars of
               Nothing -> do
                 when conf.debug $ putStrLn "Solver died while extracting model."
                 writeChan r (Left "solver died while extracting a model")
-              Just cex -> case Map.lookup (Var (TStrict.pack multiSol.var)) cex.vars of
+              Just vars -> case Map.lookup (Var (TStrict.pack multiSol.var)) vars of
                 Just v -> do
                   let hexMask = maskFromBytesCount multiSol.numBytes
                       maskedVal = v .&. hexMask

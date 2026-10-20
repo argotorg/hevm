@@ -1134,6 +1134,9 @@ tests = testGroup "contract-quickcheck-run"
               c = TestCase (Prog [IRaw (hex m)] [IRaw (hex cl)]) (Inputs mempty mempty 0 1) 300000 1
           r <- withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> runSymbolic solvers c
           liftIO $ putStrLn $ "symbolic leaves: " <> show (length . fst <$> r))
+      , after AllFinish "random-contract-concrete-call" $ test "symbolic-jump-calldata-length" $ do
+        _ <- checkCase 0 (fixedCase [IOp OpCalldatasize, IOp OpJump] (BS.replicate 5 0))
+        pure ()
       , after AllFinish "random-contract-concrete-call" $ test "calldata-wraparound-1" $ do
         let items = concat
               [ pushOps [0xff, 31] <> [IOp OpMstore8] -- value, offs

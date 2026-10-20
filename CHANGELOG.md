@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- Byte reads through a word read at a concrete offset now resolve against its
+  source buffer, allowing unaligned copies to preserve concrete mapping keys.
 - KECCAK256 folds memory that becomes concrete after simplification, including
   CREATE2 preimages containing concrete hashes, while retaining nested preimages
   for the solver's keccak assumptions.
@@ -123,6 +125,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the writes they are disjoint from and resolve the writes they hit.
 
 ## Fixed
+- Retain `NonexistentFork` for source compatibility with callers such as Echidna.
+- Enumerating symbolic values no longer shrinks buffer models and silently drops
+  possible values, which could leave symbolic jump paths unexplored.
 - `hevm symbolic` no longer prints QED when some paths were only partially
   explored; it prints the partial-exploration warning and exits with an error.
 - `hevm symbolic --create` and `hevm exec --create` run the init code instead of
