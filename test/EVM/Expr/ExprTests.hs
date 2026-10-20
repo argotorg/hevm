@@ -1141,6 +1141,9 @@ basicSimplificationTests = testGroup "Basic simplification tests"
         a = successPath [PEq (Add (Lit 1) (Lit 2)) (Sub (Lit 4) (Lit 1))]
         b = Expr.simplify a
       assertEqual "Must simplify down" (successPath []) b
+  , testCase "simp-exp-ite-lits" $ do
+      let e = Exp (Lit 0x100) (ITE (Var "c") (Lit 0x1c) (Lit 4))
+      assertEqual "split" (ITE (Var "c") (Lit (0x100 ^ (0x1c :: Int))) (Lit 0x100000000)) (Expr.simplify e)
   , testCase "simp-mul-neg1" $ do
       let simp = Expr.simplify $ Mul (Lit Expr.maxLit) (Var "x")
       assertEqual "mul by -1 is negation" (Sub (Lit 0) (Var "x")) simp

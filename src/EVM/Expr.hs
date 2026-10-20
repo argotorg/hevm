@@ -2049,6 +2049,9 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
       | a < 32 && m < 32 && a * m < 32 = shl (mul (Lit 8) offset) (Lit 1)
     go (Exp (Lit 0x100) offset@(And (Lit m) _)) | m < 32 = shl (mul (Lit 8) offset) (Lit 1)
     go (Exp (Lit 2) k) = shl k (Lit 1)
+    -- an exponent picked between two constants (a packed array element's offset) splits into two
+    -- concrete powers, which SMT can encode
+    go (Exp a@(Lit _) (ITE c x@(Lit _) y@(Lit _))) = ITE c (EVM.Expr.exp a x) (EVM.Expr.exp a y)
     go (Exp a b) = EVM.Expr.exp a b
 
     go (Div (Div x (Lit a)) (Lit b))
