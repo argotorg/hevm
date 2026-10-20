@@ -16,6 +16,7 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
 import Data.Text qualified as T
+import Data.Vector qualified as V
 import Data.Word (Word8)
 import Numeric (readHex)
 import Test.QuickCheck hiding (Success, Failure)
@@ -24,6 +25,7 @@ import Test.Tasty.HUnit (testCase, (@?=))
 import Test.Tasty.QuickCheck (testProperty, QuickCheckTests(..))
 
 import EVM (makeVm, initialContract, defaultVMOpts)
+import EVM.Assembler qualified as Assembler
 import EVM.Concrete qualified as Concrete
 import EVM.Effects (App, Env(..), defaultConfig, runEnv)
 import EVM.Expr qualified as Expr
@@ -44,9 +46,9 @@ tests = testGroup "RPC fuzzing"
       testProperty "rpc-fuzz" prop_rpc
   , testCase "rpc-eoa-balance" $ do
       let addr = 0x1111111111111111111111111111111111111111
-          -- return balance(addr)
-          code = BS.pack $ [0x73] <> BS.unpack (BS.drop 12 (word256Bytes (fromIntegral (addr :: Addr))))
-            <> [0x31, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3]
+          code = asmOps
+            [ OpPush (Lit (fromIntegral (addr :: Addr))), OpBalance
+            , OpPush0, OpMstore, OpPush (Lit 0x20), OpPush0, OpReturn ]
       res <- withMockNode 16 (Map.singleton addr (eoa 1 0x1234)) $ \node ->
         runEnv (Env {config = defaultConfig}) $ withSolvers Bitwuzla 1 Nothing defMemLimit $ \solvers -> do
           sess <- Fetch.mkSessionWithoutCache
@@ -54,6 +56,9 @@ tests = testGroup "RPC fuzzing"
           runConcrete (Fetch.oracle solvers (Just sess) rpcInfo) mempty (initialContract (RuntimeCode (ConcreteRuntimeCode code))) [] mempty
       fmap (\(o, _, _) -> o) res @?= Right (Right (word256Bytes 0x1234))
   ]
+
+asmOps :: [Op] -> ByteString
+asmOps = BS.pack . map (\case LitByte b -> b; b -> internalError ("symbolic byte: " <> show b)) . V.toList . Assembler.assemble
 
 -- * Programs
 
@@ -120,9 +125,12 @@ remoteBalance = 1000
 
 -- | sstore(cd[0], cd[32]); if cd[96] revert; return sload(cd[64])
 targetCode :: ByteString
-targetCode = BS.pack
-  [ 0x60, 0x20, 0x35, 0x5f, 0x35, 0x55, 0x60, 0x60, 0x35, 0x60, 0x16, 0x57
-  , 0x60, 0x40, 0x35, 0x54, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3, 0x5b, 0x5f, 0x5f, 0xfd ]
+targetCode = asmOps $ store <> condJump revertAt <> ret <> [OpJumpdest, OpPush0, OpPush0, OpRevert]
+  where
+    store = [OpPush (Lit 0x20), OpCalldataload, OpPush0, OpCalldataload, OpSstore]
+    condJump dst = [OpPush (Lit 0x60), OpCalldataload, OpPush (Lit dst), OpJumpi]
+    ret = [OpPush (Lit 0x40), OpCalldataload, OpSload, OpPush0, OpMstore, OpPush (Lit 0x20), OpPush0, OpReturn]
+    revertAt = fromIntegral $ BS.length $ asmOps (store <> condJump 0 <> ret)
 
 keyMask :: W256
 keyMask = 3
