@@ -48,9 +48,9 @@ prelude =  SMT2 src mempty mempty
     <> (fmap SMTCommand [ "(declare-fun keccak (Buf Word) Word)" ])
     -- results of calls to unknown code, as functions of what the callee can observe:
     -- world, kind, target, value, calldata, calldata length, caller, its storage,
-    -- transient storage and balance (see PCall)
+    -- transient storage, balance and the gas it gets (see PCall)
     <> (fmap SMTCommand
-         [ "(declare-fun call_" <> f <> " (Word Word Word Word Buf Word Addr Storage Storage Word) " <> sort <> ")"
+         [ "(declare-fun call_" <> f <> " (Word Word Word Word Buf Word Addr Storage Storage Word Word) " <> sort <> ")"
          | (f, sort) <- [("success", "Word"), ("retdata", "Buf"), ("retlen", "Word"), ("world", "Word"), ("ether", "Word")] ])
   macros = fmap SMTCommand [
     "(define-fun max ((a (_ BitVec 256)) (b (_ BitVec 256))) (_ BitVec 256) (ite (bvult a b) b a))",

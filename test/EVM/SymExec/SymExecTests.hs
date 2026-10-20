@@ -12,13 +12,14 @@ import Control.Monad (filterM)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.List qualified as List (isInfixOf)
-import Data.Maybe (isJust, mapMaybe)
+import Data.Maybe (fromJust, isJust, mapMaybe)
 import Data.Monoid (Any(..))
 import Data.String.Here
 
 import EVM.ABI
 import EVM.Effects qualified as Effects
 import EVM.Expr qualified as Expr
+import EVM.Format (hexByteString)
 import EVM.Types
 import EVM.SMT qualified as SMT (getVar)
 import EVM.Solidity (solcRuntime)
@@ -44,7 +45,12 @@ solidityExplorationTests = testGroup "Exploration of Solidity"
 
 basicTests :: TestTree
 basicTests = testGroup "simple-checks"
-  [ testCase "symbolic-jump-high-bytes" $ do
+  [ testCase "unknown-calls-with-different-gas-may-differ" $ do
+    -- staticcall(1000, t) and staticcall(2000, t) to unknown t, INVALID if their results differ (#1201)
+    let c = fromJust $ hexByteString "5f5f5f5f5f356103e8fa5f5f5f5f5f356107d0fa14601957fe5b00"
+    (_, res) <- executeWithBitwuzla $ \s -> verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
+    assertBool "the callee can read GAS, so the results may differ" (any isCex res)
+  , testCase "symbolic-jump-high-bytes" $ do
     -- jumps to calldata[0:32]: 0x10005 has the JUMPDEST at 5 in its low bytes, but is invalid
     let c = BS.pack [0x60, 0x00, 0x35, 0x56, 0x00, 0x5b, 0x00]
         hits l = PEq (ReadWord (Lit 0) (AbstractBuf "txdata")) (Lit 0x10005) : extractProps l
@@ -945,7 +951,11 @@ cheatCodeTests = testGroup "Cheatcode tests via symbolic execution"
               }
             }
           |]
-      expectAllBranchesFail c Nothing
+      (paths, _) <- executeWithBitwuzla $ \s -> verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
+      let cheatFailed = \case
+            Partial _ _ CheatCodeFailed {} -> True
+            _ -> False
+      assertBool "ffi must leave the path partial" (any cheatFailed paths)
   ]
 
 maxDepthTests :: TestTree

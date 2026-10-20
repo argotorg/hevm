@@ -141,11 +141,14 @@ anything.
 ## Calls to unknown code
 
 A call to code that hevm does not know returns symbolic values. Calls with the
-same inputs, in the same program or in A and B, return the same values: the
-results are uninterpreted functions of everything the callee can observe, i.e.
-the call's target, kind, value and calldata, the caller's address, storage,
-transient storage and balance, and the effects of earlier state-changing calls.
-Gas is not among them, as hevm does not model gas.
+same inputs in A and B return the same values: the results are uninterpreted
+functions of everything the callee can observe, i.e. the call's target, kind,
+value and calldata, the caller's address, storage, transient storage and
+balance, the effects of earlier state-changing calls, and the gas the callee
+gets. hevm does not model gas, so each call in a program gets unknown gas, and
+two calls in the same program may return different values even if their other
+inputs are the same. The n-th call with the same inputs in A gets the same gas
+as the n-th such call in B.
 
 ## Creation code equivalence
 
