@@ -257,7 +257,7 @@ parseBlock j = do
      (Nothing, Just _, Just d) -> d
      _ -> internalError "block contains both difficulty and prevRandao"
   -- default codesize, default gas limit, default feescedule
-  pure $ Block coinbase timestamp number prd gasLimit (fromMaybe 0 baseFee) 0xffffffff feeSchedule
+  pure $ Block coinbase timestamp number (Lit prd) gasLimit (Lit (fromMaybe 0 baseFee)) 0xffffffff feeSchedule
 
 instance ToJSON Block where
   toJSON (Block coinbase timestamp number prevRandao gaslimit baseFee maxCodeSize _) =
@@ -265,9 +265,9 @@ instance ToJSON Block where
       [ "coinbase" .= unExpr coinbase
       , "timestamp" .= unExpr2 timestamp
       , "number" .= unExpr2 number
-      , "prevRandao" .= prevRandao
+      , "prevRandao" .= unExpr2 prevRandao
       , "gaslimit" .= gaslimit
-      , "baseFee" .= baseFee
+      , "baseFee" .= unExpr2 baseFee
       , "maxCodeSize" .= maxCodeSize
       ]
     where
@@ -284,9 +284,9 @@ instance FromJSON Block where
       <$> (LitAddr <$> v .: "coinbase")
       <*> (Lit <$> v .: "timestamp")
       <*> (Lit <$> v .: "number")
-      <*> v .: "prevRandao"
+      <*> (Lit <$> v .: "prevRandao")
       <*> v .: "gaslimit"
-      <*> v .: "baseFee"
+      <*> (Lit <$> v .: "baseFee")
       <*> v .: "maxCodeSize"
       <*> pure feeSchedule
 

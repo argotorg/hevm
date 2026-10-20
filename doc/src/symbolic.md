@@ -30,7 +30,10 @@ hevm symbolic --code $CODE --assertions '[0x01, 0x11]'
 ```
 
 The default value for `calldata` and `caller` are symbolic values, but can be
-specialized to concrete functions with their corresponding flags.
+specialized to concrete functions with their corresponding flags. So is the
+timestamp (`--timestamp`), and, unless `--rpc` is given, the block number, base
+fee and prevrandao (`--number`, `--basefee`, `--prev-randao`). The gas price is
+0 unless `--gasprice` is given.
 
 ## Specializing calldata
 

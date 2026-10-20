@@ -12,14 +12,16 @@ import Control.Monad (filterM)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.List qualified as List (isInfixOf)
-import Data.Maybe (fromJust, isJust, mapMaybe)
+import Data.Maybe (isJust, mapMaybe)
 import Data.Monoid (Any(..))
 import Data.String.Here
+import Data.Vector qualified as V
+import Data.Word (Word8)
 
 import EVM.ABI
+import EVM.Assembler (assemble)
 import EVM.Effects qualified as Effects
 import EVM.Expr qualified as Expr
-import EVM.Format (hexByteString)
 import EVM.Types
 import EVM.SMT qualified as SMT (getVar)
 import EVM.Solidity (solcRuntime)
@@ -65,10 +67,67 @@ basicTests = testGroup "simple-checks"
       assertEqual "the copied address resolves the mapping read" [Lit 7]
         [Expr.readWord (Lit 0) buf | Success _ _ buf _ <- paths]
   , testCase "unknown-calls-with-different-gas-may-differ" $ do
-    -- staticcall(1000, t) and staticcall(2000, t) to unknown t, INVALID if their results differ (#1201)
-    let c = fromJust $ hexByteString "5f5f5f5f5f356103e8fa5f5f5f5f5f356107d0fa14601957fe5b00"
+    -- INVALID if staticcall(1000, t) and staticcall(2000, t) to unknown t differ (#1201)
+    let call g = replicate 5 (I OpPush0) <> [I OpCalldataload, I (OpPush (Lit g)), I OpStaticcall]
+        c = asm $ call 1000 <> call 2000 <> [I OpEq, Target 0, I OpJumpi, I (OpUnknown 0xfe), I OpJumpdest, I OpStop]
     (_, res) <- executeWithBitwuzla $ \s -> verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
     assertBool "the callee can read GAS, so the results may differ" (any isCex res)
+  , testCase "merged-gas-reading-not-reused" $ do
+    -- the fall-through of a mergeable forward jump reads GAS, which is then
+    -- compared to a second reading; INVALID if they differ and x == 0 (#1191)
+    let x = [I (OpPush (Lit 0)), I OpCalldataload]
+        c = asm $ x <> [I (OpPush (Lit 0)), I OpMstore, I (OpPush (Lit 7))]
+          <> x <> [Target 0, I OpJumpi, I OpPop, I OpGas]
+          <> [I OpJumpdest, I OpGas, I OpEq, I OpIszero]
+          <> x <> [I OpIszero, I OpAnd, Target 1, I OpJumpi, I OpStop, I OpJumpdest, I (OpUnknown 0xfe)]
+    (_, res) <- executeWithBitwuzla $ \s -> verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
+    assertBool "two GAS readings differ" (any isCex res)
+  , testCase "symbolic-address-high-bytes" $ do
+    -- if x has low 20 bytes 0xdead: BALANCE(x), then INVALID if x has higher bytes set (#1194)
+    let c = asm
+          [ I (OpPush (Lit 0)), I OpCalldataload, I (OpDup 1), I (OpPush (Lit (2 ^ (160 :: Int) - 1))), I OpAnd
+          , I (OpPush (Lit 0xdead)), I OpEq, Target 0, I OpJumpi, I OpStop
+          , I OpJumpdest, I (OpDup 1), I OpBalance, I OpPop
+          , I (OpPush (Lit 160)), I OpShr, Target 1, I OpJumpi, I OpStop
+          , I OpJumpdest, I (OpUnknown 0xfe) ]
+    (_, res) <- executeWithBitwuzla $ \s -> verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
+    assertBool "x = 2^160 + 0xdead reaches INVALID" (any isCex res)
+  , testCase "blockhash-out-of-range-is-zero" $ do
+    -- block 0 is out of range at block 1000 (#1122)
+    (_, res) <- executeWithBitwuzla $ \s -> verifyContract s (blockhashIsZeroAt 0 1000) Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
+    assertBool "blockhash(0) is 0 at block 1000" (any isCex res)
+  , testCase "blockhash-in-range-is-nonzero" $ do
+    (_, res) <- executeWithBitwuzla $ \s -> verifyContract s (blockhashIsZeroAt 5 6) Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
+    assertBool "blockhash(5) is not 0 at block 6" (not (any isCex res))
+  , testCase "short-dynamic-calldata" $ do
+    -- the empty `bytes` is encoded in 68 bytes (#1200)
+    Just c <- solcRuntime "C" [i|
+      contract C {
+        function f(bytes calldata) external pure {
+          assert(msg.data.length >= 132);
+        }
+      }
+      |]
+    (_, res) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just (Sig "f(bytes)" [AbiBytesDynamicType])) [] defaultVeriOpts
+    assertBool "68-byte calldata violates the assert" (any isCex res)
+  , testCase "dynamic-calldata-offsets-follow-lengths" $ do
+    Just c <- solcRuntime "C" [i|
+      contract C {
+        function f(bytes calldata a, bytes calldata b) external pure {
+          assert(!(a.length == 1 && b.length == 2 && b[0] == 0x11 && b[1] == 0x22));
+        }
+      }
+      |]
+    let sig = Sig "f(bytes,bytes)" [AbiBytesDynamicType, AbiBytesDynamicType]
+    Right cd <- executeWithBitwuzla $ \s -> do
+      (_, [Cex (_, ctr)]) <- checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
+      ((buf, _), _) <- mkCalldata (Just sig) []
+      calldataFromCex ctr buf sig
+    let args = BS.drop 4 cd
+        expected = encodeAbiValue (AbiTuple (V.fromList [AbiBytesDynamic "\x00", AbiBytesDynamic "\x11\x22"]))
+    -- the solver picks the contents of `a`, and the padding is unconstrained
+    assertEqual "offsets and length of a" (BS.take 96 expected) (BS.take 96 args)
+    assertEqual "b" (BS.take 34 (BS.drop 128 expected)) (BS.take 34 (BS.drop 128 args))
   , testCase "symbolic-jump-high-bytes" $ do
     -- jumps to calldata[0:32]: 0x10005 has the JUMPDEST at 5 in its low bytes, but is invalid
     let c = BS.pack [0x60, 0x00, 0x35, 0x56, 0x00, 0x5b, 0x00]
@@ -1529,6 +1588,29 @@ badStoresInExpr exprs = any (getAny . foldExpr match mempty) exprs
   where
       match (SLoad _ (SStore _ _ _)) = Any True
       match _ = Any False
+
+data AsmOp = I Op | Target Int
+
+-- | Assembles the ops, with @Target n@ pushing the offset of the n-th JUMPDEST
+asm :: [AsmOp] -> ByteString
+asm ops = BS.pack . map byte . V.toList . assemble $ map resolve ops
+  where
+    resolve (I op) = op
+    resolve (Target n) = OpPush (Lit (jumpdests !! n))
+    -- OpPush always assembles to PUSH32
+    size :: AsmOp -> W256
+    size = \case I (OpPush _) -> 33; Target _ -> 33; _ -> 1
+    offsets = scanl (+) 0 (map size ops)
+    jumpdests = [o | (I OpJumpdest, o) <- zip ops offsets]
+    byte :: Expr Byte -> Word8
+    byte (LitByte b) = b
+    byte b = internalError $ "symbolic byte: " <> show b
+
+-- | INVALID if blockhash(blk) == 0 and number == n
+blockhashIsZeroAt :: W256 -> W256 -> ByteString
+blockhashIsZeroAt blk n = asm
+  [ I (OpPush (Lit blk)), I OpBlockhash, I OpIszero, I OpNumber, I (OpPush (Lit n)), I OpEq, I OpAnd
+  , Target 0, I OpJumpi, I OpStop, I OpJumpdest, I (OpUnknown 0xfe) ]
 
 symExecTestsConfig :: Effects.Config
 symExecTestsConfig = Effects.defaultConfig
