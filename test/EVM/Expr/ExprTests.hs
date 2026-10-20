@@ -1156,6 +1156,30 @@ basicSimplificationTests = testGroup "Basic simplification tests"
   , testCase "simp-double-not" $ do
       let simp = Expr.simplify $ Not (Not (Var "a"))
       assertEqual "Not should be concretized" (Var "a") simp
+  , testCase "simp-round-down-not-above" $ do
+      -- Solidity's uint32 now < now - now % cycleSecs, from Drips' Streams: never true
+      let m32 = Lit 0xffffffff
+          t = Add (Lit 0x5ae26348) (And m32 (Var "arg1"))
+          now = And m32 t
+          cond start = LT now (And m32 (Sub start (Mod now (Lit 0x93a80))))
+      assertEqual "uint32" (Lit 0) (Expr.simplify (cond t))
+      assertEqual "uint32, masked start" (Lit 0) (Expr.simplify (cond now))
+      assertEqual "uint256" (Lit 0) (Expr.simplify (LT (Var "x") (Sub (Var "x") (Mod (Var "x") (Var "c")))))
+      -- the rule needs a 2^n - 1 mask
+      let m = Lit 0xf0
+          other = LT (And m (Var "t")) (And m (Sub (Var "t") (Mod (And m (Var "t")) (Var "c"))))
+      assertBool "other mask" (Expr.simplify other /= Lit 0)
+  , testProperty "simp-round-down-not-above-equivalence" $ withMaxSuccess 60 $
+      forAll (elements [8, 32, 64, 255, 256]) $ \n -> forAll (elements [0, 1, 7, 0x93a80]) $ \c -> ioProperty $ do
+        let mask = Lit ((1 `shiftL` n) - 1)
+            t = Add (Var "a") (Var "b")
+            now = And mask t
+            full = LT now (And mask (Sub t (Mod now (Lit c))))
+            simp = Expr.simplify full
+        res <- checkSatWith (equivConfig {abstractArith = False}) (full ./= simp)
+        pure $ counterexample ("simplified: " <> show simp <> "\nresult: " <> show res) $
+          -- c = 0, 1 make the modulo 0 first, so the rule has nothing to match
+          (c <= 1 || simp == Lit 0) .&&. isQed res
   , testCase "keccak-small-literal" $ do
       let k = Keccak (AbstractBuf "buf")
       assertEqual "keccak is nonzero" (Lit 0) (Expr.simplify (IsZero k))

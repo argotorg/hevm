@@ -1746,6 +1746,11 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (EVM.Types.LT (Add (Lit c) a) b) | a == b, c /= 0 = lt (Lit (maxLit - c)) a
     go (EVM.Types.LT a (Sub b (Lit c))) | a == b, c /= 0 = lt a (Lit c)
     go (EVM.Types.LT (Sub a (Lit c)) b) | a == b, c /= 0 = iszero (lt a (Lit c))
+    -- rounding down to a multiple never goes above: x - x % c <= x (x % 0 is 0). Solidity's uintN
+    -- version masks both sides: x = t & m, and (t - x % c) & m = x - x % c for m = 2^n - 1
+    go (EVM.Types.LT a (Sub b (Mod a' _))) | a == b, a == a' = Lit 0
+    go (EVM.Types.LT a@(And (Lit m) t) (And (Lit m') (Sub t' (Mod a' _))))
+      | m == m', m .&. (m + 1) == 0, a == a', t == t' || a == t' = Lit 0
     go (EVM.Types.LT a b) | a == b = Lit 0
     go (SLT a b) | a == b = Lit 0
 
