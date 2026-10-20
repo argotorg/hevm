@@ -72,6 +72,12 @@ basicTests = testGroup "simple-checks"
         c = asm $ call 1000 <> call 2000 <> [I OpEq, Target 0, I OpJumpi, I (OpUnknown 0xfe), I OpJumpdest, I OpStop]
     (_, res) <- executeWithBitwuzla $ \s -> verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
     assertBool "the callee can read GAS, so the results may differ" (any isCex res)
+  , testCase "unknown-call-expands-memory" $ do
+    -- staticcall to unknown t with output at [100, 164), INVALID unless MSIZE is 0xc0
+    let c = asm $ map (I . OpPush . Lit) [64, 100, 32, 4, 0] <> [I OpCalldataload, I (OpPush (Lit 1000)), I OpStaticcall, I OpPop]
+          <> [I OpMsize, I (OpPush (Lit 0xc0)), I OpEq, Target 0, I OpJumpi, I (OpUnknown 0xfe), I OpJumpdest, I OpStop]
+    (_, res) <- executeWithBitwuzla $ \s -> verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
+    assertBool "MSIZE covers the output" (all isQed res)
   , testCase "merged-gas-reading-not-reused" $ do
     -- the fall-through of a mergeable forward jump reads GAS, which is then
     -- compared to a second reading; INVALID if they differ and x == 0 (#1191)

@@ -1007,7 +1007,7 @@ exec1 conf = do
           case stk of
             xGas:xTo':xValue:xInOffset:xInSize:xOutOffset:xOutSize:xs ->
               branch conf.maxDepth (Expr.gt xValue (Lit 0)) $ \gt0 -> do
-                let addrFallback = if conf.promiseNoReent then const fallback
+                let addrFallback = if conf.promiseNoReent then const expandingFallback
                                    else unexpectedSymArgW "unable to determine a call target"
                 (if gt0 then notStatic else id) $
                   forceAddr xTo' addrFallback $ \xTo ->
@@ -1028,6 +1028,8 @@ exec1 conf = do
                             touchAccount callee
                             transfer from' callee xValue
               where fallback = freshBufFallback xTo' xValue xInOffset xInSize xOutOffset xOutSize True xs
+                    -- without a target, callChecks doesn't run to expand the memory
+                    expandingFallback = accessMemoryRange xInOffset xInSize $ accessMemoryRange xOutOffset xOutSize fallback
             _ -> underrun
 
         OpCallcode -> {-# SCC "OpCallcode" #-}
@@ -1119,7 +1121,7 @@ exec1 conf = do
         OpStaticcall -> {-# SCC "OpStaticcall" #-}
           case stk of
             xGas:xTo:xInOffset:xInSize:xOutOffset:xOutSize:xs ->
-              forceAddr xTo (const fallback) $ \xTo' -> case gasTryFrom xGas of
+              forceAddr xTo (const expandingFallback) $ \xTo' -> case gasTryFrom xGas of
                 Left _ -> vmError IllegalOverflow
                 Right gas -> do
                   overrideC <- use $ #state % #overrideCaller
@@ -1134,6 +1136,8 @@ exec1 conf = do
                       touchAccount callee
                 where
                   fallback = freshBufFallback xTo (Lit 0) xInOffset xInSize xOutOffset xOutSize False xs
+                  -- without a target, callChecks doesn't run to expand the memory
+                  expandingFallback = accessMemoryRange xInOffset xInSize $ accessMemoryRange xOutOffset xOutSize fallback
             _ -> underrun
 
         OpSelfdestruct -> {-# SCC "OpSelfdestruct" #-}

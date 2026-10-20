@@ -144,6 +144,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   call result for the next one.
 - When hevm enumerates the values of a symbolic address, it constrains only its
   low 20 bytes. Addresses with higher bytes set were on no path.
+- Calls to unknown code with a symbolic target expand the memory over their
+  input and output ranges.
 - `hevm symbolic` no longer prints QED when some paths were only partially
   explored; it prints the partial-exploration warning and exits with an error.
 - `hevm symbolic --create` and `hevm exec --create` run the init code instead of
