@@ -129,6 +129,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the writes they are disjoint from and resolve the writes they hit.
 
 ## Fixed
+- An exception during symbolic exploration is now rethrown, instead of being
+  printed and followed by `thread blocked indefinitely in an STM transaction`.
 - `--arg` accepts negative values for `int<N>` arguments, encoding them
   sign-extended, and rejects values outside the type's range.
 - `--arg` now works for `bytesN`, `bytes`, `string` and array arguments.

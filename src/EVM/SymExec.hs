@@ -10,12 +10,12 @@ import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.Async ( mapConcurrently)
 import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
 import Control.Concurrent.Spawn (parMapIO, pool)
-import Control.Concurrent.STM (writeTChan, newTChan, TChan, readTChan, atomically, isEmptyTChan, STM)
+import Control.Concurrent.STM (writeTChan, newTChan, TChan, readTChan, atomically, isEmptyTChan, STM, orElse)
 import Control.Concurrent.STM.TVar (TVar, newTVarIO, modifyTVar, readTVar, readTVarIO, writeTVar)
-import Control.Concurrent.STM.TMVar (TMVar, putTMVar, takeTMVar, newEmptyTMVarIO)
+import Control.Concurrent.STM.TMVar (TMVar, putTMVar, takeTMVar, readTMVar, tryPutTMVar, newEmptyTMVarIO)
 import Control.Monad (when, unless, forM_, forM, forever, void)
 import Control.Monad.Loops (whileM)
-import Control.Exception (evaluate)
+import Control.Exception (evaluate, SomeException, SomeAsyncException, catch, throwIO, fromException)
 import Control.Monad.IO.Unlift (MonadIO, MonadUnliftIO, toIO, withRunInIO)
 import Control.Monad.Operational qualified as Operational
 import Control.Monad.ST (RealWorld, stToIO, ST)
@@ -399,13 +399,16 @@ interpret fetcher iterConf vm stepper handler = do
   Progress.setTaskCounter (fromIntegral <$> readTVarIO numTasks)
   numProcs <- liftIO $ newTVarIO 0
   allProcessDone <- liftIO newEmptyTMVarIO
+  -- an exception in a forked worker would otherwise only be printed, leaving
+  -- us waiting on allProcessDone forever
+  workerErr <- liftIO newEmptyTMVarIO
 
   -- spawn task orchestration thread
-  taskOrchestrate' <- toIO $ taskOrchestrate taskQ shouldAbort availableInstances processQ numTasks numProcs allProcessDone
+  taskOrchestrate' <- toIO $ taskOrchestrate taskQ shouldAbort availableInstances processQ numTasks numProcs allProcessDone workerErr
   taskOrchestrateId <- liftIO $ forkIO taskOrchestrate'
 
   -- spawn processing orchestration thread
-  processOrchestrate' <- toIO $ processOrchestrate processQ shouldAbort availableProcs resChan numProcs numTasks allProcessDone
+  processOrchestrate' <- toIO $ processOrchestrate processQ shouldAbort availableProcs resChan numProcs numTasks allProcessDone workerErr
   processOrchestrateId <- liftIO $ forkIO processOrchestrate'
 
   -- Add in the first task, further tasks will be added by the interpreters themselves
@@ -422,9 +425,10 @@ interpret fetcher iterConf vm stepper handler = do
   liftIO $ writeChan taskQ interpTask
 
   -- Wait for all done
-  liftIO . atomically $ takeTMVar allProcessDone
+  done <- liftIO . atomically $ (Left <$> readTMVar workerErr) `orElse` (Right <$> takeTMVar allProcessDone)
   liftIO $ killThread taskOrchestrateId
   liftIO $ killThread processOrchestrateId
+  liftIO $ either throwIO pure done
   res <- liftIO $ atomically (whileM (not <$> isEmptyTChan resChan) (readTChan resChan) :: STM [a])
   when (conf.debug) $ liftIO $ do
     putStrLn $ "Interpretation finished, collected " <> show (length res) <> " results."
@@ -435,8 +439,8 @@ interpret fetcher iterConf vm stepper handler = do
       => Chan (InterpTask m a)
       -> TVar Bool
       -> Chan () -> Chan (Process m a)
-      -> TVar Natural -> TVar Natural -> TMVar () -> m ()
-    taskOrchestrate taskQ shouldAbort avail processQ numTasks numProcs allProcessDone = forever $ do
+      -> TVar Natural -> TVar Natural -> TMVar () -> TMVar SomeException -> m ()
+    taskOrchestrate taskQ shouldAbort avail processQ numTasks numProcs allProcessDone workerErr = forever $ do
       _ <- liftIO $ readChan avail
       task <- liftIO $ readChan taskQ
       abortFlag <- liftIO $ readTVarIO shouldAbort
@@ -446,13 +450,13 @@ interpret fetcher iterConf vm stepper handler = do
           atomically $ modifyTVar numTasks (subtract 1) >> signalIfDone numProcs numTasks allProcessDone
         else do
           runTask' <- toIO $ getOneExpr task avail processQ numTasks numProcs
-          void $ liftIO $ forkIO runTask'
+          void $ liftIO $ forkIO $ reportTo workerErr shouldAbort runTask'
 
     -- processing orchestrator loop
     processOrchestrate :: App m
       => Chan (Process m a) -> TVar Bool -> Chan () -> TChan a
-      -> TVar Natural -> TVar Natural -> TMVar () -> m ()
-    processOrchestrate processQ shouldAbort avail resChan numProcs numTasks allProcessDone = forever $ do
+      -> TVar Natural -> TVar Natural -> TMVar () -> TMVar SomeException -> m ()
+    processOrchestrate processQ shouldAbort avail resChan numProcs numTasks allProcessDone workerErr = forever $ do
       _ <- liftIO $ readChan avail
       proc <- liftIO $ readChan processQ
       abortFlag <- liftIO $ readTVarIO shouldAbort
@@ -462,7 +466,7 @@ interpret fetcher iterConf vm stepper handler = do
           atomically $ modifyTVar numProcs (subtract 1) >> signalIfDone numProcs numTasks allProcessDone
         else do
           runProcess' <- toIO $ processOne proc shouldAbort avail resChan numProcs numTasks allProcessDone
-          void $ liftIO $ forkIO runProcess'
+          void $ liftIO $ forkIO $ reportTo workerErr shouldAbort runProcess'
 
     -- process one task
     processOne :: App m => Process m a -> TVar Bool -> Chan () -> TChan a -> TVar Natural -> TVar Natural -> TMVar () -> m ()
@@ -474,6 +478,11 @@ interpret fetcher iterConf vm stepper handler = do
       liftIO $ writeChan avail ()
 
       liftIO $ atomically $ modifyTVar numProcs (subtract 1) >> signalIfDone numProcs numTasks allProcessDone
+
+    reportTo :: TMVar SomeException -> TVar Bool -> IO () -> IO ()
+    reportTo workerErr shouldAbort io = io `catch` \e -> case fromException e of
+      Just (_ :: SomeAsyncException) -> throwIO e
+      Nothing -> atomically $ writeTVar shouldAbort True >> void (tryPutTMVar workerErr e)
 
     signalIfDone :: TVar Natural -> TVar Natural -> TMVar () -> STM ()
     signalIfDone numProcs numTasks allProcessDone = do

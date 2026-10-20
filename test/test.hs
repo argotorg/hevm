@@ -16,6 +16,8 @@ import System.IO (hSetBuffering, stdout, BufferMode(..), isEOF)
 import Control.Monad.ST (stToIO)
 import Control.Monad.State.Strict
 import Control.Monad.IO.Unlift
+import Control.Exception (ErrorCall(..), throwIO, try)
+import System.Timeout (timeout)
 import Control.Monad.Reader (ReaderT)
 import Control.Monad.Trans.Maybe (runMaybeT)
 import Data.Bits hiding (And, Xor)
@@ -2513,6 +2515,17 @@ tests = testGroup "hevm"
         (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertBoolM "unexpected partial execution" $ not (any isPartial e)
         assertBoolM "5-byte code must be reachable" $ any isCex ret
+    , test "worker-exception-propagates" $ do
+        let c = fromJust $ hexByteString "00"
+            throwingHandler _ _ = liftIO $ throwIO (ErrorCall "worker boom")
+        vm <- liftIO $ stToIO $ abstractVM (ConcreteBuf "", []) c Nothing False
+        let iterConf = IterConfig { maxIter = Nothing, askSmtIters = 1, loopHeuristic = StackBased }
+        res <- withDefaultSolver $ \s -> withRunInIO $ \runInIO -> timeout 30000000 $
+                 (try (runInIO (interpret (Fetch.noRpcFetcher s) iterConf vm runExpr throwingHandler)) :: IO (Either ErrorCall [()]))
+        case res of
+          Just (Left (ErrorCall msg)) -> assertEqualM "rethrown error" "worker boom" msg
+          Just (Right _) -> liftIO $ assertFailure "expected the worker's exception"
+          Nothing -> liftIO $ assertFailure "interpret hung after a worker exception"
     , test "require-test" $ do
         Just c <- solcRuntime "MyContract"
             [i|
