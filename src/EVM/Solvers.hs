@@ -467,7 +467,7 @@ getModel inst cexvars = runMaybeT $ do
       vars <- getVars parseVar (getValue inst) (fmap T.toStrict cexvars.calldata)
       addrs <- getAddrs parseEAddr (getValue inst) (fmap T.toStrict cexvars.addrs)
       buffers <- getBufs (getValue inst) (Map.keys cexvars.buffers)
-      storage <- getStore (getValue inst) cexvars.storeReads
+      storage <- getStore (getValue inst) cexvars.logicalStores cexvars.storeReads
       blockctx <- getVars parseBlockCtx (getValue inst) (fmap T.toStrict cexvars.blockContext)
       txctx <- getVars parseTxCtx (getValue inst) (fmap T.toStrict cexvars.txContext)
       pure $ SMTCex vars addrs buffers storage blockctx txctx mempty

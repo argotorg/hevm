@@ -28,14 +28,14 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as Char8
 import Data.Char (isDigit, toLower)
 import Data.IORef (IORef, newIORef, readIORef, atomicModifyIORef')
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, isPrefixOf)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Monoid (Any(..))
 import Data.Maybe (fromJust, fromMaybe, isJust, isNothing)
 import Data.Set (Set)
 import Data.Set qualified as Set
-import Data.Text (Text)
+import Data.Text (Text, unpack)
 import Data.Vector qualified as Vector
 import Data.Word (Word8)
 import GHC.Clock (getMonotonicTime)
@@ -306,8 +306,9 @@ genCalldataCond = do
 genBranch :: G [Item]
 genBranch = do
   d <- gets (.sdepth)
-  onCalldata <- liftG $ chooseInt (0, 2)
-  cond <- if onCalldata > 0 || d == 0 then genCalldataCond else pure []
+  onCalldata <- liftG $ chooseInt (0, 3)
+  cond <- if onCalldata == 3 then genStorageCond
+          else if onCalldata > 0 || d == 0 then genCalldataCond else pure []
   modify (\s -> s { sdepth = s.sdepth - 1 })
   pure (cond <> [IJumpFwd True])
 
@@ -331,6 +332,38 @@ maybeFromCalldata v = do
     let bits = length (takeWhile (> 0) (iterate (`div` 2) v))
         mask = if bits >= 256 then maxBound else 2 ^ bits - 1
     concat <$> sequence [push off, op 1 1 OpCalldataload, push mask, op 2 1 OpAnd]
+
+-- | A Solidity storage slot: of a mapping entry, keccak(key . p), or of an array
+-- element, keccak(p) + i, for a small slot p. Exercises storage decomposition.
+genStorageSlot :: G [Item]
+genStorageSlot = do
+  p <- liftG $ elements [0, 1, 2]
+  isMap <- liftG arbitrary
+  if isMap then do
+    key <- liftG (chooseInt (0, 2)) >>= \case
+      0 -> liftG (elements [0, 1, 7]) >>= push
+      _ -> do off <- liftG $ elements [0, 4, 32, 36]
+              (<>) <$> push off <*> op 1 1 OpCalldataload
+    concat <$> sequence
+      [ pure key, push 0, op 2 0 OpMstore, push p, push 0x20, op 2 0 OpMstore
+      , push 0x40, push 0, op 2 1 OpSha3 ]
+  else do
+    base <- concat <$> sequence [push p, push 0, op 2 0 OpMstore, push 0x20, push 0, op 2 1 OpSha3]
+    i <- maybeFromCalldata =<< liftG (elements [0, 1, 3])
+    concat <$> sequence [pure base, pure i, op 2 1 OpAdd]
+
+-- | Whether a storage slot holds a small value, pushing one word
+genStorageCond :: G [Item]
+genStorageCond = do
+  slot <- genStorageSlot
+  v <- liftG $ elements [0, 3, 4]
+  concat <$> sequence [pure slot, op 1 1 OpSload, push v, op 2 1 OpEq]
+
+genStorageWrite :: G [Item]
+genStorageWrite = do
+  v <- maybeFromCalldata =<< liftG (elements [3, 4, 0xff])
+  slot <- genStorageSlot
+  ((v <> slot) <>) <$> op 2 0 OpSstore
 
 -- | Enough stack for the deep DUPs and SWAPs
 genDeepStack :: G [Item]
@@ -470,7 +503,7 @@ genBlock :: Bool -> G [Item]
 genBlock isMain = do
   inner <- liftG $ frequency $
     [ (10, pure genStraight), (4, pure genBranch), (1, pure (pure [IJumpFwd False])), (1, pure genHalt)
-    , (1, pure genDeepStack) ] <>
+    , (1, pure genDeepStack), (2, pure genStorageWrite) ] <>
     (if isMain then [ (2, pure genLoop), (2, pure genCall), (2, pure genAccountOp), (1, pure genCreate)
                     , (1, pure genPrecompileCall), (1, pure genRefund) ] else [])
   items <- inner
@@ -839,6 +872,16 @@ symProps =
   , PGEq Timestamp (Lit 1)
   ]
 
+-- | Replays a model of the leaf as `hevm symbolic` does: Right True if the
+-- concrete run fails exactly when the leaf does
+replayModel :: App m => TestCase -> Expr End -> SMTCex -> m (Either Text Bool)
+replayModel c leaf cex = do
+  vm0 <- liftIO $ stToIO $ mkVm False () c symbolicVMInputs
+  withSolvers Z3 1 (Just 10) defMemLimit $ \solvers ->
+    replaySymCex solvers (\_ e -> PBool (isFailure e /= isFailure leaf)) (vm0 & set #constraints symProps) leaf cex
+  where
+    isFailure = \case Failure {} -> True; _ -> False
+
 -- | The leaves, and the opcodes that ran with a non-literal operand
 runSymbolic :: App m => SolverGroup -> TestCase -> m (Maybe ([Expr End], Set String))
 runSymbolic solvers c = do
@@ -1057,7 +1100,10 @@ checkLeaves c i leaves expected g = do
       _ -> fails $ "concrete inputs reach leaves " <> show taken <> " instead of exactly one"
     -- keccak of a symbolic buffer is only bounded, so a model may pick a hash no input has
     let spurious = maybe False (\e -> e /= n && hashesSymbolic (leaves !! e)) expected
-        hashesSymbolic l = getAny $ foldMap (foldProp symKeccak mempty) (extractProps l)
+        -- decomposition replaces mapping and array slots by their keys, and then
+        -- the model's storage must be exact
+        hashesSymbolic l = let ps = Expr.simplifyProps (extractProps l)
+          in getAny $ foldMap (foldProp symKeccak mempty) (fromMaybe ps (Expr.decomposeStorageProps ps))
         symKeccak :: Expr b -> Any
         symKeccak = \case Keccak (ConcreteBuf _) -> Any False; Keccak _ -> Any True; _ -> Any False
     forM_ expected $ \e -> when (e /= n && not spurious) $ fails $ "model of leaf " <> show e <> " reaches leaf " <> show n
@@ -1143,26 +1189,34 @@ checkCase maxReplays c = Progress.withProgressLogFromEnv "fuzz-symexec" $
                                                 , not (isPartial l) ]
       replays <- forM candidates $ \(n, l) -> if mentionsBlockHash l
         -- BLOCKHASH of a symbolic number is uninterpreted, so a model can pick any hash
-        then pure ("skipped: symbolic blockhash", Nothing)
+        then pure ("skipped: symbolic blockhash", Nothing, Nothing)
         else phase ("replay " <> show n) >> checkSatWithProps solvers (extractProps l) >>= \case
           Cex cex -> case modelInputs c.inputs cex of
-            Left err -> pure ("model: " <> err, Nothing)
+            Left err -> pure ("model: " <> err, Nothing, Nothing)
             Right i -> do
               g' <- runBoth i
-              (, Just g') <$> liftIO (checkLeaves c i leaves (Just n) g')
+              r <- liftIO (checkLeaves c i leaves (Just n) g')
+              phase ("hevm replay " <> show n)
+              replayed <- replayModel c l cex
+              -- where geth confirms the model reaches the leaf, so must `hevm symbolic`'s replay
+              let confirmed = not (any (`isPrefixOf` r) ["gas-dependent", "model via symbolic keccak", "call to unknown code"])
+              when (confirmed && replayed == Right False) $ liftIO $ failWith c i $
+                "hevm symbolic's replay does not reproduce leaf " <> show n <> " that geth reaches\nleaf: " <> show l
+              pure (r, Just g', Just (either (("cannot replay: " <>) . unpack) (\b -> if b then "validated" else "not reproducible") replayed))
           -- outside loops, branches are not checked for feasibility
-          Qed -> pure ("unsat leaf", Nothing)
-          Unknown _ -> pure ("unknown", Nothing)
+          Qed -> pure ("unsat leaf", Nothing, Nothing)
+          Unknown _ -> pure ("unknown", Nothing, Nothing)
           Error e
-            | any (`isInfixOf` e) ["not currently implemented", "Cannot encode"] -> pure ("unsupported by SMT", Nothing)
+            | any (`isInfixOf` e) ["not currently implemented", "Cannot encode"] -> pure ("unsupported by SMT", Nothing, Nothing)
             | otherwise -> liftIO $ assertFailure $ "solver error: " <> show e
       pure $ Report
         { tables = gethTables
             <> [("leaves", bucket (length leaves)), ("concrete inputs reach", first)]
-            <> [("replayed model reaches", r) | (r, _) <- replays]
+            <> [("replayed model reaches", r) | (r, _, _) <- replays]
+            <> [("hevm symbolic replay", h) | (_, _, Just h) <- replays]
             <> [("leaf kinds", leafKind l) | l <- leaves]
         , generated
-        , executed = Set.unions (ran g : [ran g' | (_, Just g') <- replays])
+        , executed = Set.unions (ran g : [ran g' | (_, Just g', _) <- replays])
         , symbolic = symOps
         }
   where

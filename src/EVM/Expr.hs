@@ -104,6 +104,7 @@ module EVM.Expr
   , safeToDecomposeProp
   , decomposeStorage
   , decomposeStorageProps
+  , accessedLogicalStores
 
     -- * Simplification
   , simplify
@@ -1328,9 +1329,6 @@ safeToDecomposeProp p = isJust $ mapPropM' findPEqStore p
       a -> Just a
 
 -- | A logical sub-store of the storage of a contract
-data LogicalStore = SmallSlots | ArrayStore W256 | MapStore W256
-  deriving (Show, Eq, Ord)
-
 -- | Turns a storage slot expression into a pair (logical store, index within that store)
 inferLogicalStore :: Expr EWord -> Maybe (LogicalStore, Expr EWord)
 inferLogicalStore = \case
@@ -1429,7 +1427,12 @@ decomposeStorageProps props
     -- A logical store is named by its slot alone, so an array and a mapping on the same slot
     -- would be merged into one. Solidity never lays storage out like that, other bytecode can
     noSlotClash = Set.disjoint (Set.fromList [i | ArrayStore i <- stores]) (Set.fromList [i | MapStore i <- stores])
-    stores = concatMap (foldProp accessed []) props
+    stores = accessedLogicalStores props
+
+-- | The logical stores that the storage reads and writes of the props access
+accessedLogicalStores :: [Prop] -> [LogicalStore]
+accessedLogicalStores = concatMap (foldProp accessed [])
+  where
     accessed :: Expr a -> [LogicalStore]
     accessed = \case
       SLoad k _ -> fst <$> maybe [] pure (inferLogicalStore k)

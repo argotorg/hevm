@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- `hevm symbolic` replays each counterexample concretely and marks it
+  `[validated]` or `[not reproducible]`, like `hevm test`.
+- The symbolic execution fuzzer generates mapping and array storage accesses,
+  and checks that `hevm symbolic`'s replay of each model agrees with geth.
 - Byte reads through a word read at a concrete offset now resolve against its
   source buffer, allowing unaligned copies to preserve concrete mapping keys.
 - KECCAK256 folds memory that becomes concrete after simplification, including
@@ -131,6 +135,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Fixed
 - An exception during symbolic exploration is now rethrown, instead of being
   printed and followed by `thread blocked indefinitely in an STM transaction`.
+- Counterexamples found with storage decomposition show each mapping and array
+  entry at its real storage slot, instead of dropping entries and showing keys
+  as slots.
+- Memory accesses whose offset or size is an address (e.g. from CREATE or
+  CALLER) are now charged gas and checked for overflow.
+- Counterexample block and transaction context values (callvalue, balances,
+  timestamp, ...) are now substituted when concretizing expressions.
 - `--arg` accepts negative values for `int<N>` arguments, encoding them
   sign-extended, and rejects values outside the type's range.
 - `--arg` now works for `bytesN`, `bytes`, `string` and array arguments.

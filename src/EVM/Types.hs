@@ -962,6 +962,11 @@ data Block = Block
   , schedule    :: FeeSchedule Word64
   } deriving (Show, Generic)
 
+-- | The logical sub-store a storage slot belongs to under storage
+-- decomposition: the small slots, or the array or mapping at the given slot
+data LogicalStore = SmallSlots | ArrayStore W256 | MapStore W256
+  deriving (Show, Eq, Ord)
+
 -- | Full contract state
 data Contract = Contract
   { code        :: ContractCode

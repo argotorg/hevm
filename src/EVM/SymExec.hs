@@ -1165,6 +1165,96 @@ eqReplayVmOpts cex others code calldata = (defaultVMOpts @Concrete)
     ctx k m = Map.findWithDefault 0 k m
     store = ConcreteStore $ Map.findWithDefault mempty (SymAddr "entrypoint") cex.store
 
+-- | Replays a counterexample of @leaf@ on a concrete VM set up like @vm0@ with
+-- the model's values. Right True if the concrete run violates @post@ as well.
+replaySymCex :: App m => SolverGroup -> Postcondition -> VM Symbolic -> Expr End -> SMTCex -> m (Either Text Bool)
+replaySymCex solvers post vm0 leaf cex' = case setup of
+  Left why -> pure (Left why)
+  Right opts -> do
+    vm <- liftIO $ stToIO $ makeVm opts
+    conf <- readConfig
+    (_, _, end) <- Stepper.interpret (Fetch.oracle solvers Nothing Fetch.noRpc) vm (runTraced conf 32)
+    let ctx = TraceContext mempty mempty mempty
+    pure $ case end.result of
+      Just (VMFailure e) -> violated (Failure [] ctx e)
+      Just (VMSuccess out) -> violated (Success [] ctx out mempty)
+      r -> Left $ "concrete run did not finish: " <> T.pack (show r)
+  where
+    cex = cex' { unknownCalls = modelUnknownCalls cex' (extractProps leaf) }
+    violated end = case Expr.simplifyProp (post vm0 end) of
+      PBool b -> Right (not b)
+      p -> Left $ "postcondition is not concrete on the replay: " <> T.pack (show p)
+    concrete :: Expr a -> Err (Expr a)
+    concrete = fmap Expr.simplify . defaultSymbolicValues . subModel cex
+    concWord :: Text -> Expr EWord -> Either Text W256
+    concWord what e = case concrete e of
+      Right (Lit w) -> Right w
+      r -> Left $ "the model leaves the " <> what <> " symbolic: " <> T.pack (show r)
+    concStore :: Expr Storage -> Either Text (Expr Storage)
+    concStore st = case concrete st of
+      Right (ConcreteStore m) -> Right (ConcreteStore m)
+      -- the model has no store for storage that is never read
+      Right (AbstractStore {}) -> Right (ConcreteStore mempty)
+      _ -> Left "the model leaves the storage symbolic"
+    addr :: Text -> Expr EAddr -> Either Text (Expr EAddr)
+    addr what e = case concrete e of
+      Right (LitAddr a) -> Right (LitAddr a)
+      _ -> Left $ "the model leaves the " <> what <> " address symbolic"
+    setup = do
+      let entry = vm0.state.contract
+      c <- maybe (Left "no contract at the entry address") Right (Map.lookup entry vm0.env.contracts)
+      code <- case c.code of
+        RuntimeCode (ConcreteRuntimeCode bs) -> Right bs
+        InitCode {} -> Left "contract creation is not replayed"
+        _ -> Left "the code is symbolic"
+      calldata <- maybe (Left "calldata is not concrete") Right (cexCalldata vm0.state.calldata cex)
+      store <- concStore c.storage
+      balance <- concWord "balance" c.balance
+      address <- addr "contract" entry
+      stubs <- stubAccounts address cex.unknownCalls
+      others <- fmap catMaybes . forM (Map.toList (Map.delete entry vm0.env.contracts)) $ \(a, oc) ->
+        case oc.code of
+          RuntimeCode (ConcreteRuntimeCode bs) -> do
+            a' <- addr "account" a
+            st <- concStore oc.storage
+            bal <- concWord "account balance" oc.balance
+            pure $ Just (a', (initialContract (RuntimeCode (ConcreteRuntimeCode bs)))
+              { storage = st, origStorage = st, balance = Lit bal, nonce = oc.nonce })
+          -- e.g. the abstract origin account
+          _ -> pure Nothing
+      when (isPrecompileAddr address) $ Left "the model puts the contract at a precompile address"
+      caller <- addr "caller" vm0.state.caller
+      origin <- addr "origin" vm0.tx.origin
+      coinbase <- addr "coinbase" vm0.block.coinbase
+      value <- concWord "callvalue" vm0.state.callvalue
+      timestamp <- concWord "timestamp" vm0.block.timestamp
+      number <- concWord "block number" vm0.block.number
+      prevRandao <- concWord "prevrandao" vm0.block.prevRandao
+      baseFee <- concWord "basefee" vm0.block.baseFee
+      pure $ (defaultVMOpts @Concrete)
+        { contract = (initialContract (RuntimeCode (ConcreteRuntimeCode code)))
+            { storage = store, origStorage = store, balance = Lit balance, nonce = c.nonce }
+        , otherContracts = stubs <> filter ((`notElem` map fst stubs) . fst) others
+        , calldata = (ConcreteBuf calldata, [])
+        , value = Lit value
+        , address
+        , caller
+        , origin
+        , coinbase
+        , timestamp = Lit timestamp
+        , number = Lit number
+        , gas = 0xffffffffffffffff
+        , gaslimit = vm0.tx.gaslimit
+        , blockGaslimit = vm0.block.gaslimit
+        , gasprice = vm0.tx.gasprice
+        , priorityFee = vm0.tx.priorityFee
+        , chainId = vm0.env.chainId
+        , maxCodeSize = vm0.block.maxCodeSize
+        , schedule = vm0.block.schedule
+        , prevRandao = Lit prevRandao
+        , baseFee = Lit baseFee
+        }
+
 -- | 'Stepper.runFully' that also counts the steps and keeps the code address and
 -- pc of the last @n@ of them
 runTraced :: Config -> Int -> Stepper Concrete (Int, Seq (Expr EAddr, Int), VM Concrete)
@@ -1666,9 +1756,10 @@ prettyCalldata cex buf sig types = headErr errSig (T.splitOn "(" sig) <> "(" <> 
 -- but it's probably good enough for now
 defaultSymbolicValues :: Err (Expr a) -> Err (Expr a)
 defaultSymbolicValues = \case
-    Right e -> subBufs (foldTerm symbufs mempty e)
-               . subVars (foldTerm symwords mempty e)
-               . subAddrs (foldTerm symaddrs mempty e) $ e
+    -- addresses last, as balances are keyed by symbolic address
+    Right e -> fmap (subAddrs (foldTerm symaddrs mempty e))
+               . subBufs (foldTerm symbufs mempty e)
+               . subVars (foldTerm symwords mempty e) $ e
     Left err -> Left err
   where
     symaddrs :: Expr a -> Map (Expr EAddr) Addr
@@ -1690,18 +1781,21 @@ defaultSymbolicValues = \case
       a@GasLimit -> Map.singleton a 0
       a@ChainId -> Map.singleton a 0
       a@BaseFee -> Map.singleton a 0
+      a@TxValue -> Map.singleton a 0
+      a@(Balance _) -> Map.singleton a 0
       _ -> mempty
 
 -- | Takes an expression and a Cex and replaces all abstract values in the buf with
 -- concrete ones from the Cex.
 subModel :: SMTCex -> Expr a -> Err (Expr a)
 subModel c
-  = subBufs c.buffers
+  -- addresses last: the model keys balances and stores by symbolic address
+  = fmap (subAddrs c.addrs)
+  . subBufs c.buffers
   . subStores c.store
   . subVars c.vars
   . subVars c.blockContext
   . subVars c.txContext
-  . subAddrs c.addrs
 
 subVars :: Map (Expr EWord) W256 -> Expr a -> Expr a
 subVars model b = Map.foldlWithKey subVar b model
@@ -1711,9 +1805,17 @@ subVars model b = Map.foldlWithKey subVar b model
       where
         go :: Expr a -> Expr a
         go = \case
-          v@(Var _) -> if v == var
-                      then Lit val
-                      else v
+          v@(Var _) -> if v == var then Lit val else v
+          v@(Balance _) -> if v == var then Lit val else v
+          v@TxValue -> if v == var then Lit val else v
+          v@Origin -> if v == var then Lit val else v
+          v@Coinbase -> if v == var then Lit val else v
+          v@Timestamp -> if v == var then Lit val else v
+          v@BlockNumber -> if v == var then Lit val else v
+          v@PrevRandao -> if v == var then Lit val else v
+          v@GasLimit -> if v == var then Lit val else v
+          v@ChainId -> if v == var then Lit val else v
+          v@BaseFee -> if v == var then Lit val else v
           e -> e
 
 subAddrs :: Map (Expr EAddr) Addr -> Expr a -> Expr a
