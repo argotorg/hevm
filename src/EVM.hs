@@ -2835,6 +2835,21 @@ create :: forall t. (?op :: Word8, ?conf::Config, VMOps t)
   => Expr EAddr -> Contract
   -> Expr EWord -> Gas t -> Expr EWord -> [Expr EWord] -> Expr EAddr -> Expr Buf -> EVM t ()
 create self this xSize xGas xValue xs newAddr initCode = do
+  known <- use (#env % #contracts % at newAddr)
+  case (known, newAddr) of
+    -- the address may hold an account on chain, which the collision check and the balance need;
+    -- with no chain to ask, the oracle answers with an empty account, which is left out
+    (Nothing, LitAddr a) -> query $ PleaseFetchContract a EmptyBase $ \c -> do
+      unless (accountEmpty c && c.nonce == Just 0 && c.balance == Lit 0) $
+        assign (#env % #contracts % at newAddr) (Just c)
+      assign #result Nothing
+      create' self this xSize xGas xValue xs newAddr initCode
+    _ -> create' self this xSize xGas xValue xs newAddr initCode
+
+create' :: forall t. (?op :: Word8, ?conf::Config, VMOps t)
+  => Expr EAddr -> Contract
+  -> Expr EWord -> Gas t -> Expr EWord -> [Expr EWord] -> Expr EAddr -> Expr Buf -> EVM t ()
+create' self this xSize xGas xValue xs newAddr initCode = do
   vm0 <- get
   -- are we exceeding the max init code size
   if xSize > Lit (vm0.block.maxCodeSize * 2)

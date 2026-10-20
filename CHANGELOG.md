@@ -64,7 +64,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comparisons of a literal with `c - x`, where `x` is bounded by `c`, now
   simplify using the lower bound of the difference.
 - The RPC fuzzer fetches all state from a mock JSON-RPC node, with EOAs and
-  nonexistent accounts, value transfers, balance and code queries.
+  nonexistent accounts, symbolic addresses, value transfers, reverting,
+  delegated and static calls, and CREATEs onto existing accounts.
 
 ## Changed
 - Solver queries for branch conditions and symbolic values also get the keccak
@@ -118,6 +119,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with an oracle error.
 - With `--rpc`, accounts at addresses up to 0xdeadbeef, such as the burn
   address and the precompiles, are fetched instead of treated as empty.
+- With `--rpc`, CREATE and CREATE2 fetch the account at the new address, so
+  they keep its balance and detect collisions with accounts on chain.
 - Buffer equality in SMT queries now also compares lengths, so the equivalence
   checker no longer misses return or revert data that differs only in length.
 - Replaying equivalence counterexamples no longer keeps the final VMs of every

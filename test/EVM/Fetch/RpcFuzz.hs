@@ -24,6 +24,7 @@ import Test.Tasty.HUnit (testCase, (@?=))
 import Test.Tasty.QuickCheck (testProperty, QuickCheckTests(..))
 
 import EVM (makeVm, initialContract, defaultVMOpts)
+import EVM.Concrete qualified as Concrete
 import EVM.Effects (App, Env(..), defaultConfig, runEnv)
 import EVM.Expr qualified as Expr
 import EVM.Fetch qualified as Fetch
@@ -63,15 +64,20 @@ data Key = KLit W256 | KCd Int -- ^ calldataload(off) & 3
 data Slot = Plain Key | Mapping Int Key W256 | Nested Int Key Key W256
   deriving (Show, Eq)
 
--- | Index into 'targets'
-type Target = Int
+-- | An index into 'targets', or 'targetBase' plus calldataload(off) & 3
+data Target = T Int | TCd Int
+  deriving (Show, Eq)
+
+data CallKind = KCall | KDelegate | KStatic
+  deriving (Show, Eq)
 
 data Val = VLit W256 | VCd Int | VLoad Slot | VAdd Val Val
   | VBal Target | VCodeSize Target | VCodeHash Target | VSelfBal
   deriving (Show, Eq)
 
--- | 'Call' passes a key, a value and a key to read to a target, sending the given wei along
-data Stmt = Store Slot Val | Load Slot | Call Target Key Val Key Key
+-- | 'Call' passes a key, a value, a key to read and a revert flag to a target, sending the
+-- given wei along. 'Create' deploys an empty contract with the given wei.
+data Stmt = Store Slot Val | Load Slot | Call CallKind Target Key Val Key Key Key | Create Key
   deriving (Show, Eq)
 
 -- | Pre-state storage of all accounts
@@ -82,18 +88,29 @@ type Balances = Map Addr W256
 remote :: Addr
 remote = 0x1234567890abcdef1234567890abcdef12345678
 
--- | Accounts the program can touch besides 'remote', each a contract, an EOA or absent
-targets :: [Addr]
+-- | Accounts the program can touch besides 'remote', each a contract, an EOA or absent;
 -- the burn address and a precompile, as low addresses, hold ether on chain too
-targets = [0x2234567890abcdef1234567890abcdef12345678, 0x3234567890abcdef1234567890abcdef12345678, 0x4234567890abcdef1234567890abcdef12345678
-  , 0xdead, 0x1]
+targets :: [Addr]
+targets = [targetBase + i | i <- [0 .. 3]] <> [0xdead, 0x4]
+
+targetBase :: Addr
+targetBase = 0x2234567890abcdef1234567890abcdef12345678
+
+-- | Where the CREATEs of 'remote' deploy, which may already hold an account on chain
+created :: [Addr]
+created = [a | n <- [1 .. 8], LitAddr a <- [Concrete.createAddress remote n]]
+
+accounts :: [Addr]
+accounts = remote : targets <> created
 
 remoteBalance :: W256
 remoteBalance = 1000
 
--- | sstore(cd[0], cd[32]); return sload(cd[64])
+-- | sstore(cd[0], cd[32]); if cd[96] revert; return sload(cd[64])
 targetCode :: ByteString
-targetCode = BS.pack [0x60, 0x20, 0x35, 0x5f, 0x35, 0x55, 0x60, 0x40, 0x35, 0x54, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3]
+targetCode = BS.pack
+  [ 0x60, 0x20, 0x35, 0x5f, 0x35, 0x55, 0x60, 0x60, 0x35, 0x60, 0x16, 0x57
+  , 0x60, 0x40, 0x35, 0x54, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3, 0x5b, 0x5f, 0x5f, 0xfd ]
 
 keyMask :: W256
 keyMask = 3
@@ -128,7 +145,9 @@ pushI :: Int -> [Word8]
 pushI = pushW . fromIntegral
 
 pushT :: Target -> [Word8]
-pushT t = pushW (fromIntegral (targets !! t))
+pushT = \case
+  T i -> pushW (fromIntegral (targets !! i))
+  TCd off -> asmKey (KCd off) <> pushW (fromIntegral targetBase) <> [0x01]
 
 asmKey :: Key -> [Word8]
 asmKey = \case
@@ -167,11 +186,15 @@ assemble prog = BS.pack $ concat (zipWith asm [0 ..] prog) <> pushI (32 * loads)
       Store s v -> asmVal v <> asmSlot s <> [0x55]
       Load s -> asmSlot s <> [0x54] <> pushI (outOffs !! i) <> [0x52]
       -- the success flag is stored too, as calls to accounts without code return nothing
-      Call t k v rk wei -> asmKey k <> pushI 0x100 <> [0x52] <> asmVal v <> pushI 0x120 <> [0x52]
-        <> asmKey rk <> pushI 0x140 <> [0x52]
-        <> pushI 32 <> pushI (outOffs !! i) <> pushI 96 <> pushI 0x100 <> asmKey wei
-        <> pushT t <> pushW 0xffffffff <> [0xf1]
+      Call kind t k v rk rev wei -> asmKey k <> pushI 0x100 <> [0x52] <> asmVal v <> pushI 0x120 <> [0x52]
+        <> asmKey rk <> pushI 0x140 <> [0x52] <> asmKey rev <> pushI 0x160 <> [0x52]
+        <> pushI 32 <> pushI (outOffs !! i) <> pushI 128 <> pushI 0x100
+        <> (case kind of KCall -> asmKey wei <> pushT t <> pushW 0xffffffff <> [0xf1]
+                         KDelegate -> pushT t <> pushW 0xffffffff <> [0xf4]
+                         KStatic -> pushT t <> pushW 0xffffffff <> [0xfa])
         <> pushI (outOffs !! i) <> [0x51, 0x01] <> pushI (outOffs !! i) <> [0x52]
+      -- memory at 0x1f0 is never written, so the init code is a single STOP
+      Create wei -> pushI 1 <> pushI 0x1f0 <> asmKey wei <> [0xf0] <> pushI (outOffs !! i) <> [0x52]
 
 -- * Generators
 
@@ -186,7 +209,7 @@ genKey :: Gen Key
 genKey = oneof [KLit <$> elements [0 .. keyMask], KCd <$> elements cdOffs]
 
 genTarget :: Gen Target
-genTarget = choose (0, length targets - 1)
+genTarget = frequency [(4, T <$> choose (0, length targets - 1)), (1, TCd <$> elements cdOffs)]
 
 genSlot :: Gen Slot
 genSlot = frequency
@@ -205,8 +228,11 @@ genVal d = frequency $
 genStmt :: Gen Stmt
 genStmt = frequency
   [ (3, Store <$> genSlot <*> genVal 2), (3, Load <$> genSlot)
-  , (2, Call <$> genTarget <*> genKey <*> genVal 1 <*> genKey <*> genWei) ]
+  , (2, Call <$> genKind <*> genTarget <*> genKey <*> genVal 1 <*> genKey <*> genRevert <*> genWei)
+  , (1, Create <$> genWei) ]
   where
+    genKind = frequency [(3, pure KCall), (1, pure KDelegate), (1, pure KStatic)]
+    genRevert = frequency [(3, pure (KLit 0)), (1, pure (KLit 1)), (1, KCd <$> elements cdOffs)]
     -- symbolic wei costs a balance query per call on every path
     genWei = frequency [(3, KLit <$> elements [0 .. keyMask]), (1, KCd <$> elements cdOffs)]
 
@@ -220,8 +246,15 @@ genWorld = do
       , (2, (\n b -> [(t, Account mempty n b mempty)]) <$> genNonce <*> genBalance)
       , (1, pure [])
       ]
+  -- funded before the deployment, or taken: then the CREATE collides
+  preCreated <- forM (take 2 created) $ \a -> frequency
+    [ (3, pure [])
+    , (2, (\b -> [(a, Account mempty 0 b mempty)]) <$> genBalance)
+    , (1, (\n b -> [(a, Account mempty n b mempty)]) <$> (fromIntegral <$> choose (1 :: Int, 5)) <*> genBalance)
+    , (1, (\b -> [(a, Account targetCode 1 b mempty)]) <$> genBalance)
+    ]
   st <- genStorage remote
-  pure $ Map.fromList $ (remote, Account mempty 1 remoteBalance st) : concat others
+  pure $ Map.fromList $ (remote, Account mempty 1 remoteBalance st) : concat others <> concat preCreated
   where
     -- far above the ether supply, but wrapping balances would make worlds no chain can reach
     genBalance = frequency [(1, fromIntegral <$> choose (0 :: Int, 5)), (2, (`mod` 2 ^ (96 :: Int)) <$> genWord)]
@@ -230,7 +263,7 @@ genWorld = do
       frequency [(1, pure []), (2, (\v -> [(s, v)]) <$> genWord)])
 
 shrinkWorld :: World -> [World]
-shrinkWorld w = [Map.delete t w | t <- targets, Map.member t w]
+shrinkWorld w = [Map.delete t w | t <- targets <> created, Map.member t w]
   <> [Map.adjust (\(Account c n b _) -> Account c n b mempty) a w | (a, acc) <- Map.toList w, not (null acc.storage)]
 
 genCalldata :: Gen ByteString
@@ -240,7 +273,11 @@ shrinkStmt :: Stmt -> [Stmt]
 shrinkStmt = \case
   Store s v -> Load s : [Store s v' | v' <- shrinkVal v]
   Load _ -> []
-  Call t k v rk wei -> [Call t k v rk (KLit 0) | wei /= KLit 0] <> [Call t k v' rk wei | v' <- shrinkVal v]
+  Call kind t k v rk rev wei -> [Call KCall t k v rk rev wei | kind /= KCall]
+    <> [Call kind t k v rk (KLit 0) wei | rev /= KLit 0]
+    <> [Call kind t k v rk rev (KLit 0) | wei /= KLit 0]
+    <> [Call kind t k v' rk rev wei | v' <- shrinkVal v]
+  Create wei -> [Create (KLit 0) | wei /= KLit 0]
   where
     shrinkVal = \case
       VAdd a b -> [a, b]
@@ -256,12 +293,12 @@ preSlots :: World -> Slots
 preSlots w = Map.fromList [((a, s), v) | (a, acc) <- Map.toList w, (s, v) <- Map.toList acc.storage]
 
 preBalances :: World -> Balances
-preBalances w = Map.fromList [(a, maybe 0 (.balance) (Map.lookup a w)) | a <- remote : targets]
+preBalances w = Map.fromList [(a, maybe 0 (.balance) (Map.lookup a w)) | a <- accounts]
 
 -- | Reads the final state from the given storage and balance of each account, falling back to
 -- the pre-state for accounts and slots never touched
 finalState :: World -> Map (Expr EAddr) (Expr Storage, Expr EWord) -> Either String (Slots, Balances)
-finalState w accs = (,) <$> (Map.fromList <$> mapM slot domain) <*> (Map.fromList <$> mapM bal (remote : targets))
+finalState w accs = (,) <$> (Map.fromList <$> mapM slot domain) <*> (Map.fromList <$> mapM bal accounts)
   where
     slot k@(a, s) = case Map.lookup (LitAddr a) accs >>= Expr.readStorage (Lit s) . fst of
       Nothing -> Right (k, Map.findWithDefault 0 k (preSlots w))
@@ -324,7 +361,7 @@ unexpected :: Request -> Maybe String
 unexpected (Request m ps) = case (m, map hex ps) of
   ("eth_getStorageAt", Just a : Just s : _) | (fromIntegral a, s) `notElem` domain -> bad
   (_, Just a : _) | m `elem` ["eth_getCode", "eth_getBalance", "eth_getTransactionCount"]
-                  , fromIntegral a `notElem` targets -> bad
+                  , fromIntegral a `notElem` (targets <> created) -> bad
   _ -> Nothing
   where
     bad = Just (show (Request m ps))
@@ -381,8 +418,10 @@ prop_rpc =
         $ tabulate "statements" [show (length prog)]
         $ tabulate "statement kinds" [takeWhile (/= ' ') (show st) | st <- prog]
         $ tabulate "target kinds" [kind (Map.lookup t world) | t <- targets]
+        $ tabulate "pre-created kinds" [kind (Map.lookup t world) | t <- take 2 created]
         $ tabulate "symbolic leaves" [show (length leaves)]
         $ tabulate "partial paths" [show partials]
+        $ tabulate "partial reasons" [case r of UnexpectedSymbolicArg { opcode, msg } -> opcode <> ": " <> msg; _ -> takeWhile (/= ' ') (show r) | Partial _ _ r <- leaves]
         $ tabulate "RPC requests" [T.unpack r.method | r <- reqs]
         $ counterexample ("code: " <> T.unpack (formatBinary code))
         $ counterexample ("unexpected requests: " <> show unexp)
