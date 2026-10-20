@@ -14,6 +14,7 @@ import EVM.ABI
 import EVM.Expr (readStorage, concStoreContains, writeStorage, readByte, readWord, writeWord,
   writeByte, bufLength, indexWord, readBytes, copySlice, wordToAddr, maybeLitByteSimp, maybeLitWordSimp, maybeLitAddrSimp)
 import EVM.Expr qualified as Expr
+import EVM.Keccak (concreteKeccakValues)
 import EVM.Keccak.Preimages qualified as Preimages
 import EVM.HashCons qualified as HashCons
 import EVM.FeeSchedule (FeeSchedule (..))
@@ -497,17 +498,26 @@ exec1 conf = do
             xOffset:xSize:xs ->
               burnSha3 xSize $
                 accessMemoryRange xOffset xSize $ do
-                  hash <- readMemory xOffset xSize >>= \case
+                  buf <- readMemory xOffset xSize
+                  let simplified = case buf of
+                        ConcreteBuf _ -> buf
+                        _ -> Expr.concKeccakSimpExpr buf
+                  hash <- case simplified of
                     orig@(ConcreteBuf bs) ->
                       whenSymbolicElse
-                        (pure $ Keccak orig)
+                        (do
+                          -- Folding nested hashes must retain their preimages for SMT assumptions.
+                          let facts = [PEq (Keccak input) (Lit h) | (input, h) <- toList (concreteKeccakValues buf)]
+                          modifying' #constraints (facts <>)
+                          pure $ HashCons.hashConsExpr (Keccak orig)
+                        )
                         (do
                           let kc = keccak' bs
                           when vm.config.recordKeccakPreImgs $
                             modifying' #keccakPreImgs (insert (bs, kc))
                           pure $ Lit kc
                         )
-                    buf -> pure $ HashCons.hashConsExpr (Keccak (fromMaybe buf (Expr.canonKeccakBuf buf)))
+                    _ -> pure $ HashCons.hashConsExpr (Keccak (fromMaybe buf (Expr.canonKeccakBuf buf)))
                   next
                   assign' (#state % #stack) (hash : xs)
             _ -> underrun
