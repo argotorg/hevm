@@ -133,10 +133,13 @@ answer blk world reqs body = case JSON.decodeStrict body of
         slot <- hex s
         pure $ String $ formatBinary $ word256Bytes $ Map.findWithDefault 0 slot acc.storage
       -- the root is a stand-in for the trie's: only whether storage is empty is meaningful
+      -- like Alchemy, a zero storage hash for accounts that do not exist
       ("eth_getProof", [a, _, b]) -> atBlock b $ do
         acc <- account <$> addr a
-        let root = if Map.null (Map.filter (/= 0) acc.storage) then emptyStorageRoot
-                   else keccak' (BS.concat [word256Bytes k <> word256Bytes v | (k, v) <- Map.toList acc.storage])
+        exists <- (`Map.member` world) <$> addr a
+        let root | not exists = 0
+                 | Map.null (Map.filter (/= 0) acc.storage) = emptyStorageRoot
+                 | otherwise = keccak' (BS.concat [word256Bytes k <> word256Bytes v | (k, v) <- Map.toList acc.storage])
         pure $ object
           [ "balance" .= quantity acc.balance
           , "nonce" .= quantity (fromIntegral acc.nonce)

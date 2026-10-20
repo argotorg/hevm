@@ -424,7 +424,8 @@ makeContractFromRPC (RPCContract (ByteStringS code) nonce balance root) =
       & set #nonce    (Just nonce)
       & set #balance  (Lit balance)
       & set #external True
-      & set #chainStorage (maybe False (/= emptyStorageRoot) root)
+      -- for accounts that do not exist, nodes report a zero storage hash rather than the empty root
+      & set #chainStorage (maybe False (`notElem` [0, emptyStorageRoot]) root)
 
 -- | The root of an empty storage trie: keccak256(rlp(""))
 emptyStorageRoot :: W256
