@@ -302,6 +302,7 @@ test-suite test
   other-modules:
     EVM.Equivalence.EquivalenceTests
     EVM.Equivalence.EquivFuzz
+    EVM.Fetch.MockNode
     EVM.Fetch.RpcFuzz
     EVM.Expr.ExprTests
     EVM.Expr.RewriteFuzz
@@ -319,6 +320,7 @@ test-suite test
     data-dword,
     extra,
     here,
+    network,
     time,
     optics-extra,
     QuickCheck,

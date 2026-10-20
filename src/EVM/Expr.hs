@@ -65,6 +65,7 @@ module EVM.Expr
   , readBytes
   , readWord
   , upperBound
+  , lowerBound
   , maxBytes
   , copySlice
   , canonKeccakBuf
@@ -491,6 +492,14 @@ upperBound e = case (simplifyNoLitToKeccak e) of
           else Nothing
     addBound a b = upperBound b >>= \ub ->
       if a <= (maxBound :: W256) - ub then Just (a + ub) else Nothing
+
+-- | Static lower bound on a word expression (unsigned)
+lowerBound :: Expr EWord -> W256
+lowerBound = \case
+  Lit n -> n
+  Sub (Lit c) b | Just ub <- upperBound b, ub <= c -> c - ub
+  Max a b -> Prelude.max (lowerBound a) (lowerBound b)
+  _ -> 0
 
 -- | The bits of a word expression that can be 1, looking a few levels deep
 possibleOnes :: Expr EWord -> W256
@@ -1603,8 +1612,10 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     -- every value of one side is below the other
     go (EVM.Types.LT a (Lit c))
       | possibleOnes a < c = Lit 1
+      | lowerBound a >= c = Lit 0
     go (EVM.Types.LT (Lit c) b)
       | possibleOnes b <= c = Lit 0
+      | lowerBound b > c = Lit 1
 
     -- overflow checks: x + c and x - c wrap exactly past these bounds
     go (EVM.Types.LT a (Add (Lit c) b)) | a == b, c /= 0 = lt a (Lit (0 - c))
@@ -1994,6 +2005,10 @@ simplifyProp prop =
     go (PLT (Lit c) b) | possibleOnes b <= c = PBool False
     go (PLEq a (Lit c)) | possibleOnes a <= c = PBool True
     go (PLEq (Lit c) b) | possibleOnes b < c = PBool False
+    go (PLT a (Lit c)) | lowerBound a >= c = PBool False
+    go (PLT (Lit c) b) | lowerBound b > c = PBool True
+    go (PLEq a (Lit c)) | lowerBound a > c = PBool False
+    go (PLEq (Lit c) b) | lowerBound b >= c = PBool True
 
     -- a comparison with an ITE with literal branches is a condition on its ITE
     go (PEq (Lit k) (ITE c (Lit a) (Lit b))) = onITE c (a == k) (b == k)

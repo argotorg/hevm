@@ -18,7 +18,7 @@ import Data.ByteString qualified as BS (drop, length, pack, replicate, take)
 import Data.Containers.ListUtils (nubOrd)
 import Data.List qualified as List (nub, sort, tails)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, fromMaybe)
 import Data.Text (Text)
 import Data.Typeable
 import Numeric.Natural (Natural)
@@ -26,7 +26,7 @@ import Numeric.Natural (Natural)
 import EVM.Effects
 import EVM.Expr qualified as Expr
 import EVM.Expr.Generator
-import EVM.Expr.RewriteFuzz (genShapedWord, genShapedProp, shrinkWord, shrinkProp)
+import EVM.Expr.RewriteFuzz (genShapedWord, genShapedProp, genSpecialLit, shrinkWord, shrinkProp)
 import EVM.Expr.Probe (probes, contract)
 import EVM.HashCons qualified as HC
 import EVM.Keccak.Preimages (fromBytes)
@@ -73,6 +73,9 @@ rewriteRuleTests = testGroup "Rewrite rules"
       assertEqual "an address fits its mask" (WAddr (SymAddr "a")) (Expr.simplify (And addrMask (WAddr (SymAddr "a"))))
       assertEqual "too wide for a selector" (Lit 0) (Expr.simplify (Eq (Lit 0x100000000) selector))
       assertEqual "a byte is below 256" (Lit 1) (Expr.simplify (LT (And (Lit 0xff) x) (Lit 0x100)))
+      assertEqual "a balance minus a small value stays above 2" (Lit 0) (Expr.simplify (GT (Lit 2) (Sub (Lit 1000) (And (Lit 3) x))))
+      assertEqual "prop: a balance minus a small value stays above 2" [] (Expr.simplifyProps [PLEq (Lit 2) (Sub (Lit 1000) (And (Lit 3) x))])
+      assertEqual "prop: no lower bound when it may wrap" [PLEq (Lit 2) (Sub (Lit 2) (And (Lit 3) x))] (Expr.simplifyProps [PLEq (Lit 2) (Sub (Lit 2) (And (Lit 3) x))])
       assertEqual "shifted out" (Lit 0) (Expr.simplify (SHR (Lit 8) (And (Lit 0xff) x)))
       assertEqual "prop: a bool is at most 1" [] (Expr.simplifyProps [PLEq (Eq x (Lit 3)) (Lit 1)])
       assertEqual "prop: wider than a byte" [PBool False] (Expr.simplifyProps [PEq (Lit 0x1ff) (And (Lit 0xff) x)])
@@ -2171,10 +2174,42 @@ fuzzTests = testGroup "ExprFuzzTests"
       ]
   , abstractArithmeticFuzzTests
   , enumerateFuzzTests
+  , testProperty "bounds-smt" boundsSmtFuzz
   ]
   where
     halfQuickCheckTests = adjustOption $ \(Test.Tasty.QuickCheck.QuickCheckTests n) ->
       Test.Tasty.QuickCheck.QuickCheckTests (div n 2)
+
+-- | No value of a subterm lies outside its static bounds, as the solver sees it
+boundsSmtFuzz :: Property
+boundsSmtFuzz = forAllShrink (sized $ \n -> genBounded (min n 6)) shrinkWord $ \e -> ioProperty $ do
+  let ts = take 6
+        [ (t, lb, ub) | t <- List.nub (foldExpr (maybe [] pure . Expr.asWord) [] e)
+        , let lb = Expr.lowerBound t; ub = fromMaybe Expr.maxLit (Expr.upperBound t)
+        , lb > 0 || ub < Expr.maxLit ]
+  res <- runEnv (Env {config = equivConfig}) $ withSolvers Bitwuzla 1 (Just 5) defMemLimit $ \solvers ->
+    mapM (\(t, lb, ub) -> checkSatWithProps solvers [POr (PLT t (Lit lb)) (PLT (Lit ub) t)]) ts
+  pure $ tabulate "bounded subterms" [show (length ts)] $ conjoin
+    [ case r of
+        Cex cex -> counterexample (show t <> " escapes " <> show (lb, ub) <> " with " <> show cex.vars) False
+        Error err -> counterexample err False
+        Unknown _ -> label "unknown" True
+        Qed -> property True
+    | ((t, lb, ub), r) <- zip ts res ]
+  where
+    -- the shapes that 'Expr.lowerBound' and 'Expr.upperBound' look into
+    genBounded :: Int -> Gen (Expr EWord)
+    genBounded 0 = oneof [Lit <$> genSpecialLit, Var <$> elements ["a", "b"], genShapedWord 2]
+    genBounded n = frequency
+      [ (1, genBounded 0)
+      , (3, Sub . Lit <$> lit <*> s), (2, Max <$> s <*> s)
+      , (2, And . Lit <$> lit <*> s), (1, Mod <$> s <*> (Lit <$> lit)), (1, Div <$> s <*> (Lit <$> lit))
+      , (1, Mul . Lit <$> lit <*> s), (2, Add . Lit <$> lit <*> s)
+      , (1, SHR . Lit . fromIntegral <$> choose (0 :: Int, 300) <*> s)
+      ]
+      where
+        s = genBounded (n - 1)
+        lit = oneof [genSpecialLit, fromIntegral <$> choose (0 :: Int, 2000)]
 
 -- | Every model of the path conditions must take a value of the subterm that is enumerated,
 -- and give the word the value enumerated with it: one left out drops a feasible path.

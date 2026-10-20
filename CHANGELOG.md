@@ -61,6 +61,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without parsing ANSI escape codes. Terminal output is unchanged.
 - Hash-consing of symbolic terms, on by default (`hashConsExplore` config
   option); disable it with `--no-hash-cons`.
+- Comparisons of a literal with `c - x`, where `x` is bounded by `c`, now
+  simplify using the lower bound of the difference.
+- The RPC fuzzer fetches all state from a mock JSON-RPC node, with EOAs and
+  nonexistent accounts, value transfers, balance and code queries.
 
 ## Changed
 - Solver queries for branch conditions and symbolic values also get the keccak
@@ -110,6 +114,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the writes they are disjoint from and resolve the writes they hit.
 
 ## Fixed
+- With `--rpc`, accessing an account without code (an EOA) no longer aborts
+  with an oracle error.
 - Buffer equality in SMT queries now also compares lengths, so the equivalence
   checker no longer misses return or revert data that differs only in length.
 - Replaying equivalence counterexamples no longer keeps the final VMs of every

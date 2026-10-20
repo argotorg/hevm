@@ -1,6 +1,7 @@
 
 module EVM.Fetch
   ( fetchContractWithSession
+  , fetchAccountWithSession
   , fetchBlockWithSession
   , fetchQuery
   , oracle
@@ -351,45 +352,41 @@ fetchWithSession url sess x = do
       Just err -> pure $ Left $ pack $ show err
       Nothing -> pure $ Left "Unknown RPC error"
 
+-- | Like 'fetchAccountWithSession', but an account without code is a 'FetchFailure'
 fetchContractWithSession :: Config -> Session -> BlockNumber -> Text -> Addr -> IO (FetchResult RPCContract)
-fetchContractWithSession conf sess nPre url addr = do
+fetchContractWithSession conf sess nPre url addr =
+  fetchAccountWithSession conf sess nPre url addr >>= \case
+    FetchSuccess c status | c.code == ByteStringS BS.empty -> do
+      modifyMVar_ sess.failedContracts $ pure . Set.insert addr
+      pure (FetchFailure status)
+    r -> pure r
+
+-- | Fetches any account, including ones without code (EOAs and nonexistent accounts)
+fetchAccountWithSession :: Config -> Session -> BlockNumber -> Text -> Addr -> IO (FetchResult RPCContract)
+fetchAccountWithSession conf sess nPre url addr = do
   n <- getLatestBlockNum conf sess nPre url
-  -- Check successful cache first
   cache <- readMVar sess.sharedCache
   case Map.lookup addr cache.contractCache of
     Just c -> do
-      when (conf.debug) $ putStrLn $ "-> Using cached contract at " ++ show addr
+      when (conf.debug) $ putStrLn $ "-> Using cached account at " ++ show addr
       pure (FetchSuccess c Cached)
     Nothing -> do
-      -- Check failure cache
-      failures <- readMVar sess.failedContracts
-      if Set.member addr failures
-      then do
-        when (conf.debug) $ putStrLn $ "-> Skipping previously failed contract " ++ show addr
-        pure (FetchFailure Cached)
-      else do
-        -- Attempt fetch
-        when (conf.debug) $ putStrLn $ "-> Fetching contract at " ++ show addr
-        let fetch :: Show a => RpcQuery a -> IO (Either Text a)
-            fetch = fetchQuery n (fetchWithRetry conf.debug url sess)
+      when (conf.debug) $ putStrLn $ "-> Fetching account at " ++ show addr
+      let fetch :: Show a => RpcQuery a -> IO (Either Text a)
+          fetch = fetchQuery n (fetchWithRetry conf.debug url sess)
 
-        codeRes <- fetch (QueryCode addr)
-        nonceRes <- fetch (QueryNonce addr)
-        balRes <- fetch (QueryBalance addr)
+      codeRes <- fetch (QueryCode addr)
+      nonceRes <- fetch (QueryNonce addr)
+      balRes <- fetch (QueryBalance addr)
 
-        case (codeRes, nonceRes, balRes) of
-          (Right c, Right no, Right ba) -> do
-            let contr = RPCContract (ByteStringS c) no ba
-            if c /= BS.empty 
-              then do
-                modifyMVar_ sess.sharedCache $ \x -> pure $ x { contractCache = Map.insert addr contr x.contractCache }
-                pure (FetchSuccess contr Fresh)
-              else do
-                modifyMVar_ sess.failedContracts $ \f -> pure $ Set.insert addr f
-                pure (FetchFailure Fresh)
-          (Left e, _, _) -> pure (FetchError e)
-          (_, Left e, _) -> pure (FetchError e)
-          (_, _, Left e) -> pure (FetchError e)
+      case (codeRes, nonceRes, balRes) of
+        (Right c, Right no, Right ba) -> do
+          let contr = RPCContract (ByteStringS c) no ba
+          modifyMVar_ sess.sharedCache $ \x -> pure $ x { contractCache = Map.insert addr contr x.contractCache }
+          pure (FetchSuccess contr Fresh)
+        (Left e, _, _) -> pure (FetchError e)
+        (_, Left e, _) -> pure (FetchError e)
+        (_, _, Left e) -> pure (FetchError e)
 
 -- In case the user asks for Latest, and we have not yet established what Latest is,
 -- we fetch the block to find out. Otherwise, we update Latest to the value we have stored
@@ -461,7 +458,8 @@ getCacheState sess = do
   failedSlots <- readMVar sess.failedSlots
 
   -- Convert contract cache
-  let successfulContracts = fmap (Just . makeContractFromRPC) cache.contractCache
+  let successfulContracts = fmap (Just . makeContractFromRPC) $
+        Map.filter (\c -> c.code /= ByteStringS BS.empty) cache.contractCache
   let allContracts = successfulContracts
                   <> Map.fromSet (const Nothing) failedContracts
 
@@ -610,7 +608,7 @@ oracle solvers preSess rpcInfo q = do
           Nothing -> do
             when (conf.debug) $ liftIO $ putStrLn $ "Fetching contract at " ++ show addr
             let (block, url) = fromJust rpcInfo.blockNumURL
-            res <- liftIO $ fetchContractWithSession conf sess block url addr
+            res <- liftIO $ fetchAccountWithSession conf sess block url addr
             case res of
               FetchSuccess x _ -> pure $ continue (makeContractFromRPC x)
               FetchFailure _ -> internalError $ "oracle error: " ++ show q
