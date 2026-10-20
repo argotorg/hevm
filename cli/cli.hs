@@ -125,7 +125,7 @@ commonOptions = CommonOptions
   <*> (switch $ long "trace"                <> help "Dump trace")
   <*> (option auto $ long "verb"            <> showDefault <> value 1 <> help "Append call trace: {1} failures {2} all {3} also log progress to hevm-progress.jsonl {4} also log solver expressions there")
   <*> (optional $ strOption $ long "root"   <> help "Path to  project root directory")
-  <*> (option auto $ long "assertion-type"  <> showDefault <> value Forge <> help "Assertions as per Forge or DSTest")
+  <*> (option auto $ long "assertion-type"  <> showDefault <> value Forge <> help "Deprecated, has no effect: failing assertions are detected both by reverts and by the fail flag that forge-std's fail() and DSTest set")
   <*> (option auto $ long "smt-timeout"     <> value 300 <> help "Timeout given to SMT solver in seconds. Not available on Windows")
   <*> (option auto $ long "smt-memory"      <> value defMemLimit <> help "Maximum memory limit for SMT solver in MB. Only available on Linux")
   <*> (switch $ long "smt-debug"            <> help "Print smt queries sent to the solver")
@@ -586,6 +586,12 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = do
       cache <- readMVar sess.sharedCache
       Fetch.saveCache dir block cache
     case res of
+      [] | any Expr.isPartial expr -> do
+        liftIO $ putStrLn "\nNo reachable property violations discovered on the explored paths, but exploration was partial\n"
+        liftIO $ printWarnings Nothing mempty expr res "symbolically"
+        liftIO $ printCaveats caveats
+        showExtras solvers sOpts calldata expr
+        liftIO exitFailure
       [] -> do
         liftIO $ putStrLn "\nQED: No reachable property violations discovered\n"
         liftIO $ printCaveats caveats
@@ -921,7 +927,7 @@ unitTestOptions testOpts cOpts solvers buildOutput = do
     , testParams = params
     , dapp = srcInfo
     , ffiAllowed = testOpts.ffi
-    , checkFailBit = cOpts.assertionType == DSTest
+    , checkFailBit = True
     , loopHeuristic = cOpts.loopDetectionHeuristic
     }
 parseInitialStorage :: InitialStorage -> BaseState

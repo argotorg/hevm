@@ -48,7 +48,7 @@ module EVM.Format
 
 import Prelude hiding (LT, GT)
 
-import EVM (traceForest, traceForest', traceContext, cheatCode)
+import EVM (traceForest, traceForest', traceContext, cheatCode, stripErrorPrefix)
 import EVM.ABI (getAbiSeq, parseTypeName, AbiValue(..), AbiType(..), SolError(..), Indexed(..), Event(..))
 import EVM.ConsoleLog (formatConsoleLog)
 import EVM.Dapp (DappContext(..), DappInfo(..), findSrc, showTraceLocation)
@@ -464,7 +464,9 @@ prettyError = \case
   StackUnderrun -> "Stack underrun"
   BalanceTooLow a b -> "Balance too low. value: " <> show a <> " balance: " <> show b
   UnrecognizedOpcode a -> "Unrecognized opcode: " <> show a
-  Revert (ConcreteBuf msg) -> "Revert: " <> (T.unpack $ formatBinary msg)
+  Revert (ConcreteBuf msg) -> "Revert: " <> case stripErrorPrefix msg of
+    Just s -> "Error(" <> show (T.decodeUtf8Lenient s) <> ")"
+    Nothing -> T.unpack $ formatBinary msg
   Revert _ -> "Revert: <symbolic>"
   OutOfGas a b -> "Out of gas: have: " <> show a <> " need: " <> show b
   StateChangeWhileStatic -> "State change while static"
@@ -477,7 +479,6 @@ prettyError = \case
   ReturnDataOutOfBounds -> "Return data out of bounds"
   NonceOverflow -> "Nonce overflow"
   BadCheatCode reason a -> "Bad cheat code: " <>  reason <> " sig: " <> show a
-  NonexistentFork a -> "Fork ID does not exist: " <> show a
   AssumeCheatFailed -> "Assume failed"
 
 prettyvmresult :: Expr End -> String
@@ -547,6 +548,14 @@ formatPartial = \case
       , "function selector: " <> T.pack (show selector)
       ]
     ]
+  CheatCodeFailed pc addr selector msg -> T.unlines
+    [ "Cheat code failed: " <> T.pack msg
+    , indent 2 $ T.unlines
+      [ "contract addr: " <> T.pack (show addr)
+      , "program counter: " <> T.pack (show pc)
+      , "function selector: " <> T.pack (show selector)
+      ]
+    ]
   BranchTooDeep pc addr -> T.unlines
     ["Branch too deep."
     , indent 2 $ T.unlines
@@ -577,6 +586,7 @@ formatPartialDetailed srcLookupM contracts p =
     MaxIterationsReached {..}  -> "Max iterations reached" <> toTxt addr pc
     JumpIntoSymbolicCode {..}  -> "Encountered a jump into a symbolic code" <> toTxt addr pc
     CheatCodeMissing {..}      -> "Cheat code not recognized: " <> T.pack (show selector) <> toTxt addr pc
+    CheatCodeFailed {..}       -> "Cheat code failed: " <> T.pack msg <> toTxt addr pc
     PrecompileMissing {..}     -> "Precompile at address " <> pack (show preAddr) <> " does not exist, called from" <> toTxt addr pc
     BranchTooDeep {..}         -> "Branches too deep" <> toTxt addr pc
 
@@ -905,6 +915,7 @@ formatProp x = T.stripEnd $ case x of
         , "caller storage: " <> formatExpr i.callerStorage
         , "caller transient storage: " <> formatExpr i.callerTStorage
         , "caller balance: " <> formatExpr i.callerBalance
+        , "gas: " <> formatExpr i.callGas
         ]
     , ")"
     ]

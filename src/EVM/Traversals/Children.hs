@@ -130,8 +130,8 @@ mapPropChildrenM g = \case
   PCall i s r w -> PCall <$> mapCallInputsM g i <*> g s <*> g r <*> traverse (\(a, b) -> (,) <$> g a <*> g b) w
 
 mapCallInputsM :: Applicative m => (forall a . Expr a -> m (Expr a)) -> CallInputs -> m CallInputs
-mapCallInputsM g (CallInputs w k t v d l c s ts b) =
-  CallInputs <$> g w <*> g k <*> g t <*> g v <*> g d <*> g l <*> g c <*> g s <*> g ts <*> g b
+mapCallInputsM g (CallInputs w k t v d l c s ts b gas) =
+  CallInputs <$> g w <*> g k <*> g t <*> g v <*> g d <*> g l <*> g c <*> g s <*> g ts <*> g b <*> g gas
 
 mapCodeChildrenM :: Applicative m => (forall a . Expr a -> m (Expr a)) -> ContractCode -> m ContractCode
 mapCodeChildrenM g = \case
@@ -162,7 +162,6 @@ mapErrorChildrenM g = \case
   e@ReturnDataOutOfBounds -> pure e
   e@NonceOverflow -> pure e
   e@BadCheatCode{} -> pure e
-  e@NonexistentFork{} -> pure e
   e@AssumeCheatFailed -> pure e
 
 mapPartialChildrenM :: Applicative m => (forall a . Expr a -> m (Expr a)) -> PartialExec -> m PartialExec
@@ -173,4 +172,5 @@ mapPartialChildrenM g = \case
   JumpIntoSymbolicCode pc a dst -> (\a' -> JumpIntoSymbolicCode pc a' dst) <$> g a
   PrecompileMissing pc a pre -> (\a' -> PrecompileMissing pc a' pre) <$> g a
   CheatCodeMissing pc a sel -> (\a' -> CheatCodeMissing pc a' sel) <$> g a
+  CheatCodeFailed pc a sel m -> (\a' -> CheatCodeFailed pc a' sel m) <$> g a
   BranchTooDeep pc a -> BranchTooDeep pc <$> g a

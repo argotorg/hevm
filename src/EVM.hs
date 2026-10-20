@@ -220,6 +220,7 @@ makeVm o = do
       , freshAddresses = o.freshAddresses
       , freshGasVals = 0
       , callWorld = Lit 0
+      , callCounts = mempty
       }
     block = Block
       { coinbase = o.coinbase
@@ -1812,7 +1813,7 @@ unknownCode n = unexpectedSymArg "call target has unknown code" [n]
 
 -- | Overapproximates a call to unknown code with fresh results, defined as
 -- functions of the call's inputs (see 'PCall'), so that calls with equal
--- inputs, e.g. in the two programs of an equivalence check, get equal results.
+-- inputs in the two programs of an equivalence check get equal results.
 freshBufFallback :: (?conf :: Config, VMOps t, ?op :: Word8)
   => Expr EWord -> Expr EWord -> Expr EWord -> Expr EWord -> Expr EWord -> Expr EWord -> Bool -> [Expr EWord] -> EVM t ()
 freshBufFallback target value inOffset inSize outOffset outSize changesState xs = do
@@ -1844,8 +1845,17 @@ freshBufFallback target value inOffset inSize outOffset outSize changesState xs 
         , callerStorage = maybe (AbstractStore self Nothing) (.storage) callee
         , callerTStorage = maybe (AbstractStore self Nothing) (.tStorage) callee
         , callerBalance = maybe (Balance self) (.balance) callee
+        , callGas = Lit 0
         }
-  modifying #constraints ((:) (PCall inputs freshVarExpr freshReturndataExpr ((, etherIn) <$> worldAfter)))
+  -- Every call of a path gets its own gas, so that a callee reading GAS can answer
+  -- differently each time. The name has no "-fresh-", so rewriteFresh keeps it
+  -- shared between A and B, where calls with the same inputs get the same gas.
+  let inputsHash = inputs & show & Char8.pack & keccak'
+  nth <- fromMaybe 0 <$> use (#env % #callCounts % at inputsHash)
+  modifying (#env % #callCounts) (Map.insert inputsHash (nth + 1))
+  let callGas = Var ("call-gas-" <> pack (show inputsHash) <> "-" <> pack (show nth))
+      inputs' = inputs { callGas }
+  modifying #constraints ((:) (PCall inputs' freshVarExpr freshReturndataExpr ((, etherIn) <$> worldAfter)))
   mapM_ (assign (#env % #callWorld)) worldAfter
   -- the callee gets the value if the call succeeds, and can send the caller ether
   -- without running the caller's code, e.g. by self-destructing
@@ -2224,7 +2234,7 @@ cheatActions = Map.fromList
                       }
                   doStop
               Nothing ->
-                vmError (NonexistentFork forkId')
+                frameRevert $ "assertion failed: selectFork: fork " <> Char8.pack (show forkId') <> " does not exist"
         _ -> vmError (BadCheatCode "selectFork(uint256) parameter decoding failed" sig)
 
   , action "activeFork()" $
@@ -2650,7 +2660,7 @@ setExpectedRevert reasonExp isPartial reverterExp = do
   vm <- get
   case vm.expectedRevert of
     Just _ ->
-      vmError (BadCheatCode "expectRevert: previous expectation not yet consumed" 0)
+      finishFrame (FrameReverted (assertionFailedBuf "expectRevert: previous expectation not yet consumed"))
     Nothing -> do
       assign #expectedRevert $ Just ExpectedRevert
         { reason         = reasonExp
@@ -3048,7 +3058,13 @@ resetState = do
 -- * VM error implementation
 
 vmError :: VMOps t => EvmError -> EVM t ()
-vmError e = finishFrame (FrameErrored e)
+vmError e = case e of
+  -- symbolically, e.g. given symbolic arguments it cannot decode: reverting
+  -- would make the test pass, so the path is only partially explored
+  BadCheatCode msg sel -> whenSymbolicElse
+    (do vm <- get; partial $ CheatCodeFailed vm.state.pc vm.state.contract sel msg)
+    (finishFrame (FrameErrored e))
+  _ -> finishFrame (FrameErrored e)
 
 wrap :: Typeable a => [Expr a] -> [SomeExpr]
 wrap = fmap SomeExpr
@@ -3128,9 +3144,8 @@ finishFrame how = do
                 Mismatch ->
                   finishFrameNoExpectation
                     (FrameReverted (assertionFailedBuf "expected revert did not match"))
-                Indeterminate reason -> do
+                Indeterminate reason ->
                   unexpectedSymArg ("expectRevert: " <> reason) [actual]
-                  finishFrameNoExpectation how
             FrameReturned _ ->
               finishFrameNoExpectation
                 (FrameReverted (assertionFailedBuf "expected call did not revert"))

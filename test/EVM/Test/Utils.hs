@@ -77,7 +77,7 @@ testOpts solvers root buildOutput methodFilter maxIter allowFFI rpcinfo = do
     , testParams = params
     , dapp = srcInfo
     , ffiAllowed = allowFFI
-    , checkFailBit = False
+    , checkFailBit = True
     , loopHeuristic = SymExec.StackBased
     }
 
