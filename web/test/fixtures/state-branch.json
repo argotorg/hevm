@@ -1,0 +1,128 @@
+{
+    "branch": {
+        "condition": "(Eq\n  5\n  (ReadWord\n    idx:\n      0\n    buf: \n      (AbstractBuf \"txdata\")\n  )\n)",
+        "options": [
+            "true",
+            "false"
+        ]
+    },
+    "branchMode": "solver",
+    "breakpoints": [],
+    "choices": [],
+    "code": [
+        {
+            "current": false,
+            "op": "PUSH1 0x00",
+            "pc": 0
+        },
+        {
+            "current": false,
+            "op": "CALLDATALOAD",
+            "pc": 2
+        },
+        {
+            "current": false,
+            "op": "DUP1",
+            "pc": 3
+        },
+        {
+            "current": false,
+            "op": "PUSH1 0x05",
+            "pc": 4
+        },
+        {
+            "current": false,
+            "op": "EQ",
+            "pc": 6
+        },
+        {
+            "current": false,
+            "op": "PUSH1 0x0c",
+            "pc": 7
+        },
+        {
+            "current": true,
+            "op": "JUMPI",
+            "pc": 9
+        },
+        {
+            "current": false,
+            "op": "POP",
+            "pc": 10
+        },
+        {
+            "current": false,
+            "op": "STOP",
+            "pc": 11
+        },
+        {
+            "current": false,
+            "op": "JUMPDEST",
+            "pc": 12
+        },
+        {
+            "current": false,
+            "op": "PUSH1 0x05",
+            "pc": 13
+        },
+        {
+            "current": false,
+            "op": "EQ",
+            "pc": 15
+        },
+        {
+            "current": false,
+            "op": "PUSH1 0x15",
+            "pc": 16
+        },
+        {
+            "current": false,
+            "op": "JUMPI",
+            "pc": 18
+        },
+        {
+            "current": false,
+            "op": "INVALID",
+            "pc": 19
+        },
+        {
+            "current": false,
+            "op": "STOP",
+            "pc": 20
+        },
+        {
+            "current": false,
+            "op": "JUMPDEST",
+            "pc": 21
+        },
+        {
+            "current": false,
+            "op": "STOP",
+            "pc": 22
+        }
+    ],
+    "codeContract": "(SymAddr \"entrypoint\")",
+    "contract": "(SymAddr \"entrypoint\")",
+    "depth": 0,
+    "gas": null,
+    "memory": "Length: 0 (0x0) bytes\n",
+    "memorySize": 0,
+    "merging": false,
+    "message": "Stopped at a symbolic branch. Use 'branch true' or 'branch false'.",
+    "mode": "symbolic",
+    "op": "JUMPI",
+    "output": null,
+    "pathConditions": 0,
+    "pc": 9,
+    "result": null,
+    "simplified": true,
+    "source": null,
+    "stack": [
+        "0xc (12)",
+        "(Eq\n  5\n  (ReadWord\n    idx:\n      0\n    buf: \n      (AbstractBuf \"txdata\")\n  )\n)",
+        "(ReadWord\n  idx:\n    0\n  buf: \n    (AbstractBuf \"txdata\")\n)"
+    ],
+    "status": "branch",
+    "step": 7,
+    "warnings": []
+}

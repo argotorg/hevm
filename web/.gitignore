@@ -1,0 +1,3 @@
+.test-dist/
+# the bundle is committed, unlike the dist/ directories the top-level .gitignore means
+!dist/

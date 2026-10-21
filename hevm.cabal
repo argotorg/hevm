@@ -21,6 +21,8 @@ build-type:
   Simple
 extra-source-files:
   bench/contracts/*.sol
+  web/index.html
+  web/dist/debugger.js
   test/scripts/convert_trace_to_json.sh
 extra-doc-files:
   CHANGELOG.md
@@ -98,6 +100,7 @@ library
     EVM.Dapp,
     EVM.Debugger,
     EVM.Debugger.Server,
+    EVM.Debugger.Embed,
     EVM.Expr,
     EVM.SMT,
     EVM.Solvers,
@@ -337,7 +340,9 @@ test-suite test
     EVM.Debugger.DebuggerTests
     EVM.Debugger.DebuggerFuzz
     EVM.Debugger.ProgressTests
+    EVM.Debugger.WebFixtures
   build-depends:
+    aeson-pretty,
     base16,
     binary,
     data-dword,

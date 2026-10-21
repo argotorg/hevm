@@ -1,0 +1,95 @@
+{
+    "branch": null,
+    "branchMode": "solver",
+    "breakpoints": [],
+    "choices": [],
+    "code": [
+        {
+            "current": false,
+            "op": "PUSH1 0x00",
+            "pc": 0
+        },
+        {
+            "current": false,
+            "op": "JUMPDEST",
+            "pc": 2
+        },
+        {
+            "current": false,
+            "op": "DUP1",
+            "pc": 3
+        },
+        {
+            "current": false,
+            "op": "DUP1",
+            "pc": 4
+        },
+        {
+            "current": false,
+            "op": "MSTORE",
+            "pc": 5
+        },
+        {
+            "current": true,
+            "op": "PUSH1 0x01",
+            "pc": 6
+        },
+        {
+            "current": false,
+            "op": "ADD",
+            "pc": 8
+        },
+        {
+            "current": false,
+            "op": "DUP1",
+            "pc": 9
+        },
+        {
+            "current": false,
+            "op": "PUSH1 0x64",
+            "pc": 10
+        },
+        {
+            "current": false,
+            "op": "GT",
+            "pc": 12
+        },
+        {
+            "current": false,
+            "op": "PUSH1 0x02",
+            "pc": 13
+        },
+        {
+            "current": false,
+            "op": "JUMPI",
+            "pc": 15
+        },
+        {
+            "current": false,
+            "op": "STOP",
+            "pc": 16
+        }
+    ],
+    "codeContract": "0x000000000000000000000000000000000000ACAb",
+    "contract": "0x000000000000000000000000000000000000ACAb",
+    "depth": 0,
+    "gas": 999984,
+    "memory": "Length: 32 (0x20) bytes\n0000:   00 00 00 00  00 00 00 00  00 00 00 00  00 00 00 00   ................\n0010:   00 00 00 00  00 00 00 00  00 00 00 00  00 00 00 00   ................\n",
+    "memorySize": 32,
+    "merging": false,
+    "message": "",
+    "mode": "concrete",
+    "op": "PUSH1",
+    "output": null,
+    "pathConditions": 0,
+    "pc": 6,
+    "result": null,
+    "simplified": true,
+    "source": null,
+    "stack": [
+        "0x0"
+    ],
+    "status": "running",
+    "step": 5,
+    "warnings": []
+}

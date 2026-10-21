@@ -1,0 +1,144 @@
+// What each pane shows for a model: pure functions to virtual DOM.
+import type { Progress, StatsView, View } from "./api";
+import { branchArgument, pcBreakpoints, type LogEntry } from "./model";
+import { h, type VNode } from "./vdom";
+
+export type Run = (command: string) => void;
+
+export function hex(n: number): string {
+  return "0x" + n.toString(16);
+}
+
+function fixed(n: number, digits: number): string {
+  return Number.isInteger(n) ? String(n) : n.toFixed(digits);
+}
+
+const badge = (label: string, cls: string): VNode => h("span", { class: `badge ${cls}` }, label);
+
+export function statusBar(v: View): VNode[] {
+  return [
+    h("span", { class: "step" }, `step ${v.step}`),
+    badge(v.status, `status-${v.status}`),
+    badge(v.mode, "mode"),
+    h("span", { class: "where" }, `pc ${hex(v.pc)} `, h("b", {}, v.op)),
+    h("span", { class: "meta" }, `depth ${v.depth}`),
+    v.gas !== null && h("span", { class: "meta" }, `gas ${v.gas}`),
+    h("span", { class: "contract", title: `code of ${v.codeContract}` }, v.contract),
+    v.branchMode !== "solver" && badge(`branches: ${v.branchMode}`, "setting"),
+    v.merging && badge("merging", "setting"),
+    !v.simplified && badge("not simplified", "setting"),
+  ].filter((n): n is VNode => n !== false);
+}
+
+export function codePane(v: View, run: Run): VNode[] {
+  const breaks = pcBreakpoints(v);
+  return v.code.map((line) => {
+    const bp = breaks.get(line.pc);
+    const cls = ["code-line", line.current ? "current" : "", bp !== undefined ? "has-break" : ""].filter(Boolean).join(" ");
+    return h(
+      "div",
+      {
+        class: cls,
+        title: bp !== undefined ? "click to delete the breakpoint" : "click to break here",
+        onClick: () => run(bp !== undefined ? `delete ${bp}` : `break pc ${hex(line.pc)}`),
+      },
+      h("span", { class: "gutter" }, bp !== undefined ? "●" : line.current ? "▶" : ""),
+      h("span", { class: "addr" }, hex(line.pc)),
+      h("span", { class: "op" }, line.op),
+    );
+  });
+}
+
+export function sourcePane(v: View): VNode[] {
+  if (v.source === null) {
+    return [h("div", { class: "empty" }, "No source map for this code. Run hevm in the project root, with its build output.")];
+  }
+  return [
+    h("div", { class: "file" }, `${v.source.file}:${v.source.line}`),
+    ...v.source.lines.map((l) =>
+      h("div", { class: l.current ? "src-line current" : "src-line" }, h("span", { class: "lineno" }, l.line), h("span", { class: "text" }, l.text)),
+    ),
+  ];
+}
+
+export function stackPane(v: View): VNode[] {
+  if (v.stack.length === 0) return [h("div", { class: "empty" }, "empty")];
+  return v.stack.map((word, i) => h("div", { class: "stack-item" }, h("span", { class: "index" }, i), h("pre", { class: "word" }, word)));
+}
+
+export function memoryPane(v: View, run: Run): VNode[] {
+  return [
+    h(
+      "div",
+      { class: "pane-note" },
+      `${v.memorySize} bytes`,
+      v.memorySize > 128 && " · first 128 shown ",
+      v.memorySize > 128 && h("button", { type: "button", class: "small", onClick: () => run(`memory 0 ${Math.min(v.memorySize, 65536)}`) }, "show all"),
+    ),
+    v.memorySize > 0 && h("pre", { class: "memory" }, v.memory),
+  ].filter((n): n is VNode => n !== false);
+}
+
+export function branchPane(v: View, run: Run): VNode[] {
+  if (v.branch === null) {
+    return [
+      h("div", { class: "empty" }, v.mode === "symbolic" ? "No branch pending." : "Concrete run: no symbolic branches."),
+      ...(v.choices.length > 0 ? [h("div", { class: "pane-note" }, "Taken so far:"), ...v.choices.map((c) => h("div", { class: "choice" }, c))] : []),
+    ];
+  }
+  const { options, condition } = v.branch;
+  return [
+    h("div", { class: "pane-note" }, "Pick a side: keys t / f, or the option's number"),
+    h(
+      "div",
+      { class: "options" },
+      ...options.map((opt, i) => h("button", { type: "button", class: "branch-option", onClick: () => run(`branch ${branchArgument(options, i)}`) }, `${i}: ${opt}`)),
+    ),
+    condition !== null && h("pre", { class: "condition", title: "the branch condition" }, condition),
+  ].filter((n): n is VNode => n !== false);
+}
+
+export function breakpointList(v: View, run: Run): VNode[] {
+  if (v.breakpoints.length === 0) return [h("div", { class: "empty" }, "None. Click a line of code, or add one below.")];
+  return v.breakpoints.map((b, i) =>
+    h("div", { class: "bp" }, h("span", {}, `${i}: ${b}`), h("button", { type: "button", class: "small", title: "delete", onClick: () => run(`delete ${i}`) }, "✕")),
+  );
+}
+
+export function warningsPane(v: View): VNode[] {
+  return v.warnings.map((w) => h("pre", { class: "warning" }, w));
+}
+
+export function statsRows(s: StatsView): [string, string][] {
+  const c = s.counters;
+  return [
+    ["opcodes", `${c.opcodes} (${c.replayedOpcodes} replayed going back)`],
+    ["commands", `${c.commands} in ${fixed(c.commandSecs, 3)}s`],
+    ["solver queries", `${c.queries} in ${fixed(c.querySecs, 3)}s`],
+    ["  by kind", `${c.branchQueries} branch · ${c.solutionQueries} solutions · ${c.fetchQueries} fetch · ${c.otherQueries} other`],
+    ["branches", `${c.branchesOffered} offered · ${c.branchesTaken} taken`],
+    ["static decisions", `${c.staticDecisions} (${c.staticWrong} wrong · ${c.staticMissed} missed · ${c.staticInconclusive} unchecked)`],
+    ["breakpoint hits", String(c.breakpointHits)],
+    ["snapshots", String(s.snapshotCount)],
+  ];
+}
+
+export function statsPane(s: StatsView | null): VNode[] {
+  if (s === null) return [h("div", { class: "empty" }, "…")];
+  return [h("table", {}, ...statsRows(s).map(([k, val]) => h("tr", {}, h("th", {}, k), h("td", {}, val))))];
+}
+
+export function progressPane(p: Progress | null, busy: boolean): VNode[] {
+  if (p === null || !p.running) return [h("div", { class: "empty" }, busy ? "Working…" : "Idle.")];
+  const solving = p.queries.inFlight.filter((q) => q.solving);
+  return [
+    h("div", { class: busy ? "progress-line busy" : "progress-line" }, busy ? "Working · " : "", `${p.queries.done} solver queries done`),
+    ...solving.map((q) => h("div", { class: "solving" }, `solving ${q.kind ?? "a query"} for ${fixed(q.secs, 1)}s${q.pc !== undefined ? ` at pc ${hex(q.pc)}` : ""}`)),
+    ...(p.hottest.length > 0 ? [h("div", { class: "pane-note" }, "Most solver time:")] : []),
+    ...p.hottest.slice(0, 5).map((s) => h("div", { class: "hot" }, `pc ${hex(s.pc)} · ${fixed(s.solveSecs, 2)}s · ${s.queries} queries`)),
+  ];
+}
+
+export function logPane(log: LogEntry[]): VNode[] {
+  return log.map((e) => h("pre", { class: `log-${e.kind}` }, e.text));
+}

@@ -1,0 +1,23 @@
+{
+    "counters": {
+        "branchQueries": 0,
+        "branchesOffered": 0,
+        "branchesTaken": 0,
+        "breakpointHits": 0,
+        "commandSecs": 1.9551699915609788e-4,
+        "commands": 1,
+        "fetchQueries": 0,
+        "opcodes": 5,
+        "otherQueries": 0,
+        "queries": 0,
+        "querySecs": 0,
+        "replayedOpcodes": 0,
+        "solutionQueries": 0,
+        "staticDecisions": 0,
+        "staticInconclusive": 0,
+        "staticMissed": 0,
+        "staticWrong": 0
+    },
+    "snapshotCount": 1,
+    "step": 5
+}

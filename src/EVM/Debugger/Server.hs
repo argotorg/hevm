@@ -1,5 +1,8 @@
+{-# LANGUAGE TemplateHaskell #-}
+
 -- | Minimal HTTP+JSON front end for debugging sessions and run progress, bound
--- to localhost. Hand-rolled on top of 'network' to avoid pulling a web framework into hevm.
+-- to localhost, which also serves the web frontend in web/. Hand-rolled on top
+-- of 'network' to avoid pulling a web framework into hevm.
 module EVM.Debugger.Server
   ( serveSession
   , withProgressServer
@@ -30,6 +33,7 @@ import System.IO (hFlush, stdout)
 import System.Timeout (timeout)
 
 import EVM.Debugger
+import EVM.Debugger.Embed (embedFile)
 import EVM.Effects (App)
 import EVM.Fetch qualified as Fetch
 import EVM.Progress qualified as Progress
@@ -92,19 +96,26 @@ serveRoutes port onListen done routes = do
       void $ forkIO $ handleConn (dispatch routes) conn `finally` close conn
     takeMVar done `finally` killThread acceptor
 
+-- | Built by web/build.sh, which keeps web/dist up to date
+indexHtml, debuggerJs :: ByteString
+indexHtml = $(embedFile "web/index.html")
+debuggerJs = $(embedFile "web/dist/debugger.js")
+
 dispatch :: [Route] -> Request -> IO Response
 dispatch routes req = case (req.method, req.path) of
   ("OPTIONS", _) -> pure $ Response 204 "text/plain" ""
-  ("GET", "/") -> pure $ Response 200 "text/plain; charset=utf-8" (encodeUtf8 apiHelp)
+  ("GET", "/") -> pure $ Response 200 "text/html; charset=utf-8" indexHtml
+  ("GET", "/debugger.js") -> pure $ Response 200 "text/javascript; charset=utf-8" debuggerJs
+  ("GET", "/api") -> pure $ Response 200 "text/plain; charset=utf-8" (encodeUtf8 apiHelp)
   _ -> go routes
   where
-    go [] = pure $ Response 404 "text/plain" "not found; GET / for the API"
+    go [] = pure $ Response 404 "text/plain" "not found; GET /api for the API"
     go (r : rest) = r req >>= maybe (go rest) pure
 
 announce :: Int -> IO ()
 announce port = do
-  putStrLn $ "hevm listening on http://127.0.0.1:" <> show port
-    <> "  (debugger: hevm-debug --port " <> show port <> ")"
+  putStrLn $ "hevm debugger at http://127.0.0.1:" <> show port
+    <> "  (or in a terminal: hevm-debug --port " <> show port <> ")"
   hFlush stdout
 
 handleConn :: (Request -> IO Response) -> Socket -> IO ()
@@ -215,6 +226,8 @@ json = pure . Response 200 "application/json" . BL.toStrict . JSON.encode
 apiHelp :: Text
 apiHelp = T.unlines
   [ "hevm HTTP API (all responses JSON unless ?format=text is given)"
+  , "GET  /                 the debugger's web page"
+  , "GET  /api              this help"
   , "GET  /progress         progress of the run: phase, paths, solver queries, hot spots"
   , ""
   , "With --debugger:"

@@ -1,0 +1,75 @@
+{
+    "branch": null,
+    "branchMode": "solver",
+    "breakpoints": [],
+    "choices": [
+        "step 7: true"
+    ],
+    "code": [
+        {
+            "current": false,
+            "op": "JUMPDEST",
+            "pc": 12
+        },
+        {
+            "current": false,
+            "op": "PUSH1 0x05",
+            "pc": 13
+        },
+        {
+            "current": false,
+            "op": "EQ",
+            "pc": 15
+        },
+        {
+            "current": false,
+            "op": "PUSH1 0x15",
+            "pc": 16
+        },
+        {
+            "current": false,
+            "op": "JUMPI",
+            "pc": 18
+        },
+        {
+            "current": false,
+            "op": "INVALID",
+            "pc": 19
+        },
+        {
+            "current": false,
+            "op": "STOP",
+            "pc": 20
+        },
+        {
+            "current": false,
+            "op": "JUMPDEST",
+            "pc": 21
+        },
+        {
+            "current": true,
+            "op": "STOP",
+            "pc": 22
+        }
+    ],
+    "codeContract": "(SymAddr \"entrypoint\")",
+    "contract": "(SymAddr \"entrypoint\")",
+    "depth": 0,
+    "gas": null,
+    "memory": "Length: 0 (0x0) bytes\n",
+    "memorySize": 0,
+    "merging": false,
+    "message": "Execution finished: success, returned nothing",
+    "mode": "symbolic",
+    "op": "STOP",
+    "output": null,
+    "pathConditions": 2,
+    "pc": 22,
+    "result": "success, returned nothing",
+    "simplified": true,
+    "source": null,
+    "stack": [],
+    "status": "halted",
+    "step": 14,
+    "warnings": []
+}

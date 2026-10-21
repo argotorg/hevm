@@ -214,6 +214,9 @@
             pkgs.mdbook
             pkgs.mdbook-mermaid
             pkgs.yarn
+            # the debugger's web frontend, see web/
+            pkgs.typescript
+            pkgs.esbuild
             (hspkgs pkgs).cabal-install
             (hspkgs pkgs).eventlog2html
             (hspkgs pkgs).haskell-language-server
