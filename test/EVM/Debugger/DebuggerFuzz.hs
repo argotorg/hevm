@@ -47,21 +47,23 @@ import EVM.Types hiding (Env)
 
 tests :: TestTree
 tests = testGroup "debugger-fuzz"
-  [ testProperty "concrete-replay" $ withMaxSuccess 50 $ mapSize (* 4) $ \(c :: TestCase) ->
+  [ testProperty "concrete-replay" $ mapSize (* 4) $ \(c :: TestCase) ->
       forAll (genCommands False) $ \cmds -> within 120_000_000 $ ioProperty $ runEnv testEnv $ concreteReplay c cmds
-  , testProperty "symbolic-branches" $ withMaxSuccess 30 $ mapSize (* 4) $ \(c :: TestCase) ->
+  , testProperty "symbolic-branches" $ mapSize (* 4) $ \(c :: TestCase) ->
       forAll (genCommands True) $ \cmds -> forAll (vectorOf 40 genReaction) $ \reactions ->
       within 300_000_000 $ ioProperty $ runEnv testEnv $ symbolicBranches c cmds reactions
-  , testProperty "forward-back-concrete" $ withMaxSuccess 100 $ mapSize (* 4) $ \(c :: TestCase) ->
+  , testProperty "forward-back-concrete" $ mapSize (* 4) $ \(c :: TestCase) ->
       forAll genRoundTrips $ \(start, ks) -> within 120_000_000 $ ioProperty $ runEnv testEnv $ withSession $ \solvers -> do
         s0 <- liftIO $ stToIO (concreteTestVm c) >>= newSession emptyDapp
         roundTrips (Fetch.oracle solvers Nothing Fetch.noRpc) (repeat Nothing) start ks s0
-  , testProperty "forward-back-symbolic" $ withMaxSuccess 50 $ mapSize (* 4) $ \(c :: TestCase) ->
-      forAll genRoundTrips $ \(start, ks) -> forAll (vectorOf 100 genReaction) $ \reactions ->
+  , testProperty "forward-back-symbolic" $ mapSize (* 4) $ \(c :: TestCase) ->
+      forAll genRoundTrips $ \(start, ks) -> forAll (vectorOf 100 genReaction) $ \reactions -> \explorer ->
       within 300_000_000 $ ioProperty $ runEnv testEnv $ withSession $ \solvers -> do
         s0 <- liftIO $ stToIO (symbolicTestVm c) >>= newSession emptyDapp
-        roundTrips (Fetch.oracle solvers Nothing Fetch.noRpc) reactions start ks (setStepLimit 3000 s0)
-  , testProperty "http-garbage" $ withMaxSuccess 30 $ \(c :: TestCase) ->
+        let mode = if explorer then ExplorerBranches else SolverBranches
+        tabulate "branch mode" [show mode] <$>
+          roundTrips (Fetch.oracle solvers Nothing Fetch.noRpc) reactions start ks (setBranchMode mode (setStepLimit 3000 s0))
+  , testProperty "http-garbage" $ \(c :: TestCase) ->
       forAll (listOf1 genRequest) $ \reqs -> within 120_000_000 $ ioProperty $ runEnv testEnv $ httpGarbage c reqs
   ]
 
@@ -91,7 +93,8 @@ genCommand symbolic = frequency $
   , (1, elements ["memory", "memory 0 64", "memory 32", "memory 0x40 0x20", "storage", "calldata", "trace"
                  , "pathconds", "help", "show", "stats", ""])
   , (1, genGarbage)
-  ] <> [ (8, elements ["branch true", "branch false", "branch 0", "branch 1", "branch 2", "branch t", "branch f"])
+  , (1, elements ["simplify on", "simplify off"])
+  ] <> [ (1, elements ["branches solver", "branches explorer"]) | not symbolic ] <> [ (8, elements ["branch true", "branch false", "branch 0", "branch 1", "branch 2", "branch t", "branch f"])
        | symbolic ]
 
 genGarbage :: Gen Text
@@ -107,7 +110,9 @@ type Fingerprint = [Text]
 
 -- | Everything a session shows. Also forces the JSON and text renderings.
 fingerprint :: (App m, Debuggable t) => Fetch.Fetcher t m -> Session t -> m Fingerprint
-fingerprint fetcher s = do
+fingerprint fetcher s0 = do
+  -- what is shown depends on this setting, the state does not
+  s <- runCommandText fetcher "simplify on" s0
   v <- liftIO $ mkView s
   _ <- liftIO $ evaluate (BL.length (JSON.encode v) + fromIntegral (T.length (renderView v)))
   let memLen = min 4096 (fromIntegral v.memorySize) :: Int
@@ -143,6 +148,7 @@ statsProblems before after =
     ints = [ ("opcodes", (.opcodes)), ("replayedOpcodes", (.replayedOpcodes)), ("queries", (.queries))
            , ("branchQueries", (.branchQueries)), ("solutionQueries", (.solutionQueries)), ("fetchQueries", (.fetchQueries))
            , ("otherQueries", (.otherQueries)), ("branchesOffered", (.branchesOffered)), ("branchesTaken", (.branchesTaken))
+           , ("staticDecisions", (.staticDecisions))
            , ("breakpointHits", (.breakpointHits)) ]
 
 withSession :: (MonadUnliftIO m, ReadConfig m, TTY m) => (SolverGroup -> m a) -> m a

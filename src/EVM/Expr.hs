@@ -404,6 +404,16 @@ pleq a b
 -- structure, so reads outside of the bounds of a ConcreteBuf return 0. This is
 -- inline with the semantics of calldata and memory, but not of returndata.
 
+-- | Every byte is zero, e.g. a copy of zeros onto zeros: any read gives 0,
+-- whatever the offsets and sizes
+zeroContents :: Expr Buf -> Bool
+zeroContents = \case
+  ConcreteBuf b -> BS.all (== 0) b
+  CopySlice _ _ _ src dst -> zeroContents src && zeroContents dst
+  WriteWord _ (Lit 0) b -> zeroContents b
+  WriteByte _ (LitByte 0) b -> zeroContents b
+  _ -> False
+
 -- fully concrete reads
 readByte :: Expr EWord -> Expr Buf -> Expr Byte
 readByte (Lit x) (ConcreteBuf b)
@@ -415,6 +425,7 @@ readByte (Lit x) (ConcreteBuf b)
     i = case x of
           (W256 (Word256 _ (Word128 _ x'))) -> unsafeInto x'
 
+readByte _ b | zeroContents b = LitByte 0
 readByte i@(Lit x) (WriteByte (Lit idx) val src)
   = if x == idx
     then val
@@ -449,7 +460,6 @@ readByte i@(Lit x) buf@(CopySlice _ (Lit dstOffset) (Lit size) _ dst)
     then readByte i dst
     else ReadByte (Lit x) buf
 
-readByte _ (ConcreteBuf b) | BS.all (== 0) b = LitByte 0
 -- offsets from the same symbolic base
 readByte i (WriteWord j val src)
   | Just d <- offsetDiff i j = if d < 32 then indexWord (Lit d) val else readByte i src
@@ -601,7 +611,7 @@ writeDisjointFromReadWord i = \case
 -- | Reads the word starting at idx from the given buf
 readWord :: Expr EWord -> Expr Buf -> Expr EWord
 readWord idx buf@(AbstractBuf _) = ReadWord idx buf
-readWord _ (ConcreteBuf b) | BS.all (== 0) b = Lit 0
+readWord _ b | zeroContents b = Lit 0
 readWord idx b@(WriteWord idx' val buf)
   -- the word we are trying to read exactly matches a WriteWord
   | idx == idx' = val

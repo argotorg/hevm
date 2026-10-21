@@ -7,6 +7,8 @@ module EVM.Debugger
   , Debuggable
   , newSession
   , setStepLimit
+  , BranchMode(..)
+  , setBranchMode
   , runCommand
   , runCommandText
   , Command(..)
@@ -35,6 +37,7 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.ST (ST, RealWorld, stToIO)
 import Control.Monad.State.Strict (execStateT)
 import Data.Aeson (ToJSON, (.=))
+import Data.Aeson.Types (Pair)
 import Data.ByteString qualified as BS
 import Data.Char (isDigit)
 import Data.List (find)
@@ -64,12 +67,22 @@ import EVM (exec1, currentContract, opSize)
 import EVM.Dapp (DappInfo(..), srcMap, srcMapCode)
 import EVM.Effects
 import EVM.Expr (maybeLitByteSimp, maybeLitWordSimp)
+import EVM.Expr qualified as Expr
+import EVM.SymExec (staticBranch, checkStaticBranch, askBranch)
+import Data.Functor ((<&>))
 import EVM.Fetch qualified as Fetch
 import EVM.Format (formatExpr, formatProp, traceDocForest)
 import EVM.Op (intToOpName)
 import EVM.Progress qualified as Progress
 import EVM.Solidity (SourceCache(..), SrcMap(..))
 import EVM.Types
+
+-- | How symbolic branches are decided: by asking the solver which sides are
+-- feasible, or as exploration does, by simplifying without the solver and
+-- offering both sides when that is inconclusive. Checked is the latter, with
+-- the solver confirming every decision.
+data BranchMode = SolverBranches | ExplorerBranches | CheckedBranches
+  deriving (Eq, Show)
 
 data Breakpoint
   = BreakPc Int
@@ -96,6 +109,8 @@ data Command
   | ShowTrace
   | ShowPathConds
   | ShowStats
+  | SetSimplify Bool
+  | SetBranches BranchMode
   | Help
   | Refresh
   deriving (Eq, Show)
@@ -135,6 +150,11 @@ data Session t = Session
   , out         :: Maybe Text
   , stepLimit   :: Int
   , stats       :: Stats
+  -- | simplify the expressions shown
+  , simp        :: Bool
+  , branchMode  :: BranchMode
+  -- | problems found by 'CheckedBranches', newest first
+  , warnings    :: [Text]
   }
 
 -- | What a session has done so far. Going back in time does not undo these.
@@ -152,6 +172,12 @@ data Stats = Stats
   , otherQueries    :: Int
   , branchesOffered :: Int
   , branchesTaken   :: Int
+  -- | branches decided without the solver, in 'ExplorerBranches' mode
+  , staticDecisions :: Int
+  -- | in 'CheckedBranches' mode: static decisions the solver contradicts, and
+  -- branches the solver could decide but simplification could not
+  , staticWrong     :: Int
+  , staticMissed    :: Int
   , breakpointHits  :: Int
   }
   deriving (Eq, Show, Generic, ToJSON)
@@ -164,7 +190,7 @@ data StatsView = StatsView
   deriving (Show, Generic, ToJSON)
 
 emptyStats :: Stats
-emptyStats = Stats 0 0 0 0 0 0 0 0 0 0 0 0 0
+emptyStats = Stats 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
 
 addStats :: (Stats -> Stats) -> Session t -> Session t
 addStats f s = s { stats = f s.stats }
@@ -179,7 +205,10 @@ renderStats v = T.unlines
   , "opcodes:   " <> tshow c.opcodes <> " executed, " <> tshow c.replayedOpcodes <> " of them to go back"
   , "queries:   " <> tshow c.queries <> " in " <> secs c.querySecs <> " (" <> tshow c.branchQueries <> " branch, "
       <> tshow c.solutionQueries <> " solutions, " <> tshow c.fetchQueries <> " fetch, " <> tshow c.otherQueries <> " other)"
-  , "branches:  " <> tshow c.branchesOffered <> " offered, " <> tshow c.branchesTaken <> " taken"
+  , "branches:  " <> tshow c.branchesOffered <> " offered, " <> tshow c.branchesTaken <> " taken, "
+      <> tshow c.staticDecisions <> " decided without the solver"
+  , "checked:   " <> tshow c.staticWrong <> " static decisions the solver contradicts, "
+      <> tshow c.staticMissed <> " branches only the solver could decide"
   , "breakpoint hits: " <> tshow c.breakpointHits
   ]
   where
@@ -200,6 +229,9 @@ maxMemoryDump = 65536
 setStepLimit :: Int -> Session t -> Session t
 setStepLimit n s = s { stepLimit = n }
 
+setBranchMode :: BranchMode -> Session t -> Session t
+setBranchMode m s = s { branchMode = m }
+
 sessionVM :: Session t -> VM t
 sessionVM s = s.vm
 
@@ -216,7 +248,7 @@ newSession dapp vm0 = do
     { vm = vm0, curStep = 0, snapshots = Map.singleton 0 snap, pending = Nothing
     , lastCond = Nothing, taken = [], bps = [], dapp = dapp
     , note = "Started. Type 'help' for commands.", out = Nothing, stepLimit = maxRunSteps
-    , stats = emptyStats }
+    , stats = emptyStats, simp = True, branchMode = SolverBranches, warnings = [] }
 
 -- | Memory is a mutable vector, so a VM must be copied before it is kept around
 cloneVM :: forall t. VM t -> ST RealWorld (VM t)
@@ -254,6 +286,23 @@ stepOnce fetcher s
 resolve :: (App m, Debuggable t) => Fetch.Fetcher t m -> Bool -> Session t -> m (Session t)
 resolve fetcher queried s = case s.vm.result of
   Just (HandleEffect e) -> case splitEffect s.lastCond e of
+    Left (PleaseAskSMT c pcs continue) | s.branchMode /= SolverBranches -> do
+      let decision = case Expr.concKeccakSimpExpr c of
+            Lit v -> Case (v > 0)
+            _ -> staticBranch c pcs
+      Progress.emit "debug-static-decision" $ where_ s <> ["decision" .= T.pack (show decision)]
+      checked <- if s.branchMode /= CheckedBranches then pure s else case decision of
+        Case _ -> checkStaticBranch fetcher s.vm c pcs decision >>= \case
+          Nothing -> pure s
+          Just msg -> do
+            Progress.emit "debug-static-decision-wrong" $ where_ s <> ["problem" .= T.pack msg]
+            pure $ addStats (\st -> st { staticWrong = st.staticWrong + 1 })
+              s { warnings = take 20 (("step " <> tshow s.curStep <> ": " <> T.pack msg) : s.warnings) }
+        _ -> askBranch fetcher s.vm c pcs <&> \case
+          Case _ -> addStats (\st -> st { staticMissed = st.staticMissed + 1 }) s
+          _ -> s
+      vm' <- liftIO $ stToIO $ execStateT (continue decision) checked.vm
+      resolve fetcher True $ addStats (\st -> st { staticDecisions = st.staticDecisions + 1 }) checked { vm = vm', lastCond = Just c }
     Left q -> do
       let cond = case q of
             PleaseAskSMT c _ _ -> Just c
@@ -272,7 +321,10 @@ resolve fetcher queried s = case s.vm.result of
             _ -> st { otherQueries = st.otherQueries + 1 }
       resolve fetcher True $ addStats (\st -> count st { queries = st.queries + 1, querySecs = st.querySecs + t1 - t0 })
         s { vm = vm', lastCond = cond }
-    Right p -> pure $ addStats (\st -> st { branchesOffered = st.branchesOffered + 1 }) s { pending = Just p }
+    Right p@(Pending c ctx) -> do
+      Progress.emit "debug-branch-offered" $ where_ s <> ["options" .= branchOptionCount ctx]
+      Progress.emitExprs "debug-branch-condition" $ where_ s <> maybe [] (Progress.bigText "cond" . formatExpr) c
+      pure $ addStats (\st -> st { branchesOffered = st.branchesOffered + 1 }) s { pending = Just p }
   _ | queried || s.curStep `mod` snapshotInterval == 0 -> do
         snap <- liftIO $ stToIO $ cloneVM s.vm
         pure s { snapshots = Map.insert s.curStep snap s.snapshots }
@@ -293,9 +345,23 @@ choose fetcher arg s = case s.pending of
       Just (m, desc) -> do
         vm' <- liftIO $ stToIO $ execStateT m s.vm { result = Nothing, exploreDepth = s.vm.exploreDepth + 1 }
         let what = maybe "" (\c -> " for condition " <> clip 200 (formatExpr c)) cond
+        Progress.emit "debug-branch-taken" $ where_ s <> ["choice" .= desc]
         s' <- resolve fetcher True $ addStats (\st -> st { branchesTaken = st.branchesTaken + 1 })
                 s { vm = vm', pending = Nothing, taken = (s.curStep, desc) : s.taken }
         pure s' { note = "Took branch " <> desc <> what <> "." }
+
+-- | An expression as the session shows it
+shown :: Session t -> Expr a -> Expr a
+shown s = if s.simp then Expr.simplify else id
+
+-- | Where the session is, for the progress log
+where_ :: Session t -> [Pair]
+where_ s = ["step" .= s.curStep, "pc" .= s.vm.state.pc, "addr" .= T.pack (show s.vm.state.contract), "depth" .= length s.vm.frames]
+
+branchOptionCount :: BranchContext -> Int
+branchOptionCount = \case
+  PleaseRunBoth _ -> 2
+  PleaseRunAll vals _ -> length vals
 
 branchHint :: BranchContext -> Text
 branchHint = \case
@@ -316,7 +382,8 @@ runUntil fetcher limit p = go 0
       | otherwise = do
           s' <- stepOnce fetcher s
           case findBreak s' of
-            Just i -> pure (addStats (\st -> st { breakpointHits = st.breakpointHits + 1 }) s', StopBreak i)
+            Just i -> Progress.emit "debug-breakpoint" (where_ s' <> ["breakpoint" .= showBreak (s'.bps !! i)])
+                      >> pure (addStats (\st -> st { breakpointHits = st.breakpointHits + 1 }) s', StopBreak i)
             _ | p s' -> pure (s', StopCond)
               | otherwise -> go (n + 1) s'
 
@@ -349,6 +416,7 @@ backTo fetcher target s = do
   let s0 = s { vm = vm, curStep = k, snapshots = snaps, pending = Nothing, lastCond = Nothing
              , taken = filter ((< target) . fst) s.taken }
   s' <- replay (target - k) s0
+  Progress.emit "debug-back" ["from" .= s.curStep, "to" .= target, "snapshot" .= k, "replayed" .= (target - k), "branchAgain" .= chosenAt]
   pure $ addStats (\st -> st { replayedOpcodes = st.replayedOpcodes + st.opcodes - s.stats.opcodes }) s'
   where
     replay 0 s' = pure s'
@@ -363,10 +431,21 @@ runCommandText fetcher line s = do
     Left err -> pure s { note = err, out = Nothing }
     Right cmd -> runCommand fetcher cmd s
   t1 <- liftIO getMonotonicTime
+  Progress.emit "debug-command" $
+    [ "command" .= line, "from" .= s.curStep, "secs" .= (t1 - t0), "message" .= s'.note
+    , "status" .= (if isHalted s' then "halted" else if isJust s'.pending then "branch" else "running" :: Text) ]
+    <> where_ s'
   pure $ addStats (\st -> st { commands = st.commands + 1, commandSecs = st.commandSecs + t1 - t0 }) s'
 
+-- | The session passed in stays valid: commands work on a copy of its VM, whose
+-- memory would otherwise be mutated in place
 runCommand :: (App m, Debuggable t) => Fetch.Fetcher t m -> Command -> Session t -> m (Session t)
-runCommand fetcher cmd s0 = let s = s0 { note = "", out = Nothing } in case cmd of
+runCommand fetcher cmd s0 = do
+  vm <- liftIO $ stToIO $ cloneVM s0.vm
+  runCommand' fetcher cmd s0 { vm = vm, note = "", out = Nothing }
+
+runCommand' :: (App m, Debuggable t) => Fetch.Fetcher t m -> Command -> Session t -> m (Session t)
+runCommand' fetcher cmd s = case cmd of
   Step n -> do
     (s', why) <- runUntil fetcher n (const False) s
     pure $ case why of
@@ -416,16 +495,21 @@ runCommand fetcher cmd s0 = let s = s0 { note = "", out = Nothing } in case cmd 
   ListBreakpoints -> pure s { out = Just $ if null s.bps then "No breakpoints."
                               else T.unlines [tshow i <> ": " <> showBreak b | (i, b) <- zip [0 :: Int ..] s.bps] }
   ShowMemory off len -> do
-    t <- liftIO $ memoryText s.vm off (min len maxMemoryDump)
+    t <- liftIO $ memoryText (shown s) s.vm off (min len maxMemoryDump)
     pure s { out = Just t }
   ShowStorage -> pure s { out = Just $ case currentContract s.vm of
-                        Just c -> formatExpr c.storage
+                        Just c -> formatExpr (shown s c.storage)
                         Nothing -> "No contract." }
-  ShowCalldata -> pure s { out = Just (bufText s.vm.state.calldata) }
+  ShowCalldata -> pure s { out = Just (bufText (shown s s.vm.state.calldata)) }
   ShowTrace -> pure s { out = Just (traceText s.dapp s.vm) }
   ShowPathConds -> pure s { out = Just $ if null s.vm.constraints then "No path conditions."
-                        else T.unlines (map formatProp (reverse s.vm.constraints)) }
+                        else T.unlines (map (formatProp . (if s.simp then Expr.simplifyProp else id)) (reverse s.vm.constraints)) }
   ShowStats -> pure s { out = Just (renderStats (sessionStats s)) }
+  SetSimplify b -> pure s { simp = b, note = "Expressions are shown " <> (if b then "simplified." else "as they are.") }
+  SetBranches m -> pure s { branchMode = m, note = case m of
+    SolverBranches -> "Branches are decided by the solver: only feasible sides are offered."
+    ExplorerBranches -> "Branches are decided as exploration does, without the solver: sides that may be infeasible are offered too."
+    CheckedBranches -> "Branches are decided as exploration does, and the solver checks every decision: see 'stats'." }
   Help -> pure s { out = Just commandHelp }
   Refresh -> pure s
   where
@@ -467,6 +551,11 @@ parseCommand line = case T.words (T.strip line) of
     ("calldata", []) -> Right ShowCalldata
     ("trace", []) -> Right ShowTrace
     ("stats", []) -> Right ShowStats
+    ("simplify", ["on"]) -> Right (SetSimplify True)
+    ("simplify", ["off"]) -> Right (SetSimplify False)
+    ("branches", ["solver"]) -> Right (SetBranches SolverBranches)
+    ("branches", ["explorer"]) -> Right (SetBranches ExplorerBranches)
+    ("branches", ["checked"]) -> Right (SetBranches CheckedBranches)
     (w, []) | w `elem` ["pathconds", "pc", "constraints"] -> Right ShowPathConds
     (w, []) | w `elem` ["h", "help", "?"] -> Right Help
     (w, []) | w `elem` ["show", "state"] -> Right Refresh
@@ -507,6 +596,10 @@ commandHelp = T.unlines
   , "trace                 call trace so far"
   , "pathconds             path conditions so far"
   , "stats                 what the session has done: commands, opcodes, solver queries, branches"
+  , "simplify on|off       show expressions simplified (default) or as they are"
+  , "branches solver|explorer|checked  decide symbolic branches with the solver (default), or as"
+  , "                      exploration does: without the solver, offering sides that may be"
+  , "                      infeasible. 'checked' also has the solver confirm each decision"
   , "show                  just show the current state"
   , "quit             (q)  stop the debugger (hevm-debug; 'detach' leaves it running)"
   ]
@@ -553,12 +646,15 @@ data View = View
   , breakpoints    :: [Text]
   , message        :: Text
   , output         :: Maybe Text
+  , branchMode     :: Text
+  , simplified     :: Bool
+  , warnings       :: [Text]
   }
   deriving (Show, Generic, ToJSON)
 
 mkView :: Debuggable t => Session t -> IO View
 mkView s = do
-  mem <- memoryText vm 0 (min 128 (unsafeInto vm.state.memorySize))
+  mem <- memoryText (shown s) vm 0 (min 128 (unsafeInto vm.state.memorySize))
   pure View
     { mode = modeName vm
     , step = s.curStep
@@ -571,12 +667,18 @@ mkView s = do
     , depth = length vm.frames
     , gas = gasLeft vm
     , code = codeWindow vm.state.code vm.state.pc
-    , stack = map (clip 300 . formatWord) vm.state.stack
+    , stack = map (clip 300 . formatWord . shown s) vm.state.stack
     , memorySize = vm.state.memorySize
     , memory = mem
     , source = sourceView s.dapp vm
     , pathConditions = length vm.constraints
-    , branch = (\(Pending c ctx) -> BranchView (clip 1000 . formatExpr <$> c) (branchOptions ctx)) <$> s.pending
+    , branch = (\(Pending c ctx) -> BranchView (clip 1000 . formatExpr . shown s <$> c) (branchOptions ctx)) <$> s.pending
+    , branchMode = case s.branchMode of
+        SolverBranches -> "solver"
+        ExplorerBranches -> "explorer"
+        CheckedBranches -> "checked"
+    , simplified = s.simp
+    , warnings = s.warnings
     , choices = [ "step " <> tshow st <> ": " <> clip 100 d | (st, d) <- reverse s.taken ]
     , breakpoints = map showBreak s.bps
     , message = s.note
@@ -593,6 +695,8 @@ renderView v = T.unlines $
   [ "== step " <> tshow v.step <> " | " <> v.mode <> " | " <> v.status
     <> " | pc " <> hex v.pc <> " " <> v.op <> " | depth " <> tshow v.depth
     <> maybe "" (\g -> " | gas " <> tshow g) v.gas
+    <> (if v.branchMode == "solver" then "" else " | branches " <> v.branchMode)
+    <> (if v.simplified then "" else " | not simplified")
   , "contract " <> v.contract <> (if v.codeContract /= v.contract then " (code of " <> v.codeContract <> ")" else "")
   , ""
   , "-- code"
@@ -609,6 +713,7 @@ renderView v = T.unlines $
   <> maybe [] (\b -> [ "", "-- symbolic branch pending" ]
                      <> maybe [] (\c -> ["   condition: " <> c]) b.condition
                      <> [ "   options: " <> T.intercalate " | " [ tshow i <> ": " <> o | (i, o) <- zip [0 :: Int ..] b.options ] ]) v.branch
+  <> (if null v.warnings then [] else ["", "-- warnings"] <> map ("   " <>) v.warnings)
   <> maybe [] (\r -> ["", "result: " <> r]) v.result
   <> maybe [] (\o -> ["", o]) v.output
   <> [ "\n" <> v.message | not (T.null v.message) ]
@@ -676,15 +781,15 @@ formatWord e = case maybeLitWordSimp e of
   Just w -> T.pack ("0x" <> showHex w "") <> (if w < 0x10000 && w > 9 then " (" <> tshow (into w :: Integer) <> ")" else "")
   Nothing -> formatExpr e
 
-memoryText :: VM t -> Int -> Int -> IO Text
-memoryText vm off len = case vm.state.memory of
+memoryText :: (Expr Buf -> Expr Buf) -> VM t -> Int -> Int -> IO Text
+memoryText display vm off len = case vm.state.memory of
   ConcreteMemory m -> do
     let avail = max 0 (min len (VSM.length m - off))
     bytes <- if avail <= 0 || off < 0 then pure VS.empty
              else stToIO $ VS.freeze (VSM.slice off avail m)
     let bs = BS.pack (VS.toList bytes) <> BS.replicate (max 0 len - avail) 0
     pure $ T.pack (prettyHexAt off bs)
-  SymbolicMemory buf -> pure $ clip 4000 (formatExpr buf)
+  SymbolicMemory buf -> pure $ clip 4000 (formatExpr (display buf))
 
 prettyHexAt :: Int -> BS.ByteString -> String
 prettyHexAt off bs

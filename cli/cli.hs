@@ -116,6 +116,7 @@ data CommonOptions = CommonOptions
   , debugger      ::Bool
   , serve         ::Bool
   , port          ::Int
+  , checkStaticBranches ::Bool
   }
 
 commonOptions :: Parser CommonOptions
@@ -156,6 +157,7 @@ commonOptions = CommonOptions
   <*> (switch $ long "debugger" <> help "Start the interactive debugger, served over HTTP on localhost. Connect with hevm-debug")
   <*> (switch $ long "serve" <> help "Serve the progress of the run over HTTP on localhost, at /progress")
   <*> (option auto $ long "port" <> showDefault <> value defaultDebuggerPort <> help "Port for --debugger and --serve, 0 picks a free one")
+  <*> (switch $ long "check-static-branches" <> help "Internal check, slow: ask the solver to confirm every branch side that exploration drops by simplification alone")
 
 data CommonExecOptions = CommonExecOptions
   { address       ::Maybe Addr
@@ -424,6 +426,7 @@ main = do
         , hashConsExplore = Prelude.not cOpts.noHashCons
         , progressLog = progressFile cOpts
         , progressExprs = cOpts.progressExprs || cOpts.verb >= 4
+        , checkStaticBranches = cOpts.checkStaticBranches
         } }
     -- the debugger serves the progress itself
     serving :: MonadUnliftIO m => CommonOptions -> m a -> m a

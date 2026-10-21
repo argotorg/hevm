@@ -1363,6 +1363,8 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
     burn' gasCap $ do
       assign' (#state % #stack) (Lit 0 : xs)
       assign (#state % #returndata) mempty
+      -- as for a call that runs out of gas, so traces show why it failed
+      pushTrace $ ErrorTrace (OutOfGas (fromMaybe 0 (gasWord gasCap)) cost)
       next
   else burn cost $
     case preCompileAddr of
@@ -3884,6 +3886,7 @@ instance VMOps Symbolic where
   enoughGas _ _ = True
   subGas _ _ = ()
   toGas _ = ()
+  gasWord _ = Nothing
   whenSymbolicElse a _ = a
 
   partial e = assign #result $ Just (Unfinished e)
@@ -4080,6 +4083,7 @@ instance VMOps Concrete where
   enoughGas cost gasCap = cost <= gasCap
   subGas gasCap cost = gasCap - cost
   toGas = id
+  gasWord = Just
   whenSymbolicElse _ a = a
   partial _ = internalError "won't happen during concrete exec"
   branch _ (forceLit -> cond) continue = continue (cond > 0)

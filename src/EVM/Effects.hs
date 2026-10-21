@@ -53,6 +53,9 @@ data Config = Config
   , hashConsExplore  :: Bool       -- ^ Share equal subterms (EVM.HashCons)
   , progressLog      :: Maybe FilePath
   , progressExprs    :: Bool
+  -- | Internal check: ask the solver to confirm every branch side that
+  -- exploration drops by simplification alone
+  , checkStaticBranches :: Bool
   }
   deriving (Show, Eq)
 
@@ -79,6 +82,7 @@ defaultConfig = Config
   , hashConsExplore = True
   , progressLog = Nothing
   , progressExprs = False
+  , checkStaticBranches = False
   }
 
 -- Write to the console

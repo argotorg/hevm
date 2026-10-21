@@ -380,6 +380,15 @@ storageTests = testGroup "Storage tests"
         (Expr.decomposeStorage $ SLoad (arrElem 2 (Var "i"))
           (SStore (Lit 0) (Var "a") (SStore (arrZero 2) (Lit 1) emptyStore)))
     , concreteKeccakStorageTests
+    , testCase "read-from-copy-of-zeros" $ do
+        -- callee calldata of symbolic size, copied from untouched memory
+        let buf = CopySlice (Lit 0) (Lit 0) (ReadWord (Lit 0x20) (AbstractBuf "calldata")) (ConcreteBuf "") (ConcreteBuf "")
+            written = WriteWord (Var "i") (Lit 0) (WriteByte (Lit 5) (LitByte 0) buf)
+        assertEqual "word" (Lit 0) (Expr.readWord (Lit 3) buf)
+        assertEqual "word at a symbolic index" (Lit 0) (Expr.readWord (Var "j") written)
+        assertEqual "byte" (LitByte 0) (Expr.readByte (Lit 40) written)
+        assertEqual "a nonzero write is kept" (Lit 7)
+          (Expr.readWord (Lit 0) (WriteWord (Lit 0) (Lit 7) buf))
     , testCase "readStorage-struct-field-offsets" $ do
         let slot o = Add (Lit o) (mappingRead 0 "acc")
             store a b = SStore (slot a) (Var "other")

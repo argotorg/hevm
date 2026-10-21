@@ -19,7 +19,9 @@ import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString qualified as BS
 import Data.IORef
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe, isJust, mapMaybe, listToMaybe)
+import Data.ByteString.Char8 qualified as BC
+import System.IO.Temp (withSystemTempDirectory)
 import Data.Text (Text)
 import Data.Vector qualified as V
 import Test.Tasty
@@ -27,7 +29,7 @@ import Test.Tasty.HUnit
 import Test.Tasty.QuickCheck
 
 import EVM.Dapp (emptyDapp)
-import EVM.Debugger (newSession)
+import EVM.Debugger (newSession, runCommandText)
 import EVM.Debugger.DebuggerTests (http, httpJSON, branchCode)
 import EVM.Debugger.Server (serveSession, withProgressServer)
 import EVM.Effects
@@ -126,7 +128,25 @@ tests = after AllFinish "!/progress-global/" $ sequentialTestGroup "progress-glo
           assertEqual "at the first JUMPI" (Just 9) (int =<< at ["pc"] =<< first =<< at ["hottest"] v)
           _ <- http port "POST" "/quit" ""
           takeMVar done
-  , testProperty "concurrent-progress" $ withMaxSuccess 30 $ \(Workers ws) (Positive clients') ->
+  , testCase "debugger-logs-events" $ withSystemTempDirectory "hevm-progress" $ \dir -> do
+      let file = dir <> "/log.jsonl"
+      withProgress (ProgressOpts (Just file) True False False) $ runEnv (Env defaultConfig) $
+        withSolvers Bitwuzla 1 Nothing defMemLimit $ \solvers -> do
+          vm <- liftIO $ stToIO $ abstractVM (AbstractBuf "txdata", []) branchCode Nothing False
+          s0 <- liftIO $ newSession emptyDapp vm
+          let run = runCommandText (Fetch.oracle solvers Nothing Fetch.noRpc)
+          void $ run "break op STOP" s0 >>= run "continue" >>= run "branch true" >>= run "step" >>= run "back" >>= run "branch true" >>= run "continue"
+      events <- mapMaybe JSON.decodeStrict . BC.lines <$> BS.readFile file
+      let named n = [ e | e <- events, at ["ev"] e == Just (JSON.String n) ]
+      forM_ ["debug-command", "debug-branch-offered", "debug-branch-taken", "debug-back", "debug-breakpoint", "debug-branch-condition"] $ \n ->
+        assertBool ("logs " <> show n) (not (null (named n)))
+      assertEqual "one event per command" 7 (length (named "debug-command"))
+      assertEqual "the branch is offered again after going back" 2 (length (named "debug-branch-offered"))
+      assertEqual "where it was offered" (Just 9) (int =<< at ["pc"] =<< headMay (named "debug-branch-offered"))
+      assertBool "the condition at expression verbosity" $
+        maybe False (const True) (str =<< at ["cond"] =<< headMay (named "debug-branch-condition"))
+      assertEqual "going back replays the branch" (Just (JSON.Bool True)) (at ["branchAgain"] =<< headMay (named "debug-back"))
+  , testProperty "concurrent-progress" $ \(Workers ws) (Positive clients') ->
       within 60_000_000 $ ioProperty $ withProgress tracking $ concurrentProgress ws (min 4 clients')
   ]
 
@@ -233,6 +253,9 @@ arr = \case { JSON.Array a -> Just a; _ -> Nothing }
 
 len :: JSON.Value -> Maybe Int
 len = fmap V.length . arr
+
+headMay :: [a] -> Maybe a
+headMay = listToMaybe
 
 first :: JSON.Value -> Maybe JSON.Value
 first v = arr v >>= (V.!? 0)

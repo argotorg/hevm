@@ -239,6 +239,7 @@ runSubSet p = defaultMain . applyPattern p $ tests
 tests :: TestTree
 tests = testGroup "hevm"
   [ FuzzSymExec.tests
+  , FuzzSymExec.lockstepTests
   , ExprTests.tests
   , RewriteFuzz.tests
   , KeccakFuzz.tests
