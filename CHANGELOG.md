@@ -10,13 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Added
 - `--debugger` for `symbolic`, `exec` and `test` starts an interactive debugger
   served over HTTP on localhost, with a web frontend, symbolic branches,
-  stepping back, breakpoints and statistics. `hevm-debug` is a command-line
-  client for it.
+  stepping back, breakpoints, storage, call traces and statistics. Its views
+  are JSON for clients to format; `hevm-debug` is a command-line client.
+  `--debug-snapshot-every` sets how often it snapshots for stepping back.
 - `--serve` serves the progress of a run over HTTP, at `/progress`.
 - `--check-static-branches` checks branch decisions made without the solver
   against the solver.
 - The symbolic execution fuzzer runs symbolic and concrete execution in
-  lockstep, also with path merging and along paths given by solver models.
+  lockstep, also with path merging and along paths given by solver models, and
+  checks the debugger's stepping, back and forth, against geth.
+- Word reads that straddle literal bytes and written words, such as calldata's
+  selector and first argument, simplify to the written parts shifted and or-ed.
 - Reads of all-zero buffers simplify to zero.
 - `hevm symbolic` replays each counterexample concretely and marks it
   `[validated]` or `[not reproducible]`, like `hevm test`.
