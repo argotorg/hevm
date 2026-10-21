@@ -632,8 +632,9 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
                     let decision = staticBranch cond preconds
                     conf <- readConfig
                     when (conf.checkStaticBranches || checkStaticBranchesFromEnv) $
-                      checkStaticBranch fetcher vm cond preconds decision >>= mapM_ (\msg -> internalError $
-                        "a branch side was dropped by simplification, but the solver finds it feasible: " <> msg)
+                      checkStaticBranch fetcher vm cond preconds decision >>= \case
+                        StaticWrong msg -> internalError $ "a branch side was dropped by simplification, but it is reachable: " <> msg
+                        _ -> pure ()
                     (r, vm') <- liftIO $ stToIO $ runStateT (continue decision) vm
                     interpretInternal t { vm = vm', stepper = (k r) }
           _ -> performQuery
@@ -654,24 +655,46 @@ checkStaticBranchesFromEnv = unsafePerformIO $ isJust <$> lookupEnv "HEVM_CHECK_
 
 -- | What the fetcher, normally the solver, decides about a branch condition
 askBranch :: App m => Fetch.Fetcher Symbolic m -> VM Symbolic -> Expr EWord -> [Prop] -> m BranchCondition
-askBranch fetcher vm cond preconds = do
-  ref <- liftIO $ stToIO $ newSTRef Nothing
-  m <- fetcher (PleaseAskSMT cond preconds (\bc -> lift (writeSTRef ref (Just bc))))
-  _ <- liftIO $ stToIO $ runStateT m vm
-  fromMaybe UnknownBranch <$> liftIO (stToIO (readSTRef ref))
+askBranch fetcher vm cond preconds = askFetcher fetcher vm (PleaseAskSMT cond preconds) UnknownBranch
 
--- | A description of what is wrong when 'staticBranch' dropped a side that the
--- solver finds feasible, or took one that it finds infeasible
-checkStaticBranch :: App m => Fetch.Fetcher Symbolic m -> VM Symbolic -> Expr EWord -> [Prop] -> BranchCondition -> m (Maybe String)
-checkStaticBranch fetcher vm cond preconds = \case
-  Case b -> askBranch fetcher vm cond preconds <&> \case
-    Case b' | b' == b -> Nothing
-    Infeasible -> Nothing
-    solver -> Just $ "simplification decided " <> show b <> ", the solver " <> show solver
+-- | Whether the fetcher, normally the solver, finds the props satisfiable
+askSat :: App m => Fetch.Fetcher Symbolic m -> VM Symbolic -> [Prop] -> m (Maybe Bool)
+askSat fetcher vm props = askFetcher fetcher vm (PleaseCheckSat props) Nothing
+
+askFetcher :: App m => Fetch.Fetcher Symbolic m -> VM Symbolic -> ((a -> EVM Symbolic ()) -> Query Symbolic) -> a -> m a
+askFetcher fetcher vm mkQuery dflt = do
+  ref <- liftIO $ stToIO $ newSTRef Nothing
+  m <- fetcher (mkQuery (\r -> lift (writeSTRef ref (Just r))))
+  _ <- liftIO $ stToIO $ runStateT m vm
+  fromMaybe dflt <$> liftIO (stToIO (readSTRef ref))
+
+data StaticCheck
+  = StaticOk
+  -- | the solver finds a dropped side satisfiable, or a taken side unsatisfiable
+  | StaticWrong String
+  -- | the solver could not tell
+  | StaticInconclusive
+  -- | 'staticBranch' kept both sides, but the solver finds one unsatisfiable
+  | StaticMissed
+  deriving (Show)
+
+-- | Asks the solver whether the sides 'staticBranch' dropped are unsatisfiable
+checkStaticBranch :: App m => Fetch.Fetcher Symbolic m -> VM Symbolic -> Expr EWord -> [Prop] -> BranchCondition -> m StaticCheck
+checkStaticBranch fetcher vm cond preconds decision = case decision of
+  Case b -> askSat fetcher vm (side (not b) : preconds) <&> \case
+    Just False -> StaticOk
+    Nothing -> StaticInconclusive
+    Just True -> StaticWrong $ "simplification decided " <> show b <> ", but the solver finds " <> show (not b) <> " satisfiable"
       <> " at pc " <> show vm.state.pc <> " of " <> show vm.state.contract
       <> "\ncondition: " <> T.unpack (formatExpr cond)
       <> "\npath conditions: " <> T.unpack (T.unlines (map formatProp preconds))
-  _ -> pure Nothing
+  _ -> do
+    t <- askSat fetcher vm (side True : preconds)
+    f <- askSat fetcher vm (side False : preconds)
+    pure $ if t == Just False || f == Just False then StaticMissed else StaticOk
+  where
+    side True = cond ./= Lit 0
+    side False = cond .== Lit 0
 
 logQueryExprs :: MonadIO m => Query Symbolic -> m ()
 logQueryExprs = \case
@@ -697,6 +720,7 @@ stepName = \case
     PleaseFetchSlot {} -> "query-fetch-slot"
     PleaseDoFFI {} -> "query-ffi"
     PleaseReadEnv {} -> "query-env"
+    PleaseCheckSat {} -> "query-sat"
 
 maxIterationsReached :: VM Symbolic -> Maybe Integer -> Maybe Bool
 maxIterationsReached _ Nothing = Nothing

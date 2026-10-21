@@ -685,6 +685,8 @@ data Query t where
   PleaseGetSols       :: Expr EWord -> Int -> [Prop] -> (Maybe [W256] -> EVM Symbolic ()) -> Query Symbolic
   PleaseDoFFI         :: [String] -> Map String String -> (ByteString -> EVM t ()) -> Query t
   PleaseReadEnv       :: String -> (String -> EVM t ()) -> Query t
+  -- | Just True: satisfiable, Just False: unsatisfiable, Nothing: unknown
+  PleaseCheckSat      :: [Prop] -> (Maybe Bool -> EVM Symbolic ()) -> Query Symbolic
 
 data BranchContext where
   PleaseRunBoth :: (Bool -> EVM Symbolic ()) -> BranchContext
@@ -716,6 +718,8 @@ instance Show (Query t) where
       (("<EVM.Query: do ffi: " ++ (show cmd) ++ " env: " ++ (show env)) ++)
     PleaseReadEnv variable _ ->
       (("<EVM.Query: read env: " ++ variable) ++)
+    PleaseCheckSat props _ ->
+      (("<EVM.Query: check satisfiability of " ++ show props ++ ">") ++)
 
 instance Show (BranchContext) where
   showsPrec _ = \case

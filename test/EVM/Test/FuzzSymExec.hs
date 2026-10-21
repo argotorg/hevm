@@ -1027,7 +1027,7 @@ reproduction c i = unwords
   , "HEVM_FUZZ_CALLDATA=" <> hex i.calldata, "HEVM_FUZZ_CALLVALUE=" <> show i.callvalue
   , "HEVM_FUZZ_TIMESTAMP=" <> show i.timestamp, "HEVM_FUZZ_STORE=" <> intercalate "," [ show k <> ":" <> show v | (k, v) <- Map.toList i.store ]
   , "HEVM_FUZZ_GASLIMIT=" <> show c.gasLimit, "HEVM_FUZZ_NUMBER=" <> show c.number ]
-  where hex = drop 2 . bsToHex
+  where hex = bsToHex
 
 -- | The case 'reproduction' describes, if HEVM_FUZZ_MAIN is set
 caseFromEnv :: IO (Maybe TestCase)
@@ -1322,6 +1322,7 @@ data Lockstep = Lockstep
   , retries  :: Int -- ^ sides tried that the concrete run did not take
   , trail    :: [String] -- ^ the latest steps, newest first, for failure reports
   , static   :: (Int, Int) -- ^ branches decided without the solver, and those it could have decided
+  , ended    :: Maybe (Int, Int, String) -- ^ pc, depth and kind of result, when both runs halted
   }
 
 maxLockstepSteps :: Int
@@ -1334,7 +1335,7 @@ lockstepCase :: App m => SolverGroup -> BranchMode -> TestCase -> m (Either Stri
 lockstepCase solvers mode c = Progress.withProgressLogFromEnv "lockstep" $ do
   sc0 <- liftIO $ stToIO (concreteTestVm c) >>= newSession emptyDapp
   ss0 <- liftIO $ setBranchMode mode <$> (stToIO (symbolicTestVm c) >>= newSession emptyDapp)
-  r <- go sc0 ss0 (Lockstep "" 0 0 0 0 0 [] (0, 0)) Nothing
+  r <- go sc0 ss0 (Lockstep "" 0 0 0 0 0 [] (0, 0) Nothing) Nothing
   Progress.emit "lockstep-end" $ case r of
     Left err -> ["failure" JSON..= T.pack err]
     Right l -> ["stopped" JSON..= T.pack l.stopped, "steps" JSON..= l.steps, "compared" JSON..= l.compared, "branches" JSON..= l.branches]
@@ -1359,7 +1360,7 @@ lockstepCase solvers mode c = Progress.withProgressLogFromEnv "lockstep" $ do
         Right (n, o) -> do
           let acc' = acc { compared = acc.compared + n, opaque = acc.opaque + o }
           case (isHalted sc, isHalted ss) of
-            (True, True) -> either mismatch (const (pure (Right acc' { stopped = "halted" }))) (compareEnds c vc vs)
+            (True, True) -> either mismatch (const (pure (Right acc' { stopped = "halted", ended = Just (endOf vs) }))) (compareEnds c vc vs)
             (True, False) -> mismatch $ "only the concrete run halted: " <> show vc.result
             (False, True) -> mismatch $ "only the symbolic run halted: " <> show vs.result
             _ | acc.steps >= maxLockstepSteps -> stopWith "step limit"
@@ -1449,6 +1450,35 @@ lockstepCase solvers mode c = Progress.withProgressLogFromEnv "lockstep" $ do
       InitCode bs _ | vm.state.pc < BS.length bs -> BS.index bs vm.state.pc
       _ -> 0
 
+-- | Where a run halted, and how
+endOf :: VM t -> (Int, Int, String)
+endOf vm = (vm.state.pc, length vm.frames, case vm.result of
+  Just (VMSuccess _) -> "success"
+  Just (VMFailure (Revert _)) -> "revert"
+  Just (VMFailure e) -> hevmErrorKind e
+  r -> show r)
+
+-- | Follows a random path of a symbolic session, picking a random feasible side
+-- at every branch, until it halts
+randomPath :: App m => SolverGroup -> TestCase -> [Int] -> m (Session Symbolic)
+randomPath solvers c picks0 = do
+  s0 <- liftIO $ stToIO (symbolicTestVm c) >>= newSession emptyDapp
+  go s0 (cycle (0 : picks0)) (0 :: Int)
+  where
+    fetcher :: Fetch.Fetcher Symbolic m
+    fetcher = Fetch.oracle solvers Nothing Fetch.noRpc
+    go s picks n
+      | isHalted s || n >= maxLockstepSteps = pure s
+      | hasPendingBranch s = do
+          v <- liftIO $ mkView s
+          let opts = maybe [] (.options) v.branch
+              pick = fromMaybe 0 (headMay picks)
+              side = if opts == ["true", "false"] then (["true", "false"] !! (pick `mod` 2))
+                     else T.pack (show (pick `mod` max 1 (length opts)))
+          s' <- runCommand fetcher (Choose side) s
+          go s' (drop 1 picks) n
+      | otherwise = runCommand fetcher (Step 1) s >>= \s' -> go s' picks (n + 1)
+
 -- | Gas is not tracked symbolically, so after it ran out anywhere the runs may differ
 gasDependentRun :: VM Concrete -> Bool
 gasDependentRun vm = any isGas (concatMap flatten (traceForest vm)) || resultIsGas
@@ -1463,6 +1493,10 @@ gasDependentRun vm = any isGas (concatMap flatten (traceForest vm)) || resultIsG
     gasError e = "gas" `isInfixOf` hevmErrorKind e || case e of
       IllegalOverflow -> True
       _ -> False
+
+-- | Ops that change balances, nonces, storage or code
+accountOps :: [String]
+accountOps = ["SSTORE", "TSTORE", "SELFDESTRUCT"] <> callOps
 
 memWriters, callOps :: [String]
 memWriters = ["MSTORE", "MSTORE8", "MCOPY", "CALLDATACOPY", "CODECOPY", "RETURNDATACOPY", "EXTCODECOPY"] <> callOps
@@ -1491,7 +1525,7 @@ compareStates' pre c prevOp vc vs
           nWords = length [ () | (_, Lit _, Lit _) <- words' ]
       mem <- if maybe True (`elem` memWriters) prevOp then compareMemory pre c vc vs else pure (Right 0)
       let ret = if maybe False (`elem` callOps) prevOp then compareBufs "return data" c vc.state.returndata (pre vs.state.returndata) else Right 0
-          store = if prevOp == Just "SSTORE" then compareStorage pre c vc vs else Right 0
+          store = if maybe False (`elem` accountOps) prevOp then compareStorage pre c vc vs else Right 0
       pure $ case badWords of
         (i, a, b) : _ -> Left $ "stack word " <> show i <> " differs: concrete " <> show a <> ", symbolic " <> show b
           <> "\nsymbolic, before substituting: " <> show (pre (vs.state.stack !! i))
@@ -1524,13 +1558,37 @@ compareBufs what c a b = case (concretize c c.inputs a, concretize c c.inputs b)
                                  | otherwise -> Right 1
   _ -> Right 0
 
+-- | Balances, nonces, storage, transient storage and code of the accounts both
+-- runs have
 compareStorage :: (forall a. Expr a -> Expr a) -> TestCase -> VM Concrete -> VM Symbolic -> Either String Int
-compareStorage pre c vc vs = sum <$> forM [contractAddr, calleeAddr] (\a ->
-  case ((.storage) <$> Map.lookup (LitAddr a) vc.env.contracts, concretize c c.inputs . pre . (.storage) <$> Map.lookup (LitAddr a) vs.env.contracts) of
-    (Just (ConcreteStore x), Just (ConcreteStore y))
-      | nonZero x /= nonZero y -> Left $ "storage of " <> show a <> " differs: concrete " <> show x <> ", symbolic " <> show y
+compareStorage pre c vc vs = sum <$> forM common (\(a, cc, sc) -> do
+  let what :: String -> String
+      what x = x <> " of " <> show a <> " differs: concrete "
+      conc :: Expr b -> Expr b
+      conc = concretize c c.inputs . pre
+      stores :: String -> Expr Storage -> Expr Storage -> Either String Int
+      stores name x y = case (x, conc y) of
+        (ConcreteStore m, ConcreteStore m')
+          | nonZero m /= nonZero m' -> Left $ what name <> show m <> ", symbolic " <> show m'
+          | otherwise -> Right 1
+        _ -> Right 0
+  balance <- case (cc.balance, conc sc.balance) of
+    -- they pay for and are paid the gas, which is not tracked symbolically
+    _ | a `elem` [fromAddress, coinbaseAddr] -> Right 0
+    (Lit x, Lit y) | x /= y -> Left $ what "balance" <> show x <> ", symbolic " <> show y
+                   | otherwise -> Right 1
+    _ -> Right 0
+  nonce <- if cc.nonce /= sc.nonce then Left $ what "nonce" <> show cc.nonce <> ", symbolic " <> show sc.nonce else Right 1
+  code <- case (cc.code, sc.code) of
+    (RuntimeCode (ConcreteRuntimeCode x), RuntimeCode (ConcreteRuntimeCode y))
+      | x /= y -> Left $ what "code" <> bsToHex x <> ", symbolic " <> bsToHex y
       | otherwise -> Right 1
-    _ -> Right 0)
+    _ -> Right 0
+  st <- stores "storage" cc.storage sc.storage
+  tst <- stores "transient storage" cc.tStorage sc.tStorage
+  pure (balance + nonce + code + st + tst))
+  where
+    common = [ (a, cc, sc) | (LitAddr a, cc) <- Map.toList vc.env.contracts, Just sc <- [Map.lookup (LitAddr a) vs.env.contracts] ]
 
 -- | Both runs halted: the same way, with the same output, logs and storage
 compareEnds :: TestCase -> VM Concrete -> VM Symbolic -> Either String ()
@@ -1553,9 +1611,45 @@ compareEnds c vc vs = do
       LogEntry (WAddr (LitAddr _)) (ConcreteBuf _) ts -> all (isJust . Expr.maybeLitWordSimp) ts
       _ -> False
 
+-- | Lockstep along a random path: the inputs a model of its path conditions
+-- gives must take the concrete run along it, to where it ended
+modelGuided :: App m => SolverGroup -> BranchMode -> TestCase -> [Int] -> m Property
+modelGuided solvers mode c picks = do
+  sp <- randomPath solvers c picks
+  let vs = sessionVM sp
+      skip why = pure $ label why (property True)
+  case vs.result of
+    Nothing -> skip "random path too long"
+    Just (Unfinished _) -> skip "random path unfinished"
+    _ | any mentionsBlockHash vs.constraints -> skip "path conditions on a symbolic blockhash"
+      | PBool False `elem` vs.constraints -> skip "path ends in a failed assumption"
+      | otherwise -> checkSatWithProps solvers vs.constraints >>= \case
+          Qed -> liftIO $ failWith c c.inputs $ "the random path offered only feasible sides, but is infeasible:\n"
+                   <> unlines (map show vs.constraints)
+          Unknown _ -> skip "unknown"
+          Error e -> skip ("solver error: " <> take 40 e)
+          Cex cex -> case modelInputs c.inputs cex of
+            Left e -> skip ("model: " <> takeWhile (/= ':') e)
+            Right i -> do
+              let c' = c { inputs = i }
+              lockstepCase solvers mode c' >>= \case
+                Left err -> liftIO $ failWith c' i err
+                Right l -> case l.ended of
+                  Just e | e /= endOf vs -> liftIO $ failWith c' i $
+                    "the inputs from a model of the path conditions end at " <> show e
+                    <> ", the path ends at " <> show (endOf vs) <> "\npath conditions:\n" <> unlines (map show vs.constraints)
+                  Just _ -> pure $ label "followed the path" (property True)
+                  Nothing -> skip l.stopped
+  where
+    mentionsBlockHash = getAny . foldProp (\case BlockHash _ -> Any True; _ -> Any False) mempty
+
 lockstepTests :: TestTree
 lockstepTests = testGroup "lockstep-fuzz"
-  [ -- the case from the HEVM_FUZZ_* variables that a failure prints, in every branch mode
+  [ testProperty "model-guided-lockstep" $ \(c :: TestCase) -> forAll (vectorOf 50 (chooseInt (0, 7))) $ \picks ->
+      forAll (elements [SolverBranches, ExplorerBranches, CheckedBranches]) $ \mode ->
+      within 300_000_000 $ ioProperty $ runEnv testEnv $ withSolvers Z3 1 (Just 10) defMemLimit $ \solvers ->
+        modelGuided solvers mode c picks
+  , -- the case from the HEVM_FUZZ_* variables that a failure prints, in every branch mode
     test "lockstep-from-env" $ liftIO caseFromEnv >>= mapM_ (\c ->
       withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> forM_ [SolverBranches, ExplorerBranches, CheckedBranches] $ \mode ->
         lockstepCase solvers mode c >>= \case

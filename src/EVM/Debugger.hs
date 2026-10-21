@@ -68,8 +68,7 @@ import EVM.Dapp (DappInfo(..), srcMap, srcMapCode)
 import EVM.Effects
 import EVM.Expr (maybeLitByteSimp, maybeLitWordSimp)
 import EVM.Expr qualified as Expr
-import EVM.SymExec (staticBranch, checkStaticBranch, askBranch)
-import Data.Functor ((<&>))
+import EVM.SymExec (staticBranch, checkStaticBranch, StaticCheck(..))
 import EVM.Fetch qualified as Fetch
 import EVM.Format (formatExpr, formatProp, traceDocForest)
 import EVM.Op (intToOpName)
@@ -178,6 +177,7 @@ data Stats = Stats
   -- branches the solver could decide but simplification could not
   , staticWrong     :: Int
   , staticMissed    :: Int
+  , staticInconclusive :: Int
   , breakpointHits  :: Int
   }
   deriving (Eq, Show, Generic, ToJSON)
@@ -190,7 +190,7 @@ data StatsView = StatsView
   deriving (Show, Generic, ToJSON)
 
 emptyStats :: Stats
-emptyStats = Stats 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+emptyStats = Stats 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
 
 addStats :: (Stats -> Stats) -> Session t -> Session t
 addStats f s = s { stats = f s.stats }
@@ -208,7 +208,8 @@ renderStats v = T.unlines
   , "branches:  " <> tshow c.branchesOffered <> " offered, " <> tshow c.branchesTaken <> " taken, "
       <> tshow c.staticDecisions <> " decided without the solver"
   , "checked:   " <> tshow c.staticWrong <> " static decisions the solver contradicts, "
-      <> tshow c.staticMissed <> " branches only the solver could decide"
+      <> tshow c.staticMissed <> " branches only the solver could decide, "
+      <> tshow c.staticInconclusive <> " the solver could not check"
   , "breakpoint hits: " <> tshow c.breakpointHits
   ]
   where
@@ -291,16 +292,14 @@ resolve fetcher queried s = case s.vm.result of
             Lit v -> Case (v > 0)
             _ -> staticBranch c pcs
       Progress.emit "debug-static-decision" $ where_ s <> ["decision" .= T.pack (show decision)]
-      checked <- if s.branchMode /= CheckedBranches then pure s else case decision of
-        Case _ -> checkStaticBranch fetcher s.vm c pcs decision >>= \case
-          Nothing -> pure s
-          Just msg -> do
-            Progress.emit "debug-static-decision-wrong" $ where_ s <> ["problem" .= T.pack msg]
-            pure $ addStats (\st -> st { staticWrong = st.staticWrong + 1 })
-              s { warnings = take 20 (("step " <> tshow s.curStep <> ": " <> T.pack msg) : s.warnings) }
-        _ -> askBranch fetcher s.vm c pcs <&> \case
-          Case _ -> addStats (\st -> st { staticMissed = st.staticMissed + 1 }) s
-          _ -> s
+      checked <- if s.branchMode /= CheckedBranches then pure s else checkStaticBranch fetcher s.vm c pcs decision >>= \case
+        StaticOk -> pure s
+        StaticMissed -> pure $ addStats (\st -> st { staticMissed = st.staticMissed + 1 }) s
+        StaticInconclusive -> pure $ addStats (\st -> st { staticInconclusive = st.staticInconclusive + 1 }) s
+        StaticWrong msg -> do
+          Progress.emit "debug-static-decision-wrong" $ where_ s <> ["problem" .= T.pack msg]
+          pure $ addStats (\st -> st { staticWrong = st.staticWrong + 1 })
+            s { warnings = take 20 (("step " <> tshow s.curStep <> ": " <> T.pack msg) : s.warnings) }
       vm' <- liftIO $ stToIO $ execStateT (continue decision) checked.vm
       resolve fetcher True $ addStats (\st -> st { staticDecisions = st.staticDecisions + 1 }) checked { vm = vm', lastCond = Just c }
     Left q -> do
