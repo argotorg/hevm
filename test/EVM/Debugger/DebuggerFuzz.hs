@@ -1,3 +1,5 @@
+{-# LANGUAGE MultiWayIf #-}
+
 {-|
 Module      : DebuggerFuzz
 Description : Fuzzing of the interactive debugger and its HTTP server
@@ -50,6 +52,15 @@ tests = testGroup "debugger-fuzz"
   , testProperty "symbolic-branches" $ withMaxSuccess 30 $ mapSize (* 4) $ \(c :: TestCase) ->
       forAll (genCommands True) $ \cmds -> forAll (vectorOf 40 genReaction) $ \reactions ->
       within 300_000_000 $ ioProperty $ runEnv testEnv $ symbolicBranches c cmds reactions
+  , testProperty "forward-back-concrete" $ withMaxSuccess 100 $ mapSize (* 4) $ \(c :: TestCase) ->
+      forAll genRoundTrips $ \(start, ks) -> within 120_000_000 $ ioProperty $ runEnv testEnv $ withSession $ \solvers -> do
+        s0 <- liftIO $ stToIO (concreteTestVm c) >>= newSession emptyDapp
+        roundTrips (Fetch.oracle solvers Nothing Fetch.noRpc) (repeat Nothing) start ks s0
+  , testProperty "forward-back-symbolic" $ withMaxSuccess 50 $ mapSize (* 4) $ \(c :: TestCase) ->
+      forAll genRoundTrips $ \(start, ks) -> forAll (vectorOf 100 genReaction) $ \reactions ->
+      within 300_000_000 $ ioProperty $ runEnv testEnv $ withSession $ \solvers -> do
+        s0 <- liftIO $ stToIO (symbolicTestVm c) >>= newSession emptyDapp
+        roundTrips (Fetch.oracle solvers Nothing Fetch.noRpc) reactions start ks (setStepLimit 3000 s0)
   , testProperty "http-garbage" $ withMaxSuccess 30 $ \(c :: TestCase) ->
       forAll (listOf1 genRequest) $ \reqs -> within 120_000_000 $ ioProperty $ runEnv testEnv $ httpGarbage c reqs
   ]
@@ -78,7 +89,7 @@ genCommand symbolic = frequency $
   , (1, ("break line " <>) . tshow <$> chooseInt (0, 30))
   , (1, elements ["delete all", "delete 0", "delete 1", "delete 7", "breakpoints"])
   , (1, elements ["memory", "memory 0 64", "memory 32", "memory 0x40 0x20", "storage", "calldata", "trace"
-                 , "pathconds", "help", "show", ""])
+                 , "pathconds", "help", "show", "stats", ""])
   , (1, genGarbage)
   ] <> [ (8, elements ["branch true", "branch false", "branch 0", "branch 1", "branch 2", "branch t", "branch f"])
        | symbolic ]
@@ -115,6 +126,25 @@ describeDiff a b = unlines
   [ T.unpack k <> ":\n  got:      " <> T.unpack x <> "\n  expected: " <> T.unpack y
   | (k, x, y) <- zip3 fingerprintKeys a b, x /= y ]
 
+-- | Each command counts once, and nothing counted is ever undone
+statsProblems :: StatsView -> StatsView -> [String]
+statsProblems before after =
+  [ "commands went from " <> show b.commands <> " to " <> show a.commands | a.commands /= b.commands + 1 ]
+  <> [ name <> " decreased from " <> show (f b) <> " to " <> show (f a) | (name, f) <- ints, f a < f b ]
+  <> [ name <> " decreased" | (name, f) <- [("commandSecs", (.commandSecs)), ("querySecs", (.querySecs))], f a < f b ]
+  <> [ "replayed " <> show a.replayedOpcodes <> " of " <> show a.opcodes <> " opcodes" | a.replayedOpcodes > a.opcodes ]
+  <> [ "took " <> show a.branchesTaken <> " of " <> show a.branchesOffered <> " branches offered" | a.branchesTaken > a.branchesOffered ]
+  <> [ "queries " <> show a.queries <> " are not the sum of their kinds" | a.queries /= a.branchQueries + a.solutionQueries + a.fetchQueries + a.otherQueries ]
+  <> [ "step " <> show after.step <> " is not the session's" | after.step < 0 ]
+  where
+    a = after.counters
+    b = before.counters
+    ints :: [(String, Stats -> Int)]
+    ints = [ ("opcodes", (.opcodes)), ("replayedOpcodes", (.replayedOpcodes)), ("queries", (.queries))
+           , ("branchQueries", (.branchQueries)), ("solutionQueries", (.solutionQueries)), ("fetchQueries", (.fetchQueries))
+           , ("otherQueries", (.otherQueries)), ("branchesOffered", (.branchesOffered)), ("branchesTaken", (.branchesTaken))
+           , ("breakpointHits", (.breakpointHits)) ]
+
 withSession :: (MonadUnliftIO m, ReadConfig m, TTY m) => (SolverGroup -> m a) -> m a
 withSession = withSolvers Bitwuzla 1 (Just 10) defMemLimit
 
@@ -133,9 +163,13 @@ concreteReplay c cmds = withSession $ \solvers -> do
         a <- fingerprint fetcher s'
         b <- fingerprint fetcher ref
         let hist = reverse (cmd : done)
-        if a /= b
-          then pure $ Just $ "after commands " <> show hist <> " the state differs from stepping forward:\n" <> describeDiff a b
-          else go s' rest (cmd : done)
+            refStats = (sessionStats ref).counters
+            problems = statsProblems (sessionStats s) (sessionStats s')
+              <> [ "a session that only stepped forward executed " <> show refStats.opcodes <> " opcodes to reach step "
+                   <> show (sessionStep ref) | refStats.opcodes /= sessionStep ref || refStats.replayedOpcodes /= 0 ]
+        if | a /= b -> pure $ Just $ "after commands " <> show hist <> " the state differs from stepping forward:\n" <> describeDiff a b
+           | not (null problems) -> pure $ Just $ "after commands " <> show hist <> " the stats are wrong:\n" <> unlines problems
+           | otherwise -> go s' rest (cmd : done)
   s0 <- fresh
   mismatch <- go s0 cmds []
   case mismatch of
@@ -179,11 +213,16 @@ symbolicBranches c cmds0 reactions0 = withSession $ \solvers -> do
         infeasible <- if tookBranch
           then isQed <$> checkSatWithProps solvers (sessionVM s').constraints
           else pure False
+        let problems = statsProblems (sessionStats s) (sessionStats s')
+              <> [ "branchesTaken is " <> show (sessionStats s').counters.branchesTaken <> " after taking " <> show taken'
+                 | (sessionStats s').counters.branchesTaken /= taken' ]
+            taken' = taken + if tookBranch then 1 else 0
         case Map.lookup key seen of
+          _ | not (null problems) -> pure $ Left $ "after commands " <> show hist <> " the stats are wrong:\n" <> unlines problems
           _ | infeasible -> pure $ Left $ "after commands " <> show hist <> " the path is infeasible"
           Just fp0 | fp0 /= fp ->
             pure $ Left $ "after commands " <> show hist <> " a revisited state differs:\n" <> describeDiff fp fp0
-          _ -> go s' (Map.insert key fp seen) rest (cmd : done) (taken + if tookBranch then 1 else 0) reactions
+          _ -> go s' (Map.insert key fp seen) rest (cmd : done) taken' reactions
   s0 <- liftIO $ stToIO (symbolicTestVm c) >>= newSession emptyDapp
   mismatch <- go (setStepLimit 3000 s0) (mempty :: Map ([Text], Int, Text) Fingerprint) cmds0 [] (0 :: Int) reactions0
   pure $ case mismatch of
@@ -191,6 +230,43 @@ symbolicBranches c cmds0 reactions0 = withSession $ \solvers -> do
     Right (taken, status, res) -> tabulate "branches taken" [bucket taken]
                                 $ tabulate "final status" [T.unpack status]
                                 $ tabulate "result" [T.unpack res] (property True)
+
+-- * Round trips
+
+-- | Where to start, as a fraction of the steps the run has, and the trips
+genRoundTrips :: Gen (Double, [Int])
+genRoundTrips = (,) <$> choose (0, 1) <*> (listOf1 (frequency [(3, chooseInt (1, 20)), (1, chooseInt (1, 300))]))
+
+-- | Steps n times, picking a side whenever a branch is pending
+advance :: (App m, Debuggable t) => Fetch.Fetcher t m -> [Maybe Text] -> Int -> Session t -> m (Session t, [Maybe Text])
+advance fetcher reactions n s
+  | n <= 0 || isHalted s = pure (s, reactions)
+  | hasPendingBranch s = case reactions of
+      Just r : more -> runCommandText fetcher r s >>= advance fetcher more n
+      _ -> pure (s, drop 1 reactions)
+  | otherwise = do
+      s' <- runCommandText fetcher "step" s
+      if sessionStep s' == sessionStep s then pure (s', reactions) else advance fetcher reactions (n - 1) s'
+
+-- | From step @start@, going forward k steps and back as many as were taken
+-- must return to the same state, for each k in turn
+roundTrips :: (App m, Debuggable t) => Fetch.Fetcher t m -> [Maybe Text] -> Double -> [Int] -> Session t -> m Property
+roundTrips fetcher reactions0 at ks s0 = do
+  (sEnd, _) <- advance fetcher reactions0 3000 s0
+  let start = floor (at * fromIntegral (sessionStep sEnd))
+  (s1, reactions1) <- advance fetcher reactions0 start s0
+  fp1 <- fingerprint fetcher s1
+  let go _ [] _ trips = pure $ tabulate "trips taken" [bucket trips] (property True)
+      go reactions (k : rest) done trips = do
+        (s2, reactions') <- advance fetcher reactions k s1
+        let d = sessionStep s2 - sessionStep s1
+        s3 <- if d > 0 then runCommandText fetcher ("back " <> tshow d) s2 else pure s1
+        fp3 <- fingerprint fetcher s3
+        if fp3 /= fp1
+          then pure $ counterexample ("from step " <> show (sessionStep s1) <> ", after going forward " <> show done
+                                      <> " then " <> show d <> " steps and back, the state differs:\n" <> describeDiff fp3 fp1) False
+          else go reactions' rest (done <> [k]) (trips + if d > 0 then 1 else 0)
+  go reactions1 ks [] (0 :: Int)
 
 -- * HTTP
 
@@ -209,7 +285,7 @@ genRequest :: Gen Request
 genRequest = do
   m <- frequency [(5, pure "GET"), (5, pure "POST"), (1, elements ["OPTIONS", "PUT", "DELETE", "", "get", "POST POST"])]
   t <- frequency
-    [ (8, elements [ "/state", "/state?format=text", "/command", "/command?format=text", "/help", "/" ])
+    [ (8, elements [ "/state", "/state?format=text", "/command", "/command?format=text", "/help", "/", "/stats", "/stats?format=text" ])
     , (2, elements [ "/nope", "/state?format", "/command?&&==", "/state?format=text&format=json", "//state"
                    , "/command?format=text?x", "*", "" ])
     , (1, BS.pack <$> listOf (choose (33, 126)))
@@ -303,7 +379,11 @@ httpGarbage c reqs = withSession $ \solvers -> do
             isCommand = r.raw == Nothing && r.method == "POST" && BC.takeWhile (/= '?') r.target == "/command"
                         && case r.framing of { Exact -> True; _ -> False }
             jsonOk = r.target /= "/command" || maybe False (KM.member "step") (JSON.decodeStrict (bodyOf resp) :: Maybe JSON.Object)
+            isStats = r.raw == Nothing && r.method == "GET" && r.target == "/stats"
+                      && case r.framing of { Exact -> True; _ -> False }
+            statsOk = maybe False (KM.member "counters") (JSON.decodeStrict (bodyOf resp) :: Maybe JSON.Object)
         in okStatus && (not isCommand || (" 200 " `BS.isInfixOf` statusLine && jsonOk))
+                    && (not isStats || (" 200 " `BS.isInfixOf` statusLine && statsOk))
 
 bucket :: Int -> String
 bucket n

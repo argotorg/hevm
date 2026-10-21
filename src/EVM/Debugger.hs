@@ -23,6 +23,10 @@ module EVM.Debugger
   , sessionVM
   , sessionStep
   , hasPendingBranch
+  , Stats(..)
+  , StatsView(..)
+  , sessionStats
+  , renderStats
   , isHalted
   ) where
 
@@ -46,9 +50,10 @@ import Data.Vector qualified as V
 import Data.Vector.Storable qualified as VS
 import Data.Vector.Storable.Mutable qualified as VSM
 import Data.Word (Word8, Word64)
+import GHC.Clock (getMonotonicTime)
 import GHC.Generics (Generic)
 import Hexdump (prettyHex)
-import Numeric (showHex)
+import Numeric (showHex, showFFloat)
 import Prettyprinter (layoutPretty, LayoutOptions(..), PageWidth(..), unAnnotate)
 import Prettyprinter.Render.Text (renderStrict)
 import Data.Tree.View (showTree)
@@ -89,6 +94,7 @@ data Command
   | ShowCalldata
   | ShowTrace
   | ShowPathConds
+  | ShowStats
   | Help
   | Refresh
   deriving (Eq, Show)
@@ -127,7 +133,57 @@ data Session t = Session
   , note        :: Text
   , out         :: Maybe Text
   , stepLimit   :: Int
+  , stats       :: Stats
   }
+
+-- | What a session has done so far. Going back in time does not undo these.
+data Stats = Stats
+  { commands        :: Int
+  , commandSecs     :: Double
+  , opcodes         :: Int
+  -- | the part of 'opcodes' that re-executed steps to go back in time
+  , replayedOpcodes :: Int
+  , queries         :: Int
+  , querySecs       :: Double
+  , branchQueries   :: Int
+  , solutionQueries :: Int
+  , fetchQueries    :: Int
+  , otherQueries    :: Int
+  , branchesOffered :: Int
+  , branchesTaken   :: Int
+  , breakpointHits  :: Int
+  }
+  deriving (Eq, Show, Generic, ToJSON)
+
+data StatsView = StatsView
+  { step          :: Int
+  , snapshotCount :: Int
+  , counters      :: Stats
+  }
+  deriving (Show, Generic, ToJSON)
+
+emptyStats :: Stats
+emptyStats = Stats 0 0 0 0 0 0 0 0 0 0 0 0 0
+
+addStats :: (Stats -> Stats) -> Session t -> Session t
+addStats f s = s { stats = f s.stats }
+
+sessionStats :: Session t -> StatsView
+sessionStats s = StatsView s.curStep (Map.size s.snapshots) s.stats
+
+renderStats :: StatsView -> Text
+renderStats v = T.unlines
+  [ "step " <> tshow v.step <> ", " <> tshow v.snapshotCount <> " snapshots"
+  , "commands:  " <> tshow c.commands <> " in " <> secs c.commandSecs
+  , "opcodes:   " <> tshow c.opcodes <> " executed, " <> tshow c.replayedOpcodes <> " of them to go back"
+  , "queries:   " <> tshow c.queries <> " in " <> secs c.querySecs <> " (" <> tshow c.branchQueries <> " branch, "
+      <> tshow c.solutionQueries <> " solutions, " <> tshow c.fetchQueries <> " fetch, " <> tshow c.otherQueries <> " other)"
+  , "branches:  " <> tshow c.branchesOffered <> " offered, " <> tshow c.branchesTaken <> " taken"
+  , "breakpoint hits: " <> tshow c.breakpointHits
+  ]
+  where
+    c = v.counters
+    secs x = T.pack (showFFloat (Just 3) x "s")
 
 snapshotInterval :: Int
 snapshotInterval = 50
@@ -158,7 +214,8 @@ newSession dapp vm0 = do
   pure Session
     { vm = vm0, curStep = 0, snapshots = Map.singleton 0 snap, pending = Nothing
     , lastCond = Nothing, taken = [], bps = [], dapp = dapp
-    , note = "Started. Type 'help' for commands.", out = Nothing, stepLimit = maxRunSteps }
+    , note = "Started. Type 'help' for commands.", out = Nothing, stepLimit = maxRunSteps
+    , stats = emptyStats }
 
 -- | Memory is a mutable vector, so a VM must be copied before it is kept around
 cloneVM :: forall t. VM t -> ST RealWorld (VM t)
@@ -191,7 +248,7 @@ stepOnce fetcher s
       conf <- readConfig
       -- merging would swallow both sides of a branch into one step
       vm' <- liftIO $ stToIO $ execStateT (exec1 conf { mergeMaxBudget = 0 }) s.vm
-      resolve fetcher False s { vm = vm', curStep = s.curStep + 1 }
+      resolve fetcher False $ addStats (\st -> st { opcodes = st.opcodes + 1 }) s { vm = vm', curStep = s.curStep + 1 }
 
 resolve :: (App m, Debuggable t) => Fetch.Fetcher t m -> Bool -> Session t -> m (Session t)
 resolve fetcher queried s = case s.vm.result of
@@ -200,10 +257,19 @@ resolve fetcher queried s = case s.vm.result of
       let cond = case q of
             PleaseAskSMT c _ _ -> Just c
             _ -> s.lastCond
+      t0 <- liftIO getMonotonicTime
       m <- fetcher q
       vm' <- liftIO $ stToIO $ execStateT m s.vm
-      resolve fetcher True s { vm = vm', lastCond = cond }
-    Right p -> pure s { pending = Just p }
+      t1 <- liftIO getMonotonicTime
+      let count st = case q of
+            PleaseAskSMT {} -> st { branchQueries = st.branchQueries + 1 }
+            PleaseGetSols {} -> st { solutionQueries = st.solutionQueries + 1 }
+            PleaseFetchContract {} -> st { fetchQueries = st.fetchQueries + 1 }
+            PleaseFetchSlot {} -> st { fetchQueries = st.fetchQueries + 1 }
+            _ -> st { otherQueries = st.otherQueries + 1 }
+      resolve fetcher True $ addStats (\st -> count st { queries = st.queries + 1, querySecs = st.querySecs + t1 - t0 })
+        s { vm = vm', lastCond = cond }
+    Right p -> pure $ addStats (\st -> st { branchesOffered = st.branchesOffered + 1 }) s { pending = Just p }
   _ | queried || s.curStep `mod` snapshotInterval == 0 -> do
         snap <- liftIO $ stToIO $ cloneVM s.vm
         pure s { snapshots = Map.insert s.curStep snap s.snapshots }
@@ -224,7 +290,8 @@ choose fetcher arg s = case s.pending of
       Just (m, desc) -> do
         vm' <- liftIO $ stToIO $ execStateT m s.vm { result = Nothing, exploreDepth = s.vm.exploreDepth + 1 }
         let what = maybe "" (\c -> " for condition " <> clip 200 (formatExpr c)) cond
-        s' <- resolve fetcher True s { vm = vm', pending = Nothing, taken = (s.curStep, desc) : s.taken }
+        s' <- resolve fetcher True $ addStats (\st -> st { branchesTaken = st.branchesTaken + 1 })
+                s { vm = vm', pending = Nothing, taken = (s.curStep, desc) : s.taken }
         pure s' { note = "Took branch " <> desc <> what <> "." }
 
 branchHint :: BranchContext -> Text
@@ -246,7 +313,7 @@ runUntil fetcher limit p = go 0
       | otherwise = do
           s' <- stepOnce fetcher s
           case findBreak s' of
-            Just i -> pure (s', StopBreak i)
+            Just i -> pure (addStats (\st -> st { breakpointHits = st.breakpointHits + 1 }) s', StopBreak i)
             _ | p s' -> pure (s', StopCond)
               | otherwise -> go (n + 1) s'
 
@@ -270,12 +337,16 @@ stopMessage s = \case
 
 backTo :: (App m, Debuggable t) => Fetch.Fetcher t m -> Int -> Session t -> m (Session t)
 backTo fetcher target s = do
-  let snaps = Map.filterWithKey (\i _ -> i <= target) s.snapshots
+  -- a step that took a branch is snapshotted after the choice, so restoring
+  -- it would skip the branch: replay that step to offer the branch again
+  let chosenAt = target `elem` map fst s.taken
+      snaps = Map.filterWithKey (\i _ -> i < target || (i == target && not chosenAt)) s.snapshots
       (k, snap) = fromMaybe (internalError "no initial snapshot") (Map.lookupMax snaps)
   vm <- liftIO $ stToIO $ cloneVM snap
   let s0 = s { vm = vm, curStep = k, snapshots = snaps, pending = Nothing, lastCond = Nothing
              , taken = filter ((< target) . fst) s.taken }
-  replay (target - k) s0
+  s' <- replay (target - k) s0
+  pure $ addStats (\st -> st { replayedOpcodes = st.replayedOpcodes + st.opcodes - s.stats.opcodes }) s'
   where
     replay 0 s' = pure s'
     replay n s' = stepOnce fetcher s' >>= replay (n - 1)
@@ -283,9 +354,13 @@ backTo fetcher target s = do
 -- * Commands
 
 runCommandText :: (App m, Debuggable t) => Fetch.Fetcher t m -> Text -> Session t -> m (Session t)
-runCommandText fetcher line s = case parseCommand line of
-  Left err -> pure s { note = err, out = Nothing }
-  Right cmd -> runCommand fetcher cmd s
+runCommandText fetcher line s = do
+  t0 <- liftIO getMonotonicTime
+  s' <- case parseCommand line of
+    Left err -> pure s { note = err, out = Nothing }
+    Right cmd -> runCommand fetcher cmd s
+  t1 <- liftIO getMonotonicTime
+  pure $ addStats (\st -> st { commands = st.commands + 1, commandSecs = st.commandSecs + t1 - t0 }) s'
 
 runCommand :: (App m, Debuggable t) => Fetch.Fetcher t m -> Command -> Session t -> m (Session t)
 runCommand fetcher cmd s0 = let s = s0 { note = "", out = Nothing } in case cmd of
@@ -347,6 +422,7 @@ runCommand fetcher cmd s0 = let s = s0 { note = "", out = Nothing } in case cmd 
   ShowTrace -> pure s { out = Just (traceText s.dapp s.vm) }
   ShowPathConds -> pure s { out = Just $ if null s.vm.constraints then "No path conditions."
                         else T.unlines (map formatProp (reverse s.vm.constraints)) }
+  ShowStats -> pure s { out = Just (renderStats (sessionStats s)) }
   Help -> pure s { out = Just commandHelp }
   Refresh -> pure s
   where
@@ -387,6 +463,7 @@ parseCommand line = case T.words (T.strip line) of
     ("storage", []) -> Right ShowStorage
     ("calldata", []) -> Right ShowCalldata
     ("trace", []) -> Right ShowTrace
+    ("stats", []) -> Right ShowStats
     (w, []) | w `elem` ["pathconds", "pc", "constraints"] -> Right ShowPathConds
     (w, []) | w `elem` ["h", "help", "?"] -> Right Help
     (w, []) | w `elem` ["show", "state"] -> Right Refresh
@@ -426,6 +503,7 @@ commandHelp = T.unlines
   , "calldata              calldata of the current frame"
   , "trace                 call trace so far"
   , "pathconds             path conditions so far"
+  , "stats                 what the session has done: commands, opcodes, solver queries, branches"
   , "show                  just show the current state"
   , "quit             (q)  stop the debugger (hevm-debug; 'detach' leaves it running)"
   ]

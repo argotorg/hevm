@@ -80,6 +80,54 @@ tests = testGroup "Debugger"
       liftIO $ do
         assertEqual "other side" 0x0b vF.pc
         assertEqual "halted" "halted" vF.status
+  , testCase "back-to-branch-offers-it-again" $ runEnv testEnv $ withSymbolic branchCode $ \run s0 -> do
+      s1 <- run "continue" s0
+      v1 <- liftIO $ mkView s1
+      v2 <- run "branch true" s1 >>= run "step" >>= run "back" >>= liftIO . mkView
+      liftIO $ do
+        assertEqual "same step" v1.step v2.step
+        assertEqual "branch pending again" "branch" v2.status
+        assertEqual "same pc" v1.pc v2.pc
+        assertEqual "choice undone" [] v2.choices
+        assertEqual "same path conditions" v1.pathConditions v2.pathConditions
+      v3 <- run "branch true" s1 >>= run "step" >>= run "back" >>= run "branch false" >>= run "continue" >>= liftIO . mkView
+      liftIO $ assertEqual "the other side can be taken" 0x0b v3.pc
+  , testCase "stats-concrete" $ runEnv testEnv $ withConcrete loopCode $ \run s0 -> do
+      s1 <- run "step 300" s0
+      let c1 = (sessionStats s1).counters
+      liftIO $ do
+        assertEqual "opcodes" 300 c1.opcodes
+        assertEqual "nothing replayed" 0 c1.replayedOpcodes
+        assertEqual "no queries" 0 c1.queries
+        assertEqual "one command" 1 c1.commands
+      -- the nearest snapshot to step 290 is at 250
+      s2 <- run "back 10" s1
+      let c2 = (sessionStats s2).counters
+      liftIO $ do
+        assertEqual "replayed from the snapshot" 40 c2.replayedOpcodes
+        assertEqual "opcodes include the replay" 340 c2.opcodes
+      s3 <- run "break op MSTORE" s2 >>= run "restart" >>= run "continue" >>= run "continue"
+      let v3 = sessionStats s3
+      liftIO $ do
+        assertEqual "two breakpoint hits" 2 v3.counters.breakpointHits
+        assertEqual "commands" 6 v3.counters.commands
+        assertBool "snapshots kept" (v3.snapshotCount >= 1)
+  , testCase "stats-symbolic" $ runEnv testEnv $ withSymbolic branchCode $ \run s0 -> do
+      s1 <- run "continue" s0
+      let c1 = (sessionStats s1).counters
+      liftIO $ do
+        assertEqual "one branch query" 1 c1.branchQueries
+        assertEqual "one branch offered" 1 c1.branchesOffered
+        assertEqual "none taken" 0 c1.branchesTaken
+      s2 <- run "branch true" s1 >>= run "continue"
+      let c2 = (sessionStats s2).counters
+      liftIO $ do
+        assertEqual "the second branch was queried too" 2 c2.branchQueries
+        assertEqual "but decided by the solver" 1 c2.branchesOffered
+        assertEqual "one taken" 1 c2.branchesTaken
+        assertBool "query time" (c2.querySecs > 0)
+      v <- run "stats" s2 >>= liftIO . mkView
+      liftIO $ assertBool "stats command" (maybe False ("2 branch" `T.isInfixOf`) v.output)
   , testCase "http" $ runEnv testEnv $ withSolvers Bitwuzla 1 Nothing defMemLimit $ \solvers -> do
       vm <- liftIO $ concreteVM loopCode
       sess <- liftIO $ newSession emptyDapp vm
@@ -97,6 +145,16 @@ tests = testGroup "Debugger"
         assertEqual "stepped back" (Just (JSON.Number 3)) (KM.lookup "step" st'')
         txt <- http port "GET" "/state?format=text" ""
         assertBool "text view" ("== step 3" `BS.isInfixOf` txt)
+        stats <- httpJSON port "GET" "/stats" ""
+        let counter k = KM.lookup "counters" stats >>= \case
+              JSON.Object o -> KM.lookup k o
+              _ -> Nothing
+        assertEqual "stats step" (Just (JSON.Number 3)) (KM.lookup "step" stats)
+        assertEqual "stats commands" (Just (JSON.Number 2)) (counter "commands")
+        -- 5 forward, then 3 replayed from step 0 to go back to step 3
+        assertEqual "stats opcodes" (Just (JSON.Number 8)) (counter "opcodes")
+        statsTxt <- http port "GET" "/stats?format=text" ""
+        assertBool "text stats" ("opcodes:" `BS.isInfixOf` statsTxt)
         _ <- http port "POST" "/quit" ""
         takeMVar done
   ]

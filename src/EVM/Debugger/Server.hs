@@ -146,6 +146,11 @@ route run sessVar done req = case (req.method, req.path) of
   ("GET", "/") -> pure $ Response 200 "text/plain; charset=utf-8" (encodeUtf8 apiHelp)
   ("GET", "/help") -> json $ JSON.object [ "commands" .= T.lines commandHelp, "api" .= T.lines apiHelp ]
   ("GET", "/state") -> readMVar sessVar >>= viewResponse
+  ("GET", "/stats") -> do
+    v <- sessionStats <$> readMVar sessVar
+    if textFormat
+      then pure $ Response 200 "text/plain; charset=utf-8" (encodeUtf8 (renderStats v))
+      else json v
   ("POST", "/command") -> run commandLine >>= viewResponse
   ("POST", "/quit") -> do
     void $ tryPutMVar done ()
@@ -171,6 +176,7 @@ apiHelp = T.unlines
   , "GET  /state            current view"
   , "POST /command          run a command, returns the new view"
   , "                       body: {\"command\": \"step 10\"} or the bare command text"
+  , "GET  /stats            counters of what the session has done"
   , "GET  /help             commands and API"
   , "POST /quit             stop the debugger"
   , ""
