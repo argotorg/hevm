@@ -34,13 +34,15 @@ import Options.Applicative as Options
 import Paths_hevm qualified as Paths
 import System.Directory (withCurrentDirectory, getCurrentDirectory, doesDirectoryExist, makeAbsolute, findExecutable)
 import System.FilePath ((</>))
-import System.Exit (exitFailure, exitWith, ExitCode(..))
+import System.Exit (exitFailure, exitSuccess, exitWith, ExitCode(..))
 import Data.List.Split (splitOn)
 import Text.Read (readMaybe)
 import JSONL (jsonlBuilder, jsonLine)
 
 import EVM (initialContract, abstractContract, makeVm, defaultVMOpts)
 import EVM.ABI (Sig(..))
+import EVM.Debugger (newSession)
+import EVM.Debugger.Server (serveSession, announce, defaultDebuggerPort)
 import EVM.Dapp (dappInfo, DappInfo, emptyDapp, TestMethodInfo(..))
 import EVM.Expr qualified as Expr
 import EVM.Concrete qualified as Concrete
@@ -110,6 +112,8 @@ data CommonOptions = CommonOptions
   , progressLog   ::Maybe FilePath
   , progressExprs ::Bool
   , noProgress    ::Bool
+  , debugger      ::Bool
+  , debuggerPort  ::Int
   }
 
 commonOptions :: Parser CommonOptions
@@ -147,6 +151,8 @@ commonOptions = CommonOptions
   <*> (optional $ strOption $ long "progress-log" <> help "Write a JSONL log of interpreter and solver progress to this file (default with --verb 3: hevm-progress.jsonl)")
   <*> (switch $ long "progress-exprs" <> help "Also log the expressions and path conditions sent to the solver in the progress log (implied by --verb 4)")
   <*> (switch $ long "no-progress" <> help "Don't show the live status line on stderr")
+  <*> (switch $ long "debugger" <> help "Start the interactive debugger, served over HTTP on localhost. Connect with hevm-debug")
+  <*> (option auto $ long "debugger-port" <> showDefault <> value defaultDebuggerPort <> help "Port of the interactive debugger, 0 picks a free one")
 
 data CommonExecOptions = CommonExecOptions
   { address       ::Maybe Addr
@@ -339,6 +345,9 @@ main = do
       root <- getRoot cOpts
       withCurrentDirectory root $ runEnv env $ withProgress (progressOpts env cOpts) $ symbCheck cFileOpts symbOpts cExecOpts cOpts
     Equal eqOpts cOpts -> do
+      when cOpts.debugger $ do
+        putStrLn "Error: --debugger is not supported for equivalence checking"
+        exitFailure
       env <- makeEnv cOpts
       runEnv env $ withProgress (progressOpts env cOpts) $ equivalence eqOpts cOpts
     Test testOpts cOpts -> do
@@ -356,6 +365,13 @@ main = do
           Right out -> do
             -- TODO: which functions here actually require a BuildOutput, and which can take it as a Maybe?
             unitTestOpts <- unitTestOptions testOpts cOpts solvers (Just out)
+            when cOpts.debugger $ do
+              debugTestVm unitTestOpts out >>= \case
+                Left err -> liftIO $ T.putStrLn err >> exitFailure
+                Right vm -> do
+                  sess <- liftIO $ newSession unitTestOpts.dapp vm
+                  serveSession (Fetch.oracle solvers (Just unitTestOpts.sess) unitTestOpts.rpcInfo) cOpts.debuggerPort announce sess
+              liftIO exitSuccess
             res <- unitTest unitTestOpts out
             Progress.stopStatus
             liftIO $ forM_ ((,) <$> cOpts.cacheDir <*> testOpts.number) $ \(dir, fetchedBlock) -> do
@@ -371,7 +387,7 @@ main = do
     progressOpts env cOpts = ProgressOpts
       { logFile = env.config.progressLog
       , logExprs = env.config.progressExprs
-      , statusLine = Prelude.not cOpts.noProgress && Prelude.not cOpts.debug
+      , statusLine = Prelude.not cOpts.noProgress && Prelude.not cOpts.debug && Prelude.not cOpts.debugger
       }
     makeEnv :: CommonOptions -> IO Env
     makeEnv cOpts = do
@@ -509,15 +525,15 @@ getSolver s = case T.unpack s of
           <> "Install it, or pick another one with --solver (bitwuzla, z3, or cvc5)."
         exitFailure
 
-getSrcInfo :: App m => ExecOptions -> CommonOptions -> m DappInfo
-getSrcInfo execOpts cOpts = do
+getSrcInfo :: App m => ProjectType -> CommonOptions -> m DappInfo
+getSrcInfo projectType cOpts = do
   root <- liftIO $ getRoot cOpts
   conf <- readConfig
   liftIO $ withCurrentDirectory root $ do
     outExists <- doesDirectoryExist (root System.FilePath.</> "out")
     if outExists
     then do
-      buildOutput <- runEnv Env {config = conf} $ readBuildOutput root execOpts.projectType
+      buildOutput <- runEnv Env {config = conf} $ readBuildOutput root projectType
       case buildOutput of
         Left _ -> pure emptyDapp
         Right o -> pure $ dappInfo root o
@@ -580,6 +596,11 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = do
                             , rpcInfo = Fetch.RpcInfo blockUrlInfo
                             }
     let fetcher = Fetch.oracle solvers (Just sess) veriOpts.rpcInfo
+    when cOpts.debugger $ do
+      dapp <- getSrcInfo sOpts.projectType cOpts
+      dsess <- liftIO $ newSession dapp preState
+      serveSession fetcher cOpts.debuggerPort announce dsess
+      liftIO exitSuccess
     (expr, res) <- verify solvers fetcher veriOpts preState (checkAssertions errCodes) Nothing
     Progress.stopStatus
     liftIO $ forM_ ((,) <$> cOpts.cacheDir <*> cExecOpts.block) $ \(dir, block) -> do
@@ -647,7 +668,7 @@ areAnyPrefixOf prefixes t = any (flip T.isPrefixOf t) prefixes
 
 launchExec :: App m => CommonFileOptions -> ExecOptions -> CommonExecOptions -> CommonOptions -> m ()
 launchExec cFileOpts execOpts cExecOpts cOpts = do
-  dapp <- getSrcInfo execOpts cOpts
+  dapp <- getSrcInfo execOpts.projectType cOpts
   sess <- Fetch.mkSession cOpts.cacheDir cExecOpts.block
   vm <- vmFromCommand cOpts cExecOpts cFileOpts execOpts sess
   let
@@ -658,6 +679,10 @@ launchExec cFileOpts execOpts cExecOpts cOpts = do
   -- TODO: we shouldn't need solvers to execute this code
   withSolvers Z3 0 Nothing cOpts.smtMemory $ \solvers -> do
     let fetcher = Fetch.oracle solvers (Just sess) rpcDat
+    when cOpts.debugger $ do
+      dsess <- liftIO $ newSession dapp vm
+      serveSession fetcher cOpts.debuggerPort announce dsess
+      liftIO exitSuccess
     vm' <- if execOpts.jsonTrace
            then do
              (vm', (_, traces)) <- runStateT (interpretWithTrace fetcher EVM.Stepper.runFully) (vm, [])

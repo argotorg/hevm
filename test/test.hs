@@ -90,6 +90,7 @@ import EVM.Equivalence.EquivalenceTests qualified as EquivalenceTests
 import EVM.Equivalence.EquivFuzz qualified as EquivFuzz
 import EVM.Fetch.RpcFuzz qualified as RpcFuzz
 import EVM.SymExec.SymExecTests qualified as SymExecTests
+import EVM.Debugger.DebuggerTests qualified as DebuggerTests
 import EVM.Test.FoundryTests qualified as FoundryTests
 
 testEnv :: Env
@@ -242,6 +243,7 @@ tests = testGroup "hevm"
   , HashConsTests.tests
   , ConcreteExecutionTests.tests
   , SymExecTests.tests
+  , DebuggerTests.tests
   , EquivalenceTests.tests
   , EquivFuzz.tests
   , RpcFuzz.tests
