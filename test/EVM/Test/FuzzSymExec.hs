@@ -12,7 +12,7 @@ leaves must select exactly one leaf, whose outcome must match geth's. For other
 leaves, the solver's model of their path condition is replayed in geth, and
 must reach that leaf.
 -}
-module EVM.Test.FuzzSymExec (tests) where
+module EVM.Test.FuzzSymExec (tests, TestCase, concreteTestVm, symbolicTestVm) where
 
 import Control.Monad (forM, forM_, unless, when)
 import Control.Monad.IO.Unlift
@@ -859,6 +859,14 @@ runHevm solvers url c i = do
         Just (Lit b) -> unsafeInto c.gasLimit - (b - originBalance)
         b -> internalError $ "origin balance: " <> show b
   pure $ HevmRun trace out stores (reverse vm.logs) gasUsed
+
+-- | The VMs 'checkCase' starts from, for other fuzzers to run
+concreteTestVm :: TestCase -> ST RealWorld (VM Concrete)
+concreteTestVm c = mkVm False gas c (concreteVMInputs c.inputs)
+  where gas = unsafeInto c.gasLimit - EVM.Transaction.txGasCost feeSchedule (mkTx c c.inputs)
+
+symbolicTestVm :: TestCase -> ST RealWorld (VM Symbolic)
+symbolicTestVm c = set #constraints symProps <$> mkVm False () c symbolicVMInputs
 
 symIterConf :: IterConfig
 symIterConf = IterConfig { maxIter = Just 6, askSmtIters = 1, loopHeuristic = Naive }

@@ -22,6 +22,7 @@ module EVM.Debugger
   , commandHelp
   , sessionVM
   , sessionStep
+  , hasPendingBranch
   , isHalted
   ) where
 
@@ -147,6 +148,9 @@ sessionVM s = s.vm
 
 sessionStep :: Session t -> Int
 sessionStep s = s.curStep
+
+hasPendingBranch :: Session t -> Bool
+hasPendingBranch s = isJust s.pending
 
 newSession :: Debuggable t => DappInfo -> VM t -> IO (Session t)
 newSession dapp vm0 = do
@@ -388,10 +392,17 @@ parseCommand line = case T.words (T.strip line) of
     (w, []) | w `elem` ["show", "state"] -> Right Refresh
     _ -> Left $ "Unknown command '" <> T.strip line <> "'. Type 'help' for commands."
   where
+    num :: Text -> Either Text Int
     num t = case T.stripPrefix "0x" t of
-      Just h | [(v, "")] <- reads ("0x" <> T.unpack h) -> Right v
-      _ | T.all isDigit t, not (T.null t) -> Right (read (T.unpack t))
+      Just h | [(v, "")] <- reads ("0x" <> T.unpack h) -> inRange v
+      _ | T.all isDigit t, not (T.null t) -> inRange (read (T.unpack t))
       _ -> Left $ "Not a number: " <> t
+      where
+        -- parsed as Integer, as Int would silently wrap around
+        inRange :: Integer -> Either Text Int
+        inRange v
+          | v <= 1000000000000 = Right (fromInteger v)
+          | otherwise = Left $ "Number too large: " <> t
 
 commandHelp :: Text
 commandHelp = T.unlines
