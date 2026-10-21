@@ -106,6 +106,18 @@ tests = testGroup "Debugger"
         assertEqual "same pc" vFresh.pc vBack.pc
         assertEqual "same stack" vFresh.stack vBack.stack
         assertEqual "no branch" "running" vBack.status
+  , testCase "fork-offers-feasible-values-only" $ runEnv testEnv $ withSymbolic forkLoopCode $ \run s0 -> do
+      -- a loop over x & 3 with x & 1 set: its second test forks on values of x & 3, one of them infeasible
+      let walk = run "continue" s0 >>= run "branch true" >>= run "continue" >>= run "branch true" >>= run "continue"
+      sSolver <- walk
+      vSolver <- liftIO $ mkView sSolver
+      liftIO $ do
+        assertEqual "the solver's sides run to the end" "halted" vSolver.status
+        assertEqual "one infeasible value hidden" 1 (sessionStats sSolver).counters.infeasibleOptions
+      sExplorer <- run "branches explorer" s0 >>= \s -> run "continue" s >>= run "branch true" >>= run "continue"
+        >>= run "branch true" >>= run "continue"
+      vExplorer <- liftIO $ mkView sExplorer
+      liftIO $ assertEqual "exploration forks on both values" (Just 2) (length . (.options) <$> vExplorer.branch)
   , testCase "stats-concrete" $ runEnv testEnv $ withConcrete loopCode $ \run s0 -> do
       s1 <- run "step 300" s0
       let c1 = (sessionStats s1).counters
@@ -186,6 +198,12 @@ branchCode :: ByteString
 branchCode = BS.pack
   [ 0x60, 0x00, 0x35, 0x80, 0x60, 0x05, 0x14, 0x60, 0x0c, 0x57, 0x50, 0x00
   , 0x5b, 0x60, 0x05, 0x14, 0x60, 0x15, 0x57, 0xfe, 0x00, 0x5b, 0x00 ]
+
+forkLoopCode :: ByteString
+forkLoopCode = BS.pack
+  [ 0x5b, 0x60, 0x20, 0x35, 0x60, 0x01, 0x16, 0x61, 0x00, 0x0b, 0x57, 0x5b, 0x5b, 0x63, 0xc0, 0xde, 0x00, 0x00, 0x5c
+  , 0x60, 0x01, 0x01, 0x80, 0x63, 0xc0, 0xde, 0x00, 0x00, 0x5d, 0x60, 0x20, 0x35, 0x60, 0x03, 0x16, 0x11, 0x61, 0x00
+  , 0x0c, 0x57, 0x5b, 0x5b, 0x5b, 0x5b ]
 
 -- memory made symbolic, then x = 5, and if (calldata[0] != 0) x = x + 3: exploration merges it
 mergeCode :: ByteString

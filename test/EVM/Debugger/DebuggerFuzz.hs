@@ -149,7 +149,7 @@ statsProblems before after =
     ints = [ ("opcodes", (.opcodes)), ("replayedOpcodes", (.replayedOpcodes)), ("queries", (.queries))
            , ("branchQueries", (.branchQueries)), ("solutionQueries", (.solutionQueries)), ("fetchQueries", (.fetchQueries))
            , ("otherQueries", (.otherQueries)), ("branchesOffered", (.branchesOffered)), ("branchesTaken", (.branchesTaken))
-           , ("staticDecisions", (.staticDecisions))
+           , ("staticDecisions", (.staticDecisions)), ("infeasibleOptions", (.infeasibleOptions))
            , ("breakpointHits", (.breakpointHits)) ]
 
 withSession :: (MonadUnliftIO m, ReadConfig m, TTY m) => (SolverGroup -> m a) -> m a

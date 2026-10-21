@@ -1375,7 +1375,7 @@ lockstepCase solvers mode merging c = Progress.withProgressLogFromEnv "lockstep"
             | otherwise = pure (Left (where_ <> msg <> "\nlast steps, oldest first:\n" <> unlines (reverse acc.trail)))
       cmp <- liftIO $ compareStates c prevOp vc vs
       case cmp of
-        _ | Just (Unfinished p) <- vs.result -> stopWith ("symbolic unfinished: " <> takeWhile (/= ' ') (show p))
+        _ | Just (Unfinished p) <- vs.result -> stopWith ("symbolic unfinished: " <> unfinishedReason p)
         Left msg -> mismatch msg
         Right (n, o) -> do
           let acc' = acc { compared = acc.compared + n, opaque = acc.opaque + o }
@@ -1483,6 +1483,12 @@ lockstepCase solvers mode merging c = Progress.withProgressLogFromEnv "lockstep"
       RuntimeCode (ConcreteRuntimeCode bs) | vm.state.pc < BS.length bs -> BS.index bs vm.state.pc
       InitCode bs _ | vm.state.pc < BS.length bs -> BS.index bs vm.state.pc
       _ -> 0
+
+-- | Why a symbolic run gave up, briefly
+unfinishedReason :: PartialExec -> String
+unfinishedReason = \case
+  UnexpectedSymbolicArg { opcode, msg } -> opcode <> ": " <> msg
+  p -> takeWhile (/= ' ') (show p)
 
 -- | Where a run halted, and how
 endOf :: VM t -> (Int, Int, String)
@@ -1687,7 +1693,9 @@ lockstepTests :: TestTree
 lockstepTests = testGroup "lockstep-fuzz"
   [ testProperty "model-guided-lockstep" $ \(c :: TestCase) -> forAll (vectorOf 50 (chooseInt (0, 7))) $ \picks ->
       forAll (elements [SolverBranches, ExplorerBranches, CheckedBranches]) $ \mode ->
-      within 300_000_000 $ ioProperty $ runEnv testEnv $ withSolvers Z3 1 (Just 10) defMemLimit $ \solvers ->
+      within 300_000_000 $ ioProperty $ runEnv testEnv $ withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> do
+        liftIO $ lookupEnv "HEVM_FUZZ_CASE_FILE" >>= mapM_ (\f -> writeFile f $ show c <> "\npicks: " <> show picks
+          <> "\nmode: " <> show mode <> "\nreproduce with: " <> reproduction c c.inputs)
         modelGuided solvers mode c picks
   , -- the case from the HEVM_FUZZ_* variables that a failure prints, in every branch mode
     test "lockstep-from-env" $ liftIO caseFromEnv >>= mapM_ (\c ->

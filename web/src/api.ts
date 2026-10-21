@@ -58,6 +58,7 @@ export const stats = obj({
     staticWrong: num,
     staticMissed: num,
     staticInconclusive: num,
+    infeasibleOptions: num,
     breakpointHits: num,
   }),
 });

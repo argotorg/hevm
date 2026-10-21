@@ -121,6 +121,7 @@ var stats = obj({
     staticWrong: num,
     staticMissed: num,
     staticInconclusive: num,
+    infeasibleOptions: num,
     breakpointHits: num
   })
 });
@@ -354,7 +355,7 @@ function statsRows(s) {
     ["commands", `${c.commands} in ${fixed(c.commandSecs, 3)}s`],
     ["solver queries", `${c.queries} in ${fixed(c.querySecs, 3)}s`],
     ["  by kind", `${c.branchQueries} branch \xB7 ${c.solutionQueries} solutions \xB7 ${c.fetchQueries} fetch \xB7 ${c.otherQueries} other`],
-    ["branches", `${c.branchesOffered} offered \xB7 ${c.branchesTaken} taken`],
+    ["branches", `${c.branchesOffered} offered \xB7 ${c.branchesTaken} taken \xB7 ${c.infeasibleOptions} infeasible values hidden`],
     ["static decisions", `${c.staticDecisions} (${c.staticWrong} wrong \xB7 ${c.staticMissed} missed \xB7 ${c.staticInconclusive} unchecked)`],
     ["breakpoint hits", String(c.breakpointHits)],
     ["snapshots", String(s.snapshotCount)]

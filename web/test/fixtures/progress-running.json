@@ -1,12 +1,12 @@
 {
-    "elapsedSecs": 4.830964200118615e-2,
+    "elapsedSecs": 6.743270799961465e-2,
     "hottest": [
         {
             "addr": "SymAddr \"entrypoint\"",
             "forks": 0,
             "pc": 9,
             "queries": 2,
-            "solveSecs": 4.696416000115278e-2
+            "solveSecs": 6.579286600026535e-2
         }
     ],
     "paths": {
@@ -25,8 +25,8 @@
                 "count": 2,
                 "kind": "sat",
                 "result": "sat (PhasePlain)",
-                "solveSecs": 4.696416000115278e-2,
-                "waitSecs": 6.331899930955842e-5
+                "solveSecs": 6.579286600026535e-2,
+                "waitSecs": 9.238200073014013e-5
             }
         ],
         "done": 2,
@@ -38,9 +38,9 @@
         {
             "addr": "SymAddr \"entrypoint\"",
             "pc": 9,
-            "secs": 4.8127801001101034e-2,
+            "secs": 6.722293500024534e-2,
             "step": 7,
-            "thread": "ThreadId 90"
+            "thread": "ThreadId 98"
         }
     ]
 }

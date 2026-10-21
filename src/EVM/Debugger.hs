@@ -33,7 +33,7 @@ module EVM.Debugger
   , isHalted
   ) where
 
-import Control.Monad (forM)
+import Control.Monad (filterM, forM)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.ST (ST, RealWorld, stToIO)
 import Control.Monad.State.Strict (execStateT)
@@ -69,7 +69,7 @@ import EVM.Dapp (DappInfo(..), srcMap, srcMapCode)
 import EVM.Effects
 import EVM.Expr (maybeLitByteSimp, maybeLitWordSimp)
 import EVM.Expr qualified as Expr
-import EVM.SymExec (staticBranch, checkStaticBranch, StaticCheck(..))
+import EVM.SymExec (staticBranch, checkStaticBranch, StaticCheck(..), askSat)
 import EVM.Fetch qualified as Fetch
 import EVM.Format (formatExpr, formatProp, traceDocForest)
 import EVM.Op (intToOpName)
@@ -186,6 +186,8 @@ data Stats = Stats
   , staticWrong     :: Int
   , staticMissed    :: Int
   , staticInconclusive :: Int
+  -- | values of multi-way branches not offered, as the solver finds them infeasible
+  , infeasibleOptions :: Int
   , breakpointHits  :: Int
   }
   deriving (Eq, Show, Generic, ToJSON)
@@ -198,7 +200,7 @@ data StatsView = StatsView
   deriving (Show, Generic, ToJSON)
 
 emptyStats :: Stats
-emptyStats = Stats 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+emptyStats = Stats 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
 
 addStats :: (Stats -> Stats) -> Session t -> Session t
 addStats f s = s { stats = f s.stats }
@@ -214,6 +216,7 @@ renderStats v = T.unlines
   , "queries:   " <> tshow c.queries <> " in " <> secs c.querySecs <> " (" <> tshow c.branchQueries <> " branch, "
       <> tshow c.solutionQueries <> " solutions, " <> tshow c.fetchQueries <> " fetch, " <> tshow c.otherQueries <> " other)"
   , "branches:  " <> tshow c.branchesOffered <> " offered, " <> tshow c.branchesTaken <> " taken, "
+      <> tshow c.infeasibleOptions <> " infeasible values not offered, "
       <> tshow c.staticDecisions <> " decided without the solver"
   , "checked:   " <> tshow c.staticWrong <> " static decisions the solver contradicts, "
       <> tshow c.staticMissed <> " branches only the solver could decide, "
@@ -335,10 +338,27 @@ resolve fetcher queried s = case s.vm.result of
             _ -> st { otherQueries = st.otherQueries + 1 }
       resolve fetcher True $ addStats (\st -> count st { queries = st.queries + 1, querySecs = st.querySecs + t1 - t0 })
         s { vm = vm', lastCond = cond }
-    Right p@(Pending c ctx) -> do
-      Progress.emit "debug-branch-offered" $ where_ s <> ["options" .= branchOptionCount ctx]
-      Progress.emitExprs "debug-branch-condition" $ where_ s <> maybe [] (Progress.bigText "cond" . formatExpr) c
-      pure $ addStats (\st -> st { branchesOffered = st.branchesOffered + 1 }) s { pending = Just p }
+    Right (Pending c ctx0) -> do
+      -- forks over the values of a subterm do not check them against the path
+      -- conditions: in solver mode only the feasible ones are offered
+      (ctx, hidden) <- case ctx0 of
+        PleaseRunAll vals k | s.branchMode == SolverBranches -> do
+          feasible <- filterM (\v -> do
+            vm0 <- liftIO $ stToIO $ cloneVM s.vm
+            vmv <- liftIO $ stToIO $ execStateT (k v) (vm0 :: VM Symbolic) { result = Nothing }
+            (/= Just False) <$> askSat fetcher vmv vmv.constraints) vals
+          pure $ if null feasible then (ctx0, 0) else (PleaseRunAll feasible k, length vals - length feasible)
+        _ -> pure (ctx0, 0)
+      let s' = addStats (\st -> st { infeasibleOptions = st.infeasibleOptions + hidden }) s
+      case ctx of
+        PleaseRunAll [v] k -> do
+          Progress.emit "debug-branch-decided" $ where_ s <> ["value" .= formatExpr v, "hidden" .= hidden]
+          vm' <- liftIO $ stToIO $ execStateT (k v) s.vm { result = Nothing, exploreDepth = s.vm.exploreDepth + 1 }
+          resolve fetcher True s' { vm = vm', taken = (s.curStep, formatExpr v) : s.taken }
+        _ -> do
+          Progress.emit "debug-branch-offered" $ where_ s <> ["options" .= branchOptionCount ctx, "hidden" .= hidden]
+          Progress.emitExprs "debug-branch-condition" $ where_ s <> maybe [] (Progress.bigText "cond" . formatExpr) c
+          pure $ addStats (\st -> st { branchesOffered = st.branchesOffered + 1 }) s' { pending = Just (Pending c ctx) }
   _ | queried || s.curStep `mod` snapshotInterval == 0 -> do
         snap <- liftIO $ stToIO $ cloneVM s.vm
         pure s { snapshots = Map.insert s.curStep snap s.snapshots }

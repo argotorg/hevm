@@ -116,7 +116,7 @@ export function statsRows(s: StatsView): [string, string][] {
     ["commands", `${c.commands} in ${fixed(c.commandSecs, 3)}s`],
     ["solver queries", `${c.queries} in ${fixed(c.querySecs, 3)}s`],
     ["  by kind", `${c.branchQueries} branch · ${c.solutionQueries} solutions · ${c.fetchQueries} fetch · ${c.otherQueries} other`],
-    ["branches", `${c.branchesOffered} offered · ${c.branchesTaken} taken`],
+    ["branches", `${c.branchesOffered} offered · ${c.branchesTaken} taken · ${c.infeasibleOptions} infeasible values hidden`],
     ["static decisions", `${c.staticDecisions} (${c.staticWrong} wrong · ${c.staticMissed} missed · ${c.staticInconclusive} unchecked)`],
     ["breakpoint hits", String(c.breakpointHits)],
     ["snapshots", String(s.snapshotCount)],
