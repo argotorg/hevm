@@ -80,7 +80,7 @@ import EVM.Types hiding (Env)
 import EVM.Effects
 import EVM.Dapp (emptyDapp)
 import EVM.Debugger (Session, newSession, runCommand, Command(..), mkView, View(..), BranchView(..), sessionVM, isHalted, hasPendingBranch
-                    , BranchMode(..), setBranchMode, sessionStats, StatsView(..), Stats(..))
+                    , BranchMode(..), setBranchMode, setMerge, sessionStats, StatsView(..), Stats(..))
 import EVM.Tracing (interpretWithTrace, VMTraceStep(..))
 
 -- * Programs
@@ -505,10 +505,28 @@ genRefund = do
     , push 0, push k2, op 2 0 OpSstore
     , push k1, op 2 0 OpSstore ]
 
+-- | if (a calldata condition) { arithmetic on stack values }, which exploration
+-- merges into ITE values: memory must already be symbolic, the skipped code
+-- must have no side effects and leave the stack as high as it was
+genMergeable :: G [Item]
+genMergeable = do
+  symMem <- concat <$> sequence [push 0, op 1 1 OpCalldataload, push 0x40, op 2 0 OpMstore]
+  vals <- liftG (chooseInt (1, 3)) >>= \n -> concat <$> sequence (replicate n (liftG genWord >>= push))
+  cond <- genCalldataCond
+  modify (\s -> s { sdepth = s.sdepth - 1 })
+  l <- gets (.nextLabel)
+  modify (\s -> s { nextLabel = l + 1 })
+  k <- liftG $ chooseInt (1, 4)
+  body <- concat <$> sequence (replicate k (do
+    o <- liftG $ elements [OpAdd, OpXor, OpMul, OpSub, OpAnd, OpShl]
+    w <- liftG genWord
+    (<>) <$> push w <*> op 2 1 o))
+  pure (symMem <> vals <> cond <> [IJump True l] <> body <> [ILabel l])
+
 genBlock :: Bool -> G [Item]
 genBlock isMain = do
   inner <- liftG $ frequency $
-    [ (10, pure genStraight), (4, pure genBranch), (1, pure (pure [IJumpFwd False])), (1, pure genHalt)
+    [ (10, pure genStraight), (4, pure genBranch), (2, pure genMergeable), (1, pure (pure [IJumpFwd False])), (1, pure genHalt)
     , (1, pure genDeepStack), (2, pure genStorageWrite) ] <>
     (if isMain then [ (2, pure genLoop), (2, pure genCall), (2, pure genAccountOp), (1, pure genCreate)
                     , (1, pure genPrecompileCall), (1, pure genRefund) ] else [])
@@ -1324,6 +1342,7 @@ data Lockstep = Lockstep
   , static   :: (Int, Int) -- ^ branches decided without the solver, and those it could have decided
   , ended    :: Maybe (Int, Int, String) -- ^ pc, depth and kind of result, when both runs halted
   , ops      :: Set String -- ^ the opcodes stepped and compared after
+  , merges   :: Int -- ^ symbolic steps that merged a branch
   }
 
 maxLockstepSteps :: Int
@@ -1332,11 +1351,11 @@ maxLockstepSteps = 2000
 -- | Steps a concrete and a symbolic debugging session of the case side by side,
 -- taking the concrete run's side at every symbolic branch. After every step the
 -- symbolic state, with the concrete inputs substituted, must be the concrete one.
-lockstepCase :: App m => SolverGroup -> BranchMode -> TestCase -> m (Either String Lockstep)
-lockstepCase solvers mode c = Progress.withProgressLogFromEnv "lockstep" $ do
+lockstepCase :: App m => SolverGroup -> BranchMode -> Bool -> TestCase -> m (Either String Lockstep)
+lockstepCase solvers mode merging c = Progress.withProgressLogFromEnv "lockstep" $ do
   sc0 <- liftIO $ stToIO (concreteTestVm c) >>= newSession emptyDapp
-  ss0 <- liftIO $ setBranchMode mode <$> (stToIO (symbolicTestVm c) >>= newSession emptyDapp)
-  r <- go sc0 ss0 (Lockstep "" 0 0 0 0 0 [] (0, 0) Nothing mempty) Nothing
+  ss0 <- liftIO $ setMerge merging . setBranchMode mode <$> (stToIO (symbolicTestVm c) >>= newSession emptyDapp)
+  r <- go sc0 ss0 (Lockstep "" 0 0 0 0 0 [] (0, 0) Nothing mempty 0) Nothing
   Progress.emit "lockstep-end" $ case r of
     Left err -> ["failure" JSON..= T.pack err]
     Right l -> ["stopped" JSON..= T.pack l.stopped, "steps" JSON..= l.steps, "compared" JSON..= l.compared, "branches" JSON..= l.branches]
@@ -1367,8 +1386,14 @@ lockstepCase solvers mode c = Progress.withProgressLogFromEnv "lockstep" $ do
             _ | acc.steps >= maxLockstepSteps -> stopWith "step limit"
               | otherwise -> do
                   let opName' = intToOpName (fromIntegral (getOpW8' vc))
-                  sc' <- runCommand fetcher (Step 1) sc >>= settle (4 :: Int) vc
-                  picked <- runCommand fetcher (Step 1) ss >>= pickSide vs (sessionVM sc')
+                  sc1 <- runCommand fetcher (Step 1) sc >>= settle (4 :: Int) vc
+                  ss1 <- runCommand fetcher (Step 1) ss
+                  -- a merged branch runs one side's instructions in the symbolic step: the
+                  -- concrete run catches up to where the merge ended
+                  (sc', merged) <- if merging && not (hasPendingBranch ss1) && not (isHalted ss1) && not (atSame sc1 ss1)
+                    then catchUp (200 :: Int) ss1 sc1 <&> \sc2 -> if atSame sc2 ss1 then (sc2, True) else (sc1, False)
+                    else pure (sc1, False)
+                  picked <- if merged then pure (Right (ss1, 0, 0)) else pickSide vs (sessionVM sc') ss1
                   case picked of
                     -- a call to an address that stays symbolic goes to unknown code, which is
                     -- over-approximated rather than run
@@ -1396,6 +1421,7 @@ lockstepCase solvers mode c = Progress.withProgressLogFromEnv "lockstep" $ do
                           <> [ "branchesTaken" JSON..= took | took > 0 ] <> [ "sidesRetried" JSON..= tried | tried > 0 ]
                         let counters = (sessionStats ss'').counters
                         go sc' ss'' acc' { steps = acc.steps + 1, branches = acc.branches + took, retries = acc.retries + tried
+                                         , merges = acc.merges + if merged then 1 else 0
                                          , ops = Set.insert opName' acc.ops
                                          , trail = take 30 (entry : acc.trail)
                                          , static = (counters.staticDecisions, counters.staticMissed) } (Just opName')
@@ -1404,6 +1430,12 @@ lockstepCase solvers mode c = Progress.withProgressLogFromEnv "lockstep" $ do
     midInstruction :: VM t -> VM t -> Bool
     midInstruction before now = isNothing now.result && now.state.pc == before.state.pc
                                   && length now.frames == length before.frames
+    atSame :: Session Concrete -> Session Symbolic -> Bool
+    atSame a b = (sessionVM a).state.pc == (sessionVM b).state.pc && length (sessionVM a).frames == length (sessionVM b).frames
+    catchUp :: App m => Int -> Session Symbolic -> Session Concrete -> m (Session Concrete)
+    catchUp n target s
+      | n <= 0 || isHalted s || atSame s target = pure s
+      | otherwise = runCommand fetcher (Step 1) s >>= catchUp (n - 1) target
     settle :: App m => Int -> VM Concrete -> Session Concrete -> m (Session Concrete)
     settle n before s
       | n > 0, midInstruction before (sessionVM s) = runCommand fetcher (Step 1) s >>= settle (n - 1) before
@@ -1634,7 +1666,7 @@ modelGuided solvers mode c picks = do
             Left e -> skip ("model: " <> takeWhile (/= ':') e)
             Right i -> do
               let c' = c { inputs = i }
-              lockstepCase solvers mode c' >>= \case
+              lockstepCase solvers mode False c' >>= \case
                 Left err -> liftIO $ failWith c' i err
                 Right l -> case l.ended of
                   -- the solver may pick any hash of symbolic data, which the concrete run does not get
@@ -1659,19 +1691,20 @@ lockstepTests = testGroup "lockstep-fuzz"
         modelGuided solvers mode c picks
   , -- the case from the HEVM_FUZZ_* variables that a failure prints, in every branch mode
     test "lockstep-from-env" $ liftIO caseFromEnv >>= mapM_ (\c ->
-      withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> forM_ [SolverBranches, ExplorerBranches, CheckedBranches] $ \mode ->
-        lockstepCase solvers mode c >>= \case
-          Left err -> liftIO $ failWith c c.inputs (show mode <> ": " <> err)
-          Right r -> liftIO $ putStrLn $ show mode <> ": " <> r.stopped <> " after " <> show r.steps <> " steps, "
+      withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> forM_ [(m, g) | m <- [SolverBranches, ExplorerBranches, CheckedBranches], g <- [False, True]] $ \(mode, merging) ->
+        lockstepCase solvers mode merging c >>= \case
+          Left err -> liftIO $ failWith c c.inputs (show mode <> (if merging then ", merging" else "") <> ": " <> err)
+          Right r -> liftIO $ putStrLn $ show mode <> (if merging then ", merging" else "") <> ": " <> r.stopped <> " after " <> show r.steps <> " steps, "
                        <> show r.compared <> " values compared")
-  , testProperty "symbolic-lockstep" $ \(c :: TestCase) -> forAll (elements [SolverBranches, ExplorerBranches, CheckedBranches]) $ \mode ->
+  , testProperty "symbolic-lockstep" $ \(c :: TestCase) -> forAll (elements [SolverBranches, ExplorerBranches, CheckedBranches]) $ \mode -> \merging ->
       within 300_000_000 $ ioProperty $ runEnv testEnv $ withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> do
         -- to find a case that crashes, hangs or runs out of memory
         liftIO $ lookupEnv "HEVM_FUZZ_CASE_FILE" >>= mapM_ (\f -> writeFile f $ show c
           <> "\nmain: " <> bsToHex (assembleItems c.prog.main) <> "\ncallee: " <> bsToHex (assembleItems c.prog.callee))
-        lockstepCase solvers mode c >>= \case
+        lockstepCase solvers mode merging c >>= \case
           Left err -> liftIO $ failWith c c.inputs err
           Right r -> pure $ tabulate "stopped" [r.stopped]
+                          $ tabulate "merged branches" [bucket r.merges | merging]
                           $ tabulate "opcodes compared after, in cases" (Set.toList r.ops)
                           $ tabulate "branch mode" [show mode]
                           $ tabulate "decided by simplification" [bucket (fst r.static)]

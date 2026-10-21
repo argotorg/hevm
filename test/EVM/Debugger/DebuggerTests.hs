@@ -92,6 +92,20 @@ tests = testGroup "Debugger"
         assertEqual "same path conditions" v1.pathConditions v2.pathConditions
       v3 <- run "branch true" s1 >>= run "step" >>= run "back" >>= run "branch false" >>= run "continue" >>= liftIO . mkView
       liftIO $ assertEqual "the other side can be taken" 0x0b v3.pc
+  , testCase "back-replays-merged-steps" $ runEnv testEnv $ withSymbolic mergeCode $ \run s0 -> do
+      -- run with merging, then go back after turning it off: the replay must merge as before
+      sEnd <- run "merge on" s0 >>= run "continue"
+      vEnd <- liftIO $ mkView sEnd
+      liftIO $ assertEqual "merged to the end without a pending branch" "halted" vEnd.status
+      sBack <- run "merge off" sEnd >>= run "back"
+      sFresh <- run "merge on" s0 >>= run ("step " <> tshow (sessionStep sBack))
+      vBack <- liftIO $ mkView sBack
+      vFresh <- liftIO $ mkView sFresh
+      liftIO $ do
+        assertEqual "same step" vFresh.step vBack.step
+        assertEqual "same pc" vFresh.pc vBack.pc
+        assertEqual "same stack" vFresh.stack vBack.stack
+        assertEqual "no branch" "running" vBack.status
   , testCase "stats-concrete" $ runEnv testEnv $ withConcrete loopCode $ \run s0 -> do
       s1 <- run "step 300" s0
       let c1 = (sessionStats s1).counters
@@ -172,6 +186,15 @@ branchCode :: ByteString
 branchCode = BS.pack
   [ 0x60, 0x00, 0x35, 0x80, 0x60, 0x05, 0x14, 0x60, 0x0c, 0x57, 0x50, 0x00
   , 0x5b, 0x60, 0x05, 0x14, 0x60, 0x15, 0x57, 0xfe, 0x00, 0x5b, 0x00 ]
+
+-- memory made symbolic, then x = 5, and if (calldata[0] != 0) x = x + 3: exploration merges it
+mergeCode :: ByteString
+mergeCode = BS.pack
+  [ 0x5f, 0x35, 0x60, 0x40, 0x52      -- mstore(0x40, calldata[0])
+  , 0x60, 0x05                        -- x = 5
+  , 0x5f, 0x35, 0x60, 0x0f, 0x57      -- jumpi(0x0f, calldata[0])
+  , 0x60, 0x03, 0x01                  -- x = x + 3
+  , 0x5b, 0x00 ]                      -- 0x0f: jumpdest, stop
 
 concreteVM :: ByteString -> IO (VM Concrete)
 concreteVM code = do

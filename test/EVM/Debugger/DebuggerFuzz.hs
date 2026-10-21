@@ -57,12 +57,12 @@ tests = testGroup "debugger-fuzz"
         s0 <- liftIO $ stToIO (concreteTestVm c) >>= newSession emptyDapp
         roundTrips (Fetch.oracle solvers Nothing Fetch.noRpc) (repeat Nothing) start ks s0
   , testProperty "forward-back-symbolic" $ mapSize (* 4) $ \(c :: TestCase) ->
-      forAll genRoundTrips $ \(start, ks) -> forAll (vectorOf 100 genReaction) $ \reactions -> \explorer ->
+      forAll genRoundTrips $ \(start, ks) -> forAll (vectorOf 100 genReaction) $ \reactions -> \explorer -> \merging ->
       within 300_000_000 $ ioProperty $ runEnv testEnv $ withSession $ \solvers -> do
         s0 <- liftIO $ stToIO (symbolicTestVm c) >>= newSession emptyDapp
         let mode = if explorer then ExplorerBranches else SolverBranches
-        tabulate "branch mode" [show mode] <$>
-          roundTrips (Fetch.oracle solvers Nothing Fetch.noRpc) reactions start ks (setBranchMode mode (setStepLimit 3000 s0))
+        tabulate "branch mode" [show mode <> if merging then ", merging" else ""] <$>
+          roundTrips (Fetch.oracle solvers Nothing Fetch.noRpc) reactions start ks (setMerge merging (setBranchMode mode (setStepLimit 3000 s0)))
   , testProperty "http-garbage" $ \(c :: TestCase) ->
       forAll (listOf1 genRequest) $ \reqs -> within 120_000_000 $ ioProperty $ runEnv testEnv $ httpGarbage c reqs
   ]
@@ -94,6 +94,7 @@ genCommand symbolic = frequency $
                  , "pathconds", "help", "show", "stats", ""])
   , (1, genGarbage)
   , (1, elements ["simplify on", "simplify off"])
+  , (1, elements ["merge on", "merge off"])
   ] <> [ (1, elements ["branches solver", "branches explorer"]) | not symbolic ] <> [ (8, elements ["branch true", "branch false", "branch 0", "branch 1", "branch 2", "branch t", "branch f"])
        | symbolic ]
 
@@ -228,7 +229,9 @@ symbolicBranches c cmds0 reactions0 = withSession $ \solvers -> do
           _ | infeasible -> pure $ Left $ "after commands " <> show hist <> " the path is infeasible"
           Just fp0 | fp0 /= fp ->
             pure $ Left $ "after commands " <> show hist <> " a revisited state differs:\n" <> describeDiff fp fp0
-          _ -> go s' (Map.insert key fp seen) rest (cmd : done) taken' reactions
+          -- with another merge setting, a step number reaches another state
+          _ | "merge" `T.isPrefixOf` T.strip cmd -> go s' (Map.singleton key fp) rest (cmd : done) taken' reactions
+            | otherwise -> go s' (Map.insert key fp seen) rest (cmd : done) taken' reactions
   s0 <- liftIO $ stToIO (symbolicTestVm c) >>= newSession emptyDapp
   mismatch <- go (setStepLimit 3000 s0) (mempty :: Map ([Text], Int, Text) Fingerprint) cmds0 [] (0 :: Int) reactions0
   pure $ case mismatch of
