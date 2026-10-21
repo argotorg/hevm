@@ -1323,6 +1323,7 @@ data Lockstep = Lockstep
   , trail    :: [String] -- ^ the latest steps, newest first, for failure reports
   , static   :: (Int, Int) -- ^ branches decided without the solver, and those it could have decided
   , ended    :: Maybe (Int, Int, String) -- ^ pc, depth and kind of result, when both runs halted
+  , ops      :: Set String -- ^ the opcodes stepped and compared after
   }
 
 maxLockstepSteps :: Int
@@ -1335,7 +1336,7 @@ lockstepCase :: App m => SolverGroup -> BranchMode -> TestCase -> m (Either Stri
 lockstepCase solvers mode c = Progress.withProgressLogFromEnv "lockstep" $ do
   sc0 <- liftIO $ stToIO (concreteTestVm c) >>= newSession emptyDapp
   ss0 <- liftIO $ setBranchMode mode <$> (stToIO (symbolicTestVm c) >>= newSession emptyDapp)
-  r <- go sc0 ss0 (Lockstep "" 0 0 0 0 0 [] (0, 0) Nothing) Nothing
+  r <- go sc0 ss0 (Lockstep "" 0 0 0 0 0 [] (0, 0) Nothing mempty) Nothing
   Progress.emit "lockstep-end" $ case r of
     Left err -> ["failure" JSON..= T.pack err]
     Right l -> ["stopped" JSON..= T.pack l.stopped, "steps" JSON..= l.steps, "compared" JSON..= l.compared, "branches" JSON..= l.branches]
@@ -1395,6 +1396,7 @@ lockstepCase solvers mode c = Progress.withProgressLogFromEnv "lockstep" $ do
                           <> [ "branchesTaken" JSON..= took | took > 0 ] <> [ "sidesRetried" JSON..= tried | tried > 0 ]
                         let counters = (sessionStats ss'').counters
                         go sc' ss'' acc' { steps = acc.steps + 1, branches = acc.branches + took, retries = acc.retries + tried
+                                         , ops = Set.insert opName' acc.ops
                                          , trail = take 30 (entry : acc.trail)
                                          , static = (counters.staticDecisions, counters.staticMissed) } (Just opName')
     -- an instruction may take several steps, e.g. when it is re-executed after
@@ -1635,6 +1637,8 @@ modelGuided solvers mode c picks = do
               lockstepCase solvers mode c' >>= \case
                 Left err -> liftIO $ failWith c' i err
                 Right l -> case l.ended of
+                  -- the solver may pick any hash of symbolic data, which the concrete run does not get
+                  Just e | e /= endOf vs, any mentionsSymbolicKeccak vs.constraints -> skip "model via symbolic keccak"
                   Just e | e /= endOf vs -> liftIO $ failWith c' i $
                     "the inputs from a model of the path conditions end at " <> show e
                     <> ", the path ends at " <> show (endOf vs) <> "\npath conditions:\n" <> unlines (map show vs.constraints)
@@ -1642,6 +1646,10 @@ modelGuided solvers mode c picks = do
                   Nothing -> skip l.stopped
   where
     mentionsBlockHash = getAny . foldProp (\case BlockHash _ -> Any True; _ -> Any False) mempty
+    mentionsSymbolicKeccak = getAny . foldProp (\case
+      Keccak (ConcreteBuf _) -> Any False
+      Keccak _ -> Any True
+      _ -> Any False) mempty
 
 lockstepTests :: TestTree
 lockstepTests = testGroup "lockstep-fuzz"
@@ -1664,6 +1672,7 @@ lockstepTests = testGroup "lockstep-fuzz"
         lockstepCase solvers mode c >>= \case
           Left err -> liftIO $ failWith c c.inputs err
           Right r -> pure $ tabulate "stopped" [r.stopped]
+                          $ tabulate "opcodes compared after, in cases" (Set.toList r.ops)
                           $ tabulate "branch mode" [show mode]
                           $ tabulate "decided by simplification" [bucket (fst r.static)]
                           $ tabulate "only the solver could decide" [bucket (snd r.static)]
