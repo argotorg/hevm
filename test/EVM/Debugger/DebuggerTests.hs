@@ -1,4 +1,4 @@
-module EVM.Debugger.DebuggerTests (tests) where
+module EVM.Debugger.DebuggerTests (tests, http, httpJSON, branchCode) where
 
 import Test.Tasty
 import Test.Tasty.HUnit

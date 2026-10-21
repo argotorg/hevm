@@ -336,6 +336,7 @@ test-suite test
     EVM.Test.FoundryTests
     EVM.Debugger.DebuggerTests
     EVM.Debugger.DebuggerFuzz
+    EVM.Debugger.ProgressTests
   build-depends:
     base16,
     binary,

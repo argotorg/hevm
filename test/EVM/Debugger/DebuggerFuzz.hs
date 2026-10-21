@@ -285,7 +285,8 @@ genRequest :: Gen Request
 genRequest = do
   m <- frequency [(5, pure "GET"), (5, pure "POST"), (1, elements ["OPTIONS", "PUT", "DELETE", "", "get", "POST POST"])]
   t <- frequency
-    [ (8, elements [ "/state", "/state?format=text", "/command", "/command?format=text", "/help", "/", "/stats", "/stats?format=text" ])
+    [ (8, elements [ "/state", "/state?format=text", "/command", "/command?format=text", "/help", "/", "/stats", "/stats?format=text"
+                   , "/progress", "/progress?format=text" ])
     , (2, elements [ "/nope", "/state?format", "/command?&&==", "/state?format=text&format=json", "//state"
                    , "/command?format=text?x", "*", "" ])
     , (1, BS.pack <$> listOf (choose (33, 126)))
@@ -382,8 +383,12 @@ httpGarbage c reqs = withSession $ \solvers -> do
             isStats = r.raw == Nothing && r.method == "GET" && r.target == "/stats"
                       && case r.framing of { Exact -> True; _ -> False }
             statsOk = maybe False (KM.member "counters") (JSON.decodeStrict (bodyOf resp) :: Maybe JSON.Object)
+            isProgress = r.raw == Nothing && r.method == "GET" && r.target == "/progress"
+                         && case r.framing of { Exact -> True; _ -> False }
+            progressOk = maybe False (KM.member "running") (JSON.decodeStrict (bodyOf resp) :: Maybe JSON.Object)
         in okStatus && (not isCommand || (" 200 " `BS.isInfixOf` statusLine && jsonOk))
                     && (not isStats || (" 200 " `BS.isInfixOf` statusLine && statsOk))
+                    && (not isProgress || (" 200 " `BS.isInfixOf` statusLine && progressOk))
 
 bucket :: Int -> String
 bucket n

@@ -30,6 +30,8 @@ module EVM.Progress
   , clearWorker
   , timedQuery
   , fork
+  , snapshot
+  , snapshotText
   ) where
 
 import Control.Concurrent (ThreadId, forkIO, killThread, myThreadId, threadDelay)
@@ -54,6 +56,8 @@ import Data.Ord (Down(..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as T
+import Data.Text.Lazy qualified as TL
+import Data.Text.Lazy.Encoding qualified as TLE
 import GHC.Clock (getMonotonicTime)
 import System.Console.ANSI
 import System.Environment (lookupEnv)
@@ -67,6 +71,8 @@ data ProgressOpts = ProgressOpts
   { logFile :: Maybe FilePath
   , logExprs :: Bool
   , statusLine :: Bool
+  -- | keep the state for 'snapshot' even without a log or a status line
+  , track :: Bool
   }
 
 data Worker = Worker
@@ -115,12 +121,16 @@ data St = St
   , workers :: IORef (Map ThreadId Worker)
   , queries :: IORef (Map Int Query)
   , nextQuery :: IORef Int
+  -- | not nextQuery minus the queries in flight: reading both is not atomic
+  , queriesDone :: IORef Int
   , phaseStats :: IORef PhaseStats
   , phase :: IORef Phase
   , paths :: IORef (Int, Int)
   , taskCounter :: IORef (IO Int)
   , statusOn :: IORef Bool
   , closed :: IORef Bool
+  -- | the phases that ended, newest first
+  , finished :: IORef [JSON.Value]
   }
 
 -- Global so that pure-ish IO code deep in the solver layer can report progress
@@ -131,7 +141,7 @@ global = unsafePerformIO $ newIORef Nothing
 
 withProgress :: MonadUnliftIO m => ProgressOpts -> m a -> m a
 withProgress opts act
-  | Nothing <- opts.logFile, not opts.statusLine = act
+  | Nothing <- opts.logFile, not opts.statusLine, not opts.track = act
   | otherwise = withRunInIO $ \run -> bracket open close (const $ run act)
   where
     open = do
@@ -139,8 +149,9 @@ withProgress opts act
       mapM_ (`hSetBuffering` BlockBuffering Nothing) h
       tty <- hSupportsANSI stderr
       st <- St h opts.logExprs tty
-        <$> newMVar () <*> getMonotonicTime <*> newIORef mempty <*> newIORef mempty <*> newIORef 0 <*> newIORef (PhaseStats mempty mempty Nothing)
+        <$> newMVar () <*> getMonotonicTime <*> newIORef mempty <*> newIORef mempty <*> newIORef 0 <*> newIORef 0 <*> newIORef (PhaseStats mempty mempty Nothing)
         <*> newIORef (Phase "starting" 0 0) <*> newIORef (0, 0) <*> newIORef (pure 0) <*> newIORef opts.statusLine <*> newIORef False
+        <*> newIORef []
       writeIORef global (Just st)
       write st "start" []
       threads <- sequence $ catMaybes
@@ -169,7 +180,7 @@ withProgressLogFromEnv label act = liftIO (lookupEnv "HEVM_PROGRESS_LOG_DIR") >>
   Just dir -> do
     n <- liftIO $ atomicModifyIORef' logCounter (\i -> (i + 1, i))
     exprs <- liftIO $ isJust <$> lookupEnv "HEVM_PROGRESS_EXPRS"
-    withProgress (ProgressOpts (Just (dir <> "/" <> label <> "-" <> show n <> ".jsonl")) exprs False) act
+    withProgress (ProgressOpts (Just (dir <> "/" <> label <> "-" <> show n <> ".jsonl")) exprs False False) act
 
 {-# NOINLINE logCounter #-}
 logCounter :: IORef Int
@@ -231,6 +242,8 @@ withPhase name fs summary act = do
       pure $ [("hottest", JSON.String (showLoc l <> T.pack (printf " %.1fs/%dq" ls.lSolveSecs ls.lQueries))) | (l, ls) <- take 1 (hottest ps.byLoc), ls.lSolveSecs >= 1]
           <> [("slowest", JSON.String (T.pack (printf "%.1fs" secs) <> maybe "" ((" @" <>) . showLoc) l)) | Just (secs, l) <- [ps.slowest], secs >= 1]
   emit "phase-end" (["phase" .= name, "secs" .= (t1 - t0)] <> fs <> summary r)
+  liftIO $ readIORef global >>= mapM_ (\st -> atomicModifyIORef' st.finished $ \ps ->
+    (take 1000 (JSON.object (["phase" .= name, "secs" .= (t1 - t0)] <> fs <> summary r <> hot) : ps), ()))
   phaseDoneLine name (t1 - t0) (summary r <> hot)
   pure r
 
@@ -347,6 +360,7 @@ timedQuery kind fs exprFs showRes act = readIORef global >>= \case
     r <- act started
     t1 <- getMonotonicTime
     q <- atomicModifyIORef' st.queries $ \m -> (Map.delete qid m, Map.lookup qid m)
+    atomicModifyIORef' st.queriesDone $ \n -> (n + 1, ())
     -- a query answered without a solver, e.g. from the cache, only waited
     let solveStart = fromMaybe t1 (q >>= (.qSolveStart))
         wait = solveStart - t0
@@ -372,6 +386,49 @@ fork :: MonadIO m => Text -> Int -> [Pair] -> m ()
 fork addr pc fs = liftIO $ readIORef global >>= mapM_ (\st -> do
   atomicModifyIORef' st.phaseStats $ \ps -> (ps { byLoc = Map.insertWith (<>) (addr, pc) (LocStats 0 0 1) ps.byLoc }, ())
   write st "fork" (["addr" .= addr, "pc" .= pc] <> fs))
+
+-- | The current state, as the status line and the summary show it. Not
+-- running unless inside 'withProgress'.
+snapshot :: IO JSON.Value
+snapshot = readIORef global >>= \case
+  Nothing -> pure $ JSON.object ["running" .= False]
+  Just st -> do
+    now <- getMonotonicTime
+    p <- readIORef st.phase
+    (nPaths, nPartial) <- readIORef st.paths
+    tasks <- join (readIORef st.taskCounter)
+    ws <- Map.toList <$> readIORef st.workers
+    qs <- Map.elems <$> readIORef st.queries
+    qDone <- readIORef st.queriesDone
+    ps <- readIORef st.phaseStats
+    done <- readIORef st.finished
+    pure $ JSON.object
+      [ "running" .= True
+      , "elapsedSecs" .= (now - st.start)
+      , "phase" .= JSON.object ["name" .= p.name, "done" .= p.done, "total" .= p.total]
+      , "paths" .= JSON.object ["done" .= nPaths, "partial" .= nPartial]
+      , "tasks" .= tasks
+      , "workers" .= [JSON.object (["thread" .= T.pack (show tid), "secs" .= (now - w.since)] <> w.fields) | (tid, w) <- ws]
+      , "queries" .= JSON.object
+          [ "done" .= qDone
+          , "inFlight" .= [ JSON.object (["secs" .= (now - q.qStart), "solving" .= isJust q.qSolveStart] <> q.qFields) | q <- qs ]
+          , "byResult" .= [ JSON.object ["kind" .= k, "result" .= res, "count" .= n, "waitSecs" .= w, "solveSecs" .= sv]
+                          | ((k, res), (n, w, sv)) <- sortOn (\(_, (_, _, sv)) -> Down sv) (Map.toList ps.byResult) ]
+          ]
+      , "hottest" .= [ JSON.object ["addr" .= a, "pc" .= pc, "queries" .= ls.lQueries, "solveSecs" .= ls.lSolveSecs, "forks" .= ls.lForks]
+                     | ((a, pc), ls) <- take 10 (hottest ps.byLoc) ]
+      , "phases" .= reverse done
+      ]
+
+-- | 'snapshot' as the plain status line, followed by the phases that ended
+snapshotText :: IO Text
+snapshotText = readIORef global >>= \case
+  Nothing -> pure "not running\n"
+  Just st -> do
+    segs <- statusSegments st
+    done <- readIORef st.finished
+    let status = T.intercalate " | " [T.strip (T.unwords (filter (Prelude.not . T.null) [l, v])) | (l, _, v) <- segs]
+    pure $ T.unlines $ status : [ "done: " <> TL.toStrict (TLE.decodeUtf8 (JSON.encode ph)) | ph <- reverse done ]
 
 heartbeat :: St -> IO ()
 heartbeat st = do
@@ -434,7 +491,7 @@ statusSegments st = do
   tasks <- join (readIORef st.taskCounter)
   nWorkers <- Map.size <$> readIORef st.workers
   qs <- Map.elems <$> readIORef st.queries
-  qDone <- readIORef st.nextQuery
+  qDone <- readIORef st.queriesDone
   ps <- readIORef st.phaseStats
   let solving = length (filter (isJust . (.qSolveStart)) qs)
       queued = length qs - solving
@@ -451,7 +508,7 @@ statusSegments st = do
   pure
     [ (T.justifyLeft 11 ' ' p.name, [bold, fg Magenta], progress)
     , ("paths", [fg Green], pad 6 nPaths <> " (" <> pad 5 nPartial <> " partial)")
-    , ("SMT", [fg Blue], pad 7 (qDone - length qs) <> " done, " <> pad 3 solving <> " solving, " <> pad 3 queued <> " queued")
+    , ("SMT", [fg Blue], pad 7 qDone <> " done, " <> pad 3 solving <> " solving, " <> pad 3 queued <> " queued")
     , ("hottest", [fg Yellow], hot)
     , ("tasks", [], pad 6 tasks <> ", " <> pad 3 nWorkers <> " busy")
     , ("", [], T.pack $ printf "%3d:%02d" (floor (elapsed / 60) :: Int) (floor elapsed `mod` 60 :: Int))

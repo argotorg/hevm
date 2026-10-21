@@ -34,7 +34,7 @@ import Control.Monad (forM)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.ST (ST, RealWorld, stToIO)
 import Control.Monad.State.Strict (execStateT)
-import Data.Aeson (ToJSON)
+import Data.Aeson (ToJSON, (.=))
 import Data.ByteString qualified as BS
 import Data.Char (isDigit)
 import Data.List (find)
@@ -67,6 +67,7 @@ import EVM.Expr (maybeLitByteSimp, maybeLitWordSimp)
 import EVM.Fetch qualified as Fetch
 import EVM.Format (formatExpr, formatProp, traceDocForest)
 import EVM.Op (intToOpName)
+import EVM.Progress qualified as Progress
 import EVM.Solidity (SourceCache(..), SrcMap(..))
 import EVM.Types
 
@@ -257,6 +258,8 @@ resolve fetcher queried s = case s.vm.result of
       let cond = case q of
             PleaseAskSMT c _ _ -> Just c
             _ -> s.lastCond
+      -- tells /progress where the solver time goes
+      Progress.setWorker [ "pc" .= s.vm.state.pc, "addr" .= T.pack (show s.vm.state.contract), "step" .= s.curStep ]
       t0 <- liftIO getMonotonicTime
       m <- fetcher q
       vm' <- liftIO $ stToIO $ execStateT m s.vm

@@ -92,6 +92,7 @@ import EVM.Fetch.RpcFuzz qualified as RpcFuzz
 import EVM.SymExec.SymExecTests qualified as SymExecTests
 import EVM.Debugger.DebuggerTests qualified as DebuggerTests
 import EVM.Debugger.DebuggerFuzz qualified as DebuggerFuzz
+import EVM.Debugger.ProgressTests qualified as ProgressTests
 import EVM.Test.FoundryTests qualified as FoundryTests
 
 testEnv :: Env
@@ -147,7 +148,7 @@ propNoSimp a = let testEnvNoSimp = Env { config = testEnv.config { simp = False 
 progressEvents :: ReaderT Env IO () -> ReaderT Env IO [(String, Maybe String)]
 progressEvents act = withRunInIO $ \runIO -> withSystemTempDirectory "progress" $ \dir -> do
   let f = dir </> "progress.jsonl"
-  runIO $ withProgress (ProgressOpts (Just f) True False) act
+  runIO $ withProgress (ProgressOpts (Just f) True False False) act
   ls <- BSLazy.split 10 <$> BSLazy.readFile f
   forM (filter (not . BSLazy.null) ls) $ \l -> case JSON.decode l of
     Just (JSON.Object o) | Just (JSON.String ev) <- KeyMap.lookup "ev" o, Just (JSON.Number _) <- KeyMap.lookup "t" o ->
@@ -246,6 +247,7 @@ tests = testGroup "hevm"
   , SymExecTests.tests
   , DebuggerTests.tests
   , DebuggerFuzz.tests
+  , ProgressTests.tests
   , EquivalenceTests.tests
   , EquivFuzz.tests
   , RpcFuzz.tests

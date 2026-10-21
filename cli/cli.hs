@@ -35,6 +35,7 @@ import Paths_hevm qualified as Paths
 import System.Directory (withCurrentDirectory, getCurrentDirectory, doesDirectoryExist, makeAbsolute, findExecutable)
 import System.FilePath ((</>))
 import System.Exit (exitFailure, exitSuccess, exitWith, ExitCode(..))
+import System.IO (hFlush, stdout)
 import Data.List.Split (splitOn)
 import Text.Read (readMaybe)
 import JSONL (jsonlBuilder, jsonLine)
@@ -42,7 +43,7 @@ import JSONL (jsonlBuilder, jsonLine)
 import EVM (initialContract, abstractContract, makeVm, defaultVMOpts)
 import EVM.ABI (Sig(..))
 import EVM.Debugger (newSession)
-import EVM.Debugger.Server (serveSession, announce, defaultDebuggerPort)
+import EVM.Debugger.Server (serveSession, withProgressServer, announce, defaultDebuggerPort)
 import EVM.Dapp (dappInfo, DappInfo, emptyDapp, TestMethodInfo(..))
 import EVM.Expr qualified as Expr
 import EVM.Concrete qualified as Concrete
@@ -113,7 +114,8 @@ data CommonOptions = CommonOptions
   , progressExprs ::Bool
   , noProgress    ::Bool
   , debugger      ::Bool
-  , debuggerPort  ::Int
+  , serve         ::Bool
+  , port          ::Int
   }
 
 commonOptions :: Parser CommonOptions
@@ -152,7 +154,8 @@ commonOptions = CommonOptions
   <*> (switch $ long "progress-exprs" <> help "Also log the expressions and path conditions sent to the solver in the progress log (implied by --verb 4)")
   <*> (switch $ long "no-progress" <> help "Don't show the live status line on stderr")
   <*> (switch $ long "debugger" <> help "Start the interactive debugger, served over HTTP on localhost. Connect with hevm-debug")
-  <*> (option auto $ long "debugger-port" <> showDefault <> value defaultDebuggerPort <> help "Port of the interactive debugger, 0 picks a free one")
+  <*> (switch $ long "serve" <> help "Serve the progress of the run over HTTP on localhost, at /progress")
+  <*> (option auto $ long "port" <> showDefault <> value defaultDebuggerPort <> help "Port for --debugger and --serve, 0 picks a free one")
 
 data CommonExecOptions = CommonExecOptions
   { address       ::Maybe Addr
@@ -343,20 +346,20 @@ main = do
     Symbolic cFileOpts symbOpts cExecOpts cOpts -> do
       env <- makeEnv cOpts
       root <- getRoot cOpts
-      withCurrentDirectory root $ runEnv env $ withProgress (progressOpts env cOpts) $ symbCheck cFileOpts symbOpts cExecOpts cOpts
+      withCurrentDirectory root $ runEnv env $ withProgress (progressOpts env cOpts) $ serving cOpts $ symbCheck cFileOpts symbOpts cExecOpts cOpts
     Equal eqOpts cOpts -> do
       when cOpts.debugger $ do
         putStrLn "Error: --debugger is not supported for equivalence checking"
         exitFailure
       env <- makeEnv cOpts
-      runEnv env $ withProgress (progressOpts env cOpts) $ equivalence eqOpts cOpts
+      runEnv env $ withProgress (progressOpts env cOpts) $ serving cOpts $ equivalence eqOpts cOpts
     Test testOpts cOpts -> do
       env <- makeEnv cOpts
       root <- getRoot cOpts
       solver <- getSolver cOpts.solver
       cores <- liftIO $ unsafeInto <$> getNumProcessors
       let solverCount = fromMaybe cores cOpts.numSolvers
-      runEnv env $ withProgress (progressOpts env cOpts) $ withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
+      runEnv env $ withProgress (progressOpts env cOpts) $ serving cOpts $ withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
         buildOut <- readBuildOutput root testOpts.projectType
         case buildOut of
           Left e -> liftIO $ do
@@ -370,7 +373,7 @@ main = do
                 Left err -> liftIO $ T.putStrLn err >> exitFailure
                 Right vm -> do
                   sess <- liftIO $ newSession unitTestOpts.dapp vm
-                  serveSession (Fetch.oracle solvers (Just unitTestOpts.sess) unitTestOpts.rpcInfo) cOpts.debuggerPort announce sess
+                  serveSession (Fetch.oracle solvers (Just unitTestOpts.sess) unitTestOpts.rpcInfo) cOpts.port announce sess
               liftIO exitSuccess
             res <- unitTest unitTestOpts out
             Progress.stopStatus
@@ -380,7 +383,8 @@ main = do
             liftIO $ unless (uncurry (&&) res) exitFailure
     Exec cFileOpts execOpts cExecOpts cOpts-> do
       env <- makeEnv cOpts
-      runEnv env $ launchExec cFileOpts execOpts cExecOpts cOpts
+      -- no status line: concrete execution has no phases or solver queries to show
+      runEnv env $ withProgress ((progressOpts env cOpts) { statusLine = False }) $ serving cOpts $ launchExec cFileOpts execOpts cExecOpts cOpts
     Version {} ->putStrLn getFullVersion
   where
     progressOpts :: Env -> CommonOptions -> ProgressOpts
@@ -388,6 +392,7 @@ main = do
       { logFile = env.config.progressLog
       , logExprs = env.config.progressExprs
       , statusLine = Prelude.not cOpts.noProgress && Prelude.not cOpts.debug && Prelude.not cOpts.debugger
+      , track = cOpts.serve || cOpts.debugger
       }
     makeEnv :: CommonOptions -> IO Env
     makeEnv cOpts = do
@@ -420,6 +425,12 @@ main = do
         , progressLog = progressFile cOpts
         , progressExprs = cOpts.progressExprs || cOpts.verb >= 4
         } }
+    -- the debugger serves the progress itself
+    serving :: MonadUnliftIO m => CommonOptions -> m a -> m a
+    serving cOpts
+      | cOpts.serve && Prelude.not cOpts.debugger = withProgressServer cOpts.port $ \p ->
+          putStrLn ("hevm progress at http://127.0.0.1:" <> show p <> "/progress") >> hFlush stdout
+      | otherwise = id
     progressFile cOpts = case cOpts.progressLog of
       Nothing | cOpts.verb >= 3 -> Just "hevm-progress.jsonl"
       f -> f
@@ -599,7 +610,7 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = do
     when cOpts.debugger $ do
       dapp <- getSrcInfo sOpts.projectType cOpts
       dsess <- liftIO $ newSession dapp preState
-      serveSession fetcher cOpts.debuggerPort announce dsess
+      serveSession fetcher cOpts.port announce dsess
       liftIO exitSuccess
     (expr, res) <- verify solvers fetcher veriOpts preState (checkAssertions errCodes) Nothing
     Progress.stopStatus
@@ -681,7 +692,7 @@ launchExec cFileOpts execOpts cExecOpts cOpts = do
     let fetcher = Fetch.oracle solvers (Just sess) rpcDat
     when cOpts.debugger $ do
       dsess <- liftIO $ newSession dapp vm
-      serveSession fetcher cOpts.debuggerPort announce dsess
+      serveSession fetcher cOpts.port announce dsess
       liftIO exitSuccess
     vm' <- if execOpts.jsonTrace
            then do
