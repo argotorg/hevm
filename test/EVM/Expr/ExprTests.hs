@@ -18,7 +18,9 @@ import Data.ByteString qualified as BS (drop, length, pack, replicate, take)
 import Data.Containers.ListUtils (nubOrd)
 import Data.List qualified as List (nub, sort, tails)
 import Data.Map.Strict qualified as Map
+import Control.Exception (evaluate)
 import Data.Maybe (isJust, fromMaybe)
+import System.Timeout qualified as Timeout
 import Data.Monoid (All(..))
 import Data.Text (Text)
 import Data.Typeable
@@ -380,6 +382,10 @@ storageTests = testGroup "Storage tests"
         (Expr.decomposeStorage $ SLoad (arrElem 2 (Var "i"))
           (SStore (Lit 0) (Var "a") (SStore (arrZero 2) (Lit 1) emptyStore)))
     , concreteKeccakStorageTests
+    , testCase "read-through-unresolved-copy-terminates" $ do
+        let e = ReadWord (Lit 0x56) (CopySlice (Var "p") (Lit 0x34) (Lit 0x3c) (ConcreteBuf "\233") (AbstractBuf "buf"))
+        r <- Timeout.timeout 5000000 (evaluate (Expr.simplify e))
+        assertBool "simplify finishes" (isJust r)
     , testCase "read-of-selector-and-argument" $ do
         -- calldata as hevm test builds it: selector bytes, then the arguments
         let cd = foldr (\(i, v) acc -> WriteByte (Lit i) (LitByte v) acc)
@@ -2651,7 +2657,10 @@ proveEquivPropWith cfg a b
 -- concrete or empty buffer, so that the read straddles them
 genStraddle :: Gen (Expr EWord, Expr Buf)
 genStraddle = do
-  base <- elements [AbstractBuf "b", ConcreteBuf "", ConcreteBuf (BS.pack [1 .. 90])]
+  base <- elements
+    [ AbstractBuf "b", ConcreteBuf "", ConcreteBuf (BS.pack [1 .. 90])
+    -- reads through it stay reads of the whole buffer, which must not be rewritten
+    , CopySlice (Var "p") (Lit 0x34) (Lit 0x3c) (ConcreteBuf "\233") (AbstractBuf "b") ]
   n <- chooseInt (1, 5)
   writes <- vectorOf n $ frequency
     [ (3, WriteByte . Lit <$> chooseBoundedIntegral (0, 70) <*> (LitByte <$> arbitrary))

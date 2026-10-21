@@ -715,7 +715,8 @@ readWordFromRuns (Lit idx) buf | idx + 31 >= idx = do
     byteSource = \case
       LitByte v -> Just (LitRun [v])
       IndexWord (Lit j) w | j < 32 -> Just (WordRun w j 1)
-      ReadByte (Lit k) b -> Just (BufRun b k 1)
+      -- reading the buffer itself would rewrite the read into itself, forever
+      ReadByte (Lit k) b | b /= buf -> Just (BufRun b k 1)
       _ -> Nothing
     addByte r [] = [r]
     addByte r (next : rest) = case (r, next) of
