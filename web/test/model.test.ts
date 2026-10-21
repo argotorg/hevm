@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { branchArgument, initialModel, maxLog, pcBreakpoints, update, type Model } from "../src/model";
+import { branchArgument, commandEnabled, initialModel, maxLog, pcBreakpoints, update, type Model } from "../src/model";
 import { states, stateWith, statsFixture } from "./fixtures";
 
 describe("update", () => {
@@ -63,8 +63,18 @@ describe("helpers", () => {
     ]);
   });
   test("the argument of a branch option", () => {
-    assert.equal(branchArgument(["true", "false"], 0), "true");
-    assert.equal(branchArgument(["true", "false"], 1), "false");
+    assert.equal(branchArgument(["false", "true"], 0), "false");
+    assert.equal(branchArgument(["false", "true"], 1), "true");
     assert.equal(branchArgument(["0x1", "0x2", "0x3"], 2), "2");
+  });
+  test("which toolbar commands can run", () => {
+    const at = (status: "running" | "branch" | "halted", step: number) => stateWith({ status, step });
+    assert.equal(commandEnabled(null, "step"), false);
+    assert.equal(commandEnabled(at("running", 0), "step"), true);
+    assert.equal(commandEnabled(at("running", 0), "back"), false);
+    assert.equal(commandEnabled(at("halted", 5), "continue"), false);
+    assert.equal(commandEnabled(at("halted", 5), "restart"), true);
+    assert.equal(commandEnabled(at("branch", 3), "next"), false);
+    assert.equal(commandEnabled(at("branch", 3), "branch true"), true);
   });
 });

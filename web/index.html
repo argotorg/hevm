@@ -12,9 +12,12 @@
   --panel-raised: #161b25;
   --line: #222a37;
   --line-strong: #2e3848;
-  --fg: #cdd6e4;
-  --fg-strong: #eef2f8;
-  --muted: #6c7a8f;
+  --fg: #e4e9f1;
+  --fg-strong: #f8fafd;
+  --muted: #9aa6b8;
+  --disabled: #4f5a6b;
+  --button: #263043;
+  --button-hover: #313d55;
   --accent: #7aa2f7;
   --teal: #5fd3bc;
   --amber: #f0b45a;
@@ -61,12 +64,14 @@ nav { display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; padding:
 nav .spacer { flex: 1; }
 #result { font-family: var(--mono); font-size: 13px; color: var(--green); }
 button {
-  font: 500 13px var(--sans); color: var(--fg); background: var(--panel-raised);
-  border: 1px solid var(--line-strong); border-radius: 7px; padding: .28rem .7rem; cursor: pointer;
+  font: 500 13px var(--sans); color: var(--fg-strong); background: var(--button);
+  border: 1px solid #3b4860; border-radius: 7px; padding: .28rem .7rem; cursor: pointer;
   transition: border-color .12s, background .12s, color .12s;
 }
-button:hover { border-color: var(--accent); color: var(--fg-strong); }
-button:active { background: var(--line); }
+button:hover { border-color: var(--accent); background: var(--button-hover); }
+button:active { background: var(--line-strong); }
+button:disabled, button:disabled:hover { color: var(--disabled); background: var(--panel); border-color: var(--line); cursor: not-allowed; }
+button:disabled kbd { color: var(--disabled); border-color: var(--line); }
 button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 button.small { padding: .05rem .45rem; font-size: 12px; }
 kbd { font: 11px var(--mono); color: var(--muted); margin-left: .35rem; padding: 0 .3rem;
@@ -103,7 +108,7 @@ pre { font: 13px/1.5 var(--mono); margin: 0; white-space: pre-wrap; word-break: 
 .stack-item { display: grid; grid-template-columns: 2.2rem 1fr; padding: .15rem 0; border-bottom: 1px solid var(--line); }
 .stack-item:last-child { border-bottom: none; }
 .index { color: var(--muted); font: 12px/1.5 var(--mono); }
-.memory { font-size: 12px; color: var(--fg); }
+.memory, .trace { font-size: 12px; color: var(--fg); }
 
 .condition { max-height: 10rem; overflow: auto; margin: .4rem 0; padding: .4rem .6rem;
              background: var(--bg); border-left: 3px solid var(--amber); border-radius: 0 6px 6px 0; }
@@ -171,6 +176,7 @@ dialog::backdrop { background: rgba(5, 7, 10, .7); backdrop-filter: blur(2px); }
   <div class="column">
     <section class="grow"><h2>Stack · top first</h2><div id="stack"></div></section>
     <section><h2>Memory</h2><div id="memory"></div></section>
+    <section><h2>Trace</h2><div id="trace"></div></section>
   </div>
   <div class="column side">
     <section id="warnings" hidden><h2>Warnings</h2><div id="warnings-list"></div></section>

@@ -12,6 +12,7 @@ export interface Model {
   view: View | null;
   stats: StatsView | null;
   progress: Progress | null;
+  trace: string | null;
   busy: boolean;
   log: LogEntry[];
 }
@@ -21,12 +22,13 @@ export type Msg =
   | { type: "view"; view: View }
   | { type: "stats"; stats: StatsView }
   | { type: "progress"; progress: Progress }
+  | { type: "trace"; trace: string }
   | { type: "failed"; error: string }
   | { type: "finished" };
 
 export const maxLog = 500;
 
-export const initialModel: Model = { view: null, stats: null, progress: null, busy: false, log: [] };
+export const initialModel: Model = { view: null, stats: null, progress: null, trace: null, busy: false, log: [] };
 
 function logged(model: Model, ...entries: LogEntry[]): LogEntry[] {
   return [...model.log, ...entries].slice(-maxLog);
@@ -47,6 +49,8 @@ export function update(model: Model, msg: Msg): Model {
       return { ...model, stats: msg.stats };
     case "progress":
       return { ...model, progress: msg.progress };
+    case "trace":
+      return { ...model, trace: msg.trace };
     case "failed":
       return { ...model, log: logged(model, { kind: "error", text: msg.error }) };
     case "finished":
@@ -64,7 +68,19 @@ export function pcBreakpoints(view: View): Map<number, number> {
   return found;
 }
 
-// The argument `branch` takes for an option: true/false for two-way branches, else its index
+// The argument `branch` takes for an option: false/true for two-way branches, else its index
 export function branchArgument(options: string[], index: number): string {
-  return options.length === 2 && options[0] === "true" ? (options[index] ?? String(index)) : String(index);
+  return options.length === 2 && options[0] === "false" ? (options[index] ?? String(index)) : String(index);
+}
+
+const forward = new Set(["step", "next", "over", "out", "continue"]);
+const backward = new Set(["back", "back-line", "restart"]);
+
+// Whether a toolbar command can do anything: nothing runs past the end or a pending
+// branch, and nothing goes back from the first step
+export function commandEnabled(view: View | null, command: string): boolean {
+  if (view === null) return false;
+  if (forward.has(command)) return view.status === "running";
+  if (backward.has(command)) return view.step > 0;
+  return true;
 }

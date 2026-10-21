@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { findAll, h, hasClass, textOf, type VNode } from "../src/vdom";
 import * as view from "../src/view";
-import { progressIdle, progressRunning, states, stateWith, statsFixture } from "./fixtures";
+import { progressIdle, progressRunning, states, stateWith, statsFixture, traceFixture } from "./fixtures";
 
 function recorder(): { run: (c: string) => void; ran: string[] } {
   const ran: string[] = [];
@@ -15,7 +15,7 @@ const clickable = (nodes: VNode[]): VNode[] => findAll(all(nodes), (n) => n.prop
 describe("status bar", () => {
   test("shows the step, status and position", () => {
     const text = textOf(all(view.statusBar(states["branch"]!)));
-    assert.match(text, /step \d+/);
+    assert.match(text, /Step \d+/);
     assert.match(text, /branch/);
     assert.match(text, /symbolic/);
     assert.match(text, /pc 0x[0-9a-f]+ JUMPI/);
@@ -54,7 +54,7 @@ describe("branch", () => {
     const nodes = view.branchPane(states["branch"]!, r.run);
     assert.match(textOf(all(nodes)), /Eq/);
     for (const option of clickable(nodes)) option.props.onClick!();
-    assert.deepEqual(r.ran, ["branch true", "branch false"]);
+    assert.deepEqual(r.ran, ["branch false", "branch true"]);
   });
   test("a concrete run has no branches", () => {
     assert.match(textOf(all(view.branchPane(states["concrete"]!, recorder().run))), /Concrete run/);
@@ -105,5 +105,12 @@ describe("other panes", () => {
     const nodes = view.logPane([{ kind: "error", text: "oops" }]);
     assert.ok(hasClass(nodes[0]!, "log-error"));
     assert.equal(textOf(nodes[0]!), "oops");
+  });
+});
+
+describe("trace", () => {
+  test("shows the server's trace, or that there is none yet", () => {
+    assert.equal(textOf(all(view.tracePane(traceFixture))), traceFixture.trim() === "" ? "No calls yet." : traceFixture);
+    assert.match(textOf(all(view.tracePane(""))), /No calls yet/);
   });
 });

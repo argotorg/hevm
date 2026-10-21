@@ -83,6 +83,7 @@ export const progress = oneOf(runningProgress, obj({ running: lit(false) }));
 export type Progress = Infer<typeof progress>;
 
 export const help = obj({ commands: arr(str), api: arr(str) });
+export const trace = obj({ trace: str });
 
 export class ApiError extends Error {
   override name = "ApiError";
@@ -109,4 +110,5 @@ export const api = {
   stats: (): Promise<StatsView> => request(stats, "GET", "/stats"),
   progress: (): Promise<Progress> => request(progress, "GET", "/progress"),
   help: (): Promise<Infer<typeof help>> => request(help, "GET", "/help"),
+  trace: async (): Promise<string> => (await request(trace, "GET", "/trace")).trace,
 };

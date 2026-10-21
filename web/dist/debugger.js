@@ -141,6 +141,7 @@ var runningProgress = obj({
 });
 var progress = oneOf(runningProgress, obj({ running: lit(false) }));
 var help = obj({ commands: arr(str), api: arr(str) });
+var trace = obj({ trace: str });
 var ApiError = class extends Error {
   name = "ApiError";
 };
@@ -163,7 +164,8 @@ var api = {
   command: (command) => request(view, "POST", "/command", JSON.stringify({ command })),
   stats: () => request(stats, "GET", "/stats"),
   progress: () => request(progress, "GET", "/progress"),
-  help: () => request(help, "GET", "/help")
+  help: () => request(help, "GET", "/help"),
+  trace: async () => (await request(trace, "GET", "/trace")).trace
 };
 
 // src/keys.ts
@@ -191,7 +193,7 @@ function keyAction(press, branchPending) {
 
 // src/model.ts
 var maxLog = 500;
-var initialModel = { view: null, stats: null, progress: null, busy: false, log: [] };
+var initialModel = { view: null, stats: null, progress: null, trace: null, busy: false, log: [] };
 function logged(model, ...entries) {
   return [...model.log, ...entries].slice(-maxLog);
 }
@@ -209,6 +211,8 @@ function update(model, msg) {
       return { ...model, stats: msg.stats };
     case "progress":
       return { ...model, progress: msg.progress };
+    case "trace":
+      return { ...model, trace: msg.trace };
     case "failed":
       return { ...model, log: logged(model, { kind: "error", text: msg.error }) };
     case "finished":
@@ -224,7 +228,15 @@ function pcBreakpoints(view2) {
   return found;
 }
 function branchArgument(options, index) {
-  return options.length === 2 && options[0] === "true" ? options[index] ?? String(index) : String(index);
+  return options.length === 2 && options[0] === "false" ? options[index] ?? String(index) : String(index);
+}
+var forward = /* @__PURE__ */ new Set(["step", "next", "over", "out", "continue"]);
+var backward = /* @__PURE__ */ new Set(["back", "back-line", "restart"]);
+function commandEnabled(view2, command) {
+  if (view2 === null) return false;
+  if (forward.has(command)) return view2.status === "running";
+  if (backward.has(command)) return view2.step > 0;
+  return true;
 }
 
 // src/vdom.ts
@@ -264,7 +276,7 @@ function fixed(n, digits) {
 var badge = (label, cls) => h("span", { class: `badge ${cls}` }, label);
 function statusBar(v) {
   return [
-    h("span", { class: "step" }, `step ${v.step}`),
+    h("span", { class: "step" }, `Step ${v.step}`),
     badge(v.status, `status-${v.status}`),
     badge(v.mode, "mode"),
     h("span", { class: "where" }, `pc ${hex(v.pc)} `, h("b", {}, v.op)),
@@ -375,6 +387,11 @@ function progressPane(p, busy) {
     ...p.hottest.slice(0, 5).map((s) => h("div", { class: "hot" }, `pc ${hex(s.pc)} \xB7 ${fixed(s.solveSecs, 2)}s \xB7 ${s.queries} queries`))
   ];
 }
+function tracePane(trace2) {
+  if (trace2 === null) return [h("div", { class: "empty" }, "\u2026")];
+  if (trace2.trim() === "") return [h("div", { class: "empty" }, "No calls yet.")];
+  return [h("pre", { class: "trace" }, trace2)];
+}
 function logPane(log) {
   return log.map((e) => h("pre", { class: `log-${e.kind}` }, e.text));
 }
@@ -442,9 +459,10 @@ var App = class {
   }
   async refreshSide() {
     try {
-      const [stats2, progress2] = await Promise.all([api.stats(), api.progress()]);
+      const [stats2, progress2, trace2] = await Promise.all([api.stats(), api.progress(), api.trace()]);
       this.dispatch({ type: "stats", stats: stats2 });
       this.dispatch({ type: "progress", progress: progress2 });
+      this.dispatch({ type: "trace", trace: trace2 });
     } catch (e) {
       this.dispatch({ type: "failed", error: String(e) });
     }
@@ -466,8 +484,12 @@ var App = class {
       byId("result").textContent = v.result ?? "";
       byId("code").querySelector(".current")?.scrollIntoView({ block: "nearest" });
     }
+    for (const button of document.querySelectorAll("[data-command]")) {
+      button.disabled = !commandEnabled(v, button.dataset["command"] ?? "");
+    }
     render(byId("stats"), statsPane(m.stats));
     render(byId("progress"), progressPane(m.progress, m.busy));
+    render(byId("trace"), tracePane(m.trace));
     const log = byId("log");
     render(log, logPane(m.log));
     log.scrollTop = log.scrollHeight;
@@ -500,8 +522,9 @@ var App = class {
     );
     if (action === null) return;
     e.preventDefault();
-    if ("run" in action) this.run(action.run);
-    else if ("focusConsole" in action) this.input.focus();
+    if ("run" in action) {
+      if (commandEnabled(this.model.view, action.run)) this.run(action.run);
+    } else if ("focusConsole" in action) this.input.focus();
     else void this.showHelp();
   }
   async showHelp() {

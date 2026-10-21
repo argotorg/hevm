@@ -2,8 +2,8 @@
     "branch": {
         "condition": "(Eq\n  5\n  (ReadWord\n    idx:\n      0\n    buf: \n      (AbstractBuf \"txdata\")\n  )\n)",
         "options": [
-            "true",
-            "false"
+            "false",
+            "true"
         ]
     },
     "branchMode": "solver",

@@ -58,6 +58,7 @@ tests = testGroup "web-fixtures"
       fixture "state-breakpoint" . JSON.Object =<< httpJSON port "POST" "/command" "branch true"
       _ <- httpJSON port "POST" "/command" "delete all"
       fixture "state-halted" . JSON.Object =<< httpJSON port "POST" "/command" "continue"
+      fixture "trace" =<< get port "/trace"
   ]
   where
     get port path = JSON.Object <$> httpJSON port "GET" path ""

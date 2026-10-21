@@ -1478,7 +1478,7 @@ lockstepCase solvers mode merging c = Progress.withProgressLogFromEnv "lockstep"
           | hasPendingBranch s = do
               v <- liftIO $ mkView s
               let opts = maybe [] (.options) v.branch
-                  sides = if opts == ["true", "false"] then ["true", "false"] else map (T.pack . show) [0 .. length opts - 1]
+                  sides = if opts == ["false", "true"] then ["true", "false"] else map (T.pack . show) [0 .. length opts - 1]
                   tryEach _ [] tr = pure (Nothing, tr)
                   tryEach n (side : rest) tr = do
                     s1 <- runCommand fetcher (Choose side) s
@@ -1525,7 +1525,7 @@ randomPath solvers c picks0 = do
           v <- liftIO $ mkView s
           let opts = maybe [] (.options) v.branch
               pick = fromMaybe 0 (headMay picks)
-              side = if opts == ["true", "false"] then (["true", "false"] !! (pick `mod` 2))
+              side = if opts == ["false", "true"] then (["true", "false"] !! (pick `mod` 2))
                      else T.pack (show (pick `mod` max 1 (length opts)))
           s' <- runCommand fetcher (Choose side) s
           go s' (drop 1 picks) n

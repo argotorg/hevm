@@ -29,6 +29,7 @@ module EVM.Debugger
   , Stats(..)
   , StatsView(..)
   , sessionStats
+  , sessionTrace
   , renderStats
   , isHalted
   ) where
@@ -481,81 +482,86 @@ runCommand fetcher cmd s0 = do
   runCommand' fetcher cmd s0 { vm = vm, note = "", out = Nothing }
 
 runCommand' :: (App m, Debuggable t) => Fetch.Fetcher t m -> Command -> Session t -> m (Session t)
-runCommand' fetcher cmd s = case cmd of
-  Step n -> do
-    (s', why) <- runUntil fetcher n (const False) s
-    pure $ case why of
-      StopLimit -> s'
-      _ -> stopping (s', why)
-  Next -> do
-    let here = srcKey s
-    stopping <$> runUntil fetcher s.stepLimit (\s' -> isJust (srcKey s') && srcKey s' /= here) s
-  Over -> do
-    let here = srcKey s
-        depth = length s.vm.frames
-    stopping <$> runUntil fetcher s.stepLimit (\s' -> isJust (srcKey s') && srcKey s' /= here
-                                                     && length s'.vm.frames <= depth && not (boring s')) s
-  Out -> do
-    let depth = length s.vm.frames
-    if depth == 0
-      then stopping <$> runUntil fetcher s.stepLimit (const False) s
-      else stopping <$> runUntil fetcher s.stepLimit (\s' -> length s'.vm.frames < depth) s
-  Continue -> stopping <$> runUntil fetcher s.stepLimit (const False) s
-  Back n
-    | s.curStep == 0 -> pure s { note = "Already at the first step." }
-    | otherwise -> do
-        s' <- backTo fetcher (max 0 (s.curStep - n)) s
-        pure s' { note = "Stepped back to step " <> tshow s'.curStep <> "." }
-  BackLine
-    | s.curStep == 0 -> pure s { note = "Already at the first step." }
-    | otherwise -> do
-        let here = srcKey s
-            go t | t <= 0 = backTo fetcher 0 s
-                 | otherwise = do
-                     s' <- backTo fetcher t s
-                     if isJust (srcKey s') && srcKey s' /= here then pure s' else go (t - 1)
-        s' <- go (s.curStep - 1)
-        pure s' { note = "Stepped back to step " <> tshow s'.curStep <> "." }
-  Restart -> do
-    s' <- backTo fetcher 0 s
-    pure s' { note = "Restarted." }
-  Choose arg -> choose fetcher arg s
-  Break bp -> pure s { bps = s.bps <> [bp]
-                     , note = "Breakpoint " <> tshow (length s.bps) <> " set: " <> showBreak bp }
-  Delete Nothing -> pure s { bps = [], note = "All breakpoints deleted." }
-  Delete (Just i)
-    | i >= 0 && i < length s.bps ->
-        pure s { bps = take i s.bps <> drop (i + 1) s.bps
-               , note = "Breakpoint " <> tshow i <> " deleted." }
-    | otherwise -> pure s { note = "No breakpoint " <> tshow i <> "." }
-  ListBreakpoints -> pure s { out = Just $ if null s.bps then "No breakpoints."
-                              else T.unlines [tshow i <> ": " <> showBreak b | (i, b) <- zip [0 :: Int ..] s.bps] }
-  ShowMemory off len -> do
-    t <- liftIO $ memoryText (shown s) s.vm off (min len maxMemoryDump)
-    pure s { out = Just t }
-  ShowStorage -> pure s { out = Just $ case currentContract s.vm of
-                        Just c -> formatExpr (shown s c.storage)
-                        Nothing -> "No contract." }
-  ShowCalldata -> pure s { out = Just (bufText (shown s s.vm.state.calldata)) }
-  ShowTrace -> pure s { out = Just (traceText s.dapp s.vm) }
-  ShowPathConds -> pure s { out = Just $ if null s.vm.constraints then "No path conditions."
-                        else T.unlines (map (formatProp . (if s.simp then Expr.simplifyProp else id)) (reverse s.vm.constraints)) }
-  ShowStats -> pure s { out = Just (renderStats (sessionStats s)) }
-  SetSimplify b -> pure s { simp = b, note = "Expressions are shown " <> (if b then "simplified." else "as they are.") }
-  SetMerge b -> pure (setMerge b s) { note = if b
-    then "Short branches are merged as exploration does: a step may run a whole if/else."
-    else "Branches are not merged: every step is one instruction." }
-  SetBranches m -> pure s { branchMode = m, note = case m of
-    SolverBranches -> "Branches are decided by the solver: only feasible sides are offered."
-    ExplorerBranches -> "Branches are decided as exploration does, without the solver: sides that may be infeasible are offered too."
-    CheckedBranches -> "Branches are decided as exploration does, and the solver checks every decision: see 'stats'." }
-  Help -> pure s { out = Just commandHelp }
-  Refresh -> pure s
-  where
-    stopping (s', why) = s' { note = stopMessage s' why }
-    boring s' = case srcPos s'.dapp s'.vm of
-      Just (_, _, _, sm) -> maybe True (BS.isPrefixOf "contract ") (srcMapCode s'.dapp.sources sm)
-      Nothing -> True
+runCommand' fetcher cmd s
+  | isHalted s && forward = pure s { note = "Execution has finished: " <> resultText s.vm <> ". Use back or restart." }
+  | otherwise = case cmd of
+    Step n -> do
+      (s', why) <- runUntil fetcher n (const False) s
+      pure $ case why of
+        StopLimit -> s'
+        _ -> stopping (s', why)
+    Next -> do
+      let here = srcKey s
+      stopping <$> runUntil fetcher s.stepLimit (\s' -> isJust (srcKey s') && srcKey s' /= here) s
+    Over -> do
+      let here = srcKey s
+          depth = length s.vm.frames
+      stopping <$> runUntil fetcher s.stepLimit (\s' -> isJust (srcKey s') && srcKey s' /= here
+                                                       && length s'.vm.frames <= depth && not (boring s')) s
+    Out -> do
+      let depth = length s.vm.frames
+      if depth == 0
+        then stopping <$> runUntil fetcher s.stepLimit (const False) s
+        else stopping <$> runUntil fetcher s.stepLimit (\s' -> length s'.vm.frames < depth) s
+    Continue -> stopping <$> runUntil fetcher s.stepLimit (const False) s
+    Back n
+      | s.curStep == 0 -> pure s { note = "Already at the first step." }
+      | otherwise -> do
+          s' <- backTo fetcher (max 0 (s.curStep - n)) s
+          pure s' { note = "Stepped back to step " <> tshow s'.curStep <> "." }
+    BackLine
+      | s.curStep == 0 -> pure s { note = "Already at the first step." }
+      | otherwise -> do
+          let here = srcKey s
+              go t | t <= 0 = backTo fetcher 0 s
+                   | otherwise = do
+                       s' <- backTo fetcher t s
+                       if isJust (srcKey s') && srcKey s' /= here then pure s' else go (t - 1)
+          s' <- go (s.curStep - 1)
+          pure s' { note = "Stepped back to step " <> tshow s'.curStep <> "." }
+    Restart -> do
+      s' <- backTo fetcher 0 s
+      pure s' { note = "Restarted." }
+    Choose arg -> choose fetcher arg s
+    Break bp -> pure s { bps = s.bps <> [bp]
+                       , note = "Breakpoint " <> tshow (length s.bps) <> " set: " <> showBreak bp }
+    Delete Nothing -> pure s { bps = [], note = "All breakpoints deleted." }
+    Delete (Just i)
+      | i >= 0 && i < length s.bps ->
+          pure s { bps = take i s.bps <> drop (i + 1) s.bps
+                 , note = "Breakpoint " <> tshow i <> " deleted." }
+      | otherwise -> pure s { note = "No breakpoint " <> tshow i <> "." }
+    ListBreakpoints -> pure s { out = Just $ if null s.bps then "No breakpoints."
+                                else T.unlines [tshow i <> ": " <> showBreak b | (i, b) <- zip [0 :: Int ..] s.bps] }
+    ShowMemory off len -> do
+      t <- liftIO $ memoryText (shown s) s.vm off (min len maxMemoryDump)
+      pure s { out = Just t }
+    ShowStorage -> pure s { out = Just $ case currentContract s.vm of
+                          Just c -> formatExpr (shown s c.storage)
+                          Nothing -> "No contract." }
+    ShowCalldata -> pure s { out = Just (bufText (shown s s.vm.state.calldata)) }
+    ShowTrace -> pure s { out = Just (traceText s.dapp s.vm) }
+    ShowPathConds -> pure s { out = Just $ if null s.vm.constraints then "No path conditions."
+                          else T.unlines (map (formatProp . (if s.simp then Expr.simplifyProp else id)) (reverse s.vm.constraints)) }
+    ShowStats -> pure s { out = Just (renderStats (sessionStats s)) }
+    SetSimplify b -> pure s { simp = b, note = "Expressions are shown " <> (if b then "simplified." else "as they are.") }
+    SetMerge b -> pure (setMerge b s) { note = if b
+      then "Short branches are merged as exploration does: a step may run a whole if/else."
+      else "Branches are not merged: every step is one instruction." }
+    SetBranches m -> pure s { branchMode = m, note = case m of
+      SolverBranches -> "Branches are decided by the solver: only feasible sides are offered."
+      ExplorerBranches -> "Branches are decided as exploration does, without the solver: sides that may be infeasible are offered too."
+      CheckedBranches -> "Branches are decided as exploration does, and the solver checks every decision: see 'stats'." }
+    Help -> pure s { out = Just commandHelp }
+    Refresh -> pure s
+    where
+      forward = case cmd of
+        Step _ -> True; Next -> True; Over -> True; Out -> True; Continue -> True
+        _ -> False
+      stopping (s', why) = s' { note = stopMessage s' why }
+      boring s' = case srcPos s'.dapp s'.vm of
+        Just (_, _, _, sm) -> maybe True (BS.isPrefixOf "contract ") (srcMapCode s'.dapp.sources sm)
+        Nothing -> True
 
 srcKey :: Session t -> Maybe (Int, Int)
 srcKey s = (\(fid, _, l, _) -> (fid, l)) <$> srcPos s.dapp s.vm
@@ -732,7 +738,7 @@ mkView s = do
   where
     vm = s.vm
     branchOptions = \case
-      PleaseRunBoth _ -> ["true", "false"]
+      PleaseRunBoth _ -> ["false", "true"]
       PleaseRunAll vals _ -> map (clip 200 . formatExpr) vals
 
 renderView :: View -> Text
@@ -846,6 +852,9 @@ bufText :: Expr Buf -> Text
 bufText = \case
   ConcreteBuf bs -> T.pack (prettyHex bs)
   b -> clip 4000 (formatExpr b)
+
+sessionTrace :: Session t -> Text
+sessionTrace s = traceText s.dapp s.vm
 
 traceText :: DappInfo -> VM t -> Text
 traceText dapp vm =

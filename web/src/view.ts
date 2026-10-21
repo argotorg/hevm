@@ -17,7 +17,7 @@ const badge = (label: string, cls: string): VNode => h("span", { class: `badge $
 
 export function statusBar(v: View): VNode[] {
   return [
-    h("span", { class: "step" }, `step ${v.step}`),
+    h("span", { class: "step" }, `Step ${v.step}`),
     badge(v.status, `status-${v.status}`),
     badge(v.mode, "mode"),
     h("span", { class: "where" }, `pc ${hex(v.pc)} `, h("b", {}, v.op)),
@@ -137,6 +137,12 @@ export function progressPane(p: Progress | null, busy: boolean): VNode[] {
     ...(p.hottest.length > 0 ? [h("div", { class: "pane-note" }, "Most solver time:")] : []),
     ...p.hottest.slice(0, 5).map((s) => h("div", { class: "hot" }, `pc ${hex(s.pc)} · ${fixed(s.solveSecs, 2)}s · ${s.queries} queries`)),
   ];
+}
+
+export function tracePane(trace: string | null): VNode[] {
+  if (trace === null) return [h("div", { class: "empty" }, "…")];
+  if (trace.trim() === "") return [h("div", { class: "empty" }, "No calls yet.")];
+  return [h("pre", { class: "trace" }, trace)];
 }
 
 export function logPane(log: LogEntry[]): VNode[] {

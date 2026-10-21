@@ -1,5 +1,5 @@
 // The server's answers, parsed as the page parses them
-import { help, progress, stats, view, type Progress, type StatsView, type View } from "../src/api";
+import { help, progress, stats, trace, view, type Progress, type StatsView, type View } from "../src/api";
 import helpJson from "./fixtures/help.json";
 import progressIdleJson from "./fixtures/progress-idle.json";
 import progressRunningJson from "./fixtures/progress-running.json";
@@ -8,6 +8,7 @@ import stateBreakpointJson from "./fixtures/state-breakpoint.json";
 import stateConcreteJson from "./fixtures/state-concrete.json";
 import stateHaltedJson from "./fixtures/state-halted.json";
 import statsJson from "./fixtures/stats.json";
+import traceJson from "./fixtures/trace.json";
 
 export const raw = {
   help: helpJson,
@@ -18,6 +19,7 @@ export const raw = {
   stateConcrete: stateConcreteJson,
   stateHalted: stateHaltedJson,
   stats: statsJson,
+  trace: traceJson,
 };
 
 export const states: Record<string, View> = {
@@ -30,6 +32,7 @@ export const statsFixture: StatsView = stats.parse(statsJson);
 export const progressRunning: Progress = progress.parse(progressRunningJson);
 export const progressIdle: Progress = progress.parse(progressIdleJson);
 export const helpFixture = help.parse(helpJson);
+export const traceFixture: string = trace.parse(traceJson).trace;
 
 // A state with changes to the concrete fixture, for cases the server's fixtures do not cover
 export function stateWith(changes: Partial<View>): View {

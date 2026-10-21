@@ -54,6 +54,11 @@ tests = testGroup "Debugger"
         assertBool "halted" (isHalted sEnd)
         assertEqual "result" (show vm'.result) (show (sessionVM sEnd).result)
         assertEqual "gas" vm'.state.gas (sessionVM sEnd).state.gas
+      sMore <- run "step" sEnd
+      v <- liftIO $ mkView sMore
+      liftIO $ do
+        assertEqual "no step past the end" (sessionStep sEnd) (sessionStep sMore)
+        assertBool ("says it finished: " <> T.unpack v.message) ("Use back or restart." `T.isSuffixOf` v.message)
   , testCase "restart-after-memory-writes" $ runEnv testEnv $ withConcrete loopCode $ \run s0 -> do
       v0 <- snap s0
       s <- run "step 120" s0 >>= run "restart"
@@ -68,7 +73,7 @@ tests = testGroup "Debugger"
       v1 <- liftIO $ mkView s1
       liftIO $ do
         assertEqual "branch pending" "branch" v1.status
-        assertEqual "two options" (Just ["true", "false"]) ((.options) <$> v1.branch)
+        assertEqual "two options" (Just ["false", "true"]) ((.options) <$> v1.branch)
       -- x == 5 is implied on this side, so the second branch is decided by the solver
       sT <- run "branch true" s1 >>= run "continue"
       vT <- liftIO $ mkView sT

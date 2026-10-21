@@ -197,6 +197,9 @@ sessionRoute run sessVar done req = case (req.method, req.path) of
   ("GET", "/stats") -> do
     v <- sessionStats <$> readMVar sessVar
     Just <$> if textFormat req then pure (plain (renderStats v)) else json v
+  ("GET", "/trace") -> do
+    t <- sessionTrace <$> readMVar sessVar
+    Just <$> if textFormat req then pure (plain t) else json (JSON.object [ "trace" .= t ])
   ("POST", "/command") -> Just <$> (run commandLine >>= viewResponse)
   ("POST", "/quit") -> do
     void $ tryPutMVar done ()
@@ -235,6 +238,7 @@ apiHelp = T.unlines
   , "POST /command          run a command, returns the new view"
   , "                       body: {\"command\": \"step 10\"} or the bare command text"
   , "GET  /stats            counters of what the session has done"
+  , "GET  /trace            the call trace so far"
   , "GET  /help             commands and API"
   , "POST /quit             stop the debugger"
   , ""

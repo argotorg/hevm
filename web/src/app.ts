@@ -2,7 +2,7 @@
 // feeds the answers through `update`, and renders the model with `view`.
 import { api, type View } from "./api";
 import { keyAction, shortcuts } from "./keys";
-import { initialModel, update, type Model, type Msg } from "./model";
+import { commandEnabled, initialModel, update, type Model, type Msg } from "./model";
 import { render, h } from "./vdom";
 import * as view from "./view";
 
@@ -77,9 +77,10 @@ export class App {
 
   private async refreshSide(): Promise<void> {
     try {
-      const [stats, progress] = await Promise.all([api.stats(), api.progress()]);
+      const [stats, progress, trace] = await Promise.all([api.stats(), api.progress(), api.trace()]);
       this.dispatch({ type: "stats", stats });
       this.dispatch({ type: "progress", progress });
+      this.dispatch({ type: "trace", trace });
     } catch (e) {
       this.dispatch({ type: "failed", error: String(e) });
     }
@@ -102,8 +103,12 @@ export class App {
       byId("result").textContent = v.result ?? "";
       byId("code").querySelector(".current")?.scrollIntoView({ block: "nearest" });
     }
+    for (const button of document.querySelectorAll<HTMLButtonElement>("[data-command]")) {
+      button.disabled = !commandEnabled(v, button.dataset["command"] ?? "");
+    }
     render(byId("stats"), view.statsPane(m.stats));
     render(byId("progress"), view.progressPane(m.progress, m.busy));
+    render(byId("trace"), view.tracePane(m.trace));
     const log = byId("log");
     render(log, view.logPane(m.log));
     log.scrollTop = log.scrollHeight;
@@ -138,7 +143,9 @@ export class App {
     );
     if (action === null) return;
     e.preventDefault();
-    if ("run" in action) this.run(action.run);
+    if ("run" in action) {
+      if (commandEnabled(this.model.view, action.run)) this.run(action.run);
+    }
     else if ("focusConsole" in action) this.input.focus();
     else void this.showHelp();
   }

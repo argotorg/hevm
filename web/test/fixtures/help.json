@@ -10,6 +10,7 @@
         "POST /command          run a command, returns the new view",
         "                       body: {\"command\": \"step 10\"} or the bare command text",
         "GET  /stats            counters of what the session has done",
+        "GET  /trace            the call trace so far",
         "GET  /help             commands and API",
         "POST /quit             stop the debugger",
         "",
