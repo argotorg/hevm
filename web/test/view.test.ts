@@ -65,6 +65,21 @@ describe("branch", () => {
 });
 
 describe("other panes", () => {
+  test("storage: each contract, current one marked, words coloured", () => {
+    const v = stateWith({
+      storage: [
+        { address: { hex: "0xacab" }, current: true, initial: "unknown", slots: [{ slot: { hex: "0x1" }, value: { expr: "(Caller)" } }] },
+        { address: { hex: "0xbeef" }, current: false, initial: "known", slots: [] },
+      ],
+    });
+    const nodes = view.storagePane(v);
+    assert.equal(nodes.length, 2);
+    assert.ok(hasClass(nodes[0]!, "current-store"));
+    assert.match(textOf(nodes[0]!), /0xacab · initial storage unknown/);
+    assert.match(textOf(nodes[1]!), /nothing written/);
+    assert.equal(findAll(nodes[0]!, (n) => hasClass(n, "expr-ctor")).length, 1);
+    assert.match(textOf(all(view.storagePane(stateWith({ storage: [] })))), /No storage/);
+  });
   test("source, without a source map", () => {
     assert.match(textOf(all(view.sourcePane(states["concrete"]!))), /No source map/);
     assert.match(textOf(all(view.sourcePane(stateWith({ generatedCode: true })))), /Compiler-generated code/);

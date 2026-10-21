@@ -72,5 +72,15 @@
     "stack": [],
     "status": "halted",
     "step": 14,
+    "storage": [
+        {
+            "address": {
+                "expr": "(SymAddr \"entrypoint\")"
+            },
+            "current": true,
+            "initial": "unknown",
+            "slots": []
+        }
+    ],
     "warnings": []
 }

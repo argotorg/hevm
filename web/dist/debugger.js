@@ -74,6 +74,7 @@ var codeLine = obj({ pc: num, op: str, current: bool });
 var sourceLine = obj({ line: num, text: str, current: bool });
 var sourceView = obj({ file: str, line: num, lines: arr(sourceLine) });
 var branchView = obj({ condition: nullable(str), options: arr(str) });
+var word = oneOf(obj({ hex: str }), obj({ expr: str }));
 var view = obj({
   mode: lit("concrete", "symbolic"),
   step: num,
@@ -91,6 +92,7 @@ var view = obj({
   memory: str,
   source: nullable(sourceView),
   generatedCode: bool,
+  storage: arr(obj({ address: word, current: bool, initial: lit("known", "unknown"), slots: arr(obj({ slot: word, value: word })) })),
   pathConditions: num,
   branch: nullable(branchView),
   choices: arr(str),
@@ -267,12 +269,1044 @@ function render(container, nodes) {
   container.replaceChildren(...nodes.map(toDom));
 }
 
+// src/vendor/prism.js
+(typeof window !== "undefined" ? window : globalThis).Prism = { manual: true };
+var _self = typeof window !== "undefined" ? window : typeof WorkerGlobalScope !== "undefined" && self instanceof WorkerGlobalScope ? self : {};
+var Prism = function(_self2) {
+  var lang = /(?:^|\s)lang(?:uage)?-([\w-]+)(?=\s|$)/i;
+  var uniqueId = 0;
+  var plainTextGrammar = {};
+  var _ = {
+    /**
+     * By default, Prism will attempt to highlight all code elements (by calling {@link Prism.highlightAll}) on the
+     * current page after the page finished loading. This might be a problem if e.g. you wanted to asynchronously load
+     * additional languages or plugins yourself.
+     *
+     * By setting this value to `true`, Prism will not automatically highlight all code elements on the page.
+     *
+     * You obviously have to change this value before the automatic highlighting started. To do this, you can add an
+     * empty Prism object into the global scope before loading the Prism script like this:
+     *
+     * ```js
+     * window.Prism = window.Prism || {};
+     * Prism.manual = true;
+     * // add a new <script> to load Prism's script
+     * ```
+     *
+     * @default false
+     * @type {boolean}
+     * @memberof Prism
+     * @public
+     */
+    manual: _self2.Prism && _self2.Prism.manual,
+    /**
+     * By default, if Prism is in a web worker, it assumes that it is in a worker it created itself, so it uses
+     * `addEventListener` to communicate with its parent instance. However, if you're using Prism manually in your
+     * own worker, you don't want it to do this.
+     *
+     * By setting this value to `true`, Prism will not add its own listeners to the worker.
+     *
+     * You obviously have to change this value before Prism executes. To do this, you can add an
+     * empty Prism object into the global scope before loading the Prism script like this:
+     *
+     * ```js
+     * window.Prism = window.Prism || {};
+     * Prism.disableWorkerMessageHandler = true;
+     * // Load Prism's script
+     * ```
+     *
+     * @default false
+     * @type {boolean}
+     * @memberof Prism
+     * @public
+     */
+    disableWorkerMessageHandler: _self2.Prism && _self2.Prism.disableWorkerMessageHandler,
+    /**
+     * A namespace for utility methods.
+     *
+     * All function in this namespace that are not explicitly marked as _public_ are for __internal use only__ and may
+     * change or disappear at any time.
+     *
+     * @namespace
+     * @memberof Prism
+     */
+    util: {
+      encode: function encode(tokens) {
+        if (tokens instanceof Token) {
+          return new Token(tokens.type, encode(tokens.content), tokens.alias);
+        } else if (Array.isArray(tokens)) {
+          return tokens.map(encode);
+        } else {
+          return tokens.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/\u00a0/g, " ");
+        }
+      },
+      /**
+       * Returns the name of the type of the given value.
+       *
+       * @param {any} o
+       * @returns {string}
+       * @example
+       * type(null)      === 'Null'
+       * type(undefined) === 'Undefined'
+       * type(123)       === 'Number'
+       * type('foo')     === 'String'
+       * type(true)      === 'Boolean'
+       * type([1, 2])    === 'Array'
+       * type({})        === 'Object'
+       * type(String)    === 'Function'
+       * type(/abc+/)    === 'RegExp'
+       */
+      type: function(o) {
+        return Object.prototype.toString.call(o).slice(8, -1);
+      },
+      /**
+       * Returns a unique number for the given object. Later calls will still return the same number.
+       *
+       * @param {Object} obj
+       * @returns {number}
+       */
+      objId: function(obj2) {
+        if (!obj2["__id"]) {
+          Object.defineProperty(obj2, "__id", { value: ++uniqueId });
+        }
+        return obj2["__id"];
+      },
+      /**
+       * Creates a deep clone of the given object.
+       *
+       * The main intended use of this function is to clone language definitions.
+       *
+       * @param {T} o
+       * @param {Record<number, any>} [visited]
+       * @returns {T}
+       * @template T
+       */
+      clone: function deepClone(o, visited) {
+        visited = visited || {};
+        var clone;
+        var id;
+        switch (_.util.type(o)) {
+          case "Object":
+            id = _.util.objId(o);
+            if (visited[id]) {
+              return visited[id];
+            }
+            clone = /** @type {Record<string, any>} */
+            {};
+            visited[id] = clone;
+            for (var key in o) {
+              if (o.hasOwnProperty(key)) {
+                clone[key] = deepClone(o[key], visited);
+              }
+            }
+            return (
+              /** @type {any} */
+              clone
+            );
+          case "Array":
+            id = _.util.objId(o);
+            if (visited[id]) {
+              return visited[id];
+            }
+            clone = [];
+            visited[id] = clone;
+            /** @type {Array} */
+            /** @type {any} */
+            o.forEach(function(v, i) {
+              clone[i] = deepClone(v, visited);
+            });
+            return (
+              /** @type {any} */
+              clone
+            );
+          default:
+            return o;
+        }
+      },
+      /**
+       * Returns the Prism language of the given element set by a `language-xxxx` or `lang-xxxx` class.
+       *
+       * If no language is set for the element or the element is `null` or `undefined`, `none` will be returned.
+       *
+       * @param {Element} element
+       * @returns {string}
+       */
+      getLanguage: function(element) {
+        while (element) {
+          var m = lang.exec(element.className);
+          if (m) {
+            return m[1].toLowerCase();
+          }
+          element = element.parentElement;
+        }
+        return "none";
+      },
+      /**
+       * Sets the Prism `language-xxxx` class of the given element.
+       *
+       * @param {Element} element
+       * @param {string} language
+       * @returns {void}
+       */
+      setLanguage: function(element, language) {
+        element.className = element.className.replace(RegExp(lang, "gi"), "");
+        element.classList.add("language-" + language);
+      },
+      /**
+       * Returns the script element that is currently executing.
+       *
+       * This does __not__ work for line script element.
+       *
+       * @returns {HTMLScriptElement | null}
+       */
+      currentScript: function() {
+        if (typeof document === "undefined") {
+          return null;
+        }
+        if ("currentScript" in document && 1 < 2) {
+          return (
+            /** @type {any} */
+            document.currentScript
+          );
+        }
+        try {
+          throw new Error();
+        } catch (err) {
+          var src = (/at [^(\r\n]*\((.*):[^:]+:[^:]+\)$/i.exec(err.stack) || [])[1];
+          if (src) {
+            var scripts = document.getElementsByTagName("script");
+            for (var i in scripts) {
+              if (scripts[i].src == src) {
+                return scripts[i];
+              }
+            }
+          }
+          return null;
+        }
+      },
+      /**
+       * Returns whether a given class is active for `element`.
+       *
+       * The class can be activated if `element` or one of its ancestors has the given class and it can be deactivated
+       * if `element` or one of its ancestors has the negated version of the given class. The _negated version_ of the
+       * given class is just the given class with a `no-` prefix.
+       *
+       * Whether the class is active is determined by the closest ancestor of `element` (where `element` itself is
+       * closest ancestor) that has the given class or the negated version of it. If neither `element` nor any of its
+       * ancestors have the given class or the negated version of it, then the default activation will be returned.
+       *
+       * In the paradoxical situation where the closest ancestor contains __both__ the given class and the negated
+       * version of it, the class is considered active.
+       *
+       * @param {Element} element
+       * @param {string} className
+       * @param {boolean} [defaultActivation=false]
+       * @returns {boolean}
+       */
+      isActive: function(element, className, defaultActivation) {
+        var no = "no-" + className;
+        while (element) {
+          var classList = element.classList;
+          if (classList.contains(className)) {
+            return true;
+          }
+          if (classList.contains(no)) {
+            return false;
+          }
+          element = element.parentElement;
+        }
+        return !!defaultActivation;
+      }
+    },
+    /**
+     * This namespace contains all currently loaded languages and the some helper functions to create and modify languages.
+     *
+     * @namespace
+     * @memberof Prism
+     * @public
+     */
+    languages: {
+      /**
+       * The grammar for plain, unformatted text.
+       */
+      plain: plainTextGrammar,
+      plaintext: plainTextGrammar,
+      text: plainTextGrammar,
+      txt: plainTextGrammar,
+      /**
+       * Creates a deep copy of the language with the given id and appends the given tokens.
+       *
+       * If a token in `redef` also appears in the copied language, then the existing token in the copied language
+       * will be overwritten at its original position.
+       *
+       * ## Best practices
+       *
+       * Since the position of overwriting tokens (token in `redef` that overwrite tokens in the copied language)
+       * doesn't matter, they can technically be in any order. However, this can be confusing to others that trying to
+       * understand the language definition because, normally, the order of tokens matters in Prism grammars.
+       *
+       * Therefore, it is encouraged to order overwriting tokens according to the positions of the overwritten tokens.
+       * Furthermore, all non-overwriting tokens should be placed after the overwriting ones.
+       *
+       * @param {string} id The id of the language to extend. This has to be a key in `Prism.languages`.
+       * @param {Grammar} redef The new tokens to append.
+       * @returns {Grammar} The new language created.
+       * @public
+       * @example
+       * Prism.languages['css-with-colors'] = Prism.languages.extend('css', {
+       *     // Prism.languages.css already has a 'comment' token, so this token will overwrite CSS' 'comment' token
+       *     // at its original position
+       *     'comment': { ... },
+       *     // CSS doesn't have a 'color' token, so this token will be appended
+       *     'color': /\b(?:red|green|blue)\b/
+       * });
+       */
+      extend: function(id, redef) {
+        var lang2 = _.util.clone(_.languages[id]);
+        for (var key in redef) {
+          lang2[key] = redef[key];
+        }
+        return lang2;
+      },
+      /**
+       * Inserts tokens _before_ another token in a language definition or any other grammar.
+       *
+       * ## Usage
+       *
+       * This helper method makes it easy to modify existing languages. For example, the CSS language definition
+       * not only defines CSS highlighting for CSS documents, but also needs to define highlighting for CSS embedded
+       * in HTML through `<style>` elements. To do this, it needs to modify `Prism.languages.markup` and add the
+       * appropriate tokens. However, `Prism.languages.markup` is a regular JavaScript object literal, so if you do
+       * this:
+       *
+       * ```js
+       * Prism.languages.markup.style = {
+       *     // token
+       * };
+       * ```
+       *
+       * then the `style` token will be added (and processed) at the end. `insertBefore` allows you to insert tokens
+       * before existing tokens. For the CSS example above, you would use it like this:
+       *
+       * ```js
+       * Prism.languages.insertBefore('markup', 'cdata', {
+       *     'style': {
+       *         // token
+       *     }
+       * });
+       * ```
+       *
+       * ## Special cases
+       *
+       * If the grammars of `inside` and `insert` have tokens with the same name, the tokens in `inside`'s grammar
+       * will be ignored.
+       *
+       * This behavior can be used to insert tokens after `before`:
+       *
+       * ```js
+       * Prism.languages.insertBefore('markup', 'comment', {
+       *     'comment': Prism.languages.markup.comment,
+       *     // tokens after 'comment'
+       * });
+       * ```
+       *
+       * ## Limitations
+       *
+       * The main problem `insertBefore` has to solve is iteration order. Since ES2015, the iteration order for object
+       * properties is guaranteed to be the insertion order (except for integer keys) but some browsers behave
+       * differently when keys are deleted and re-inserted. So `insertBefore` can't be implemented by temporarily
+       * deleting properties which is necessary to insert at arbitrary positions.
+       *
+       * To solve this problem, `insertBefore` doesn't actually insert the given tokens into the target object.
+       * Instead, it will create a new object and replace all references to the target object with the new one. This
+       * can be done without temporarily deleting properties, so the iteration order is well-defined.
+       *
+       * However, only references that can be reached from `Prism.languages` or `insert` will be replaced. I.e. if
+       * you hold the target object in a variable, then the value of the variable will not change.
+       *
+       * ```js
+       * var oldMarkup = Prism.languages.markup;
+       * var newMarkup = Prism.languages.insertBefore('markup', 'comment', { ... });
+       *
+       * assert(oldMarkup !== Prism.languages.markup);
+       * assert(newMarkup === Prism.languages.markup);
+       * ```
+       *
+       * @param {string} inside The property of `root` (e.g. a language id in `Prism.languages`) that contains the
+       * object to be modified.
+       * @param {string} before The key to insert before.
+       * @param {Grammar} insert An object containing the key-value pairs to be inserted.
+       * @param {Object<string, any>} [root] The object containing `inside`, i.e. the object that contains the
+       * object to be modified.
+       *
+       * Defaults to `Prism.languages`.
+       * @returns {Grammar} The new grammar object.
+       * @public
+       */
+      insertBefore: function(inside, before, insert, root) {
+        root = root || /** @type {any} */
+        _.languages;
+        var grammar = root[inside];
+        var ret = {};
+        for (var token in grammar) {
+          if (grammar.hasOwnProperty(token)) {
+            if (token == before) {
+              for (var newToken in insert) {
+                if (insert.hasOwnProperty(newToken)) {
+                  ret[newToken] = insert[newToken];
+                }
+              }
+            }
+            if (!insert.hasOwnProperty(token)) {
+              ret[token] = grammar[token];
+            }
+          }
+        }
+        var old = root[inside];
+        root[inside] = ret;
+        _.languages.DFS(_.languages, function(key, value) {
+          if (value === old && key != inside) {
+            this[key] = ret;
+          }
+        });
+        return ret;
+      },
+      // Traverse a language definition with Depth First Search
+      DFS: function DFS(o, callback, type, visited) {
+        visited = visited || {};
+        var objId = _.util.objId;
+        for (var i in o) {
+          if (o.hasOwnProperty(i)) {
+            callback.call(o, i, o[i], type || i);
+            var property = o[i];
+            var propertyType = _.util.type(property);
+            if (propertyType === "Object" && !visited[objId(property)]) {
+              visited[objId(property)] = true;
+              DFS(property, callback, null, visited);
+            } else if (propertyType === "Array" && !visited[objId(property)]) {
+              visited[objId(property)] = true;
+              DFS(property, callback, i, visited);
+            }
+          }
+        }
+      }
+    },
+    plugins: {},
+    /**
+     * This is the most high-level function in Prism’s API.
+     * It fetches all the elements that have a `.language-xxxx` class and then calls {@link Prism.highlightElement} on
+     * each one of them.
+     *
+     * This is equivalent to `Prism.highlightAllUnder(document, async, callback)`.
+     *
+     * @param {boolean} [async=false] Same as in {@link Prism.highlightAllUnder}.
+     * @param {HighlightCallback} [callback] Same as in {@link Prism.highlightAllUnder}.
+     * @memberof Prism
+     * @public
+     */
+    highlightAll: function(async, callback) {
+      _.highlightAllUnder(document, async, callback);
+    },
+    /**
+     * Fetches all the descendants of `container` that have a `.language-xxxx` class and then calls
+     * {@link Prism.highlightElement} on each one of them.
+     *
+     * The following hooks will be run:
+     * 1. `before-highlightall`
+     * 2. `before-all-elements-highlight`
+     * 3. All hooks of {@link Prism.highlightElement} for each element.
+     *
+     * @param {ParentNode} container The root element, whose descendants that have a `.language-xxxx` class will be highlighted.
+     * @param {boolean} [async=false] Whether each element is to be highlighted asynchronously using Web Workers.
+     * @param {HighlightCallback} [callback] An optional callback to be invoked on each element after its highlighting is done.
+     * @memberof Prism
+     * @public
+     */
+    highlightAllUnder: function(container, async, callback) {
+      var env = {
+        callback,
+        container,
+        selector: 'code[class*="language-"], [class*="language-"] code, code[class*="lang-"], [class*="lang-"] code'
+      };
+      _.hooks.run("before-highlightall", env);
+      env.elements = Array.prototype.slice.apply(env.container.querySelectorAll(env.selector));
+      _.hooks.run("before-all-elements-highlight", env);
+      for (var i = 0, element; element = env.elements[i++]; ) {
+        _.highlightElement(element, async === true, env.callback);
+      }
+    },
+    /**
+     * Highlights the code inside a single element.
+     *
+     * The following hooks will be run:
+     * 1. `before-sanity-check`
+     * 2. `before-highlight`
+     * 3. All hooks of {@link Prism.highlight}. These hooks will be run by an asynchronous worker if `async` is `true`.
+     * 4. `before-insert`
+     * 5. `after-highlight`
+     * 6. `complete`
+     *
+     * Some the above hooks will be skipped if the element doesn't contain any text or there is no grammar loaded for
+     * the element's language.
+     *
+     * @param {Element} element The element containing the code.
+     * It must have a class of `language-xxxx` to be processed, where `xxxx` is a valid language identifier.
+     * @param {boolean} [async=false] Whether the element is to be highlighted asynchronously using Web Workers
+     * to improve performance and avoid blocking the UI when highlighting very large chunks of code. This option is
+     * [disabled by default](https://prismjs.com/faq.html#why-is-asynchronous-highlighting-disabled-by-default).
+     *
+     * Note: All language definitions required to highlight the code must be included in the main `prism.js` file for
+     * asynchronous highlighting to work. You can build your own bundle on the
+     * [Download page](https://prismjs.com/download.html).
+     * @param {HighlightCallback} [callback] An optional callback to be invoked after the highlighting is done.
+     * Mostly useful when `async` is `true`, since in that case, the highlighting is done asynchronously.
+     * @memberof Prism
+     * @public
+     */
+    highlightElement: function(element, async, callback) {
+      var language = _.util.getLanguage(element);
+      var grammar = _.languages[language];
+      _.util.setLanguage(element, language);
+      var parent = element.parentElement;
+      if (parent && parent.nodeName.toLowerCase() === "pre") {
+        _.util.setLanguage(parent, language);
+      }
+      var code = element.textContent;
+      var env = {
+        element,
+        language,
+        grammar,
+        code
+      };
+      function insertHighlightedCode(highlightedCode) {
+        env.highlightedCode = highlightedCode;
+        _.hooks.run("before-insert", env);
+        env.element.innerHTML = env.highlightedCode;
+        _.hooks.run("after-highlight", env);
+        _.hooks.run("complete", env);
+        callback && callback.call(env.element);
+      }
+      _.hooks.run("before-sanity-check", env);
+      parent = env.element.parentElement;
+      if (parent && parent.nodeName.toLowerCase() === "pre" && !parent.hasAttribute("tabindex")) {
+        parent.setAttribute("tabindex", "0");
+      }
+      if (!env.code) {
+        _.hooks.run("complete", env);
+        callback && callback.call(env.element);
+        return;
+      }
+      _.hooks.run("before-highlight", env);
+      if (!env.grammar) {
+        insertHighlightedCode(_.util.encode(env.code));
+        return;
+      }
+      if (async && _self2.Worker) {
+        var worker = new Worker(_.filename);
+        worker.onmessage = function(evt) {
+          insertHighlightedCode(evt.data);
+        };
+        worker.postMessage(JSON.stringify({
+          language: env.language,
+          code: env.code,
+          immediateClose: true
+        }));
+      } else {
+        insertHighlightedCode(_.highlight(env.code, env.grammar, env.language));
+      }
+    },
+    /**
+     * Low-level function, only use if you know what you’re doing. It accepts a string of text as input
+     * and the language definitions to use, and returns a string with the HTML produced.
+     *
+     * The following hooks will be run:
+     * 1. `before-tokenize`
+     * 2. `after-tokenize`
+     * 3. `wrap`: On each {@link Token}.
+     *
+     * @param {string} text A string with the code to be highlighted.
+     * @param {Grammar} grammar An object containing the tokens to use.
+     *
+     * Usually a language definition like `Prism.languages.markup`.
+     * @param {string} language The name of the language definition passed to `grammar`.
+     * @returns {string} The highlighted HTML.
+     * @memberof Prism
+     * @public
+     * @example
+     * Prism.highlight('var foo = true;', Prism.languages.javascript, 'javascript');
+     */
+    highlight: function(text2, grammar, language) {
+      var env = {
+        code: text2,
+        grammar,
+        language
+      };
+      _.hooks.run("before-tokenize", env);
+      if (!env.grammar) {
+        throw new Error('The language "' + env.language + '" has no grammar.');
+      }
+      env.tokens = _.tokenize(env.code, env.grammar);
+      _.hooks.run("after-tokenize", env);
+      return Token.stringify(_.util.encode(env.tokens), env.language);
+    },
+    /**
+     * This is the heart of Prism, and the most low-level function you can use. It accepts a string of text as input
+     * and the language definitions to use, and returns an array with the tokenized code.
+     *
+     * When the language definition includes nested tokens, the function is called recursively on each of these tokens.
+     *
+     * This method could be useful in other contexts as well, as a very crude parser.
+     *
+     * @param {string} text A string with the code to be highlighted.
+     * @param {Grammar} grammar An object containing the tokens to use.
+     *
+     * Usually a language definition like `Prism.languages.markup`.
+     * @returns {TokenStream} An array of strings and tokens, a token stream.
+     * @memberof Prism
+     * @public
+     * @example
+     * let code = `var foo = 0;`;
+     * let tokens = Prism.tokenize(code, Prism.languages.javascript);
+     * tokens.forEach(token => {
+     *     if (token instanceof Prism.Token && token.type === 'number') {
+     *         console.log(`Found numeric literal: ${token.content}`);
+     *     }
+     * });
+     */
+    tokenize: function(text2, grammar) {
+      var rest = grammar.rest;
+      if (rest) {
+        for (var token in rest) {
+          grammar[token] = rest[token];
+        }
+        delete grammar.rest;
+      }
+      var tokenList = new LinkedList();
+      addAfter(tokenList, tokenList.head, text2);
+      matchGrammar(text2, tokenList, grammar, tokenList.head, 0);
+      return toArray(tokenList);
+    },
+    /**
+     * @namespace
+     * @memberof Prism
+     * @public
+     */
+    hooks: {
+      all: {},
+      /**
+       * Adds the given callback to the list of callbacks for the given hook.
+       *
+       * The callback will be invoked when the hook it is registered for is run.
+       * Hooks are usually directly run by a highlight function but you can also run hooks yourself.
+       *
+       * One callback function can be registered to multiple hooks and the same hook multiple times.
+       *
+       * @param {string} name The name of the hook.
+       * @param {HookCallback} callback The callback function which is given environment variables.
+       * @public
+       */
+      add: function(name, callback) {
+        var hooks = _.hooks.all;
+        hooks[name] = hooks[name] || [];
+        hooks[name].push(callback);
+      },
+      /**
+       * Runs a hook invoking all registered callbacks with the given environment variables.
+       *
+       * Callbacks will be invoked synchronously and in the order in which they were registered.
+       *
+       * @param {string} name The name of the hook.
+       * @param {Object<string, any>} env The environment variables of the hook passed to all callbacks registered.
+       * @public
+       */
+      run: function(name, env) {
+        var callbacks = _.hooks.all[name];
+        if (!callbacks || !callbacks.length) {
+          return;
+        }
+        for (var i = 0, callback; callback = callbacks[i++]; ) {
+          callback(env);
+        }
+      }
+    },
+    Token
+  };
+  _self2.Prism = _;
+  function Token(type, content, alias, matchedStr) {
+    this.type = type;
+    this.content = content;
+    this.alias = alias;
+    this.length = (matchedStr || "").length | 0;
+  }
+  Token.stringify = function stringify(o, language) {
+    if (typeof o == "string") {
+      return o;
+    }
+    if (Array.isArray(o)) {
+      var s = "";
+      o.forEach(function(e) {
+        s += stringify(e, language);
+      });
+      return s;
+    }
+    var env = {
+      type: o.type,
+      content: stringify(o.content, language),
+      tag: "span",
+      classes: ["token", o.type],
+      attributes: {},
+      language
+    };
+    var aliases = o.alias;
+    if (aliases) {
+      if (Array.isArray(aliases)) {
+        Array.prototype.push.apply(env.classes, aliases);
+      } else {
+        env.classes.push(aliases);
+      }
+    }
+    _.hooks.run("wrap", env);
+    var attributes = "";
+    for (var name in env.attributes) {
+      attributes += " " + name + '="' + (env.attributes[name] || "").replace(/"/g, "&quot;") + '"';
+    }
+    return "<" + env.tag + ' class="' + env.classes.join(" ") + '"' + attributes + ">" + env.content + "</" + env.tag + ">";
+  };
+  function matchPattern(pattern, pos, text2, lookbehind) {
+    pattern.lastIndex = pos;
+    var match = pattern.exec(text2);
+    if (match && lookbehind && match[1]) {
+      var lookbehindLength = match[1].length;
+      match.index += lookbehindLength;
+      match[0] = match[0].slice(lookbehindLength);
+    }
+    return match;
+  }
+  function matchGrammar(text2, tokenList, grammar, startNode, startPos, rematch) {
+    for (var token in grammar) {
+      if (!grammar.hasOwnProperty(token) || !grammar[token]) {
+        continue;
+      }
+      var patterns = grammar[token];
+      patterns = Array.isArray(patterns) ? patterns : [patterns];
+      for (var j = 0; j < patterns.length; ++j) {
+        if (rematch && rematch.cause == token + "," + j) {
+          return;
+        }
+        var patternObj = patterns[j];
+        var inside = patternObj.inside;
+        var lookbehind = !!patternObj.lookbehind;
+        var greedy = !!patternObj.greedy;
+        var alias = patternObj.alias;
+        if (greedy && !patternObj.pattern.global) {
+          var flags = patternObj.pattern.toString().match(/[imsuy]*$/)[0];
+          patternObj.pattern = RegExp(patternObj.pattern.source, flags + "g");
+        }
+        var pattern = patternObj.pattern || patternObj;
+        for (var currentNode = startNode.next, pos = startPos; currentNode !== tokenList.tail; pos += currentNode.value.length, currentNode = currentNode.next) {
+          if (rematch && pos >= rematch.reach) {
+            break;
+          }
+          var str2 = currentNode.value;
+          if (tokenList.length > text2.length) {
+            return;
+          }
+          if (str2 instanceof Token) {
+            continue;
+          }
+          var removeCount = 1;
+          var match;
+          if (greedy) {
+            match = matchPattern(pattern, pos, text2, lookbehind);
+            if (!match || match.index >= text2.length) {
+              break;
+            }
+            var from = match.index;
+            var to = match.index + match[0].length;
+            var p = pos;
+            p += currentNode.value.length;
+            while (from >= p) {
+              currentNode = currentNode.next;
+              p += currentNode.value.length;
+            }
+            p -= currentNode.value.length;
+            pos = p;
+            if (currentNode.value instanceof Token) {
+              continue;
+            }
+            for (var k = currentNode; k !== tokenList.tail && (p < to || typeof k.value === "string"); k = k.next) {
+              removeCount++;
+              p += k.value.length;
+            }
+            removeCount--;
+            str2 = text2.slice(pos, p);
+            match.index -= pos;
+          } else {
+            match = matchPattern(pattern, 0, str2, lookbehind);
+            if (!match) {
+              continue;
+            }
+          }
+          var from = match.index;
+          var matchStr = match[0];
+          var before = str2.slice(0, from);
+          var after = str2.slice(from + matchStr.length);
+          var reach = pos + str2.length;
+          if (rematch && reach > rematch.reach) {
+            rematch.reach = reach;
+          }
+          var removeFrom = currentNode.prev;
+          if (before) {
+            removeFrom = addAfter(tokenList, removeFrom, before);
+            pos += before.length;
+          }
+          removeRange(tokenList, removeFrom, removeCount);
+          var wrapped = new Token(token, inside ? _.tokenize(matchStr, inside) : matchStr, alias, matchStr);
+          currentNode = addAfter(tokenList, removeFrom, wrapped);
+          if (after) {
+            addAfter(tokenList, currentNode, after);
+          }
+          if (removeCount > 1) {
+            var nestedRematch = {
+              cause: token + "," + j,
+              reach
+            };
+            matchGrammar(text2, tokenList, grammar, currentNode.prev, pos, nestedRematch);
+            if (rematch && nestedRematch.reach > rematch.reach) {
+              rematch.reach = nestedRematch.reach;
+            }
+          }
+        }
+      }
+    }
+  }
+  function LinkedList() {
+    var head = { value: null, prev: null, next: null };
+    var tail = { value: null, prev: head, next: null };
+    head.next = tail;
+    this.head = head;
+    this.tail = tail;
+    this.length = 0;
+  }
+  function addAfter(list, node, value) {
+    var next = node.next;
+    var newNode = { value, prev: node, next };
+    node.next = newNode;
+    next.prev = newNode;
+    list.length++;
+    return newNode;
+  }
+  function removeRange(list, node, count) {
+    var next = node.next;
+    for (var i = 0; i < count && next !== list.tail; i++) {
+      next = next.next;
+    }
+    node.next = next;
+    next.prev = node;
+    list.length -= i;
+  }
+  function toArray(list) {
+    var array = [];
+    var node = list.head.next;
+    while (node !== list.tail) {
+      array.push(node.value);
+      node = node.next;
+    }
+    return array;
+  }
+  if (!_self2.document) {
+    if (!_self2.addEventListener) {
+      return _;
+    }
+    if (!_.disableWorkerMessageHandler) {
+      _self2.addEventListener("message", function(evt) {
+        var message = JSON.parse(evt.data);
+        var lang2 = message.language;
+        var code = message.code;
+        var immediateClose = message.immediateClose;
+        _self2.postMessage(_.highlight(code, _.languages[lang2], lang2));
+        if (immediateClose) {
+          _self2.close();
+        }
+      }, false);
+    }
+    return _;
+  }
+  var script = _.util.currentScript();
+  if (script) {
+    _.filename = script.src;
+    if (script.hasAttribute("data-manual")) {
+      _.manual = true;
+    }
+  }
+  function highlightAutomaticallyCallback() {
+    if (!_.manual) {
+      _.highlightAll();
+    }
+  }
+  if (!_.manual) {
+    var readyState = document.readyState;
+    if (readyState === "loading" || readyState === "interactive" && script && script.defer) {
+      document.addEventListener("DOMContentLoaded", highlightAutomaticallyCallback);
+    } else {
+      if (window.requestAnimationFrame) {
+        window.requestAnimationFrame(highlightAutomaticallyCallback);
+      } else {
+        window.setTimeout(highlightAutomaticallyCallback, 16);
+      }
+    }
+  }
+  return _;
+}(_self);
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = Prism;
+}
+if (typeof global !== "undefined") {
+  global.Prism = Prism;
+}
+Prism.languages.clike = {
+  "comment": [
+    {
+      pattern: /(^|[^\\])\/\*[\s\S]*?(?:\*\/|$)/,
+      lookbehind: true,
+      greedy: true
+    },
+    {
+      pattern: /(^|[^\\:])\/\/.*/,
+      lookbehind: true,
+      greedy: true
+    }
+  ],
+  "string": {
+    pattern: /(["'])(?:\\(?:\r\n|[\s\S])|(?!\1)[^\\\r\n])*\1/,
+    greedy: true
+  },
+  "class-name": {
+    pattern: /(\b(?:class|extends|implements|instanceof|interface|new|trait)\s+|\bcatch\s+\()[\w.\\]+/i,
+    lookbehind: true,
+    inside: {
+      "punctuation": /[.\\]/
+    }
+  },
+  "keyword": /\b(?:break|catch|continue|do|else|finally|for|function|if|in|instanceof|new|null|return|throw|try|while)\b/,
+  "boolean": /\b(?:false|true)\b/,
+  "function": /\b\w+(?=\()/,
+  "number": /\b0x[\da-f]+\b|(?:\b\d+(?:\.\d*)?|\B\.\d+)(?:e[+-]?\d+)?/i,
+  "operator": /[<>]=?|[!=]=?=?|--?|\+\+?|&&?|\|\|?|[?*/~^%]/,
+  "punctuation": /[{}[\];(),.:]/
+};
+Prism.languages.solidity = Prism.languages.extend("clike", {
+  "class-name": {
+    pattern: /(\b(?:contract|enum|interface|library|new|struct|using)\s+)(?!\d)[\w$]+/,
+    lookbehind: true
+  },
+  "keyword": /\b(?:_|anonymous|as|assembly|assert|break|calldata|case|constant|constructor|continue|contract|default|delete|do|else|emit|enum|event|external|for|from|function|if|import|indexed|inherited|interface|internal|is|let|library|mapping|memory|modifier|new|payable|pragma|private|public|pure|require|returns?|revert|selfdestruct|solidity|storage|struct|suicide|switch|this|throw|using|var|view|while)\b/,
+  "operator": /=>|->|:=|=:|\*\*|\+\+|--|\|\||&&|<<=?|>>=?|[-+*/%^&|<>!=]=?|[~?]/
+});
+Prism.languages.insertBefore("solidity", "keyword", {
+  "builtin": /\b(?:address|bool|byte|u?int(?:8|16|24|32|40|48|56|64|72|80|88|96|104|112|120|128|136|144|152|160|168|176|184|192|200|208|216|224|232|240|248|256)?|string|bytes(?:[1-9]|[12]\d|3[0-2])?)\b/
+});
+Prism.languages.insertBefore("solidity", "number", {
+  "version": {
+    pattern: /([<>]=?|\^)\d+\.\d+\.\d+\b/,
+    lookbehind: true,
+    alias: "number"
+  }
+});
+Prism.languages.sol = Prism.languages.solidity;
+var prism_default = Prism;
+
+// src/highlight.ts
+function flatten(stream, kind, out) {
+  if (typeof stream === "string") out.push({ text: stream, kind });
+  else if (Array.isArray(stream)) for (const s of stream) flatten(s, kind, out);
+  else flatten(stream.content, `tok-${stream.type}`, out);
+}
+function solidityLines(lines) {
+  const pieces2 = [];
+  flatten(prism_default.tokenize(lines.join("\n"), prism_default.languages["solidity"]), null, pieces2);
+  const result = [[]];
+  for (const p of pieces2) {
+    p.text.split("\n").forEach((part, i) => {
+      if (i > 0) result.push([]);
+      if (part !== "") result[result.length - 1].push({ text: part, kind: p.kind });
+    });
+  }
+  return result;
+}
+var hexWord = /^0x[0-9a-f]+$/i;
+function number(hex2) {
+  if (!hexWord.test(hex2)) return [{ text: hex2, kind: null }];
+  const v = BigInt(hex2);
+  return v > 9n && v < 0x10000n ? [{ text: hex2, kind: "num-hex" }, { text: v.toString(), kind: "num-dec" }] : [{ text: hex2, kind: "num-hex" }];
+}
+var exprToken = /("(?:[^"\\]|\\.)*")|(\b0x[0-9a-fA-F]+\b)|(\b\d+\b)|([A-Za-z_]\w*:)|(\b[A-Z]\w*)|([()])/g;
+var exprKinds = ["expr-str", "num-hex", "expr-num", "expr-field", "expr-ctor", "expr-paren"];
+function expr(text2) {
+  const out = [];
+  let last = 0;
+  for (const m of text2.matchAll(exprToken)) {
+    if (m.index > last) out.push({ text: text2.slice(last, m.index), kind: null });
+    const group = m.slice(1).findIndex((g) => g !== void 0);
+    out.push({ text: m[0], kind: exprKinds[group] ?? null });
+    last = m.index + m[0].length;
+  }
+  if (last < text2.length) out.push({ text: text2.slice(last), kind: null });
+  return out;
+}
+function unwrap(text2) {
+  if (!text2.startsWith("(") || !text2.endsWith(")")) return text2;
+  let depth = 0;
+  for (let i = 0; i < text2.length; i++) {
+    if (text2[i] === "(") depth++;
+    else if (text2[i] === ")") depth--;
+    if (depth === 0 && i < text2.length - 1) return text2;
+  }
+  return text2.slice(1, -1).trimEnd();
+}
+function shownExpr(text2) {
+  return expr(unwrap(text2));
+}
+function word2(w) {
+  return "hex" in w ? number(w.hex) : shownExpr(w.expr);
+}
+function stackWord(text2) {
+  const m = /^(0x[0-9a-f]+)(?: \(\d+\))?$/i.exec(text2);
+  return m?.[1] !== void 0 ? number(m[1]) : shownExpr(text2);
+}
+function opcode(text2) {
+  const space = text2.indexOf(" ");
+  if (space < 0) return [{ text: text2, kind: "opcode" }];
+  return [{ text: text2.slice(0, space), kind: "opcode" }, { text: " ", kind: null }, ...number(text2.slice(space + 1))];
+}
+function memoryLine(line) {
+  const m = /^([0-9a-f]+:)( +)(.*)$/i.exec(line);
+  if (m === null) return /^Length:/.test(line) ? [{ text: line, kind: "mem-header" }] : expr(line);
+  const [, addr = "", gap = "", rest = ""] = m;
+  const split = rest.search(/ {3,}/);
+  const bytes = split < 0 ? rest : rest.slice(0, split);
+  const out = [{ text: addr, kind: "mem-addr" }, { text: gap, kind: null }];
+  for (const part of bytes.split(/( +)/)) {
+    if (part === "") continue;
+    out.push({ text: part, kind: part.trim() === "" ? null : part === "00" ? "mem-zero" : "mem-byte" });
+  }
+  if (split >= 0) {
+    const text2 = rest.slice(split);
+    const lead = text2.length - text2.trimStart().length;
+    out.push({ text: text2.slice(0, lead), kind: null }, { text: text2.slice(lead), kind: "mem-ascii" });
+  }
+  return out;
+}
+
 // src/view.ts
 function hex(n) {
   return "0x" + n.toString(16);
 }
 function fixed(n, digits) {
   return Number.isInteger(n) ? String(n) : n.toFixed(digits);
+}
+function pieces(ps) {
+  return ps.map((p) => p.kind === null ? p.text : h("span", { class: p.kind }, p.text));
 }
 var badge = (label, cls) => h("span", { class: `badge ${cls}` }, label);
 function statusBar(v) {
@@ -303,7 +1337,7 @@ function codePane(v, run) {
       },
       h("span", { class: "gutter" }, bp !== void 0 ? "\u25CF" : line.current ? "\u25B6" : ""),
       h("span", { class: "addr" }, hex(line.pc)),
-      h("span", { class: "op" }, line.op)
+      h("span", { class: "op" }, ...pieces(opcode(line.op)))
     );
   });
 }
@@ -317,16 +1351,22 @@ function sourcePane(v) {
       )
     ];
   }
+  const highlighted = solidityLines(v.source.lines.map((l) => l.text));
   return [
     h("div", { class: "file" }, `${v.source.file}:${v.source.line}`),
     ...v.source.lines.map(
-      (l) => h("div", { class: l.current ? "src-line current" : "src-line" }, h("span", { class: "lineno" }, l.line), h("span", { class: "text" }, l.text))
+      (l, i) => h(
+        "div",
+        { class: l.current ? "src-line current" : "src-line" },
+        h("span", { class: "lineno" }, l.line),
+        h("span", { class: "text" }, ...pieces(highlighted[i] ?? []))
+      )
     )
   ];
 }
 function stackPane(v) {
   if (v.stack.length === 0) return [h("div", { class: "empty" }, "empty")];
-  return v.stack.map((word, i) => h("div", { class: "stack-item" }, h("span", { class: "index" }, i), h("pre", { class: "word" }, word)));
+  return v.stack.map((word3, i) => h("div", { class: "stack-item" }, h("span", { class: "index" }, i), h("pre", { class: "word" }, ...pieces(stackWord(word3)))));
 }
 function memoryPane(v, run) {
   return [
@@ -337,7 +1377,7 @@ function memoryPane(v, run) {
       v.memorySize > 128 && " \xB7 first 128 shown ",
       v.memorySize > 128 && h("button", { type: "button", class: "small", onClick: () => run(`memory 0 ${Math.min(v.memorySize, 65536)}`) }, "show all")
     ),
-    v.memorySize > 0 && h("pre", { class: "memory" }, v.memory)
+    v.memorySize > 0 && h("pre", { class: "memory" }, ...v.memory.split("\n").flatMap((l, i) => [i > 0 && "\n", ...pieces(memoryLine(l))]))
   ].filter((n) => n !== false);
 }
 function branchPane(v, run) {
@@ -355,8 +1395,19 @@ function branchPane(v, run) {
       { class: "options" },
       ...options.map((opt, i) => h("button", { type: "button", class: "branch-option", onClick: () => run(`branch ${branchArgument(options, i)}`) }, `${i}: ${opt}`))
     ),
-    condition !== null && h("pre", { class: "condition", title: "the branch condition" }, condition)
+    condition !== null && h("pre", { class: "condition", title: "the branch condition" }, ...pieces(shownExpr(condition)))
   ].filter((n) => n !== false);
+}
+function storagePane(v) {
+  if (v.storage.length === 0) return [h("div", { class: "empty" }, "No storage.")];
+  return v.storage.map(
+    (st) => h(
+      "div",
+      { class: st.current ? "store current-store" : "store" },
+      h("div", { class: "store-head" }, h("span", { class: "store-addr" }, ..."hex" in st.address ? [st.address.hex] : [st.address.expr]), ` \xB7 initial storage ${st.initial}`),
+      ...st.slots.length === 0 ? [h("div", { class: "empty" }, "nothing written")] : st.slots.map((sl) => h("div", { class: "slot" }, h("pre", {}, ...pieces(word2(sl.slot))), h("pre", {}, ...pieces(word2(sl.value)))))
+    )
+  );
 }
 function breakpointList(v, run) {
   if (v.breakpoints.length === 0) return [h("div", { class: "empty" }, "None. Click a line of code, or add one below.")];
@@ -484,12 +1535,14 @@ var App = class {
       render(byId("source"), sourcePane(v));
       render(byId("stack"), stackPane(v));
       render(byId("memory"), memoryPane(v, this.run));
+      render(byId("storage"), storagePane(v));
       render(byId("branch"), branchPane(v, this.run));
       render(byId("breakpoints"), breakpointList(v, this.run));
       render(byId("warnings-list"), warningsPane(v));
       byId("warnings").hidden = v.warnings.length === 0;
       byId("result").textContent = v.result ?? "";
       byId("code").querySelector(".current")?.scrollIntoView({ block: "nearest" });
+      byId("source").querySelector(".current")?.scrollIntoView({ block: "center" });
     }
     for (const button of document.querySelectorAll("[data-command]")) {
       button.disabled = !commandEnabled(v, button.dataset["command"] ?? "");

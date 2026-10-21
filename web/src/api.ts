@@ -9,6 +9,10 @@ export const sourceLine = obj({ line: num, text: str, current: bool });
 export const sourceView = obj({ file: str, line: num, lines: arr(sourceLine) });
 export const branchView = obj({ condition: nullable(str), options: arr(str) });
 
+// A literal word as hex, anything else as an expression
+export const word = oneOf(obj({ hex: str }), obj({ expr: str }));
+export type Word = Infer<typeof word>;
+
 export const view = obj({
   mode: lit("concrete", "symbolic"),
   step: num,
@@ -26,6 +30,7 @@ export const view = obj({
   memory: str,
   source: nullable(sourceView),
   generatedCode: bool,
+  storage: arr(obj({ address: word, current: bool, initial: lit("known", "unknown"), slots: arr(obj({ slot: word, value: word })) })),
   pathConditions: num,
   branch: nullable(branchView),
   choices: arr(str),

@@ -96,12 +96,14 @@ export class App {
       render(byId("source"), view.sourcePane(v));
       render(byId("stack"), view.stackPane(v));
       render(byId("memory"), view.memoryPane(v, this.run));
+      render(byId("storage"), view.storagePane(v));
       render(byId("branch"), view.branchPane(v, this.run));
       render(byId("breakpoints"), view.breakpointList(v, this.run));
       render(byId("warnings-list"), view.warningsPane(v));
       byId("warnings").hidden = v.warnings.length === 0;
       byId("result").textContent = v.result ?? "";
       byId("code").querySelector(".current")?.scrollIntoView({ block: "nearest" });
+      byId("source").querySelector(".current")?.scrollIntoView({ block: "center" });
     }
     for (const button of document.querySelectorAll<HTMLButtonElement>("[data-command]")) {
       button.disabled = !commandEnabled(v, button.dataset["command"] ?? "");

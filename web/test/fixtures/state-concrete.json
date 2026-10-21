@@ -92,5 +92,15 @@
     ],
     "status": "running",
     "step": 5,
+    "storage": [
+        {
+            "address": {
+                "hex": "0xacab"
+            },
+            "current": true,
+            "initial": "known",
+            "slots": []
+        }
+    ],
     "warnings": []
 }

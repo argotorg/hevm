@@ -1,7 +1,8 @@
 // What each pane shows for a model: pure functions to virtual DOM.
 import type { Progress, StatsView, View } from "./api";
+import { memoryLine, opcode, shownExpr, solidityLines, stackWord, word, type Piece } from "./highlight";
 import { branchArgument, pcBreakpoints, type LogEntry } from "./model";
-import { h, type VNode } from "./vdom";
+import { h, type Child, type VNode } from "./vdom";
 
 export type Run = (command: string) => void;
 
@@ -11,6 +12,11 @@ export function hex(n: number): string {
 
 function fixed(n: number, digits: number): string {
   return Number.isInteger(n) ? String(n) : n.toFixed(digits);
+}
+
+// Pieces as text and spans, classed by their kind for the CSS to colour
+export function pieces(ps: Piece[]): Child[] {
+  return ps.map((p) => (p.kind === null ? p.text : h("span", { class: p.kind }, p.text)));
 }
 
 const badge = (label: string, cls: string): VNode => h("span", { class: `badge ${cls}` }, label);
@@ -44,7 +50,7 @@ export function codePane(v: View, run: Run): VNode[] {
       },
       h("span", { class: "gutter" }, bp !== undefined ? "●" : line.current ? "▶" : ""),
       h("span", { class: "addr" }, hex(line.pc)),
-      h("span", { class: "op" }, line.op),
+      h("span", { class: "op" }, ...pieces(opcode(line.op))),
     );
   });
 }
@@ -61,17 +67,23 @@ export function sourcePane(v: View): VNode[] {
       ),
     ];
   }
+  const highlighted = solidityLines(v.source.lines.map((l) => l.text));
   return [
     h("div", { class: "file" }, `${v.source.file}:${v.source.line}`),
-    ...v.source.lines.map((l) =>
-      h("div", { class: l.current ? "src-line current" : "src-line" }, h("span", { class: "lineno" }, l.line), h("span", { class: "text" }, l.text)),
+    ...v.source.lines.map((l, i) =>
+      h(
+        "div",
+        { class: l.current ? "src-line current" : "src-line" },
+        h("span", { class: "lineno" }, l.line),
+        h("span", { class: "text" }, ...pieces(highlighted[i] ?? [])),
+      ),
     ),
   ];
 }
 
 export function stackPane(v: View): VNode[] {
   if (v.stack.length === 0) return [h("div", { class: "empty" }, "empty")];
-  return v.stack.map((word, i) => h("div", { class: "stack-item" }, h("span", { class: "index" }, i), h("pre", { class: "word" }, word)));
+  return v.stack.map((word, i) => h("div", { class: "stack-item" }, h("span", { class: "index" }, i), h("pre", { class: "word" }, ...pieces(stackWord(word)))));
 }
 
 export function memoryPane(v: View, run: Run): VNode[] {
@@ -83,7 +95,7 @@ export function memoryPane(v: View, run: Run): VNode[] {
       v.memorySize > 128 && " · first 128 shown ",
       v.memorySize > 128 && h("button", { type: "button", class: "small", onClick: () => run(`memory 0 ${Math.min(v.memorySize, 65536)}`) }, "show all"),
     ),
-    v.memorySize > 0 && h("pre", { class: "memory" }, v.memory),
+    v.memorySize > 0 && h("pre", { class: "memory" }, ...v.memory.split("\n").flatMap((l, i) => [i > 0 && "\n", ...pieces(memoryLine(l))])),
   ].filter((n): n is VNode => n !== false);
 }
 
@@ -102,8 +114,22 @@ export function branchPane(v: View, run: Run): VNode[] {
       { class: "options" },
       ...options.map((opt, i) => h("button", { type: "button", class: "branch-option", onClick: () => run(`branch ${branchArgument(options, i)}`) }, `${i}: ${opt}`)),
     ),
-    condition !== null && h("pre", { class: "condition", title: "the branch condition" }, condition),
+    condition !== null && h("pre", { class: "condition", title: "the branch condition" }, ...pieces(shownExpr(condition))),
   ].filter((n): n is VNode => n !== false);
+}
+
+export function storagePane(v: View): VNode[] {
+  if (v.storage.length === 0) return [h("div", { class: "empty" }, "No storage.")];
+  return v.storage.map((st) =>
+    h(
+      "div",
+      { class: st.current ? "store current-store" : "store" },
+      h("div", { class: "store-head" }, h("span", { class: "store-addr" }, ..."hex" in st.address ? [st.address.hex] : [st.address.expr]), ` · initial storage ${st.initial}`),
+      ...(st.slots.length === 0
+        ? [h("div", { class: "empty" }, "nothing written")]
+        : st.slots.map((sl) => h("div", { class: "slot" }, h("pre", {}, ...pieces(word(sl.slot))), h("pre", {}, ...pieces(word(sl.value)))))),
+    ),
+  );
 }
 
 export function breakpointList(v: View, run: Run): VNode[] {

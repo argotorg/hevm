@@ -40,11 +40,12 @@ import Control.Monad (filterM, forM)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.ST (ST, RealWorld, stToIO)
 import Control.Monad.State.Strict (execStateT)
-import Data.Aeson (ToJSON, (.=))
+import Data.Aeson (ToJSON(..), (.=), object)
 import Data.Aeson.Types (Pair)
 import Data.ByteString qualified as BS
 import Data.Char (isDigit)
-import Data.List (find)
+import Data.List (find, nubBy, sortOn)
+import Data.Function (on)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isJust, isNothing)
@@ -677,6 +678,27 @@ data SourceLine = SourceLine { line :: Int, text :: Text, current :: Bool }
 data SourceView = SourceView { file :: Text, line :: Int, lines :: [SourceLine] }
   deriving (Show, Generic, ToJSON)
 
+-- | A word for clients to show as they like: {"hex": "0x1f"} for a literal, {"expr": ...} otherwise
+data WordView = HexWord Text | ExprWord Text
+  deriving (Show)
+
+instance ToJSON WordView where
+  toJSON = \case
+    HexWord t -> object ["hex" .= t]
+    ExprWord t -> object ["expr" .= t]
+
+wordView :: Expr EWord -> WordView
+wordView e = case maybeLitWordSimp e of
+  Just w -> HexWord (T.pack ("0x" <> showHex w ""))
+  Nothing -> ExprWord (clip 1000 (formatExpr e))
+
+-- | initial is "known" when the storage started from known values, else "unknown"
+data StorageView = StorageView { address :: WordView, current :: Bool, initial :: Text, slots :: [StorageSlot] }
+  deriving (Show, Generic, ToJSON)
+
+data StorageSlot = StorageSlot { slot :: WordView, value :: WordView }
+  deriving (Show, Generic, ToJSON)
+
 data BranchView = BranchView { condition :: Maybe Text, options :: [Text] }
   deriving (Show, Generic, ToJSON)
 
@@ -699,6 +721,7 @@ data View = View
   -- | the code has a source map, but this instruction is the compiler's own,
   -- such as ABI decoding or overflow checks, with no Solidity behind it
   , generatedCode  :: Bool
+  , storage        :: [StorageView]
   , pathConditions :: Int
   , branch         :: Maybe BranchView
   , choices        :: [Text]
@@ -735,6 +758,7 @@ mkView s = do
         c <- currentContract vm
         i <- c.opIxMap VS.!? vm.state.pc
         srcMap s.dapp c i)
+    , storage = storageViews s
     , pathConditions = length vm.constraints
     , branch = (\(Pending c ctx) -> BranchView (clip 1000 . formatExpr . shown s <$> c) (branchOptions ctx)) <$> s.pending
     , branchMode = case s.branchMode of
@@ -770,7 +794,7 @@ renderView v = T.unlines $
   <> [ "", "-- stack (top first)" ]
   <> (if null v.stack then ["   <empty>"] else [ "   " <> tshow i <> ": " <> e | (i, e) <- zip [0 :: Int ..] v.stack ])
   <> maybe [] (\sv -> ["", "-- source " <> sv.file <> ":" <> tshow sv.line]
-                      <> [ (if l.current then " > " else "   ") <> T.justifyRight 5 ' ' (tshow l.line) <> " | " <> l.text | l <- sv.lines ]) v.source
+                      <> [ (if l.current then " > " else "   ") <> T.justifyRight 5 ' ' (tshow l.line) <> " | " <> l.text | l <- sv.lines, abs (l.line - sv.line) <= 4 ]) v.source
   <> [ "\n-- no source: compiler-generated code, such as ABI decoding or overflow checks" | v.generatedCode ]
   <> [ "", "-- memory (" <> tshow v.memorySize <> " bytes)" ]
   <> (if v.memorySize == 0 then [] else T.lines v.memory)
@@ -799,8 +823,8 @@ sourceView :: DappInfo -> VM t -> Maybe SourceView
 sourceView dapp vm = do
   (fid, path, line, _) <- srcPos dapp vm
   ls <- Map.lookup fid dapp.sources.lines
-  let from = max 1 (line - 4)
-      to = min (V.length ls) (line + 4)
+  let from = max 1 (line - 40)
+      to = min (V.length ls) (line + 40)
   pure $ SourceView (T.pack path) line
     [ SourceLine n (decode (ls V.! (n - 1))) (n == line) | n <- [from .. to] ]
   where decode = T.stripEnd . decodeUtf8With lenientDecode
@@ -847,6 +871,25 @@ formatWord :: Expr EWord -> Text
 formatWord e = case maybeLitWordSimp e of
   Just w -> T.pack ("0x" <> showHex w "") <> (if w < 0x10000 && w > 9 then " (" <> tshow (into w :: Integer) <> ")" else "")
   Nothing -> formatExpr e
+
+-- | The storage of each contract that has some, the current one first: its
+-- newest writes, then what it started with, each slot only once
+storageViews :: Session t -> [StorageView]
+storageViews s =
+  [ StorageView (addrView a) (a == s.vm.state.contract) initial
+      [ StorageSlot (wordView k) (wordView v) | (k, v) <- nubBy ((==) `on` fst) entries ]
+  | (a, c) <- sortOn ((/= s.vm.state.contract) . fst) (Map.toList s.vm.env.contracts)
+  , let (entries, initial) = walk (shown s c.storage)
+  , not (null entries) || a == s.vm.state.contract ]
+  where
+    walk :: Expr Storage -> ([(Expr EWord, Expr EWord)], Text)
+    walk = \case
+      SStore k v rest -> let (es, i) = walk rest in ((k, v) : es, i)
+      ConcreteStore m -> ([(Lit k, Lit v) | (k, v) <- Map.toList m], "known")
+      _ -> ([], "unknown")
+    addrView = \case
+      LitAddr x -> HexWord (T.pack ("0x" <> showHex (into x :: Integer) ""))
+      other -> ExprWord (formatExpr other)
 
 memoryText :: (Expr Buf -> Expr Buf) -> VM t -> Int -> Int -> IO Text
 memoryText display vm off len = case vm.state.memory of

@@ -111,5 +111,15 @@
     ],
     "status": "running",
     "step": 7,
+    "storage": [
+        {
+            "address": {
+                "expr": "(SymAddr \"entrypoint\")"
+            },
+            "current": true,
+            "initial": "unknown",
+            "slots": []
+        }
+    ],
     "warnings": []
 }
