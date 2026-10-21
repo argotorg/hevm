@@ -90,7 +90,7 @@ checkFixture :: String -> JSON.Value -> IO ()
 checkFixture name value = do
   let path = "web/test/fixtures/" <> name <> ".json"
   lookupEnv "HEVM_WRITE_WEB_FIXTURES" >>= \case
-    Just _ -> BL.writeFile path (encodePretty (withoutTimes value) <> "\n")
+    Just _ -> BL.writeFile path (encodePretty (withoutNoise value) <> "\n")
     Nothing -> JSON.eitherDecodeFileStrict path >>= \case
       Left err -> assertFailure $ "cannot read " <> path <> ": " <> err
       Right expected -> case difference "" expected value of
@@ -98,17 +98,18 @@ checkFixture name value = do
         Just diff -> assertFailure $ "the server's answer no longer matches " <> path <> ", which the web frontend is tested against: "
           <> diff <> "\nIf the change is meant, rewrite the fixtures with HEVM_WRITE_WEB_FIXTURES=1 and update web/src/api.ts."
 
--- | Durations zeroed, so that rewriting the fixtures only changes what changed
-withoutTimes :: JSON.Value -> JSON.Value
-withoutTimes = \case
-  JSON.Object o -> JSON.Object (KM.mapWithKey (\k v -> if isTime k then zeroed v else withoutTimes v) o)
-  JSON.Array a -> JSON.Array (V.map withoutTimes a)
+-- | Durations and thread ids replaced by fixed values, so that rewriting the
+-- fixtures only changes what changed
+withoutNoise :: JSON.Value -> JSON.Value
+withoutNoise = \case
+  JSON.Object o -> JSON.Object (KM.mapWithKey fixed o)
+  JSON.Array a -> JSON.Array (V.map withoutNoise a)
   v -> v
   where
-    isTime k = let n = Key.toString k in n == "secs" || "Secs" `isSuffixOf` n
-    zeroed = \case
-      JSON.Number _ -> JSON.Number 0
-      v -> v
+    fixed k v = case (Key.toString k, v) of
+      (n, JSON.Number _) | n == "secs" || "Secs" `isSuffixOf` n -> JSON.Number 0
+      ("thread", JSON.String _) -> JSON.String "ThreadId 0"
+      _ -> withoutNoise v
 
 -- | Where two values differ in their fields or the types of their values
 difference :: String -> JSON.Value -> JSON.Value -> Maybe String

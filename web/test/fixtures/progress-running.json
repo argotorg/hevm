@@ -4,7 +4,7 @@
         {
             "addr": "SymAddr \"entrypoint\"",
             "forks": 0,
-            "pc": 9,
+            "pc": 102,
             "queries": 2,
             "solveSecs": 0
         }
@@ -37,10 +37,10 @@
     "workers": [
         {
             "addr": "SymAddr \"entrypoint\"",
-            "pc": 9,
+            "pc": 102,
             "secs": 0,
             "step": 7,
-            "thread": "ThreadId 98"
+            "thread": "ThreadId 0"
         }
     ]
 }

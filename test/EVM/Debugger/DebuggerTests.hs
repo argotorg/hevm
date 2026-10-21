@@ -1,4 +1,4 @@
-module EVM.Debugger.DebuggerTests (tests, http, httpJSON, branchCode, loopCode, concreteVM) where
+module EVM.Debugger.DebuggerTests (tests, http, httpJSON, branchCode, branchJumpi, loopCode, concreteVM) where
 
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -29,6 +29,7 @@ import EVM.Stepper qualified as Stepper
 import EVM.SymExec (abstractVM)
 import EVM.Transaction (initTx)
 import EVM.Types hiding (Env)
+import EVM.Test.Asm (AsmOp(..), asm, offsets)
 
 tests :: TestTree
 tests = testGroup "Debugger"
@@ -73,12 +74,12 @@ tests = testGroup "Debugger"
       vT <- liftIO $ mkView sT
       liftIO $ do
         assertEqual "halted" "halted" vT.status
-        assertEqual "stopped at the end" 0x16 vT.pc
+        assertEqual "stopped at the end" branchStopThen vT.pc
         assertEqual "one choice made" 1 (length vT.choices)
       sF <- run "back" sT >>= run "restart" >>= run "continue" >>= run "branch false" >>= run "continue"
       vF <- liftIO $ mkView sF
       liftIO $ do
-        assertEqual "other side" 0x0b vF.pc
+        assertEqual "other side" branchStopElse vF.pc
         assertEqual "halted" "halted" vF.status
   , testCase "back-to-branch-offers-it-again" $ runEnv testEnv $ withSymbolic branchCode $ \run s0 -> do
       s1 <- run "continue" s0
@@ -91,7 +92,7 @@ tests = testGroup "Debugger"
         assertEqual "choice undone" [] v2.choices
         assertEqual "same path conditions" v1.pathConditions v2.pathConditions
       v3 <- run "branch true" s1 >>= run "step" >>= run "back" >>= run "branch false" >>= run "continue" >>= liftIO . mkView
-      liftIO $ assertEqual "the other side can be taken" 0x0b v3.pc
+      liftIO $ assertEqual "the other side can be taken" branchStopElse v3.pc
   , testCase "back-replays-merged-steps" $ runEnv testEnv $ withSymbolic mergeCode $ \run s0 -> do
       -- run with merging, then go back after turning it off: the replay must merge as before
       sEnd <- run "merge on" s0 >>= run "continue"
@@ -190,29 +191,59 @@ tests = testGroup "Debugger"
       pure (v.pc, v.stack, v.memory, v.gas, v.depth, v.status)
 
 -- mstore(i, i) for i in 0..99
-loopCode :: ByteString
-loopCode = BS.pack [0x60, 0x00, 0x5b, 0x80, 0x80, 0x52, 0x60, 0x01, 0x01, 0x80, 0x60, 0x64, 0x11, 0x60, 0x02, 0x57, 0x00]
+loopProg :: [AsmOp]
+loopProg =
+  [ I (OpPush (Lit 0))
+  , I OpJumpdest
+  , I (OpDup 1), I (OpDup 1), I OpMstore
+  , I (OpPush (Lit 1)), I OpAdd
+  , I (OpDup 1), I (OpPush (Lit 100)), I OpGt, Target 0, I OpJumpi
+  , I OpStop ]
 
--- if (x == 5) { if (x == 5) stop at 0x16 else invalid } else stop at 0x0b
+loopCode :: ByteString
+loopCode = asm loopProg
+
+-- if (x == 5) { if (x == 5) stop else invalid } else stop
+branchProg :: [AsmOp]
+branchProg =
+  [ I (OpPush (Lit 0)), I OpCalldataload, I (OpDup 1), I (OpPush (Lit 5)), I OpEq, Target 0, I OpJumpi
+  , I OpPop, I OpStop
+  , I OpJumpdest, I (OpPush (Lit 5)), I OpEq, Target 1, I OpJumpi, I (OpUnknown 0xfe)
+  , I OpJumpdest, I OpStop ]
+
 branchCode :: ByteString
-branchCode = BS.pack
-  [ 0x60, 0x00, 0x35, 0x80, 0x60, 0x05, 0x14, 0x60, 0x0c, 0x57, 0x50, 0x00
-  , 0x5b, 0x60, 0x05, 0x14, 0x60, 0x15, 0x57, 0xfe, 0x00, 0x5b, 0x00 ]
+branchCode = asm branchProg
+
+-- | Where branchProg branches first, stops when x /= 5, and when x == 5
+branchJumpi, branchStopElse, branchStopThen :: Int
+branchJumpi = offsets branchProg !! 6
+branchStopElse = offsets branchProg !! 8
+branchStopThen = offsets branchProg !! 16
+
+-- a loop over x & 3, entered with x & 1 set: its second test forks on values of x & 3, one infeasible
+forkLoopProg :: [AsmOp]
+forkLoopProg =
+  [ I OpJumpdest
+  , I (OpPush (Lit 0x20)), I OpCalldataload, I (OpPush (Lit 1)), I OpAnd, Target 1, I OpJumpi
+  , I OpJumpdest
+  , I OpJumpdest                                                  -- the loop
+  , I (OpPush (Lit counter)), I OpTload, I (OpPush (Lit 1)), I OpAdd
+  , I (OpDup 1), I (OpPush (Lit counter)), I OpTstore              -- count up in transient storage
+  , I (OpPush (Lit 0x20)), I OpCalldataload, I (OpPush (Lit 3)), I OpAnd, I OpGt, Target 2, I OpJumpi
+  , I OpJumpdest ]
+  where counter = 0xc0de0000
 
 forkLoopCode :: ByteString
-forkLoopCode = BS.pack
-  [ 0x5b, 0x60, 0x20, 0x35, 0x60, 0x01, 0x16, 0x61, 0x00, 0x0b, 0x57, 0x5b, 0x5b, 0x63, 0xc0, 0xde, 0x00, 0x00, 0x5c
-  , 0x60, 0x01, 0x01, 0x80, 0x63, 0xc0, 0xde, 0x00, 0x00, 0x5d, 0x60, 0x20, 0x35, 0x60, 0x03, 0x16, 0x11, 0x61, 0x00
-  , 0x0c, 0x57, 0x5b, 0x5b, 0x5b, 0x5b ]
+forkLoopCode = asm forkLoopProg
 
 -- memory made symbolic, then x = 5, and if (calldata[0] != 0) x = x + 3: exploration merges it
 mergeCode :: ByteString
-mergeCode = BS.pack
-  [ 0x5f, 0x35, 0x60, 0x40, 0x52      -- mstore(0x40, calldata[0])
-  , 0x60, 0x05                        -- x = 5
-  , 0x5f, 0x35, 0x60, 0x0f, 0x57      -- jumpi(0x0f, calldata[0])
-  , 0x60, 0x03, 0x01                  -- x = x + 3
-  , 0x5b, 0x00 ]                      -- 0x0f: jumpdest, stop
+mergeCode = asm
+  [ I (OpPush (Lit 0)), I OpCalldataload, I (OpPush (Lit 0x40)), I OpMstore
+  , I (OpPush (Lit 5))
+  , I (OpPush (Lit 0)), I OpCalldataload, Target 0, I OpJumpi
+  , I (OpPush (Lit 3)), I OpAdd
+  , I OpJumpdest, I OpStop ]
 
 concreteVM :: ByteString -> IO (VM Concrete)
 concreteVM code = do

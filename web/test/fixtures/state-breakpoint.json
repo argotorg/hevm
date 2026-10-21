@@ -11,87 +11,82 @@
         {
             "current": false,
             "op": "CALLDATALOAD",
-            "pc": 2
+            "pc": 33
         },
         {
             "current": false,
             "op": "DUP1",
-            "pc": 3
+            "pc": 34
         },
         {
             "current": false,
-            "op": "PUSH1 0x05",
-            "pc": 4
+            "op": "PUSH32 0x0000000000000000000000000000000000000000000000000000000000000005",
+            "pc": 35
         },
         {
             "current": false,
             "op": "EQ",
-            "pc": 6
+            "pc": 68
         },
         {
             "current": false,
-            "op": "PUSH1 0x0c",
-            "pc": 7
+            "op": "PUSH32 0x0000000000000000000000000000000000000000000000000000000000000069",
+            "pc": 69
         },
         {
             "current": false,
             "op": "JUMPI",
-            "pc": 9
+            "pc": 102
         },
         {
             "current": false,
             "op": "POP",
-            "pc": 10
+            "pc": 103
         },
         {
             "current": false,
             "op": "STOP",
-            "pc": 11
+            "pc": 104
         },
         {
             "current": true,
             "op": "JUMPDEST",
-            "pc": 12
+            "pc": 105
         },
         {
             "current": false,
-            "op": "PUSH1 0x05",
-            "pc": 13
+            "op": "PUSH32 0x0000000000000000000000000000000000000000000000000000000000000005",
+            "pc": 106
         },
         {
             "current": false,
             "op": "EQ",
-            "pc": 15
+            "pc": 139
         },
         {
             "current": false,
-            "op": "PUSH1 0x15",
-            "pc": 16
+            "op": "PUSH32 0x00000000000000000000000000000000000000000000000000000000000000af",
+            "pc": 140
         },
         {
             "current": false,
             "op": "JUMPI",
-            "pc": 18
+            "pc": 173
         },
         {
             "current": false,
             "op": "INVALID",
-            "pc": 19
-        },
-        {
-            "current": false,
-            "op": "STOP",
-            "pc": 20
+            "pc": 174
         },
         {
             "current": false,
             "op": "JUMPDEST",
-            "pc": 21
+            "pc": 175
         },
         {
             "current": false,
             "op": "STOP",
-            "pc": 22
+            "pc": 176
         }
     ],
     "codeContract": "(SymAddr \"entrypoint\")",
@@ -106,7 +101,7 @@
     "op": "JUMPDEST",
     "output": null,
     "pathConditions": 1,
-    "pc": 12,
+    "pc": 105,
     "result": null,
     "simplified": true,
     "source": null,

@@ -30,7 +30,7 @@ import Test.Tasty.QuickCheck
 
 import EVM.Dapp (emptyDapp)
 import EVM.Debugger (newSession, runCommandText)
-import EVM.Debugger.DebuggerTests (http, httpJSON, branchCode)
+import EVM.Debugger.DebuggerTests (http, httpJSON, branchCode, branchJumpi)
 import EVM.Debugger.WebFixtures (checkFixture)
 import EVM.Debugger.Server (serveSession, withProgressServer)
 import EVM.Effects
@@ -128,7 +128,7 @@ tests = after AllFinish "!/progress-global/" $ sequentialTestGroup "progress-glo
           v <- JSON.Object <$> httpJSON port "GET" "/progress" ""
           checkFixture "progress-running" v
           assertBool "solver queries" (maybe False (>= 1) (int =<< at ["queries", "done"] v))
-          assertEqual "at the first JUMPI" (Just 9) (int =<< at ["pc"] =<< first =<< at ["hottest"] v)
+          assertEqual "at the first JUMPI" (Just branchJumpi) (int =<< at ["pc"] =<< first =<< at ["hottest"] v)
           _ <- http port "POST" "/quit" ""
           takeMVar done
   , testCase "debugger-logs-events" $ withSystemTempDirectory "hevm-progress" $ \dir -> do
@@ -145,7 +145,7 @@ tests = after AllFinish "!/progress-global/" $ sequentialTestGroup "progress-glo
         assertBool ("logs " <> show n) (not (null (named n)))
       assertEqual "one event per command" 7 (length (named "debug-command"))
       assertEqual "the branch is offered again after going back" 2 (length (named "debug-branch-offered"))
-      assertEqual "where it was offered" (Just 9) (int =<< at ["pc"] =<< headMay (named "debug-branch-offered"))
+      assertEqual "where it was offered" (Just branchJumpi) (int =<< at ["pc"] =<< headMay (named "debug-branch-offered"))
       assertBool "the condition at expression verbosity" $
         maybe False (const True) (str =<< at ["cond"] =<< headMay (named "debug-branch-condition"))
       assertEqual "going back replays the branch" (Just (JSON.Bool True)) (at ["branchAgain"] =<< headMay (named "debug-back"))

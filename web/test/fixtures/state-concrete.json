@@ -6,68 +6,68 @@
     "code": [
         {
             "current": false,
-            "op": "PUSH1 0x00",
+            "op": "PUSH32 0x0000000000000000000000000000000000000000000000000000000000000000",
             "pc": 0
         },
         {
             "current": false,
             "op": "JUMPDEST",
-            "pc": 2
+            "pc": 33
         },
         {
             "current": false,
             "op": "DUP1",
-            "pc": 3
+            "pc": 34
         },
         {
             "current": false,
             "op": "DUP1",
-            "pc": 4
+            "pc": 35
         },
         {
             "current": false,
             "op": "MSTORE",
-            "pc": 5
+            "pc": 36
         },
         {
             "current": true,
-            "op": "PUSH1 0x01",
-            "pc": 6
+            "op": "PUSH32 0x0000000000000000000000000000000000000000000000000000000000000001",
+            "pc": 37
         },
         {
             "current": false,
             "op": "ADD",
-            "pc": 8
+            "pc": 70
         },
         {
             "current": false,
             "op": "DUP1",
-            "pc": 9
+            "pc": 71
         },
         {
             "current": false,
-            "op": "PUSH1 0x64",
-            "pc": 10
+            "op": "PUSH32 0x0000000000000000000000000000000000000000000000000000000000000064",
+            "pc": 72
         },
         {
             "current": false,
             "op": "GT",
-            "pc": 12
+            "pc": 105
         },
         {
             "current": false,
-            "op": "PUSH1 0x02",
-            "pc": 13
+            "op": "PUSH32 0x0000000000000000000000000000000000000000000000000000000000000021",
+            "pc": 106
         },
         {
             "current": false,
             "op": "JUMPI",
-            "pc": 15
+            "pc": 139
         },
         {
             "current": false,
             "op": "STOP",
-            "pc": 16
+            "pc": 140
         }
     ],
     "codeContract": "0x000000000000000000000000000000000000ACAb",
@@ -79,10 +79,10 @@
     "merging": false,
     "message": "",
     "mode": "concrete",
-    "op": "PUSH1",
+    "op": "PUSH32",
     "output": null,
     "pathConditions": 0,
-    "pc": 6,
+    "pc": 37,
     "result": null,
     "simplified": true,
     "source": null,

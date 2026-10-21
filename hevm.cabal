@@ -337,6 +337,7 @@ test-suite test
     EVM.SymExec.SymExecTests
     EVM.Test.FuzzSymExec
     EVM.Test.FoundryTests
+    EVM.Test.Asm
     EVM.Debugger.DebuggerTests
     EVM.Debugger.DebuggerFuzz
     EVM.Debugger.ProgressTests
