@@ -7,6 +7,8 @@ module EVM.Debugger
   , Debuggable
   , newSession
   , setStepLimit
+  , setSnapshotInterval
+  , snapshotInterval
   , BranchMode(..)
   , setBranchMode
   , setMerge
@@ -140,7 +142,7 @@ instance Debuggable Symbolic where
 data Session t = Session
   { vm          :: VM t
   , curStep     :: Int
-  -- | step -> VM after that step. Taken every 'snapshotInterval' steps and after
+  -- | step -> VM after that step. Taken every 'snapEvery' steps and after
   -- every step that needed a query, so replaying from one never re-queries.
   , snapshots   :: Map Int (VM t)
   , pending     :: Maybe (Pending t)
@@ -151,6 +153,7 @@ data Session t = Session
   , note        :: Text
   , out         :: Maybe Text
   , stepLimit   :: Int
+  , snapEvery   :: Int
   , stats       :: Stats
   -- | simplify the expressions shown
   , simp        :: Bool
@@ -242,6 +245,10 @@ maxMemoryDump = 65536
 setStepLimit :: Int -> Session t -> Session t
 setStepLimit n s = s { stepLimit = n }
 
+-- | Snapshots taken more often make going back faster and use more memory
+setSnapshotInterval :: Int -> Session t -> Session t
+setSnapshotInterval n s = s { snapEvery = max 1 n }
+
 setBranchMode :: BranchMode -> Session t -> Session t
 setBranchMode m s = s { branchMode = m }
 
@@ -267,7 +274,7 @@ newSession dapp vm0 = do
   pure Session
     { vm = vm0, curStep = 0, snapshots = Map.singleton 0 snap, pending = Nothing
     , lastCond = Nothing, taken = [], bps = [], dapp = dapp
-    , note = "Started. Type 'help' for commands.", out = Nothing, stepLimit = maxRunSteps
+    , note = "Started. Type 'help' for commands.", out = Nothing, stepLimit = maxRunSteps, snapEvery = snapshotInterval
     , stats = emptyStats, simp = True, branchMode = SolverBranches, warnings = [], merge = False
     , mergeFrom = [(-1, False)] }
 
@@ -360,7 +367,7 @@ resolve fetcher queried s = case s.vm.result of
           Progress.emit "debug-branch-offered" $ where_ s <> ["options" .= branchOptionCount ctx, "hidden" .= hidden]
           Progress.emitExprs "debug-branch-condition" $ where_ s <> maybe [] (Progress.bigText "cond" . formatExpr) c
           pure $ addStats (\st -> st { branchesOffered = st.branchesOffered + 1 }) s' { pending = Just (Pending c ctx) }
-  _ | queried || s.curStep `mod` snapshotInterval == 0 -> do
+  _ | queried || s.curStep `mod` s.snapEvery == 0 -> do
         snap <- liftIO $ stToIO $ cloneVM s.vm
         pure s { snapshots = Map.insert s.curStep snap s.snapshots }
     | otherwise -> pure s

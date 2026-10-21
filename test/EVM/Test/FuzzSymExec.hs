@@ -12,7 +12,7 @@ leaves must select exactly one leaf, whose outcome must match geth's. For other
 leaves, the solver's model of their path condition is replayed in geth, and
 must reach that leaf.
 -}
-module EVM.Test.FuzzSymExec (tests, lockstepTests, TestCase, concreteTestVm, symbolicTestVm) where
+module EVM.Test.FuzzSymExec (tests, lockstepTests, TestCase, concreteTestVm, symbolicTestVm, genSnapEvery) where
 
 import Control.Monad (foldM, forM, forM_, unless, void, when, zipWithM)
 import Control.Monad.IO.Unlift
@@ -79,7 +79,7 @@ import EVM.Transaction qualified
 import EVM.Types hiding (Env)
 import EVM.Effects
 import EVM.Dapp (emptyDapp)
-import EVM.Debugger (Session, newSession, runCommand, Command(..), mkView, View(..), BranchView(..), sessionVM, sessionStep, isHalted, hasPendingBranch
+import EVM.Debugger (Session, newSession, setSnapshotInterval, runCommand, Command(..), mkView, View(..), BranchView(..), sessionVM, sessionStep, isHalted, hasPendingBranch
                     , BranchMode(..), setBranchMode, setMerge, sessionStats, StatsView(..), Stats(..))
 import EVM.Tracing (interpretWithTrace, vmTraceStep, VMTraceStep(..))
 
@@ -377,6 +377,28 @@ genDeepStack = do
   n <- liftG $ chooseInt (8, 16)
   concat <$> sequence (replicate n (liftG genWord >>= push))
 
+-- | A few ops run many times, so that runs are long: the debugger snapshots every 50 steps
+genSmallLoop :: G [Item]
+genSmallLoop = do
+  l <- gets (.nextLabel)
+  n <- gets (.nextLoop)
+  modify (\s -> s { nextLabel = l + 1, nextLoop = n + 1 })
+  k <- liftG $ chooseInt (1, 3)
+  body <- concat <$> sequence (replicate k (do
+    w <- liftG genWord
+    liftG (chooseInt (0, 2)) >>= \case
+      0 -> concat <$> sequence [push w, liftG (elements [0, 0x20, 0x41]) >>= push, op 2 0 OpMstore]
+      1 -> concat <$> sequence [push w, liftG (chooseBoundedIntegral (0, 3)) >>= push, op 2 0 OpTstore]
+      _ -> concat <$> sequence [push w, op 0 1 OpCalldatasize, liftG (elements [OpAdd, OpMul, OpXor]) >>= op 2 1, op 1 0 OpPop]))
+  let ctr = 0xc0de0000 + unsafeInto n
+  count <- concat <$> sequence
+    [ push ctr, op 1 1 OpTload, push 1, op 2 1 OpAdd
+    , op 1 2 (OpDup 1), push ctr, op 2 0 OpTstore ]
+  bound <- liftG (chooseBoundedIntegral (5, 40)) >>= push
+  cmp <- op 2 1 OpGt
+  modify (\s -> s { sdepth = s.sdepth - 1 })
+  pure $ [ILabel l] <> body <> count <> bound <> cmp <> [IJump True l]
+
 -- | A loop whose trip count is kept in transient storage, bounded by a constant or by calldata
 genLoop :: G [Item]
 genLoop = do
@@ -528,7 +550,7 @@ genBlock isMain = do
   inner <- liftG $ frequency $
     [ (10, pure genStraight), (4, pure genBranch), (2, pure genMergeable), (1, pure (pure [IJumpFwd False])), (1, pure genHalt)
     , (1, pure genDeepStack), (2, pure genStorageWrite) ] <>
-    (if isMain then [ (2, pure genLoop), (2, pure genCall), (2, pure genAccountOp), (1, pure genCreate)
+    (if isMain then [ (2, pure genLoop), (2, pure genSmallLoop), (2, pure genCall), (2, pure genAccountOp), (1, pure genCreate)
                     , (1, pure genPrecompileCall), (1, pure genRefund) ] else [])
   items <- inner
   addLabel <- liftG $ chooseInt (0, 1)
@@ -1761,6 +1783,10 @@ modelGuided solvers mode c picks = Progress.withProgressLogFromEnv "model-guided
       Keccak _ -> Any True
       _ -> Any False) mempty
 
+-- | How often a debugger session snapshots: rarely, every step, or often enough that going back crosses snapshots
+genSnapEvery :: Gen Int
+genSnapEvery = frequency [(1, pure 1), (4, chooseInt (2, 10)), (1, chooseInt (11, 60))]
+
 genMove :: Gen Command
 genMove = frequency
   [ (4, Step <$> chooseInt (1, 120)), (4, Back <$> chooseInt (1, 120)), (1, pure Restart), (1, pure Continue) ]
@@ -1768,13 +1794,14 @@ genMove = frequency
 -- | A concrete debugger session must see the same state at a step however it
 -- got there, and its forward run must match geth's
 data DebuggerVsGeth = DebuggerVsGeth
-  { steps :: Int, revisits :: Int, wentBack :: Int, outcome :: String, depth :: Int, ops :: Set String }
+  { steps :: Int, revisits :: Int, wentBack :: Int, acrossSnapshots :: Int, outcome :: String, depth :: Int, ops :: Set String }
 
-debuggerVsGeth :: TestCase -> [Command] -> IO DebuggerVsGeth
-debuggerVsGeth c moves = do
+debuggerVsGeth :: Int -> TestCase -> [Command] -> IO DebuggerVsGeth
+debuggerVsGeth every c moves = do
   g <- withDir $ \dir -> runGeth dir c c.inputs
   revisits <- newIORef (0 :: Int)
   backs <- newIORef (0 :: Int)
+  across <- newIORef (0 :: Int)
   h <- runEnv testEnv $ withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> do
     let fetcher = Fetch.oracle solvers Nothing Fetch.noRpc
         shown s = if isHalted s then "halted: " <> show (sessionVM s).result else show (vmTraceStep (sessionVM s))
@@ -1786,7 +1813,9 @@ debuggerVsGeth c moves = do
           Nothing -> pure (Map.insert (sessionStep s) (shown s) seen)
         move (s, seen) m = do
           s' <- runCommand fetcher m s
-          when (sessionStep s' < sessionStep s) $ liftIO $ atomicModifyIORef' backs (\n -> (n + 1, ()))
+          when (sessionStep s' < sessionStep s) $ liftIO $ do
+            atomicModifyIORef' backs (\n -> (n + 1, ()))
+            when (sessionStep s' `div` every /= sessionStep s `div` every) $ atomicModifyIORef' across (\n -> (n + 1, ()))
           (s',) <$> visit seen s' (show m)
         forward seen s acc
           | isHalted s || sessionStep s > 100_000 = pure (s, reverse acc)
@@ -1794,7 +1823,7 @@ debuggerVsGeth c moves = do
               s' <- runCommand fetcher (Step 1) s
               seen' <- visit seen s' "stepping forward"
               forward seen' s' (vmTraceStep (sessionVM s) : acc)
-    s0 <- liftIO $ stToIO (concreteTestVm c) >>= newSession emptyDapp
+    s0 <- liftIO $ setSnapshotInterval every <$> (stToIO (concreteTestVm c) >>= newSession emptyDapp)
     seen0 <- visit mempty s0 "the start"
     (sEnd, seen) <- foldM move (s0, seen0) moves
     (sStart, seen') <- move (sEnd, seen) Restart
@@ -1806,7 +1835,7 @@ debuggerVsGeth c moves = do
       Just (VMFailure e) -> hevmRun False c c.inputs (Left e) vm (failedLast e trace)
       r -> internalError $ "the debugger stopped with " <> show r
   checkConcrete "debugger" c c.inputs g h
-  DebuggerVsGeth (length h.trace) <$> readIORef revisits <*> readIORef backs
+  DebuggerVsGeth (length h.trace) <$> readIORef revisits <*> readIORef backs <*> readIORef across
     <*> pure (either (errorKind . evmErrToString) (const "success") h.result)
     <*> pure (maximum (1 : map (.depth) h.trace))
     <*> pure (Set.fromList [intToOpName t.op | t <- h.trace])
@@ -1829,13 +1858,14 @@ lockstepTests = testGroup "lockstep-fuzz"
         liftIO $ writeCaseFile "model-guided-lockstep" $ show c <> "\nreproduce with: " <> reproduction c c.inputs
           <> " HEVM_FUZZ_PICKS=" <> intercalate "," (map show picks) <> " HEVM_FUZZ_MODE=" <> show mode
         modelGuided solvers mode c picks
-  , testProperty "debugger-vs-geth" $ \(c :: TestCase) -> forAll (resize 25 (listOf genMove)) $ \moves ->
+  , testProperty "debugger-vs-geth" $ \(c :: TestCase) -> forAll (resize 25 (listOf genMove)) $ \moves -> forAll genSnapEvery $ \every ->
       within 300_000_000 $ ioProperty $ do
         writeCaseFile "debugger-vs-geth" $ show c <> "\nmoves: " <> show moves <> "\nreproduce with: " <> reproduction c c.inputs
-        r <- debuggerVsGeth c moves
+        r <- debuggerVsGeth every c moves
         pure $ tabulate "steps compared with geth" [bucket r.steps]
              $ tabulate "states revisited and compared" [bucket r.revisits]
              $ tabulate "moves that went back" [bucket r.wentBack]
+             $ tabulate "of them, back past a snapshot" [bucket r.acrossSnapshots]
              $ tabulate "outcome" [r.outcome]
              $ tabulate "max call depth" [show r.depth]
              $ tabulate "opcodes run, in cases" (Set.toList r.ops) True

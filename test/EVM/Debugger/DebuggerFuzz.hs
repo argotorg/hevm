@@ -42,24 +42,25 @@ import EVM.Effects
 import EVM.Fetch qualified as Fetch
 import EVM.Solvers (withSolvers, defMemLimit, Solver(..), SolverGroup, checkSatWithProps)
 import EVM.Stepper qualified as Stepper
-import EVM.Test.FuzzSymExec (TestCase, concreteTestVm, symbolicTestVm)
+import EVM.Test.FuzzSymExec (TestCase, concreteTestVm, symbolicTestVm, genSnapEvery)
 import EVM.Types hiding (Env)
 
 tests :: TestTree
 tests = testGroup "debugger-fuzz"
   [ testProperty "concrete-replay" $ mapSize (* 4) $ \(c :: TestCase) ->
-      forAll (genCommands False) $ \cmds -> within 120_000_000 $ ioProperty $ runEnv testEnv $ concreteReplay c cmds
+      forAll (genCommands False) $ \cmds -> forAll genSnapEvery $ \every -> within 120_000_000 $ ioProperty $ runEnv testEnv $ concreteReplay every c cmds
   , testProperty "symbolic-branches" $ mapSize (* 4) $ \(c :: TestCase) ->
-      forAll (genCommands True) $ \cmds -> forAll (vectorOf 40 genReaction) $ \reactions ->
-      within 300_000_000 $ ioProperty $ runEnv testEnv $ symbolicBranches c cmds reactions
+      forAll (genCommands True) $ \cmds -> forAll (vectorOf 40 genReaction) $ \reactions -> forAll genSnapEvery $ \every ->
+      within 300_000_000 $ ioProperty $ runEnv testEnv $ symbolicBranches every c cmds reactions
   , testProperty "forward-back-concrete" $ mapSize (* 4) $ \(c :: TestCase) ->
-      forAll genRoundTrips $ \(start, ks) -> within 120_000_000 $ ioProperty $ runEnv testEnv $ withSession $ \solvers -> do
-        s0 <- liftIO $ stToIO (concreteTestVm c) >>= newSession emptyDapp
+      forAll genRoundTrips $ \(start, ks) -> forAll genSnapEvery $ \every -> within 120_000_000 $ ioProperty $ runEnv testEnv $ withSession $ \solvers -> do
+        s0 <- liftIO $ setSnapshotInterval every <$> (stToIO (concreteTestVm c) >>= newSession emptyDapp)
         roundTrips (Fetch.oracle solvers Nothing Fetch.noRpc) (repeat Nothing) start ks s0
   , testProperty "forward-back-symbolic" $ mapSize (* 4) $ \(c :: TestCase) ->
       forAll genRoundTrips $ \(start, ks) -> forAll (vectorOf 100 genReaction) $ \reactions -> \explorer -> \merging ->
+      forAll genSnapEvery $ \every ->
       within 300_000_000 $ ioProperty $ runEnv testEnv $ withSession $ \solvers -> do
-        s0 <- liftIO $ stToIO (symbolicTestVm c) >>= newSession emptyDapp
+        s0 <- liftIO $ setSnapshotInterval every <$> (stToIO (symbolicTestVm c) >>= newSession emptyDapp)
         let mode = if explorer then ExplorerBranches else SolverBranches
         tabulate "branch mode" [show mode <> if merging then ", merging" else ""] <$>
           roundTrips (Fetch.oracle solvers Nothing Fetch.noRpc) reactions start ks (setMerge merging (setBranchMode mode (setStepLimit 3000 s0)))
@@ -159,10 +160,10 @@ withSession = withSolvers Bitwuzla 1 (Just 10) defMemLimit
 
 -- | After every command, the state must be the one a fresh session reaches by
 -- stepping forward to the same step, and running to the end must agree with exec
-concreteReplay :: App m => TestCase -> [Text] -> m Property
-concreteReplay c cmds = withSession $ \solvers -> do
+concreteReplay :: App m => Int -> TestCase -> [Text] -> m Property
+concreteReplay every c cmds = withSession $ \solvers -> do
   let fetcher = Fetch.oracle solvers Nothing Fetch.noRpc
-      fresh = liftIO $ stToIO (concreteTestVm c) >>= newSession emptyDapp
+      fresh = liftIO $ setSnapshotInterval every <$> (stToIO (concreteTestVm c) >>= newSession emptyDapp)
       go _ [] _ = pure Nothing
       go s (cmd : rest) done = do
         s' <- runCommandText fetcher cmd s
@@ -198,8 +199,8 @@ genReaction = frequency [(3, Just <$> elements ["branch true", "branch false"]),
 
 -- | States revisited on the same path must not change, and the path
 -- conditions after picking a branch must be satisfiable
-symbolicBranches :: App m => TestCase -> [Text] -> [Maybe Text] -> m Property
-symbolicBranches c cmds0 reactions0 = withSession $ \solvers -> do
+symbolicBranches :: App m => Int -> TestCase -> [Text] -> [Maybe Text] -> m Property
+symbolicBranches every c cmds0 reactions0 = withSession $ \solvers -> do
   let fetcher = Fetch.oracle solvers Nothing Fetch.noRpc
       go s seen cmds done taken reactions
         | isPending s, (Just r : more) <- reactions = step s seen r cmds done taken more
@@ -233,7 +234,7 @@ symbolicBranches c cmds0 reactions0 = withSession $ \solvers -> do
           _ | "merge" `T.isPrefixOf` T.strip cmd -> go s' (Map.singleton key fp) rest (cmd : done) taken' reactions
             | otherwise -> go s' (Map.insert key fp seen) rest (cmd : done) taken' reactions
   s0 <- liftIO $ stToIO (symbolicTestVm c) >>= newSession emptyDapp
-  mismatch <- go (setStepLimit 3000 s0) (mempty :: Map ([Text], Int, Text) Fingerprint) cmds0 [] (0 :: Int) reactions0
+  mismatch <- go (setSnapshotInterval every (setStepLimit 3000 s0)) (mempty :: Map ([Text], Int, Text) Fingerprint) cmds0 [] (0 :: Int) reactions0
   pure $ case mismatch of
     Left msg -> counterexample msg False
     Right (taken, status, res) -> tabulate "branches taken" [bucket taken]

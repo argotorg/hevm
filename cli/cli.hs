@@ -42,7 +42,7 @@ import JSONL (jsonlBuilder, jsonLine)
 
 import EVM (initialContract, abstractContract, makeVm, defaultVMOpts)
 import EVM.ABI (Sig(..))
-import EVM.Debugger (newSession)
+import EVM.Debugger (newSession, setSnapshotInterval, snapshotInterval)
 import EVM.Debugger.Server (serveSession, withProgressServer, announce, defaultDebuggerPort)
 import EVM.Dapp (dappInfo, DappInfo, emptyDapp, TestMethodInfo(..))
 import EVM.Expr qualified as Expr
@@ -116,6 +116,7 @@ data CommonOptions = CommonOptions
   , debugger      ::Bool
   , serve         ::Bool
   , port          ::Int
+  , snapshotEvery ::Int
   , checkStaticBranches ::Bool
   }
 
@@ -157,6 +158,7 @@ commonOptions = CommonOptions
   <*> (switch $ long "debugger" <> help "Start the interactive debugger, served over HTTP on localhost. Connect with hevm-debug")
   <*> (switch $ long "serve" <> help "Serve the progress of the run over HTTP on localhost, at /progress")
   <*> (option auto $ long "port" <> showDefault <> value defaultDebuggerPort <> help "Port for --debugger and --serve, 0 picks a free one")
+  <*> (option auto $ long "debug-snapshot-every" <> showDefault <> value snapshotInterval <> help "Steps between the debugger's snapshots: fewer make going back faster and use more memory")
   <*> (switch $ long "check-static-branches" <> help "Internal check, slow: ask the solver to confirm every branch side that exploration drops by simplification alone")
 
 data CommonExecOptions = CommonExecOptions
@@ -374,7 +376,7 @@ main = do
               debugTestVm unitTestOpts out >>= \case
                 Left err -> liftIO $ T.putStrLn err >> exitFailure
                 Right vm -> do
-                  sess <- liftIO $ newSession unitTestOpts.dapp vm
+                  sess <- liftIO $ setSnapshotInterval cOpts.snapshotEvery <$> newSession unitTestOpts.dapp vm
                   serveSession (Fetch.oracle solvers (Just unitTestOpts.sess) unitTestOpts.rpcInfo) cOpts.port announce sess
               liftIO exitSuccess
             res <- unitTest unitTestOpts out
@@ -612,7 +614,7 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = do
     let fetcher = Fetch.oracle solvers (Just sess) veriOpts.rpcInfo
     when cOpts.debugger $ do
       dapp <- getSrcInfo sOpts.projectType cOpts
-      dsess <- liftIO $ newSession dapp preState
+      dsess <- liftIO $ setSnapshotInterval cOpts.snapshotEvery <$> newSession dapp preState
       serveSession fetcher cOpts.port announce dsess
       liftIO exitSuccess
     (expr, res) <- verify solvers fetcher veriOpts preState (checkAssertions errCodes) Nothing
@@ -694,7 +696,7 @@ launchExec cFileOpts execOpts cExecOpts cOpts = do
   withSolvers Z3 0 Nothing cOpts.smtMemory $ \solvers -> do
     let fetcher = Fetch.oracle solvers (Just sess) rpcDat
     when cOpts.debugger $ do
-      dsess <- liftIO $ newSession dapp vm
+      dsess <- liftIO $ setSnapshotInterval cOpts.snapshotEvery <$> newSession dapp vm
       serveSession fetcher cOpts.port announce dsess
       liftIO exitSuccess
     vm' <- if execOpts.jsonTrace
