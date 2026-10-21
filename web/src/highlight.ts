@@ -75,11 +75,6 @@ export function word(w: { hex: string } | { expr: string }): Piece[] {
   return "hex" in w ? number(w.hex) : shownExpr(w.expr);
 }
 
-// A word as the server shows it: "0x69 (105)", a bare hex word, or an expression
-export function stackWord(text: string): Piece[] {
-  const m = /^(0x[0-9a-f]+)(?: \(\d+\))?$/i.exec(text);
-  return m?.[1] !== undefined ? number(m[1]) : shownExpr(text);
-}
 
 // An opcode and its argument, like "PUSH2 0x0100"
 export function opcode(text: string): Piece[] {

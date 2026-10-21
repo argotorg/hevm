@@ -92,7 +92,7 @@ describe("other panes", () => {
   });
   test("stack, empty and not", () => {
     assert.match(textOf(all(view.stackPane(stateWith({ stack: [] })))), /empty/);
-    assert.match(textOf(all(view.stackPane(stateWith({ stack: ["0x1", "0x2"] })))), /0.*0x1.*1.*0x2/);
+    assert.match(textOf(all(view.stackPane(stateWith({ stack: [{ hex: "0x1" }, { expr: "(Caller)" }] })))), /0.*0x1.*1.*Caller/);
   });
   test("memory offers the rest when it is long", () => {
     const r = recorder();

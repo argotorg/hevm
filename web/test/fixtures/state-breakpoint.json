@@ -107,7 +107,9 @@
     "simplified": true,
     "source": null,
     "stack": [
-        "(ReadWord\n  idx:\n    0\n  buf: \n    (AbstractBuf \"txdata\")\n)"
+        {
+            "expr": "(ReadWord\n  idx:\n    0\n  buf: \n    (AbstractBuf \"txdata\")\n)"
+        }
     ],
     "status": "running",
     "step": 7,

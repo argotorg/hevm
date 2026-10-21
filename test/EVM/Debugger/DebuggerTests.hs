@@ -67,7 +67,7 @@ tests = testGroup "Debugger"
       s <- run "break op MSTORE" s0 >>= run "continue" >>= run "continue"
       v <- liftIO $ mkView s
       liftIO $ assertEqual "stopped at MSTORE" "MSTORE" v.op
-      liftIO $ assertEqual "second iteration" ["0x1", "0x1", "0x1"] (take 3 v.stack)
+      liftIO $ assertEqual "second iteration" ["0x1", "0x1", "0x1"] (map wordText (take 3 v.stack))
   , testCase "symbolic-branch-choice" $ runEnv testEnv $ withSymbolic branchCode $ \run s0 -> do
       s1 <- run "continue" s0
       v1 <- liftIO $ mkView s1

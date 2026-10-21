@@ -1,6 +1,6 @@
 // What each pane shows for a model: pure functions to virtual DOM.
 import type { Progress, StatsView, View } from "./api";
-import { memoryLine, opcode, shownExpr, solidityLines, stackWord, word, type Piece } from "./highlight";
+import { memoryLine, opcode, shownExpr, solidityLines, word, type Piece } from "./highlight";
 import { branchArgument, pcBreakpoints, type LogEntry } from "./model";
 import { h, type Child, type VNode } from "./vdom";
 
@@ -83,7 +83,7 @@ export function sourcePane(v: View): VNode[] {
 
 export function stackPane(v: View): VNode[] {
   if (v.stack.length === 0) return [h("div", { class: "empty" }, "empty")];
-  return v.stack.map((word, i) => h("div", { class: "stack-item" }, h("span", { class: "index" }, i), h("pre", { class: "word" }, ...pieces(stackWord(word)))));
+  return v.stack.map((w, i) => h("div", { class: "stack-item" }, h("span", { class: "index" }, i), h("pre", { class: "word" }, ...pieces(word(w)))));
 }
 
 export function memoryPane(v: View, run: Run): VNode[] {

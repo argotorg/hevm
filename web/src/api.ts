@@ -25,7 +25,7 @@ export const view = obj({
   depth: num,
   gas: nullable(num),
   code: arr(codeLine),
-  stack: arr(str),
+  stack: arr(word),
   memorySize: num,
   memory: str,
   source: nullable(sourceView),

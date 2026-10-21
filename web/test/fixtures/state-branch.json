@@ -114,9 +114,15 @@
     "simplified": true,
     "source": null,
     "stack": [
-        "0x69 (105)",
-        "(Eq\n  5\n  (ReadWord\n    idx:\n      0\n    buf: \n      (AbstractBuf \"txdata\")\n  )\n)",
-        "(ReadWord\n  idx:\n    0\n  buf: \n    (AbstractBuf \"txdata\")\n)"
+        {
+            "hex": "0x69"
+        },
+        {
+            "expr": "(Eq\n  5\n  (ReadWord\n    idx:\n      0\n    buf: \n      (AbstractBuf \"txdata\")\n  )\n)"
+        },
+        {
+            "expr": "(ReadWord\n  idx:\n    0\n  buf: \n    (AbstractBuf \"txdata\")\n)"
+        }
     ],
     "status": "branch",
     "step": 7,

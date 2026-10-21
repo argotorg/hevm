@@ -149,7 +149,7 @@ fingerprint fetcher s0 = do
   extra <- forM ["memory 0 " <> tshow memLen, "storage", "calldata", "trace", "pathconds"] $ \cmd -> do
     v' <- runCommandText fetcher cmd s >>= liftIO . mkView
     pure (maybe "" id v'.output)
-  pure $ [ tshow v.step, tshow v.pc, v.op, T.intercalate "," v.stack, tshow v.gas, tshow v.depth
+  pure $ [ tshow v.step, tshow v.pc, v.op, T.intercalate "," (map wordText v.stack), tshow v.gas, tshow v.depth
          , v.status, tshow v.result, tshow v.memorySize, tshow (fmap (.options) v.branch) ] <> extra
 
 fingerprintKeys :: [Text]

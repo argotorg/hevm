@@ -87,7 +87,7 @@ var view = obj({
   depth: num,
   gas: nullable(num),
   code: arr(codeLine),
-  stack: arr(str),
+  stack: arr(word),
   memorySize: num,
   memory: str,
   source: nullable(sourceView),
@@ -1270,10 +1270,6 @@ function shownExpr(text2) {
 function word2(w) {
   return "hex" in w ? number(w.hex) : shownExpr(w.expr);
 }
-function stackWord(text2) {
-  const m = /^(0x[0-9a-f]+)(?: \(\d+\))?$/i.exec(text2);
-  return m?.[1] !== void 0 ? number(m[1]) : shownExpr(text2);
-}
 function opcode(text2) {
   const space = text2.indexOf(" ");
   if (space < 0) return [{ text: text2, kind: "opcode" }];
@@ -1366,7 +1362,7 @@ function sourcePane(v) {
 }
 function stackPane(v) {
   if (v.stack.length === 0) return [h("div", { class: "empty" }, "empty")];
-  return v.stack.map((word3, i) => h("div", { class: "stack-item" }, h("span", { class: "index" }, i), h("pre", { class: "word" }, ...pieces(stackWord(word3)))));
+  return v.stack.map((w, i) => h("div", { class: "stack-item" }, h("span", { class: "index" }, i), h("pre", { class: "word" }, ...pieces(word2(w)))));
 }
 function memoryPane(v, run) {
   return [

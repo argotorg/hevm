@@ -33,7 +33,8 @@ describe("unexpected answers fail with where they differ", () => {
     assert.throws(() => stats.parse({ ...raw.stats, counters }), /counters\.opcodes: expected a number/);
   });
   test("a wrong element of an array", () => {
-    assert.throws(() => view.parse({ ...raw.stateConcrete, stack: ["0x1", 2] }), /stack\[1\]: expected a string/);
+    assert.throws(() => view.parse({ ...raw.stateConcrete, stack: [{ hex: "0x1" }, "0x2"] }), /stack\[1\]: expected an object/);
+    assert.throws(() => view.parse({ ...raw.stateConcrete, stack: [{ hex: 1 }] }), /stack\[0\]\.expr: expected a string/);
   });
   test("neither kind of progress", () => {
     assert.throws(() => progress.parse({ running: "yes" }), /running/);

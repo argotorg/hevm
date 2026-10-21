@@ -18,6 +18,8 @@ module EVM.Debugger
   , Breakpoint(..)
   , parseCommand
   , View(..)
+  , WordView(..)
+  , wordText
   , CodeLine(..)
   , SourceView(..)
   , SourceLine(..)
@@ -680,12 +682,20 @@ data SourceView = SourceView { file :: Text, line :: Int, lines :: [SourceLine] 
 
 -- | A word for clients to show as they like: {"hex": "0x1f"} for a literal, {"expr": ...} otherwise
 data WordView = HexWord Text | ExprWord Text
-  deriving (Show)
+  deriving (Show, Eq)
 
 instance ToJSON WordView where
   toJSON = \case
     HexWord t -> object ["hex" .= t]
     ExprWord t -> object ["expr" .= t]
+
+-- | A word as the text view shows it, small numbers also in decimal
+wordText :: WordView -> Text
+wordText = \case
+  HexWord h -> h <> case readMaybe (T.unpack h) :: Maybe Integer of
+    Just w | w < 0x10000 && w > 9 -> " (" <> tshow w <> ")"
+    _ -> ""
+  ExprWord e -> e
 
 wordView :: Expr EWord -> WordView
 wordView e = case maybeLitWordSimp e of
@@ -714,7 +724,7 @@ data View = View
   , depth          :: Int
   , gas            :: Maybe Word64
   , code           :: [CodeLine]
-  , stack          :: [Text]
+  , stack          :: [WordView]
   , memorySize     :: Word64
   , memory         :: Text
   , source         :: Maybe SourceView
@@ -750,7 +760,7 @@ mkView s = do
     , depth = length vm.frames
     , gas = gasLeft vm
     , code = codeWindow vm.state.code vm.state.pc
-    , stack = map (clip 300 . formatWord . shown s) vm.state.stack
+    , stack = map (wordView . shown s) vm.state.stack
     , memorySize = vm.state.memorySize
     , memory = mem
     , source = sourceView s.dapp vm
@@ -792,7 +802,7 @@ renderView v = T.unlines $
   , "-- code"
   ] <> [ (if c.current then " > " else "   ") <> hex c.pc <> "  " <> c.op | c <- v.code ]
   <> [ "", "-- stack (top first)" ]
-  <> (if null v.stack then ["   <empty>"] else [ "   " <> tshow i <> ": " <> e | (i, e) <- zip [0 :: Int ..] v.stack ])
+  <> (if null v.stack then ["   <empty>"] else [ "   " <> tshow i <> ": " <> wordText e | (i, e) <- zip [0 :: Int ..] v.stack ])
   <> maybe [] (\sv -> ["", "-- source " <> sv.file <> ":" <> tshow sv.line]
                       <> [ (if l.current then " > " else "   ") <> T.justifyRight 5 ' ' (tshow l.line) <> " | " <> l.text | l <- sv.lines, abs (l.line - sv.line) <= 4 ]) v.source
   <> [ "\n-- no source: compiler-generated code, such as ABI decoding or overflow checks" | v.generatedCode ]
@@ -866,11 +876,6 @@ opName b = case intToOpName (fromIntegral b) of
 
 byteHex :: Word8 -> String
 byteHex b = let h = showHex b "" in if length h < 2 then '0' : h else h
-
-formatWord :: Expr EWord -> Text
-formatWord e = case maybeLitWordSimp e of
-  Just w -> T.pack ("0x" <> showHex w "") <> (if w < 0x10000 && w > 9 then " (" <> tshow (into w :: Integer) <> ")" else "")
-  Nothing -> formatExpr e
 
 -- | The storage of each contract that has some, the current one first: its
 -- newest writes, then what it started with, each slot only once

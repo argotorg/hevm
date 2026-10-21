@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { expr, memoryLine, number, opcode, solidityLines, stackWord, unwrap, word, type Piece } from "../src/highlight";
+import { expr, memoryLine, number, opcode, solidityLines, unwrap, word, type Piece } from "../src/highlight";
 
 const joined = (ps: Piece[]): string => ps.map((p) => p.text).join("");
 const kinds = (ps: Piece[]): (string | null)[] => ps.map((p) => p.kind);
@@ -37,12 +37,9 @@ describe("numbers", () => {
     assert.deepEqual(kinds(opcode("ADD")), ["opcode"]);
     assert.deepEqual(opcode("PUSH2 0x0100").map((p) => p.text), ["PUSH2", " ", "0x0100", "256"]);
   });
-  test("stack words as the server shows them", () => {
-    assert.deepEqual(stackWord("0x69 (105)"), number("0x69"));
-    assert.equal(kindOf(stackWord("(Max\n  100\n  (BufLength\n    (AbstractBuf \"txdata\")\n  )\n)"), "Max"), "expr-ctor");
-  });
   test("words sent as JSON", () => {
     assert.deepEqual(word({ hex: "0x20" }), number("0x20"));
+    assert.equal(kindOf(word({ expr: "(Max\n  100\n  (BufLength\n    (AbstractBuf \"txdata\")\n  )\n)" }), "Max"), "expr-ctor");
     assert.equal(joined(word({ expr: "(Keccak (ConcreteBuf \"\"))" })), "Keccak (ConcreteBuf \"\")");
   });
 });

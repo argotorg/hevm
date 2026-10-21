@@ -88,7 +88,9 @@
     "simplified": true,
     "source": null,
     "stack": [
-        "0x0"
+        {
+            "hex": "0x0"
+        }
     ],
     "status": "running",
     "step": 5,
