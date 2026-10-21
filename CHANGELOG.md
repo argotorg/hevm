@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- `--debugger` for `symbolic`, `exec` and `test` starts an interactive debugger
+  served over HTTP on localhost, with a web frontend, symbolic branches,
+  stepping back, breakpoints and statistics. `hevm-debug` is a command-line
+  client for it.
+- `--serve` serves the progress of a run over HTTP, at `/progress`.
+- `--check-static-branches` checks branch decisions made without the solver
+  against the solver.
+- The symbolic execution fuzzer runs symbolic and concrete execution in
+  lockstep, also with path merging and along paths given by solver models.
+- Reads of all-zero buffers simplify to zero.
 - `hevm symbolic` replays each counterexample concretely and marks it
   `[validated]` or `[not reproducible]`, like `hevm test`.
 - The symbolic execution fuzzer generates mapping and array storage accesses,
@@ -133,6 +143,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the writes they are disjoint from and resolve the writes they hit.
 
 ## Fixed
+- MCOPY of a symbolic size now grows memory.
+- A precompile call that runs out of gas now leaves an error trace.
+- A copy with a symbolic offset is encoded in SMT once instead of once per byte,
+  and copies over 1 MiB are not encoded, so large copies no longer exhaust memory.
 - An exception during symbolic exploration is now rethrown, instead of being
   printed and followed by `thread blocked indefinitely in an STM transaction`.
 - Counterexamples found with storage decomposition show each mapping and array
