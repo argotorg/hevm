@@ -745,8 +745,8 @@ exec1 conf = do
                       next
                       assign' (#state % #stack) xs
                       mcopy sz srcOff dstOff
-                _ -> do
-                  -- symbolic, ignore gas
+                -- no gas for a symbolic size, but the memory still grows
+                _ -> accessMemoryRange srcOff sz $ accessMemoryRange dstOff sz $ do
                   next
                   assign' (#state % #stack) xs
                   mcopy sz srcOff dstOff

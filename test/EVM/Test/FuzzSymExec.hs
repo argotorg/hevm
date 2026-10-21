@@ -28,7 +28,7 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as Char8
 import Data.Char (isDigit, toLower)
 import Data.IORef (IORef, newIORef, readIORef, atomicModifyIORef')
-import Data.List (isInfixOf, isPrefixOf)
+import Data.List (intercalate, isInfixOf, isPrefixOf)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Monoid (Any(..))
@@ -1018,6 +1018,39 @@ failWith c i msg = assertFailure $ msg
   <> "\ninputs: " <> show i
   <> "\nmain: " <> bsToHex (assembleItems c.prog.main)
   <> "\ncallee: " <> bsToHex (assembleItems c.prog.callee)
+  <> "\nreproduce with: " <> reproduction c i
+
+-- | Environment variables that 'caseFromEnv' reads back
+reproduction :: TestCase -> Inputs -> String
+reproduction c i = unwords
+  [ "HEVM_FUZZ_MAIN=" <> hex (assembleItems c.prog.main), "HEVM_FUZZ_CALLEE=" <> hex (assembleItems c.prog.callee)
+  , "HEVM_FUZZ_CALLDATA=" <> hex i.calldata, "HEVM_FUZZ_CALLVALUE=" <> show i.callvalue
+  , "HEVM_FUZZ_TIMESTAMP=" <> show i.timestamp, "HEVM_FUZZ_STORE=" <> intercalate "," [ show k <> ":" <> show v | (k, v) <- Map.toList i.store ]
+  , "HEVM_FUZZ_GASLIMIT=" <> show c.gasLimit, "HEVM_FUZZ_NUMBER=" <> show c.number ]
+  where hex = drop 2 . bsToHex
+
+-- | The case 'reproduction' describes, if HEVM_FUZZ_MAIN is set
+caseFromEnv :: IO (Maybe TestCase)
+caseFromEnv = lookupEnv "HEVM_FUZZ_MAIN" >>= \case
+  Nothing -> pure Nothing
+  Just m -> do
+    let var k d = fromMaybe d <$> lookupEnv ("HEVM_FUZZ_" <> k)
+        bytes = fromJust . hexByteString . Char8.pack
+        w256 :: String -> W256
+        w256 = fromInteger . read
+    callee <- var "CALLEE" ""
+    cd <- var "CALLDATA" ""
+    cv <- var "CALLVALUE" "0"
+    ts <- var "TIMESTAMP" "1"
+    st <- var "STORE" ""
+    gl <- var "GASLIMIT" "300000"
+    n <- var "NUMBER" "1"
+    let store = Map.fromList [ (w256 k, w256 (drop 1 v)) | kv <- splitOn' ',' st, not (null kv), let (k, v) = break (== ':') kv ]
+    pure $ Just $ TestCase (Prog [IRaw (bytes m)] [IRaw (bytes callee)]) (Inputs (bytes cd) store (w256 cv) (w256 ts)) (read gl) (w256 n)
+  where
+    splitOn' d str = case break (== d) str of
+      (a, []) -> [a]
+      (a, _ : rest) -> a : splitOn' d rest
 
 -- | Concrete hevm against geth, howling failures with how hevm ran
 checkConcrete :: String -> TestCase -> Inputs -> GethRun -> HevmRun -> IO ()
@@ -1335,6 +1368,12 @@ lockstepCase solvers mode c = Progress.withProgressLogFromEnv "lockstep" $ do
                   sc' <- runCommand fetcher (Step 1) sc >>= settle (4 :: Int) vc
                   picked <- runCommand fetcher (Step 1) ss >>= pickSide vs (sessionVM sc')
                   case picked of
+                    -- a call to an address that stays symbolic goes to unknown code, which is
+                    -- over-approximated rather than run
+                    Left _ | opName' `elem` ["CALL", "CALLCODE", "DELEGATECALL", "STATICCALL"]
+                           , target : _ <- drop 1 vs.state.stack
+                           , Nothing <- Expr.maybeLitWordSimp (Expr.simplify target)
+                           , length (sessionVM sc').frames > length vs.frames -> stopWith "call to a symbolic address"
                     Left msg -> mismatchAt (sessionVM sc') msg
                     Right (ss'', _, _) | (sessionStats ss'').counters.staticWrong > 0 -> do
                       v <- liftIO $ mkView ss''
@@ -1516,7 +1555,14 @@ compareEnds c vc vs = do
 
 lockstepTests :: TestTree
 lockstepTests = testGroup "lockstep-fuzz"
-  [ testProperty "symbolic-lockstep" $ \(c :: TestCase) -> forAll (elements [SolverBranches, ExplorerBranches, CheckedBranches]) $ \mode ->
+  [ -- the case from the HEVM_FUZZ_* variables that a failure prints, in every branch mode
+    test "lockstep-from-env" $ liftIO caseFromEnv >>= mapM_ (\c ->
+      withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> forM_ [SolverBranches, ExplorerBranches, CheckedBranches] $ \mode ->
+        lockstepCase solvers mode c >>= \case
+          Left err -> liftIO $ failWith c c.inputs (show mode <> ": " <> err)
+          Right r -> liftIO $ putStrLn $ show mode <> ": " <> r.stopped <> " after " <> show r.steps <> " steps, "
+                       <> show r.compared <> " values compared")
+  , testProperty "symbolic-lockstep" $ \(c :: TestCase) -> forAll (elements [SolverBranches, ExplorerBranches, CheckedBranches]) $ \mode ->
       within 300_000_000 $ ioProperty $ runEnv testEnv $ withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> do
         -- to find a case that crashes, hangs or runs out of memory
         liftIO $ lookupEnv "HEVM_FUZZ_CASE_FILE" >>= mapM_ (\f -> writeFile f $ show c

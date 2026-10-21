@@ -29,7 +29,9 @@ import Data.Either (fromRight, rights)
 import Data.Foldable (length, foldl', foldr, toList)
 import Data.List (sortBy, sort)
 import Data.List.NonEmpty qualified as NE
-import Data.Maybe (fromMaybe, listToMaybe, mapMaybe, catMaybes)
+import Data.Maybe (fromMaybe, listToMaybe, mapMaybe, catMaybes, isJust)
+import System.Environment (lookupEnv)
+import System.IO.Unsafe (unsafePerformIO)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Map.Merge.Strict qualified as Map
@@ -629,7 +631,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
                   _ -> do
                     let decision = staticBranch cond preconds
                     conf <- readConfig
-                    when conf.checkStaticBranches $
+                    when (conf.checkStaticBranches || checkStaticBranchesFromEnv) $
                       checkStaticBranch fetcher vm cond preconds decision >>= mapM_ (\msg -> internalError $
                         "a branch side was dropped by simplification, but the solver finds it feasible: " <> msg)
                     (r, vm') <- liftIO $ stToIO $ runStateT (continue decision) vm
@@ -644,6 +646,11 @@ staticBranch cond preconds = case Expr.concKeccakSimpProps ((cond ./= Lit 0):pre
   [] -> Case True
   _ | Expr.concKeccakSimpProps ((cond .== Lit 0):preconds) == [PBool False] -> Case True
     | otherwise -> UnknownBranch
+
+-- | Turns on 'checkStaticBranches' for every run, e.g. a whole test suite
+{-# NOINLINE checkStaticBranchesFromEnv #-}
+checkStaticBranchesFromEnv :: Bool
+checkStaticBranchesFromEnv = unsafePerformIO $ isJust <$> lookupEnv "HEVM_CHECK_STATIC_BRANCHES"
 
 -- | What the fetcher, normally the solver, decides about a branch condition
 askBranch :: App m => Fetch.Fetcher Symbolic m -> VM Symbolic -> Expr EWord -> [Prop] -> m BranchCondition
