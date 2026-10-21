@@ -1,6 +1,6 @@
 // What each pane shows for a model: pure functions to virtual DOM.
 import type { Progress, StatsView, View } from "./api";
-import { memoryLine, opcode, shownExpr, solidityLines, word, type Piece } from "./highlight";
+import { memoryRows, opcode, shownExpr, solidityLines, word, type Piece } from "./highlight";
 import { branchArgument, pcBreakpoints, type LogEntry } from "./model";
 import { h, type Child, type VNode } from "./vdom";
 
@@ -38,7 +38,8 @@ export function statusBar(v: View): VNode[] {
 
 export function codePane(v: View, run: Run): VNode[] {
   const breaks = pcBreakpoints(v);
-  return v.code.map((line) => {
+  const header = h("div", { class: "file" }, v.codeName ?? "code", h("span", { class: "code-addr" }, ` at ${v.codeContract}`));
+  return [header, ...v.code.map((line) => {
     const bp = breaks.get(line.pc);
     const cls = ["code-line", line.current ? "current" : "", bp !== undefined ? "has-break" : ""].filter(Boolean).join(" ");
     return h(
@@ -50,9 +51,9 @@ export function codePane(v: View, run: Run): VNode[] {
       },
       h("span", { class: "gutter" }, bp !== undefined ? "●" : line.current ? "▶" : ""),
       h("span", { class: "addr" }, hex(line.pc)),
-      h("span", { class: "op" }, ...pieces(opcode(line.op))),
+      h("span", { class: "op" }, ...pieces(opcode(line.op, line.arg))),
     );
-  });
+  })];
 }
 
 export function sourcePane(v: View): VNode[] {
@@ -95,7 +96,12 @@ export function memoryPane(v: View, run: Run): VNode[] {
       v.memorySize > 128 && " · first 128 shown ",
       v.memorySize > 128 && h("button", { type: "button", class: "small", onClick: () => run(`memory 0 ${Math.min(v.memorySize, 65536)}`) }, "show all"),
     ),
-    v.memorySize > 0 && h("pre", { class: "memory" }, ...v.memory.split("\n").flatMap((l, i) => [i > 0 && "\n", ...pieces(memoryLine(l))])),
+    v.memorySize > 0 &&
+      h(
+        "pre",
+        { class: "memory" },
+        ...("hex" in v.memory ? memoryRows(v.memory.hex).flatMap((row, i) => [i > 0 && "\n", ...pieces(row)]) : pieces(shownExpr(v.memory.expr))),
+      ),
   ].filter((n): n is VNode => n !== false);
 }
 

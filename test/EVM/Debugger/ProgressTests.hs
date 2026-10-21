@@ -23,6 +23,7 @@ import Data.Maybe (fromMaybe, isJust, mapMaybe, listToMaybe)
 import Data.ByteString.Char8 qualified as BC
 import System.IO.Temp (withSystemTempDirectory)
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Vector qualified as V
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -106,8 +107,8 @@ tests = after AllFinish "!/progress-global/" $ sequentialTestGroup "progress-glo
         v <- JSON.Object <$> httpJSON port "GET" "/progress" ""
         assertEqual "running" (Just (JSON.Bool True)) (at ["running"] v)
         assertEqual "phase" (Just "served") (str =<< at ["phase", "name"] v)
-        txt <- http port "GET" "/progress?format=text" ""
-        assertBool "text" ("served" `BS.isInfixOf` txt)
+        txt <- snapshotText
+        assertBool "text" ("served" `T.isInfixOf` txt)
         st <- http port "GET" "/state" ""
         assertBool "no debugging session" ("not found" `BS.isInfixOf` st)
         putMVar portVar port
@@ -186,7 +187,7 @@ concurrentProgress ws nClients = withPhase "fuzz" [] (const []) $ do
     let report p = atomicModifyIORef' problems (\ps -> (p : ps, ()))
         poll i prev = do
           fin <- readIORef stop
-          r <- http port "GET" (if even i then "/progress" else "/progress?format=text") ""
+          r <- http port "GET" "/progress" ""
           prev' <- if odd i then pure prev else case JSON.decodeStrict r of
             Nothing -> report ("not JSON: " <> show r) >> pure prev
             Just v -> do

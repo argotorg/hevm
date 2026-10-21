@@ -100,6 +100,7 @@ library
     EVM.Dapp,
     EVM.Debugger,
     EVM.Debugger.Server,
+    EVM.Debugger.Text,
     EVM.Debugger.Embed,
     EVM.Expr,
     EVM.SMT,
@@ -254,6 +255,7 @@ executable hevm-debug
     hevm-debug.hs
   ghc-options: -threaded
   build-depends:
+    aeson,
     base,
     bytestring,
     haskeline                         >= 0.8 && < 0.9,

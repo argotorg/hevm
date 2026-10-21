@@ -22,6 +22,7 @@ import EVM (makeVm, defaultVMOpts, initialContract)
 import EVM.Dapp (emptyDapp)
 import EVM.Debugger
 import EVM.Debugger.Server (serveSession)
+import EVM.Debugger.Text (renderView)
 import EVM.Effects
 import EVM.Fetch qualified as Fetch
 import EVM.Solvers (withSolvers, defMemLimit, Solver(..))
@@ -67,7 +68,7 @@ tests = testGroup "Debugger"
       s <- run "break op MSTORE" s0 >>= run "continue" >>= run "continue"
       v <- liftIO $ mkView s
       liftIO $ assertEqual "stopped at MSTORE" "MSTORE" v.op
-      liftIO $ assertEqual "second iteration" ["0x1", "0x1", "0x1"] (map wordText (take 3 v.stack))
+      liftIO $ assertEqual "second iteration" [HexValue "0x1", HexValue "0x1", HexValue "0x1"] (take 3 v.stack)
   , testCase "symbolic-branch-choice" $ runEnv testEnv $ withSymbolic branchCode $ \run s0 -> do
       s1 <- run "continue" s0
       v1 <- liftIO $ mkView s1
@@ -175,8 +176,8 @@ tests = testGroup "Debugger"
         assertEqual "stepped" (Just (JSON.Number 5)) (KM.lookup "step" st')
         st'' <- httpJSON port "POST" "/command" "back 2"
         assertEqual "stepped back" (Just (JSON.Number 3)) (KM.lookup "step" st'')
-        txt <- http port "GET" "/state?format=text" ""
-        assertBool "text view" ("== step 3" `BS.isInfixOf` txt)
+        view <- JSON.decodeStrict <$> http port "GET" "/state" ""
+        assertBool "a client can read the view, and show it" (maybe False (("== step 3" `T.isInfixOf`) . renderView) view)
         stats <- httpJSON port "GET" "/stats" ""
         let counter k = KM.lookup "counters" stats >>= \case
               JSON.Object o -> KM.lookup k o
@@ -185,8 +186,6 @@ tests = testGroup "Debugger"
         assertEqual "stats commands" (Just (JSON.Number 2)) (counter "commands")
         -- 5 forward, then 3 replayed from step 0 to go back to step 3
         assertEqual "stats opcodes" (Just (JSON.Number 8)) (counter "opcodes")
-        statsTxt <- http port "GET" "/stats?format=text" ""
-        assertBool "text stats" ("opcodes:" `BS.isInfixOf` statsTxt)
         _ <- http port "POST" "/quit" ""
         takeMVar done
   ]

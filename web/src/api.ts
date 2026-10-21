@@ -4,7 +4,7 @@
 // test "web-fixtures-match-server" checks that the server still answers that way.
 import { arr, bool, lit, nullable, num, obj, oneOf, optional, record, str, unknownValue, type Infer, type Schema } from "./schema";
 
-export const codeLine = obj({ pc: num, op: str, current: bool });
+export const codeLine = obj({ pc: num, op: str, arg: nullable(str), current: bool });
 export const sourceLine = obj({ line: num, text: str, current: bool });
 export const sourceView = obj({ file: str, line: num, lines: arr(sourceLine) });
 export const branchView = obj({ condition: nullable(str), options: arr(str) });
@@ -17,17 +17,18 @@ export const view = obj({
   mode: lit("concrete", "symbolic"),
   step: num,
   status: lit("running", "branch", "halted"),
-  result: nullable(str),
+  result: nullable(obj({ outcome: lit("success", "revert", "failure", "unfinished"), output: nullable(word), problem: nullable(str) })),
   pc: num,
   op: str,
   contract: str,
   codeContract: str,
   depth: num,
   gas: nullable(num),
+  codeName: nullable(str),
   code: arr(codeLine),
   stack: arr(word),
   memorySize: num,
-  memory: str,
+  memory: word,
   source: nullable(sourceView),
   generatedCode: bool,
   storage: arr(obj({ address: word, current: bool, initial: lit("known", "unknown"), slots: arr(obj({ slot: word, value: word })) })),

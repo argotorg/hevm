@@ -9,92 +9,111 @@
     ],
     "code": [
         {
+            "arg": null,
             "current": false,
             "op": "CALLDATALOAD",
             "pc": 33
         },
         {
+            "arg": null,
             "current": false,
             "op": "DUP1",
             "pc": 34
         },
         {
+            "arg": "0x0000000000000000000000000000000000000000000000000000000000000005",
             "current": false,
-            "op": "PUSH32 0x0000000000000000000000000000000000000000000000000000000000000005",
+            "op": "PUSH32",
             "pc": 35
         },
         {
+            "arg": null,
             "current": false,
             "op": "EQ",
             "pc": 68
         },
         {
+            "arg": "0x0000000000000000000000000000000000000000000000000000000000000069",
             "current": false,
-            "op": "PUSH32 0x0000000000000000000000000000000000000000000000000000000000000069",
+            "op": "PUSH32",
             "pc": 69
         },
         {
+            "arg": null,
             "current": false,
             "op": "JUMPI",
             "pc": 102
         },
         {
+            "arg": null,
             "current": false,
             "op": "POP",
             "pc": 103
         },
         {
+            "arg": null,
             "current": false,
             "op": "STOP",
             "pc": 104
         },
         {
+            "arg": null,
             "current": true,
             "op": "JUMPDEST",
             "pc": 105
         },
         {
+            "arg": "0x0000000000000000000000000000000000000000000000000000000000000005",
             "current": false,
-            "op": "PUSH32 0x0000000000000000000000000000000000000000000000000000000000000005",
+            "op": "PUSH32",
             "pc": 106
         },
         {
+            "arg": null,
             "current": false,
             "op": "EQ",
             "pc": 139
         },
         {
+            "arg": "0x00000000000000000000000000000000000000000000000000000000000000af",
             "current": false,
-            "op": "PUSH32 0x00000000000000000000000000000000000000000000000000000000000000af",
+            "op": "PUSH32",
             "pc": 140
         },
         {
+            "arg": null,
             "current": false,
             "op": "JUMPI",
             "pc": 173
         },
         {
+            "arg": null,
             "current": false,
             "op": "INVALID",
             "pc": 174
         },
         {
+            "arg": null,
             "current": false,
             "op": "JUMPDEST",
             "pc": 175
         },
         {
+            "arg": null,
             "current": false,
             "op": "STOP",
             "pc": 176
         }
     ],
     "codeContract": "(SymAddr \"entrypoint\")",
+    "codeName": null,
     "contract": "(SymAddr \"entrypoint\")",
     "depth": 0,
     "gas": null,
     "generatedCode": false,
-    "memory": "Length: 0 (0x0) bytes\n",
+    "memory": {
+        "hex": "0x"
+    },
     "memorySize": 0,
     "merging": false,
     "message": "Took branch true for condition (Eq\n  5\n  (ReadWord\n    idx:\n      0\n    buf: \n      (AbstractBuf \"txdata\")\n  )\n).",

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { expr, memoryLine, number, opcode, solidityLines, unwrap, word, type Piece } from "../src/highlight";
+import { expr, memoryRows, number, opcode, resultText, solidityLines, unwrap, word, type Piece } from "../src/highlight";
 
 const joined = (ps: Piece[]): string => ps.map((p) => p.text).join("");
 const kinds = (ps: Piece[]): (string | null)[] => ps.map((p) => p.kind);
@@ -34,8 +34,8 @@ describe("numbers", () => {
     assert.deepEqual(kinds(number("0x" + "f".repeat(64))), ["num-hex"]);
   });
   test("opcodes and their arguments", () => {
-    assert.deepEqual(kinds(opcode("ADD")), ["opcode"]);
-    assert.deepEqual(opcode("PUSH2 0x0100").map((p) => p.text), ["PUSH2", " ", "0x0100", "256"]);
+    assert.deepEqual(kinds(opcode("ADD", null)), ["opcode"]);
+    assert.deepEqual(opcode("PUSH2", "0x0100").map((p) => p.text), ["PUSH2", " ", "0x0100", "256"]);
   });
   test("words sent as JSON", () => {
     assert.deepEqual(word({ hex: "0x20" }), number("0x20"));
@@ -71,17 +71,26 @@ describe("unwrapping", () => {
 });
 
 describe("memory", () => {
-  const line = "0010:   00 41 00 00  00 00 00 00  00 00 00 00  00 00 00 00   .A..............";
-  test("a dump line keeps its text", () => assert.equal(joined(memoryLine(line)), line));
-  test("offset, zero and other bytes, and the text column", () => {
-    const out = memoryLine(line);
-    assert.equal(out[0]?.kind, "mem-addr");
-    assert.equal(kindOf(out, "41"), "mem-byte");
-    assert.equal(kindOf(out, "00"), "mem-zero");
-    assert.equal(out[out.length - 1]?.kind, "mem-ascii");
+  const rows = memoryRows("0x" + "00".repeat(16) + "0041ff");
+  test("sixteen bytes a row, the last one padded", () => {
+    assert.equal(rows.length, 2);
+    assert.equal(joined(rows[0]!), "0000:  00 00 00 00  00 00 00 00  00 00 00 00  00 00 00 00   ................");
+    assert.equal(joined(rows[1]!), "0010:  00 41 ff" + " ".repeat(3 + 13 * 3) + ".A.");
   });
-  test("the header, and symbolic memory", () => {
-    assert.deepEqual(kinds(memoryLine("Length: 32 (0x20) bytes")), ["mem-header"]);
-    assert.equal(kindOf(memoryLine("(WriteWord"), "WriteWord"), "expr-ctor");
+  test("offset, zero and other bytes, and the text column", () => {
+    const row = rows[1]!;
+    assert.equal(row[0]?.kind, "mem-addr");
+    assert.equal(kindOf(row, "41"), "mem-byte");
+    assert.equal(kindOf(row, "00"), "mem-zero");
+    assert.equal(row[row.length - 1]?.kind, "mem-ascii");
+    assert.deepEqual(memoryRows("0x"), []);
+  });
+});
+
+describe("results", () => {
+  test("in words", () => {
+    assert.equal(resultText({ outcome: "success", output: { hex: "0x" }, problem: null }), "success, returned nothing");
+    assert.equal(resultText({ outcome: "revert", output: { hex: "0x01" }, problem: null }), "revert, returned 0x01");
+    assert.equal(resultText({ outcome: "failure", output: null, problem: "BadJumpDestination" }), "failure: BadJumpDestination");
   });
 });

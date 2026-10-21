@@ -76,30 +76,33 @@ export function word(w: { hex: string } | { expr: string }): Piece[] {
 }
 
 
-// An opcode and its argument, like "PUSH2 0x0100"
-export function opcode(text: string): Piece[] {
-  const space = text.indexOf(" ");
-  if (space < 0) return [{ text, kind: "opcode" }];
-  return [{ text: text.slice(0, space), kind: "opcode" }, { text: " ", kind: null }, ...number(text.slice(space + 1))];
+// An opcode and the data it pushes, as hex
+export function opcode(op: string, arg: string | null): Piece[] {
+  return arg === null ? [{ text: op, kind: "opcode" }] : [{ text: op, kind: "opcode" }, { text: " ", kind: null }, ...number(arg)];
 }
 
-// One line of the server's hex dump: offset, bytes, then the bytes as text
-export function memoryLine(line: string): Piece[] {
-  const m = /^([0-9a-f]+:)( +)(.*)$/i.exec(line);
-  if (m === null) return /^Length:/.test(line) ? [{ text: line, kind: "mem-header" }] : expr(line);
-  const [, addr = "", gap = "", rest = ""] = m;
-  // byte groups are at most two spaces apart, the text column three
-  const split = rest.search(/ {3,}/);
-  const bytes = split < 0 ? rest : rest.slice(0, split);
-  const out: Piece[] = [{ text: addr, kind: "mem-addr" }, { text: gap, kind: null }];
-  for (const part of bytes.split(/( +)/)) {
-    if (part === "") continue;
-    out.push({ text: part, kind: part.trim() === "" ? null : part === "00" ? "mem-zero" : "mem-byte" });
+// Bytes, given as hex, as hex dump rows: offset, sixteen bytes in groups of four, then as text
+export function memoryRows(hex: string): Piece[][] {
+  const bytes = hex.replace(/^0x/, "").match(/../g) ?? [];
+  const rows: Piece[][] = [];
+  for (let off = 0; off < bytes.length; off += 16) {
+    const row = bytes.slice(off, off + 16);
+    const out: Piece[] = [{ text: off.toString(16).padStart(4, "0") + ":", kind: "mem-addr" }];
+    row.forEach((b, i) => {
+      out.push({ text: i % 4 === 0 ? "  " : " ", kind: null }, { text: b, kind: b === "00" ? "mem-zero" : "mem-byte" });
+    });
+    const ascii = row.map((b) => {
+      const c = parseInt(b, 16);
+      return c >= 0x20 && c < 0x7f ? String.fromCharCode(c) : ".";
+    });
+    out.push({ text: "   " + "   ".repeat(16 - row.length), kind: null }, { text: ascii.join(""), kind: "mem-ascii" });
+    rows.push(out);
   }
-  if (split >= 0) {
-    const text = rest.slice(split);
-    const lead = text.length - text.trimStart().length;
-    out.push({ text: text.slice(0, lead), kind: null }, { text: text.slice(lead), kind: "mem-ascii" });
-  }
-  return out;
+  return rows;
+}
+
+// How a run ended, in words
+export function resultText(r: { outcome: string; output: { hex: string } | { expr: string } | null; problem: string | null }): string {
+  const output = r.output === null ? "" : "hex" in r.output ? (r.output.hex === "0x" ? ", returned nothing" : `, returned ${r.output.hex}`) : ", returned a symbolic value";
+  return r.outcome + output + (r.problem === null ? "" : `: ${r.problem}`);
 }

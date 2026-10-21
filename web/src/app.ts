@@ -4,6 +4,7 @@ import { api, type View } from "./api";
 import { keyAction, shortcuts } from "./keys";
 import { commandEnabled, initialModel, update, type Model, type Msg } from "./model";
 import { render, h } from "./vdom";
+import { resultText } from "./highlight";
 import * as view from "./view";
 
 function byId<T extends HTMLElement>(id: string): T {
@@ -101,7 +102,7 @@ export class App {
       render(byId("breakpoints"), view.breakpointList(v, this.run));
       render(byId("warnings-list"), view.warningsPane(v));
       byId("warnings").hidden = v.warnings.length === 0;
-      byId("result").textContent = v.result ?? "";
+      byId("result").textContent = v.result === null ? "" : resultText(v.result);
       byId("code").querySelector(".current")?.scrollIntoView({ block: "nearest" });
       byId("source").querySelector(".current")?.scrollIntoView({ block: "center" });
     }

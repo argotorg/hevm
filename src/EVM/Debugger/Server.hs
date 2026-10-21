@@ -44,7 +44,6 @@ defaultDebuggerPort = 7317
 data Request = Request
   { method :: ByteString
   , path   :: ByteString
-  , query  :: [(ByteString, ByteString)]
   , body   :: ByteString
   , host   :: Maybe ByteString
   }
@@ -151,8 +150,7 @@ readRequest conn = go BS.empty
               b <- readBody (BS.drop 4 rest) len
               pure $ case BC.words (head' ls) of
                 (m : target : _) ->
-                  let (p, q) = BC.break (== '?') target
-                  in Just (Request m p (parseQuery (BS.drop 1 q)) b (lookup "host" headers))
+                  Just (Request m (BC.takeWhile (/= '?') target) b (lookup "host" headers))
                 _ -> Nothing
           _ -> do
             chunk <- recv conn 4096
@@ -166,9 +164,6 @@ readRequest conn = go BS.empty
       (x : _) -> x
       [] -> ""
     maxSize = 1024 * 1024
-
-parseQuery :: ByteString -> [(ByteString, ByteString)]
-parseQuery q = [ (k, BS.drop 1 v) | kv <- BC.split '&' q, not (BS.null kv), let (k, v) = BC.break (== '=') kv ]
 
 renderResponse :: Response -> ByteString
 renderResponse r = BS.concat
@@ -190,19 +185,16 @@ newtype CommandBody = CommandBody Text
 instance FromJSON CommandBody where
   parseJSON = JSON.withObject "command" $ \o -> CommandBody <$> o .: "command"
 
-textFormat :: Request -> Bool
-textFormat req = lookup "format" req.query == Just "text"
-
 sessionRoute :: Debuggable t => (Text -> IO (Session t)) -> MVar (Session t) -> MVar () -> Route
 sessionRoute run sessVar done req = case (req.method, req.path) of
   ("GET", "/help") -> Just <$> json (JSON.object [ "commands" .= T.lines commandHelp, "api" .= T.lines apiHelp ])
   ("GET", "/state") -> Just <$> (readMVar sessVar >>= viewResponse)
   ("GET", "/stats") -> do
     v <- sessionStats <$> readMVar sessVar
-    Just <$> if textFormat req then pure (plain (renderStats v)) else json v
+    Just <$> json v
   ("GET", "/trace") -> do
     t <- sessionTrace <$> readMVar sessVar
-    Just <$> if textFormat req then pure (plain t) else json (JSON.object [ "trace" .= t ])
+    Just <$> json (JSON.object [ "trace" .= t ])
   ("POST", "/command") -> Just <$> (run commandLine >>= viewResponse)
   ("POST", "/quit") -> do
     void $ tryPutMVar done ()
@@ -211,27 +203,22 @@ sessionRoute run sessVar done req = case (req.method, req.path) of
   where
     viewResponse s = do
       v <- mkView s
-      if textFormat req then pure (plain (renderView v)) else json v
+      json v
     commandLine = case JSON.decodeStrict req.body of
       Just v | Just (CommandBody c) <- parseMaybe JSON.parseJSON v -> c
       _ -> decodeUtf8With lenientDecode req.body
 
 progressRoute :: Route
 progressRoute req = case (req.method, req.path) of
-  ("GET", "/progress") -> Just <$> if textFormat req
-    then plain <$> Progress.snapshotText
-    else Progress.snapshot >>= json
+  ("GET", "/progress") -> Just <$> (Progress.snapshot >>= json)
   _ -> pure Nothing
-
-plain :: Text -> Response
-plain = Response 200 "text/plain; charset=utf-8" . encodeUtf8
 
 json :: ToJSON a => a -> IO Response
 json = pure . Response 200 "application/json" . BL.toStrict . JSON.encode
 
 apiHelp :: Text
 apiHelp = T.unlines
-  [ "hevm HTTP API (all responses JSON unless ?format=text is given)"
+  [ "hevm HTTP API (responses are JSON: clients format what they show)"
   , "GET  /                 the debugger's web page"
   , "GET  /api              this help"
   , "GET  /progress         progress of the run: phase, paths, solver queries, hot spots"

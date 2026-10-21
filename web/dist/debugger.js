@@ -70,7 +70,7 @@ function oneOf(a, b) {
 }
 
 // src/api.ts
-var codeLine = obj({ pc: num, op: str, current: bool });
+var codeLine = obj({ pc: num, op: str, arg: nullable(str), current: bool });
 var sourceLine = obj({ line: num, text: str, current: bool });
 var sourceView = obj({ file: str, line: num, lines: arr(sourceLine) });
 var branchView = obj({ condition: nullable(str), options: arr(str) });
@@ -79,17 +79,18 @@ var view = obj({
   mode: lit("concrete", "symbolic"),
   step: num,
   status: lit("running", "branch", "halted"),
-  result: nullable(str),
+  result: nullable(obj({ outcome: lit("success", "revert", "failure", "unfinished"), output: nullable(word), problem: nullable(str) })),
   pc: num,
   op: str,
   contract: str,
   codeContract: str,
   depth: num,
   gas: nullable(num),
+  codeName: nullable(str),
   code: arr(codeLine),
   stack: arr(word),
   memorySize: num,
-  memory: str,
+  memory: word,
   source: nullable(sourceView),
   generatedCode: bool,
   storage: arr(obj({ address: word, current: bool, initial: lit("known", "unknown"), slots: arr(obj({ slot: word, value: word })) })),
@@ -1270,28 +1271,30 @@ function shownExpr(text2) {
 function word2(w) {
   return "hex" in w ? number(w.hex) : shownExpr(w.expr);
 }
-function opcode(text2) {
-  const space = text2.indexOf(" ");
-  if (space < 0) return [{ text: text2, kind: "opcode" }];
-  return [{ text: text2.slice(0, space), kind: "opcode" }, { text: " ", kind: null }, ...number(text2.slice(space + 1))];
+function opcode(op, arg) {
+  return arg === null ? [{ text: op, kind: "opcode" }] : [{ text: op, kind: "opcode" }, { text: " ", kind: null }, ...number(arg)];
 }
-function memoryLine(line) {
-  const m = /^([0-9a-f]+:)( +)(.*)$/i.exec(line);
-  if (m === null) return /^Length:/.test(line) ? [{ text: line, kind: "mem-header" }] : expr(line);
-  const [, addr = "", gap = "", rest = ""] = m;
-  const split = rest.search(/ {3,}/);
-  const bytes = split < 0 ? rest : rest.slice(0, split);
-  const out = [{ text: addr, kind: "mem-addr" }, { text: gap, kind: null }];
-  for (const part of bytes.split(/( +)/)) {
-    if (part === "") continue;
-    out.push({ text: part, kind: part.trim() === "" ? null : part === "00" ? "mem-zero" : "mem-byte" });
+function memoryRows(hex2) {
+  const bytes = hex2.replace(/^0x/, "").match(/../g) ?? [];
+  const rows = [];
+  for (let off = 0; off < bytes.length; off += 16) {
+    const row = bytes.slice(off, off + 16);
+    const out = [{ text: off.toString(16).padStart(4, "0") + ":", kind: "mem-addr" }];
+    row.forEach((b, i) => {
+      out.push({ text: i % 4 === 0 ? "  " : " ", kind: null }, { text: b, kind: b === "00" ? "mem-zero" : "mem-byte" });
+    });
+    const ascii = row.map((b) => {
+      const c = parseInt(b, 16);
+      return c >= 32 && c < 127 ? String.fromCharCode(c) : ".";
+    });
+    out.push({ text: "   " + "   ".repeat(16 - row.length), kind: null }, { text: ascii.join(""), kind: "mem-ascii" });
+    rows.push(out);
   }
-  if (split >= 0) {
-    const text2 = rest.slice(split);
-    const lead = text2.length - text2.trimStart().length;
-    out.push({ text: text2.slice(0, lead), kind: null }, { text: text2.slice(lead), kind: "mem-ascii" });
-  }
-  return out;
+  return rows;
+}
+function resultText(r) {
+  const output = r.output === null ? "" : "hex" in r.output ? r.output.hex === "0x" ? ", returned nothing" : `, returned ${r.output.hex}` : ", returned a symbolic value";
+  return r.outcome + output + (r.problem === null ? "" : `: ${r.problem}`);
 }
 
 // src/view.ts
@@ -1321,7 +1324,8 @@ function statusBar(v) {
 }
 function codePane(v, run) {
   const breaks = pcBreakpoints(v);
-  return v.code.map((line) => {
+  const header = h("div", { class: "file" }, v.codeName ?? "code", h("span", { class: "code-addr" }, ` at ${v.codeContract}`));
+  return [header, ...v.code.map((line) => {
     const bp = breaks.get(line.pc);
     const cls = ["code-line", line.current ? "current" : "", bp !== void 0 ? "has-break" : ""].filter(Boolean).join(" ");
     return h(
@@ -1333,9 +1337,9 @@ function codePane(v, run) {
       },
       h("span", { class: "gutter" }, bp !== void 0 ? "\u25CF" : line.current ? "\u25B6" : ""),
       h("span", { class: "addr" }, hex(line.pc)),
-      h("span", { class: "op" }, ...pieces(opcode(line.op)))
+      h("span", { class: "op" }, ...pieces(opcode(line.op, line.arg)))
     );
-  });
+  })];
 }
 function sourcePane(v) {
   if (v.source === null) {
@@ -1373,7 +1377,11 @@ function memoryPane(v, run) {
       v.memorySize > 128 && " \xB7 first 128 shown ",
       v.memorySize > 128 && h("button", { type: "button", class: "small", onClick: () => run(`memory 0 ${Math.min(v.memorySize, 65536)}`) }, "show all")
     ),
-    v.memorySize > 0 && h("pre", { class: "memory" }, ...v.memory.split("\n").flatMap((l, i) => [i > 0 && "\n", ...pieces(memoryLine(l))]))
+    v.memorySize > 0 && h(
+      "pre",
+      { class: "memory" },
+      ..."hex" in v.memory ? memoryRows(v.memory.hex).flatMap((row, i) => [i > 0 && "\n", ...pieces(row)]) : pieces(shownExpr(v.memory.expr))
+    )
   ].filter((n) => n !== false);
 }
 function branchPane(v, run) {
@@ -1536,7 +1544,7 @@ var App = class {
       render(byId("breakpoints"), breakpointList(v, this.run));
       render(byId("warnings-list"), warningsPane(v));
       byId("warnings").hidden = v.warnings.length === 0;
-      byId("result").textContent = v.result ?? "";
+      byId("result").textContent = v.result === null ? "" : resultText(v.result);
       byId("code").querySelector(".current")?.scrollIntoView({ block: "nearest" });
       byId("source").querySelector(".current")?.scrollIntoView({ block: "center" });
     }

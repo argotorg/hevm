@@ -40,6 +40,7 @@ import Test.Tasty.QuickCheck
 import EVM.Dapp (emptyDapp)
 import EVM.Debugger
 import EVM.Debugger.Server (serveSession)
+import EVM.Debugger.Text (renderView, valueText)
 import EVM.Effects
 import EVM.Fetch qualified as Fetch
 import EVM.Solvers (withSolvers, defMemLimit, Solver(..), SolverGroup, checkSatWithProps)
@@ -149,7 +150,7 @@ fingerprint fetcher s0 = do
   extra <- forM ["memory 0 " <> tshow memLen, "storage", "calldata", "trace", "pathconds"] $ \cmd -> do
     v' <- runCommandText fetcher cmd s >>= liftIO . mkView
     pure (maybe "" id v'.output)
-  pure $ [ tshow v.step, tshow v.pc, v.op, T.intercalate "," (map wordText v.stack), tshow v.gas, tshow v.depth
+  pure $ [ tshow v.step, tshow v.pc, v.op, T.intercalate "," (map valueText v.stack), tshow v.gas, tshow v.depth
          , v.status, tshow v.result, tshow v.memorySize, tshow (fmap (.options) v.branch) ] <> extra
 
 fingerprintKeys :: [Text]
@@ -238,7 +239,7 @@ symbolicBranches every c cmds0 reactions0 = withSession $ \solvers -> do
       isPending = hasPendingBranch
       finish s taken = do
         v <- liftIO $ mkView s
-        pure (Right (taken, v.status, maybe "" (T.take 40) v.result))
+        pure (Right (taken, v.status, maybe "" (\r -> r.outcome <> maybe "" ((": " <>) . T.take 30) r.problem) v.result))
       step s seen cmd rest done taken reactions = do
         s' <- runCommandText fetcher cmd s
         v <- liftIO $ mkView s'

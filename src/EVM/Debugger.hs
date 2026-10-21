@@ -18,14 +18,15 @@ module EVM.Debugger
   , Breakpoint(..)
   , parseCommand
   , View(..)
-  , WordView(..)
-  , wordText
+  , ValueView(..)
+  , ResultView(..)
+  , StorageView(..)
+  , StorageSlot(..)
   , CodeLine(..)
   , SourceView(..)
   , SourceLine(..)
   , BranchView(..)
   , mkView
-  , renderView
   , commandHelp
   , sessionVM
   , sessionStep
@@ -42,7 +43,9 @@ import Control.Monad (filterM, forM)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.ST (ST, RealWorld, stToIO)
 import Control.Monad.State.Strict (execStateT)
-import Data.Aeson (ToJSON(..), (.=), object)
+import Control.Applicative ((<|>))
+import Data.Aeson (FromJSON(..), ToJSON(..), (.=), (.:), object)
+import Data.Aeson qualified as JSON
 import Data.Aeson.Types (Pair)
 import Data.ByteString qualified as BS
 import Data.Char (isDigit)
@@ -68,10 +71,10 @@ import Prettyprinter (layoutPretty, LayoutOptions(..), PageWidth(..), unAnnotate
 import Prettyprinter.Render.Text (renderStrict)
 import Data.Tree.View (showTree)
 import Text.Read (readMaybe)
-import Witch (into, unsafeInto)
+import Witch (into)
 
 import EVM (exec1, currentContract, opSize)
-import EVM.Dapp (DappInfo(..), srcMap, srcMapCode)
+import EVM.Dapp (DappInfo(..), findSrc, srcMap, srcMapCode)
 import EVM.Effects
 import EVM.Expr (maybeLitByteSimp, maybeLitWordSimp)
 import EVM.Expr qualified as Expr
@@ -80,7 +83,7 @@ import EVM.Fetch qualified as Fetch
 import EVM.Format (formatExpr, formatProp, traceDocForest)
 import EVM.Op (intToOpName)
 import EVM.Progress qualified as Progress
-import EVM.Solidity (SourceCache(..), SrcMap(..))
+import EVM.Solidity (SolcContract(..), SourceCache(..), SrcMap(..))
 import EVM.Types
 
 -- | How symbolic branches are decided: by asking the solver which sides are
@@ -671,62 +674,76 @@ showBreak = \case
 
 -- * Views
 
-data CodeLine = CodeLine { pc :: Int, op :: Text, current :: Bool }
-  deriving (Show, Generic, ToJSON)
+-- | arg is the data an instruction pushes, as hex
+data CodeLine = CodeLine { pc :: Int, op :: Text, arg :: Maybe Text, current :: Bool }
+  deriving (Show, Generic, ToJSON, FromJSON)
 
 data SourceLine = SourceLine { line :: Int, text :: Text, current :: Bool }
-  deriving (Show, Generic, ToJSON)
+  deriving (Show, Generic, ToJSON, FromJSON)
 
 data SourceView = SourceView { file :: Text, line :: Int, lines :: [SourceLine] }
-  deriving (Show, Generic, ToJSON)
+  deriving (Show, Generic, ToJSON, FromJSON)
 
--- | A word for clients to show as they like: {"hex": "0x1f"} for a literal, {"expr": ...} otherwise
-data WordView = HexWord Text | ExprWord Text
-  deriving (Show, Eq)
+-- | A value for clients to show as they like: {"hex": "0x1f"} when it is known, an
+-- expression otherwise. Words are hex numbers, buffers hex bytes.
+data ValueView = HexValue Text | ExprValue Text
+  deriving (Show, Eq, Generic)
 
-instance ToJSON WordView where
+instance ToJSON ValueView where
   toJSON = \case
-    HexWord t -> object ["hex" .= t]
-    ExprWord t -> object ["expr" .= t]
+    HexValue t -> object ["hex" .= t]
+    ExprValue t -> object ["expr" .= t]
 
--- | A word as the text view shows it, small numbers also in decimal
-wordText :: WordView -> Text
-wordText = \case
-  HexWord h -> h <> case readMaybe (T.unpack h) :: Maybe Integer of
-    Just w | w < 0x10000 && w > 9 -> " (" <> tshow w <> ")"
-    _ -> ""
-  ExprWord e -> e
+instance FromJSON ValueView where
+  parseJSON = JSON.withObject "value" $ \o ->
+    (HexValue <$> o .: "hex") <|> (ExprValue <$> o .: "expr")
 
-wordView :: Expr EWord -> WordView
+-- | Expressions are sent whole, for clients to copy, up to a size a page can still take
+maxExprChars :: Int
+maxExprChars = 200000
+
+wordView :: Expr EWord -> ValueView
 wordView e = case maybeLitWordSimp e of
-  Just w -> HexWord (T.pack ("0x" <> showHex w ""))
-  Nothing -> ExprWord (clip 1000 (formatExpr e))
+  Just w -> HexValue (T.pack ("0x" <> showHex w ""))
+  Nothing -> ExprValue (clip maxExprChars (formatExpr e))
+
+bufView :: Expr Buf -> ValueView
+bufView = \case
+  ConcreteBuf bs -> HexValue (T.pack ("0x" <> concatMap byteHex (BS.unpack bs)))
+  b -> ExprValue (clip maxExprChars (formatExpr b))
 
 -- | initial is "known" when the storage started from known values, else "unknown"
-data StorageView = StorageView { address :: WordView, current :: Bool, initial :: Text, slots :: [StorageSlot] }
-  deriving (Show, Generic, ToJSON)
+data StorageView = StorageView { address :: ValueView, current :: Bool, initial :: Text, slots :: [StorageSlot] }
+  deriving (Show, Generic, ToJSON, FromJSON)
 
-data StorageSlot = StorageSlot { slot :: WordView, value :: WordView }
-  deriving (Show, Generic, ToJSON)
+data StorageSlot = StorageSlot { slot :: ValueView, value :: ValueView }
+  deriving (Show, Generic, ToJSON, FromJSON)
+
+-- | How the run ended: outcome is "success", "revert", "failure" or "unfinished"
+data ResultView = ResultView { outcome :: Text, output :: Maybe ValueView, problem :: Maybe Text }
+  deriving (Show, Generic, ToJSON, FromJSON)
 
 data BranchView = BranchView { condition :: Maybe Text, options :: [Text] }
-  deriving (Show, Generic, ToJSON)
+  deriving (Show, Generic, ToJSON, FromJSON)
 
 data View = View
   { mode           :: Text
   , step           :: Int
   , status         :: Text
-  , result         :: Maybe Text
+  , result         :: Maybe ResultView
   , pc             :: Int
   , op             :: Text
   , contract       :: Text
   , codeContract   :: Text
+  -- | the compiled contract the code is, when the build output has it
+  , codeName       :: Maybe Text
   , depth          :: Int
   , gas            :: Maybe Word64
   , code           :: [CodeLine]
-  , stack          :: [WordView]
+  , stack          :: [ValueView]
   , memorySize     :: Word64
-  , memory         :: Text
+  -- | the first 128 bytes
+  , memory         :: ValueView
   , source         :: Maybe SourceView
   -- | the code has a source map, but this instruction is the compiler's own,
   -- such as ABI decoding or overflow checks, with no Solidity behind it
@@ -743,20 +760,26 @@ data View = View
   , warnings       :: [Text]
   , merging        :: Bool
   }
-  deriving (Show, Generic, ToJSON)
+  deriving (Show, Generic, ToJSON, FromJSON)
 
 mkView :: Debuggable t => Session t -> IO View
 mkView s = do
-  mem <- memoryText (shown s) vm 0 (min 128 (unsafeInto vm.state.memorySize))
+  mem <- case vm.state.memory of
+    ConcreteMemory m -> do
+      let n = min 128 (VSM.length m)
+      bytes <- stToIO $ VS.freeze (VSM.slice 0 n m)
+      pure $ bufView (ConcreteBuf (BS.pack (VS.toList bytes)))
+    SymbolicMemory buf -> pure $ bufView (shown s buf)
   pure View
     { mode = modeName vm
     , step = s.curStep
     , status = if isHalted s then "halted" else if isJust s.pending then "branch" else "running"
-    , result = if isHalted s then Just (resultText vm) else Nothing
+    , result = resultView (shown s) vm
     , pc = vm.state.pc
     , op = T.pack (opNameAt vm.state.code vm.state.pc)
     , contract = formatExpr vm.state.contract
     , codeContract = formatExpr vm.state.codeContract
+    , codeName = (.contractName) <$> (Map.lookup vm.state.codeContract vm.env.contracts >>= (`findSrc` s.dapp))
     , depth = length vm.frames
     , gas = gasLeft vm
     , code = codeWindow vm.state.code vm.state.pc
@@ -789,36 +812,6 @@ mkView s = do
       PleaseRunBoth _ -> ["false", "true"]
       PleaseRunAll vals _ -> map (clip 200 . formatExpr) vals
 
-renderView :: View -> Text
-renderView v = T.unlines $
-  [ "== step " <> tshow v.step <> " | " <> v.mode <> " | " <> v.status
-    <> " | pc " <> hex v.pc <> " " <> v.op <> " | depth " <> tshow v.depth
-    <> maybe "" (\g -> " | gas " <> tshow g) v.gas
-    <> (if v.branchMode == "solver" then "" else " | branches " <> v.branchMode)
-    <> (if v.simplified then "" else " | not simplified")
-    <> (if v.merging then " | merging" else "")
-  , "contract " <> v.contract <> (if v.codeContract /= v.contract then " (code of " <> v.codeContract <> ")" else "")
-  , ""
-  , "-- code"
-  ] <> [ (if c.current then " > " else "   ") <> hex c.pc <> "  " <> c.op | c <- v.code ]
-  <> [ "", "-- stack (top first)" ]
-  <> (if null v.stack then ["   <empty>"] else [ "   " <> tshow i <> ": " <> wordText e | (i, e) <- zip [0 :: Int ..] v.stack ])
-  <> maybe [] (\sv -> ["", "-- source " <> sv.file <> ":" <> tshow sv.line]
-                      <> [ (if l.current then " > " else "   ") <> T.justifyRight 5 ' ' (tshow l.line) <> " | " <> l.text | l <- sv.lines, abs (l.line - sv.line) <= 4 ]) v.source
-  <> [ "\n-- no source: compiler-generated code, such as ABI decoding or overflow checks" | v.generatedCode ]
-  <> [ "", "-- memory (" <> tshow v.memorySize <> " bytes)" ]
-  <> (if v.memorySize == 0 then [] else T.lines v.memory)
-  <> [ "\npath conditions: " <> tshow v.pathConditions <> " (see 'pathconds')" | v.pathConditions > 0 ]
-  <> [ "branches taken: " <> T.intercalate ", " v.choices | not (null v.choices) ]
-  <> [ "breakpoints: " <> T.intercalate ", " [ tshow i <> ": " <> b | (i, b) <- zip [0 :: Int ..] v.breakpoints ] | not (null v.breakpoints) ]
-  <> maybe [] (\b -> [ "", "-- symbolic branch pending" ]
-                     <> maybe [] (\c -> ["   condition: " <> c]) b.condition
-                     <> [ "   options: " <> T.intercalate " | " [ tshow i <> ": " <> o | (i, o) <- zip [0 :: Int ..] b.options ] ]) v.branch
-  <> (if null v.warnings then [] else ["", "-- warnings"] <> map ("   " <>) v.warnings)
-  <> maybe [] (\r -> ["", "result: " <> r]) v.result
-  <> maybe [] (\o -> ["", o]) v.output
-  <> [ "\n" <> v.message | not (T.null v.message) ]
-
 -- * Helpers
 
 srcPos :: DappInfo -> VM t -> Maybe (Int, FilePath, Int, SrcMap)
@@ -846,22 +839,22 @@ codeBytes = \case
   RuntimeCode (ConcreteRuntimeCode bs) -> map Just (BS.unpack bs)
   RuntimeCode (SymbolicRuntimeCode ops) -> map maybeLitByteSimp (V.toList ops)
 
-disassemble :: ContractCode -> [(Int, Text)]
+disassemble :: ContractCode -> [(Int, Text, Maybe Text)]
 disassemble = go 0 . codeBytes
   where
     go _ [] = []
-    go i (Nothing : rest) = (i, "<symbolic>") : go (i + 1) rest
+    go i (Nothing : rest) = (i, "<symbolic>", Nothing) : go (i + 1) rest
     go i (Just b : rest) =
       let n = opSize b - 1
           imm = take n rest
-          txt = T.pack (opName b) <> if n > 0 then " 0x" <> T.pack (concatMap (maybe "??" byteHex) imm) else ""
-      in (i, txt) : go (i + 1 + n) (drop n rest)
+          arg = if n > 0 then Just ("0x" <> T.pack (concatMap (maybe "??" byteHex) imm)) else Nothing
+      in (i, T.pack (opName b), arg) : go (i + 1 + n) (drop n rest)
 
 codeWindow :: ContractCode -> Int -> [CodeLine]
 codeWindow code pc =
   let ops = disassemble code
-      (before, after) = span ((< pc) . fst) ops
-  in [ CodeLine i o (i == pc) | (i, o) <- reverse (take 8 (reverse before)) <> take 12 after ]
+      (before, after) = span (\(i, _, _) -> i < pc) ops
+  in [ CodeLine i o a (i == pc) | (i, o, a) <- reverse (take 8 (reverse before)) <> take 12 after ]
 
 opNameAt :: ContractCode -> Int -> String
 opNameAt code pc = case drop pc (codeBytes code) of
@@ -893,8 +886,8 @@ storageViews s =
       ConcreteStore m -> ([(Lit k, Lit v) | (k, v) <- Map.toList m], "known")
       _ -> ([], "unknown")
     addrView = \case
-      LitAddr x -> HexWord (T.pack ("0x" <> showHex (into x :: Integer) ""))
-      other -> ExprWord (formatExpr other)
+      LitAddr x -> HexValue (T.pack ("0x" <> showHex (into x :: Integer) ""))
+      other -> ExprValue (formatExpr other)
 
 memoryText :: (Expr Buf -> Expr Buf) -> VM t -> Int -> Int -> IO Text
 memoryText display vm off len = case vm.state.memory of
@@ -922,6 +915,14 @@ sessionTrace s = traceText s.dapp s.vm
 traceText :: DappInfo -> VM t -> Text
 traceText dapp vm =
   T.pack $ concatMap (showTree . fmap (T.unpack . renderStrict . layoutPretty (LayoutOptions Unbounded) . unAnnotate)) (traceDocForest dapp vm)
+
+resultView :: (forall a. Expr a -> Expr a) -> VM t -> Maybe ResultView
+resultView display vm = case vm.result of
+  Just (VMSuccess buf) -> Just $ ResultView "success" (Just (bufView (display buf))) Nothing
+  Just (VMFailure (Revert buf)) -> Just $ ResultView "revert" (Just (bufView (display buf))) Nothing
+  Just (VMFailure e) -> Just $ ResultView "failure" Nothing (Just (T.pack (show e)))
+  Just (Unfinished p) -> Just $ ResultView "unfinished" Nothing (Just (clip 2000 (T.pack (show p))))
+  _ -> Nothing
 
 resultText :: VM t -> Text
 resultText vm = case vm.result of

@@ -23,7 +23,8 @@ several clients can drive the same session.
 - **`hevm-debug`**, a command-line client. It sends the same commands that can
   be typed into the web page's console.
 - **Any program**, such as a script or an LLM agent, through the HTTP API.
-  `GET /api` describes it, and every view can also be had as plain text.
+  `GET /api` describes it. Views are JSON with values unformatted, words as
+  hex and symbolic ones as expressions, so each client shows them its own way.
 
 The `help` command lists the commands.
 

@@ -7,57 +7,69 @@
     ],
     "code": [
         {
+            "arg": null,
             "current": false,
             "op": "STOP",
             "pc": 104
         },
         {
+            "arg": null,
             "current": false,
             "op": "JUMPDEST",
             "pc": 105
         },
         {
+            "arg": "0x0000000000000000000000000000000000000000000000000000000000000005",
             "current": false,
-            "op": "PUSH32 0x0000000000000000000000000000000000000000000000000000000000000005",
+            "op": "PUSH32",
             "pc": 106
         },
         {
+            "arg": null,
             "current": false,
             "op": "EQ",
             "pc": 139
         },
         {
+            "arg": "0x00000000000000000000000000000000000000000000000000000000000000af",
             "current": false,
-            "op": "PUSH32 0x00000000000000000000000000000000000000000000000000000000000000af",
+            "op": "PUSH32",
             "pc": 140
         },
         {
+            "arg": null,
             "current": false,
             "op": "JUMPI",
             "pc": 173
         },
         {
+            "arg": null,
             "current": false,
             "op": "INVALID",
             "pc": 174
         },
         {
+            "arg": null,
             "current": false,
             "op": "JUMPDEST",
             "pc": 175
         },
         {
+            "arg": null,
             "current": true,
             "op": "STOP",
             "pc": 176
         }
     ],
     "codeContract": "(SymAddr \"entrypoint\")",
+    "codeName": null,
     "contract": "(SymAddr \"entrypoint\")",
     "depth": 0,
     "gas": null,
     "generatedCode": false,
-    "memory": "Length: 0 (0x0) bytes\n",
+    "memory": {
+        "hex": "0x"
+    },
     "memorySize": 0,
     "merging": false,
     "message": "Execution finished: success, returned nothing",
@@ -66,7 +78,13 @@
     "output": null,
     "pathConditions": 2,
     "pc": 176,
-    "result": "success, returned nothing",
+    "result": {
+        "outcome": "success",
+        "output": {
+            "hex": "0x"
+        },
+        "problem": null
+    },
     "simplified": true,
     "source": null,
     "stack": [],
