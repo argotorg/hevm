@@ -72,13 +72,13 @@ describe("other panes", () => {
         { address: { hex: "0xbeef" }, current: false, initial: "known", slots: [] },
       ],
     });
-    const nodes = view.storagePane(v);
+    const nodes = view.storagePane(v, () => {});
     assert.equal(nodes.length, 2);
     assert.ok(hasClass(nodes[0]!, "current-store"));
     assert.match(textOf(nodes[0]!), /0xacab · initial storage unknown/);
     assert.match(textOf(nodes[1]!), /nothing written/);
     assert.equal(findAll(nodes[0]!, (n) => hasClass(n, "expr-ctor")).length, 1);
-    assert.match(textOf(all(view.storagePane(stateWith({ storage: [] })))), /No storage/);
+    assert.match(textOf(all(view.storagePane(stateWith({ storage: [] }), () => {}))), /No storage/);
   });
   test("source, without a source map", () => {
     assert.match(textOf(all(view.sourcePane(states["concrete"]!))), /No source map/);
@@ -90,9 +90,18 @@ describe("other panes", () => {
     assert.match(textOf(all(nodes)), /Foo\.sol:2/);
     assert.equal(findAll(all(nodes), (n) => hasClass(n, "current")).length, 1);
   });
+  test("a long expression shows its first lines, and copies whole", () => {
+    const long = "(Big\n" + Array.from({ length: 30 }, (_, i) => `  ${i}`).join("\n") + "\n)";
+    const copied: string[] = [];
+    const nodes = view.stackPane(stateWith({ stack: [{ expr: long }] }), (t) => copied.push(t));
+    assert.match(textOf(all(nodes)), /… 19 more lines/);
+    assert.ok(!/\b29\b/.test(textOf(all(nodes))));
+    for (const b of clickable(nodes)) b.props.onClick!();
+    assert.deepEqual(copied, [long]);
+  });
   test("stack, empty and not", () => {
-    assert.match(textOf(all(view.stackPane(stateWith({ stack: [] })))), /empty/);
-    assert.match(textOf(all(view.stackPane(stateWith({ stack: [{ hex: "0x1" }, { expr: "(Caller)" }] })))), /0.*0x1.*1.*Caller/);
+    assert.match(textOf(all(view.stackPane(stateWith({ stack: [] }), () => {}))), /empty/);
+    assert.match(textOf(all(view.stackPane(stateWith({ stack: [{ hex: "0x1" }, { expr: "(Caller)" }] }), () => {}))), /0.*0x1.*1.*Caller/);
   });
   test("memory offers the rest when it is long", () => {
     const r = recorder();

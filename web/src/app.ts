@@ -44,6 +44,13 @@ export class App {
     void this.execute(command);
   };
 
+  readonly copy = (text: string): void => {
+    navigator.clipboard.writeText(text).then(
+      () => this.dispatch({ type: "note", text: `Copied ${text.length} characters.` }),
+      (e: unknown) => this.dispatch({ type: "failed", error: `Cannot copy: ${String(e)}` }),
+    );
+  };
+
   private dispatch(msg: Msg): void {
     this.model = update(this.model, msg);
     this.draw();
@@ -95,9 +102,9 @@ export class App {
       render(byId("status"), view.statusBar(v));
       render(byId("code"), view.codePane(v, this.run));
       render(byId("source"), view.sourcePane(v));
-      render(byId("stack"), view.stackPane(v));
+      render(byId("stack"), view.stackPane(v, this.copy));
       render(byId("memory"), view.memoryPane(v, this.run));
-      render(byId("storage"), view.storagePane(v));
+      render(byId("storage"), view.storagePane(v, this.copy));
       render(byId("branch"), view.branchPane(v, this.run));
       render(byId("breakpoints"), view.breakpointList(v, this.run));
       render(byId("warnings-list"), view.warningsPane(v));

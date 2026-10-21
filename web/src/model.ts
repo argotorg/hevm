@@ -24,6 +24,7 @@ export type Msg =
   | { type: "progress"; progress: Progress }
   | { type: "trace"; trace: string }
   | { type: "failed"; error: string }
+  | { type: "note"; text: string }
   | { type: "finished" };
 
 export const maxLog = 500;
@@ -53,6 +54,8 @@ export function update(model: Model, msg: Msg): Model {
       return { ...model, trace: msg.trace };
     case "failed":
       return { ...model, log: logged(model, { kind: "error", text: msg.error }) };
+    case "note":
+      return { ...model, log: logged(model, { kind: "message", text: msg.text }) };
     case "finished":
       return { ...model, busy: false };
   }

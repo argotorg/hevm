@@ -1,10 +1,30 @@
 // What each pane shows for a model: pure functions to virtual DOM.
-import type { Progress, StatsView, View } from "./api";
-import { memoryRows, opcode, shownExpr, solidityLines, word, type Piece } from "./highlight";
+import type { Progress, StatsView, View, Word } from "./api";
+import { expr, memoryRows, opcode, shownExpr, solidityLines, unwrap, word, type Piece } from "./highlight";
 import { branchArgument, pcBreakpoints, type LogEntry } from "./model";
 import { h, type Child, type VNode } from "./vdom";
 
 export type Run = (command: string) => void;
+export type Copy = (text: string) => void;
+
+const maxValueLines = 12;
+
+// A value, a long expression cut to its first lines with a button to copy all of it
+export function valueBlock(w: Word, copy: Copy): VNode[] {
+  if ("hex" in w) return [h("pre", { class: "word" }, ...pieces(word(w)))];
+  const lines = unwrap(w.expr).split("\n");
+  const shown = h("pre", { class: "word" }, ...pieces(expr(lines.slice(0, maxValueLines).join("\n"))));
+  if (lines.length <= maxValueLines) return [shown];
+  return [
+    shown,
+    h(
+      "div",
+      { class: "more" },
+      `… ${lines.length - maxValueLines} more lines `,
+      h("button", { type: "button", class: "small", title: "copy the whole expression", onClick: () => copy(w.expr) }, "copy"),
+    ),
+  ];
+}
 
 export function hex(n: number): string {
   return "0x" + n.toString(16);
@@ -82,9 +102,9 @@ export function sourcePane(v: View): VNode[] {
   ];
 }
 
-export function stackPane(v: View): VNode[] {
+export function stackPane(v: View, copy: Copy): VNode[] {
   if (v.stack.length === 0) return [h("div", { class: "empty" }, "empty")];
-  return v.stack.map((w, i) => h("div", { class: "stack-item" }, h("span", { class: "index" }, i), h("pre", { class: "word" }, ...pieces(word(w)))));
+  return v.stack.map((w, i) => h("div", { class: "stack-item" }, h("span", { class: "index" }, i), h("div", {}, ...valueBlock(w, copy))));
 }
 
 export function memoryPane(v: View, run: Run): VNode[] {
@@ -124,7 +144,7 @@ export function branchPane(v: View, run: Run): VNode[] {
   ].filter((n): n is VNode => n !== false);
 }
 
-export function storagePane(v: View): VNode[] {
+export function storagePane(v: View, copy: Copy): VNode[] {
   if (v.storage.length === 0) return [h("div", { class: "empty" }, "No storage.")];
   return v.storage.map((st) =>
     h(
@@ -133,7 +153,7 @@ export function storagePane(v: View): VNode[] {
       h("div", { class: "store-head" }, h("span", { class: "store-addr" }, ..."hex" in st.address ? [st.address.hex] : [st.address.expr]), ` · initial storage ${st.initial}`),
       ...(st.slots.length === 0
         ? [h("div", { class: "empty" }, "nothing written")]
-        : st.slots.map((sl) => h("div", { class: "slot" }, h("pre", {}, ...pieces(word(sl.slot))), h("pre", {}, ...pieces(word(sl.value)))))),
+        : st.slots.map((sl) => h("div", { class: "slot" }, h("div", {}, ...valueBlock(sl.slot, copy)), h("div", {}, ...valueBlock(sl.value, copy))))),
     ),
   );
 }

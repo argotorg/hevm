@@ -219,6 +219,8 @@ function update(model, msg) {
       return { ...model, trace: msg.trace };
     case "failed":
       return { ...model, log: logged(model, { kind: "error", text: msg.error }) };
+    case "note":
+      return { ...model, log: logged(model, { kind: "message", text: msg.text }) };
     case "finished":
       return { ...model, busy: false };
   }
@@ -1298,6 +1300,22 @@ function resultText(r) {
 }
 
 // src/view.ts
+var maxValueLines = 12;
+function valueBlock(w, copy) {
+  if ("hex" in w) return [h("pre", { class: "word" }, ...pieces(word2(w)))];
+  const lines = unwrap(w.expr).split("\n");
+  const shown = h("pre", { class: "word" }, ...pieces(expr(lines.slice(0, maxValueLines).join("\n"))));
+  if (lines.length <= maxValueLines) return [shown];
+  return [
+    shown,
+    h(
+      "div",
+      { class: "more" },
+      `\u2026 ${lines.length - maxValueLines} more lines `,
+      h("button", { type: "button", class: "small", title: "copy the whole expression", onClick: () => copy(w.expr) }, "copy")
+    )
+  ];
+}
 function hex(n) {
   return "0x" + n.toString(16);
 }
@@ -1364,9 +1382,9 @@ function sourcePane(v) {
     )
   ];
 }
-function stackPane(v) {
+function stackPane(v, copy) {
   if (v.stack.length === 0) return [h("div", { class: "empty" }, "empty")];
-  return v.stack.map((w, i) => h("div", { class: "stack-item" }, h("span", { class: "index" }, i), h("pre", { class: "word" }, ...pieces(word2(w)))));
+  return v.stack.map((w, i) => h("div", { class: "stack-item" }, h("span", { class: "index" }, i), h("div", {}, ...valueBlock(w, copy))));
 }
 function memoryPane(v, run) {
   return [
@@ -1402,14 +1420,14 @@ function branchPane(v, run) {
     condition !== null && h("pre", { class: "condition", title: "the branch condition" }, ...pieces(shownExpr(condition)))
   ].filter((n) => n !== false);
 }
-function storagePane(v) {
+function storagePane(v, copy) {
   if (v.storage.length === 0) return [h("div", { class: "empty" }, "No storage.")];
   return v.storage.map(
     (st) => h(
       "div",
       { class: st.current ? "store current-store" : "store" },
       h("div", { class: "store-head" }, h("span", { class: "store-addr" }, ..."hex" in st.address ? [st.address.hex] : [st.address.expr]), ` \xB7 initial storage ${st.initial}`),
-      ...st.slots.length === 0 ? [h("div", { class: "empty" }, "nothing written")] : st.slots.map((sl) => h("div", { class: "slot" }, h("pre", {}, ...pieces(word2(sl.slot))), h("pre", {}, ...pieces(word2(sl.value)))))
+      ...st.slots.length === 0 ? [h("div", { class: "empty" }, "nothing written")] : st.slots.map((sl) => h("div", { class: "slot" }, h("div", {}, ...valueBlock(sl.slot, copy)), h("div", {}, ...valueBlock(sl.value, copy))))
     )
   );
 }
@@ -1492,6 +1510,12 @@ var App = class {
   run = (command) => {
     void this.execute(command);
   };
+  copy = (text2) => {
+    navigator.clipboard.writeText(text2).then(
+      () => this.dispatch({ type: "note", text: `Copied ${text2.length} characters.` }),
+      (e) => this.dispatch({ type: "failed", error: `Cannot copy: ${String(e)}` })
+    );
+  };
   dispatch(msg) {
     this.model = update(this.model, msg);
     this.draw();
@@ -1537,9 +1561,9 @@ var App = class {
       render(byId("status"), statusBar(v));
       render(byId("code"), codePane(v, this.run));
       render(byId("source"), sourcePane(v));
-      render(byId("stack"), stackPane(v));
+      render(byId("stack"), stackPane(v, this.copy));
       render(byId("memory"), memoryPane(v, this.run));
-      render(byId("storage"), storagePane(v));
+      render(byId("storage"), storagePane(v, this.copy));
       render(byId("branch"), branchPane(v, this.run));
       render(byId("breakpoints"), breakpointList(v, this.run));
       render(byId("warnings-list"), warningsPane(v));
