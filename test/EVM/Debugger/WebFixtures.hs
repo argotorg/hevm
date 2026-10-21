@@ -21,7 +21,7 @@ import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
-import Data.List (sort)
+import Data.List (isSuffixOf, sort)
 import Data.Vector qualified as V
 import System.Environment (lookupEnv)
 import Test.Tasty
@@ -90,13 +90,25 @@ checkFixture :: String -> JSON.Value -> IO ()
 checkFixture name value = do
   let path = "web/test/fixtures/" <> name <> ".json"
   lookupEnv "HEVM_WRITE_WEB_FIXTURES" >>= \case
-    Just _ -> BL.writeFile path (encodePretty value <> "\n")
+    Just _ -> BL.writeFile path (encodePretty (withoutTimes value) <> "\n")
     Nothing -> JSON.eitherDecodeFileStrict path >>= \case
       Left err -> assertFailure $ "cannot read " <> path <> ": " <> err
       Right expected -> case difference "" expected value of
         Nothing -> pure ()
         Just diff -> assertFailure $ "the server's answer no longer matches " <> path <> ", which the web frontend is tested against: "
           <> diff <> "\nIf the change is meant, rewrite the fixtures with HEVM_WRITE_WEB_FIXTURES=1 and update web/src/api.ts."
+
+-- | Durations zeroed, so that rewriting the fixtures only changes what changed
+withoutTimes :: JSON.Value -> JSON.Value
+withoutTimes = \case
+  JSON.Object o -> JSON.Object (KM.mapWithKey (\k v -> if isTime k then zeroed v else withoutTimes v) o)
+  JSON.Array a -> JSON.Array (V.map withoutTimes a)
+  v -> v
+  where
+    isTime k = let n = Key.toString k in n == "secs" || "Secs" `isSuffixOf` n
+    zeroed = \case
+      JSON.Number _ -> JSON.Number 0
+      v -> v
 
 -- | Where two values differ in their fields or the types of their values
 difference :: String -> JSON.Value -> JSON.Value -> Maybe String
