@@ -47,7 +47,7 @@ import Data.Char (isDigit)
 import Data.List (find)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8With)
@@ -696,6 +696,9 @@ data View = View
   , memorySize     :: Word64
   , memory         :: Text
   , source         :: Maybe SourceView
+  -- | the code has a source map, but this instruction is the compiler's own,
+  -- such as ABI decoding or overflow checks, with no Solidity behind it
+  , generatedCode  :: Bool
   , pathConditions :: Int
   , branch         :: Maybe BranchView
   , choices        :: [Text]
@@ -728,6 +731,10 @@ mkView s = do
     , memorySize = vm.state.memorySize
     , memory = mem
     , source = sourceView s.dapp vm
+    , generatedCode = isNothing (srcPos s.dapp vm) && isJust (do
+        c <- currentContract vm
+        i <- c.opIxMap VS.!? vm.state.pc
+        srcMap s.dapp c i)
     , pathConditions = length vm.constraints
     , branch = (\(Pending c ctx) -> BranchView (clip 1000 . formatExpr . shown s <$> c) (branchOptions ctx)) <$> s.pending
     , branchMode = case s.branchMode of
@@ -764,6 +771,7 @@ renderView v = T.unlines $
   <> (if null v.stack then ["   <empty>"] else [ "   " <> tshow i <> ": " <> e | (i, e) <- zip [0 :: Int ..] v.stack ])
   <> maybe [] (\sv -> ["", "-- source " <> sv.file <> ":" <> tshow sv.line]
                       <> [ (if l.current then " > " else "   ") <> T.justifyRight 5 ' ' (tshow l.line) <> " | " <> l.text | l <- sv.lines ]) v.source
+  <> [ "\n-- no source: compiler-generated code, such as ABI decoding or overflow checks" | v.generatedCode ]
   <> [ "", "-- memory (" <> tshow v.memorySize <> " bytes)" ]
   <> (if v.memorySize == 0 then [] else T.lines v.memory)
   <> [ "\npath conditions: " <> tshow v.pathConditions <> " (see 'pathconds')" | v.pathConditions > 0 ]

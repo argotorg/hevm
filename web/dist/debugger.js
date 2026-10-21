@@ -90,6 +90,7 @@ var view = obj({
   memorySize: num,
   memory: str,
   source: nullable(sourceView),
+  generatedCode: bool,
   pathConditions: num,
   branch: nullable(branchView),
   choices: arr(str),
@@ -308,7 +309,13 @@ function codePane(v, run) {
 }
 function sourcePane(v) {
   if (v.source === null) {
-    return [h("div", { class: "empty" }, "No source map for this code. Run hevm in the project root, with its build output.")];
+    return [
+      h(
+        "div",
+        { class: "empty" },
+        v.generatedCode ? "Compiler-generated code, such as ABI decoding or overflow checks: it has no Solidity source. Use 'next' to step to the next source line." : "No source map for this code. Run hevm in the project root, with its build output."
+      )
+    ];
   }
   return [
     h("div", { class: "file" }, `${v.source.file}:${v.source.line}`),

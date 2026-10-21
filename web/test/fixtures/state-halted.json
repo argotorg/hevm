@@ -56,6 +56,7 @@
     "contract": "(SymAddr \"entrypoint\")",
     "depth": 0,
     "gas": null,
+    "generatedCode": false,
     "memory": "Length: 0 (0x0) bytes\n",
     "memorySize": 0,
     "merging": false,

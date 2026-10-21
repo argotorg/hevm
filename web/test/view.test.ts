@@ -67,6 +67,7 @@ describe("branch", () => {
 describe("other panes", () => {
   test("source, without a source map", () => {
     assert.match(textOf(all(view.sourcePane(states["concrete"]!))), /No source map/);
+    assert.match(textOf(all(view.sourcePane(stateWith({ generatedCode: true })))), /Compiler-generated code/);
   });
   test("source, with one", () => {
     const v = stateWith({ source: { file: "Foo.sol", line: 2, lines: [{ line: 1, text: "a", current: false }, { line: 2, text: "b", current: true }] } });

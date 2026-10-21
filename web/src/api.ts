@@ -25,6 +25,7 @@ export const view = obj({
   memorySize: num,
   memory: str,
   source: nullable(sourceView),
+  generatedCode: bool,
   pathConditions: num,
   branch: nullable(branchView),
   choices: arr(str),
