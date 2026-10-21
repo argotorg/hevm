@@ -656,11 +656,14 @@ exec1 conf = do
                 fetchAccountWithFallback x (freshVarFallback xs) $ \c -> do
                    next
                    assign' (#state % #stack) xs
-                   if accountEmpty c
-                     then push (W256 0)
-                     else case view bytecode c of
-                            Just b -> pushSym $ keccak b
-                            Nothing -> pushSym $ CodeHash x
+                   let hash = case view bytecode c of
+                         Just b -> keccak b
+                         Nothing -> CodeHash x
+                   if accountEmpty c then push (W256 0)
+                   -- emptiness then hinges on a symbolic balance, e.g. after a symbolic transfer of 0
+                   else if codeEmpty c && c.nonce == Just 0 && isNothing (maybeLitWordSimp c.balance)
+                     then pushSym $ Expr.simplify $ ITE (Expr.eq c.balance (Lit 0)) (Lit 0) hash
+                   else pushSym hash
             [] ->
               underrun
 
@@ -1665,13 +1668,16 @@ accountExists addr vm =
 -- EIP 161
 accountEmpty :: Contract -> Bool
 accountEmpty c =
-  case c.code of
-    RuntimeCode (ConcreteRuntimeCode "") -> True
-    RuntimeCode (SymbolicRuntimeCode b) -> null b
-    _ -> False
+  codeEmpty c
   && c.nonce == (Just 0)
   -- TODO: handle symbolic balance...
   && c.balance == Lit 0
+
+codeEmpty :: Contract -> Bool
+codeEmpty c = case c.code of
+  RuntimeCode (ConcreteRuntimeCode "") -> True
+  RuntimeCode (SymbolicRuntimeCode b) -> null b
+  _ -> False
 
 -- Adds constraints such that two symbolic addresses cannot alias each other
 -- and symbolic addresses cannot alias concrete addresses

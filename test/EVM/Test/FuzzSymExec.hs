@@ -14,7 +14,7 @@ must reach that leaf.
 -}
 module EVM.Test.FuzzSymExec (tests, lockstepTests, TestCase, concreteTestVm, symbolicTestVm) where
 
-import Control.Monad (forM, forM_, unless, void, when)
+import Control.Monad (foldM, forM, forM_, unless, void, when, zipWithM)
 import Control.Monad.IO.Unlift
 import Control.Monad.ST (ST, stToIO, RealWorld)
 import Control.Monad.ST.Unsafe (unsafeIOToST)
@@ -37,7 +37,7 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text, unpack)
 import Data.Text qualified as T
-import Data.Tree (flatten)
+import Data.Tree (Forest, flatten, rootLabel, subForest)
 import Data.Vector.Storable qualified as VS
 import Data.Vector qualified as Vector
 import Data.Word (Word8)
@@ -79,9 +79,9 @@ import EVM.Transaction qualified
 import EVM.Types hiding (Env)
 import EVM.Effects
 import EVM.Dapp (emptyDapp)
-import EVM.Debugger (Session, newSession, runCommand, Command(..), mkView, View(..), BranchView(..), sessionVM, isHalted, hasPendingBranch
+import EVM.Debugger (Session, newSession, runCommand, Command(..), mkView, View(..), BranchView(..), sessionVM, sessionStep, isHalted, hasPendingBranch
                     , BranchMode(..), setBranchMode, setMerge, sessionStats, StatsView(..), Stats(..))
-import EVM.Tracing (interpretWithTrace, VMTraceStep(..))
+import EVM.Tracing (interpretWithTrace, vmTraceStep, VMTraceStep(..))
 
 -- * Programs
 
@@ -867,8 +867,13 @@ runHevm solvers url c i = do
       pure $ Fetch.oracle solvers (Just sess) (Fetch.RpcInfo (Just (Fetch.BlockNumber c.number, u)))
   vm0 <- liftIO $ stToIO $ mkVm (isJust url) gas c (concreteVMInputs i)
   (res, (vm, trace)) <- runStateT (interpretWithTrace fetcher Stepper.execFully) (vm0, [])
+  pure $ hevmRun (isJust url) c i res vm trace
+
+-- | How a concrete run ended, from its last VM
+hevmRun :: Bool -> TestCase -> Inputs -> Either EvmError (Expr Buf) -> VM Concrete -> [VMTraceStep] -> HevmRun
+hevmRun viaRpc c i res vm trace =
   -- slots never read or written were never fetched
-  let pre a = if isJust url then (.storage) (Map.findWithDefault (Account mempty 0 0 mempty) a (preState c i)) else mempty
+  let pre a = if viaRpc then (.storage) (Map.findWithDefault (Account mempty 0 0 mempty) a (preState c i)) else mempty
       storageOf a = case (.storage) <$> Map.lookup (LitAddr a) vm.env.contracts of
         Just (ConcreteStore s) -> nonZero (Map.union s (pre a))
         Nothing -> nonZero (pre a)
@@ -882,7 +887,7 @@ runHevm solvers url c i = do
       gasUsed = case (.balance) <$> Map.lookup (LitAddr fromAddress) vm.env.contracts of
         Just (Lit b) -> unsafeInto c.gasLimit - (b - originBalance)
         b -> internalError $ "origin balance: " <> show b
-  pure $ HevmRun trace out stores (reverse vm.logs) gasUsed
+  in HevmRun trace out stores (reverse vm.logs) gasUsed
 
 -- | The VMs 'checkCase' starts from, for other fuzzers to run
 concreteTestVm :: TestCase -> ST RealWorld (VM Concrete)
@@ -1578,10 +1583,63 @@ compareStates' pre c prevOp vc vs
       mem <- if maybe True (`elem` memWriters) prevOp then compareMemory pre c vc vs else pure (Right 0)
       let ret = if maybe False (`elem` callOps) prevOp then compareBufs "return data" c vc.state.returndata (pre vs.state.returndata) else Right 0
           store = if maybe False (`elem` accountOps) prevOp then compareStorage pre c vc vs else Right 0
+          traces = compareCallTraces pre c vc vs
       pure $ case badWords of
         (i, a, b) : _ -> Left $ "stack word " <> show i <> " differs: concrete " <> show a <> ", symbolic " <> show b
           <> "\nsymbolic, before substituting: " <> show (pre (vs.state.stack !! i))
-        [] -> (\m r st -> (nWords + m + r + st, length words' - nWords)) <$> mem <*> ret <*> store
+        [] -> (\m r st tr -> (nWords + m + r + st + tr, length words' - nWords)) <$> mem <*> ret <*> store <*> traces
+
+-- | The traces, node by node, where the symbolic one is concrete once the inputs are substituted
+compareCallTraces :: (forall a. Expr a -> Expr a) -> TestCase -> VM Concrete -> VM Symbolic -> Either String Int
+compareCallTraces pre c vc vs
+  | length tc /= length ts = Left $ "traces differ in length: concrete " <> show (length tc) <> ", symbolic " <> show (length ts)
+      <> "\nconcrete: " <> show (map (kind . snd) tc) <> "\nsymbolic: " <> show (map (kind . snd) ts)
+  | otherwise = sum <$> zipWithM node [0 :: Int ..] (zip tc ts)
+  where
+    tc = nodes 0 (traceForest vc)
+    ts = nodes 0 (traceForest vs)
+    nodes :: Int -> Forest Trace -> [(Int, Trace)]
+    nodes d = concatMap (\t -> (d, t.rootLabel) : nodes (d + 1) t.subForest)
+    node i ((dc, a), (ds, b))
+      | dc /= ds || kind a /= kind b || a.opIx /= b.opIx =
+          Left $ "trace node " <> show i <> " differs: concrete " <> show (dc, a.opIx, kind a) <> ", symbolic " <> show (ds, b.opIx, kind b)
+      | otherwise = case same (a.tracedata, b.tracedata) of
+          Just False -> Left $ "trace node " <> show i <> " differs: concrete " <> show a.tracedata <> "\nsymbolic " <> show b.tracedata
+          Just True -> Right 1
+          Nothing -> Right 0
+    kind t = case t.tracedata of
+      EventTrace {} -> "event"
+      FrameTrace (CallContext {}) -> "call"
+      FrameTrace (CreationContext {}) -> "create"
+      ErrorTrace e -> "error " <> hevmErrorKind e
+      EntryTrace e -> "entry " <> T.unpack e
+      ReturnTrace {} -> "return"
+      ConsoleLog {} -> "console"
+    -- Nothing when some part stays symbolic and every concrete part agrees
+    same :: (TraceData, TraceData) -> Maybe Bool
+    same = \case
+      (EventTrace a d ts1, EventTrace a' d' ts2) -> allOf' ([eq a a', eq d d'] <> zipWith eq ts1 ts2)
+      (FrameTrace x, FrameTrace y) -> frame x y
+      (ReturnTrace d x, ReturnTrace d' y) -> allOf' [eq d d', frame x y]
+      (ConsoleLog d, ConsoleLog d') -> eq d d'
+      _ -> Just True
+    frame (CallContext t ctx o sz _ _ cd _ _) (CallContext t' ctx' o' sz' _ _ cd' _ _) =
+      allOf' [eq t t', eq ctx ctx', eq o o', eq sz sz', eq cd cd']
+    frame (CreationContext a _ _ _) (CreationContext a' _ _ _) = eq a a'
+    frame _ _ = Just False
+    allOf' rs
+      | Just False `elem` rs = Just False
+      | all (== Just True) rs = Just True
+      | otherwise = Nothing
+    eq :: Expr a -> Expr a -> Maybe Bool
+    eq x y = let y' = concretize c c.inputs (pre y) in
+      if concrete x && concrete y' then Just (x == y') else Nothing
+    concrete :: Expr a -> Bool
+    concrete = \case
+      Lit _ -> True
+      ConcreteBuf _ -> True
+      LitAddr _ -> True
+      _ -> False
 
 compareMemory :: (forall a. Expr a -> Expr a) -> TestCase -> VM Concrete -> VM Symbolic -> IO (Either String Int)
 compareMemory pre c vc vs = do
@@ -1658,6 +1716,8 @@ compareEnds c vc vs = do
   when (all concreteLog logs && logs /= vc.logs) $ Left $ "logs differ: concrete " <> show vc.logs <> ", symbolic " <> show logs
   void $ compareStorage id c vc vs
   void $ compareStorage Expr.simplify c vc vs
+  void $ compareCallTraces id c vc vs
+  void $ compareCallTraces Expr.simplify c vc vs
   where
     concreteLog = \case
       LogEntry (WAddr (LitAddr _)) (ConcreteBuf _) ts -> all (isJust . Expr.maybeLitWordSimp) ts
@@ -1701,6 +1761,60 @@ modelGuided solvers mode c picks = Progress.withProgressLogFromEnv "model-guided
       Keccak _ -> Any True
       _ -> Any False) mempty
 
+genMove :: Gen Command
+genMove = frequency
+  [ (4, Step <$> chooseInt (1, 120)), (4, Back <$> chooseInt (1, 120)), (1, pure Restart), (1, pure Continue) ]
+
+-- | A concrete debugger session must see the same state at a step however it
+-- got there, and its forward run must match geth's
+data DebuggerVsGeth = DebuggerVsGeth
+  { steps :: Int, revisits :: Int, wentBack :: Int, outcome :: String, depth :: Int, ops :: Set String }
+
+debuggerVsGeth :: TestCase -> [Command] -> IO DebuggerVsGeth
+debuggerVsGeth c moves = do
+  g <- withDir $ \dir -> runGeth dir c c.inputs
+  revisits <- newIORef (0 :: Int)
+  backs <- newIORef (0 :: Int)
+  h <- runEnv testEnv $ withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> do
+    let fetcher = Fetch.oracle solvers Nothing Fetch.noRpc
+        shown s = if isHalted s then "halted: " <> show (sessionVM s).result else show (vmTraceStep (sessionVM s))
+        visit seen s how = case Map.lookup (sessionStep s) seen of
+          Just before
+            | before /= shown s -> liftIO $ failWith c c.inputs $ "debugger: step " <> show (sessionStep s) <> " after " <> how
+                <> " is\n" <> shown s <> "\nbut was\n" <> before <> "\nmoves: " <> show moves
+            | otherwise -> liftIO (atomicModifyIORef' revisits (\n -> (n + 1, ()))) >> pure seen
+          Nothing -> pure (Map.insert (sessionStep s) (shown s) seen)
+        move (s, seen) m = do
+          s' <- runCommand fetcher m s
+          when (sessionStep s' < sessionStep s) $ liftIO $ atomicModifyIORef' backs (\n -> (n + 1, ()))
+          (s',) <$> visit seen s' (show m)
+        forward seen s acc
+          | isHalted s || sessionStep s > 100_000 = pure (s, reverse acc)
+          | otherwise = do
+              s' <- runCommand fetcher (Step 1) s
+              seen' <- visit seen s' "stepping forward"
+              forward seen' s' (vmTraceStep (sessionVM s) : acc)
+    s0 <- liftIO $ stToIO (concreteTestVm c) >>= newSession emptyDapp
+    seen0 <- visit mempty s0 "the start"
+    (sEnd, seen) <- foldM move (s0, seen0) moves
+    (sStart, seen') <- move (sEnd, seen) Restart
+    (sLast, trace) <- forward seen' sStart []
+    let vm = sessionVM sLast
+    pure $ case vm.result of
+      Just (VMSuccess b) -> hevmRun False c c.inputs (Right b) vm trace
+      -- as in hevm's own traces, the failing step carries the error
+      Just (VMFailure e) -> hevmRun False c c.inputs (Left e) vm (failedLast e trace)
+      r -> internalError $ "the debugger stopped with " <> show r
+  checkConcrete "debugger" c c.inputs g h
+  DebuggerVsGeth (length h.trace) <$> readIORef revisits <*> readIORef backs
+    <*> pure (either (errorKind . evmErrToString) (const "success") h.result)
+    <*> pure (maximum (1 : map (.depth) h.trace))
+    <*> pure (Set.fromList [intToOpName t.op | t <- h.trace])
+  where
+    failedLast e t = case reverse t of
+      VMTraceStep p o gas m d st _ : rest -> reverse (VMTraceStep p o gas m d st (Just (evmErrToString e)) : rest)
+      [] -> []
+
 lockstepTests :: TestTree
 lockstepTests = testGroup "lockstep-fuzz"
   [ -- the case from HEVM_FUZZ_* with HEVM_FUZZ_PICKS and HEVM_FUZZ_MODE, that model-guided-lockstep prints
@@ -1715,6 +1829,26 @@ lockstepTests = testGroup "lockstep-fuzz"
         liftIO $ writeCaseFile "model-guided-lockstep" $ show c <> "\nreproduce with: " <> reproduction c c.inputs
           <> " HEVM_FUZZ_PICKS=" <> intercalate "," (map show picks) <> " HEVM_FUZZ_MODE=" <> show mode
         modelGuided solvers mode c picks
+  , testProperty "debugger-vs-geth" $ \(c :: TestCase) -> forAll (resize 25 (listOf genMove)) $ \moves ->
+      within 300_000_000 $ ioProperty $ do
+        writeCaseFile "debugger-vs-geth" $ show c <> "\nmoves: " <> show moves <> "\nreproduce with: " <> reproduction c c.inputs
+        r <- debuggerVsGeth c moves
+        pure $ tabulate "steps compared with geth" [bucket r.steps]
+             $ tabulate "states revisited and compared" [bucket r.revisits]
+             $ tabulate "moves that went back" [bucket r.wentBack]
+             $ tabulate "outcome" [r.outcome]
+             $ tabulate "max call depth" [show r.depth]
+             $ tabulate "opcodes run, in cases" (Set.toList r.ops) True
+  , test "extcodehash-after-symbolic-transfer" $ withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> do
+      -- a value that may be 0 makes the precompile's balance symbolic
+      let c = TestCase (Prog
+            [ IPush 0 0, IPush 0 0, IPush 0 0, IPush 0 0, IPush 0 0, IOp OpCalldataload, IPush 1 4, IPush 3 0xffffff
+            , IOp OpCall, IOp OpPop, IPush 1 4, IOp OpExtcodehash, IPush 0 0, IOp OpMstore, IPush 1 0x20, IPush 0 0, IOp OpReturn ] [])
+            (Inputs "" mempty 0 0x10000000000) 931794 0x12c
+      forM_ [(m, g) | m <- [SolverBranches, ExplorerBranches, CheckedBranches], g <- [False, True]] $ \(mode, merging) ->
+        lockstepCase solvers mode merging c >>= \case
+          Left err -> liftIO $ failWith c c.inputs (show mode <> ": " <> err)
+          Right r -> liftIO $ unless (r.stopped == "halted") $ assertFailure ("stopped: " <> r.stopped)
   , -- the case from the HEVM_FUZZ_* variables that a failure prints, in every branch mode
     test "lockstep-from-env" $ liftIO caseFromEnv >>= mapM_ (\c ->
       withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> forM_ [(m, g) | m <- [SolverBranches, ExplorerBranches, CheckedBranches], g <- [False, True]] $ \(mode, merging) ->

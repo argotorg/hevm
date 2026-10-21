@@ -145,6 +145,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Fixed
 - MCOPY of a symbolic size now grows memory.
 - A precompile call that runs out of gas now leaves an error trace.
+- EXTCODEHASH of an account with no code or nonce and a symbolic balance is 0
+  when that balance is 0, instead of the hash of empty code.
 - A copy with a symbolic offset is encoded in SMT once instead of once per byte,
   and copies over 1 MiB are not encoded, so large copies no longer exhaust memory.
 - An exception during symbolic exploration is now rethrown, instead of being
