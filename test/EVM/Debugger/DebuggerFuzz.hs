@@ -28,6 +28,8 @@ import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
+import Data.Time.Clock (diffUTCTime, getCurrentTime)
+import Numeric (showHex)
 import Network.Socket
 import Network.Socket.ByteString (recv, sendAll)
 import System.Timeout (timeout)
@@ -66,6 +68,8 @@ tests = testGroup "debugger-fuzz"
           roundTrips (Fetch.oracle solvers Nothing Fetch.noRpc) reactions start ks (setMerge merging (setBranchMode mode (setStepLimit 3000 s0)))
   , testProperty "http-garbage" $ \(c :: TestCase) ->
       forAll (listOf1 genRequest) $ \reqs -> within 120_000_000 $ ioProperty $ runEnv testEnv $ httpGarbage c reqs
+  , testProperty "http-abuse" $ \(c :: TestCase) -> forAll genAbuse $ \abuse ->
+      within 120_000_000 $ ioProperty $ runEnv testEnv $ httpAbuse c abuse
   ]
 
 testEnv :: Env
@@ -94,6 +98,7 @@ genCommand symbolic = frequency $
   , (1, elements ["memory", "memory 0 64", "memory 32", "memory 0x40 0x20", "storage", "calldata", "trace"
                  , "pathconds", "help", "show", "stats", ""])
   , (1, genGarbage)
+  , (4, genKeywordCommand)
   , (1, elements ["simplify on", "simplify off"])
   , (1, elements ["merge on", "merge off"])
   ] <> [ (1, elements ["branches solver", "branches explorer"]) | not symbolic ] <> [ (8, elements ["branch true", "branch false", "branch 0", "branch 1", "branch 2", "branch t", "branch f"])
@@ -107,6 +112,29 @@ genGarbage = oneof
              , "break pc -1", "break line :", "break line foo:", "break line :12", "delete -1"
              , "branch", "branch 99999999999999999999", "branch -1", "STEP 2", "  step   3  ", "step 1 2" ]
   ]
+
+-- | Each command word, in any case, with arguments that are valid, nearly valid or junk
+genKeywordCommand :: Gen Text
+genKeywordCommand = do
+  w <- elements
+    [ "s", "step", "n", "next", "o", "over", "out", "c", "continue", "e", "end", "b", "back", "bl", "back-line"
+    , "r", "restart", "branch", "choose", "break", "delete", "breakpoints", "bps", "memory", "mem", "storage"
+    , "calldata", "trace", "stats", "simplify", "branches", "merge", "pathconds", "pc", "constraints"
+    , "h", "help", "?", "show", "state" ]
+  spelled <- elements [id, T.toUpper, \t -> T.toUpper (T.take 1 t) <> T.drop 1 t]
+  n <- frequency [(3, pure 0), (5, pure 1), (3, pure 2), (1, pure 3)]
+  args <- vectorOf n $ frequency $
+    [ (5, genNumber)
+    , (2, elements ["on", "off", "true", "false", "t", "f", "jump", "nojump", "all", "solver", "explorer", "checked"])
+    , (1, elements ["JUMPI", "sstore", "PUSH1", "nope", "Foo.sol:12", ":3", "Foo.sol:", "a:b:7", ":", "-", "--", "\"x\"", "\8734"])
+    ] <> [ (6, elements ["pc", "op", "line"]) | w == "break" ]
+  pure $ T.unwords (spelled w : args)
+  where
+    genNumber = oneof
+      [ tshow <$> chooseInt (0, 300)
+      , T.pack . ("0x" <>) . flip showHex "" <$> chooseInt (0, 0x1000)
+      , elements [ "-1", "0", "1000000000000", "1000000000001", "99999999999999999999999", "0x", "0xZZ", "0X10"
+                 , "1e3", "007", "0x7fffffffffffffff", "0xffffffffffffffffff", "+3", "3.5", "" ] ]
 
 type Fingerprint = [Text]
 
@@ -288,15 +316,35 @@ data Request = Request
   , target  :: ByteString
   , body    :: ByteString
   , framing :: Framing
+  , host    :: Host
   , raw     :: Maybe ByteString
   } deriving (Show)
+
+data Host = GoodHost ByteString | ForeignHost | WrongPort | NoPort | NoHost
+  deriving (Show)
+
+genHost :: Gen Host
+genHost = frequency
+  [ (12, GoodHost <$> elements ["127.0.0.1", "localhost", "LocalHost"])
+  , (1, pure ForeignHost), (1, pure WrongPort), (1, pure NoPort), (1, pure NoHost) ]
+
+hostHeader :: Int -> Host -> ByteString
+hostHeader port = \case
+  GoodHost h -> "Host: " <> h <> ":" <> BC.pack (show port) <> "\r\n"
+  ForeignHost -> "Host: attacker.example:" <> BC.pack (show port) <> "\r\n"
+  WrongPort -> "Host: 127.0.0.1:" <> BC.pack (show (port + 1)) <> "\r\n"
+  NoPort -> "Host: localhost\r\n"
+  NoHost -> ""
+
+goodHost :: Host -> Bool
+goodHost = \case GoodHost _ -> True; _ -> False
 
 genRequest :: Gen Request
 genRequest = do
   m <- frequency [(5, pure "GET"), (5, pure "POST"), (1, elements ["OPTIONS", "PUT", "DELETE", "", "get", "POST POST"])]
   t <- frequency
     [ (8, elements [ "/state", "/state?format=text", "/command", "/command?format=text", "/help", "/", "/stats", "/stats?format=text"
-                   , "/progress", "/progress?format=text" ])
+                   , "/progress", "/progress?format=text", "/trace", "/trace?format=text", "/api", "/debugger.js" ])
     , (2, elements [ "/nope", "/state?format", "/command?&&==", "/state?format=text&format=json", "//state"
                    , "/command?format=text?x", "*", "" ])
     , (1, BS.pack <$> listOf (choose (33, 126)))
@@ -304,6 +352,7 @@ genRequest = do
   b <- frequency
     [ (6, encodeUtf8 <$> genCommand True)
     , (3, (\cmd -> BL.toStrict (JSON.encode (JSON.object ["command" JSON..= cmd]))) <$> genCommand True)
+    , (3, encodeUtf8 <$> genKeywordCommand)
     , (1, elements [ "{\"command\": 5}", "{\"cmd\": \"step\"}", "{", "[]", "null", "{\"command\": \"step\"" ])
     , (1, arbitrary)
     ]
@@ -311,11 +360,12 @@ genRequest = do
     [ (8, pure Exact), (1, pure NoLength), (1, pure Shorter), (1, pure Longer)
     , (1, BogusLength <$> elements ["-5", "abc", "99999999999999999999", "", "0x10", " 3 "])
     , (1, pure Truncated), (1, pure BareNewlines) ]
+  h <- genHost
   r <- frequency [(12, pure Nothing), (1, Just <$> arbitrary)]
-  pure $ Request m t b f r
+  pure $ Request m t b f h r
 
-render :: Request -> ByteString
-render r = case r.raw of
+render :: Int -> Request -> ByteString
+render port r = case r.raw of
   Just bytes -> bytes
   Nothing -> case r.framing of
     Truncated -> BS.take (BS.length full `div` 2) full
@@ -330,7 +380,7 @@ render r = case r.raw of
       BogusLength v -> "Content-Length: " <> v <> "\r\n"
       _ -> header len
     header n = "Content-Length: " <> BC.pack (show n) <> "\r\n"
-    full = r.method <> " " <> r.target <> " HTTP/1.1\r\nHost: localhost\r\n" <> lenHeader <> "\r\n" <> r.body
+    full = r.method <> " " <> r.target <> " HTTP/1.1\r\n" <> hostHeader port r.host <> lenHeader <> "\r\n" <> r.body
 
 -- | Sends a request, closing our side so a server waiting for more body sees EOF
 exchange :: Int -> ByteString -> IO (Maybe ByteString)
@@ -338,8 +388,8 @@ exchange port bytes = timeout 30_000_000 $ do
   addr : _ <- getAddrInfo (Just defaultHints { addrSocketType = Stream }) (Just "127.0.0.1") (Just (show port))
   bracket (openSocket addr) close $ \sock -> do
     connect sock (addrAddress addr)
-    sendAll sock bytes
-    shutdown sock ShutdownSend
+    -- the server may answer and close before taking all of an oversized request
+    _ <- try (sendAll sock bytes >> shutdown sock ShutdownSend) :: IO (Either SomeException ())
     readAll sock BS.empty
   where
     readAll sock acc = do
@@ -352,32 +402,20 @@ exchange port bytes = timeout 30_000_000 $ do
 -- | Every request is answered with a well-formed response, and afterwards the
 -- server still serves the session
 httpGarbage :: App m => TestCase -> [Request] -> m Property
-httpGarbage c reqs = withSession $ \solvers -> do
-  sess <- liftIO $ stToIO (concreteTestVm c) >>= newSession emptyDapp
-  portVar <- liftIO newEmptyMVar
-  done <- liftIO newEmptyMVar
-  conf <- readConfig
-  let serve = serveSession (Fetch.oracle solvers Nothing Fetch.noRpc) 0 (putMVar portVar) (setStepLimit 20000 sess)
-  liftIO $ bracket (forkIO (runEnv (Env { config = conf }) serve >> putMVar done ())) killThread $ \_ -> do
-    port <- takeMVar portVar
-    -- a few at a time, concurrently
-    results <- fmap concat $ forM (chunksOf 4 reqs) $ \batch -> do
-      vars <- forM batch $ \r -> do
-        var <- newEmptyMVar
-        void $ forkIO $ exchange port (render r) >>= putMVar var . (r,)
-        pure var
-      mapM takeMVar vars
-    let bad = [ (r, resp) | (r, resp) <- results, not (wellFormed r resp) ]
-    final <- exchange port "GET /state HTTP/1.1\r\n\r\n"
-    let finalOk = case final of
-          Just resp | Just o <- JSON.decodeStrict (bodyOf resp) -> KM.member "step" (o :: JSON.Object)
-          _ -> False
-    _ <- exchange port "POST /quit HTTP/1.1\r\n\r\n"
-    _ <- timeout 10_000_000 (takeMVar done)
-    forM_ bad $ \(r, resp) -> putStrLn $ "bad response to " <> show r <> ":\n" <> show resp
-    pure $ tabulate "status" [ BC.unpack (BC.takeWhile (/= '\r') resp) | (_, Just resp) <- results ]
-         $ counterexample ("bad responses: " <> show (length bad) <> ", final state ok: " <> show finalOk)
-                          (null bad && finalOk)
+httpGarbage c reqs = withServer c $ \port -> do
+  -- a few at a time, concurrently
+  results <- fmap concat $ forM (chunksOf 4 reqs) $ \batch -> do
+    vars <- forM batch $ \r -> do
+      var <- newEmptyMVar
+      void $ forkIO $ exchange port (render port r) >>= putMVar var . (r,)
+      pure var
+    mapM takeMVar vars
+  let bad = [ (r, resp) | (r, resp) <- results, not (wellFormed r resp) ]
+  finalOk <- stateOk port
+  forM_ bad $ \(r, resp) -> putStrLn $ "bad response to " <> show r <> ":\n" <> show resp
+  pure $ tabulate "status" [ BC.unpack (BC.takeWhile (/= '\r') resp) | (_, Just resp) <- results ]
+       $ counterexample ("bad responses: " <> show (length bad) <> ", final state ok: " <> show finalOk)
+                        (null bad && finalOk)
   where
     bodyOf = BS.drop 4 . snd . BS.breakSubstring "\r\n\r\n"
     wellFormed r = \case
@@ -385,20 +423,106 @@ httpGarbage c reqs = withSession $ \solvers -> do
       Just resp ->
         let statusLine = BC.takeWhile (/= '\r') resp
             okStatus = case BC.words statusLine of
-              ("HTTP/1.1" : code : _) -> maybe False ((`elem` [200, 204, 400, 404, 500]) . fst) (BC.readInt code)
+              ("HTTP/1.1" : code : _) -> maybe False ((`elem` [200, 400, 403, 404, 500]) . fst) (BC.readInt code)
               _ -> False
-            isCommand = r.raw == Nothing && r.method == "POST" && BC.takeWhile (/= '?') r.target == "/command"
+            exact = r.raw == Nothing && case r.framing of { Exact -> True; _ -> False }
+            -- a request the server can parse gets past the Host check only with a good Host
+            parses = exact && length (BC.words (r.method <> " " <> r.target)) >= 2
+            hostOk = not parses || goodHost r.host == not (" 403 " `BS.isInfixOf` statusLine)
+            isCommand = goodHost r.host && r.raw == Nothing && r.method == "POST" && BC.takeWhile (/= '?') r.target == "/command"
                         && case r.framing of { Exact -> True; _ -> False }
             jsonOk = r.target /= "/command" || maybe False (KM.member "step") (JSON.decodeStrict (bodyOf resp) :: Maybe JSON.Object)
-            isStats = r.raw == Nothing && r.method == "GET" && r.target == "/stats"
+            isStats = goodHost r.host && r.raw == Nothing && r.method == "GET" && r.target == "/stats"
                       && case r.framing of { Exact -> True; _ -> False }
             statsOk = maybe False (KM.member "counters") (JSON.decodeStrict (bodyOf resp) :: Maybe JSON.Object)
-            isProgress = r.raw == Nothing && r.method == "GET" && r.target == "/progress"
+            isProgress = goodHost r.host && r.raw == Nothing && r.method == "GET" && r.target == "/progress"
                          && case r.framing of { Exact -> True; _ -> False }
             progressOk = maybe False (KM.member "running") (JSON.decodeStrict (bodyOf resp) :: Maybe JSON.Object)
-        in okStatus && (not isCommand || (" 200 " `BS.isInfixOf` statusLine && jsonOk))
+        in okStatus && hostOk && (not isCommand || (" 200 " `BS.isInfixOf` statusLine && jsonOk))
                     && (not isStats || (" 200 " `BS.isInfixOf` statusLine && statsOk))
                     && (not isProgress || (" 200 " `BS.isInfixOf` statusLine && progressOk))
+
+data Abuse = Abuse
+  { hanging   :: [ByteString] -- ^ sent on connections that then stay open
+  , oversized :: [ByteString]
+  , flood     :: Int
+  } deriving (Show)
+
+genAbuse :: Gen Abuse
+genAbuse = do
+  hanging <- resize 40 $ listOf $ elements
+    [ "", "GET /state HTTP/1.1\r\n", "GET /sta", "POST /command HTTP/1.1\r\nContent-Length: 100\r\n\r\nstep" ]
+  oversized <- resize 3 $ listOf $ elements
+    [ "GET /state HTTP/1.1\r\n" <> BS.concat (replicate 40000 "X-Junk: aaaaaaaaaaaaaaaaaaaa\r\n")
+    , "POST /command HTTP/1.1\r\nContent-Length: 1100000\r\n\r\n" <> BC.replicate 1100000 'x'
+    , "POST /command HTTP/1.1\r\nContent-Length: 99999999999\r\n\r\nstep" ]
+  flood <- chooseInt (1, 150)
+  pure Abuse {..}
+
+-- | With connections hanging and oversized requests coming in, a flood of
+-- ordinary requests is still answered promptly, and correctly
+httpAbuse :: App m => TestCase -> Abuse -> m Property
+httpAbuse c abuse = withServer c $ \port -> do
+  addr : _ <- getAddrInfo (Just defaultHints { addrSocketType = Stream }) (Just "127.0.0.1") (Just (show port))
+  let open bytes = do
+        sock <- openSocket addr
+        connect sock (addrAddress addr)
+        sendAll sock bytes
+        pure sock
+  bracket (mapM open abuse.hanging) (mapM_ close) $ \_ -> do
+    big <- forM abuse.oversized $ \r -> do
+      var <- newEmptyMVar
+      void $ forkIO $ exchange port r >>= putMVar var
+      pure var
+    t0 <- getCurrentTime
+    vars <- forM [0 .. abuse.flood - 1] $ \i -> do
+      var <- newEmptyMVar
+      let req = case i `mod` 3 of
+            0 -> request port "GET" "/state" ""
+            1 -> request port "GET" "/stats" ""
+            _ -> request port "POST" "/command" "step"
+      void $ forkIO $ exchange port req >>= putMVar var
+      pure var
+    answers <- mapM takeMVar vars
+    t1 <- getCurrentTime
+    bigAnswers <- mapM takeMVar big
+    ok <- stateOk port
+    let failures = [ maybe "no answer" (BS.take 60) a | a <- answers, maybe True (not . (" 200 " `BS.isInfixOf`) . BC.takeWhile (/= '\r')) a ]
+        failed = length failures
+        -- an oversized request is refused, or the connection reset while it was being sent
+        bigBad = [ a | Just a <- bigAnswers, not (BS.null a), not (" 400 " `BS.isInfixOf` BC.takeWhile (/= '\r') a) ]
+        secs = realToFrac (diffUTCTime t1 t0) :: Double
+    pure $ tabulate "hanging connections" [bucket (length abuse.hanging)]
+         $ tabulate "flood" [bucket abuse.flood]
+         $ tabulate "oversized" [show (length abuse.oversized)]
+         $ counterexample ("failed: " <> show failed <> " of " <> show abuse.flood <> " in " <> show secs <> "s: " <> show (take 3 failures)
+                           <> ", oversized answered with: " <> show (map (BS.take 40) bigBad) <> ", state ok after: " <> show ok)
+           (failed == 0 && null bigBad && ok && secs < 20)
+
+request :: Int -> ByteString -> ByteString -> ByteString -> ByteString
+request port m path body = m <> " " <> path <> " HTTP/1.1\r\nHost: 127.0.0.1:" <> BC.pack (show port)
+  <> "\r\nContent-Length: " <> BC.pack (show (BS.length body)) <> "\r\n\r\n" <> body
+
+stateOk :: Int -> IO Bool
+stateOk port = exchange port (request port "GET" "/state" "") <&> \case
+  Just resp | Just o <- JSON.decodeStrict (BS.drop 4 (snd (BS.breakSubstring "\r\n\r\n" resp))) -> KM.member "step" (o :: JSON.Object)
+  _ -> False
+  where x <&> f = fmap f x
+
+-- | Serves a fresh concrete session of the case while the action runs, then quits it
+withServer :: App m => TestCase -> (Int -> IO a) -> m a
+withServer c act = withSession $ \solvers -> do
+  sess <- liftIO $ stToIO (concreteTestVm c) >>= newSession emptyDapp
+  portVar <- liftIO newEmptyMVar
+  done <- liftIO newEmptyMVar
+  conf <- readConfig
+  let serve = serveSession (Fetch.oracle solvers Nothing Fetch.noRpc) 0 (putMVar portVar) (setStepLimit 20000 sess)
+  liftIO $ bracket (forkIO (runEnv (Env { config = conf }) serve >> putMVar done ())) killThread $ \_ -> do
+    port <- takeMVar portVar
+    r <- act port
+    _ <- exchange port (request port "POST" "/quit" "")
+    _ <- timeout 10_000_000 (takeMVar done)
+    pure r
 
 bucket :: Int -> String
 bucket n

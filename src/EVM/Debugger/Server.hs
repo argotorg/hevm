@@ -46,6 +46,7 @@ data Request = Request
   , path   :: ByteString
   , query  :: [(ByteString, ByteString)]
   , body   :: ByteString
+  , host   :: Maybe ByteString
   }
 
 data Response = Response
@@ -89,11 +90,15 @@ serveRoutes port onListen done routes = do
   bracket (openSocket addr) close $ \sock -> do
     setSocketOption sock ReuseAddr 1
     bind sock (addrAddress addr)
-    listen sock 16
-    socketPort sock >>= onListen . fromIntegral
+    listen sock maxListenQueue
+    p <- fromIntegral <$> socketPort sock
+    onListen p
+    -- browsers send the Host they looked up, so another site's name pointing here
+    -- (DNS rebinding) cannot reach the debugger
+    let hosts = [h <> ":" <> BC.pack (show p) | h <- ["127.0.0.1", "localhost"]]
     acceptor <- forkIO $ forever $ do
       (conn, _) <- accept sock
-      void $ forkIO $ handleConn (dispatch routes) conn `finally` close conn
+      void $ forkIO $ handleConn hosts (dispatch routes) conn `finally` close conn
     takeMVar done `finally` killThread acceptor
 
 -- | Built by web/build.sh, which keeps web/dist up to date
@@ -103,7 +108,6 @@ debuggerJs = $(embedFile "web/dist/debugger.js")
 
 dispatch :: [Route] -> Request -> IO Response
 dispatch routes req = case (req.method, req.path) of
-  ("OPTIONS", _) -> pure $ Response 204 "text/plain" ""
   ("GET", "/") -> pure $ Response 200 "text/html; charset=utf-8" indexHtml
   ("GET", "/debugger.js") -> pure $ Response 200 "text/javascript; charset=utf-8" debuggerJs
   ("GET", "/api") -> pure $ Response 200 "text/plain; charset=utf-8" (encodeUtf8 apiHelp)
@@ -118,14 +122,16 @@ announce port = do
     <> "  (or in a terminal: hevm-debug --port " <> show port <> ")"
   hFlush stdout
 
-handleConn :: (Request -> IO Response) -> Socket -> IO ()
-handleConn handler conn = do
+handleConn :: [ByteString] -> (Request -> IO Response) -> Socket -> IO ()
+handleConn hosts handler conn = do
   -- a client that stops sending must not hold the connection forever
   r <- try (timeout 30000000 (readRequest conn))
   resp <- case r of
     Left (e :: SomeException) -> pure $ Response 400 "text/plain" (BC.pack ("bad request: " <> show e))
     Right Nothing -> pure $ Response 400 "text/plain" "bad request: timed out"
     Right (Just Nothing) -> pure $ Response 400 "text/plain" "bad request"
+    Right (Just (Just req)) | fmap (BC.map toLower) req.host `notElem` map Just hosts ->
+      pure $ Response 403 "text/plain" ("forbidden: the Host header must be one of " <> BC.unwords hosts)
     Right (Just (Just req)) -> try (handler req) >>= \case
       Left (e :: SomeException) -> pure $ Response 500 "text/plain" (BC.pack ("internal error: " <> show e))
       Right x -> pure x
@@ -146,7 +152,7 @@ readRequest conn = go BS.empty
               pure $ case BC.words (head' ls) of
                 (m : target : _) ->
                   let (p, q) = BC.break (== '?') target
-                  in Just (Request m p (parseQuery (BS.drop 1 q)) b)
+                  in Just (Request m p (parseQuery (BS.drop 1 q)) b (lookup "host" headers))
                 _ -> Nothing
           _ -> do
             chunk <- recv conn 4096
@@ -169,16 +175,13 @@ renderResponse r = BS.concat
   [ "HTTP/1.1 ", BC.pack (show r.status), " ", reason r.status, "\r\n"
   , "Content-Type: ", r.contentType, "\r\n"
   , "Content-Length: ", BC.pack (show (BS.length r.content)), "\r\n"
-  , "Access-Control-Allow-Origin: *\r\n"
-  , "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-  , "Access-Control-Allow-Headers: Content-Type\r\n"
   , "Connection: close\r\n\r\n"
   , r.content
   ]
   where
     reason = \case
       200 -> "OK"
-      204 -> "No Content"
+      403 -> "Forbidden"
       400 -> "Bad Request"
       404 -> "Not Found"
       _ -> "Internal Server Error"

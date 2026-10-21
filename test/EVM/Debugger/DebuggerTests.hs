@@ -279,7 +279,7 @@ http port method path body = do
   addr : _ <- getAddrInfo (Just defaultHints { addrSocketType = Stream }) (Just "127.0.0.1") (Just (show port))
   bracket (openSocket addr) close $ \sock -> do
     connect sock (addrAddress addr)
-    sendAll sock $ BS.concat [method, " ", path, " HTTP/1.1\r\nHost: localhost\r\nContent-Length: "
+    sendAll sock $ BS.concat [method, " ", path, " HTTP/1.1\r\nHost: 127.0.0.1:", BC.pack (show port), "\r\nContent-Length: "
                              , BC.pack (show (BS.length body)), "\r\n\r\n", body]
     resp <- readAll sock BS.empty
     pure $ snd (BS.breakSubstring "\r\n\r\n" resp) & BS.drop 4

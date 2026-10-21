@@ -27,8 +27,9 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as Char8
 import Data.Char (isDigit, toLower)
+import Data.Either (isLeft)
 import Data.IORef (IORef, newIORef, readIORef, atomicModifyIORef')
-import Data.List (intercalate, isInfixOf, isPrefixOf)
+import Data.List (intercalate, isInfixOf, isPrefixOf, tails)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Monoid (Any(..))
@@ -1758,6 +1759,11 @@ modelGuided solvers mode c picks = Progress.withProgressLogFromEnv "model-guided
     _ | any mentionsBlockHash vs.constraints -> skip "path conditions on a symbolic blockhash"
       | PBool False `elem` vs.constraints -> skip "path ends in a failed assumption"
       | otherwise -> checkSatWithProps solvers vs.constraints >>= \case
+          -- a branch query the solver could not encode offers both sides
+          -- the solver may have had no say at some branch: with path conditions it cannot
+          -- encode, as they were before a later one made them plainly false, both sides are offered
+          Qed | any (isLeft . SMT.assertProps defaultConfig) (tails vs.constraints) ->
+                skip "infeasible, after path conditions the solver cannot take"
           Qed -> liftIO $ failWith c c.inputs $ "the random path offered only feasible sides, but is infeasible:\n"
                    <> unlines (map show vs.constraints)
           Unknown _ -> skip "unknown"
