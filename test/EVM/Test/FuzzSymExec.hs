@@ -1052,6 +1052,17 @@ reproduction c i = unwords
 writeCaseFile :: String -> String -> IO ()
 writeCaseFile name content = lookupEnv "HEVM_FUZZ_CASE_FILE" >>= mapM_ (\f -> writeFile (f <> "." <> name) content)
 
+splitOn' :: Char -> String -> [String]
+splitOn' d str = case break (== d) str of
+  (a, []) -> [a]
+  (a, _ : rest) -> a : splitOn' d rest
+
+modeOf :: String -> BranchMode
+modeOf = \case
+  "ExplorerBranches" -> ExplorerBranches
+  "CheckedBranches" -> CheckedBranches
+  _ -> SolverBranches
+
 -- | The case 'reproduction' describes, if HEVM_FUZZ_MAIN is set
 caseFromEnv :: IO (Maybe TestCase)
 caseFromEnv = lookupEnv "HEVM_FUZZ_MAIN" >>= \case
@@ -1070,10 +1081,6 @@ caseFromEnv = lookupEnv "HEVM_FUZZ_MAIN" >>= \case
     n <- var "NUMBER" "1"
     let store = Map.fromList [ (w256 k, w256 (drop 1 v)) | kv <- splitOn' ',' st, not (null kv), let (k, v) = break (== ':') kv ]
     pure $ Just $ TestCase (Prog [IRaw (bytes m)] [IRaw (bytes callee)]) (Inputs (bytes cd) store (w256 cv) (w256 ts)) (read gl) (w256 n)
-  where
-    splitOn' d str = case break (== d) str of
-      (a, []) -> [a]
-      (a, _ : rest) -> a : splitOn' d rest
 
 -- | Concrete hevm against geth, howling failures with how hevm ran
 checkConcrete :: String -> TestCase -> Inputs -> GethRun -> HevmRun -> IO ()
@@ -1659,7 +1666,7 @@ compareEnds c vc vs = do
 -- | Lockstep along a random path: the inputs a model of its path conditions
 -- gives must take the concrete run along it, to where it ended
 modelGuided :: App m => SolverGroup -> BranchMode -> TestCase -> [Int] -> m Property
-modelGuided solvers mode c picks = do
+modelGuided solvers mode c picks = Progress.withProgressLogFromEnv "model-guided" $ do
   sp <- randomPath solvers c picks
   let vs = sessionVM sp
       skip why = pure $ label why (property True)
@@ -1696,11 +1703,17 @@ modelGuided solvers mode c picks = do
 
 lockstepTests :: TestTree
 lockstepTests = testGroup "lockstep-fuzz"
-  [ testProperty "model-guided-lockstep" $ \(c :: TestCase) -> forAll (vectorOf 50 (chooseInt (0, 7))) $ \picks ->
+  [ -- the case from HEVM_FUZZ_* with HEVM_FUZZ_PICKS and HEVM_FUZZ_MODE, that model-guided-lockstep prints
+    test "model-guided-from-env" $ liftIO caseFromEnv >>= mapM_ (\c -> do
+      picks <- liftIO $ maybe [] (map read . splitOn' ',') <$> lookupEnv "HEVM_FUZZ_PICKS"
+      mode <- liftIO $ maybe SolverBranches modeOf <$> lookupEnv "HEVM_FUZZ_MODE"
+      -- failures are raised; what is returned only labels the case
+      void $ withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> modelGuided solvers mode c picks)
+  , testProperty "model-guided-lockstep" $ \(c :: TestCase) -> forAll (vectorOf 50 (chooseInt (0, 7))) $ \picks ->
       forAll (elements [SolverBranches, ExplorerBranches, CheckedBranches]) $ \mode ->
       within 300_000_000 $ ioProperty $ runEnv testEnv $ withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> do
-        liftIO $ writeCaseFile "model-guided-lockstep" $ show c <> "\npicks: " <> show picks
-          <> "\nmode: " <> show mode <> "\nreproduce with: " <> reproduction c c.inputs
+        liftIO $ writeCaseFile "model-guided-lockstep" $ show c <> "\nreproduce with: " <> reproduction c c.inputs
+          <> " HEVM_FUZZ_PICKS=" <> intercalate "," (map show picks) <> " HEVM_FUZZ_MODE=" <> show mode
         modelGuided solvers mode c picks
   , -- the case from the HEVM_FUZZ_* variables that a failure prints, in every branch mode
     test "lockstep-from-env" $ liftIO caseFromEnv >>= mapM_ (\c ->
