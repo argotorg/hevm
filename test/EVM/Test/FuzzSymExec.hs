@@ -1047,6 +1047,11 @@ reproduction c i = unwords
   , "HEVM_FUZZ_GASLIMIT=" <> show c.gasLimit, "HEVM_FUZZ_NUMBER=" <> show c.number ]
   where hex = bsToHex
 
+-- | Records the case a property runs in HEVM_FUZZ_CASE_FILE, suffixed with the
+-- property's name as properties run concurrently, to find one that crashes or hangs
+writeCaseFile :: String -> String -> IO ()
+writeCaseFile name content = lookupEnv "HEVM_FUZZ_CASE_FILE" >>= mapM_ (\f -> writeFile (f <> "." <> name) content)
+
 -- | The case 'reproduction' describes, if HEVM_FUZZ_MAIN is set
 caseFromEnv :: IO (Maybe TestCase)
 caseFromEnv = lookupEnv "HEVM_FUZZ_MAIN" >>= \case
@@ -1227,7 +1232,7 @@ leafKind = \case
 checkCase :: App m => Int -> TestCase -> m Report
 checkCase maxReplays c = Progress.withProgressLogFromEnv "fuzz-symexec" $
   withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> do
-  let phase name = liftIO $ lookupEnv "HEVM_FUZZ_CASE_FILE" >>= mapM_ (\f -> appendFile f ("\nphase: " <> name))
+  let phase name = liftIO $ lookupEnv "HEVM_FUZZ_CASE_FILE" >>= mapM_ (\f -> appendFile (f <> ".random-contract-concrete-call") ("\nphase: " <> name))
       runBoth i = do
         phase "geth"
         g <- liftIO $ withDir $ \dir -> runGeth dir c i
@@ -1694,8 +1699,8 @@ lockstepTests = testGroup "lockstep-fuzz"
   [ testProperty "model-guided-lockstep" $ \(c :: TestCase) -> forAll (vectorOf 50 (chooseInt (0, 7))) $ \picks ->
       forAll (elements [SolverBranches, ExplorerBranches, CheckedBranches]) $ \mode ->
       within 300_000_000 $ ioProperty $ runEnv testEnv $ withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> do
-        liftIO $ lookupEnv "HEVM_FUZZ_CASE_FILE" >>= mapM_ (\f -> writeFile f $ show c <> "\npicks: " <> show picks
-          <> "\nmode: " <> show mode <> "\nreproduce with: " <> reproduction c c.inputs)
+        liftIO $ writeCaseFile "model-guided-lockstep" $ show c <> "\npicks: " <> show picks
+          <> "\nmode: " <> show mode <> "\nreproduce with: " <> reproduction c c.inputs
         modelGuided solvers mode c picks
   , -- the case from the HEVM_FUZZ_* variables that a failure prints, in every branch mode
     test "lockstep-from-env" $ liftIO caseFromEnv >>= mapM_ (\c ->
@@ -1707,8 +1712,8 @@ lockstepTests = testGroup "lockstep-fuzz"
   , testProperty "symbolic-lockstep" $ \(c :: TestCase) -> forAll (elements [SolverBranches, ExplorerBranches, CheckedBranches]) $ \mode -> \merging ->
       within 300_000_000 $ ioProperty $ runEnv testEnv $ withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> do
         -- to find a case that crashes, hangs or runs out of memory
-        liftIO $ lookupEnv "HEVM_FUZZ_CASE_FILE" >>= mapM_ (\f -> writeFile f $ show c
-          <> "\nmain: " <> bsToHex (assembleItems c.prog.main) <> "\ncallee: " <> bsToHex (assembleItems c.prog.callee))
+        liftIO $ writeCaseFile "symbolic-lockstep" $ show c <> "\nmode: " <> show mode <> ", merging: " <> show merging
+          <> "\nreproduce with: " <> reproduction c c.inputs
         lockstepCase solvers mode merging c >>= \case
           Left err -> liftIO $ failWith c c.inputs err
           Right r -> pure $ tabulate "stopped" [r.stopped]
@@ -1747,8 +1752,8 @@ tests = testGroup "contract-quickcheck-run"
       -- the flag is process-wide, so concurrent tests may flip it mid-run; results must not change either way
       within 120_000_000 $ ioProperty $ runEnv (Env { config = defaultConfig { hashConsExplore = hashCons } }) $ do
         -- to find a case that crashes or runs out of memory
-        liftIO $ lookupEnv "HEVM_FUZZ_CASE_FILE" >>= mapM_ (\f -> writeFile f $ show c
-          <> "\nmain: " <> bsToHex (assembleItems c.prog.main) <> "\ncallee: " <> bsToHex (assembleItems c.prog.callee))
+        liftIO $ writeCaseFile "random-contract-concrete-call" $ show c
+          <> "\nmain: " <> bsToHex (assembleItems c.prog.main) <> "\ncallee: " <> bsToHex (assembleItems c.prog.callee)
         t0 <- liftIO getMonotonicTime
         report <- checkCase 3 c
         t1 <- liftIO getMonotonicTime
