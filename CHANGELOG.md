@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--serve` serves the progress of a run over HTTP, at `/progress`.
 - `--check-static-branches` checks branch decisions made without the solver
   against the solver.
+- The symbolic execution fuzzer runs symbolic and concrete execution in
+  lockstep, also with path merging and along paths given by solver models, and
+  checks the debugger's stepping, back and forth, against geth.
 - Word reads that straddle literal bytes and written words, such as calldata's
   selector and first argument, simplify to the written parts shifted and or-ed.
 - Reads of all-zero buffers simplify to zero.
