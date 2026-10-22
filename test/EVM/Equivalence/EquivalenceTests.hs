@@ -535,6 +535,13 @@ bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
     forM_ replays $ \case
       Validated ra rb -> assertBool "Replay must show the different stores" (ra /= rb)
       r -> assertFailure $ "Counterexample must replay as validated, got: " <> show r
+  , testCase "eq-replay-zero-write-over-nonzero-slot" $ do
+    -- stop vs sstore(1, 0): they differ only if slot 1 starts nonzero, so the model must give its value
+    replays <- replayAll "00" "5f600155"
+    assertBool "Must have a counterexample" (not (null replays))
+    forM_ replays $ \case
+      Validated {} -> pure ()
+      r -> assertFailure $ "Counterexample must replay as validated, got: " <> show r
   , testCase "eq-replay-answers-calls-to-unknown-code" $ do
     -- STATICCALL(gas, 0x1234, 0, 0, 0, 32), then sstore(0, mload(0) == 5) vs sstore(0, 0)
     let callOut = "60205f5f5f6112345afa50"
