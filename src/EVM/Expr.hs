@@ -1258,6 +1258,10 @@ readStorage w st = go (simplifyNoLitToKeccak w) (simplifyNoLitToKeccak st)
       Keccak b -> do
         ConcreteBuf bs <- concreteBuf b
         pure $ keccak' bs
+      -- e.g. a fixed-size array indexed by a hash: keccak(x) & 255
+      e | containsNode (\case Keccak _ -> True; _ -> False) e
+        , Lit x <- simplifyNoLitToKeccak (mapExpr (\case k@(Keccak _) -> maybe k Lit (concreteSlot k); k -> k) e)
+        -> Just x
       _ -> Nothing
     concreteBuf :: Expr Buf -> Maybe (Expr Buf)
     concreteBuf b@(ConcreteBuf _) = Just b

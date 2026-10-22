@@ -2,7 +2,7 @@
 -- front as with it fetched from a mock node, concretely and symbolically.
 module EVM.Fetch.RpcFuzz (tests) where
 
-import Control.Monad (forM)
+import Control.Monad (forM, forM_)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.ST (stToIO)
 import Data.Aeson ((.=))
@@ -11,7 +11,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Control.Concurrent.MVar (readMVar, modifyMVar_)
 import Data.IORef (readIORef)
-import Data.List (zip4)
+import Data.List (zip5)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
@@ -21,10 +21,11 @@ import Data.Word (Word8)
 import Numeric (readHex)
 import Test.QuickCheck hiding (Success, Failure)
 import Test.Tasty
-import Test.Tasty.HUnit (testCase, (@?=))
+import Test.Tasty.HUnit (testCase, (@?=), assertFailure)
 import Test.Tasty.QuickCheck (testProperty, QuickCheckTests(..))
 
 import EVM (makeVm, initialContract, defaultVMOpts)
+import EVM.ABI (abiMethod, AbiValue(..))
 import EVM.Assembler qualified as Assembler
 import EVM.Concrete qualified as Concrete
 import EVM.Effects (App, Env(..), defaultConfig, runEnv)
@@ -34,6 +35,7 @@ import EVM.Fetch.MockNode (Account(..), World, Node(..), Request(..), withMockNo
 import EVM.Format (formatBinary)
 import EVM.Progress qualified as Progress
 import EVM.Solvers (withSolvers, defMemLimit, Solver(..))
+import EVM.Solidity (solcRuntime)
 import EVM.Stepper qualified as Stepper
 import EVM.SymExec (interpret, defaultIterConf, runExpr, noopPathHandler)
 import EVM.Traversals (mapExpr, mapProp)
@@ -55,6 +57,32 @@ tests = testGroup "RPC fuzzing"
           let rpcInfo = Fetch.RpcInfo (Just (Fetch.BlockNumber 16, node.url))
           runConcrete (Fetch.oracle solvers (Just sess) rpcInfo) mempty (initialContract (RuntimeCode (ConcreteRuntimeCode code))) [] mempty
       fmap (\(o, _, _) -> o) res @?= Right (Right (word256Bytes 0x1234))
+  , testCase "rpc-cached-concrete-slot" $ do
+      Just code <- solcRuntime "C" $ T.unlines
+        [ "contract C {"
+        , "  uint256[256] values;"
+        , "  function read(uint256 x) public view returns (uint256) {"
+        , "    return values[uint256(keccak256(abi.encode(x))) & 255];"
+        , "  }"
+        , "}"
+        ]
+      let slot = And (Lit 255) (Keccak (ConcreteBuf (word256Bytes 1)))
+          cached v = ConcreteStore (Map.singleton (keccak' (word256Bytes 1) `mod` 256) v)
+          cd = ConcreteBuf $ abiMethod "read(uint256)" (AbiTuple (V.singleton (AbiUInt 256 1)))
+          cases = [(cached v, Lit v) | v <- [0, 1337]]
+            <> [(SStore slot (Var "newValue") (cached 1337), Var "newValue")]
+      runEnv (Env {config = defaultConfig}) $ withSolvers Bitwuzla 1 (Just 5) defMemLimit $ \solvers ->
+        forM_ cases $ \(st, expected) -> do
+          vm <- liftIO $ stToIO $ makeVm (defaultVMOpts @Symbolic)
+            { contract = (initialContract (RuntimeCode (ConcreteRuntimeCode code))) { storage = st, external = True }
+            , address = LitAddr remote, calldata = (cd, []) }
+          let fetcher q = case q of
+                PleaseFetchSlot {} -> liftIO $ assertFailure "cached reads must not fetch storage"
+                _ -> Fetch.oracle solvers Nothing Fetch.noRpc q
+          leaves <- interpret fetcher defaultIterConf vm runExpr noopPathHandler
+          liftIO $ case leaves of
+            [Success _ _ out _] -> Expr.readWord (Lit 0) out @?= expected
+            _ -> assertFailure $ "expected one successful read, got " <> show leaves
   ]
 
 asmOps :: [Op] -> ByteString
@@ -65,8 +93,13 @@ asmOps = BS.pack . map (\case LitByte b -> b; b -> internalError ("symbolic byte
 data Key = KLit W256 | KCd Int -- ^ calldataload(off) & 3
   deriving (Show, Eq)
 
--- | Mapping slots hash their preimage at the given memory offset
-data Slot = Plain Key | Mapping Int Key W256 | Nested Int Key Key W256
+-- | Mapping slots hash their preimage at the given memory offset. 'Folded' reduces a slot
+-- to 0..3 and adds an offset, like a fixed-size array indexed by a hash: the slot stays a
+-- term over a keccak that only concretizing the keccak resolves.
+data Slot = Plain Key | Mapping Int Key W256 | Nested Int Key Key W256 | Folded Fold W256 Slot
+  deriving (Show, Eq)
+
+data Fold = FAnd | FMod | FShr
   deriving (Show, Eq)
 
 -- | An index into 'targets', or 'targetBase' plus calldataload(off) & 3
@@ -138,6 +171,9 @@ keyMask = 3
 idxs :: [W256]
 idxs = [0, 1]
 
+foldOffs :: [W256]
+foldOffs = [0, 0x10]
+
 cdOffs :: [Int]
 cdOffs = [0, 32, 64, 96]
 
@@ -150,6 +186,7 @@ mapSlot k idx = keccak' (word256Bytes k <> word256Bytes idx)
 -- | Every slot a program can touch
 domain :: [(Addr, W256)]
 domain = map (remote,) (keys
+  <> [o + k | o <- drop 1 foldOffs, k <- keys]
   <> [mapSlot k i | k <- keys, i <- idxs]
   <> [mapSlot k2 (mapSlot k1 i) | k1 <- keys, k2 <- keys, i <- idxs])
   <> [(t, k) | t <- targets, k <- keys]
@@ -179,6 +216,11 @@ asmSlot = \case
   Plain k -> asmKey k
   Mapping h k idx -> hash h (asmKey k) (pushW idx)
   Nested h k1 k2 idx -> hash h (asmKey k2) (asmSlot (Mapping h k1 idx))
+  Folded f off s -> (case f of
+      FAnd -> asmSlot s <> pushW keyMask <> [0x16]
+      FMod -> pushW (keyMask + 1) <> asmSlot s <> [0x06]
+      FShr -> asmSlot s <> pushW 254 <> [0x1c])
+    <> (if off == 0 then [] else pushW off <> [0x01])
   where
     -- the second word goes in first: it may itself hash at h
     hash h key second = second <> pushI (h + 32) <> [0x52] <> key <> pushI h <> [0x52]
@@ -234,11 +276,16 @@ genTarget = frequency [(4, T <$> choose (0, length targets - 1)), (1, TCd <$> el
 
 genSlot :: Gen Slot
 genSlot = frequency
-  [ (2, Plain <$> genKey)
-  , (3, Mapping <$> hashOff <*> genKey <*> elements idxs)
-  , (2, Nested <$> hashOff <*> genKey <*> genKey <*> elements idxs)
+  [ (4, base)
+  , (1, Folded <$> elements [FAnd, FMod, FShr] <*> elements foldOffs <*> base)
   ]
-  where hashOff = elements [0, 0x40, 0xa0]
+  where
+    base = frequency
+      [ (2, Plain <$> genKey)
+      , (3, Mapping <$> hashOff <*> genKey <*> elements idxs)
+      , (2, Nested <$> hashOff <*> genKey <*> genKey <*> elements idxs)
+      ]
+    hashOff = elements [0, 0x40, 0xa0]
 
 genVal :: Int -> Gen Val
 genVal d = frequency $
@@ -294,8 +341,8 @@ genCalldata = BS.concat <$> vectorOf (length cdOffs) (word256Bytes <$> genWord)
 
 shrinkStmt :: Stmt -> [Stmt]
 shrinkStmt = \case
-  Store s v -> Load s : [Store s v' | v' <- shrinkVal v]
-  Load _ -> []
+  Store s v -> Load s : [Store s v' | v' <- shrinkVal v] <> [Store s' v | s' <- shrinkSlot s]
+  Load s -> map Load (shrinkSlot s)
   Call kind t k v rk rev wei -> [Call KCall t k v rk rev wei | kind /= KCall]
     <> [Call kind t k v rk (KLit 0) wei | rev /= KLit 0]
     <> [Call kind t k v rk rev (KLit 0) | wei /= KLit 0]
@@ -305,6 +352,9 @@ shrinkStmt = \case
     shrinkVal = \case
       VAdd a b -> [a, b]
       VLit w | w > 1 -> [VLit 0, VLit 1]
+      _ -> []
+    shrinkSlot = \case
+      Folded _ _ s -> [s]
       _ -> []
 
 -- * Runs
@@ -354,11 +404,13 @@ runConcrete fetcher w c others cd = do
         r -> Left (show r)
   pure $ (\(s, b) -> (out, s, b)) <$> finalState w (fmap (\c' -> (c'.storage, c'.balance)) end.env.contracts)
 
--- | The outcome of the symbolic leaf that the given calldata takes, if it is not a partial one
-evalSymbolic :: World -> [Expr End] -> ByteString -> Either String (Maybe Outcome)
-evalSymbolic w leaves cd = case filter (taken . props) leaves of
+-- | The outcome of the symbolic leaf that the given calldata takes, if it is not a partial one.
+-- When strict, the returndata must be concrete without concretizing keccaks: symbolic
+-- execution on concrete calldata has every value it reads.
+evalSymbolic :: Bool -> World -> [Expr End] -> ByteString -> Either String (Maybe Outcome)
+evalSymbolic strict w leaves cd = case filter (taken . props) leaves of
   [Success _ _ buf cs] -> do
-    out <- case sub buf of
+    out <- case (if strict then Expr.simplify buf else sub buf) of
       ConcreteBuf bs -> Right (Right bs)
       b -> Left ("undecided returndata: " <> show b)
     (s, b) <- finalState w (Map.fromList [(a, (sub st, sub bal)) | (a, C _ st _ bal _) <- Map.toList cs])
@@ -426,16 +478,23 @@ prop_rpc =
         , calldata = (AbstractBuf "txdata", []) }
       leaves <- Progress.withPhase "symbolic" ["program" .= show prog] (\ls -> ["leaves" .= length ls]) $
         interpret (Fetch.oracle solvers (Just symSess) rpcInfo) defaultIterConf symVm runExpr noopPathHandler
-      let symbolic = map (sequence . evalSymbolic world leaves) cds
+      let symbolic = map (sequence . evalSymbolic False world leaves) cds
+      symConcrete <- Progress.withPhase "symbolic-concrete" [] (const []) $ forM cds $ \cd -> do
+        vm <- liftIO $ stToIO $ makeVm (defaultVMOpts @Symbolic)
+          { contract = remoteContract code world True, address = LitAddr remote
+          , calldata = (ConcreteBuf cd, []) }
+        ls <- interpret (Fetch.oracle solvers (Just symSess) rpcInfo) defaultIterConf vm runExpr noopPathHandler
+        pure $ sequence (evalSymbolic True world ls cd)
       reqs <- liftIO $ readIORef node.requests
       let unexp = mapMaybe unexpected reqs
           partials = length [() | Nothing <- symbolic]
           mismatches =
             [ "calldata " <> T.unpack (formatBinary cd) <> "\n  " <> what <> ":\n" <> d
-            | (cd, truth, conc, sym) <- zip4 cds truths fetched symbolic
+            | (cd, truth, conc, sym, symConc) <- zip5 cds truths fetched symbolic symConcrete
             , (what, Just d) <-
                 [ ("concrete via RPC", diff world conc truth) ]
                 <> [ ("symbolic via RPC", diff world got truth) | Just got <- [sym] ]
+                <> [ ("symbolic on concrete calldata via RPC", diff world got truth) | Just got <- [symConc] ]
             ]
       pure
         $ tabulate "statements" [show (length prog)]
