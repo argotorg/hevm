@@ -549,6 +549,22 @@ possibleOnes = go (8 :: Int)
     -- every bit up to the highest set one: bounds any value whose bits are a subset
     fill v = if v == 0 then 0 else maxLit `shiftR` countLeadingZeros v
 
+-- | Drops the OR operands that cannot set a bit in care, looking through literal masks and
+-- shifts. Nothing if there is none.
+dropHidden :: W256 -> Expr EWord -> Maybe (Expr EWord)
+dropHidden care = \case
+  Or a b
+    | care .&. possibleOnes a == 0 -> Just (fromMaybe b (dropHidden care b))
+    | care .&. possibleOnes b == 0 -> Just (fromMaybe a (dropHidden care a))
+    | otherwise -> case (dropHidden care a, dropHidden care b) of
+        (Nothing, Nothing) -> Nothing
+        (a', b') -> Just (EVM.Expr.or (fromMaybe a a') (fromMaybe b b'))
+  And (Lit m) x -> EVM.Expr.and (Lit m) <$> dropHidden (care .&. m) x
+  SHL (Lit k) x | k < 256 -> shl (Lit k) <$> dropHidden (care `shiftR` unsafeInto k) x
+  SHR (Lit k) x | k < 256 -> shr (Lit k) <$> dropHidden (care `shiftL` unsafeInto k) x
+  Mul (Lit c) x | Just k <- log2W c -> mul (Lit c) <$> dropHidden (care `shiftR` k) x
+  _ -> Nothing
+
 -- | The inverse of an odd number mod 2^256, by Newton's iteration: each step doubles the
 -- correct low bits, starting from the 3 that an odd number is its own inverse in
 oddInverse :: W256 -> W256
@@ -1733,16 +1749,9 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
       | k < 256, Just r <- packedField m (unsafeInto k) x = r
 
     -- Drop OR terms hidden by the mask without distributing it.
-    go (And m@(Lit mask) x@(Or _ _))
-      | terms <- orTerms x
-      , kept <- filter (\t -> mask .&. possibleOnes t /= 0) terms
-      , length kept < length terms
-      = EVM.Expr.and m $ case kept of
-          [] -> Lit 0
-          _ -> foldr1 EVM.Expr.or kept
-      where
-        orTerms (Or a b) = orTerms a <> orTerms b
-        orTerms t = [t]
+    go (And m@(Lit mask) x) | Just x' <- dropHidden mask x = EVM.Expr.and m x'
+    go (SHR s@(Lit k) x) | k < 256, Just x' <- dropHidden (maxLit `shiftL` unsafeInto k) x = shr s x'
+    go (SHL s@(Lit k) x) | k < 256, Just x' <- dropHidden (maxLit `shiftR` unsafeInto k) x = shl s x'
 
     -- address masking
     go (And (Lit 0xffffffffffffffffffffffffffffffffffffffff) a@(WAddr _)) = a
