@@ -45,6 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   false, matching the SMT assumption.
 - Masked `Div` and `SHR` reads now simplify through packed-word writes,
   allowing reads of Solidity-packed fields to reduce to the written value.
+- Masked and shifted reads of packed words drop `Or` operands that cannot
+  reach the read bits, also through intermediate masks and shifts, without
+  distributing the mask over the remaining operands.
 - Small, word-aligned keccak inputs are canonicalized so equivalent mapping
   keys built from memory writes or copies can resolve to the same storage entry.
 - Storage reads resolve concrete keccak slots, including nested hashes and

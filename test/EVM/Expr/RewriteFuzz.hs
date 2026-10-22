@@ -424,6 +424,7 @@ genTemplate s shiftAmt = oneof
   , IsZero <$> (litOp <*> lit <*> s)
   , IsZero . Not <$> s
   , And <$> lit <*> (shiftOp <*> shiftAmt <*> s)
+  , And <$> lit <*> (Or <$> s <*> (shiftOp <*> shiftAmt <*> s))
   , shiftOp <*> shiftAmt <*> (shiftOp <*> shiftAmt <*> s)
   , SAR <$> shiftAmt <*> (SAR <$> shiftAmt <*> s)
   , Mod <$> s <*> pow2, Div <$> s <*> pow2
