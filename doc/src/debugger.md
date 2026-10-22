@@ -12,20 +12,6 @@ $ hevm test --root . --match prove_transfer --interactive
 hevm debugger at http://127.0.0.1:7317
 ```
 
-## Clients
-
-hevm itself has no user interface: everything goes through the HTTP API, so
-several clients can drive the same session.
-
-- **hevm-web-ui**, a web page, kept as a separate project. It shows the source
-  line, the code, the stack, memory, storage, the call trace, pending branches,
-  breakpoints and statistics.
-- **Any program**, such as a script or an LLM agent, through the HTTP API.
-  `GET /api` describes it. Views are JSON with values unformatted, words as
-  hex and symbolic ones as expressions, so each client shows them its own way.
-
-The `help` command lists the commands.
-
 ## Stepping forward and back
 
 The debugger steps one instruction at a time, by source line, over or out of
@@ -48,9 +34,6 @@ other side. How the sides offered are decided is a setting:
   simplification alone, so the debugger follows what `hevm test` would do;
 - **checked**: as explorer, and the solver checks every decision
   simplification made. This is for finding bugs in hevm itself.
-
-Unlike exploration, the debugger never merges the two sides of a short branch:
-every step is one instruction.
 
 Symbolic values are shown simplified, as the solver would see them. This can
 be turned off to see the expressions as execution built them.

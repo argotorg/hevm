@@ -30,8 +30,7 @@ module EVM.Progress
   , clearWorker
   , timedQuery
   , fork
-  , snapshot
-  , snapshotText
+  , currentProgress
   ) where
 
 import Control.Concurrent (ThreadId, forkIO, killThread, myThreadId, threadDelay)
@@ -56,8 +55,6 @@ import Data.Ord (Down(..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as T
-import Data.Text.Lazy qualified as TL
-import Data.Text.Lazy.Encoding qualified as TLE
 import GHC.Clock (getMonotonicTime)
 import System.Console.ANSI
 import System.Environment (lookupEnv)
@@ -71,7 +68,7 @@ data ProgressOpts = ProgressOpts
   { logFile :: Maybe FilePath
   , logExprs :: Bool
   , statusLine :: Bool
-  -- | keep the state for 'snapshot' even without a log or a status line
+  -- | keep the state for 'currentProgress' even without a log or a status line
   , track :: Bool
   }
 
@@ -389,8 +386,8 @@ fork addr pc fs = liftIO $ readIORef global >>= mapM_ (\st -> do
 
 -- | The current state, as the status line and the summary show it. Not
 -- running unless inside 'withProgress'.
-snapshot :: IO JSON.Value
-snapshot = readIORef global >>= \case
+currentProgress :: IO JSON.Value
+currentProgress = readIORef global >>= \case
   Nothing -> pure $ JSON.object ["running" .= False]
   Just st -> do
     now <- getMonotonicTime
@@ -419,16 +416,6 @@ snapshot = readIORef global >>= \case
                      | ((a, pc), ls) <- take 10 (hottest ps.byLoc) ]
       , "phases" .= reverse done
       ]
-
--- | 'snapshot' as the plain status line, followed by the phases that ended
-snapshotText :: IO Text
-snapshotText = readIORef global >>= \case
-  Nothing -> pure "not running\n"
-  Just st -> do
-    segs <- statusSegments st
-    done <- readIORef st.finished
-    let status = T.intercalate " | " [T.strip (T.unwords (filter (Prelude.not . T.null) [l, v])) | (l, _, v) <- segs]
-    pure $ T.unlines $ status : [ "done: " <> TL.toStrict (TLE.decodeUtf8 (JSON.encode ph)) | ph <- reverse done ]
 
 heartbeat :: St -> IO ()
 heartbeat st = do

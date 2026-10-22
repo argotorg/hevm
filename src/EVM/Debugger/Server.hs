@@ -197,7 +197,7 @@ sessionRoute run sessVar done req = case (req.method, req.path) of
 
 progressRoute :: Route
 progressRoute req = case (req.method, req.path) of
-  ("GET", "/progress") -> Just <$> (Progress.snapshot >>= json)
+  ("GET", "/progress") -> Just <$> (Progress.currentProgress >>= json)
   _ -> pure Nothing
 
 json :: ToJSON a => a -> IO Response

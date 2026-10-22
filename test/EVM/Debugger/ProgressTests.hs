@@ -1,6 +1,6 @@
 {-|
 Module      : ProgressTests
-Description : The progress of a run, as snapshots and over HTTP
+Description : The progress of a run, read directly and over HTTP
 
 The progress state is global, so these run one at a time and after every other
 test: anything else running would report into it.
@@ -23,7 +23,6 @@ import Data.Maybe (fromMaybe, isJust, mapMaybe, listToMaybe)
 import Data.ByteString.Char8 qualified as BC
 import System.IO.Temp (withSystemTempDirectory)
 import Data.Text (Text)
-import Data.Text qualified as T
 import Data.Vector qualified as V
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -43,7 +42,7 @@ import EVM.Types (Expr(AbstractBuf))
 tests :: TestTree
 tests = after AllFinish "!/progress-global/" $ sequentialTestGroup "progress-global" AllFinish
   [ testCase "not-running" $ do
-      v <- snapshot
+      v <- currentProgress
       assertEqual "running" (Just (JSON.Bool False)) (at ["running"] v)
   , testCase "phases-and-paths" $ withProgress tracking $ do
       inside <- withPhase "explore" ["test" .= ("t" :: Text)] (const ["found" .= (2 :: Int)]) $ do
@@ -52,13 +51,13 @@ tests = after AllFinish "!/progress-global/" $ sequentialTestGroup "progress-glo
         phaseTick
         pathDone False
         pathDone True
-        snapshot
+        currentProgress
       assertEqual "phase" (Just "explore") (str =<< at ["phase", "name"] inside)
       assertEqual "done" (Just 2) (int =<< at ["phase", "done"] inside)
       assertEqual "total" (Just 5) (int =<< at ["phase", "total"] inside)
       assertEqual "paths" (Just 2) (int =<< at ["paths", "done"] inside)
       assertEqual "partial" (Just 1) (int =<< at ["paths", "partial"] inside)
-      after' <- snapshot
+      after' <- currentProgress
       case at ["phases"] after' of
         Just (JSON.Array ps) | [p] <- V.toList ps -> do
           assertEqual "ended phase" (Just "explore") (str =<< at ["phase"] p)
@@ -69,7 +68,7 @@ tests = after AllFinish "!/progress-global/" $ sequentialTestGroup "progress-glo
       setWorker ["pc" .= (7 :: Int), "addr" .= ("0xabc" :: Text)]
       r <- timedQuery "test-kind" [] [] (const "sat") (\started -> started >> pure (5 :: Int))
       clearWorker
-      v <- snapshot
+      v <- currentProgress
       assertEqual "result passed through" 5 r
       assertEqual "done" (Just 1) (int =<< at ["queries", "done"] v)
       assertEqual "none in flight" (Just 0) (len =<< at ["queries", "inFlight"] v)
@@ -88,14 +87,14 @@ tests = after AllFinish "!/progress-global/" $ sequentialTestGroup "progress-glo
         _ <- timedQuery "slow" ["n" .= (1 :: Int)] [] (const "unsat") (\started -> started >> putMVar solving () >> takeMVar gate)
         putMVar finished ()
       takeMVar solving
-      v <- snapshot
+      v <- currentProgress
       assertEqual "nothing done yet" (Just 0) (int =<< at ["queries", "done"] v)
       assertEqual "in flight" (Just (JSON.Bool True, "slow")) $ do
         q <- first =<< at ["queries", "inFlight"] v
         (,) <$> at ["solving"] q <*> (str =<< at ["kind"] q)
       putMVar gate ()
       takeMVar finished
-      v' <- snapshot
+      v' <- currentProgress
       assertEqual "done" (Just 1) (int =<< at ["queries", "done"] v')
       assertEqual "none in flight" (Just 0) (len =<< at ["queries", "inFlight"] v')
   , testCase "progress-over-http" $ withProgress tracking $ do
@@ -105,8 +104,6 @@ tests = after AllFinish "!/progress-global/" $ sequentialTestGroup "progress-glo
         v <- JSON.Object <$> httpJSON port "GET" "/progress" ""
         assertEqual "running" (Just (JSON.Bool True)) (at ["running"] v)
         assertEqual "phase" (Just "served") (str =<< at ["phase", "name"] v)
-        txt <- snapshotText
-        assertBool "text" ("served" `T.isInfixOf` txt)
         st <- http port "GET" "/state" ""
         assertBool "no debugging session" ("not found" `BS.isInfixOf` st)
         putMVar portVar port
@@ -216,7 +213,7 @@ concurrentProgress ws nClients = withPhase "fuzz" [] (const []) $ do
     mapM_ takeMVar workers
     writeIORef stop True
     mapM_ takeMVar pollers
-    v <- snapshot
+    v <- currentProgress
     ps <- readIORef problems
     let ops = concat ws
         expect name got want = [ name <> ": " <> show got <> ", expected " <> show want | got /= Just want ]
