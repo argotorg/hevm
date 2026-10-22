@@ -56,12 +56,3 @@ if/else.
 
 Symbolic values are shown simplified, as the solver would see them. This can
 be turned off to see the expressions as execution built them.
-
-## Statistics and progress
-
-The debugger counts what a session has done: instructions run and replayed,
-solver queries by kind and their time, branches offered and taken, and how
-branch decisions held up in checked mode. A run with `--serve` (or with
-`--debugger`) also serves hevm's progress live: the current phase, the
-solver queries in flight and where solving time goes. With `--progress-log`,
-the debugger's commands and branch decisions go into the progress log too.
