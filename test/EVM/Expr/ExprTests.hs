@@ -18,7 +18,9 @@ import Data.ByteString qualified as BS (drop, length, pack, replicate, take)
 import Data.Containers.ListUtils (nubOrd)
 import Data.List qualified as List (nub, sort, tails)
 import Data.Map.Strict qualified as Map
+import Control.Exception (evaluate)
 import Data.Maybe (isJust, fromMaybe)
+import System.Timeout qualified as Timeout
 import Data.Monoid (All(..))
 import Data.Text (Text)
 import Data.Typeable
@@ -380,6 +382,28 @@ storageTests = testGroup "Storage tests"
         (Expr.decomposeStorage $ SLoad (arrElem 2 (Var "i"))
           (SStore (Lit 0) (Var "a") (SStore (arrZero 2) (Lit 1) emptyStore)))
     , concreteKeccakStorageTests
+    , testCase "read-through-unresolved-copy-terminates" $ do
+        let e = ReadWord (Lit 0x56) (CopySlice (Var "p") (Lit 0x34) (Lit 0x3c) (ConcreteBuf "\233") (AbstractBuf "buf"))
+        r <- Timeout.timeout 5000000 (evaluate (Expr.simplify e))
+        assertBool "simplify finishes" (isJust r)
+    , testCase "read-of-selector-and-argument" $ do
+        -- calldata as hevm test builds it: selector bytes, then the arguments
+        let cd = foldr (\(i, v) acc -> WriteByte (Lit i) (LitByte v) acc)
+                   (WriteWord (Lit 4) (Var "arg1") (WriteWord (Lit 36) (Var "arg2") (AbstractBuf "txdata")))
+                   (zip [0 ..] [0x4a, 0xc1, 0x5a, 0xe9])
+        assertEqual "the selector, then the top of the argument"
+          (Or (Lit 0x4ac15ae900000000000000000000000000000000000000000000000000000000) (SHR (Lit 32) (Var "arg1")))
+          (Expr.simplify (ReadWord (Lit 0) cd))
+        assertEqual "the selector" (Lit 0x4ac15ae9) (Expr.simplify (SHR (Lit 224) (ReadWord (Lit 0) cd)))
+    , testCase "read-from-copy-of-zeros" $ do
+        -- callee calldata of symbolic size, copied from untouched memory
+        let buf = CopySlice (Lit 0) (Lit 0) (ReadWord (Lit 0x20) (AbstractBuf "calldata")) (ConcreteBuf "") (ConcreteBuf "")
+            written = WriteWord (Var "i") (Lit 0) (WriteByte (Lit 5) (LitByte 0) buf)
+        assertEqual "word" (Lit 0) (Expr.readWord (Lit 3) buf)
+        assertEqual "word at a symbolic index" (Lit 0) (Expr.readWord (Var "j") written)
+        assertEqual "byte" (LitByte 0) (Expr.readByte (Lit 40) written)
+        assertEqual "a nonzero write is kept" (Lit 7)
+          (Expr.readWord (Lit 0) (WriteWord (Lit 0) (Lit 7) buf))
     , testCase "readStorage-struct-field-offsets" $ do
         let slot o = Add (Lit o) (mappingRead 0 "acc")
             store a b = SStore (slot a) (Var "other")
@@ -2346,6 +2370,17 @@ simplifierFuzzTests cfg = testGroup "SimplifierPropertyTests"
         let simplified = Expr.readWord idx buf
             full = ReadWord idx buf
         proveEquivExprWith cfg full simplified
+    -- the reads straddle writes, so that 'readWordFromRuns' rewrites them
+    , testProperty "readWord-from-runs-equivalence" $ forAll genStraddle $ \(idx, buf) -> ioProperty $ do
+        let full = ReadWord idx buf
+            runs = Expr.readWordFromRuns idx buf
+            selector = SHR (Lit 224) full
+        direct <- maybe (pure True) (proveEquivExprWith cfg full) runs
+        simplified <- proveEquivExprWith cfg full (Expr.simplify full)
+        sel <- proveEquivExprWith cfg selector (Expr.simplify selector)
+        pure $ tabulate "rewritten, in runs" [maybe "no" (show . runCount) runs]
+             $ counterexample ("rewritten to " <> show runs <> "\nsimplified: " <> show (Expr.simplify full))
+             $ direct && simplified && sel
     , testProperty "writeWord-equivalance" $ \(idx, val, WriteWordBuf buf) -> ioProperty $ do
         let simplified = Expr.writeWord idx val buf
             full = WriteWord idx val buf
@@ -2608,6 +2643,34 @@ proveEquivPropWith cfg a b
   | otherwise = do
       res <- checkSatWith cfg $ PNeg ((PImpl a b) .&& (PImpl b a))
       pure $ isUnsatOrUnknown res
+
+-- | Literal bytes and symbolic words written near a read, over an abstract,
+-- concrete or empty buffer, so that the read straddles them
+genStraddle :: Gen (Expr EWord, Expr Buf)
+genStraddle = do
+  base <- elements
+    [ AbstractBuf "b", ConcreteBuf "", ConcreteBuf (BS.pack [1 .. 90])
+    -- reads through it stay reads of the whole buffer, which must not be rewritten
+    , CopySlice (Var "p") (Lit 0x34) (Lit 0x3c) (ConcreteBuf "\233") (AbstractBuf "b") ]
+  n <- chooseInt (1, 5)
+  writes <- vectorOf n $ frequency
+    [ (3, WriteByte . Lit <$> chooseBoundedIntegral (0, 70) <*> (LitByte <$> arbitrary))
+    , (3, WriteWord . Lit <$> chooseBoundedIntegral (0, 70) <*> elements
+            [Var "x", Var "y", Add (Var "x") (Lit 1), ReadWord (Lit 3) (AbstractBuf "c"), Lit 0x1234])
+    -- a selector, as calldata starts with
+    , (2, (\i bs b -> foldr (\(k, v) acc -> WriteByte (Lit (i + k)) (LitByte v) acc) b (zip [0 ..] bs))
+            <$> chooseBoundedIntegral (0, 40) <*> vectorOf 4 arbitrary)
+    -- a symbolic byte, which no run takes
+    , (1, WriteByte . Lit <$> chooseBoundedIntegral (0, 70) <*> pure (ReadByte (Lit 0) (AbstractBuf "d")))
+    ]
+  idx <- frequency [(12, chooseBoundedIntegral (0, 60)), (1, pure (maxBound - 10))]
+  pure (Lit idx, foldr ($) base writes)
+
+-- | How many parts 'readWordFromRuns' or-ed together
+runCount :: Expr EWord -> Int
+runCount = \case
+  Or a b -> runCount a + runCount b
+  _ -> 1
 
 proveEquivExpr :: Typeable a => Expr a -> Expr a -> IO Bool
 proveEquivExpr = proveEquivExprWith equivConfig

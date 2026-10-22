@@ -78,6 +78,14 @@ basicTests = testGroup "simple-checks"
           <> [I OpMsize, I (OpPush (Lit 0xc0)), I OpEq, Target 0, I OpJumpi, I (OpUnknown 0xfe), I OpJumpdest, I OpStop]
     (_, res) <- executeWithBitwuzla $ \s -> verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
     assertBool "MSIZE covers the output" (all isQed res)
+  , testCase "mcopy-symbolic-size-expands-memory" $ do
+    -- MCOPY of calldata[0] & 0x3f bytes to 0; INVALID if 32 bytes were copied but MSIZE is not 32
+    let size = [I (OpPush (Lit 0)), I OpCalldataload, I (OpPush (Lit 0x3f)), I OpAnd]
+        c = asm $ size <> [I (OpPush (Lit 0)), I (OpPush (Lit 0)), I OpMcopy]
+          <> [I OpMsize, I (OpPush (Lit 0x20)), I OpEq, I OpIszero]
+          <> size <> [I (OpPush (Lit 0x20)), I OpEq, I OpAnd, Target 0, I OpJumpi, I OpStop, I OpJumpdest, I (OpUnknown 0xfe)]
+    (_, res) <- executeWithBitwuzla $ \s -> verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
+    assertBool "MSIZE covers the copy" (all isQed res)
   , testCase "merged-gas-reading-not-reused" $ do
     -- the fall-through of a mergeable forward jump reads GAS, which is then
     -- compared to a second reading; INVALID if they differ and x == 0 (#1191)

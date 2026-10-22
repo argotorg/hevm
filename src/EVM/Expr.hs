@@ -64,6 +64,7 @@ module EVM.Expr
   , readByte
   , readBytes
   , readWord
+  , readWordFromRuns
   , upperBound
   , lowerBound
   , maxBytes
@@ -147,7 +148,7 @@ module EVM.Expr
 
 import Prelude hiding (LT, GT, exp, drop, take, not, and, or, div, mod, min, max)
 import Prelude qualified (div, mod, not, take, min, max)
-import Control.Monad (unless, when)
+import Control.Monad (guard, unless, when)
 import Control.Monad.ST (ST)
 import Control.Monad.State (put, get, execState, State)
 import Data.Bits hiding (And, Xor, xor)
@@ -404,6 +405,16 @@ pleq a b
 -- structure, so reads outside of the bounds of a ConcreteBuf return 0. This is
 -- inline with the semantics of calldata and memory, but not of returndata.
 
+-- | Every byte is zero, e.g. a copy of zeros onto zeros: any read gives 0,
+-- whatever the offsets and sizes
+zeroContents :: Expr Buf -> Bool
+zeroContents = \case
+  ConcreteBuf b -> BS.all (== 0) b
+  CopySlice _ _ _ src dst -> zeroContents src && zeroContents dst
+  WriteWord _ (Lit 0) b -> zeroContents b
+  WriteByte _ (LitByte 0) b -> zeroContents b
+  _ -> False
+
 -- fully concrete reads
 readByte :: Expr EWord -> Expr Buf -> Expr Byte
 readByte (Lit x) (ConcreteBuf b)
@@ -415,6 +426,7 @@ readByte (Lit x) (ConcreteBuf b)
     i = case x of
           (W256 (Word256 _ (Word128 _ x'))) -> unsafeInto x'
 
+readByte _ b | zeroContents b = LitByte 0
 readByte i@(Lit x) (WriteByte (Lit idx) val src)
   = if x == idx
     then val
@@ -449,7 +461,6 @@ readByte i@(Lit x) buf@(CopySlice _ (Lit dstOffset) (Lit size) _ dst)
     then readByte i dst
     else ReadByte (Lit x) buf
 
-readByte _ (ConcreteBuf b) | BS.all (== 0) b = LitByte 0
 -- offsets from the same symbolic base
 readByte i (WriteWord j val src)
   | Just d <- offsetDiff i j = if d < 32 then indexWord (Lit d) val else readByte i src
@@ -601,7 +612,7 @@ writeDisjointFromReadWord i = \case
 -- | Reads the word starting at idx from the given buf
 readWord :: Expr EWord -> Expr Buf -> Expr EWord
 readWord idx buf@(AbstractBuf _) = ReadWord idx buf
-readWord _ (ConcreteBuf b) | BS.all (== 0) b = Lit 0
+readWord _ b | zeroContents b = Lit 0
 readWord idx b@(WriteWord idx' val buf)
   -- the word we are trying to read exactly matches a WriteWord
   | idx == idx' = val
@@ -682,6 +693,51 @@ readWordFromBytes i@(Lit idx) buf
      then Lit (bytesToW256 . mapMaybe maybeLitByteSimp $ bytes)
      else ReadWord i buf
 readWordFromBytes idx buf = ReadWord idx buf
+
+-- | Consecutive bytes of a word read, by where they come from: literals, bytes of a
+-- written word from byte 'first' on, or bytes of a buffer from 'start' on
+data ByteRun
+  = LitRun [Word8]
+  | WordRun (Expr EWord) W256 W256
+  | BufRun (Expr Buf) W256 W256
+
+-- | A word read that straddles writes, like calldata's selector bytes and its
+-- first argument, as the parts of what was written, shifted into place and or-ed
+-- together, which reads better than the whole buffer under a ReadWord
+readWordFromRuns :: Expr EWord -> Expr Buf -> Maybe (Expr EWord)
+readWordFromRuns (Lit idx) buf | idx + 31 >= idx = do
+  sources <- mapM byteSource [readByte (Lit i) buf | i <- [idx .. idx + 31]]
+  let runs = foldr addByte [] sources
+  guard $ length runs >= 2 && length runs <= 3 && Prelude.not (all isLitRun runs)
+  pure $ foldr1 EVM.Expr.or (zipWith place (scanl (+) 0 (map runLength runs)) runs)
+  where
+    byteSource :: Expr Byte -> Maybe ByteRun
+    byteSource = \case
+      LitByte v -> Just (LitRun [v])
+      IndexWord (Lit j) w | j < 32 -> Just (WordRun w j 1)
+      -- reading the buffer itself would rewrite the read into itself, forever
+      ReadByte (Lit k) b | b /= buf -> Just (BufRun b k 1)
+      _ -> Nothing
+    addByte r [] = [r]
+    addByte r (next : rest) = case (r, next) of
+      (LitRun a, LitRun b) -> LitRun (a <> b) : rest
+      (WordRun w j n, WordRun w' j' n') | w == w', j + n == j' -> WordRun w j (n + n') : rest
+      (BufRun b k n, BufRun b' k' n') | b == b', k + n == k' -> BufRun b k (n + n') : rest
+      _ -> r : next : rest
+    isLitRun = \case LitRun _ -> True; _ -> False
+    runLength = \case
+      LitRun vs -> unsafeInto (length vs)
+      WordRun _ _ n -> n
+      BufRun _ _ n -> n
+    -- a run at byte p of the result: its bytes moved to the top of a word, then down to p
+    place p = \case
+      r@(LitRun vs) -> Lit (bytesToW256 vs `shiftL` unsafeInto (8 * (32 - p - runLength r)))
+      WordRun w j n -> moved p n (if j == 0 then w else shl (Lit (8 * j)) w)
+      BufRun b k n -> moved p n (ReadWord (Lit k) b)
+    moved p n top =
+      let low = if n == 32 then top else shr (Lit (8 * (32 - n))) top
+      in if p + n == 32 then low else shl (Lit (8 * (32 - p - n))) low
+readWordFromRuns _ _ = Nothing
 
 {- | Copies a slice of src into dst.
 
@@ -1488,7 +1544,9 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (SStore slot val store) = writeStorage slot val store
 
     -- simplify buffers
-    go o@(ReadWord (Lit _) _) = simplifyReads o
+    go o@(ReadWord (Lit _) _) = case simplifyReads o of
+      ReadWord i@(Lit _) b | Just w <- readWordFromRuns i b -> w
+      r -> r
     go (ReadWord idx buf) = readWord idx buf
     go o@(ReadByte (Lit _) _) = simplifyReads o
     go (ReadByte idx buf) = readByte idx buf
@@ -1840,6 +1898,8 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (SHR (Lit a) _) | a >= 256 = Lit 0
     -- compose shifts by literals; past 256 the possibleOnes rules above already gave 0
     go (SHR (Lit n) (SHR (Lit m) x)) | n < 256, m < 256, n + m < 256 = shr (Lit (n + m)) x
+    -- e.g. the selector out of a word 'readWordFromRuns' made of it and an argument
+    go (SHR (Lit n) (Or a b)) | n < 256, isJust (maybeLitWordSimp a) || isJust (maybeLitWordSimp b) = EVM.Expr.or (shr (Lit n) a) (shr (Lit n) b)
     go (SHL (Lit n) (SHL (Lit m) x)) | n < 256, m < 256, n + m < 256 = shl (Lit (n + m)) x
     go (SAR (Lit n) (SAR (Lit m) x)) | n < 256, m < 256 = sar (Lit (Prelude.min 255 (n + m))) x
     go (SHL (Lit n) (SHR (Lit m) x)) | n < 256, m < 256, n /= m =

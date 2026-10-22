@@ -712,25 +712,38 @@ propToSMTWith arithEnc = \case
 
 -- ** Helpers ** ---------------------------------------------------------------------------------
 
+-- | Copies are encoded a byte at a time, so a larger one would take gigabytes
+maxEncodedCopy :: W256
+maxEncodedCopy = 0x100000
+
 copySliceWith :: ArithEncoding -> Expr EWord -> Expr EWord -> Expr EWord -> Builder -> Builder -> Err Builder
 copySliceWith arithEnc srcOffset dstOffset (Lit size) src dst = do
   -- a symbolic size, e.g. a keccak, can become this large only once concretized for encoding
-  when (size >= into memoryAccessLimit) $
-    Left $ "CopySlice of 0x" <> showHex size "" <> " bytes not currently implemented, it is beyond the memory access limit"
+  when (size > maxEncodedCopy) $
+    Left $ "CopySlice of 0x" <> showHex size "" <> " bytes not currently implemented, encoding it would take too much memory"
+  -- a symbolic offset is encoded once, not once per byte
+  srcBind <- binding "copy!srcoff" srcOffset
+  dstBind <- binding "copy!dstoff" dstOffset
   sz <- internal size
-  -- the binder must not be a possible buffer name, or it captures that buffer in dst
-  pure $ "(let ((copy!src " <> src <> ")) " <> sz <> ")"
+  -- the binders must not be possible buffer names, or they capture that buffer in dst
+  pure $ "(let ((copy!src " <> src <> ")" <> srcBind <> dstBind <> ") " <> sz <> ")"
   where
+    binding :: Builder -> Expr EWord -> Err Builder
+    binding _ (Lit _) = pure ""
+    binding name e = do
+      enc <- exprToSMTWith arithEnc e
+      pure $ " (" <> name <> " " <> enc <> ")"
     internal 0 = pure dst
     internal idx = do
       let idx' = idx - 1
-      encDstOff <- offset idx' dstOffset
-      encSrcOff <- offset idx' srcOffset
+          encDstOff = offset "copy!dstoff" idx' dstOffset
+          encSrcOff = offset "copy!srcoff" idx' srcOffset
       child <- internal idx'
       pure $ "(store " <> child `sp` encDstOff `sp` "(select copy!src " <> encSrcOff <> "))"
-    offset :: W256 -> Expr EWord -> Err Builder
-    offset o (Lit b) = pure $ wordAsBV $ o + b
-    offset o e = exprToSMTWith arithEnc $ Expr.add (Lit o) e
+    offset :: Builder -> W256 -> Expr EWord -> Builder
+    offset _ o (Lit b) = wordAsBV $ o + b
+    offset name 0 _ = name
+    offset name o _ = "(bvadd " <> name <> " (_ bv" <> fromString (show (into o :: Integer)) <> " 256))"
 copySliceWith _ _ _ _ _ _ = Left "CopySlice with a symbolically sized region not currently implemented, cannot execute SMT solver on this query"
 
 expandExpWith :: ArithEncoding -> Expr EWord -> W256 -> Err Builder

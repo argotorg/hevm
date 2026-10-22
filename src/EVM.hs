@@ -656,11 +656,14 @@ exec1 conf = do
                 fetchAccountWithFallback x (freshVarFallback xs) $ \c -> do
                    next
                    assign' (#state % #stack) xs
-                   if accountEmpty c
-                     then push (W256 0)
-                     else case view bytecode c of
-                            Just b -> pushSym $ keccak b
-                            Nothing -> pushSym $ CodeHash x
+                   let hash = case view bytecode c of
+                         Just b -> keccak b
+                         Nothing -> CodeHash x
+                   if accountEmpty c then push (W256 0)
+                   -- emptiness then hinges on a symbolic balance, e.g. after a symbolic transfer of 0
+                   else if codeEmpty c && c.nonce == Just 0 && isNothing (maybeLitWordSimp c.balance)
+                     then pushSym $ Expr.simplify $ ITE (Expr.eq c.balance (Lit 0)) (Lit 0) hash
+                   else pushSym hash
             [] ->
               underrun
 
@@ -745,8 +748,8 @@ exec1 conf = do
                       next
                       assign' (#state % #stack) xs
                       mcopy sz srcOff dstOff
-                _ -> do
-                  -- symbolic, ignore gas
+                -- no gas for a symbolic size, but the memory still grows
+                _ -> accessMemoryRange srcOff sz $ accessMemoryRange dstOff sz $ do
                   next
                   assign' (#state % #stack) xs
                   mcopy sz srcOff dstOff
@@ -1363,6 +1366,8 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
     burn' gasCap $ do
       assign' (#state % #stack) (Lit 0 : xs)
       assign (#state % #returndata) mempty
+      -- as for a call that runs out of gas, so traces show why it failed
+      pushTrace $ ErrorTrace (OutOfGas (fromMaybe 0 (gasWord gasCap)) cost)
       next
   else burn cost $
     case preCompileAddr of
@@ -1663,13 +1668,16 @@ accountExists addr vm =
 -- EIP 161
 accountEmpty :: Contract -> Bool
 accountEmpty c =
-  case c.code of
-    RuntimeCode (ConcreteRuntimeCode "") -> True
-    RuntimeCode (SymbolicRuntimeCode b) -> null b
-    _ -> False
+  codeEmpty c
   && c.nonce == (Just 0)
   -- TODO: handle symbolic balance...
   && c.balance == Lit 0
+
+codeEmpty :: Contract -> Bool
+codeEmpty c = case c.code of
+  RuntimeCode (ConcreteRuntimeCode "") -> True
+  RuntimeCode (SymbolicRuntimeCode b) -> null b
+  _ -> False
 
 -- Adds constraints such that two symbolic addresses cannot alias each other
 -- and symbolic addresses cannot alias concrete addresses
@@ -3884,6 +3892,7 @@ instance VMOps Symbolic where
   enoughGas _ _ = True
   subGas _ _ = ()
   toGas _ = ()
+  gasWord _ = Nothing
   whenSymbolicElse a _ = a
 
   partial e = assign #result $ Just (Unfinished e)
@@ -4080,6 +4089,7 @@ instance VMOps Concrete where
   enoughGas cost gasCap = cost <= gasCap
   subGas gasCap cost = gasCap - cost
   toGas = id
+  gasWord = Just
   whenSymbolicElse _ a = a
   partial _ = internalError "won't happen during concrete exec"
   branch _ (forceLit -> cond) continue = continue (cond > 0)

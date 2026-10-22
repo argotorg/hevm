@@ -5,6 +5,7 @@ module EVM.Fetch
   , fetchBlockWithSession
   , fetchQuery
   , oracle
+  , checkBranch
   , Fetcher
   , RpcInfo (..)
   , RpcQuery (..)
@@ -604,7 +605,7 @@ oracle solvers preSess rpcInfo q = do
          case branchcondition of
            Lit 0 -> pure $ continue (Case False)
            Lit _ -> pure $ continue (Case True)
-           _     -> continue <$> checkBranch solvers (branchcondition ./= (Lit 0)) pathconds
+           _     -> continue <$> checkBranch solvers branchcondition pathconds
 
     PleaseGetSols symExpr numBytes pathconditions continue -> do
          let pathconds = foldl' PAnd (PBool True) pathconditions
@@ -684,28 +685,24 @@ getSolutions solvers symExprPreSimp numBytes pathconditions = do
         let smt2 = assertProps conf [(PEq (Var "multiQueryVar") symExpr) .&& conds]
         checkMulti solvers smt2 $ MultiSol { maxSols = conf.maxWidth , numBytes = numBytes , var = "multiQueryVar" }
 
--- | Checks which branches are satisfiable, checking the pathconditions for consistency
--- if the third argument is true.
--- When in debug mode, we do not want to be able to navigate to dead paths,
--- but for normal execution paths with inconsistent pathconditions
--- will be pruned anyway.
-checkBranch :: App m => SolverGroup -> Prop -> Prop -> m BranchCondition
-checkBranch solvers branchcondition pathconditions = do
-  let props = [pathconditions .&& branchcondition]
-  checkSatWithProps solvers props >>= \case
+-- | Which sides of a branch the path conditions allow. Each side is asked as
+-- execution records it when taken, which simplification can take apart, and a
+-- side the solver cannot decide, e.g. as it cannot encode it, does not keep the
+-- other side from being refuted.
+checkBranch :: App m => SolverGroup -> Expr EWord -> Prop -> m BranchCondition
+checkBranch solvers cond pathconditions = do
+  let condSimp = Expr.simplify cond
+      true = Expr.simplifyProp (Lit 0 ./= condSimp)
+      false = Expr.simplifyProp (Lit 0 .== condSimp)
+      ask side = checkSatWithProps solvers [pathconditions .&& side]
+  ask true >>= \case
     -- the condition is unsatisfiable: it is false, unless the path conditions are too
-    Qed -> checkSatWithProps solvers [pathconditions .&& PNeg branchcondition] <&> \case
+    Qed -> ask false <&> \case
       Qed -> Infeasible
       _ -> Case False
-    -- Sat means its possible for condition to hold
-    Cex {} -> do -- is its negation also possible?
-      let propsNeg = [pathconditions .&& (PNeg branchcondition)]
-      checkSatWithProps solvers propsNeg >>= \case
-        -- No. The condition must hold
-        Qed -> pure $ Case True
-        -- Yes. Both branches possible
-        Cex {} -> pure UnknownBranch
-        -- If the query times out, or can't be executed (e.g. symbolic copyslice) we simply explore both paths
-        _ -> pure UnknownBranch
-    -- If the query times out, or can't be executed (e.g. symbolic copyslice) we simply explore both paths
-    _ -> pure UnknownBranch
+    -- possibly true, or the solver could not tell: is false possible?
+    _ -> ask false <&> \case
+      Qed -> Case True
+      -- both sides are possible, or the solver could not tell, e.g. a timeout or a
+      -- query it cannot encode (a symbolic copyslice): explore both
+      _ -> UnknownBranch
