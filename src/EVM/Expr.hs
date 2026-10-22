@@ -549,20 +549,20 @@ possibleOnes = go (8 :: Int)
     -- every bit up to the highest set one: bounds any value whose bits are a subset
     fill v = if v == 0 then 0 else maxLit `shiftR` countLeadingZeros v
 
--- | Drops the OR operands that cannot set a bit in care, looking through literal masks and
+-- | Drops the OR operands that cannot set a visible bit, looking through literal masks and
 -- shifts. Nothing if there is none.
 dropHidden :: W256 -> Expr EWord -> Maybe (Expr EWord)
-dropHidden care = \case
+dropHidden visible = \case
   Or a b
-    | care .&. possibleOnes a == 0 -> Just (fromMaybe b (dropHidden care b))
-    | care .&. possibleOnes b == 0 -> Just (fromMaybe a (dropHidden care a))
-    | otherwise -> case (dropHidden care a, dropHidden care b) of
+    | visible .&. possibleOnes a == 0 -> Just (fromMaybe b (dropHidden visible b))
+    | visible .&. possibleOnes b == 0 -> Just (fromMaybe a (dropHidden visible a))
+    | otherwise -> case (dropHidden visible a, dropHidden visible b) of
         (Nothing, Nothing) -> Nothing
         (a', b') -> Just (EVM.Expr.or (fromMaybe a a') (fromMaybe b b'))
-  And (Lit m) x -> EVM.Expr.and (Lit m) <$> dropHidden (care .&. m) x
-  SHL (Lit k) x | k < 256 -> shl (Lit k) <$> dropHidden (care `shiftR` unsafeInto k) x
-  SHR (Lit k) x | k < 256 -> shr (Lit k) <$> dropHidden (care `shiftL` unsafeInto k) x
-  Mul (Lit c) x | Just k <- log2W c -> mul (Lit c) <$> dropHidden (care `shiftR` k) x
+  And (Lit m) x -> EVM.Expr.and (Lit m) <$> dropHidden (visible .&. m) x
+  SHL (Lit k) x | k < 256 -> shl (Lit k) <$> dropHidden (visible `shiftR` unsafeInto k) x
+  SHR (Lit k) x | k < 256 -> shr (Lit k) <$> dropHidden (visible `shiftL` unsafeInto k) x
+  Mul (Lit c) x | Just k <- log2W c -> mul (Lit c) <$> dropHidden (visible `shiftR` k) x
   _ -> Nothing
 
 -- | The inverse of an odd number mod 2^256, by Newton's iteration: each step doubles the
