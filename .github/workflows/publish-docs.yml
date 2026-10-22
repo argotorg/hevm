@@ -18,7 +18,7 @@ jobs:
         run: nix develop --ignore-environment --command sh -c "cd doc && mdbook build"
 
       - name: publish docs
-        uses: JamesIves/github-pages-deploy-action@ec9c88baef04b842ca6f0a132fd61c762aa6c1b0 # v4.6.0
+        uses: JamesIves/github-pages-deploy-action@fa24774553152dd7873cd16ebd8d959b010c5445 # v4.9.0
         with:
           branch: gh-pages
           folder: doc/book
