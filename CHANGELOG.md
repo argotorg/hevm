@@ -8,11 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
-- `--debugger` for `symbolic`, `exec` and `test` starts an interactive debugger
+- `--interactive` for `symbolic`, `exec` and `test` starts an interactive debugger
   served over HTTP on localhost, with symbolic branches,
   stepping back, breakpoints, storage, call traces and statistics. Its views
   are JSON for clients to format; `hevm attach` is a terminal client.
-  `--debug-snapshot-every` sets how often it snapshots for stepping back.
+  `--interactive-snapshot-every` sets how often it snapshots for stepping back.
 - `--serve` serves the progress of a run over HTTP, at `/progress`.
 - `--check-static-branches` checks branch decisions made without the solver
   against the solver.

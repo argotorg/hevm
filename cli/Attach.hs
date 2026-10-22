@@ -1,4 +1,4 @@
--- | hevm attach: a line-based client for a debugger started with --debugger
+-- | hevm attach: a line-based client for a debugger started with --interactive
 module Attach (AttachOptions, attachOptions, attach) where
 
 import Control.Exception (SomeException, try)

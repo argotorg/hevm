@@ -114,7 +114,7 @@ data CommonOptions = CommonOptions
   , progressLog   ::Maybe FilePath
   , progressExprs ::Bool
   , noProgress    ::Bool
-  , debugger      ::Bool
+  , interactive   ::Bool
   , serve         ::Bool
   , port          ::Int
   , snapshotEvery ::Int
@@ -156,10 +156,10 @@ commonOptions = CommonOptions
   <*> (optional $ strOption $ long "progress-log" <> help "Write a JSONL log of interpreter and solver progress to this file (default with --verb 3: hevm-progress.jsonl)")
   <*> (switch $ long "progress-exprs" <> help "Also log the expressions and path conditions sent to the solver in the progress log (implied by --verb 4)")
   <*> (switch $ long "no-progress" <> help "Don't show the live status line on stderr")
-  <*> (switch $ long "debugger" <> help "Start the interactive debugger, served over HTTP on localhost. Drive it with hevm attach")
+  <*> (switch $ long "interactive" <> help "Debug interactively: step through the run, forward and back, served over HTTP on localhost. Drive it with hevm attach")
   <*> (switch $ long "serve" <> help "Serve the progress of the run over HTTP on localhost, at /progress")
-  <*> (option auto $ long "port" <> showDefault <> value defaultDebuggerPort <> help "Port for --debugger and --serve, 0 picks a free one")
-  <*> (option auto $ long "debug-snapshot-every" <> showDefault <> value snapshotInterval <> help "Steps between the debugger's snapshots: fewer make going back faster and use more memory")
+  <*> (option auto $ long "port" <> showDefault <> value defaultDebuggerPort <> help "Port for --interactive and --serve, 0 picks a free one")
+  <*> (option auto $ long "interactive-snapshot-every" <> showDefault <> value snapshotInterval <> help "Steps between the debugger's snapshots: fewer make going back faster and use more memory")
   <*> (switch $ long "check-static-branches" <> help "Internal check, slow: ask the solver to confirm every branch side that exploration drops by simplification alone")
 
 data CommonExecOptions = CommonExecOptions
@@ -319,7 +319,7 @@ commandParser = subparser
         <> footer "For more help, see https://hevm.dev/exec.html" ))
   <> command "attach"
       (info (Attach <$> attachOptions <**> helper)
-        (progDesc "Drive a debugger, started with --debugger, from the terminal"))
+        (progDesc "Drive a debugger, started with --interactive, from the terminal"))
   <> command "version"
       (info (pure Version)
         (progDesc "Show the version of the tool"))
@@ -358,8 +358,8 @@ main = do
       withCurrentDirectory root $ runEnv env $ withProgress (progressOpts env cOpts) $ serving cOpts $ symbCheck cFileOpts symbOpts cExecOpts cOpts
     Attach o -> attach o
     Equal eqOpts cOpts -> do
-      when cOpts.debugger $ do
-        putStrLn "Error: --debugger is not supported for equivalence checking"
+      when cOpts.interactive $ do
+        putStrLn "Error: --interactive is not supported for equivalence checking"
         exitFailure
       env <- makeEnv cOpts
       runEnv env $ withProgress (progressOpts env cOpts) $ serving cOpts $ equivalence eqOpts cOpts
@@ -378,7 +378,7 @@ main = do
           Right out -> do
             -- TODO: which functions here actually require a BuildOutput, and which can take it as a Maybe?
             unitTestOpts <- unitTestOptions testOpts cOpts solvers (Just out)
-            when cOpts.debugger $ do
+            when cOpts.interactive $ do
               debugTestVm unitTestOpts out >>= \case
                 Left err -> liftIO $ T.putStrLn err >> exitFailure
                 Right vm -> do
@@ -401,8 +401,8 @@ main = do
     progressOpts env cOpts = ProgressOpts
       { logFile = env.config.progressLog
       , logExprs = env.config.progressExprs
-      , statusLine = Prelude.not cOpts.noProgress && Prelude.not cOpts.debug && Prelude.not cOpts.debugger
-      , track = cOpts.serve || cOpts.debugger
+      , statusLine = Prelude.not cOpts.noProgress && Prelude.not cOpts.debug && Prelude.not cOpts.interactive
+      , track = cOpts.serve || cOpts.interactive
       }
     makeEnv :: CommonOptions -> IO Env
     makeEnv cOpts = do
@@ -439,7 +439,7 @@ main = do
     -- the debugger serves the progress itself
     serving :: MonadUnliftIO m => CommonOptions -> m a -> m a
     serving cOpts
-      | cOpts.serve && Prelude.not cOpts.debugger = withProgressServer cOpts.port $ \p ->
+      | cOpts.serve && Prelude.not cOpts.interactive = withProgressServer cOpts.port $ \p ->
           putStrLn ("hevm progress at http://127.0.0.1:" <> show p <> "/progress") >> hFlush stdout
       | otherwise = id
     progressFile cOpts = case cOpts.progressLog of
@@ -618,7 +618,7 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = do
                             , rpcInfo = Fetch.RpcInfo blockUrlInfo
                             }
     let fetcher = Fetch.oracle solvers (Just sess) veriOpts.rpcInfo
-    when cOpts.debugger $ do
+    when cOpts.interactive $ do
       dapp <- getSrcInfo sOpts.projectType cOpts
       dsess <- liftIO $ setSnapshotInterval cOpts.snapshotEvery <$> newSession dapp preState
       serveSession fetcher cOpts.port announce dsess
@@ -701,7 +701,7 @@ launchExec cFileOpts execOpts cExecOpts cOpts = do
   -- TODO: we shouldn't need solvers to execute this code
   withSolvers Z3 0 Nothing cOpts.smtMemory $ \solvers -> do
     let fetcher = Fetch.oracle solvers (Just sess) rpcDat
-    when cOpts.debugger $ do
+    when cOpts.interactive $ do
       dsess <- liftIO $ setSnapshotInterval cOpts.snapshotEvery <$> newSession dapp vm
       serveSession fetcher cOpts.port announce dsess
       liftIO exitSuccess
