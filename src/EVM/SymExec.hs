@@ -1171,7 +1171,7 @@ replayEqCex solvers create codeA codeB cd cex
         [ "program" .= label, "result" .= T.pack (show end.result), "steps" .= steps
         , "trail" .= [(showAddr a, pc) | (a, pc) <- toList lastSteps] ]
       let finalStore = case (.storage) <$> Map.lookup entry end.env.contracts of
-            Just (ConcreteStore m) -> Right m
+            Just (ConcreteStore m) -> Right (Map.filter (/= 0) m)
             s -> Left (T.pack (show s))
           balances = Map.mapMaybe (\c -> case c.balance of Lit v -> Just v; _ -> Nothing) end.env.contracts
       pure $ case end.result of
@@ -1643,7 +1643,8 @@ equivalenceCheck' solvers sess branchesA branchesB create = do
         -- TODO: is this sound? do we need a more sophisticated nonce representation?
         noncesDiffer = PBool (ac.nonce /= bc.nonce)
         storesDiffer = case (ac.storage, bc.storage) of
-          (ConcreteStore as, ConcreteStore bs) | not (as == Map.empty || bs == Map.empty) -> PBool $ as /= bs
+          -- a slot written with 0 is the same as an unwritten one
+          (ConcreteStore as, ConcreteStore bs) -> PBool $ Map.filter (/= 0) as /= Map.filter (/= 0) bs
           (as, bs) -> if as == bs then PBool False else as ./= bs
       in balsDiffer .|| storesDiffer .|| noncesDiffer
 

@@ -97,6 +97,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   EXTCODECOPY, CREATE and CREATE2, over a pre-state with EOAs, an empty
   account and accounts at the addresses the program creates. Each case also
   runs with all state but the contract's code fetched from a mock RPC node.
+- The equivalence fuzzer checks contract creation, and generates storage
+  writes of zero.
 
 ## Changed
 - Results that revert with `Error(string)` show the decoded message instead of hex.
@@ -147,6 +149,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the writes they are disjoint from and resolve the writes they hit.
 
 ## Fixed
+- Equivalence checking treats a storage slot written with 0 as equal to an
+  unset one.
+- Equivalence counterexamples now include the initial storage value of slots
+  that the contracts write but never read, so replaying them reproduces the
+  difference.
 - MCOPY of a symbolic size now grows memory.
 - A copy within symbolic memory, e.g. an MCOPY in a loop, no longer makes
   expressions grow exponentially when its source bytes are known.

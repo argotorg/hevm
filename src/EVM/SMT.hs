@@ -327,6 +327,11 @@ findStorageReads p = foldProp go mempty p
       SLoad slot store | baseIsAbstractStore store -> case Expr.getAddr store of
           Nothing -> internalError $ "could not extract address from: " <> show store
           Just address -> StorageReads $ Map.singleton (address, Expr.getLogicalIdx store) (Set.singleton slot)
+      -- the prestate of a written slot matters when stores are compared,
+      -- e.g. writing 0 differs from not writing only if the slot was nonzero
+      SStore slot _ store | baseIsAbstractStore store -> case Expr.getAddr store of
+          Nothing -> internalError $ "could not extract address from: " <> show store
+          Just address -> StorageReads $ Map.singleton (address, Expr.getLogicalIdx store) (Set.singleton slot)
       _ -> mempty
 
     baseIsAbstractStore :: Expr 'Storage -> Bool
