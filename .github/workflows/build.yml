@@ -91,13 +91,6 @@ jobs:
       # runs hevm against the vendored forge-symbolic-tests bug suite (needs forge)
       - name: run symbolic bug-suite tests
         run: nix develop --command bash -c "cabal --active-repositories=:none run forge-symbolic-tests"
-      # the bundle is committed, as hevm embeds it: it must be the one the sources build
-      - name: test the web frontend, check its bundle is up to date
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          nix develop --command web/build.sh test
-          nix develop --command web/build.sh
-          git diff --exit-code web/dist
 
   build-windows:
     name: build (windows-latest)

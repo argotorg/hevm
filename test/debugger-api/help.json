@@ -1,7 +1,7 @@
 {
     "api": [
         "hevm HTTP API (responses are JSON: clients format what they show)",
-        "GET  /                 the debugger's web page",
+        "GET  /                 this help",
         "GET  /api              this help",
         "GET  /progress         progress of the run: phase, paths, solver queries, hot spots",
         "",

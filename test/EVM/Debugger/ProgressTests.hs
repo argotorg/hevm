@@ -32,7 +32,7 @@ import Test.Tasty.QuickCheck
 import EVM.Dapp (emptyDapp)
 import EVM.Debugger (newSession, runCommandText)
 import EVM.Debugger.DebuggerTests (http, httpJSON, branchCode, branchJumpi)
-import EVM.Debugger.WebFixtures (checkFixture)
+import EVM.Debugger.ApiFixtures (checkFixture)
 import EVM.Debugger.Server (serveSession, withProgressServer)
 import EVM.Effects
 import EVM.Fetch qualified as Fetch

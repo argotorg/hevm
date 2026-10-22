@@ -1,14 +1,13 @@
 {-|
-Module      : WebFixtures
-Description : The JSON the web frontend is written against
+Module      : ApiFixtures
+Description : The JSON clients of the debugger are written against
 
-The fixtures in web/test/fixtures are answers of the debugger server, which the
-frontend's TypeScript tests parse and render. These tests check that the
-server still answers with the same fields and types. After changing the API on
-purpose, rewrite the fixtures with HEVM_WRITE_WEB_FIXTURES=1 and run the
-TypeScript tests (web/build.sh test).
+The fixtures in test/debugger-api are answers of the debugger server. These
+tests check that it still answers with the same fields and types; clients, such
+as hevm-web-ui, test against copies of them. After changing the API on purpose,
+rewrite them with HEVM_WRITE_API_FIXTURES=1.
 -}
-module EVM.Debugger.WebFixtures (tests, checkFixture) where
+module EVM.Debugger.ApiFixtures (tests, checkFixture) where
 
 import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.MVar
@@ -38,20 +37,17 @@ import EVM.SymExec (abstractVM)
 import EVM.Types (Expr(AbstractBuf))
 
 tests :: TestTree
-tests = testGroup "web-fixtures"
+tests = testGroup "api-fixtures"
   [ testCase "concrete" $ withServer False $ \port -> do
       _ <- httpJSON port "POST" "/command" "step 5"
       fixture "state-concrete" =<< get port "/state"
       fixture "stats" =<< get port "/stats"
       fixture "help" =<< get port "/help"
-  , testCase "serves-the-page" $ withServer False $ \port -> do
-      page <- http port "GET" "/" ""
-      assertBool "the page loads the bundle" ("<script type=\"module\" src=\"debugger.js\">" `BS.isInfixOf` page)
-      served <- http port "GET" "/debugger.js" ""
-      bundle <- BS.readFile "web/dist/debugger.js"
-      assertBool "hevm embeds the current bundle: rebuild hevm after web/build.sh" (served == bundle)
+  , testCase "describes-the-api" $ withServer False $ \port -> do
       apiText <- http port "GET" "/api" ""
       assertBool "the API help" ("POST /command" `BS.isInfixOf` apiText)
+      root <- http port "GET" "/" ""
+      assertEqual "the same at /" apiText root
   , testCase "symbolic" $ withServer True $ \port -> do
       fixture "state-branch" . JSON.Object =<< httpJSON port "POST" "/command" "continue"
       _ <- httpJSON port "POST" "/command" "break op STOP"
@@ -85,19 +81,19 @@ withServer symbolic act = runEnv (Env defaultConfig) $ withSolvers Bitwuzla 1 No
     _ <- http port "POST" "/quit" ""
     takeMVar done
 
--- | Writes the fixture with HEVM_WRITE_WEB_FIXTURES set, else checks the server
+-- | Writes the fixture with HEVM_WRITE_API_FIXTURES set, else checks the server
 -- still answers in its shape
 checkFixture :: String -> JSON.Value -> IO ()
 checkFixture name value = do
-  let path = "web/test/fixtures/" <> name <> ".json"
-  lookupEnv "HEVM_WRITE_WEB_FIXTURES" >>= \case
+  let path = "test/debugger-api/" <> name <> ".json"
+  lookupEnv "HEVM_WRITE_API_FIXTURES" >>= \case
     Just _ -> BL.writeFile path (encodePretty (withoutNoise value) <> "\n")
     Nothing -> JSON.eitherDecodeFileStrict path >>= \case
       Left err -> assertFailure $ "cannot read " <> path <> ": " <> err
       Right expected -> case difference "" expected value of
         Nothing -> pure ()
-        Just diff -> assertFailure $ "the server's answer no longer matches " <> path <> ", which the web frontend is tested against: "
-          <> diff <> "\nIf the change is meant, rewrite the fixtures with HEVM_WRITE_WEB_FIXTURES=1 and update web/src/api.ts."
+        Just diff -> assertFailure $ "the server's answer no longer matches " <> path <> ", which clients are written against: "
+          <> diff <> "\nIf the change is meant, rewrite the fixtures with HEVM_WRITE_API_FIXTURES=1, and tell the clients."
 
 -- | Durations and thread ids replaced by fixed values, so that rewriting the
 -- fixtures only changes what changed

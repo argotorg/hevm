@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Added
 - `--debugger` for `symbolic`, `exec` and `test` starts an interactive debugger
-  served over HTTP on localhost, with a web frontend, symbolic branches,
+  served over HTTP on localhost, with symbolic branches,
   stepping back, breakpoints, storage, call traces and statistics. Its views
   are JSON for clients to format; `hevm-debug` is a command-line client.
   `--debug-snapshot-every` sets how often it snapshots for stepping back.

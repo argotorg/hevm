@@ -1,8 +1,6 @@
-{-# LANGUAGE TemplateHaskell #-}
-
--- | Minimal HTTP+JSON front end for debugging sessions and run progress, bound
--- to localhost, which also serves the web frontend in web/. Hand-rolled on top
--- of 'network' to avoid pulling a web framework into hevm.
+-- | Minimal HTTP+JSON API for debugging sessions and run progress, bound to
+-- localhost. Clients, such as hevm-debug or hevm-web-ui, format what it sends.
+-- Hand-rolled on top of 'network' to avoid pulling a web framework into hevm.
 module EVM.Debugger.Server
   ( serveSession
   , withProgressServer
@@ -33,7 +31,6 @@ import System.IO (hFlush, stdout)
 import System.Timeout (timeout)
 
 import EVM.Debugger
-import EVM.Debugger.Embed (embedFile)
 import EVM.Effects (App)
 import EVM.Fetch qualified as Fetch
 import EVM.Progress qualified as Progress
@@ -100,16 +97,9 @@ serveRoutes port onListen done routes = do
       void $ forkIO $ handleConn hosts (dispatch routes) conn `finally` close conn
     takeMVar done `finally` killThread acceptor
 
--- | Built by web/build.sh, which keeps web/dist up to date
-indexHtml, debuggerJs :: ByteString
-indexHtml = $(embedFile "web/index.html")
-debuggerJs = $(embedFile "web/dist/debugger.js")
-
 dispatch :: [Route] -> Request -> IO Response
 dispatch routes req = case (req.method, req.path) of
-  ("GET", "/") -> pure $ Response 200 "text/html; charset=utf-8" indexHtml
-  ("GET", "/debugger.js") -> pure $ Response 200 "text/javascript; charset=utf-8" debuggerJs
-  ("GET", "/api") -> pure $ Response 200 "text/plain; charset=utf-8" (encodeUtf8 apiHelp)
+  (m, p) | m == "GET", p `elem` ["/", "/api"] -> pure $ Response 200 "text/plain; charset=utf-8" (encodeUtf8 apiHelp)
   _ -> go routes
   where
     go [] = pure $ Response 404 "text/plain" "not found; GET /api for the API"
@@ -219,7 +209,7 @@ json = pure . Response 200 "application/json" . BL.toStrict . JSON.encode
 apiHelp :: Text
 apiHelp = T.unlines
   [ "hevm HTTP API (responses are JSON: clients format what they show)"
-  , "GET  /                 the debugger's web page"
+  , "GET  /                 this help"
   , "GET  /api              this help"
   , "GET  /progress         progress of the run: phase, paths, solver queries, hot spots"
   , ""

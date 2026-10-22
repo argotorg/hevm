@@ -1,7 +1,7 @@
 # Interactive debugger
 
-> The debugger is new and still changing: commands, the web page and the HTTP
-> API may change between releases. This page covers the concepts only.
+> The debugger is new and still changing: its commands and HTTP API may change
+> between releases. This page covers the concepts only.
 
 `hevm test`, `hevm symbolic` and `hevm exec` take `--debugger`. Instead of
 running to the end, hevm then starts a debugger that serves the execution over
@@ -17,11 +17,10 @@ hevm debugger at http://127.0.0.1:7317  (or in a terminal: hevm-debug --port 731
 hevm itself has no user interface: everything goes through the HTTP API, so
 several clients can drive the same session.
 
-- **The web page**, at the address hevm prints. It shows the source line, the
-  code, the stack, memory, the call trace, pending branches, breakpoints and
-  statistics. Press `?` on the page for its keys.
-- **`hevm-debug`**, a command-line client. It sends the same commands that can
-  be typed into the web page's console.
+- **`hevm-debug`**, a command-line client that comes with hevm.
+- **hevm-web-ui**, a web page, kept as a separate project. It shows the source
+  line, the code, the stack, memory, storage, the call trace, pending branches,
+  breakpoints and statistics.
 - **Any program**, such as a script or an LLM agent, through the HTTP API.
   `GET /api` describes it. Views are JSON with values unformatted, words as
   hex and symbolic ones as expressions, so each client shows them its own way.
