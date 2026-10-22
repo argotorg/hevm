@@ -1012,6 +1012,8 @@ class VMOps (t :: VMType) where
   enoughGas :: Word64 -> Gas t -> Bool
   subGas :: Gas t -> Word64 -> Gas t
   toGas :: Word64 -> Gas t
+  -- | Nothing when gas is not tracked
+  gasWord :: Gas t -> Maybe Word64
 
   whenSymbolicElse :: EVM t a -> EVM t a -> EVM t a
 

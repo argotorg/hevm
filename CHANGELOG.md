@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- Word reads that straddle literal bytes and written words, such as calldata's
+  selector and first argument, simplify to the written parts shifted and or-ed.
+- Reads of all-zero buffers simplify to zero.
 - `hevm symbolic` replays each counterexample concretely and marks it
   `[validated]` or `[not reproducible]`, like `hevm test`.
 - The symbolic execution fuzzer generates mapping and array storage accesses,
@@ -133,6 +136,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the writes they are disjoint from and resolve the writes they hit.
 
 ## Fixed
+- MCOPY of a symbolic size now grows memory.
+- A precompile call that runs out of gas now leaves an error trace.
+- A branch side the solver refutes is no longer explored when it could not decide
+  the other side, e.g. one it cannot encode.
+- EXTCODEHASH of an account with no code or nonce and a symbolic balance is 0
+  when that balance is 0, instead of the hash of empty code.
+- A copy with a symbolic offset is encoded in SMT once instead of once per byte,
+  and copies over 1 MiB are not encoded, so large copies no longer exhaust memory.
 - An exception during symbolic exploration is now rethrown, instead of being
   printed and followed by `thread blocked indefinitely in an STM transaction`.
 - Counterexamples found with storage decomposition show each mapping and array
