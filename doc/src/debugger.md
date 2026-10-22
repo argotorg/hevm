@@ -3,12 +3,12 @@
 > The debugger is new and still changing: its commands and HTTP API may change
 > between releases. This page covers the concepts only.
 
-`hevm test`, `hevm symbolic` and `hevm exec` take `--debugger`. Instead of
+`hevm test`, `hevm symbolic` and `hevm exec` take `--interactive`. Instead of
 running to the end, hevm then starts a debugger that serves the execution over
 HTTP on localhost, by default at port 7317 (`--port`):
 
 ```shell
-$ hevm test --root . --match prove_transfer --debugger
+$ hevm test --root . --match prove_transfer --interactive
 hevm debugger at http://127.0.0.1:7317  (or in a terminal: hevm attach --port 7317)
 ```
 
@@ -32,7 +32,7 @@ The `help` command lists the commands.
 The debugger steps one instruction at a time, by source line, over or out of
 calls, or until a breakpoint (a pc, an opcode or a source line). It can also
 step back. The EVM cannot run backwards, so the debugger keeps snapshots of the
-VM, by default every 50 steps (`--debug-snapshot-every`), and goes back by
+VM, by default every 50 steps (`--interactive-snapshot-every`), and goes back by
 restoring the latest snapshot before the target and replaying from there.
 Going back therefore shows exactly the state the run had at that step.
 

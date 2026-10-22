@@ -213,7 +213,7 @@ apiHelp = T.unlines
   , "GET  /api              this help"
   , "GET  /progress         progress of the run: phase, paths, solver queries, hot spots"
   , ""
-  , "With --debugger:"
+  , "With --interactive:"
   , "GET  /state            current view"
   , "POST /command          run a command, returns the new view"
   , "                       body: {\"command\": \"step 10\"} or the bare command text"
