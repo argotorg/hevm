@@ -25,11 +25,14 @@ module EVM.SMT.AbstractBase
   , collectFrom
   , collectDivMods
   , collectMuls
+  , collectMulMods
   , collectConstMuls
   , asMul
   , asConstMul
   , isAbstractMul
   , mulSMT
+  , mulModSMT
+  , concreteMulModSMT
   , udivSMT
     -- * Signed reconstruction helpers
   , smtZeroGuard
@@ -64,8 +67,10 @@ type Enc = Expr EWord -> Err Builder
 -- from the name tables, so a new 'DivModKind' cannot be left undeclared.
 divModAbstractDecls :: [SMTEntry]
 divModAbstractDecls =
-  SMTComment "abstract division/modulo/multiplication (uninterpreted functions)"
-    : fmap declareBinOp (fmap abstFnName [minBound ..] <> [abstMulFnName])
+  [SMTComment "abstract division/modulo/multiplication (uninterpreted functions)"]
+    <> fmap declareBinOp (fmap abstFnName [minBound ..] <> [abstMulFnName])
+    <> [SMTCommand $ "(declare-fun" `sp` abstMulModFnName
+          `sp` "((_ BitVec 256) (_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"]
   where
     declareBinOp fn = SMTCommand $
       "(declare-fun" `sp` fn `sp` "((_ BitVec 256) (_ BitVec 256)) (_ BitVec 256))"
@@ -101,6 +106,9 @@ isSigned _      = False
 abstMulFnName :: Builder
 abstMulFnName = "abst_evm_bvmul"
 
+abstMulModFnName :: Builder
+abstMulModFnName = "abst_evm_mulmod"
+
 -- | Name of the uninterpreted function standing in for this op.
 abstFnName :: DivModKind -> Builder
 abstFnName IsSDiv = "abst_evm_bvsdiv"
@@ -129,6 +137,11 @@ collectDivMods = \case
 
 collectMuls :: Expr a -> [(Expr EWord, Expr EWord)]
 collectMuls = maybe [] pure . asMul
+
+collectMulMods :: Expr a -> [(Expr EWord, Expr EWord, Expr EWord)]
+collectMulMods = \case
+  T.MulMod a b c -> [(a, b, c)]
+  _ -> []
 
 collectConstMuls :: Expr a -> [(W256, Expr EWord)]
 collectConstMuls = maybe [] pure . asConstMul
@@ -163,6 +176,15 @@ mulSMT :: (Expr EWord, Builder) -> (Expr EWord, Builder) -> Builder
 mulSMT (a, aenc) (b, benc) =
   "(" <> fn `sp` aenc `sp` benc <> ")"
   where fn = if isAbstractMul a b then abstMulFnName else "bvmul"
+
+mulModSMT :: Builder -> Builder -> Builder -> Builder
+mulModSMT a b c = "(" <> abstMulModFnName `sp` a `sp` b `sp` c <> ")"
+
+-- MULMOD keeps the full 512-bit product before taking the remainder.
+concreteMulModSMT :: Builder -> Builder -> Builder -> Builder
+concreteMulModSMT a b c = smtZeroGuard c $
+  "((_ extract 255 0) (bvurem (bvmul" `sp` extend a `sp` extend b <> ")" `sp` extend c <> "))"
+  where extend x = "((_ zero_extend 256)" `sp` x <> ")"
 
 -- | Render an unsigned division. Unlike a product it is abstracted whatever
 -- its operands are, so there is no encoder choice to mirror; this only keeps
@@ -215,6 +237,10 @@ data AbstractCtx = AbstractCtx
     -- ^ Symbolic*symbolic products, including the div-mul link products.
   , acConstMuls :: [(W256, Expr EWord)]
     -- ^ Products @c*x@ by a non-trivial literal constant.
+  , acUMods     :: [(Expr EWord, Expr EWord)]
+    -- ^ Unsigned remainders in the properties.
+  , acMulMods   :: [(Expr EWord, Expr EWord, Expr EWord)]
+    -- ^ Full-precision modular products in the properties.
   }
 
 -- | Close the set of div/mul terms the lemmas range over. Beyond the raw terms
@@ -234,22 +260,30 @@ data AbstractCtx = AbstractCtx
 saturate :: [Prop] -> AbstractCtx
 saturate props =
   let udivs = [ (a, b) | (IsUDiv, a, b) <- collectFrom collectDivMods props ]
+      umods = [ (a, b) | (IsUMod, a, b) <- collectFrom collectDivMods props ]
       muls  = collectFrom collectMuls props
+      mulMods = collectFrom collectMulMods props
       constMuls = collectFrom collectConstMuls props
       divisors  = nubOrd [ b | (_, b) <- udivs ]
       synthDivs = nubOrd $ [ (T.Mul a b, b) | (a, b) <- muls, b `elem` divisors ]
                         <> [ (T.Mul a b, a) | (a, b) <- muls, a `elem` divisors ]
+      -- Bridge constant-scaled products to the literal divisors in the query.
+      synthConstDivs = nubOrd $ [ (T.Mul (Lit c) x, d) | (c, x) <- constMuls, d@(Lit _) <- divisors ]
+                            <> [ (T.Mul x (Lit c), d) | (c, x) <- constMuls, d@(Lit _) <- divisors ]
       collapsedDivs = nubOrd
         [ (innerA, Lit (c1 * c2))
         | (a, b) <- udivs <> synthDivs, Lit c2 <- [b]
         , T.Div innerA (Lit c1) <- [a]
         , c1 /= 0, c2 /= 0, toInteger c1 * toInteger c2 < 2 ^ (256 :: Int) ]
-      udivsAll  = nubOrd (udivs <> synthDivs <> collapsedDivs)
+      udivsAll  = nubOrd (udivs <> synthDivs <> synthConstDivs <> collapsedDivs)
       -- a link product over a literal divisor is a native bvmul in the goal, so
       -- it must not enter the families that range over abstract products
       linkMuls  = [ (q, b) | (a, b) <- udivsAll, let q = T.Div a b, isAbstractMul q b ]
       allMuls   = nubOrd (muls <> linkMuls)
-  in AbstractCtx { acUDivs = udivsAll, acMuls = allMuls, acConstMuls = constMuls }
+  in AbstractCtx
+    { acUDivs = udivsAll, acMuls = allMuls, acConstMuls = constMuls
+    , acUMods = umods, acMulMods = mulMods
+    }
 
 -- | Names for the arithmetic terms of the props, smallest first, each defined
 -- over the names of the terms inside it. The lemmas mention an operand many
@@ -273,6 +307,7 @@ shareTerms props = (mapExpr (named table), reverse defs)
     arithTerm :: Expr a -> [Expr EWord]
     arithTerm e = case e of
       T.Mul{}  -> [e]
+      T.MulMod{} -> [e]
       T.Div{}  -> [e]
       T.SDiv{} -> [e]
       T.Mod{}  -> [e]
@@ -282,6 +317,7 @@ shareTerms props = (mapExpr (named table), reverse defs)
     named :: Map.Map (Expr EWord) TS.Text -> Expr a -> Expr a
     named tbl e = case e of
       T.Mul{}  -> look e
+      T.MulMod{} -> look e
       T.Div{}  -> look e
       T.SDiv{} -> look e
       T.Mod{}  -> look e

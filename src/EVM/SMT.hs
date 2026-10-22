@@ -73,7 +73,7 @@ import EVM.Effects
 import EVM.SMT.Types
 import EVM.SMT.SMTLIB
 import EVM.SMT.ArithEncoding
-import EVM.SMT.AbstractBase (DivModKind(..), abstFnName, concFnName, mulSMT, shareTerms)
+import EVM.SMT.AbstractBase (DivModKind(..), abstFnName, concFnName, mulSMT, mulModSMT, concreteMulModSMT, shareTerms)
 
 
 -- ** Encoding ** ----------------------------------------------------------------------------------
@@ -178,10 +178,11 @@ assertPropsAbstract conf ps = do
   (families, mulLemmas) <- mulEncoding enc goalPs
   divTruth <- divModGroundTruth enc goalPs
   mulTruth <- mulGroundTruth enc goalPs
+  mulModTruth <- mulModGroundTruth enc goalPs
   saturated <- saturatedGroundTruth enc goalPs
   pure AbstractQuery
     { query = base <> SMT2 (SMTScript (termDefs <> shiftBounds <> mulLemmas)) mempty mempty
-    , refinement = divTruth <> mulTruth
+    , refinement = divTruth <> mulTruth <> mulModTruth
     , saturatedTruth = saturated
     , lemmaFamilies = families
     }
@@ -541,15 +542,13 @@ exprToSMTWith arithEnc = \case
   SDiv a b -> divModOp IsSDiv a b
   Mod a b -> divModOp IsUMod a b
   SMod a b -> divModOp IsSMod a b
-  -- NOTE: this needs to do the MUL at a higher precision, then MOD, then downcast
   MulMod a b c -> do
     aExp <- exprToSMT a
     bExp <- exprToSMT b
     cExp <- exprToSMT c
-    let aLift = "((_ zero_extend 256) " <> aExp <> ")"
-        bLift = "((_ zero_extend 256) " <> bExp <> ")"
-        cLift = "((_ zero_extend 256) " <> cExp <> ")"
-    pure $ "(ite (= " <> cExp <> " (_ bv0 256)) (_ bv0 256) ((_ extract 255 0) (bvurem (bvmul " <> aLift `sp` bLift <> ")" <> cLift <> ")))"
+    pure $ case arithEnc of
+      AbstractArith -> mulModSMT aExp bExp cExp
+      ConcreteArith -> concreteMulModSMT aExp bExp cExp
   AddMod a b c -> do
     aExp <- exprToSMT a
     bExp <- exprToSMT b

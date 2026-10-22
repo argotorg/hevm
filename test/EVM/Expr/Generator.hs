@@ -772,6 +772,12 @@ genBaseArithCase = oneof
   , withBindings "signed division and modulo"
       (Expr.add (SDiv arithA arithB) (SMod arithA arithB)) signedEdges
   , withBindings "unsigned modulo" (Mod (Expr.mul arithA arithB) arithC) []
+  , withBindings "mulmod" (MulMod arithA arithB arithC) []
+  , withBindings "mulmod max modulus" (MulMod arithA arithB (Lit maxBound)) []
+  , withBindings "div-mod identity"
+      (Expr.add (Expr.mul (Div arithA arithB) arithB) (Mod arithA arithB)) []
+  , withBindings "round-trip conditional"
+      (Div (Expr.mul (ITE (Eq arithA (Lit 1)) (Div (Expr.mul arithA arithB) arithC) (Lit 100)) arithC) arithB) []
   , shiftDividendCase
   , pow2DividendCase
   , congruenceCase "signed division congruence" SDiv

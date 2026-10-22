@@ -1641,6 +1641,46 @@ tests = testGroup "hevm"
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertBoolM "Expected counterexample" (any isCex res)
     ]
+  , testGroup "MulMod-Abstraction"
+    [ testCase "bounded-product-collapses" $ do
+        let x = Var "x"; y = Var "y"; c = Var "c"
+            bounds = [PLT x (Lit (2^(128 :: Int))), PLT y (Lit (2^(128 :: Int))), PGT c (Lit 0)]
+        res <- abstractPhase (PNeg (PEq (MulMod x y c) (Mod (Mul x y) c)) : bounds)
+        assertEqual "Must collapse before refinement" (Qed, PhaseAbstract) res
+    , testCase "max-modulus-collapses" $ do
+        let x = Var "x"; y = Var "y"
+            bounds = [PLT x (Lit (2^(128 :: Int))), PLT y (Lit (2^(128 :: Int)))]
+        forM_ [x, Lit 7] $ \factor -> do
+          res <- abstractPhase (PNeg (PEq (MulMod factor y (Lit maxBound)) (Mul factor y)) : bounds)
+          assertEqual "Must use the goal's product encoding" (Qed, PhaseAbstract) res
+    , testCase "zero-modulus" $ do
+        res <- abstractPhase
+          [ PNeg (PEq (MulMod (Var "x") (Var "y") (Var "c")) (Lit 0))
+          , PEq (Var "c") (Lit 0) ]
+        assertEqual "EVM MULMOD by zero is zero" (Qed, PhaseAbstract) res
+    , testCase "refinement-keeps-full-product" $ do
+        let x = Var "x"; y = Var "y"; c = Var "c"
+            inputs = [PEq x (Lit (2^(200 :: Int))), PEq y (Lit (2^(100 :: Int))), PEq c (Lit 13)]
+            counterexampleQuery value = PNeg (PEq (MulMod x y c) (Lit value)) : inputs
+        exact <- abstractPhase (counterexampleQuery 1)
+        assertEqual "2^300 mod 13 is 1, with no product truncation" (Qed, PhaseRefined) exact
+        (wrong, phase) <- abstractPhase (counterexampleQuery 2)
+        assertBool "A false property must retain its counterexample" (isCex wrong)
+        assertEqual "Counterexamples require exact MULMOD" PhaseRefined phase
+    , testCase "roundtrip-conditional-branches" $ do
+        let x = Var "x"; a = Var "a"; b = Var "b"; cond = Var "cond"
+            productXY = Mul x a
+            branches = [ ITE cond (Div productXY b) (Lit 100)
+                       , Div (ITE cond productXY (Lit 100)) b ]
+            bound quotient = PGT (Div (Mul quotient b) a) x
+            bounds = [PLT x (Lit (2^(128 :: Int))), PLT a (Lit (2^(128 :: Int))), PGT a (Lit 0)]
+            inputs = [PEq x (Lit 1), PEq a (Lit 2), PEq b (Lit 2)]
+        forM_ branches $ \quotient -> do
+          selected <- abstractPhase (bound quotient : PEq cond (Lit 1) : bounds)
+          assertEqual "The matching branch obeys the round-trip bound" (Qed, PhaseAbstract) selected
+          (other, _) <- abstractPhase (bound quotient : PEq cond (Lit 0) : inputs)
+          assertBool "The other branch must not inherit that bound" (isCex other)
+    ]
   , testGroup "Mul-Abstraction"
     -- Symbolic*symbolic multiplication is abstracted as an uninterpreted
     -- function (abst_evm_bvmul) with sound lemmas (commutativity, 0/1
@@ -2038,7 +2078,7 @@ tests = testGroup "hevm"
         "require(a < (1<<128) && d < (1<<128) && n <= d && d != 0); uint256 r = a * n / d; assert(r <= a);"
     , provesAbstractly "muldiv-monotone-literal-divisor" "uint256 a1, uint256 a2, uint256 p"
         "require(a1 <= a2 && a2 < (1<<128) && p < (1<<128)); uint256 r1; uint256 r2; assembly { r1 := div(mul(a1, p), 1000000000000000000) r2 := div(mul(a2, p), 1000000000000000000) } assert(r1 <= r2);"
-    , abstractArithGap "gap-divmod-identity" "uint256 a, uint256 b"
+    , provesAbstractly "divmod-identity" "uint256 a, uint256 b"
         "require(b != 0); uint256 r; assembly { r := add(mul(div(a, b), b), mod(a, b)) } assert(r == a);"
     , abstractArithGap "gap-checked-mul-div-cancel" "uint256 x, uint256 y"
         "require(y != 0); uint256 r = x * y / y; assert(r == x);"
