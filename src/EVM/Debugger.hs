@@ -11,7 +11,6 @@ module EVM.Debugger
   , snapshotInterval
   , BranchMode(..)
   , setBranchMode
-  , setMerge
   , runCommand
   , runCommandText
   , Command(..)
@@ -121,7 +120,6 @@ data Command
   | ShowStats
   | SetSimplify Bool
   | SetBranches BranchMode
-  | SetMerge Bool
   | Help
   | Refresh
   deriving (Eq, Show)
@@ -165,12 +163,6 @@ data Session t = Session
   , branchMode  :: BranchMode
   -- | problems found by 'CheckedBranches', newest first
   , warnings    :: [Text]
-  -- | merge both sides of short branches as exploration does, so a step may
-  -- execute a whole if/else
-  , merge       :: Bool
-  -- | (step, merge): the steps after that step ran with that setting, newest
-  -- first, so that going back replays them the same way
-  , mergeFrom   :: [(Int, Bool)]
   }
 
 -- | What a session has done so far. Going back in time does not undo these.
@@ -248,12 +240,6 @@ setSnapshotInterval n s = s { snapEvery = max 1 n }
 setBranchMode :: BranchMode -> Session t -> Session t
 setBranchMode m s = s { branchMode = m }
 
-setMerge :: Bool -> Session t -> Session t
-setMerge b s = s { merge = b, mergeFrom = (s.curStep, b) : s.mergeFrom }
-
-mergesAt :: Session t -> Int -> Bool
-mergesAt s i = maybe False snd (find ((< i) . fst) s.mergeFrom)
-
 sessionVM :: Session t -> VM t
 sessionVM s = s.vm
 
@@ -270,8 +256,7 @@ newSession dapp vm0 = do
     { vm = vm0, curStep = 0, snapshots = Map.singleton 0 snap, pending = Nothing
     , lastCond = Nothing, taken = [], bps = [], dapp = dapp
     , note = "Started. Type 'help' for commands.", out = Nothing, stepLimit = maxRunSteps, snapEvery = snapshotInterval
-    , stats = emptyStats, simp = True, branchMode = SolverBranches, warnings = [], merge = False
-    , mergeFrom = [(-1, False)] }
+    , stats = emptyStats, simp = True, branchMode = SolverBranches, warnings = [] }
 
 -- | Memory is a mutable vector, so a VM must be copied before it is kept around
 cloneVM :: forall t. VM t -> ST RealWorld (VM t)
@@ -302,7 +287,7 @@ stepOnce fetcher s
   | isJust s.pending || isHalted s = pure s
   | otherwise = do
       conf <- readConfig
-      vm' <- liftIO $ stToIO $ execStateT (exec1 conf { mergeMaxBudget = if mergesAt s (s.curStep + 1) then conf.mergeMaxBudget else 0 }) s.vm
+      vm' <- liftIO $ stToIO $ execStateT (exec1 conf { mergeMaxBudget = 0 }) s.vm
       resolve fetcher False $ addStats (\st -> st { opcodes = st.opcodes + 1 }) s { vm = vm', curStep = s.curStep + 1 }
 
 resolve :: (App m, Debuggable t) => Fetch.Fetcher t m -> Bool -> Session t -> m (Session t)
@@ -440,9 +425,7 @@ backTo fetcher target s = do
   vm <- liftIO $ stToIO $ cloneVM snap
   let s0 = s { vm = vm, curStep = k, snapshots = snaps, pending = Nothing, lastCond = Nothing
              , taken = filter ((< target) . fst) s.taken }
-  s1 <- replay (target - k) s0
-  -- the steps from here on are new, and run with the current setting
-  let s' = s1 { mergeFrom = (target, s.merge) : filter ((< target) . fst) s.mergeFrom }
+  s' <- replay (target - k) s0
   Progress.emit "debug-back" ["from" .= s.curStep, "to" .= target, "snapshot" .= k, "replayed" .= (target - k), "branchAgain" .= chosenAt]
   pure $ addStats (\st -> st { replayedOpcodes = st.replayedOpcodes + st.opcodes - s.stats.opcodes }) s'
   where
@@ -535,9 +518,6 @@ runCommand' fetcher cmd s
                           else T.unlines (map (formatProp . (if s.simp then Expr.simplifyProp else id)) (reverse s.vm.constraints)) }
     ShowStats -> pure s { out = Just (renderStats (sessionStats s)) }
     SetSimplify b -> pure s { simp = b, note = "Expressions are shown " <> (if b then "simplified." else "as they are.") }
-    SetMerge b -> pure (setMerge b s) { note = if b
-      then "Short branches are merged as exploration does: a step may run a whole if/else."
-      else "Branches are not merged: every step is one instruction." }
     SetBranches m -> pure s { branchMode = m, note = case m of
       SolverBranches -> "Branches are decided by the solver: only feasible sides are offered."
       ExplorerBranches -> "Branches are decided as exploration does, without the solver: sides that may be infeasible are offered too."
@@ -591,8 +571,6 @@ parseCommand line = case T.words (T.strip line) of
     ("branches", ["solver"]) -> Right (SetBranches SolverBranches)
     ("branches", ["explorer"]) -> Right (SetBranches ExplorerBranches)
     ("branches", ["checked"]) -> Right (SetBranches CheckedBranches)
-    ("merge", ["on"]) -> Right (SetMerge True)
-    ("merge", ["off"]) -> Right (SetMerge False)
     (w, []) | w `elem` ["pathconds", "pc", "constraints"] -> Right ShowPathConds
     (w, []) | w `elem` ["h", "help", "?"] -> Right Help
     (w, []) | w `elem` ["show", "state"] -> Right Refresh
@@ -637,8 +615,6 @@ commandHelp = T.unlines
   , "branches solver|explorer|checked  decide symbolic branches with the solver (default), or as"
   , "                      exploration does: without the solver, offering sides that may be"
   , "                      infeasible. 'checked' also has the solver confirm each decision"
-  , "merge on|off          merge short branches as exploration does (default off): a step"
-  , "                      may then run a whole if/else"
   , "show                  just show the current state"
   ]
 
@@ -734,7 +710,6 @@ data View = View
   , branchMode     :: Text
   , simplified     :: Bool
   , warnings       :: [Text]
-  , merging        :: Bool
   }
   deriving (Show, Generic, ToJSON, FromJSON)
 
@@ -776,7 +751,6 @@ mkView s = do
         CheckedBranches -> "checked"
     , simplified = s.simp
     , warnings = s.warnings
-    , merging = s.merge
     , choices = [ "step " <> tshow st <> ": " <> clip 100 d | (st, d) <- reverse s.taken ]
     , breakpoints = map showBreak s.bps
     , message = s.note

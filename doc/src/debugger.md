@@ -49,9 +49,8 @@ other side. How the sides offered are decided is a setting:
 - **checked**: as explorer, and the solver checks every decision
   simplification made. This is for finding bugs in hevm itself.
 
-Exploration can also merge both sides of a short branch into one path. The
-debugger does the same when merging is turned on, so one step may run a whole
-if/else.
+Unlike exploration, the debugger never merges the two sides of a short branch:
+every step is one instruction.
 
 Symbolic values are shown simplified, as the solver would see them. This can
 be turned off to see the expressions as execution built them.

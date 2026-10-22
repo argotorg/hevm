@@ -98,20 +98,9 @@ tests = testGroup "Debugger"
         assertEqual "same path conditions" v1.pathConditions v2.pathConditions
       v3 <- run "branch true" s1 >>= run "step" >>= run "back" >>= run "branch false" >>= run "continue" >>= liftIO . mkView
       liftIO $ assertEqual "the other side can be taken" branchStopElse v3.pc
-  , testCase "back-replays-merged-steps" $ runEnv testEnv $ withSymbolic mergeCode $ \run s0 -> do
-      -- run with merging, then go back after turning it off: the replay must merge as before
-      sEnd <- run "merge on" s0 >>= run "continue"
-      vEnd <- liftIO $ mkView sEnd
-      liftIO $ assertEqual "merged to the end without a pending branch" "halted" vEnd.status
-      sBack <- run "merge off" sEnd >>= run "back"
-      sFresh <- run "merge on" s0 >>= run ("step " <> tshow (sessionStep sBack))
-      vBack <- liftIO $ mkView sBack
-      vFresh <- liftIO $ mkView sFresh
-      liftIO $ do
-        assertEqual "same step" vFresh.step vBack.step
-        assertEqual "same pc" vFresh.pc vBack.pc
-        assertEqual "same stack" vFresh.stack vBack.stack
-        assertEqual "no branch" "running" vBack.status
+  , testCase "does-not-merge-branches" $ runEnv testEnv $ withSymbolic mergeCode $ \run s0 -> do
+      v <- run "continue" s0 >>= liftIO . mkView
+      liftIO $ assertEqual "stops at the branch exploration would merge" "branch" v.status
   , testCase "fork-offers-feasible-values-only" $ runEnv testEnv $ withSymbolic forkLoopCode $ \run s0 -> do
       -- a loop over x & 3 with x & 1 set: its second test forks on values of x & 3, one of them infeasible
       let walk = run "continue" s0 >>= run "branch true" >>= run "continue" >>= run "branch true" >>= run "continue"
