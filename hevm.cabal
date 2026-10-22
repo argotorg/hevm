@@ -98,7 +98,6 @@ library
     EVM.Dapp,
     EVM.Debugger,
     EVM.Debugger.Server,
-    EVM.Debugger.Text,
     EVM.Expr,
     EVM.SMT,
     EVM.Solvers,
@@ -222,12 +221,10 @@ executable hevm
   if flag(devel)
     ghc-options: -rtsopts
   other-modules:
-    Attach
     Paths_hevm
   autogen-modules:
     Paths_hevm
   build-depends:
-    aeson,
     base,
     bytestring,
     data-dword,
@@ -244,8 +241,6 @@ executable hevm
     witch,
     unliftio-core,
     split,
-    haskeline                         >= 0.8 && < 0.9,
-    http-client                       >= 0.7 && < 0.8,
 
 --- Test Helpers ---
 

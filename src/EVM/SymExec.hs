@@ -672,7 +672,6 @@ data StaticCheck
   = StaticOk
   -- | the solver finds a dropped side satisfiable, or a taken side unsatisfiable
   | StaticWrong String
-  -- | the solver could not tell
   | StaticInconclusive
   -- | 'staticBranch' kept both sides, but the solver finds one unsatisfiable
   | StaticMissed

@@ -1,5 +1,5 @@
 -- | Minimal HTTP+JSON API for debugging sessions and run progress, bound to
--- localhost. Clients, such as hevm attach or hevm-web-ui, format what it sends.
+-- localhost. Clients, such as hevm-web-ui, format what it sends.
 -- Hand-rolled on top of 'network' to avoid pulling a web framework into hevm.
 module EVM.Debugger.Server
   ( serveSession
@@ -64,7 +64,6 @@ serveSession fetcher port onListen s0 = withRunInIO $ \runInIO -> do
         pure (s', s')
   serveRoutes port onListen done [sessionRoute run sessVar done, progressRoute]
 
--- | Serves the progress of the run while the action runs
 withProgressServer :: MonadUnliftIO m => Int -> (Int -> IO ()) -> m a -> m a
 withProgressServer port onListen act = withRunInIO $ \runInIO -> do
   done <- newEmptyMVar
@@ -108,12 +107,10 @@ dispatch routes req = case (req.method, req.path) of
 announce :: Int -> IO ()
 announce port = do
   putStrLn $ "hevm debugger at http://127.0.0.1:" <> show port
-    <> "  (or in a terminal: hevm attach --port " <> show port <> ")"
   hFlush stdout
 
 handleConn :: [ByteString] -> (Request -> IO Response) -> Socket -> IO ()
 handleConn hosts handler conn = do
-  -- a client that stops sending must not hold the connection forever
   r <- try (timeout 30000000 (readRequest conn))
   resp <- case r of
     Left (e :: SomeException) -> pure $ Response 400 "text/plain" (BC.pack ("bad request: " <> show e))

@@ -22,7 +22,6 @@ import EVM (makeVm, defaultVMOpts, initialContract)
 import EVM.Dapp (emptyDapp)
 import EVM.Debugger
 import EVM.Debugger.Server (serveSession)
-import EVM.Debugger.Text (renderView)
 import EVM.Effects
 import EVM.Fetch qualified as Fetch
 import EVM.Solvers (withSolvers, defMemLimit, Solver(..))
@@ -181,7 +180,7 @@ tests = testGroup "Debugger"
         root <- http port "GET" "/" ""
         assertEqual "the same at /" apiText root
         view <- JSON.decodeStrict <$> http port "GET" "/state" ""
-        assertBool "a client can read the view, and show it" (maybe False (("== step 3" `T.isInfixOf`) . renderView) view)
+        assertEqual "a client can read the view" (Just 3) ((.step) <$> (view :: Maybe View))
         stats <- httpJSON port "GET" "/stats" ""
         let counter k = KM.lookup "counters" stats >>= \case
               JSON.Object o -> KM.lookup k o
@@ -234,7 +233,7 @@ forkLoopProg =
   [ I OpJumpdest
   , I (OpPush (Lit 0x20)), I OpCalldataload, I (OpPush (Lit 1)), I OpAnd, Target 1, I OpJumpi
   , I OpJumpdest
-  , I OpJumpdest                                                  -- the loop
+  , I OpJumpdest
   , I (OpPush (Lit counter)), I OpTload, I (OpPush (Lit 1)), I OpAdd
   , I (OpDup 1), I (OpPush (Lit counter)), I OpTstore              -- count up in transient storage
   , I (OpPush (Lit 0x20)), I OpCalldataload, I (OpPush (Lit 3)), I OpAnd, I OpGt, Target 2, I OpJumpi

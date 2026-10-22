@@ -9,7 +9,7 @@ HTTP on localhost, by default at port 7317 (`--port`):
 
 ```shell
 $ hevm test --root . --match prove_transfer --interactive
-hevm debugger at http://127.0.0.1:7317  (or in a terminal: hevm attach --port 7317)
+hevm debugger at http://127.0.0.1:7317
 ```
 
 ## Clients
@@ -17,7 +17,6 @@ hevm debugger at http://127.0.0.1:7317  (or in a terminal: hevm attach --port 73
 hevm itself has no user interface: everything goes through the HTTP API, so
 several clients can drive the same session.
 
-- **`hevm attach`**, hevm's own terminal client.
 - **hevm-web-ui**, a web page, kept as a separate project. It shows the source
   line, the code, the stack, memory, storage, the call trace, pending branches,
   breakpoints and statistics.

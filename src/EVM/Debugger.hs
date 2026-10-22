@@ -126,7 +126,6 @@ data Command
   | Refresh
   deriving (Eq, Show)
 
--- | A symbolic branch waiting for the user to pick a side
 data Pending t where
   Pending :: Maybe (Expr EWord) -> BranchContext -> Pending Symbolic
 
@@ -162,7 +161,6 @@ data Session t = Session
   , stepLimit   :: Int
   , snapEvery   :: Int
   , stats       :: Stats
-  -- | simplify the expressions shown
   , simp        :: Bool
   , branchMode  :: BranchMode
   -- | problems found by 'CheckedBranches', newest first
@@ -210,7 +208,6 @@ addStats f s = s { stats = f s.stats }
 addWarning :: Text -> Session t -> Session t
 addWarning w s = s { warnings = take 20 (("step " <> tshow s.curStep <> ": " <> w) : s.warnings) }
 
--- | Problems checked mode found, newest first
 sessionWarnings :: Session t -> [Text]
 sessionWarnings s = s.warnings
 
@@ -239,14 +236,12 @@ snapshotInterval = 50
 maxRunSteps :: Int
 maxRunSteps = 5000000
 
--- | Largest memory dump a command returns
 maxMemoryDump :: Int
 maxMemoryDump = 65536
 
 setStepLimit :: Int -> Session t -> Session t
 setStepLimit n s = s { stepLimit = n }
 
--- | Snapshots taken more often make going back faster and use more memory
 setSnapshotInterval :: Int -> Session t -> Session t
 setSnapshotInterval n s = s { snapEvery = max 1 n }
 
@@ -256,7 +251,6 @@ setBranchMode m s = s { branchMode = m }
 setMerge :: Bool -> Session t -> Session t
 setMerge b s = s { merge = b, mergeFrom = (s.curStep, b) : s.mergeFrom }
 
--- | Whether the given step runs with merging
 mergesAt :: Session t -> Int -> Bool
 mergesAt s i = maybe False snd (find ((< i) . fst) s.mergeFrom)
 
@@ -330,7 +324,6 @@ resolve fetcher queried s = case s.vm.result of
       let cond = case q of
             PleaseAskSMT c _ _ -> Just c
             _ -> s.lastCond
-      -- tells /progress where the solver time goes
       Progress.setWorker [ "pc" .= s.vm.state.pc, "addr" .= T.pack (show s.vm.state.contract), "step" .= s.curStep ]
       t0 <- liftIO getMonotonicTime
       m <- fetcher q
@@ -384,11 +377,9 @@ choose fetcher arg s = case s.pending of
                 s { vm = vm', pending = Nothing, taken = (s.curStep, desc) : s.taken }
         pure s' { note = "Took branch " <> desc <> what <> "." }
 
--- | An expression as the session shows it
 shown :: Session t -> Expr a -> Expr a
 shown s = if s.simp then Expr.simplify else id
 
--- | Where the session is, for the progress log
 where_ :: Session t -> [Pair]
 where_ s = ["step" .= s.curStep, "pc" .= s.vm.state.pc, "addr" .= T.pack (show s.vm.state.contract), "depth" .= length s.vm.frames]
 
@@ -649,7 +640,6 @@ commandHelp = T.unlines
   , "merge on|off          merge short branches as exploration does (default off): a step"
   , "                      may then run a whole if/else"
   , "show                  just show the current state"
-  , "quit             (q)  stop the debugger (hevm attach; 'detach' leaves it running)"
   ]
 
 showBreak :: Breakpoint -> Text

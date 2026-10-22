@@ -42,7 +42,6 @@ import JSONL (jsonlBuilder, jsonLine)
 
 import EVM (initialContract, abstractContract, makeVm, defaultVMOpts)
 import EVM.ABI (Sig(..))
-import Attach (attach, attachOptions, AttachOptions)
 import EVM.Debugger (newSession, setSnapshotInterval, snapshotInterval)
 import EVM.Debugger.Server (serveSession, withProgressServer, announce, defaultDebuggerPort)
 import EVM.Dapp (dappInfo, DappInfo, emptyDapp, TestMethodInfo(..))
@@ -156,7 +155,7 @@ commonOptions = CommonOptions
   <*> (optional $ strOption $ long "progress-log" <> help "Write a JSONL log of interpreter and solver progress to this file (default with --verb 3: hevm-progress.jsonl)")
   <*> (switch $ long "progress-exprs" <> help "Also log the expressions and path conditions sent to the solver in the progress log (implied by --verb 4)")
   <*> (switch $ long "no-progress" <> help "Don't show the live status line on stderr")
-  <*> (switch $ long "interactive" <> help "Debug interactively: step through the run, forward and back, served over HTTP on localhost. Drive it with hevm attach")
+  <*> (switch $ long "interactive" <> help "Debug interactively: step through the run, forward and back, served over HTTP on localhost")
   <*> (switch $ long "serve" <> help "Serve the progress of the run over HTTP on localhost, at /progress")
   <*> (option auto $ long "port" <> showDefault <> value defaultDebuggerPort <> help "Port for --interactive and --serve, 0 picks a free one")
   <*> (option auto $ long "interactive-snapshot-every" <> showDefault <> value snapshotInterval <> help "Steps between the debugger's snapshots: fewer make going back faster and use more memory")
@@ -295,7 +294,6 @@ data Command
   | Equal      EqOptions CommonOptions
   | Test       TestOptions  CommonOptions
   | Exec       CommonFileOptions ExecOptions CommonExecOptions CommonOptions
-  | Attach     AttachOptions
   | Version
 
 -- Parser for the subcommands
@@ -317,9 +315,6 @@ commandParser = subparser
       (info (Exec <$> commonFileOptions <*> execOptions <*> commonExecOptions <*> commonOptions <**> helper)
         (progDesc "Concretely execute a given program"
         <> footer "For more help, see https://hevm.dev/exec.html" ))
-  <> command "attach"
-      (info (Attach <$> attachOptions <**> helper)
-        (progDesc "Drive a debugger, started with --interactive, from the terminal"))
   <> command "version"
       (info (pure Version)
         (progDesc "Show the version of the tool"))
@@ -356,7 +351,6 @@ main = do
       env <- makeEnv cOpts
       root <- getRoot cOpts
       withCurrentDirectory root $ runEnv env $ withProgress (progressOpts env cOpts) $ serving cOpts $ symbCheck cFileOpts symbOpts cExecOpts cOpts
-    Attach o -> attach o
     Equal eqOpts cOpts -> do
       when cOpts.interactive $ do
         putStrLn "Error: --interactive is not supported for equivalence checking"
@@ -393,7 +387,6 @@ main = do
             liftIO $ unless (uncurry (&&) res) exitFailure
     Exec cFileOpts execOpts cExecOpts cOpts-> do
       env <- makeEnv cOpts
-      -- no status line: concrete execution has no phases or solver queries to show
       runEnv env $ withProgress ((progressOpts env cOpts) { statusLine = False }) $ serving cOpts $ launchExec cFileOpts execOpts cExecOpts cOpts
     Version {} ->putStrLn getFullVersion
   where
@@ -436,7 +429,6 @@ main = do
         , progressExprs = cOpts.progressExprs || cOpts.verb >= 4
         , checkStaticBranches = cOpts.checkStaticBranches
         } }
-    -- the debugger serves the progress itself
     serving :: MonadUnliftIO m => CommonOptions -> m a -> m a
     serving cOpts
       | cOpts.serve && Prelude.not cOpts.interactive = withProgressServer cOpts.port $ \p ->
