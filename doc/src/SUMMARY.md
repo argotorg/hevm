@@ -17,6 +17,7 @@
 - [Symbolic unit execution](./symbolic.md)
 - [Equivalence checking](./equivalence.md)
 - [Concrete execution](./exec.md)
+- [Interactive debugger](./debugger.md)
 - [Common options](./common-options.md)
 
 # Development

@@ -16,10 +16,8 @@ import Data.Maybe (isJust, mapMaybe)
 import Data.Monoid (Any(..))
 import Data.String.Here
 import Data.Vector qualified as V
-import Data.Word (Word8)
 
 import EVM.ABI
-import EVM.Assembler (assemble)
 import EVM.Effects qualified as Effects
 import EVM.Expr qualified as Expr
 import EVM.Types
@@ -28,6 +26,7 @@ import EVM.Solidity (solcRuntime)
 import EVM.Solvers (withSolvers, defMemLimit, Solver(..), SolverGroup, checkSatWithProps)
 import EVM.SymExec
 import EVM.Traversals
+import EVM.Test.Asm (AsmOp(..), asm)
 
 
 tests :: TestTree
@@ -1602,23 +1601,6 @@ badStoresInExpr exprs = any (getAny . foldExpr match mempty) exprs
   where
       match (SLoad _ (SStore _ _ _)) = Any True
       match _ = Any False
-
-data AsmOp = I Op | Target Int
-
--- | Assembles the ops, with @Target n@ pushing the offset of the n-th JUMPDEST
-asm :: [AsmOp] -> ByteString
-asm ops = BS.pack . map byte . V.toList . assemble $ map resolve ops
-  where
-    resolve (I op) = op
-    resolve (Target n) = OpPush (Lit (jumpdests !! n))
-    -- OpPush always assembles to PUSH32
-    size :: AsmOp -> W256
-    size = \case I (OpPush _) -> 33; Target _ -> 33; _ -> 1
-    offsets = scanl (+) 0 (map size ops)
-    jumpdests = [o | (I OpJumpdest, o) <- zip ops offsets]
-    byte :: Expr Byte -> Word8
-    byte (LitByte b) = b
-    byte b = internalError $ "symbolic byte: " <> show b
 
 -- | INVALID if blockhash(blk) == 0 and number == n
 blockhashIsZeroAt :: W256 -> W256 -> ByteString

@@ -19,7 +19,8 @@ import Control.Exception (evaluate, SomeException, SomeAsyncException, catch, th
 import Control.Monad.IO.Unlift (MonadIO, MonadUnliftIO, toIO, withRunInIO)
 import Control.Monad.Operational qualified as Operational
 import Control.Monad.ST (RealWorld, stToIO, ST)
-import Control.Monad.State.Strict (liftIO, runStateT, get)
+import Control.Monad.State.Strict (liftIO, runStateT, get, lift)
+import Data.STRef (newSTRef, readSTRef, writeSTRef)
 import Data.Bits (shiftR)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -28,7 +29,9 @@ import Data.Either (fromRight, rights)
 import Data.Foldable (length, foldl', foldr, toList)
 import Data.List (sortBy, sort)
 import Data.List.NonEmpty qualified as NE
-import Data.Maybe (fromMaybe, listToMaybe, mapMaybe, catMaybes)
+import Data.Maybe (fromMaybe, listToMaybe, mapMaybe, catMaybes, isJust)
+import System.Environment (lookupEnv)
+import System.IO.Unsafe (unsafePerformIO)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Map.Merge.Strict qualified as Map
@@ -626,14 +629,71 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
                     -- ask the smt solver about the loop condition
                     performQuery
                   _ -> do
-                    let decision = case Expr.concKeccakSimpProps ((cond ./= Lit 0):preconds) of
-                          [PBool False] -> Case False
-                          [] -> Case True
-                          _ | Expr.concKeccakSimpProps ((cond .== Lit 0):preconds) == [PBool False] -> Case True
-                            | otherwise -> UnknownBranch
+                    let decision = staticBranch cond preconds
+                    conf <- readConfig
+                    when (conf.checkStaticBranches || checkStaticBranchesFromEnv) $
+                      checkStaticBranch fetcher vm cond preconds decision >>= \case
+                        StaticWrong msg -> internalError $ "a branch side was dropped by simplification, but it is reachable: " <> msg
+                        _ -> pure ()
                     (r, vm') <- liftIO $ stToIO $ runStateT (continue decision) vm
                     interpretInternal t { vm = vm', stepper = (k r) }
           _ -> performQuery
+
+-- | How exploration decides a symbolic branch without the solver: a side is
+-- dropped only if simplifying it with the path conditions gives false
+staticBranch :: Expr EWord -> [Prop] -> BranchCondition
+staticBranch cond preconds = case Expr.concKeccakSimpProps ((cond ./= Lit 0):preconds) of
+  [PBool False] -> Case False
+  [] -> Case True
+  _ | Expr.concKeccakSimpProps ((cond .== Lit 0):preconds) == [PBool False] -> Case True
+    | otherwise -> UnknownBranch
+
+-- | Turns on 'checkStaticBranches' for every run, e.g. a whole test suite
+{-# NOINLINE checkStaticBranchesFromEnv #-}
+checkStaticBranchesFromEnv :: Bool
+checkStaticBranchesFromEnv = unsafePerformIO $ isJust <$> lookupEnv "HEVM_CHECK_STATIC_BRANCHES"
+
+-- | What the fetcher, normally the solver, decides about a branch condition
+askBranch :: App m => Fetch.Fetcher Symbolic m -> VM Symbolic -> Expr EWord -> [Prop] -> m BranchCondition
+askBranch fetcher vm cond preconds = askFetcher fetcher vm (PleaseAskSMT cond preconds) UnknownBranch
+
+-- | Whether the fetcher, normally the solver, finds the props satisfiable
+askSat :: App m => Fetch.Fetcher Symbolic m -> VM Symbolic -> [Prop] -> m (Maybe Bool)
+askSat fetcher vm props = askFetcher fetcher vm (PleaseCheckSat props) Nothing
+
+askFetcher :: App m => Fetch.Fetcher Symbolic m -> VM Symbolic -> ((a -> EVM Symbolic ()) -> Query Symbolic) -> a -> m a
+askFetcher fetcher vm mkQuery dflt = do
+  ref <- liftIO $ stToIO $ newSTRef Nothing
+  m <- fetcher (mkQuery (\r -> lift (writeSTRef ref (Just r))))
+  _ <- liftIO $ stToIO $ runStateT m vm
+  fromMaybe dflt <$> liftIO (stToIO (readSTRef ref))
+
+data StaticCheck
+  = StaticOk
+  -- | the solver finds a dropped side satisfiable, or a taken side unsatisfiable
+  | StaticWrong String
+  | StaticInconclusive
+  -- | 'staticBranch' kept both sides, but the solver finds one unsatisfiable
+  | StaticMissed
+  deriving (Show)
+
+-- | Asks the solver whether the sides 'staticBranch' dropped are unsatisfiable
+checkStaticBranch :: App m => Fetch.Fetcher Symbolic m -> VM Symbolic -> Expr EWord -> [Prop] -> BranchCondition -> m StaticCheck
+checkStaticBranch fetcher vm cond preconds decision = case decision of
+  Case b -> askSat fetcher vm (side (not b) : preconds) <&> \case
+    Just False -> StaticOk
+    Nothing -> StaticInconclusive
+    Just True -> StaticWrong $ "simplification decided " <> show b <> ", but the solver finds " <> show (not b) <> " satisfiable"
+      <> " at pc " <> show vm.state.pc <> " of " <> show vm.state.contract
+      <> "\ncondition: " <> T.unpack (formatExpr cond)
+      <> "\npath conditions: " <> T.unpack (T.unlines (map formatProp preconds))
+  _ -> do
+    t <- askSat fetcher vm (side True : preconds)
+    f <- askSat fetcher vm (side False : preconds)
+    pure $ if t == Just False || f == Just False then StaticMissed else StaticOk
+  where
+    side True = cond ./= Lit 0
+    side False = cond .== Lit 0
 
 logQueryExprs :: MonadIO m => Query Symbolic -> m ()
 logQueryExprs = \case
@@ -659,6 +719,7 @@ stepName = \case
     PleaseFetchSlot {} -> "query-fetch-slot"
     PleaseDoFFI {} -> "query-ffi"
     PleaseReadEnv {} -> "query-env"
+    PleaseCheckSat {} -> "query-sat"
 
 maxIterationsReached :: VM Symbolic -> Maybe Integer -> Maybe Bool
 maxIterationsReached _ Nothing = Nothing

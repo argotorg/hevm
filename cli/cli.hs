@@ -34,13 +34,16 @@ import Options.Applicative as Options
 import Paths_hevm qualified as Paths
 import System.Directory (withCurrentDirectory, getCurrentDirectory, doesDirectoryExist, makeAbsolute, findExecutable)
 import System.FilePath ((</>))
-import System.Exit (exitFailure, exitWith, ExitCode(..))
+import System.Exit (exitFailure, exitSuccess, exitWith, ExitCode(..))
+import System.IO (hFlush, stdout)
 import Data.List.Split (splitOn)
 import Text.Read (readMaybe)
 import JSONL (jsonlBuilder, jsonLine)
 
 import EVM (initialContract, abstractContract, makeVm, defaultVMOpts)
 import EVM.ABI (Sig(..))
+import EVM.Debugger (newSession, setSnapshotInterval, snapshotInterval)
+import EVM.Debugger.Server (serveSession, withProgressServer, announce, defaultDebuggerPort)
 import EVM.Dapp (dappInfo, DappInfo, emptyDapp, TestMethodInfo(..))
 import EVM.Expr qualified as Expr
 import EVM.Concrete qualified as Concrete
@@ -110,6 +113,11 @@ data CommonOptions = CommonOptions
   , progressLog   ::Maybe FilePath
   , progressExprs ::Bool
   , noProgress    ::Bool
+  , interactive   ::Bool
+  , serve         ::Bool
+  , port          ::Int
+  , snapshotEvery ::Int
+  , checkStaticBranches ::Bool
   }
 
 commonOptions :: Parser CommonOptions
@@ -147,6 +155,11 @@ commonOptions = CommonOptions
   <*> (optional $ strOption $ long "progress-log" <> help "Write a JSONL log of interpreter and solver progress to this file (default with --verb 3: hevm-progress.jsonl)")
   <*> (switch $ long "progress-exprs" <> help "Also log the expressions and path conditions sent to the solver in the progress log (implied by --verb 4)")
   <*> (switch $ long "no-progress" <> help "Don't show the live status line on stderr")
+  <*> (switch $ long "interactive" <> help "Debug interactively: step through the run, forward and back, served over HTTP on localhost")
+  <*> (switch $ long "serve" <> help "Serve the progress of the run over HTTP on localhost, at /progress")
+  <*> (option auto $ long "port" <> showDefault <> value defaultDebuggerPort <> help "Port for --interactive and --serve, 0 picks a free one")
+  <*> (option auto $ long "interactive-snapshot-every" <> showDefault <> value snapshotInterval <> help "Steps between the debugger's snapshots: fewer make going back faster and use more memory")
+  <*> (switch $ long "check-static-branches" <> help "Internal check, slow: ask the solver to confirm every branch side that exploration drops by simplification alone")
 
 data CommonExecOptions = CommonExecOptions
   { address       ::Maybe Addr
@@ -337,17 +350,20 @@ main = do
     Symbolic cFileOpts symbOpts cExecOpts cOpts -> do
       env <- makeEnv cOpts
       root <- getRoot cOpts
-      withCurrentDirectory root $ runEnv env $ withProgress (progressOpts env cOpts) $ symbCheck cFileOpts symbOpts cExecOpts cOpts
+      withCurrentDirectory root $ runEnv env $ withProgress (progressOpts env cOpts) $ serving cOpts $ symbCheck cFileOpts symbOpts cExecOpts cOpts
     Equal eqOpts cOpts -> do
+      when cOpts.interactive $ do
+        putStrLn "Error: --interactive is not supported for equivalence checking"
+        exitFailure
       env <- makeEnv cOpts
-      runEnv env $ withProgress (progressOpts env cOpts) $ equivalence eqOpts cOpts
+      runEnv env $ withProgress (progressOpts env cOpts) $ serving cOpts $ equivalence eqOpts cOpts
     Test testOpts cOpts -> do
       env <- makeEnv cOpts
       root <- getRoot cOpts
       solver <- getSolver cOpts.solver
       cores <- liftIO $ unsafeInto <$> getNumProcessors
       let solverCount = fromMaybe cores cOpts.numSolvers
-      runEnv env $ withProgress (progressOpts env cOpts) $ withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
+      runEnv env $ withProgress (progressOpts env cOpts) $ serving cOpts $ withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
         buildOut <- readBuildOutput root testOpts.projectType
         case buildOut of
           Left e -> liftIO $ do
@@ -356,6 +372,13 @@ main = do
           Right out -> do
             -- TODO: which functions here actually require a BuildOutput, and which can take it as a Maybe?
             unitTestOpts <- unitTestOptions testOpts cOpts solvers (Just out)
+            when cOpts.interactive $ do
+              debugTestVm unitTestOpts out >>= \case
+                Left err -> liftIO $ T.putStrLn err >> exitFailure
+                Right vm -> do
+                  sess <- liftIO $ setSnapshotInterval cOpts.snapshotEvery <$> newSession unitTestOpts.dapp vm
+                  serveSession (Fetch.oracle solvers (Just unitTestOpts.sess) unitTestOpts.rpcInfo) cOpts.port announce sess
+              liftIO exitSuccess
             res <- unitTest unitTestOpts out
             Progress.stopStatus
             liftIO $ forM_ ((,) <$> cOpts.cacheDir <*> testOpts.number) $ \(dir, fetchedBlock) -> do
@@ -364,14 +387,15 @@ main = do
             liftIO $ unless (uncurry (&&) res) exitFailure
     Exec cFileOpts execOpts cExecOpts cOpts-> do
       env <- makeEnv cOpts
-      runEnv env $ launchExec cFileOpts execOpts cExecOpts cOpts
+      runEnv env $ withProgress ((progressOpts env cOpts) { statusLine = False }) $ serving cOpts $ launchExec cFileOpts execOpts cExecOpts cOpts
     Version {} ->putStrLn getFullVersion
   where
     progressOpts :: Env -> CommonOptions -> ProgressOpts
     progressOpts env cOpts = ProgressOpts
       { logFile = env.config.progressLog
       , logExprs = env.config.progressExprs
-      , statusLine = Prelude.not cOpts.noProgress && Prelude.not cOpts.debug
+      , statusLine = Prelude.not cOpts.noProgress && Prelude.not cOpts.debug && Prelude.not cOpts.interactive
+      , track = cOpts.serve || cOpts.interactive
       }
     makeEnv :: CommonOptions -> IO Env
     makeEnv cOpts = do
@@ -403,7 +427,13 @@ main = do
         , hashConsExplore = Prelude.not cOpts.noHashCons
         , progressLog = progressFile cOpts
         , progressExprs = cOpts.progressExprs || cOpts.verb >= 4
+        , checkStaticBranches = cOpts.checkStaticBranches
         } }
+    serving :: MonadUnliftIO m => CommonOptions -> m a -> m a
+    serving cOpts
+      | cOpts.serve && Prelude.not cOpts.interactive = withProgressServer cOpts.port $ \p ->
+          putStrLn ("hevm progress at http://127.0.0.1:" <> show p <> "/progress") >> hFlush stdout
+      | otherwise = id
     progressFile cOpts = case cOpts.progressLog of
       Nothing | cOpts.verb >= 3 -> Just "hevm-progress.jsonl"
       f -> f
@@ -509,15 +539,15 @@ getSolver s = case T.unpack s of
           <> "Install it, or pick another one with --solver (bitwuzla, z3, or cvc5)."
         exitFailure
 
-getSrcInfo :: App m => ExecOptions -> CommonOptions -> m DappInfo
-getSrcInfo execOpts cOpts = do
+getSrcInfo :: App m => ProjectType -> CommonOptions -> m DappInfo
+getSrcInfo projectType cOpts = do
   root <- liftIO $ getRoot cOpts
   conf <- readConfig
   liftIO $ withCurrentDirectory root $ do
     outExists <- doesDirectoryExist (root System.FilePath.</> "out")
     if outExists
     then do
-      buildOutput <- runEnv Env {config = conf} $ readBuildOutput root execOpts.projectType
+      buildOutput <- runEnv Env {config = conf} $ readBuildOutput root projectType
       case buildOutput of
         Left _ -> pure emptyDapp
         Right o -> pure $ dappInfo root o
@@ -580,6 +610,11 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = do
                             , rpcInfo = Fetch.RpcInfo blockUrlInfo
                             }
     let fetcher = Fetch.oracle solvers (Just sess) veriOpts.rpcInfo
+    when cOpts.interactive $ do
+      dapp <- getSrcInfo sOpts.projectType cOpts
+      dsess <- liftIO $ setSnapshotInterval cOpts.snapshotEvery <$> newSession dapp preState
+      serveSession fetcher cOpts.port announce dsess
+      liftIO exitSuccess
     (expr, res) <- verify solvers fetcher veriOpts preState (checkAssertions errCodes) Nothing
     Progress.stopStatus
     liftIO $ forM_ ((,) <$> cOpts.cacheDir <*> cExecOpts.block) $ \(dir, block) -> do
@@ -647,7 +682,7 @@ areAnyPrefixOf prefixes t = any (flip T.isPrefixOf t) prefixes
 
 launchExec :: App m => CommonFileOptions -> ExecOptions -> CommonExecOptions -> CommonOptions -> m ()
 launchExec cFileOpts execOpts cExecOpts cOpts = do
-  dapp <- getSrcInfo execOpts cOpts
+  dapp <- getSrcInfo execOpts.projectType cOpts
   sess <- Fetch.mkSession cOpts.cacheDir cExecOpts.block
   vm <- vmFromCommand cOpts cExecOpts cFileOpts execOpts sess
   let
@@ -658,6 +693,10 @@ launchExec cFileOpts execOpts cExecOpts cOpts = do
   -- TODO: we shouldn't need solvers to execute this code
   withSolvers Z3 0 Nothing cOpts.smtMemory $ \solvers -> do
     let fetcher = Fetch.oracle solvers (Just sess) rpcDat
+    when cOpts.interactive $ do
+      dsess <- liftIO $ setSnapshotInterval cOpts.snapshotEvery <$> newSession dapp vm
+      serveSession fetcher cOpts.port announce dsess
+      liftIO exitSuccess
     vm' <- if execOpts.jsonTrace
            then do
              (vm', (_, traces)) <- runStateT (interpretWithTrace fetcher EVM.Stepper.runFully) (vm, [])

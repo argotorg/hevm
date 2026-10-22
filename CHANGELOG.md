@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- `--interactive` for `symbolic`, `exec` and `test` starts an interactive debugger
+  served over HTTP on localhost, with symbolic branches,
+  stepping back, breakpoints, storage, call traces and statistics. Its views
+  are JSON for clients to format.
+  `--interactive-snapshot-every` sets how often it snapshots for stepping back.
+- `--serve` serves the progress of a run over HTTP, at `/progress`.
+- `--check-static-branches` checks branch decisions made without the solver
+  against the solver.
 - Word reads that straddle literal bytes and written words, such as calldata's
   selector and first argument, simplify to the written parts shifted and or-ed.
 - Reads of all-zero buffers simplify to zero.

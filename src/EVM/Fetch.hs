@@ -607,6 +607,11 @@ oracle solvers preSess rpcInfo q = do
            Lit _ -> pure $ continue (Case True)
            _     -> continue <$> checkBranch solvers branchcondition pathconds
 
+    PleaseCheckSat props continue -> checkSatWithProps solvers props <&> \case
+      Cex _ -> continue (Just True)
+      Qed -> continue (Just False)
+      _ -> continue Nothing
+
     PleaseGetSols symExpr numBytes pathconditions continue -> do
          let pathconds = foldl' PAnd (PBool True) pathconditions
          continue <$> getSolutions solvers symExpr numBytes pathconds
