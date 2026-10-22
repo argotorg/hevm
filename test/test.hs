@@ -91,6 +91,7 @@ import EVM.Equivalence.EquivFuzz qualified as EquivFuzz
 import EVM.Fetch.RpcFuzz qualified as RpcFuzz
 import EVM.SymExec.SymExecTests qualified as SymExecTests
 import EVM.Debugger.DebuggerTests qualified as DebuggerTests
+import EVM.Debugger.DebuggerFuzz qualified as DebuggerFuzz
 import EVM.Debugger.ProgressTests qualified as ProgressTests
 import EVM.Test.FoundryTests qualified as FoundryTests
 
@@ -238,6 +239,7 @@ runSubSet p = defaultMain . applyPattern p $ tests
 tests :: TestTree
 tests = testGroup "hevm"
   [ FuzzSymExec.tests
+  , FuzzSymExec.lockstepTests
   , ExprTests.tests
   , RewriteFuzz.tests
   , KeccakFuzz.tests
@@ -245,6 +247,7 @@ tests = testGroup "hevm"
   , ConcreteExecutionTests.tests
   , SymExecTests.tests
   , DebuggerTests.tests
+  , DebuggerFuzz.tests
   , ProgressTests.tests
   , EquivalenceTests.tests
   , EquivFuzz.tests

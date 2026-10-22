@@ -81,6 +81,7 @@ import EVM.Expr qualified as Expr
 import EVM.SymExec (staticBranch, checkStaticBranch, StaticCheck(..), askSat)
 import EVM.Fetch qualified as Fetch
 import EVM.Format (formatExpr, formatProp, traceDocForest)
+import EVM.Traversals (foldExpr, foldProp)
 import EVM.Op (intToOpName)
 import EVM.Progress qualified as Progress
 import EVM.Solidity (SolcContract(..), SourceCache(..), SrcMap(..))
@@ -330,12 +331,12 @@ resolve fetcher queried s = case s.vm.result of
       let s' = addStats (\st -> st { infeasibleOptions = st.infeasibleOptions + hidden }) s
       case ctx of
         PleaseRunAll [v] k -> do
-          Progress.emit "debug-branch-decided" $ where_ s <> ["value" .= formatExpr v, "hidden" .= hidden]
+          Progress.emit "debug-branch-decided" $ where_ s <> ["value" .= exprText v, "hidden" .= hidden]
           vm' <- liftIO $ stToIO $ execStateT (k v) s.vm { result = Nothing, exploreDepth = s.vm.exploreDepth + 1 }
-          resolve fetcher True s' { vm = vm', taken = (s.curStep, formatExpr v) : s.taken }
+          resolve fetcher True s' { vm = vm', taken = (s.curStep, exprText v) : s.taken }
         _ -> do
           Progress.emit "debug-branch-offered" $ where_ s <> ["options" .= branchOptionCount ctx, "hidden" .= hidden]
-          Progress.emitExprs "debug-branch-condition" $ where_ s <> maybe [] (Progress.bigText "cond" . formatExpr) c
+          Progress.emitExprs "debug-branch-condition" $ where_ s <> maybe [] (Progress.bigText "cond" . exprText) c
           pure $ addStats (\st -> st { branchesOffered = st.branchesOffered + 1 }) s' { pending = Just (Pending c ctx) }
   _ | queried || s.curStep `mod` s.snapEvery == 0 -> do
         snap <- liftIO $ stToIO $ cloneVM s.vm
@@ -350,13 +351,13 @@ choose fetcher arg s = case s.pending of
           (PleaseRunBoth k, a) | a `elem` ["true", "t", "1", "jump"] -> Just (k True, "true")
                                | a `elem` ["false", "f", "0", "nojump"] -> Just (k False, "false")
           (PleaseRunAll vals k, a) | Just i <- readMaybe (T.unpack a), i >= 0, i < length vals ->
-                                       Just (k (vals !! i), formatExpr (vals !! i))
+                                       Just (k (vals !! i), exprText (vals !! i))
           _ -> Nothing
     case picked of
       Nothing -> pure s { note = "Invalid choice '" <> arg <> "'. " <> branchHint ctx }
       Just (m, desc) -> do
         vm' <- liftIO $ stToIO $ execStateT m s.vm { result = Nothing, exploreDepth = s.vm.exploreDepth + 1 }
-        let what = maybe "" (\c -> " for condition " <> clip 200 (formatExpr c)) cond
+        let what = maybe "" (\c -> " for condition " <> clip 200 (exprText c)) cond
         Progress.emit "debug-branch-taken" $ where_ s <> ["choice" .= desc]
         s' <- resolve fetcher True $ addStats (\st -> st { branchesTaken = st.branchesTaken + 1 })
                 s { vm = vm', pending = Nothing, taken = (s.curStep, desc) : s.taken }
@@ -510,12 +511,12 @@ runCommand' fetcher cmd s
       t <- liftIO $ memoryText (shown s) s.vm off (min len maxMemoryDump)
       pure s { out = Just t }
     ShowStorage -> pure s { out = Just $ case currentContract s.vm of
-                          Just c -> formatExpr (shown s c.storage)
+                          Just c -> exprText (shown s c.storage)
                           Nothing -> "No contract." }
     ShowCalldata -> pure s { out = Just (bufText (shown s s.vm.state.calldata)) }
     ShowTrace -> pure s { out = Just (traceText s.dapp s.vm) }
     ShowPathConds -> pure s { out = Just $ if null s.vm.constraints then "No path conditions."
-                          else T.unlines (map (formatProp . (if s.simp then Expr.simplifyProp else id)) (reverse s.vm.constraints)) }
+                          else T.unlines (map (propText . (if s.simp then Expr.simplifyProp else id)) (reverse s.vm.constraints)) }
     ShowStats -> pure s { out = Just (renderStats (sessionStats s)) }
     SetSimplify b -> pure s { simp = b, note = "Expressions are shown " <> (if b then "simplified." else "as they are.") }
     SetBranches m -> pure s { branchMode = m, note = case m of
@@ -657,12 +658,12 @@ maxExprChars = 200000
 wordView :: Expr EWord -> ValueView
 wordView e = case maybeLitWordSimp e of
   Just w -> HexValue (T.pack ("0x" <> showHex w ""))
-  Nothing -> ExprValue (clip maxExprChars (formatExpr e))
+  Nothing -> ExprValue (clip maxExprChars (exprText e))
 
 bufView :: Expr Buf -> ValueView
 bufView = \case
   ConcreteBuf bs -> HexValue (T.pack ("0x" <> concatMap byteHex (BS.unpack bs)))
-  b -> ExprValue (clip maxExprChars (formatExpr b))
+  b -> ExprValue (clip maxExprChars (exprText b))
 
 -- | initial is "known" when the storage started from known values, else "unknown"
 data StorageView = StorageView { address :: ValueView, current :: Bool, initial :: Text, slots :: [StorageSlot] }
@@ -728,8 +729,8 @@ mkView s = do
     , result = resultView (shown s) vm
     , pc = vm.state.pc
     , op = T.pack (opNameAt vm.state.code vm.state.pc)
-    , contract = formatExpr vm.state.contract
-    , codeContract = formatExpr vm.state.codeContract
+    , contract = exprText vm.state.contract
+    , codeContract = exprText vm.state.codeContract
     , codeName = (.contractName) <$> (Map.lookup vm.state.codeContract vm.env.contracts >>= (`findSrc` s.dapp))
     , depth = length vm.frames
     , gas = gasLeft vm
@@ -744,7 +745,7 @@ mkView s = do
         srcMap s.dapp c i)
     , storage = storageViews s
     , pathConditions = length vm.constraints
-    , branch = (\(Pending c ctx) -> BranchView (clip 1000 . formatExpr . shown s <$> c) (branchOptions ctx)) <$> s.pending
+    , branch = (\(Pending c ctx) -> BranchView (clip 1000 . exprText . shown s <$> c) (branchOptions ctx)) <$> s.pending
     , branchMode = case s.branchMode of
         SolverBranches -> "solver"
         ExplorerBranches -> "explorer"
@@ -760,7 +761,7 @@ mkView s = do
     vm = s.vm
     branchOptions = \case
       PleaseRunBoth _ -> ["false", "true"]
-      PleaseRunAll vals _ -> map (clip 200 . formatExpr) vals
+      PleaseRunAll vals _ -> map (clip 200 . exprText) vals
 
 -- * Helpers
 
@@ -837,7 +838,7 @@ storageViews s =
       _ -> ([], "unknown")
     addrView = \case
       LitAddr x -> HexValue (T.pack ("0x" <> showHex (into x :: Integer) ""))
-      other -> ExprValue (formatExpr other)
+      other -> ExprValue (exprText other)
 
 memoryText :: (Expr Buf -> Expr Buf) -> VM t -> Int -> Int -> IO Text
 memoryText display vm off len = case vm.state.memory of
@@ -847,7 +848,7 @@ memoryText display vm off len = case vm.state.memory of
              else stToIO $ VS.freeze (VSM.slice off avail m)
     let bs = BS.pack (VS.toList bytes) <> BS.replicate (max 0 len - avail) 0
     pure $ T.pack (prettyHexAt off bs)
-  SymbolicMemory buf -> pure $ clip 4000 (formatExpr (display buf))
+  SymbolicMemory buf -> pure $ clip 4000 (exprText (display buf))
 
 prettyHexAt :: Int -> BS.ByteString -> String
 prettyHexAt off bs
@@ -857,7 +858,7 @@ prettyHexAt off bs
 bufText :: Expr Buf -> Text
 bufText = \case
   ConcreteBuf bs -> T.pack (prettyHex bs)
-  b -> clip 4000 (formatExpr b)
+  b -> clip 4000 (exprText b)
 
 sessionTrace :: Session t -> Text
 sessionTrace s = traceText s.dapp s.vm
@@ -884,7 +885,7 @@ resultText vm = case vm.result of
   where
     retText = \case
       ConcreteBuf bs -> if BS.null bs then "nothing" else "0x" <> T.pack (concatMap byteHex (BS.unpack bs))
-      b -> formatExpr b
+      b -> exprText b
 
 hex :: Int -> Text
 hex i = T.pack ("0x" <> showHex i "")
@@ -896,3 +897,23 @@ clip :: Int -> Text -> Text
 clip n t
   | T.length t <= n = t
   | otherwise = T.take n t <> "… (" <> tshow (T.length t) <> " chars)"
+
+-- | Subterms are shared, so an expression printed as a tree can be exponentially larger than it is
+maxExprNodes :: Int
+maxExprNodes = 50000
+
+exprText :: Expr a -> Text
+exprText e
+  | longerThan maxExprNodes (foldExpr (const [()]) [] e) = tooLarge
+  | otherwise = formatExpr e
+
+propText :: Prop -> Text
+propText p
+  | longerThan maxExprNodes (foldProp (const [()]) [] p) = tooLarge
+  | otherwise = formatProp p
+
+tooLarge :: Text
+tooLarge = "(too large to show: more than " <> tshow maxExprNodes <> " nodes)"
+
+longerThan :: Int -> [a] -> Bool
+longerThan n = not . null . drop n

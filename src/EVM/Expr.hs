@@ -787,6 +787,18 @@ copySlice a@(Lit srcOffset) b@(Lit dstOffset) c@(Lit size) d@(ConcreteBuf src) e
     in ConcreteBuf $ hd <> sl <> tl
   | otherwise = CopySlice a b c d e
 
+-- A window of src that reads as literal bytes is copied from those bytes, so src is not kept:
+-- e.g. an MCOPY within memory would otherwise contain the memory twice
+copySlice (Lit srcOffset) d sz@(Lit size) src dst
+  | symbolicSrc src, size <= 256, srcOffset + (size - 1) >= srcOffset
+  , Just bs <- mapM (litByte . (\i -> readByte (Lit i) src)) [srcOffset .. srcOffset + (size - 1)]
+  = copySlice (Lit 0) d sz (ConcreteBuf (BS.pack bs)) dst
+  where
+    symbolicSrc :: Expr Buf -> Bool
+    symbolicSrc = \case ConcreteBuf _ -> False; _ -> True
+    litByte :: Expr Byte -> Maybe Word8
+    litByte = \case LitByte b -> Just b; _ -> Nothing
+
 -- Drop source bytes that a concrete copy window cannot observe.
 copySlice s@(Lit srcOffset) d@(Lit _) sz@(Lit size) src@(WriteWord {}) dst
   | Just src' <- trimToWindow srcOffset size src, src' /= src
@@ -799,9 +811,10 @@ copySlice s d@(Lit dstOffset) sz@(Lit size) src dst
   = copySlice s d sz src dst'
 
 -- concrete indices & abstract src (may produce a concrete result if we are
--- copying from a concrete region of src)
+-- copying from a concrete region of src). It reads a byte at a time, and without
+-- gas, symbolic execution can copy hundreds of megabytes.
 copySlice s@(Lit srcOffset) d@(Lit dstOffset) sz@(Lit size) src ds@(ConcreteBuf dst)
-  | dstOffset < maxBytes, size < maxBytes, srcOffset + (size-1) >= srcOffset = let
+  | dstOffset < maxBytes, size <= 65536, srcOffset + (size-1) >= srcOffset = let
     hd = padRight (unsafeInto dstOffset) $ BS.take (unsafeInto dstOffset) dst
     sl = [readByte (Lit i) src | i <- [srcOffset .. srcOffset + (size - 1)]]
     tl = BS.drop (unsafeInto dstOffset + unsafeInto size) dst

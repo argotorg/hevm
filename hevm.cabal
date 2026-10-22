@@ -319,6 +319,7 @@ test-suite test
     EVM.Test.FoundryTests
     EVM.Test.Asm
     EVM.Debugger.DebuggerTests
+    EVM.Debugger.DebuggerFuzz
     EVM.Debugger.ProgressTests
   build-depends:
     aeson-pretty,

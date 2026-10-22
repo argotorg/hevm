@@ -213,10 +213,16 @@ formatBinary :: ByteString -> Text
 formatBinary =
   (<>) "0x" . T.decodeUtf8 . toStrict . toLazyByteString . byteStringHex
 
+maxShownBytes :: Int
+maxShownBytes = 65536
+
 formatSBinary :: Expr Buf -> Text
 formatSBinary e = format $ Expr.concKeccakSimpExpr e
   where
-    format (ConcreteBuf bs) = formatBinary bs
+    -- without gas, symbolic execution can log or return hundreds of megabytes
+    format (ConcreteBuf bs)
+      | BS.length bs > maxShownBytes = formatBinary (BS.take maxShownBytes bs) <> "… (" <> T.pack (show (BS.length bs)) <> " bytes)"
+      | otherwise = formatBinary bs
     format (AbstractBuf t) = "<" <> t <> " abstract buf>"
     format e2 = T.pack $ "Symbolic expression: " <> show e2
 

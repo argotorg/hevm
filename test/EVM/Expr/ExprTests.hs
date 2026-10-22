@@ -796,10 +796,19 @@ copySliceTests = testGroup "CopySlice tests"
           e = CopySlice (Lit 145) (Lit 45) (Lit 82) src dst
       assertEqual "a write past the window does not survive simplification"
         (ConcreteBuf (BS.pack [1..45] <> BS.replicate 82 0)) (Expr.simplify e)
+  , testCase "copy-within-memory-does-not-double" $ do
+      let mcopy m = let m' = WriteWord (Lit 0x20) (Lit 0x1f) m in Expr.copySlice (Lit 0x3e) (Lit 0) (Lit 2) m' m'
+          mem = iterate mcopy (AbstractBuf "mem") !! 60
+          nodes = length (take 100000 (foldExpr (const [()]) [] mem))
+      assertBool ("the copies make " <> show nodes <> " nodes") (nodes < 1000)
+  , testCase "huge-copy-is-not-read-bytewise" $ do
+      let e = Expr.copySlice (Lit 0) (Lit 0) (Lit 100_000_000) (WriteWord (Lit 0x40) (Lit 7) (ConcreteBuf "")) (ConcreteBuf "")
+      r <- Timeout.timeout 5_000_000 (evaluate (Expr.bufLength e))
+      assertEqual "" (Just (Lit 100_000_000)) r
   , adjustOption (\(QuickCheckTests n) -> QuickCheckTests (if n == 100 then 200 else n)) $
     testProperty "copyslice-window-trim-equivalence" $ forAll genTrimCase $ \c ->
       forAll (frequency [(4, fromIntegral <$> choose (0 :: Int, 64)), (1, elements [Expr.maxBytes, maxBound - 15])]) $ \dOff ->
-      forAll (elements [ConcreteBuf "", AbstractBuf "dst", ConcreteBuf (BS.pack [1..100])]) $ \dst -> ioProperty $ do
+      forAll (elements [ConcreteBuf "", AbstractBuf "dst", ConcreteBuf (BS.pack [1..100]), tcSrc c]) $ \dst -> ioProperty $ do
         let lit = Lit . fromIntegral
             full = CopySlice (lit c.tcOff) (Lit dOff) (lit c.tcSize) (tcSrc c) dst
             simp = Expr.copySlice (lit c.tcOff) (Lit dOff) (lit c.tcSize) (tcSrc c) dst
@@ -809,6 +818,7 @@ copySliceTests = testGroup "CopySlice tests"
         let result = case simp of
               _ | simp == full -> "unchanged"
               ConcreteBuf _ -> "concrete"
+              CopySlice _ _ _ (ConcreteBuf _) _ | tcSrc c /= ConcreteBuf "" -> "source resolved"
               CopySlice _ _ _ s _ | s /= tcSrc c -> "source trimmed"
               _ -> "other"
         pure $ foldr (uncurry tabulate) (counterexample (show (c, simp, simpAll, res)) $ isUnsatOrUnknown res)

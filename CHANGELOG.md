@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--serve` serves the progress of a run over HTTP, at `/progress`.
 - `--check-static-branches` checks branch decisions made without the solver
   against the solver.
+- The symbolic execution fuzzer runs symbolic and concrete execution in
+  lockstep, also along paths given by solver models, and
+  checks the debugger's stepping, back and forth, against geth.
 - Word reads that straddle literal bytes and written words, such as calldata's
   selector and first argument, simplify to the written parts shifted and or-ed.
 - Reads of all-zero buffers simplify to zero.
@@ -145,6 +148,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Fixed
 - MCOPY of a symbolic size now grows memory.
+- A copy within symbolic memory, e.g. an MCOPY in a loop, no longer makes
+  expressions grow exponentially when its source bytes are known.
+- Huge copies, logs and return data in symbolic execution are no longer read or
+  printed byte by byte; traces show their first 64 KiB.
 - A precompile call that runs out of gas now leaves an error trace.
 - A branch side the solver refutes is no longer explored when it could not decide
   the other side, e.g. one it cannot encode.
