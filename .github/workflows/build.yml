@@ -130,7 +130,7 @@ jobs:
             gmp:p
             openssl:p
             go:p
-      - uses: haskell-actions/setup@e447c4c045e7744463435b4b731e125861006ebb # v2.7.7
+      - uses: haskell-actions/setup@0f8e8c99d88aeb3fbfd523f1ef2c6f762d10d64d # v2.12.1
         id: setup
         with:
           ghc-version: '9.8.4'
