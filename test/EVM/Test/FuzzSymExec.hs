@@ -81,7 +81,7 @@ import EVM.Types hiding (Env)
 import EVM.Effects
 import EVM.Dapp (emptyDapp)
 import EVM.Debugger (Session, newSession, setSnapshotInterval, sessionWarnings, runCommand, Command(..), mkView, View(..), BranchView(..), sessionVM, sessionStep, isHalted, hasPendingBranch
-                    , BranchMode(..), setBranchMode, setMerge, sessionStats, StatsView(..), Stats(..))
+                    , BranchMode(..), setBranchMode, sessionStats, StatsView(..), Stats(..))
 import EVM.Tracing (interpretWithTrace, vmTraceStep, VMTraceStep(..))
 
 -- * Programs
@@ -1382,7 +1382,6 @@ data Lockstep = Lockstep
   , static   :: Int -- ^ branches decided without the solver
   , ended    :: Maybe (Int, Int, String) -- ^ pc, depth and kind of result, when both runs halted
   , ops      :: Set String -- ^ the opcodes stepped and compared after
-  , merges   :: Int -- ^ symbolic steps that merged a branch
   }
 
 maxLockstepSteps :: Int
@@ -1391,11 +1390,11 @@ maxLockstepSteps = 2000
 -- | Steps a concrete and a symbolic debugging session of the case side by side,
 -- taking the concrete run's side at every symbolic branch. After every step the
 -- symbolic state, with the concrete inputs substituted, must be the concrete one.
-lockstepCase :: App m => SolverGroup -> BranchMode -> Bool -> TestCase -> m (Either String Lockstep)
-lockstepCase solvers mode merging c = Progress.withProgressLogFromEnv "lockstep" $ do
+lockstepCase :: App m => SolverGroup -> BranchMode -> TestCase -> m (Either String Lockstep)
+lockstepCase solvers mode c = Progress.withProgressLogFromEnv "lockstep" $ do
   sc0 <- liftIO $ stToIO (concreteTestVm c) >>= newSession emptyDapp
-  ss0 <- liftIO $ setMerge merging . setBranchMode mode <$> (stToIO (symbolicTestVm c) >>= newSession emptyDapp)
-  r <- go sc0 ss0 (Lockstep "" 0 0 0 0 0 [] 0 Nothing mempty 0) Nothing
+  ss0 <- liftIO $ setBranchMode mode <$> (stToIO (symbolicTestVm c) >>= newSession emptyDapp)
+  r <- go sc0 ss0 (Lockstep "" 0 0 0 0 0 [] 0 Nothing mempty) Nothing
   Progress.emit "lockstep-end" $ case r of
     Left err -> ["failure" JSON..= T.pack err]
     Right l -> ["stopped" JSON..= T.pack l.stopped, "steps" JSON..= l.steps, "compared" JSON..= l.compared, "branches" JSON..= l.branches]
@@ -1426,14 +1425,9 @@ lockstepCase solvers mode merging c = Progress.withProgressLogFromEnv "lockstep"
             _ | acc.steps >= maxLockstepSteps -> stopWith "step limit"
               | otherwise -> do
                   let opName' = intToOpName (fromIntegral (getOpW8' vc))
-                  sc1 <- runCommand fetcher (Step 1) sc >>= settle (4 :: Int) vc
+                  sc' <- runCommand fetcher (Step 1) sc >>= settle (4 :: Int) vc
                   ss1 <- runCommand fetcher (Step 1) ss
-                  -- a merged branch runs one side's instructions in the symbolic step: the
-                  -- concrete run catches up to where the merge ended
-                  (sc', merged) <- if merging && not (hasPendingBranch ss1) && not (isHalted ss1) && not (atSame sc1 ss1)
-                    then catchUp (200 :: Int) ss1 sc1 <&> \sc2 -> if atSame sc2 ss1 then (sc2, True) else (sc1, False)
-                    else pure (sc1, False)
-                  picked <- if merged then pure (Right (ss1, 0, 0)) else pickSide vs (sessionVM sc') ss1
+                  picked <- pickSide vs (sessionVM sc') ss1
                   case picked of
                     -- a call to an address that stays symbolic goes to unknown code, which is
                     -- over-approximated rather than run
@@ -1460,7 +1454,6 @@ lockstepCase solvers mode merging c = Progress.withProgressLogFromEnv "lockstep"
                           <> [ "branchesTaken" JSON..= took | took > 0 ] <> [ "sidesRetried" JSON..= tried | tried > 0 ]
                         let counters = (sessionStats ss'').counters
                         go sc' ss'' acc' { steps = acc.steps + 1, branches = acc.branches + took, retries = acc.retries + tried
-                                         , merges = acc.merges + if merged then 1 else 0
                                          , ops = Set.insert opName' acc.ops
                                          , trail = take 30 (entry : acc.trail)
                                          , static = counters.staticDecisions } (Just opName')
@@ -1469,12 +1462,6 @@ lockstepCase solvers mode merging c = Progress.withProgressLogFromEnv "lockstep"
     midInstruction :: VM t -> VM t -> Bool
     midInstruction before now = isNothing now.result && now.state.pc == before.state.pc
                                   && length now.frames == length before.frames
-    atSame :: Session Concrete -> Session Symbolic -> Bool
-    atSame a b = (sessionVM a).state.pc == (sessionVM b).state.pc && length (sessionVM a).frames == length (sessionVM b).frames
-    catchUp :: App m => Int -> Session Symbolic -> Session Concrete -> m (Session Concrete)
-    catchUp n target s
-      | n <= 0 || isHalted s || atSame s target = pure s
-      | otherwise = runCommand fetcher (Step 1) s >>= catchUp (n - 1) target
     settle :: App m => Int -> VM Concrete -> Session Concrete -> m (Session Concrete)
     settle n before s
       | n > 0, midInstruction before (sessionVM s) = runCommand fetcher (Step 1) s >>= settle (n - 1) before
@@ -1771,7 +1758,7 @@ modelGuided solvers mode c picks = Progress.withProgressLogFromEnv "model-guided
             Left e -> skip ("model: " <> takeWhile (/= ':') e)
             Right i -> do
               let c' = c { inputs = i }
-              lockstepCase solvers mode False c' >>= \case
+              lockstepCase solvers mode c' >>= \case
                 Left err -> liftIO $ failWith c' i err
                 Right l -> case l.ended of
                   -- the solver may pick any hash of symbolic data, which the concrete run does not get
@@ -1880,26 +1867,25 @@ lockstepTests = testGroup "lockstep-fuzz"
             [ IPush 0 0, IPush 0 0, IPush 0 0, IPush 0 0, IPush 0 0, IOp OpCalldataload, IPush 1 4, IPush 3 0xffffff
             , IOp OpCall, IOp OpPop, IPush 1 4, IOp OpExtcodehash, IPush 0 0, IOp OpMstore, IPush 1 0x20, IPush 0 0, IOp OpReturn ] [])
             (Inputs "" mempty 0 0x10000000000) 931794 0x12c
-      forM_ [(m, g) | m <- [SolverBranches, ExplorerBranches, CheckedBranches], g <- [False, True]] $ \(mode, merging) ->
-        lockstepCase solvers mode merging c >>= \case
+      forM_ [SolverBranches, ExplorerBranches, CheckedBranches] $ \mode ->
+        lockstepCase solvers mode c >>= \case
           Left err -> liftIO $ failWith c c.inputs (show mode <> ": " <> err)
           Right r -> liftIO $ unless (r.stopped == "halted") $ assertFailure ("stopped: " <> r.stopped)
   , -- the case from the HEVM_FUZZ_* variables that a failure prints, in every branch mode
     test "lockstep-from-env" $ liftIO caseFromEnv >>= mapM_ (\c ->
-      withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> forM_ [(m, g) | m <- [SolverBranches, ExplorerBranches, CheckedBranches], g <- [False, True]] $ \(mode, merging) ->
-        lockstepCase solvers mode merging c >>= \case
-          Left err -> liftIO $ failWith c c.inputs (show mode <> (if merging then ", merging" else "") <> ": " <> err)
-          Right r -> liftIO $ putStrLn $ show mode <> (if merging then ", merging" else "") <> ": " <> r.stopped <> " after " <> show r.steps <> " steps, "
+      withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> forM_ [SolverBranches, ExplorerBranches, CheckedBranches] $ \mode ->
+        lockstepCase solvers mode c >>= \case
+          Left err -> liftIO $ failWith c c.inputs (show mode <> ": " <> err)
+          Right r -> liftIO $ putStrLn $ show mode <> ": " <> r.stopped <> " after " <> show r.steps <> " steps, "
                        <> show r.compared <> " values compared")
-  , testProperty "symbolic-lockstep" $ \(c :: TestCase) -> forAll (elements [SolverBranches, ExplorerBranches, CheckedBranches]) $ \mode -> \merging ->
+  , testProperty "symbolic-lockstep" $ \(c :: TestCase) -> forAll (elements [SolverBranches, ExplorerBranches, CheckedBranches]) $ \mode ->
       within 300_000_000 $ ioProperty $ runEnv testEnv $ withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> do
         -- to find a case that crashes, hangs or runs out of memory
-        liftIO $ writeCaseFile "symbolic-lockstep" $ show c <> "\nmode: " <> show mode <> ", merging: " <> show merging
+        liftIO $ writeCaseFile "symbolic-lockstep" $ show c <> "\nmode: " <> show mode
           <> "\nreproduce with: " <> reproduction c c.inputs
-        lockstepCase solvers mode merging c >>= \case
+        lockstepCase solvers mode c >>= \case
           Left err -> liftIO $ failWith c c.inputs err
           Right r -> pure $ tabulate "stopped" [r.stopped]
-                          $ tabulate "merged branches" [bucket r.merges | merging]
                           $ tabulate "opcodes compared after, in cases" (Set.toList r.ops)
                           $ tabulate "branch mode" [show mode]
                           $ tabulate "decided by simplification" [bucket r.static]
