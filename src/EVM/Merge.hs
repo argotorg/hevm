@@ -19,6 +19,7 @@ module EVM.Merge
 
 import Control.Monad (when)
 import Control.Monad.State.Strict (get, put)
+import Data.Maybe (isJust)
 import Debug.Trace (traceM)
 import Optics.Core
 import Optics.State
@@ -79,9 +80,9 @@ tryMergeForwardJump
   -> [Expr EWord]     -- ^ Stack after popping JUMPI args
   -> EVM Symbolic Bool
 tryMergeForwardJump conf exec1Step currentPC jumpTarget cond stackAfterPop = do
-  -- Only handle forward jumps (skip block pattern)
-  if jumpTarget <= currentPC
-  then pure False  -- Not a forward jump
+  -- Only merge forward jumps whose conditions remain symbolic.
+  if jumpTarget <= currentPC || isJust (Expr.maybeLitWordSimp cond)
+  then pure False
   else do
     vm0 <- get
 
@@ -137,7 +138,14 @@ checkNoSideEffects vm0 vmAfter =
       freshVarUnchanged = vm0.freshVar == vmAfter.freshVar
       framesUnchanged = length vm0.frames == length vmAfter.frames
       subStateUnchanged = vm0.tx.subState == vmAfter.tx.subState
+      -- the merge restores vm0, so a GAS reading, CREATE or unknown call in the
+      -- merged segment would leave these counters rolled back
+      envCountersUnchanged = vm0.env.freshGasVals == vmAfter.env.freshGasVals
+                             && vm0.env.freshAddresses == vmAfter.env.freshAddresses
+                             && vm0.env.callWorld == vmAfter.env.callWorld
+                             && vm0.env.callCounts == vmAfter.env.callCounts
+                             && vm0.state.lastGasReading == vmAfter.state.lastGasReading
   in memoryUnchanged && memorySizeUnchanged && returndataUnchanged
      && storageUnchanged && logsUnchanged && constraintsUnchanged
      && keccakUnchanged && freshVarUnchanged
-     && framesUnchanged && subStateUnchanged
+     && framesUnchanged && subStateUnchanged && envCountersUnchanged

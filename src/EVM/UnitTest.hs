@@ -173,10 +173,18 @@ validateCex :: forall m . App m
   => UnitTestOptions
   -> Fetch.Fetcher Concrete m
   -> VM Concrete
+  -> Map (Expr EAddr) Addr
   -> ReproducibleCex
   -> m Bool
-validateCex uTestOpts fetcher vm repCex = do
-  let utoConc = uTestOpts { testParams = uTestOpts.testParams { caller = LitAddr 0xdeadbeef}}
+validateCex uTestOpts fetcher vm0 cexAddrs repCex = do
+  let concAddr dflt a = case a of
+        SymAddr _ -> LitAddr $ Map.findWithDefault dflt a cexAddrs
+        _ -> a
+      params = uTestOpts.testParams
+      utoConc = uTestOpts { testParams = params { caller = concAddr 0xdeadbeef params.caller
+                                                , origin = concAddr 0xdeadbeef params.origin }}
+      vm = vm0 & set (#tx % #origin) utoConc.testParams.origin
+               & over (#block % #coinbase) (concAddr 0)
   conf <- readConfig
   when conf.debug $ liftIO $ putStrLn $ "Repro running function: " <> show utoConc.testParams.address <>
     " with caller: " <> show utoConc.testParams.caller <> ", gas: " <> show utoConc.testParams.gasCall <>
@@ -233,6 +241,31 @@ runUnitTestContract
     Just (VMSuccess _) -> do
       forM (zip [1..] testSigs) $ \(i, s) -> symRun opts vm1 (i, length testSigs) s buildOut.sources
     _ -> internalError "setUp() did not end with a result"
+
+-- | The VM of the single test matching the filter, after setUp(), about to
+-- call the test with symbolic arguments
+debugTestVm :: App m => UnitTestOptions -> BuildOutput -> m (Either Text (VM Symbolic))
+debugTestVm opts buildOut@(BuildOutput (Contracts cs) _) =
+  case [ (c, s) | c <- Map.elems cs, s <- findUnitTests opts.methodFilter c ] of
+    [(contract, sig@(Sig testName types))] -> do
+      vm0 :: VM Concrete <- liftIO $ stToIO $ initialUnitTestVm opts contract
+      vm1 <- Stepper.interpret (Fetch.oracle opts.solvers (Just opts.sess) opts.rpcInfo) vm0 $ do
+        Stepper.enter contract.contractName
+        initializeUnitTest opts contract
+        Stepper.evm get
+      case vm1.result of
+        Just (VMSuccess _) -> do
+          (cdBuf, cdProps, _) <- symCalldata (callSig sig) types [] (AbstractBuf "txdata")
+          vm2 <- Stepper.interpret (Fetch.oracle opts.solvers (Just opts.sess) opts.rpcInfo) vm1 $
+            Stepper.evm $ do
+              pushTrace (EntryTrace testName)
+              makeTxCall opts.testParams (cdBuf, cdProps)
+              get
+          pure $ Right $ symbolify vm2 & set #srcLookup (Just $ makeSrcLookup opts.dapp buildOut.sources)
+        _ -> Left . ("setUp() failed:\n" <>) <$> failOutput vm1 opts "setUp()"
+    [] -> pure $ Left "No test matches; use --match to select exactly one test to debug"
+    many -> pure $ Left $ "Several tests match, use --match to select exactly one to debug:\n"
+      <> Text.unlines [ "  " <> c.contractName <> "." <> n | (c, Sig n _) <- many ]
 
 -- | forge-std's and ds-test's fail() set the "failed" slot of the cheat code
 -- address, so without that account nothing failed
@@ -351,7 +384,7 @@ symRun opts@UnitTestOptions{..} vm (nth, numTests) sig@(Sig testName types) sour
             Nothing -> internalError "cexHandler: expected a cex"
             Just (cexEnd, smtCex) -> do
               failsToRepro <- getReproFailure (Sig testName types) (fst cd) smtCex
-              validation <- traverse (validateCex opts fetcherConc vm) failsToRepro
+              validation <- traverse (validateCex opts fetcherConc vm smtCex.addrs) failsToRepro
               txtFail <- symFailure opts testName (fst cd) types (cexEnd, smtCex, validation)
               Progress.printOut txtFail
 
@@ -564,10 +597,10 @@ initialUnitTestVm (UnitTestOptions {..}) theContract = do
            , timestamp = Lit testParams.timestamp
            , blockGaslimit = testParams.gaslimit
            , gasprice = testParams.gasprice
-           , baseFee = testParams.baseFee
+           , baseFee = Lit testParams.baseFee
            , priorityFee = testParams.priorityFee
            , maxCodeSize = testParams.maxCodeSize
-           , prevRandao = testParams.prevrandao
+           , prevRandao = Lit testParams.prevrandao
            , chainId = testParams.chainId
            , create = True
            , allowFFI = ffiAllowed
@@ -601,7 +634,7 @@ makeSrcLookup dapp srcCache = SrcLookup $ \contracts addr pc ->
 paramsFromRpc :: forall m . App m => Fetch.RpcInfo -> Fetch.Session -> m TestVMParams
 paramsFromRpc rpcInfo sess = do
   (miner,ts,blockNum,ran,limit,base) <- case rpcInfo.blockNumURL of
-    Nothing -> pure (SymAddr "miner", Lit 0, Lit 0, 0, 0, 0)
+    Nothing -> pure (SymAddr "miner", Lit 0, Lit 0, Lit 0, 0, Lit 0)
     Just (Fetch.Latest, url) -> fetch Fetch.Latest url
     Just (Fetch.BlockNumber block, url) -> fetch (Fetch.BlockNumber block) url
   let ts' = fromMaybe (internalError "received unexpected symbolic timestamp via rpc") (maybeLitWordSimp ts)
@@ -613,7 +646,7 @@ paramsFromRpc rpcInfo sess = do
     , origin = SymAddr "origin"
     , gasCreate = defaultGasForCreating
     , gasCall = defaultGasForInvoking
-    , baseFee = base
+    , baseFee = forceLit base
     , priorityFee = 0
     , balanceCreate = defaultBalanceForTestContract
     , coinbase = miner
@@ -622,7 +655,7 @@ paramsFromRpc rpcInfo sess = do
     , gaslimit = limit
     , gasprice = 0
     , maxCodeSize = defaultMaxCodeSize
-    , prevrandao = ran
+    , prevrandao = forceLit ran
     , chainId = 99
     }
   where

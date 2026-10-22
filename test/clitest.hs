@@ -13,6 +13,7 @@ break the hevm CLI interface.
 import Test.Hspec
 import System.Process (readProcessWithExitCode)
 import System.Exit (ExitCode(..))
+import Control.Monad (forM_)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf)
 import Data.List.Split (splitOn)
 import Data.Text qualified as T
@@ -318,6 +319,16 @@ main = do
         (_, execOut, _) <- readProcessWithExitCode "cabal"
           ["run", "exe:hevm", "--", "exec", "--create", "--code", asmHex [OpUnknown 0xfe]] ""
         execOut `shouldContain` "UnrecognizedOpcode"
+      it "symbolic-block-fields" $ do
+        -- INVALID iff the field is nonzero; OpPush assembles to PUSH32, so the JUMPDEST is at 36
+        let code op = asmHex [op, OpPush (Lit 36), OpJumpi, OpStop, OpJumpdest, OpUnknown 0xfe]
+            run args = readProcessWithExitCode "cabal" (["run", "exe:hevm", "--", "symbolic"] <> args) ""
+        forM_ [OpNumber, OpBaseFee, OpPrevRandao] $ \op -> do
+          (exitCode, stdout, _) <- run ["--code", code op]
+          exitCode `shouldBe` ExitFailure 1
+          stdout `shouldContain` "Block Context"
+        (exitCode, _, _) <- run ["--code", code OpNumber, "--number", "0"]
+        exitCode `shouldBe` ExitSuccess
       it "early-abort" $ do
         (exitCode, stdout, stderr) <- runForge "test/contracts/pass/early-abort.sol" ["--max-iterations", "1000", "--early-abort"]
         stderr `shouldNotContain` "CallStack"

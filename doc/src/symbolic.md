@@ -18,6 +18,10 @@ an assertion violation is defined as either an execution of the invalid opcode
 the predefined solc assertion codes defined
 [here](https://docs.soliditylang.org/en/latest/control-structures.html#panic-via-assert-and-error-via-require).
 
+Each counterexample is replayed on a concrete EVM, and marked `[validated]` if the
+replay violates the assertion too, or `[not reproducible]` if it does not. Runs
+that fetch state over RPC, and contract creation, are not replayed.
+
 ## Arithmetic overflow
 
 By default hevm ignores assertion violations that result from arithmetic
@@ -30,7 +34,10 @@ hevm symbolic --code $CODE --assertions '[0x01, 0x11]'
 ```
 
 The default value for `calldata` and `caller` are symbolic values, but can be
-specialized to concrete functions with their corresponding flags.
+specialized to concrete functions with their corresponding flags. So is the
+timestamp (`--timestamp`), and, unless `--rpc` is given, the block number, base
+fee and prevrandao (`--number`, `--basefee`, `--prev-randao`). The gas price is
+0 unless `--gasprice` is given.
 
 ## Specializing calldata
 
@@ -62,6 +69,11 @@ bytes, followed by the bytestring
 ```shell
 hevm symbolic --sig "transfer(address,uint256)" --arg "<symbolic>" --arg 0 --code $(<dstoken.bin-runtime)
 ```
+
+Values are written as: decimal or `0x` hex numbers (negative ones like `-1` for
+`int<N>`), `true`/`false`, `0x` hex for `bytesN` and `bytes`, a double-quoted
+string for `string`, and `[a,b,...]` for arrays. Tuple arguments cannot be given
+concretely.
 
 If the `--get-models` flag is given, example input values will be returned for
 each possible execution path. This can be useful for automatic test case

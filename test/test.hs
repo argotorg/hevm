@@ -16,6 +16,8 @@ import System.IO (hSetBuffering, stdout, BufferMode(..), isEOF)
 import Control.Monad.ST (stToIO)
 import Control.Monad.State.Strict
 import Control.Monad.IO.Unlift
+import Control.Exception (ErrorCall(..), throwIO, try)
+import System.Timeout (timeout)
 import Control.Monad.Reader (ReaderT)
 import Control.Monad.Trans.Maybe (runMaybeT)
 import Data.Bits hiding (And, Xor)
@@ -63,6 +65,7 @@ import EVM.Exec
 import EVM.Expr qualified as Expr
 import EVM.Fetch qualified as Fetch
 import EVM.Format (hexText, hexByteString)
+import EVM.Merge qualified as Merge
 import EVM.Progress (withProgress, ProgressOpts(..))
 import EVM.Precompiled
 import EVM.RLP
@@ -87,6 +90,9 @@ import EVM.Equivalence.EquivalenceTests qualified as EquivalenceTests
 import EVM.Equivalence.EquivFuzz qualified as EquivFuzz
 import EVM.Fetch.RpcFuzz qualified as RpcFuzz
 import EVM.SymExec.SymExecTests qualified as SymExecTests
+import EVM.Debugger.DebuggerTests qualified as DebuggerTests
+import EVM.Debugger.DebuggerFuzz qualified as DebuggerFuzz
+import EVM.Debugger.ProgressTests qualified as ProgressTests
 import EVM.Test.FoundryTests qualified as FoundryTests
 
 testEnv :: Env
@@ -142,7 +148,7 @@ propNoSimp a = let testEnvNoSimp = Env { config = testEnv.config { simp = False 
 progressEvents :: ReaderT Env IO () -> ReaderT Env IO [(String, Maybe String)]
 progressEvents act = withRunInIO $ \runIO -> withSystemTempDirectory "progress" $ \dir -> do
   let f = dir </> "progress.jsonl"
-  runIO $ withProgress (ProgressOpts (Just f) True False) act
+  runIO $ withProgress (ProgressOpts (Just f) True False False) act
   ls <- BSLazy.split 10 <$> BSLazy.readFile f
   forM (filter (not . BSLazy.null) ls) $ \l -> case JSON.decode l of
     Just (JSON.Object o) | Just (JSON.String ev) <- KeyMap.lookup "ev" o, Just (JSON.Number _) <- KeyMap.lookup "t" o ->
@@ -233,12 +239,16 @@ runSubSet p = defaultMain . applyPattern p $ tests
 tests :: TestTree
 tests = testGroup "hevm"
   [ FuzzSymExec.tests
+  , FuzzSymExec.lockstepTests
   , ExprTests.tests
   , RewriteFuzz.tests
   , KeccakFuzz.tests
   , HashConsTests.tests
   , ConcreteExecutionTests.tests
   , SymExecTests.tests
+  , DebuggerTests.tests
+  , DebuggerFuzz.tests
+  , ProgressTests.tests
   , EquivalenceTests.tests
   , EquivFuzz.tests
   , RpcFuzz.tests
@@ -307,6 +317,17 @@ tests = testGroup "hevm"
         case decodeAbiValues [AbiIntType 24] withSelector of
           [AbiInt 24 val] -> assertEqualM "Incorrectly decoded int24 value" (-42) val
           _ -> internalError "Error in decoding function"
+    , test "ABI-decode-follows-offsets" $ do
+        let w :: Integer -> BS.ByteString
+            w n = word256Bytes (fromInteger n)
+            pad b = b <> BS.replicate (32 - BS.length b) 0
+            -- tails are not back to back: a junk word sits between the head and them
+            enc = w 0x60 <> w 0xa0 <> w 0xdead
+               <> w 1 <> pad (hex "00")
+               <> w 2 <> pad (hex "1122")
+        assertEqualM "decoded"
+          (AbiTuple $ V.fromList [AbiBytesDynamic (hex "00"), AbiBytesDynamic (hex "1122")])
+          (decodeAbiValue (AbiTupleType $ V.fromList [AbiBytesDynamicType, AbiBytesDynamicType]) (BSLazy.fromStrict enc))
     , test "ABI-function-roundtrip" $ do
         -- Test that AbiFunction encodes/decodes correctly
         let addr = 0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef
@@ -801,6 +822,57 @@ tests = testGroup "hevm"
         assertEqualM "should not find cex (bug requires 128 bytes, bound is 64)" 0 numCexes
     ]
 
+  , testGroup "Concrete-args"
+    [ testProperty "arg-roundtrip" $ forAll (arbitrary >>= \t -> (,) t <$> genAbiValue t) $
+      \(t, v) -> makeAbiValue t (renderArg v) === v
+    , testProperty "concrete-args-calldata" $ forAll genArgs $ \vs -> prop $ do
+        let types = map abiValueType vs
+            sig = "f(" <> T.intercalate "," (map abiTypeSolidity types) <> ")"
+            expected = selector sig <> encodeAbiValue (AbiTuple (V.fromList vs))
+        (cd, _, _) <- symCalldata sig types (map renderArg vs) (AbstractBuf "txdata")
+        let got = [Expr.readByte (Lit (unsafeInto k)) cd | k <- [0 .. BS.length expected - 1]]
+        assertEqualM "calldata mismatch" (map LitByte (BS.unpack expected)) got
+    , test "negative-int-arg" $ do
+        Just c <- solcRuntime "C" [i|
+            contract C {
+              function g(int8 x) external pure { assert(x >= 0); }
+            } |]
+        let sig = Just $ Sig "g(int8)" [AbiIntType 8]
+        (_, neg) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig ["-1"] defaultVeriOpts
+        assertEqualM "-1 must violate the assertion" 1 (sum $ map (fromEnum . isCex) neg)
+        (_, pos) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig ["5"] defaultVeriOpts
+        assertEqualM "5 must not violate the assertion" 0 (sum $ map (fromEnum . isCex) pos)
+    , test "int-arg-out-of-range" $ do
+        let parses v = not . null $ [x | (x, "") <- readP_to_S (parseAbiValue (AbiIntType 8)) v]
+        assertBoolM "-128 is an int8" $ parses "-128"
+        assertBoolM "127 is an int8" $ parses "127"
+        assertBoolM "-129 is not an int8" $ not (parses "-129")
+        assertBoolM "0xff is not an int8" $ not (parses "0xff")
+    , test "dynamic-and-static-args" $ do
+        Just c <- solcRuntime "C" [i|
+            contract C {
+              function t(bytes memory a, uint256 y, string memory b, uint8[2] memory c) external pure {
+                assert(!(a.length == 33 && a[32] == 0x42 && bytes(b).length == 2 && bytes(b)[1] == "z" && c[1] == 7 && y > 100));
+              }
+            } |]
+        let sig = Just $ Sig "t(bytes,uint256,string,uint8[2])"
+                    [AbiBytesDynamicType, AbiUIntType 256, AbiStringType, AbiArrayType 2 (AbiUIntType 8)]
+            a = "0x" <> concat (replicate 32 "00") <> "42"
+            check args = fmap snd $ withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig args defaultVeriOpts
+        symY <- check [a, "<symbolic>", "\"yz\"", "[0,7]"]
+        assertEqualM "symbolic y must reach the assertion" 1 (sum $ map (fromEnum . isCex) symY)
+        concY <- check [a, "50", "\"yz\"", "[0,7]"]
+        assertEqualM "y = 50 must not reach the assertion" 0 (sum $ map (fromEnum . isCex) concY)
+    , test "bytesN-arg" $ do
+        Just c <- solcRuntime "C" [i|
+            contract C {
+              function h(bytes32 x, uint256 y) external pure { assert(x != bytes32(y)); }
+            } |]
+        let sig = Just $ Sig "h(bytes32,uint256)" [AbiBytesType 32, AbiUIntType 256]
+        (_, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig ["0x" <> replicate 63 '0' <> "1"] defaultVeriOpts
+        assertEqualM "y = 1 must violate the assertion" 1 (sum $ map (fromEnum . isCex) ret)
+    ]
+
   , testGroup "Precompiled contracts"
       [ testGroup "Example (reverse)"
           [ test "success" $
@@ -822,6 +894,13 @@ tests = testGroup "hevm"
               assertEqualM "successful recovery"
                 (Just a)
                 (execute 1 (h <> v <> r <> s) 32)
+          , test "fail on v other than 27 or 28" $ forM_ [0x1d, 0x1e] $ \v -> do
+              let
+                h = BS.replicate 31 0 <> BS.singleton 1
+                vw = BS.replicate 31 0 <> BS.singleton v
+                r = BS.replicate 31 0 <> BS.singleton 2
+                s = BS.replicate 31 0 <> BS.singleton 1
+              assertEqualM "v must be rejected" Nothing (execute 1 (h <> vw <> r <> s) 32)
           , test "fail on made up values" $ do
               let
                 r = hex "c84e55cee2032ea541a32bf6749e10c8b9344c92061724c4e751600f886f4731"
@@ -2377,7 +2456,7 @@ tests = testGroup "hevm"
         -- TODO: this should work one day
         assertBoolM "should be partial" (any isPartial e)
     , test "symbolic-addresses-cannot-be-zero-or-precompiles" $ do
-        let addrs = [T.pack . show . Addr $ a | a <- [0x0..0x09]]
+        let addrs = [T.pack . show . Addr $ a | a <- [0x0..0x11] ++ [0x100]]
             mkC a = fromJust <$> solcRuntime "A"
               [i|
                 contract A {
@@ -2395,7 +2474,7 @@ tests = testGroup "hevm"
           [i|
             contract A {
               function f() external {
-                assert(msg.sender != address(0x10));
+                assert(msg.sender != address(0x12));
               }
             }
           |]
@@ -2403,7 +2482,7 @@ tests = testGroup "hevm"
           [i|
             contract B {
               function f() external {
-                assert(block.coinbase != address(0x11));
+                assert(block.coinbase != address(0x13));
               }
             }
           |]
@@ -2411,7 +2490,7 @@ tests = testGroup "hevm"
           [i|
             contract C {
               function f() external {
-                assert(tx.origin != address(0x12));
+                assert(tx.origin != address(0x14));
               }
             }
           |]
@@ -2419,7 +2498,7 @@ tests = testGroup "hevm"
           [i|
             contract D {
               function f() external {
-                assert(address(this) != address(0x13));
+                assert(address(this) != address(0x15));
               }
             }
           |]
@@ -2428,15 +2507,62 @@ tests = testGroup "hevm"
           assertEqualM "wrong number of addresses" 1 (length (Map.keys cex.addrs))
           pure cex
 
-        -- Lowest allowed address is 0x10 due to reserved addresses up to 0x9
-        assertEqualM "wrong model for a" (Addr 0x10) (fromJust $ Map.lookup (SymAddr "caller") acex.addrs)
-        assertEqualM "wrong model for b" (Addr 0x11) (fromJust $ Map.lookup (SymAddr "coinbase") bcex.addrs)
-        assertEqualM "wrong model for c" (Addr 0x12) (fromJust $ Map.lookup (SymAddr "origin") ccex.addrs)
-        assertEqualM "wrong model for d" (Addr 0x13) (fromJust $ Map.lookup (SymAddr "entrypoint") dcex.addrs)
+        assertEqualM "wrong model for a" (Addr 0x12) (fromJust $ Map.lookup (SymAddr "caller") acex.addrs)
+        assertEqualM "wrong model for b" (Addr 0x13) (fromJust $ Map.lookup (SymAddr "coinbase") bcex.addrs)
+        assertEqualM "wrong model for c" (Addr 0x14) (fromJust $ Map.lookup (SymAddr "origin") ccex.addrs)
+        assertEqualM "wrong model for d" (Addr 0x15) (fromJust $ Map.lookup (SymAddr "entrypoint") dcex.addrs)
     ]
   , testGroup "Symbolic execution"
       [
-     test "require-test" $ do
+     test "create-returns-symbolic-size" $ do
+        -- initcode returns and(callvalue, 0xf) bytes; the parent asserts the
+        -- created code is not 5 bytes long
+        let c = fromJust $ hexByteString
+                  "7f600f34165ff300000000000000000000000000000000000000000000000000005f5260065f5f35f03b600514603157005bfe"
+        (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertBoolM "unexpected partial execution" $ not (any isPartial e)
+        assertBoolM "5-byte code must be reachable" $ any isCex ret
+    , test "worker-exception-propagates" $ do
+        let c = fromJust $ hexByteString "00"
+            throwingHandler _ _ = liftIO $ throwIO (ErrorCall "worker boom")
+        vm <- liftIO $ stToIO $ abstractVM (ConcreteBuf "", []) c Nothing False
+        let iterConf = IterConfig { maxIter = Nothing, askSmtIters = 1, loopHeuristic = StackBased }
+        res <- withDefaultSolver $ \s -> withRunInIO $ \runInIO -> timeout 30000000 $
+                 (try (runInIO (interpret (Fetch.noRpcFetcher s) iterConf vm runExpr throwingHandler)) :: IO (Either ErrorCall [()]))
+        case res of
+          Just (Left (ErrorCall msg)) -> assertEqualM "rethrown error" "worker boom" msg
+          Just (Right _) -> liftIO $ assertFailure "expected the worker's exception"
+          Nothing -> liftIO $ assertFailure "interpret hung after a worker exception"
+    , test "address-sized-memory-access-charges-gas" $ do
+        -- deploys ADDRESS PUSH0 RETURN: the return size is the address, as a WAddr
+        Just vm <- loadVM (fromJust $ hexByteString "62305ff35f526003601df3")
+        res <- Stepper.interpret (Fetch.zero 0 Nothing 1024) vm Stepper.execFully
+        case res of
+          Left _ -> pure ()
+          r -> liftIO $ assertFailure $ "returning 2^160 bytes must fail, got " <> show r
+    , test "decomposed-cex-storage-replays" $ do
+        Just c <- solcRuntime "C" [i|
+            contract C {
+              mapping(uint256 => uint256) m;
+              mapping(uint256 => uint256) n;
+              function f(uint256 x) external view { assert(!(m[x] == 3 && n[x] == 4)); }
+            } |]
+        ((cd, cdProps), _) <- mkCalldata (Just (Sig "f(uint256)" [AbiUIntType 256])) []
+        vm <- liftIO $ stToIO $ abstractVM (cd, cdProps) c Nothing False
+        let post = checkAssertions defaultPanicCodes
+        withDefaultSolver $ \s -> do
+          (_, res) <- verify s (Fetch.oracle s Nothing Fetch.noRpc) defaultVeriOpts vm post Nothing
+          case mapMaybe getCex res of
+            [(leaf, cex)] -> do
+              let x = maybe 0 (word . BS.take 32 . BS.drop 4) (cexCalldata cd cex)
+                  slot p = keccak' (word256Bytes x <> word256Bytes p)
+                  st = Map.findWithDefault mempty (SymAddr "entrypoint") cex.store
+              assertEqualM "m[x] at its real slot" (Just 3) (Map.lookup (slot 0) st)
+              assertEqualM "n[x] at its real slot" (Just 4) (Map.lookup (slot 1) st)
+              replayed <- replaySymCex s post vm leaf cex
+              assertEqualM "replay" (Right True) replayed
+            r -> liftIO $ assertFailure $ "expected one counterexample, got " <> show r
+    , test "require-test" $ do
         Just c <- solcRuntime "MyContract"
             [i|
             contract MyContract {
@@ -4443,7 +4569,38 @@ tests = testGroup "hevm"
   , testGroup "state-merging"
     -- Tests for ITE-based state merging during symbolic execution
     -- State merging combines multiple execution paths into a single path with ITE expressions
-    [ testCase "merge-simple-branches" $ do
+    [ testCase "merge-skips-folded-keccak-conditions" $ do
+        vm <- stToIO $ loadEmptySymVM (RuntimeCode (ConcreteRuntimeCode "")) (Lit 0) (ConcreteBuf "", []) >>= freezeVM
+        let bytes = word256Bytes 0x5eed1234
+            h = Keccak (ConcreteBuf bytes)
+            stack = [Lit 7]
+            initial = vm & set (#state % #stack) stack
+            step = error "concrete conditions must not trigger speculation"
+        forM_ [Lit 0, Lit 1, h, Eq h (Lit (keccak' bytes)), Eq h (Lit (keccak' bytes + 1))] $ \cond -> do
+          (merged, result) <- stToIO $
+            runStateT (Merge.tryMergeForwardJump testEnv.config step 0 2 cond stack) initial
+          assertBool "leave concrete branches to the executor" (not merged)
+          assertEqual "PC is unchanged" initial.state.pc result.state.pc
+          assertEqual "stack is unchanged" stack result.state.stack
+    , test "merge-folded-keccak-keeps-concrete-results" $ do
+        let input = 0x5eed1234 :: W256
+            digest = T.pack $ show (keccak' (word256Bytes input))
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function f(uint256 x) external pure returns (uint256 result) {
+              result = 7;
+              if (keccak256(abi.encode(x)) != bytes32(${digest})) result = 42;
+            }
+          }
+        |]
+        let sig = Just (Sig "f(uint256)" [AbiUIntType 256])
+        forM_ [(input, 7), (input + 1, 42)] $ \(arg, expected) -> do
+          paths <- withDefaultSolver $ \s ->
+            getExpr s c sig [show (into arg :: Integer)] defaultVeriOpts
+          assertBoolM "execution finishes" (not (any Expr.isPartial paths))
+          assertEqualM "the selected branch returns a literal" [Lit expected]
+            [Expr.readWord (Lit 0) buf | Success _ _ buf _ <- paths]
+    , testCase "merge-simple-branches" $ do
         -- Simple branching pattern that should be merged
         Just c <- solcRuntime "C"
           [i|
@@ -4926,10 +5083,28 @@ tests = testGroup "hevm"
       assertEqualM "candidate key and field offset" (Set.singleton (ConcreteBuf pre, h)) (concreteKeccaks $ props 0x5eed1234 255)
       assertEqualM "offset outside recovery range" mempty (concreteKeccaks $ props 0x5eed1234 256)
     -- the size is symbolic during execution, and a literal near 2^256 once the keccak is concretized
+    -- the solver cannot encode the true side's exponentiation, but simplification
+    -- refutes the false side, 10 + e == 0 and e <= 2^256 - 11
+    , testCase "branch-side-refuted-as-recorded" $ runEnv testEnv $ do
+      let e = Exp (Lit 0x41) (Xor (Lit 0x3) (ReadWord (Lit 0xa) (AbstractBuf "calldata")))
+          cond = Or (EVM.Types.LT (Lit 0) (Add (Lit 0xa) e)) (EVM.Types.LT (Lit 0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff5) e)
+      r <- withSolvers Z3 1 (Just 10) defMemLimit $ \s -> Fetch.checkBranch s cond (PBool True)
+      liftIO $ case r of
+        Case True -> pure ()
+        other -> assertFailure $ "expected only the true side, got " <> show other
     , testCase "copy-sized-by-concrete-keccak" $ runEnv (testEnv {config = testEnv.config {simp = False}}) $ do
       let copied = CopySlice (Lit 0) (Lit 0) (Keccak (ConcreteBuf (BS.replicate 9 0))) (AbstractBuf "calldata") (ConcreteBuf "")
       res <- withDefaultSolver $ \s -> checkSatWithProps s [PEq (ReadWord (Lit 0) copied) (Lit 1)]
       assertBoolM ("copy beyond the memory access limit must be unsupported, got " <> show res) (isError res)
+    , test "copy-with-symbolic-offset-encodes-it-once" $ do
+      let dst = Add (Var "a") (Var "b")
+          copied n = CopySlice (Lit 0) dst (Lit n) (AbstractBuf "calldata") (ConcreteBuf "")
+          props n = [PEq (ReadWord (Lit 0) (copied n)) (Lit 1)]
+      conf <- readConfig
+      let smt = TL.toStrict . formatSMT2 $ fromRight (internalError "Must succeed") (assertProps conf (props 0x100))
+      -- once in the copy, once in the buffer length
+      assertEqualM "symbolic offset occurrences" 2 (T.count "(bvadd a b)" smt)
+      assertBoolM "a huge copy must fail fast" $ isLeft (assertProps conf (props 0xca11ee))
     , testCase "store-over-concrete-buffer" $ runEnv (testEnv {config = testEnv.config {simp = False}}) $ do
       let
         as = AbstractStore (SymAddr "test") Nothing
@@ -4937,7 +5112,7 @@ tests = testGroup "hevm"
         e1 = SLoad (Lit 0x1) (SStore (Lit 0x8) (SLoad (Lit 0x40) as) cs)
         eq = PEq e1 (Lit 0x0)
       conf <- readConfig
-      let SMT2 _ (CexVars _ _ _ storeReads _ _) _ = fromRight (internalError "Must succeed") (assertProps conf [eq])
+      let SMT2 _ (CexVars _ _ _ storeReads _ _ _) _ = fromRight (internalError "Must succeed") (assertProps conf [eq])
       let expected = StorageReads $ Map.singleton (SymAddr "test", Nothing) (Set.singleton (Lit 0x40))
       assertEqualM "Reads must be properly collected" storeReads expected
     , test "all-abstract-reads-detected" $ do
@@ -5116,6 +5291,19 @@ bothM f (a, a') = do
   b  <- f a
   b' <- f a'
   return (b, b')
+
+-- | An '--arg' string that 'makeAbiValue' parses back to the value
+renderArg :: AbiValue -> String
+renderArg = \case
+  AbiString s -> show (map (toEnum . fromIntegral) (BS.unpack s) :: String)
+  AbiArrayDynamic _ v -> "[" <> List.intercalate "," (renderArg <$> V.toList v) <> "]"
+  AbiArray _ _ v -> "[" <> List.intercalate "," (renderArg <$> V.toList v) <> "]"
+  v -> show v
+
+genArgs :: Gen [AbiValue]
+genArgs = do
+  n <- chooseInt (1, 4)
+  vectorOf n (scale (`div` 2) arbitrary)
 
 applyPattern :: String -> TestTree  -> TestTree
 applyPattern p = localOption (TestPattern (parseExpr p))

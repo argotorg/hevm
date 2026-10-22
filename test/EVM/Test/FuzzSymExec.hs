@@ -12,9 +12,9 @@ leaves must select exactly one leaf, whose outcome must match geth's. For other
 leaves, the solver's model of their path condition is replayed in geth, and
 must reach that leaf.
 -}
-module EVM.Test.FuzzSymExec (tests) where
+module EVM.Test.FuzzSymExec (tests, lockstepTests, TestCase, concreteTestVm, symbolicTestVm, genSnapEvery) where
 
-import Control.Monad (forM, forM_, unless, when)
+import Control.Monad (foldM, forM, forM_, unless, void, when, zipWithM)
 import Control.Monad.IO.Unlift
 import Control.Monad.ST (ST, stToIO, RealWorld)
 import Control.Monad.ST.Unsafe (unsafeIOToST)
@@ -27,15 +27,19 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as Char8
 import Data.Char (isDigit, toLower)
+import Data.Either (isLeft)
 import Data.IORef (IORef, newIORef, readIORef, atomicModifyIORef')
-import Data.List (isInfixOf)
+import Data.List (intercalate, isInfixOf, isPrefixOf, tails)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Monoid (Any(..))
 import Data.Maybe (fromJust, fromMaybe, isJust, isNothing)
 import Data.Set (Set)
 import Data.Set qualified as Set
-import Data.Text (Text)
+import Data.Text (Text, unpack)
+import Data.Text qualified as T
+import Data.Tree (Forest, flatten, rootLabel, subForest)
+import Data.Vector.Storable qualified as VS
 import Data.Vector qualified as Vector
 import Data.Word (Word8)
 import GHC.Clock (getMonotonicTime)
@@ -55,7 +59,7 @@ import Test.Tasty.HUnit (assertFailure, testCase)
 import Test.Tasty.QuickCheck hiding (Failure, Success)
 import Witch (into, unsafeInto)
 
-import EVM (makeVm, initialContract, defaultVMOpts, exec1)
+import EVM (makeVm, initialContract, defaultVMOpts, exec1, traceForest)
 import EVM.Assembler (assemble)
 import EVM.Concrete qualified as Concrete
 import EVM.Expr qualified as Expr
@@ -75,7 +79,10 @@ import EVM.Traversals (foldProp, mapExpr, mapProp)
 import EVM.Transaction qualified
 import EVM.Types hiding (Env)
 import EVM.Effects
-import EVM.Tracing (interpretWithTrace, VMTraceStep(..))
+import EVM.Dapp (emptyDapp)
+import EVM.Debugger (Session, newSession, setSnapshotInterval, sessionWarnings, runCommand, Command(..), mkView, View(..), BranchView(..), sessionVM, sessionStep, isHalted, hasPendingBranch
+                    , BranchMode(..), setBranchMode, sessionStats, StatsView(..), Stats(..))
+import EVM.Tracing (interpretWithTrace, vmTraceStep, VMTraceStep(..))
 
 -- * Programs
 
@@ -170,9 +177,15 @@ extraAccounts =
 createInitCode :: ByteString
 createInitCode = BS.singleton 0
 
--- | Addresses the account opcodes query, including one that does not exist
+-- | RETURNs and(callvalue, 0xf) bytes: the deployed code size is symbolic when
+-- the CREATE value is
+sizedInitCode :: ByteString
+sizedInitCode = BS.pack [0x60, 0x0f, 0x34, 0x16, 0x5f, 0xf3]
+
+-- | Addresses the account opcodes query, including one that does not exist. No 0x100:
+-- the evm in nixpkgs (1.16.1) predates its P256VERIFY precompile (EIP-7951).
 accountTargets :: [Addr]
-accountTargets = [a | (a, _, _, _) <- extraAccounts] <> [0xe0a5, contractAddr, calleeAddr, coinbaseAddr, 4]
+accountTargets = [a | (a, _, _, _) <- extraAccounts] <> [0xe0a5, contractAddr, calleeAddr, coinbaseAddr, 1, 4, 0x0a, 0x11]
 
 -- * Generators
 
@@ -300,8 +313,9 @@ genCalldataCond = do
 genBranch :: G [Item]
 genBranch = do
   d <- gets (.sdepth)
-  onCalldata <- liftG $ chooseInt (0, 2)
-  cond <- if onCalldata > 0 || d == 0 then genCalldataCond else pure []
+  onCalldata <- liftG $ chooseInt (0, 3)
+  cond <- if onCalldata == 3 then genStorageCond
+          else if onCalldata > 0 || d == 0 then genCalldataCond else pure []
   modify (\s -> s { sdepth = s.sdepth - 1 })
   pure (cond <> [IJumpFwd True])
 
@@ -326,11 +340,65 @@ maybeFromCalldata v = do
         mask = if bits >= 256 then maxBound else 2 ^ bits - 1
     concat <$> sequence [push off, op 1 1 OpCalldataload, push mask, op 2 1 OpAnd]
 
+-- | A Solidity storage slot: of a mapping entry, keccak(key . p), or of an array
+-- element, keccak(p) + i, for a small slot p. Exercises storage decomposition.
+genStorageSlot :: G [Item]
+genStorageSlot = do
+  p <- liftG $ elements [0, 1, 2]
+  isMap <- liftG arbitrary
+  if isMap then do
+    key <- liftG (chooseInt (0, 2)) >>= \case
+      0 -> liftG (elements [0, 1, 7]) >>= push
+      _ -> do off <- liftG $ elements [0, 4, 32, 36]
+              (<>) <$> push off <*> op 1 1 OpCalldataload
+    concat <$> sequence
+      [ pure key, push 0, op 2 0 OpMstore, push p, push 0x20, op 2 0 OpMstore
+      , push 0x40, push 0, op 2 1 OpSha3 ]
+  else do
+    base <- concat <$> sequence [push p, push 0, op 2 0 OpMstore, push 0x20, push 0, op 2 1 OpSha3]
+    i <- maybeFromCalldata =<< liftG (elements [0, 1, 3])
+    concat <$> sequence [pure base, pure i, op 2 1 OpAdd]
+
+-- | Whether a storage slot holds a small value, pushing one word
+genStorageCond :: G [Item]
+genStorageCond = do
+  slot <- genStorageSlot
+  v <- liftG $ elements [0, 3, 4]
+  concat <$> sequence [pure slot, op 1 1 OpSload, push v, op 2 1 OpEq]
+
+genStorageWrite :: G [Item]
+genStorageWrite = do
+  v <- maybeFromCalldata =<< liftG (elements [3, 4, 0xff])
+  slot <- genStorageSlot
+  ((v <> slot) <>) <$> op 2 0 OpSstore
+
 -- | Enough stack for the deep DUPs and SWAPs
 genDeepStack :: G [Item]
 genDeepStack = do
   n <- liftG $ chooseInt (8, 16)
   concat <$> sequence (replicate n (liftG genWord >>= push))
+
+-- | A few ops run many times, so that runs are long: the debugger snapshots every 50 steps
+genSmallLoop :: G [Item]
+genSmallLoop = do
+  l <- gets (.nextLabel)
+  n <- gets (.nextLoop)
+  modify (\s -> s { nextLabel = l + 1, nextLoop = n + 1 })
+  k <- liftG $ chooseInt (1, 3)
+  body <- concat <$> sequence (replicate k (do
+    w <- liftG genWord
+    liftG (chooseInt (0, 2)) >>= \case
+      0 -> concat <$> sequence [push w, liftG (elements [0, 0x20, 0x41]) >>= push, op 2 0 OpMstore]
+      1 -> concat <$> sequence [push w, liftG (chooseBoundedIntegral (0, 3)) >>= push, op 2 0 OpTstore]
+      _ -> concat <$> sequence [push w, op 0 1 OpCalldatasize, liftG (elements [OpAdd, OpMul, OpXor]) >>= op 2 1, op 1 0 OpPop]))
+  let ctr = 0xc0de0000 + unsafeInto n
+  count <- concat <$> sequence
+    [ push ctr, op 1 1 OpTload, push 1, op 2 1 OpAdd
+    , op 1 2 (OpDup 1), push ctr, op 2 0 OpTstore ]
+  bound <- liftG (chooseBoundedIntegral (5, 40)) >>= push
+  cmp <- op 2 1 OpGt
+  modify (\s -> s { sdepth = s.sdepth - 1 })
+  pure $ [ILabel l] <> body <> count <> bound <> cmp <> [IJump True l]
 
 -- | A loop whose trip count is kept in transient storage, bounded by a constant or by calldata
 genLoop :: G [Item]
@@ -364,15 +432,19 @@ genAccountOp = do
       (args <>) <$> ((<>) <$> push (into a) <*> op 4 0 OpExtcodecopy)
     _ -> (<>) <$> push (into a) <*> op 1 1 kind
 
--- | CREATE or CREATE2 of 'createInitCode', written to memory first
+-- | CREATE or CREATE2 of 'createInitCode' or 'sizedInitCode', written to memory first
 genCreate :: G [Item]
 genCreate = do
   off <- liftG $ elements [0, 0x20, 0x41]
   value <- liftG $ frequency [(3, pure 0), (1, elements [1, 7])]
   salt <- liftG $ oneof [pure Nothing, Just <$> elements [0, 1]]
-  initCode <- concat <$> sequence [push 0, push off, op 2 0 OpMstore8]
+  code <- liftG $ elements [createInitCode, sizedInitCode]
+  initCode <- concat <$> sequence
+    [ concat <$> sequence [push (into b), push (off + fromIntegral i), op 2 0 OpMstore8]
+    | (i, b) <- zip [0 :: Int ..] (BS.unpack code) ]
   saltItems <- maybe (pure []) push salt
-  args <- concat <$> mapM push [1, off, value]
+  valueItems <- maybeFromCalldata value
+  args <- (<>) <$> (concat <$> mapM push [fromIntegral (BS.length code), off]) <*> pure valueItems
   create <- maybe (op 3 1 OpCreate) (const (op 4 1 OpCreate2)) salt
   pure (initCode <> saltItems <> args <> create)
 
@@ -395,12 +467,92 @@ genCall = do
                <*> (concat <$> mapM push [addr, gas])
   (args <>) <$> op (if withValue then 7 else 6) 1 kind
 
+-- | A call to a precompile with well-formed or nearly well-formed input, then
+-- RETURNDATASIZE and the first output word, so that the result shows on the stack
+genPrecompileCall :: G [Item]
+genPrecompileCall = do
+  (addr, ws, size) <- liftG $ oneof
+    [ do h <- elements [0, 1, sigHash]
+         v <- elements [27, 28, 29, 30, 0, 27 + 256]
+         r <- elements [0, 1, 2, sigR, secpN - 1, secpN]
+         s' <- elements [1, sigS, secpN - 1, secpN]
+         pure (1, [h, v, r, s'], 0x80)
+    , do ws <- vectorOf 2 genWord
+         (,ws,) <$> elements [2, 3, 4] <*> elements [0, 1, 0x20, 0x21, 0x40]
+    , do lens' <- vectorOf 3 (elements [0, 1, 0x20])
+         vals <- vectorOf 3 genWord
+         pure (5, lens' <> vals, 0x60 + sum lens')
+    , do p1 <- elements bnPoints
+         p2 <- elements bnPoints
+         pure (6, p1 <> p2, 0x80)
+    , do p <- elements bnPoints
+         k <- elements [0, 1, 2, bnP, maxBound]
+         pure (7, p <> [k], 0x60)
+    , do size <- elements [0, 0xc0, 0xbf]
+         pure (8, replicate 6 0, size)
+    , do rounds <- elements [0, 1, 12]
+         ws <- vectorOf 6 genWord
+         f <- elements [0, 1, 2]
+         -- the final-block flag is byte 212, byte 20 of the last word
+         let flagUnit = 256 ^ (11 :: Int)
+             w = ws !! 5
+             lastWord = w - (w `div` flagUnit `mod` 256) * flagUnit + f * flagUnit
+         pure (9, rounds * 256 ^ (28 :: Int) : take 5 ws <> [lastWord], 0xd5)
+    ]
+  let argOff = 0x100
+      retOff = 0x400
+  stores <- concat <$> sequence
+    [ (<>) <$> ((<>) <$> push w <*> push (argOff + 0x20 * unsafeInto j)) <*> op 2 0 OpMstore
+    | (j, w) <- zip [0 :: Int ..] ws ]
+  call <- concat <$> mapM push [0x40, retOff, size, argOff, addr, 0xffffff]
+  callOp <- op 6 1 OpStaticcall
+  results <- concat <$> sequence [op 0 1 OpReturndatasize, push retOff, op 1 1 OpMload]
+  pure (stores <> call <> callOp <> results)
+  where
+    secpN = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141
+    bnP = 0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47
+    sigHash = 0x513954cf30af6638cb8f626bd3f8c39183c26784ce826084d9d267868a18fb31
+    sigR = 0xc84e55cee2032ea541a32bf6749e10c8b9344c92061724c4e751600f886f4732
+    sigS = 0x1542b6457e91098682138856165381453b3d0acae2470286fd8c8a09914b1b5d
+    bnPoints = [[0, 0], [1, 2], [1, 3], [bnP, 0]]
+
+-- | Clear two slots and restore the first, which earns refunds and then takes
+-- one back (EIP-2200)
+genRefund :: G [Item]
+genRefund = do
+  k1 <- liftG $ chooseBoundedIntegral (0, 3)
+  k2 <- liftG $ chooseBoundedIntegral (0, 3)
+  concat <$> sequence
+    [ push k1, op 1 1 OpSload
+    , push 0, push k1, op 2 0 OpSstore
+    , push 0, push k2, op 2 0 OpSstore
+    , push k1, op 2 0 OpSstore ]
+
+-- | if (a calldata condition) { arithmetic on stack values }, which exploration
+-- merges into ITE values: memory must already be symbolic, the skipped code
+-- must have no side effects and leave the stack as high as it was
+genMergeable :: G [Item]
+genMergeable = do
+  symMem <- concat <$> sequence [push 0, op 1 1 OpCalldataload, push 0x40, op 2 0 OpMstore]
+  vals <- liftG (chooseInt (1, 3)) >>= \n -> concat <$> sequence (replicate n (liftG genWord >>= push))
+  cond <- genCalldataCond
+  modify (\s -> s { sdepth = s.sdepth - 1 })
+  l <- gets (.nextLabel)
+  modify (\s -> s { nextLabel = l + 1 })
+  k <- liftG $ chooseInt (1, 4)
+  body <- concat <$> sequence (replicate k (do
+    o <- liftG $ elements [OpAdd, OpXor, OpMul, OpSub, OpAnd, OpShl]
+    w <- liftG genWord
+    (<>) <$> push w <*> op 2 1 o))
+  pure (symMem <> vals <> cond <> [IJump True l] <> body <> [ILabel l])
+
 genBlock :: Bool -> G [Item]
 genBlock isMain = do
   inner <- liftG $ frequency $
-    [ (10, pure genStraight), (4, pure genBranch), (1, pure (pure [IJumpFwd False])), (1, pure genHalt)
-    , (1, pure genDeepStack) ] <>
-    (if isMain then [(2, pure genLoop), (2, pure genCall), (2, pure genAccountOp), (1, pure genCreate)] else [])
+    [ (10, pure genStraight), (4, pure genBranch), (2, pure genMergeable), (1, pure (pure [IJumpFwd False])), (1, pure genHalt)
+    , (1, pure genDeepStack), (2, pure genStorageWrite) ] <>
+    (if isMain then [ (2, pure genLoop), (2, pure genSmallLoop), (2, pure genCall), (2, pure genAccountOp), (1, pure genCreate)
+                    , (1, pure genPrecompileCall), (1, pure genRefund) ] else [])
   items <- inner
   addLabel <- liftG $ chooseInt (0, 1)
   if addLabel == 0 then pure items else do
@@ -434,7 +586,7 @@ genInputs = do
   len <- frequency [(1, pure 0), (3, chooseInt (1, 40)), (3, elements [4, 32, 36, 64, 68, 100])]
   cd <- BS.pack <$> vectorOf len (frequency [(3, pure 0), (3, chooseBoundedIntegral (0, 10)), (4, chooseAny)])
   nslots <- chooseInt (0, 4)
-  slots <- Map.fromList <$> vectorOf nslots ((,) <$> chooseBoundedIntegral (0, 10) <*> genWord)
+  slots <- Map.fromList <$> vectorOf nslots ((,) <$> frequency [(3, chooseBoundedIntegral (0, 3)), (1, chooseBoundedIntegral (0, 10))] <*> genWord)
   cv <- frequency [(1, pure 0), (1, chooseBoundedIntegral (1, 1000))]
   ts <- chooseBoundedIntegral (1, 2 ^ (40 :: Int))
   pure $ Inputs cd slots cv ts
@@ -517,6 +669,7 @@ data GethRun = GethRun
   , error :: Maybe String
   , storage :: Map Addr (Map W256 W256)
   , logs :: [GethLog]
+  , gasUsed :: W256
   } deriving (Show)
 
 headMay :: [a] -> Maybe a
@@ -538,6 +691,9 @@ secretKey = 0xDC38EE117CAE37750EB1ECC5CFD3DE8E85963B481B93E732C5D0CB66EE6B0C9D
 
 fromAddress :: Addr
 fromAddress = fromJust $ deriveAddr secretKey
+
+originBalance :: W256
+originBalance = 0x5ffd4878be161d74
 
 mkTx :: TestCase -> Inputs -> EVM.Transaction.Transaction
 mkTx c i = EVM.Transaction.Transaction
@@ -569,7 +725,7 @@ prevRandaoVal = 42
 -- | The state before the transaction, as geth gets it and as the mock node serves it
 preState :: TestCase -> Inputs -> World
 preState c i = Map.fromList $
-  [ (fromAddress, Account mempty 0xac 0x5ffd4878be161d74 mempty)
+  [ (fromAddress, Account mempty 0xac originBalance mempty)
   , (contractAddr, Account (assembleItems c.prog.main) 0x48 contractBalance i.store)
   , (calleeAddr, Account (assembleItems c.prog.callee) 1 0 mempty) ]
   <> [(a, Account mempty (unsafeInto n) b st) | (a, b, n, st) <- extraAccounts]
@@ -611,13 +767,14 @@ runGeth dir c i = do
   (exitCode, out, err) <- readCreateProcessWithExitCode cmd ""
   when (exitCode /= ExitSuccess) $ assertFailure $ "evm failed: " <> show exitCode <> "\n" <> out <> err
   result <- fromJust <$> JSON.decodeFileStrict (dir </> "result.json")
-  let receipt :: Maybe (String, [GethLog])
+  let receipt :: Maybe (String, [GethLog], W256)
       receipt = flip JSON.parseMaybe result $ JSON.withObject "result" $ \v -> do
         rs <- v .: "receipts"
+        gasUsed <- v .: "gasUsed"
         case rs of
-          [r] -> (,) <$> r .: "transactionHash" <*> (fromMaybe [] <$> r .:? "logs")
+          [r] -> (,,) <$> r .: "transactionHash" <*> (fromMaybe [] <$> r .:? "logs") <*> pure gasUsed
           _ -> fail "expected one receipt"
-  (txHash, logs) <- maybe (assertFailure $ "cannot parse evm result: " <> show result) pure receipt
+  (txHash, logs, gasUsed) <- maybe (assertFailure $ "cannot parse evm result: " <> show result) pure receipt
   -- as a String, a trace with deep stacks on every line takes tens of GB
   traceLines <- Char8.lines <$> BS.readFile (dir </> ("trace-0-" <> txHash <> ".jsonl"))
   let decode :: JSON.FromJSON a => ByteString -> Maybe a
@@ -635,7 +792,7 @@ runGeth dir c i = do
       readStore = Map.fromList . map (\(k, v) -> (read k, v)) . Map.toList
   case (steps, final) of
     (Just s, Just f) -> pure $ GethRun s (bssToBs f.output) f.error
-      (Map.fromList [(a, nonZero (readStore (storageOf a))) | a <- [contractAddr, calleeAddr]]) logs
+      (Map.fromList [(a, nonZero (readStore (storageOf a))) | a <- [contractAddr, calleeAddr]]) logs gasUsed
     _ -> assertFailure $ "cannot parse evm trace: "
            <> show [l | l <- traceLines, isNothing (decode l :: Maybe EVMToolTrace)]
 
@@ -679,6 +836,9 @@ mkVm fetching gas c i = do
     { contract = contract
     , otherContracts =
         (LitAddr ethrunAddress, initialContract (RuntimeCode (ConcreteRuntimeCode BS.empty)))
+        -- finalize pays the unused gas and the refund back to the origin
+        : (LitAddr fromAddress, initialContract (RuntimeCode (ConcreteRuntimeCode BS.empty))
+            & set #balance (Lit originBalance) & set #nonce (Just 0xac))
         : if fetching then [] else
           (LitAddr calleeAddr, calleeContract)
           : [ (LitAddr a, initialContract (RuntimeCode (ConcreteRuntimeCode BS.empty))
@@ -697,12 +857,16 @@ mkVm fetching gas c i = do
     , gas = gas
     , gaslimit = unsafeInto c.gasLimit
     , blockGaslimit = unsafeInto c.gasLimit
-    , prevRandao = prevRandaoVal
-    , baseFee = 0
+    , prevRandao = Lit prevRandaoVal
+    , baseFee = Lit 0
     , priorityFee = 1
     , maxCodeSize = 0xfffff
     , schedule = feeSchedule
     , chainId = 1
+    -- only the concrete run tracks gas
+    , txdataFloorGas = case i.calldata of
+        ConcreteBuf cd -> EVM.Transaction.txdataFloorGas feeSchedule (mkTx c (Inputs cd mempty 0 0))
+        _ -> 0
     }
   pure $ vm & set (#state % #calldata) i.calldata
 
@@ -711,6 +875,7 @@ data HevmRun = HevmRun
   , result :: Either EvmError ByteString
   , storage :: Map Addr (Map W256 W256)
   , logs :: [Expr Log]
+  , gasUsed :: W256
   }
 
 -- | With a node's URL, everything but the contract's code and balance is fetched from it
@@ -725,8 +890,13 @@ runHevm solvers url c i = do
       pure $ Fetch.oracle solvers (Just sess) (Fetch.RpcInfo (Just (Fetch.BlockNumber c.number, u)))
   vm0 <- liftIO $ stToIO $ mkVm (isJust url) gas c (concreteVMInputs i)
   (res, (vm, trace)) <- runStateT (interpretWithTrace fetcher Stepper.execFully) (vm0, [])
+  pure $ hevmRun (isJust url) c i res vm trace
+
+-- | How a concrete run ended, from its last VM
+hevmRun :: Bool -> TestCase -> Inputs -> Either EvmError (Expr Buf) -> VM Concrete -> [VMTraceStep] -> HevmRun
+hevmRun viaRpc c i res vm trace =
   -- slots never read or written were never fetched
-  let pre a = if isJust url then (.storage) (Map.findWithDefault (Account mempty 0 0 mempty) a (preState c i)) else mempty
+  let pre a = if viaRpc then (.storage) (Map.findWithDefault (Account mempty 0 0 mempty) a (preState c i)) else mempty
       storageOf a = case (.storage) <$> Map.lookup (LitAddr a) vm.env.contracts of
         Just (ConcreteStore s) -> nonZero (Map.union s (pre a))
         Nothing -> nonZero (pre a)
@@ -736,7 +906,19 @@ runHevm solvers url c i = do
         Right b -> internalError $ "non-concrete return data: " <> show b
         Left e -> Left e
       stores = Map.fromList [(a, storageOf a) | a <- [contractAddr, calleeAddr]]
-  pure $ HevmRun trace out stores (reverse vm.logs)
+      -- the run starts after the gas purchase, so the origin only gets the unused gas back
+      gasUsed = case (.balance) <$> Map.lookup (LitAddr fromAddress) vm.env.contracts of
+        Just (Lit b) -> unsafeInto c.gasLimit - (b - originBalance)
+        b -> internalError $ "origin balance: " <> show b
+  in HevmRun trace out stores (reverse vm.logs) gasUsed
+
+-- | The VMs 'checkCase' starts from, for other fuzzers to run
+concreteTestVm :: TestCase -> ST RealWorld (VM Concrete)
+concreteTestVm c = mkVm False gas c (concreteVMInputs c.inputs)
+  where gas = unsafeInto c.gasLimit - EVM.Transaction.txGasCost feeSchedule (mkTx c c.inputs)
+
+symbolicTestVm :: TestCase -> ST RealWorld (VM Symbolic)
+symbolicTestVm c = set #constraints symProps <$> mkVm False () c symbolicVMInputs
 
 symIterConf :: IterConfig
 symIterConf = IterConfig { maxIter = Just 6, askSmtIters = 1, loopHeuristic = Naive }
@@ -749,6 +931,16 @@ symProps =
   , PLEq Timestamp (Lit (2 ^ (40 :: Int)))
   , PGEq Timestamp (Lit 1)
   ]
+
+-- | Replays a model of the leaf as `hevm symbolic` does: Right True if the
+-- concrete run fails exactly when the leaf does
+replayModel :: App m => TestCase -> Expr End -> SMTCex -> m (Either Text Bool)
+replayModel c leaf cex = do
+  vm0 <- liftIO $ stToIO $ mkVm False () c symbolicVMInputs
+  withSolvers Z3 1 (Just 10) defMemLimit $ \solvers ->
+    replaySymCex solvers (\_ e -> PBool (isFailure e /= isFailure leaf)) (vm0 & set #constraints symProps) leaf cex
+  where
+    isFailure = \case Failure {} -> True; _ -> False
 
 -- | The leaves, and the opcodes that ran with a non-literal operand
 runSymbolic :: App m => SolverGroup -> TestCase -> m (Maybe ([Expr End], Set String))
@@ -812,9 +1004,18 @@ hevmErrorKind = errorKind . evmErrToString
 
 -- | Symbolic execution does not track gas, so its outcome is unknown when gas ran out anywhere
 gasDependent :: GethRun -> Bool
-gasDependent g = any isGas (g.error : map (.error) g.trace)
+gasDependent g = any isGas (g.error : map (.error) g.trace) || any lowGasPrecompile (zip g.trace (drop 1 g.trace)) || callsModexp g
   where
     isGas = maybe False (\e -> "out of gas" `isInfixOf` e || "gas uint64 overflow" `isInfixOf` e)
+    -- geth does not trace precompiles, and one that fails burns its gas whether it ran out or not.
+    -- Generated precompile calls get plenty of gas, so a failing one with little may have run out.
+    lowGasPrecompile (a, b) = case reverse a.stack of
+      gas : target : _ -> a.op `elem` [0xf1, 0xf2, 0xf4, 0xfa] && target >= 1 && target <= 0x11
+        && b.depth == a.depth && headMay (reverse b.stack) == Just 0 && min gas a.gas < 0x100000
+      _ -> False
+
+callsModexp :: GethRun -> Bool
+callsModexp g = any (\t -> t.op `elem` [0xf1, 0xf2, 0xf4, 0xfa] && take 1 (drop 1 (reverse t.stack)) == [5]) g.trace
 
 compareTraces :: [VMTraceStep] -> [EVMToolTrace] -> Either String ()
 compareTraces hs gs = go hs (dedup gs)
@@ -863,6 +1064,51 @@ failWith c i msg = assertFailure $ msg
   <> "\ninputs: " <> show i
   <> "\nmain: " <> bsToHex (assembleItems c.prog.main)
   <> "\ncallee: " <> bsToHex (assembleItems c.prog.callee)
+  <> "\nreproduce with: " <> reproduction c i
+
+-- | Environment variables that 'caseFromEnv' reads back
+reproduction :: TestCase -> Inputs -> String
+reproduction c i = unwords
+  [ "HEVM_FUZZ_MAIN=" <> hex (assembleItems c.prog.main), "HEVM_FUZZ_CALLEE=" <> hex (assembleItems c.prog.callee)
+  , "HEVM_FUZZ_CALLDATA=" <> hex i.calldata, "HEVM_FUZZ_CALLVALUE=" <> show i.callvalue
+  , "HEVM_FUZZ_TIMESTAMP=" <> show i.timestamp, "HEVM_FUZZ_STORE=" <> intercalate "," [ show k <> ":" <> show v | (k, v) <- Map.toList i.store ]
+  , "HEVM_FUZZ_GASLIMIT=" <> show c.gasLimit, "HEVM_FUZZ_NUMBER=" <> show c.number ]
+  where hex = bsToHex
+
+-- | Records the case a property runs in HEVM_FUZZ_CASE_FILE, suffixed with the
+-- property's name as properties run concurrently, to find one that crashes or hangs
+writeCaseFile :: String -> String -> IO ()
+writeCaseFile name content = lookupEnv "HEVM_FUZZ_CASE_FILE" >>= mapM_ (\f -> writeFile (f <> "." <> name) content)
+
+splitOn' :: Char -> String -> [String]
+splitOn' d str = case break (== d) str of
+  (a, []) -> [a]
+  (a, _ : rest) -> a : splitOn' d rest
+
+modeOf :: String -> BranchMode
+modeOf = \case
+  "ExplorerBranches" -> ExplorerBranches
+  "CheckedBranches" -> CheckedBranches
+  _ -> SolverBranches
+
+-- | The case 'reproduction' describes, if HEVM_FUZZ_MAIN is set
+caseFromEnv :: IO (Maybe TestCase)
+caseFromEnv = lookupEnv "HEVM_FUZZ_MAIN" >>= \case
+  Nothing -> pure Nothing
+  Just m -> do
+    let var k d = fromMaybe d <$> lookupEnv ("HEVM_FUZZ_" <> k)
+        bytes = fromJust . hexByteString . Char8.pack
+        w256 :: String -> W256
+        w256 = fromInteger . read
+    callee <- var "CALLEE" ""
+    cd <- var "CALLDATA" ""
+    cv <- var "CALLVALUE" "0"
+    ts <- var "TIMESTAMP" "1"
+    st <- var "STORE" ""
+    gl <- var "GASLIMIT" "300000"
+    n <- var "NUMBER" "1"
+    let store = Map.fromList [ (w256 k, w256 (drop 1 v)) | kv <- splitOn' ',' st, not (null kv), let (k, v) = break (== ':') kv ]
+    pure $ Just $ TestCase (Prog [IRaw (bytes m)] [IRaw (bytes callee)]) (Inputs (bytes cd) store (w256 cv) (w256 ts)) (read gl) (w256 n)
 
 -- | Concrete hevm against geth, howling failures with how hevm ran
 checkConcrete :: String -> TestCase -> Inputs -> GethRun -> HevmRun -> IO ()
@@ -877,13 +1123,17 @@ checkConcrete how c i g h = do
             <> "\ngeth trace: "
             <> ops [(t.pc, intToOpName t.op <> maybe "" withParens t.error) | t <- g.trace]
       withParens e = "(" <> e <> ")"
-  either (fails . (<> traces)) pure (compareTraces h.trace g.trace)
-  let ho = hevmOutcome h
-      go = gethOutcome g
-  unless (ho == go || gasDependent g && failed ho && failed go) $
-    fails $ "concrete outcome mismatch\nhevm: " <> show ho <> "\ngeth: " <> show go
-  when (succeeded go && not (logsMatch h.logs g.logs)) $
-    fails $ "logs mismatch\nhevm: " <> show h.logs <> "\ngeth: " <> show g.logs
+  -- geth 1.16.1 prices modexp before EIP-7883 was final, so gas and what depends on it differ
+  unless (callsModexp g) $ do
+    either (fails . (<> traces)) pure (compareTraces h.trace g.trace)
+    let ho = hevmOutcome h
+        go = gethOutcome g
+    unless (ho == go || gasDependent g && failed ho && failed go) $
+      fails $ "concrete outcome mismatch\nhevm: " <> show ho <> "\ngeth: " <> show go
+    when (succeeded go && not (logsMatch h.logs g.logs)) $
+      fails $ "logs mismatch\nhevm: " <> show h.logs <> "\ngeth: " <> show g.logs
+    when (h.gasUsed /= g.gasUsed) $
+      fails $ "gas used mismatch\nhevm: " <> show h.gasUsed <> "\ngeth: " <> show g.gasUsed
   where
     failed = \case OSuccess {} -> False; _ -> True
     succeeded = \case OSuccess {} -> True; _ -> False
@@ -943,14 +1193,27 @@ checkLeaves c i leaves expected g = do
       undecided = [n | (n, Nothing) <- zip [0 :: Int ..] evals]
       taken = [n | (n, Just True) <- zip [0 :: Int ..] evals]
   -- past where gas runs out, the symbolic paths can e.g. hash huge buffers
-  if gasDependent g && not (null undecided) && length taken <= 1 then pure "gas-dependent, undecided path" else do
+      unknownCall = any (\case PCall {} -> True; _ -> False) . extractProps
+  if gasDependent g && not (null undecided) && length taken <= 1 then pure "gas-dependent, undecided path"
+  -- a call to a symbolic target gets fresh results, which the inputs cannot decide
+  else if not (null undecided) && all (unknownCall . (leaves !!)) undecided && length taken <= 1
+    then pure "call to unknown code, undecided path" else do
     unless (null undecided) $ fails $ "path conditions of leaves " <> show undecided <> " did not concretize: "
       <> show [concProps (extractProps (leaves !! n)) | n <- undecided]
     n <- case taken of
       [n] -> pure n
       _ -> fails $ "concrete inputs reach leaves " <> show taken <> " instead of exactly one"
-    forM_ expected $ \e -> when (e /= n) $ fails $ "model of leaf " <> show e <> " reaches leaf " <> show n
-    if gasDependent g then pure "gas-dependent" else case leafOutcome c i (leaves !! n) of
+    -- keccak of a symbolic buffer is only bounded, so a model may pick a hash no input has
+    let spurious = maybe False (\e -> e /= n && hashesSymbolic (leaves !! e)) expected
+        -- decomposition replaces mapping and array slots by their keys, and then
+        -- the model's storage must be exact
+        hashesSymbolic l = let ps = Expr.simplifyProps (extractProps l)
+          in getAny $ foldMap (foldProp symKeccak mempty) (fromMaybe ps (Expr.decomposeStorageProps ps))
+        symKeccak :: Expr b -> Any
+        symKeccak = \case Keccak (ConcreteBuf _) -> Any False; Keccak _ -> Any True; _ -> Any False
+    forM_ expected $ \e -> when (e /= n && not spurious) $ fails $ "model of leaf " <> show e <> " reaches leaf " <> show n
+    if spurious then pure "model via symbolic keccak reaches another leaf"
+    else if gasDependent g then pure "gas-dependent" else case leafOutcome c i (leaves !! n) of
       Left err -> fails err
       Right Nothing -> pure $ leafKind (leaves !! n)
       Right (Just o)
@@ -1004,7 +1267,7 @@ leafKind = \case
 checkCase :: App m => Int -> TestCase -> m Report
 checkCase maxReplays c = Progress.withProgressLogFromEnv "fuzz-symexec" $
   withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> do
-  let phase name = liftIO $ lookupEnv "HEVM_FUZZ_CASE_FILE" >>= mapM_ (\f -> appendFile f ("\nphase: " <> name))
+  let phase name = liftIO $ lookupEnv "HEVM_FUZZ_CASE_FILE" >>= mapM_ (\f -> appendFile (f <> ".random-contract-concrete-call") ("\nphase: " <> name))
       runBoth i = do
         phase "geth"
         g <- liftIO $ withDir $ \dir -> runGeth dir c i
@@ -1031,26 +1294,34 @@ checkCase maxReplays c = Progress.withProgressLogFromEnv "fuzz-symexec" $
                                                 , not (isPartial l) ]
       replays <- forM candidates $ \(n, l) -> if mentionsBlockHash l
         -- BLOCKHASH of a symbolic number is uninterpreted, so a model can pick any hash
-        then pure ("skipped: symbolic blockhash", Nothing)
+        then pure ("skipped: symbolic blockhash", Nothing, Nothing)
         else phase ("replay " <> show n) >> checkSatWithProps solvers (extractProps l) >>= \case
           Cex cex -> case modelInputs c.inputs cex of
-            Left err -> pure ("model: " <> err, Nothing)
+            Left err -> pure ("model: " <> err, Nothing, Nothing)
             Right i -> do
               g' <- runBoth i
-              (, Just g') <$> liftIO (checkLeaves c i leaves (Just n) g')
+              r <- liftIO (checkLeaves c i leaves (Just n) g')
+              phase ("hevm replay " <> show n)
+              replayed <- replayModel c l cex
+              -- where geth confirms the model reaches the leaf, so must `hevm symbolic`'s replay
+              let confirmed = not (any (`isPrefixOf` r) ["gas-dependent", "model via symbolic keccak", "call to unknown code"])
+              when (confirmed && replayed == Right False) $ liftIO $ failWith c i $
+                "hevm symbolic's replay does not reproduce leaf " <> show n <> " that geth reaches\nleaf: " <> show l
+              pure (r, Just g', Just (either (("cannot replay: " <>) . unpack) (\b -> if b then "validated" else "not reproducible") replayed))
           -- outside loops, branches are not checked for feasibility
-          Qed -> pure ("unsat leaf", Nothing)
-          Unknown _ -> pure ("unknown", Nothing)
+          Qed -> pure ("unsat leaf", Nothing, Nothing)
+          Unknown _ -> pure ("unknown", Nothing, Nothing)
           Error e
-            | any (`isInfixOf` e) ["not currently implemented", "Cannot encode"] -> pure ("unsupported by SMT", Nothing)
+            | any (`isInfixOf` e) ["not currently implemented", "Cannot encode"] -> pure ("unsupported by SMT", Nothing, Nothing)
             | otherwise -> liftIO $ assertFailure $ "solver error: " <> show e
       pure $ Report
         { tables = gethTables
             <> [("leaves", bucket (length leaves)), ("concrete inputs reach", first)]
-            <> [("replayed model reaches", r) | (r, _) <- replays]
+            <> [("replayed model reaches", r) | (r, _, _) <- replays]
+            <> [("hevm symbolic replay", h) | (_, _, Just h) <- replays]
             <> [("leaf kinds", leafKind l) | l <- leaves]
         , generated
-        , executed = Set.unions (ran g : [ran g' | (_, Just g') <- replays])
+        , executed = Set.unions (ran g : [ran g' | (_, Just g', _) <- replays])
         , symbolic = symOps
         }
   where
@@ -1097,6 +1368,537 @@ printCoverage ref = do
     chunksOf _ [] = []
     chunksOf n xs = take n xs : chunksOf n (drop n xs)
 
+-- * Lockstep
+
+-- | What a lockstep run covered, for the coverage tables
+data Lockstep = Lockstep
+  { stopped  :: String
+  , steps    :: Int
+  , compared :: Int -- ^ stack words, memory and storage that concretized and matched
+  , opaque   :: Int -- ^ stack words that stayed symbolic after substituting the inputs
+  , branches :: Int -- ^ branches offered, and taken the concrete run's way
+  , retries  :: Int -- ^ sides tried that the concrete run did not take
+  , trail    :: [String] -- ^ the latest steps, newest first, for failure reports
+  , static   :: Int -- ^ branches decided without the solver
+  , ended    :: Maybe (Int, Int, String) -- ^ pc, depth and kind of result, when both runs halted
+  , ops      :: Set String -- ^ the opcodes stepped and compared after
+  }
+
+maxLockstepSteps :: Int
+maxLockstepSteps = 2000
+
+-- | Steps a concrete and a symbolic debugging session of the case side by side,
+-- taking the concrete run's side at every symbolic branch. After every step the
+-- symbolic state, with the concrete inputs substituted, must be the concrete one.
+lockstepCase :: App m => SolverGroup -> BranchMode -> TestCase -> m (Either String Lockstep)
+lockstepCase solvers mode c = Progress.withProgressLogFromEnv "lockstep" $ do
+  sc0 <- liftIO $ stToIO (concreteTestVm c) >>= newSession emptyDapp
+  ss0 <- liftIO $ setBranchMode mode <$> (stToIO (symbolicTestVm c) >>= newSession emptyDapp)
+  r <- go sc0 ss0 (Lockstep "" 0 0 0 0 0 [] 0 Nothing mempty) Nothing
+  Progress.emit "lockstep-end" $ case r of
+    Left err -> ["failure" JSON..= T.pack err]
+    Right l -> ["stopped" JSON..= T.pack l.stopped, "steps" JSON..= l.steps, "compared" JSON..= l.compared, "branches" JSON..= l.branches]
+  pure r
+  where
+    fetcher :: Fetch.Fetcher t m
+    fetcher = Fetch.oracle solvers Nothing Fetch.noRpc
+    go :: App m => Session Concrete -> Session Symbolic -> Lockstep -> Maybe String -> m (Either String Lockstep)
+    go sc ss acc prevOp = do
+      let vc = sessionVM sc
+          vs = sessionVM ss
+          where_ = "after " <> show acc.steps <> " steps, at pc " <> show vc.state.pc <> maybe "" (" after " <>) prevOp <> ": "
+          stopWith why = pure (Right acc { stopped = why })
+          mismatch = mismatchAt vc
+          mismatchAt now msg
+            | gasDependentRun now = stopWith "gas-dependent"
+            | otherwise = pure (Left (where_ <> msg <> "\nlast steps, oldest first:\n" <> unlines (reverse acc.trail)))
+      cmp <- liftIO $ compareStates c prevOp vc vs
+      case cmp of
+        _ | Just (Unfinished p) <- vs.result -> stopWith ("symbolic unfinished: " <> unfinishedReason p)
+        Left msg -> mismatch msg
+        Right (n, o) -> do
+          let acc' = acc { compared = acc.compared + n, opaque = acc.opaque + o }
+          case (isHalted sc, isHalted ss) of
+            (True, True) -> either mismatch (const (pure (Right acc' { stopped = "halted", ended = Just (endOf vs) }))) (compareEnds c vc vs)
+            (True, False) -> mismatch $ "only the concrete run halted: " <> show vc.result
+            (False, True) -> mismatch $ "only the symbolic run halted: " <> show vs.result
+            _ | acc.steps >= maxLockstepSteps -> stopWith "step limit"
+              | otherwise -> do
+                  let opName' = intToOpName (fromIntegral (getOpW8' vc))
+                  sc' <- runCommand fetcher (Step 1) sc >>= settle (4 :: Int) vc
+                  ss1 <- runCommand fetcher (Step 1) ss
+                  picked <- pickSide vs (sessionVM sc') ss1
+                  case picked of
+                    -- a call to an address that stays symbolic goes to unknown code, which is
+                    -- over-approximated rather than run
+                    Left _ | opName' `elem` ["CALL", "CALLCODE", "DELEGATECALL", "STATICCALL"]
+                           , target : _ <- drop 1 vs.state.stack
+                           , Nothing <- Expr.maybeLitWordSimp (Expr.simplify target)
+                           , length (sessionVM sc').frames > length vs.frames -> stopWith "call to a symbolic address"
+                    Left msg -> mismatchAt (sessionVM sc') msg
+                    Right (ss'', _, _) | not (null (sessionWarnings ss'')) ->
+                      pure $ Left $ where_ <> "the solver contradicts a branch decided by simplification:\n"
+                        <> unlines (map T.unpack (sessionWarnings ss''))
+                    Right (ss'', tried, took) -> case concretizeProps c c.inputs (sessionVM ss'').constraints of
+                      Just False -> mismatch $ "the concrete inputs violate the path conditions after " <> opName'
+                        <> ": " <> show (sessionVM ss'').constraints
+                      _ -> do
+                        let vs' = sessionVM ss''
+                            entry = "  " <> show acc.steps <> ": pc " <> show vc.state.pc <> " " <> opName'
+                              <> " depth " <> show (length vc.frames)
+                              <> (if took > 0 then ", took the branch side that leads to pc " <> show vs'.state.pc
+                                                   <> " after trying " <> show tried <> " other sides" else "")
+                        Progress.emit "lockstep-step" $
+                          [ "step" JSON..= acc.steps, "pc" JSON..= vc.state.pc, "op" JSON..= T.pack opName', "depth" JSON..= length vc.frames
+                          , "compared" JSON..= n, "symbolic" JSON..= o ]
+                          <> [ "branchesTaken" JSON..= took | took > 0 ] <> [ "sidesRetried" JSON..= tried | tried > 0 ]
+                        let counters = (sessionStats ss'').counters
+                        go sc' ss'' acc' { steps = acc.steps + 1, branches = acc.branches + took, retries = acc.retries + tried
+                                         , ops = Set.insert opName' acc.ops
+                                         , trail = take 30 (entry : acc.trail)
+                                         , static = counters.staticDecisions } (Just opName')
+    -- an instruction may take several steps, e.g. when it is re-executed after
+    -- a query, but always ends at another pc or depth, or halts
+    midInstruction :: VM t -> VM t -> Bool
+    midInstruction before now = isNothing now.result && now.state.pc == before.state.pc
+                                  && length now.frames == length before.frames
+    settle :: App m => Int -> VM Concrete -> Session Concrete -> m (Session Concrete)
+    settle n before s
+      | n > 0, midInstruction before (sessionVM s) = runCommand fetcher (Step 1) s >>= settle (n - 1) before
+      | otherwise = pure s
+    -- The branch sides and further steps that reach the concrete state: same pc
+    -- and depth, and path conditions the inputs satisfy. One instruction may
+    -- branch several times, e.g. a symbolic jump target is first checked to be
+    -- in range, then resolved.
+    pickSide :: App m => VM Symbolic -> VM Concrete -> Session Symbolic -> m (Either String (Session Symbolic, Int, Int))
+    pickSide start vc ss0 = do
+      (found, tried) <- search ss0 (6 :: Int) []
+      pure $ maybe (Left (failure tried)) Right found
+      where
+        failure tried = "no sides of the branches reach the concrete pc " <> show vc.state.pc
+          <> " at depth " <> show (length vc.frames) <> ", the sides lead to:\n" <> unlines (reverse tried)
+        pathOk s = concretizeProps c c.inputs (sessionVM s).constraints /= Just False
+        -- or the side gives up on this path: incomplete, but not wrong
+        unfinished s = case (sessionVM s).result of
+          Just (Unfinished _) -> True
+          _ -> False
+        reached s = (sessionVM s).state.pc == vc.state.pc && length (sessionVM s).frames == length vc.frames
+        describe path s = "  " <> path <> ": pc " <> show (sessionVM s).state.pc <> ", depth " <> show (length (sessionVM s).frames)
+          <> ", result " <> show (sessionVM s).result
+          <> ", inputs satisfy the path conditions: " <> show (concretizeProps c c.inputs (sessionVM s).constraints)
+          <> "\n    violated: " <> show [ p | p <- (sessionVM s).constraints, concretizeProps c c.inputs [p] == Just False ]
+        search s fuel tried
+          | fuel == 0 = pure (Nothing, describe "out of fuel" s : tried)
+          | hasPendingBranch s = do
+              v <- liftIO $ mkView s
+              let opts = maybe [] (.options) v.branch
+                  sides = if opts == ["false", "true"] then ["true", "false"] else map (T.pack . show) [0 .. length opts - 1]
+                  tryEach _ [] tr = pure (Nothing, tr)
+                  tryEach n (side : rest) tr = do
+                    s1 <- runCommand fetcher (Choose side) s
+                    (found, tr') <- search s1 (fuel - 1) tr
+                    case found of
+                      Just (s2, t, took) -> pure (Just (s2, t + n, took + 1), tr')
+                      Nothing -> tryEach (n + 1) rest (describe (show (opts, side)) s1 : tr')
+              tryEach 0 sides tried
+          | not (pathOk s) = pure (Nothing, describe "the inputs violate the path conditions" s : tried)
+          | unfinished s || reached s = pure (Just (s, 0, 0), tried)
+          | midInstruction start (sessionVM s) = runCommand fetcher (Step 1) s >>= \s' -> search s' (fuel - 1) tried
+          | otherwise = pure (Nothing, describe "elsewhere" s : tried)
+    getOpW8' vm = case vm.state.code of
+      RuntimeCode (ConcreteRuntimeCode bs) | vm.state.pc < BS.length bs -> BS.index bs vm.state.pc
+      InitCode bs _ | vm.state.pc < BS.length bs -> BS.index bs vm.state.pc
+      _ -> 0
+
+-- | Why a symbolic run gave up, briefly
+unfinishedReason :: PartialExec -> String
+unfinishedReason = \case
+  UnexpectedSymbolicArg { opcode, msg } -> opcode <> ": " <> msg
+  p -> takeWhile (/= ' ') (show p)
+
+-- | Where a run halted, and how
+endOf :: VM t -> (Int, Int, String)
+endOf vm = (vm.state.pc, length vm.frames, case vm.result of
+  Just (VMSuccess _) -> "success"
+  Just (VMFailure (Revert _)) -> "revert"
+  Just (VMFailure e) -> hevmErrorKind e
+  r -> show r)
+
+-- | Follows a random path of a symbolic session, picking a random feasible side
+-- at every branch, until it halts
+randomPath :: App m => SolverGroup -> TestCase -> [Int] -> m (Session Symbolic)
+randomPath solvers c picks0 = do
+  s0 <- liftIO $ stToIO (symbolicTestVm c) >>= newSession emptyDapp
+  go s0 (cycle (0 : picks0)) (0 :: Int)
+  where
+    fetcher :: Fetch.Fetcher Symbolic m
+    fetcher = Fetch.oracle solvers Nothing Fetch.noRpc
+    go s picks n
+      | isHalted s || n >= maxLockstepSteps = pure s
+      | hasPendingBranch s = do
+          v <- liftIO $ mkView s
+          let opts = maybe [] (.options) v.branch
+              pick = fromMaybe 0 (headMay picks)
+              side = if opts == ["false", "true"] then (["true", "false"] !! (pick `mod` 2))
+                     else T.pack (show (pick `mod` max 1 (length opts)))
+          s' <- runCommand fetcher (Choose side) s
+          go s' (drop 1 picks) n
+      | otherwise = runCommand fetcher (Step 1) s >>= \s' -> go s' picks (n + 1)
+
+-- | Gas is not tracked symbolically, so after it ran out anywhere the runs may differ
+gasDependentRun :: VM Concrete -> Bool
+gasDependentRun vm = any isGas (concatMap flatten (traceForest vm)) || resultIsGas
+  where
+    isGas t = case t.tracedata of
+      ErrorTrace e -> gasError e
+      _ -> False
+    resultIsGas = case vm.result of
+      Just (VMFailure e) -> gasError e
+      _ -> False
+    -- memory this large costs more gas than any run has
+    gasError e = "gas" `isInfixOf` hevmErrorKind e || case e of
+      IllegalOverflow -> True
+      _ -> False
+
+-- | Ops that change balances, nonces, storage or code
+accountOps :: [String]
+accountOps = ["SSTORE", "TSTORE", "SELFDESTRUCT"] <> callOps
+
+memWriters, callOps :: [String]
+memWriters = ["MSTORE", "MSTORE8", "MCOPY", "CALLDATACOPY", "CODECOPY", "RETURNDATACOPY", "EXTCODECOPY"] <> callOps
+callOps = ["CALL", "CALLCODE", "DELEGATECALL", "STATICCALL", "CREATE", "CREATE2"]
+
+-- | Compares where the runs are, their stacks, and what the previous op may have
+-- changed. Returns how many values matched and how many stayed symbolic.
+-- | 'compareStates'' on the symbolic state as it is, and simplified: the
+-- simplifier must not change what any value is
+compareStates :: TestCase -> Maybe String -> VM Concrete -> VM Symbolic -> IO (Either String (Int, Int))
+compareStates c prevOp vc vs = compareStates' id c prevOp vc vs >>= \case
+  Left err -> pure (Left err)
+  Right counts -> compareStates' Expr.simplify c prevOp vc vs <&> \case
+    Left err -> Left ("only after Expr.simplify, " <> err)
+    Right _ -> Right counts
+
+compareStates' :: (forall a. Expr a -> Expr a) -> TestCase -> Maybe String -> VM Concrete -> VM Symbolic -> IO (Either String (Int, Int))
+compareStates' pre c prevOp vc vs
+  | vc.state.pc /= vs.state.pc = pure $ Left $ "pc differs: symbolic " <> show vs.state.pc
+  | length vc.frames /= length vs.frames = pure $ Left $ "depth differs: concrete " <> show (length vc.frames) <> ", symbolic " <> show (length vs.frames)
+  | vc.state.codeContract /= vs.state.codeContract = pure $ Left $ "code address differs: " <> show (vc.state.codeContract, vs.state.codeContract)
+  | length vc.state.stack /= length vs.state.stack = pure $ Left $ "stack heights differ: " <> show (length vc.state.stack, length vs.state.stack)
+  | otherwise = do
+      let words' = zip3 [0 :: Int ..] vc.state.stack (map (concretize c c.inputs . pre) vs.state.stack)
+          badWords = [ (i, a, b) | (i, a@(Lit _), b@(Lit _)) <- words', a /= b ]
+          nWords = length [ () | (_, Lit _, Lit _) <- words' ]
+      mem <- if maybe True (`elem` memWriters) prevOp then compareMemory pre c vc vs else pure (Right 0)
+      let ret = if maybe False (`elem` callOps) prevOp then compareBufs "return data" c vc.state.returndata (pre vs.state.returndata) else Right 0
+          store = if maybe False (`elem` accountOps) prevOp then compareStorage pre c vc vs else Right 0
+          traces = compareCallTraces pre c vc vs
+      pure $ case badWords of
+        (i, a, b) : _ -> Left $ "stack word " <> show i <> " differs: concrete " <> show a <> ", symbolic " <> show b
+          <> "\nsymbolic, before substituting: " <> show (pre (vs.state.stack !! i))
+        [] -> (\m r st tr -> (nWords + m + r + st + tr, length words' - nWords)) <$> mem <*> ret <*> store <*> traces
+
+-- | The traces, node by node, where the symbolic one is concrete once the inputs are substituted
+compareCallTraces :: (forall a. Expr a -> Expr a) -> TestCase -> VM Concrete -> VM Symbolic -> Either String Int
+compareCallTraces pre c vc vs
+  | length tc /= length ts = Left $ "traces differ in length: concrete " <> show (length tc) <> ", symbolic " <> show (length ts)
+      <> "\nconcrete: " <> show (map (kind . snd) tc) <> "\nsymbolic: " <> show (map (kind . snd) ts)
+  | otherwise = sum <$> zipWithM node [0 :: Int ..] (zip tc ts)
+  where
+    tc = nodes 0 (traceForest vc)
+    ts = nodes 0 (traceForest vs)
+    nodes :: Int -> Forest Trace -> [(Int, Trace)]
+    nodes d = concatMap (\t -> (d, t.rootLabel) : nodes (d + 1) t.subForest)
+    node i ((dc, a), (ds, b))
+      | dc /= ds || kind a /= kind b || a.opIx /= b.opIx =
+          Left $ "trace node " <> show i <> " differs: concrete " <> show (dc, a.opIx, kind a) <> ", symbolic " <> show (ds, b.opIx, kind b)
+      | otherwise = case same (a.tracedata, b.tracedata) of
+          Just False -> Left $ "trace node " <> show i <> " differs: concrete " <> show a.tracedata <> "\nsymbolic " <> show b.tracedata
+          Just True -> Right 1
+          Nothing -> Right 0
+    kind t = case t.tracedata of
+      EventTrace {} -> "event"
+      FrameTrace (CallContext {}) -> "call"
+      FrameTrace (CreationContext {}) -> "create"
+      ErrorTrace e -> "error " <> hevmErrorKind e
+      EntryTrace e -> "entry " <> T.unpack e
+      ReturnTrace {} -> "return"
+      ConsoleLog {} -> "console"
+    -- Nothing when some part stays symbolic and every concrete part agrees
+    same :: (TraceData, TraceData) -> Maybe Bool
+    same = \case
+      (EventTrace a d ts1, EventTrace a' d' ts2) -> allOf' ([eq a a', eq d d'] <> zipWith eq ts1 ts2)
+      (FrameTrace x, FrameTrace y) -> frame x y
+      (ReturnTrace d x, ReturnTrace d' y) -> allOf' [eq d d', frame x y]
+      (ConsoleLog d, ConsoleLog d') -> eq d d'
+      _ -> Just True
+    frame (CallContext t ctx o sz _ _ cd _ _) (CallContext t' ctx' o' sz' _ _ cd' _ _) =
+      allOf' [eq t t', eq ctx ctx', eq o o', eq sz sz', eq cd cd']
+    frame (CreationContext a _ _ _) (CreationContext a' _ _ _) = eq a a'
+    frame _ _ = Just False
+    allOf' rs
+      | Just False `elem` rs = Just False
+      | all (== Just True) rs = Just True
+      | otherwise = Nothing
+    eq :: Expr a -> Expr a -> Maybe Bool
+    eq x y = let y' = concretize c c.inputs (pre y) in
+      if concrete x && concrete y' then Just (x == y') else Nothing
+    concrete :: Expr a -> Bool
+    concrete = \case
+      Lit _ -> True
+      ConcreteBuf _ -> True
+      LitAddr _ -> True
+      _ -> False
+
+compareMemory :: (forall a. Expr a -> Expr a) -> TestCase -> VM Concrete -> VM Symbolic -> IO (Either String Int)
+compareMemory pre c vc vs = do
+  mc <- memoryBytes id vc.state.memory
+  ms <- memoryBytes pre vs.state.memory
+  let size = fromIntegral vc.state.memorySize
+      symSize = maybe (Just (fromIntegral vs.state.memorySize)) (fmap fromIntegral . Expr.maybeLitWordSimp . concretize c c.inputs) vs.state.symMemorySize
+  pure $ case (mc, ms) of
+    _ | Just size /= symSize && isJust symSize -> Left $ "memory sizes differ: concrete " <> show size <> ", symbolic " <> show symSize
+    (Just a, Just b) | pad size a /= pad size b ->
+      Left $ "memory differs:\nconcrete: " <> bsToHex (pad size a) <> "\nsymbolic: " <> bsToHex (pad size b)
+    (Just _, Just _) -> Right 1
+    _ -> Right 0
+  where
+    pad n b = BS.take n (b <> BS.replicate n 0)
+    memoryBytes :: (Expr Buf -> Expr Buf) -> Memory -> IO (Maybe ByteString)
+    memoryBytes f = \case
+      ConcreteMemory m -> Just . BS.pack . VS.toList <$> stToIO (VS.freeze m)
+      SymbolicMemory b -> pure $ case concretize c c.inputs (f b) of
+        ConcreteBuf bs -> Just bs
+        _ -> Nothing
+
+compareBufs :: String -> TestCase -> Expr Buf -> Expr Buf -> Either String Int
+compareBufs what c a b = case (concretize c c.inputs a, concretize c c.inputs b) of
+  (ConcreteBuf x, ConcreteBuf y) | x /= y -> Left $ what <> " differs: concrete " <> bsToHex x <> ", symbolic " <> bsToHex y
+                                 | otherwise -> Right 1
+  _ -> Right 0
+
+-- | Balances, nonces, storage, transient storage and code of the accounts both
+-- runs have
+compareStorage :: (forall a. Expr a -> Expr a) -> TestCase -> VM Concrete -> VM Symbolic -> Either String Int
+compareStorage pre c vc vs = sum <$> forM common (\(a, cc, sc) -> do
+  let what :: String -> String
+      what x = x <> " of " <> show a <> " differs: concrete "
+      conc :: Expr b -> Expr b
+      conc = concretize c c.inputs . pre
+      stores :: String -> Expr Storage -> Expr Storage -> Either String Int
+      stores name x y = case (x, conc y) of
+        (ConcreteStore m, ConcreteStore m')
+          | nonZero m /= nonZero m' -> Left $ what name <> show m <> ", symbolic " <> show m'
+          | otherwise -> Right 1
+        _ -> Right 0
+  balance <- case (cc.balance, conc sc.balance) of
+    -- they pay for and are paid the gas, which is not tracked symbolically
+    _ | a `elem` [fromAddress, coinbaseAddr] -> Right 0
+    (Lit x, Lit y) | x /= y -> Left $ what "balance" <> show x <> ", symbolic " <> show y
+                   | otherwise -> Right 1
+    _ -> Right 0
+  nonce <- if cc.nonce /= sc.nonce then Left $ what "nonce" <> show cc.nonce <> ", symbolic " <> show sc.nonce else Right 1
+  code <- case (cc.code, sc.code) of
+    (RuntimeCode (ConcreteRuntimeCode x), RuntimeCode (ConcreteRuntimeCode y))
+      | x /= y -> Left $ what "code" <> bsToHex x <> ", symbolic " <> bsToHex y
+      | otherwise -> Right 1
+    _ -> Right 0
+  st <- stores "storage" cc.storage sc.storage
+  tst <- stores "transient storage" cc.tStorage sc.tStorage
+  pure (balance + nonce + code + st + tst))
+  where
+    common = [ (a, cc, sc) | (LitAddr a, cc) <- Map.toList vc.env.contracts, Just sc <- [Map.lookup (LitAddr a) vs.env.contracts] ]
+
+-- | Both runs halted: the same way, with the same output, logs and storage
+compareEnds :: TestCase -> VM Concrete -> VM Symbolic -> Either String ()
+compareEnds c vc vs = do
+  case (vc.result, vs.result) of
+    (Just (VMSuccess a), Just (VMSuccess b)) -> do
+      void $ compareBufs "output" c a b
+      void $ compareBufs "output, simplified" c a (Expr.simplify b)
+    (Just (VMFailure (Revert a)), Just (VMFailure (Revert b))) -> do
+      void $ compareBufs "revert data" c a b
+      void $ compareBufs "revert data, simplified" c a (Expr.simplify b)
+    (Just (VMFailure a), Just (VMFailure b)) | hevmErrorKind a == hevmErrorKind b -> pure ()
+    (a, b) -> Left $ "the runs ended differently: concrete " <> show a <> ", symbolic " <> show b
+  let logs = map (concretize c c.inputs) vs.logs
+  when (all concreteLog logs && logs /= vc.logs) $ Left $ "logs differ: concrete " <> show vc.logs <> ", symbolic " <> show logs
+  void $ compareStorage id c vc vs
+  void $ compareStorage Expr.simplify c vc vs
+  void $ compareCallTraces id c vc vs
+  void $ compareCallTraces Expr.simplify c vc vs
+  where
+    concreteLog = \case
+      LogEntry (WAddr (LitAddr _)) (ConcreteBuf _) ts -> all (isJust . Expr.maybeLitWordSimp) ts
+      _ -> False
+
+-- | Lockstep along a random path: the inputs a model of its path conditions
+-- gives must take the concrete run along it, to where it ended
+modelGuided :: App m => SolverGroup -> BranchMode -> TestCase -> [Int] -> m Property
+modelGuided solvers mode c picks = Progress.withProgressLogFromEnv "model-guided" $ do
+  sp <- randomPath solvers c picks
+  let vs = sessionVM sp
+      skip why = pure $ label why (property True)
+  case vs.result of
+    Nothing -> skip "random path too long"
+    Just (Unfinished _) -> skip "random path unfinished"
+    _ | any mentionsBlockHash vs.constraints -> skip "path conditions on a symbolic blockhash"
+      | PBool False `elem` vs.constraints -> skip "path ends in a failed assumption"
+      | otherwise -> checkSatWithProps solvers vs.constraints >>= \case
+          -- a branch query the solver could not encode offers both sides
+          -- the solver may have had no say at some branch: with path conditions it cannot
+          -- encode, as they were before a later one made them plainly false, both sides are offered
+          Qed | any (isLeft . SMT.assertProps defaultConfig) (tails vs.constraints) ->
+                skip "infeasible, after path conditions the solver cannot take"
+          Qed -> liftIO $ failWith c c.inputs $ "the random path offered only feasible sides, but is infeasible:\n"
+                   <> unlines (map show vs.constraints)
+          Unknown _ -> skip "unknown"
+          Error e -> skip ("solver error: " <> take 40 e)
+          Cex cex -> case modelInputs c.inputs cex of
+            Left e -> skip ("model: " <> takeWhile (/= ':') e)
+            Right i -> do
+              let c' = c { inputs = i }
+              lockstepCase solvers mode c' >>= \case
+                Left err -> liftIO $ failWith c' i err
+                Right l -> case l.ended of
+                  -- the solver may pick any hash of symbolic data, which the concrete run does not get
+                  Just e | e /= endOf vs, any mentionsSymbolicKeccak vs.constraints -> skip "model via symbolic keccak"
+                  Just e | e /= endOf vs -> liftIO $ failWith c' i $
+                    "the inputs from a model of the path conditions end at " <> show e
+                    <> ", the path ends at " <> show (endOf vs) <> "\npath conditions:\n" <> unlines (map show vs.constraints)
+                  Just _ -> pure $ label "followed the path" (property True)
+                  Nothing -> skip l.stopped
+  where
+    mentionsBlockHash = getAny . foldProp (\case BlockHash _ -> Any True; _ -> Any False) mempty
+    mentionsSymbolicKeccak = getAny . foldProp (\case
+      Keccak (ConcreteBuf _) -> Any False
+      Keccak _ -> Any True
+      _ -> Any False) mempty
+
+-- | How often a debugger session snapshots: rarely, every step, or often enough that going back crosses snapshots
+genSnapEvery :: Gen Int
+genSnapEvery = frequency [(1, pure 1), (4, chooseInt (2, 10)), (1, chooseInt (11, 60))]
+
+genMove :: Gen Command
+genMove = frequency
+  [ (4, Step <$> chooseInt (1, 120)), (4, Back <$> chooseInt (1, 120)), (1, pure Restart), (1, pure Continue) ]
+
+-- | A concrete debugger session must see the same state at a step however it
+-- got there, and its forward run must match geth's
+data DebuggerVsGeth = DebuggerVsGeth
+  { steps :: Int, revisits :: Int, wentBack :: Int, acrossSnapshots :: Int, outcome :: String, depth :: Int, ops :: Set String }
+
+debuggerVsGeth :: Int -> TestCase -> [Command] -> IO DebuggerVsGeth
+debuggerVsGeth every c moves = do
+  g <- withDir $ \dir -> runGeth dir c c.inputs
+  revisits <- newIORef (0 :: Int)
+  backs <- newIORef (0 :: Int)
+  across <- newIORef (0 :: Int)
+  h <- runEnv testEnv $ withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> do
+    let fetcher = Fetch.oracle solvers Nothing Fetch.noRpc
+        shown s = if isHalted s then "halted: " <> show (sessionVM s).result else show (vmTraceStep (sessionVM s))
+        visit seen s how = case Map.lookup (sessionStep s) seen of
+          Just before
+            | before /= shown s -> liftIO $ failWith c c.inputs $ "debugger: step " <> show (sessionStep s) <> " after " <> how
+                <> " is\n" <> shown s <> "\nbut was\n" <> before <> "\nmoves: " <> show moves
+            | otherwise -> liftIO (atomicModifyIORef' revisits (\n -> (n + 1, ()))) >> pure seen
+          Nothing -> pure (Map.insert (sessionStep s) (shown s) seen)
+        move (s, seen) m = do
+          s' <- runCommand fetcher m s
+          when (sessionStep s' < sessionStep s) $ liftIO $ do
+            atomicModifyIORef' backs (\n -> (n + 1, ()))
+            when (sessionStep s' `div` every /= sessionStep s `div` every) $ atomicModifyIORef' across (\n -> (n + 1, ()))
+          (s',) <$> visit seen s' (show m)
+        forward seen s acc
+          | isHalted s || sessionStep s > 100_000 = pure (s, reverse acc)
+          | otherwise = do
+              s' <- runCommand fetcher (Step 1) s
+              seen' <- visit seen s' "stepping forward"
+              forward seen' s' (vmTraceStep (sessionVM s) : acc)
+    s0 <- liftIO $ setSnapshotInterval every <$> (stToIO (concreteTestVm c) >>= newSession emptyDapp)
+    seen0 <- visit mempty s0 "the start"
+    (sEnd, seen) <- foldM move (s0, seen0) moves
+    (sStart, seen') <- move (sEnd, seen) Restart
+    (sLast, trace) <- forward seen' sStart []
+    let vm = sessionVM sLast
+    pure $ case vm.result of
+      Just (VMSuccess b) -> hevmRun False c c.inputs (Right b) vm trace
+      -- as in hevm's own traces, the failing step carries the error
+      Just (VMFailure e) -> hevmRun False c c.inputs (Left e) vm (failedLast e trace)
+      r -> internalError $ "the debugger stopped with " <> show r
+  checkConcrete "debugger" c c.inputs g h
+  DebuggerVsGeth (length h.trace) <$> readIORef revisits <*> readIORef backs <*> readIORef across
+    <*> pure (either (errorKind . evmErrToString) (const "success") h.result)
+    <*> pure (maximum (1 : map (.depth) h.trace))
+    <*> pure (Set.fromList [intToOpName t.op | t <- h.trace])
+  where
+    failedLast e t = case reverse t of
+      VMTraceStep p o gas m d st _ : rest -> reverse (VMTraceStep p o gas m d st (Just (evmErrToString e)) : rest)
+      [] -> []
+
+lockstepTests :: TestTree
+lockstepTests = testGroup "lockstep-fuzz"
+  [ -- the case from HEVM_FUZZ_* with HEVM_FUZZ_PICKS and HEVM_FUZZ_MODE, that model-guided-lockstep prints
+    test "model-guided-from-env" $ liftIO caseFromEnv >>= mapM_ (\c -> do
+      picks <- liftIO $ maybe [] (map read . splitOn' ',') <$> lookupEnv "HEVM_FUZZ_PICKS"
+      mode <- liftIO $ maybe SolverBranches modeOf <$> lookupEnv "HEVM_FUZZ_MODE"
+      -- failures are raised; what is returned only labels the case
+      void $ withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> modelGuided solvers mode c picks)
+  , testProperty "model-guided-lockstep" $ \(c :: TestCase) -> forAll (vectorOf 50 (chooseInt (0, 7))) $ \picks ->
+      forAll (elements [SolverBranches, ExplorerBranches, CheckedBranches]) $ \mode ->
+      within 300_000_000 $ ioProperty $ runEnv testEnv $ withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> do
+        liftIO $ writeCaseFile "model-guided-lockstep" $ show c <> "\nreproduce with: " <> reproduction c c.inputs
+          <> " HEVM_FUZZ_PICKS=" <> intercalate "," (map show picks) <> " HEVM_FUZZ_MODE=" <> show mode
+        modelGuided solvers mode c picks
+  , testProperty "debugger-vs-geth" $ \(c :: TestCase) -> forAll (resize 25 (listOf genMove)) $ \moves -> forAll genSnapEvery $ \every ->
+      within 300_000_000 $ ioProperty $ do
+        writeCaseFile "debugger-vs-geth" $ show c <> "\nmoves: " <> show moves <> "\nreproduce with: " <> reproduction c c.inputs
+        r <- debuggerVsGeth every c moves
+        pure $ tabulate "steps compared with geth" [bucket r.steps]
+             $ tabulate "states revisited and compared" [bucket r.revisits]
+             $ tabulate "moves that went back" [bucket r.wentBack]
+             $ tabulate "of them, back past a snapshot" [bucket r.acrossSnapshots]
+             $ tabulate "outcome" [r.outcome]
+             $ tabulate "max call depth" [show r.depth]
+             $ tabulate "opcodes run, in cases" (Set.toList r.ops) True
+  , test "extcodehash-after-symbolic-transfer" $ withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> do
+      -- a value that may be 0 makes the precompile's balance symbolic
+      let c = TestCase (Prog
+            [ IPush 0 0, IPush 0 0, IPush 0 0, IPush 0 0, IPush 0 0, IOp OpCalldataload, IPush 1 4, IPush 3 0xffffff
+            , IOp OpCall, IOp OpPop, IPush 1 4, IOp OpExtcodehash, IPush 0 0, IOp OpMstore, IPush 1 0x20, IPush 0 0, IOp OpReturn ] [])
+            (Inputs "" mempty 0 0x10000000000) 931794 0x12c
+      forM_ [SolverBranches, ExplorerBranches, CheckedBranches] $ \mode ->
+        lockstepCase solvers mode c >>= \case
+          Left err -> liftIO $ failWith c c.inputs (show mode <> ": " <> err)
+          Right r -> liftIO $ unless (r.stopped == "halted") $ assertFailure ("stopped: " <> r.stopped)
+  , -- the case from the HEVM_FUZZ_* variables that a failure prints, in every branch mode
+    test "lockstep-from-env" $ liftIO caseFromEnv >>= mapM_ (\c ->
+      withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> forM_ [SolverBranches, ExplorerBranches, CheckedBranches] $ \mode ->
+        lockstepCase solvers mode c >>= \case
+          Left err -> liftIO $ failWith c c.inputs (show mode <> ": " <> err)
+          Right r -> liftIO $ putStrLn $ show mode <> ": " <> r.stopped <> " after " <> show r.steps <> " steps, "
+                       <> show r.compared <> " values compared")
+  , testProperty "symbolic-lockstep" $ \(c :: TestCase) -> forAll (elements [SolverBranches, ExplorerBranches, CheckedBranches]) $ \mode ->
+      within 300_000_000 $ ioProperty $ runEnv testEnv $ withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> do
+        -- to find a case that crashes, hangs or runs out of memory
+        liftIO $ writeCaseFile "symbolic-lockstep" $ show c <> "\nmode: " <> show mode
+          <> "\nreproduce with: " <> reproduction c c.inputs
+        lockstepCase solvers mode c >>= \case
+          Left err -> liftIO $ failWith c c.inputs err
+          Right r -> pure $ tabulate "stopped" [r.stopped]
+                          $ tabulate "opcodes compared after, in cases" (Set.toList r.ops)
+                          $ tabulate "branch mode" [show mode]
+                          $ tabulate "decided by simplification" [bucket r.static]
+                          $ tabulate "steps" [bucket r.steps]
+                          $ tabulate "branches taken" [bucket r.branches]
+                          $ tabulate "sides retried" [bucket r.retries]
+                          $ tabulate "values compared" [bucket r.compared]
+                          $ tabulate "stack words left symbolic" [bucket r.opaque] (property True)
+  ]
+  where
+    bucket :: Int -> String
+    bucket n | n == 0 = "0" | n < 10 = "1-9" | n < 100 = "10-99" | n < 1000 = "100-999" | otherwise = ">=1000"
+
 testEnv :: Env
 testEnv = Env { config = defaultConfig }
 
@@ -1117,8 +1919,8 @@ tests = testGroup "contract-quickcheck-run"
       -- the flag is process-wide, so concurrent tests may flip it mid-run; results must not change either way
       within 120_000_000 $ ioProperty $ runEnv (Env { config = defaultConfig { hashConsExplore = hashCons } }) $ do
         -- to find a case that crashes or runs out of memory
-        liftIO $ lookupEnv "HEVM_FUZZ_CASE_FILE" >>= mapM_ (\f -> writeFile f $ show c
-          <> "\nmain: " <> bsToHex (assembleItems c.prog.main) <> "\ncallee: " <> bsToHex (assembleItems c.prog.callee))
+        liftIO $ writeCaseFile "random-contract-concrete-call" $ show c
+          <> "\nmain: " <> bsToHex (assembleItems c.prog.main) <> "\ncallee: " <> bsToHex (assembleItems c.prog.callee)
         t0 <- liftIO getMonotonicTime
         report <- checkCase 3 c
         t1 <- liftIO getMonotonicTime
@@ -1153,7 +1955,14 @@ tests = testGroup "contract-quickcheck-run"
               ]
         _ <- checkCase 0 (fixedCase items (BS.pack [1, 2, 3, 4, 5]))
         pure ()
-      , after AllFinish "calldata-wraparound-2" $ test "calldata-overwrite-with-0-if-oversized" $ do
+      , after AllFinish "calldata-wraparound-2" $ test "codecopy-symbolic-offset-wraparound" $ do
+        let items = concat
+              [ pushOps [4] <> [IOp OpCallvalue, IOp OpNot] <> pushOps [6] <> [IOp OpCodecopy] -- size, ~callvalue, destOffs
+              , pushOps [0x60, 0] <> [IOp OpReturn]
+              ]
+        _ <- checkCase 0 (fixedCase items mempty)
+        pure ()
+      , after AllFinish "codecopy-symbolic-offset-wraparound" $ test "calldata-overwrite-with-0-if-oversized" $ do
         -- supposed to copy 1...6 and then 0s, overwriting the 0xff with 0
         let items = concat
               [ pushOps [0xff, 1] <> [IOp OpMstore8]

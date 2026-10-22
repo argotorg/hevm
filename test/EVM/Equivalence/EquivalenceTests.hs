@@ -405,6 +405,27 @@ deploymentSolidityEquivalenceTests = testGroup "Solidity deployment equivalence"
     let a = wrap aBody
     let b = wrap bBody
     expectDifferent a b
+  -- A writes 0 to slot 1, B leaves it unset; both read as 0
+  , testCase "storage-zero-same-as-unset" $ do
+    let a = [i|
+              contract C {
+                uint a = 1;
+                uint b = 0;
+                function get() public view returns (uint, uint) { return (a, b); }
+              }
+            |]
+    let b = replace $ "uint b = 0;" `with` "uint b;" `on` a
+    expectEquivalent a b
+  , testCase "storage-nonzero-differs-from-unset" $ do
+    let a = [i|
+              contract C {
+                uint a = 1;
+                uint b = 2;
+                function get() public view returns (uint) { return a; }
+              }
+            |]
+    let b = replace $ "uint b = 2;" `with` "uint b;" `on` a
+    expectDifferent a b
   ]
   where
     expectDifferent :: SourceCode -> SourceCode -> IO ()
@@ -513,6 +534,13 @@ bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
     assertBool "Must have a counterexample" (not (null replays))
     forM_ replays $ \case
       Validated ra rb -> assertBool "Replay must show the different stores" (ra /= rb)
+      r -> assertFailure $ "Counterexample must replay as validated, got: " <> show r
+  , testCase "eq-replay-zero-write-over-nonzero-slot" $ do
+    -- stop vs sstore(1, 0): they differ only if slot 1 starts nonzero, so the model must give its value
+    replays <- replayAll "00" "5f600155"
+    assertBool "Must have a counterexample" (not (null replays))
+    forM_ replays $ \case
+      Validated {} -> pure ()
       r -> assertFailure $ "Counterexample must replay as validated, got: " <> show r
   , testCase "eq-replay-answers-calls-to-unknown-code" $ do
     -- STATICCALL(gas, 0x1234, 0, 0, 0, 32), then sstore(0, mload(0) == 5) vs sstore(0, 0)

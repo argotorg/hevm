@@ -507,6 +507,13 @@ genShapedByte n = frequency
   [ (1, LitByte <$> arbitrary)
   , (2, IndexWord <$> (Lit . fromIntegral <$> choose (0 :: Int, 33)) <*> genShapedWord n)
   , (2, ReadByte <$> smallIdxWith (genShapedWord n) <*> genShapedBuf n)
+  , (2, do
+      idx <- Lit . fromIntegral <$> choose (0 :: Int, 33)
+      off <- Lit . fromIntegral <$> choose (0 :: Int, 100)
+      w <- ReadWord off <$> genShapedBuf n
+      oneof [ pure (IndexWord idx w)
+            , pure (ReadByte idx (WriteWord (Lit 0) w (AbstractBuf "buf")))
+            ])
   ]
 
 genShapedBuf :: Int -> Gen (Expr Buf)

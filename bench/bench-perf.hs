@@ -55,7 +55,9 @@ vmOptsToTestVMParams v =
       origin = v.origin,
       gasCreate = v.gas,
       gasCall = v.gas,
-      baseFee = v.baseFee,
+      baseFee = case v.baseFee of
+        Lit x -> x
+        _ -> 0,
       priorityFee = v.priorityFee,
       balanceCreate = case v.value of
         Lit x -> x
@@ -70,7 +72,9 @@ vmOptsToTestVMParams v =
       gaslimit = v.gaslimit,
       gasprice = v.gasprice,
       maxCodeSize = v.maxCodeSize,
-      prevrandao = v.prevRandao,
+      prevrandao = case v.prevRandao of
+        Lit x -> x
+        _ -> 0,
       chainId = v.chainId
     }
 

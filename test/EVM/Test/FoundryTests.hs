@@ -124,6 +124,18 @@ tests = testGroup "Foundry tests"
     , test "Expect-Revert-Fail" $ do
         let testFile = "test/contracts/fail/expectRevert.sol"
         assertAllMethodsWithPrefix testFile "prove" (False, True)
+    , test "Precompile-Cheats-Fail" $ do
+        let testFile = "test/contracts/fail/precompileCheats.sol"
+        executeSingleMethod testFile "prove_prank_not_kept_past_precompile" >>= assertEqualM "prank must be used up by the precompile call" (False, False)
+        executeSingleMethod testFile "prove_expectRevert_on_succeeding_precompile" >>= assertEqualM "a succeeding precompile call must fail expectRevert" (False, False)
+    -- the replay used to crash and then hang
+    , localOption (mkTimeout 120_000_000) $ test "Tx-Context-Cex" $ do
+        let testFile = "test/contracts/fail/txContextCex.sol"
+        executeSingleMethod testFile "prove_origin" >>= assertEqualM "origin cex" (False, True)
+        executeSingleMethod testFile "prove_coinbase" >>= assertEqualM "coinbase cex" (False, True)
+    , test "Unlinked-Library-Skipped" $ do
+        let testFile = "test/contracts/pass/unlinkedLibrary.sol"
+        executeSingleMethod testFile "prove_unrelated" >>= assertEqualM "a non-test contract with unlinked libraries must not stop the tests" (True, True)
     , test "Cheat-Codes-Fork-Pass" $ do
         let testFile = "test/contracts/pass/cheatCodesFork.sol"
         assertAllMethodsWithPrefix testFile "prove" (True, True)
@@ -186,6 +198,7 @@ tests = testGroup "Foundry tests"
               , ("prove_approx_eq_abs_int_min_zero_tight", (False, False))
               -- symbolic: not all branches revert
               , ("prove_approx_eq_abs_uint_symbolic_fail", (False, True))
+              , ("prove_approx_eq_abs_int_symbolic_min_max", (False, False))
               ]
         forM_ cases $ \(method, expected) -> do
           executeSingleMethod testFile method >>= assertEqualM (unpack method) expected

@@ -364,6 +364,12 @@ readSolc pt root fp = do
   fileContents <- liftIO $ fmap Data.Text.Encoding.decodeUtf8 $ Data.ByteString.readFile fp
   let contractName = T.pack $ takeBaseName fp
   case readJSON pt contractName fileContents of
+      -- forge links libraries at test time; we cannot, so only a test contract
+      -- that needs one is fatal
+      Left (UnlinkedLibrary _) | Foundry <- pt, not (isTestContractJson fileContents) -> do
+        liftIO $ putStrLn $ "\x1b[33m[WARNING]\x1b[0m skipping contract " <> T.unpack contractName
+          <> " (" <> fp <> "): it uses unlinked external libraries, which are not supported"
+        pure (Right mempty)
       Left err -> pure . Left $ "unable to parse " <> show pt <> " project JSON: " <> fp
         <> " Contract: " <> show contractName <> "\nError: " <> show err
       Right (contracts, asts, sources) -> do
@@ -371,6 +377,10 @@ readSolc pt root fp = do
         when (conf.debug) $ liftIO $ putStrLn $ "Parsed contract: " <> show contractName <> " file: " <> fp
         sourceCache <- liftIO $ makeSourceCache root sources asts
         pure (Right (BuildOutput contracts sourceCache))
+
+isTestContractJson :: Text -> Bool
+isTestContractJson json = any (\e -> e ^? key "name" % _String == Just "IS_TEST") $
+  fromMaybe mempty (json ^? key "abi" % _Array)
 
 yul :: Text -> Text -> IO (Either BytecodeReadingError ByteString)
 yul contractName src = yul' contractName src False

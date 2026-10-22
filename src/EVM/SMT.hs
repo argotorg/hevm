@@ -133,10 +133,16 @@ declareIntermediatesWith enc bufs stores = do
       storage <- exprToSMTWith enc expr
       pure [SMTCommand ("(define-fun store" <> (Data.Text.Lazy.Builder.Int.decimal n) <> " () Storage " <> storage <> ")")]
 
-decompose :: Config -> [Prop] -> [Prop]
-decompose conf props = if conf.decomposeStorage
-                    then fromMaybe props (Expr.decomposeStorageProps props)
-                    else props
+decompose :: Config -> [Prop] -> ([Prop], CexVars)
+decompose conf props = case Expr.decomposeStorageProps props of
+  Just decomposed | conf.decomposeStorage ->
+    (decomposed, mempty { logicalStores = Map.fromList [(i, s) | s <- Expr.accessedLogicalStores props, i <- storeIdx s] })
+  _ -> (props, mempty)
+  where
+    storeIdx = \case
+      MapStore i -> [i]
+      ArrayStore i -> [i]
+      SmallSlots -> []
 
 -- simplify to rewrite sload/sstore combos
 -- notice: it is VERY important not to concretize early, because Keccak assumptions
@@ -144,7 +150,8 @@ decompose conf props = if conf.decomposeStorage
 assertProps :: Config -> [Prop] -> Err SMT2
 assertProps conf ps =
   if not conf.simp then assertPropsHelperWith ConcreteArith False [] ps
-  else assertPropsHelperWith ConcreteArith True [] (decompose conf ps)
+  else let (decomposed, stores) = decompose conf ps
+       in (<> SMT2 mempty stores mempty) <$> assertPropsHelperWith ConcreteArith True [] decomposed
 
 data AbstractQuery = AbstractQuery
   { query :: SMT2
@@ -160,7 +167,7 @@ data AbstractQuery = AbstractQuery
 -- | Assert props with abstract div/mod/mul (uninterpreted functions + lemmas).
 assertPropsAbstract :: Config -> [Prop] -> Err AbstractQuery
 assertPropsAbstract conf ps = do
-  base@(SMT2 _ _ goalPs) <- assertPropsHelperWith AbstractArith conf.simp divModAbstractDecls psDecomp
+  base@(SMT2 _ _ goalPs) <- (<> SMT2 mempty decompStores mempty) <$> assertPropsHelperWith AbstractArith conf.simp divModAbstractDecls psDecomp
   -- Lemmas and ground truth come from the helper's concretized props, the ones
   -- the goal is encoded from: raw props can keep storage reads that simplify
   -- away in the goal, so their terms would not match.
@@ -179,7 +186,7 @@ assertPropsAbstract conf ps = do
     , lemmaFamilies = families
     }
   where
-    psDecomp = if conf.simp then decompose conf ps else ps
+    (psDecomp, decompStores) = if conf.simp then decompose conf ps else (ps, mempty)
     defineTerm (name, body) = do
       encoded <- exprToSMTWith AbstractArith body
       pure $ SMTCommand $ "(define-fun " <> fromText name <> " () (_ BitVec 256) " <> encoded <> ")"
@@ -320,6 +327,11 @@ findStorageReads p = foldProp go mempty p
       SLoad slot store | baseIsAbstractStore store -> case Expr.getAddr store of
           Nothing -> internalError $ "could not extract address from: " <> show store
           Just address -> StorageReads $ Map.singleton (address, Expr.getLogicalIdx store) (Set.singleton slot)
+      -- the prestate of a written slot matters when stores are compared,
+      -- e.g. writing 0 differs from not writing only if the slot was nonzero
+      SStore slot _ store | baseIsAbstractStore store -> case Expr.getAddr store of
+          Nothing -> internalError $ "could not extract address from: " <> show store
+          Just address -> StorageReads $ Map.singleton (address, Expr.getLogicalIdx store) (Set.singleton slot)
       _ -> mempty
 
     baseIsAbstractStore :: Expr 'Storage -> Bool
@@ -407,7 +419,7 @@ declareConstrainAddrs names = SMT2 (SMTScript ([SMTComment "concrete and symboli
   where
     declare n = SMTCommand $ "(declare-fun " <> n <> " () Addr)"
     -- assume that symbolic addresses do not collide with the zero address or precompiles
-    assume n = SMTCommand $ "(assert (bvugt " <> n <> " (_ bv9 160)))"
+    assume n = SMTCommand $ "(assert (and (bvugt " <> n <> " (_ bv17 160)) (distinct " <> n <> " (_ bv256 160))))"
     cexvars = (mempty :: CexVars){ addrs = fmap toLazyText names }
 
 declareFrameContext :: [(Builder, [Prop])] -> Err SMT2
@@ -705,25 +717,38 @@ propToSMTWith arithEnc = \case
 
 -- ** Helpers ** ---------------------------------------------------------------------------------
 
+-- | Copies are encoded a byte at a time, so a larger one would take gigabytes
+maxEncodedCopy :: W256
+maxEncodedCopy = 0x100000
+
 copySliceWith :: ArithEncoding -> Expr EWord -> Expr EWord -> Expr EWord -> Builder -> Builder -> Err Builder
 copySliceWith arithEnc srcOffset dstOffset (Lit size) src dst = do
   -- a symbolic size, e.g. a keccak, can become this large only once concretized for encoding
-  when (size >= into memoryAccessLimit) $
-    Left $ "CopySlice of 0x" <> showHex size "" <> " bytes not currently implemented, it is beyond the memory access limit"
+  when (size > maxEncodedCopy) $
+    Left $ "CopySlice of 0x" <> showHex size "" <> " bytes not currently implemented, encoding it would take too much memory"
+  -- a symbolic offset is encoded once, not once per byte
+  srcBind <- binding "copy!srcoff" srcOffset
+  dstBind <- binding "copy!dstoff" dstOffset
   sz <- internal size
-  -- the binder must not be a possible buffer name, or it captures that buffer in dst
-  pure $ "(let ((copy!src " <> src <> ")) " <> sz <> ")"
+  -- the binders must not be possible buffer names, or they capture that buffer in dst
+  pure $ "(let ((copy!src " <> src <> ")" <> srcBind <> dstBind <> ") " <> sz <> ")"
   where
+    binding :: Builder -> Expr EWord -> Err Builder
+    binding _ (Lit _) = pure ""
+    binding name e = do
+      enc <- exprToSMTWith arithEnc e
+      pure $ " (" <> name <> " " <> enc <> ")"
     internal 0 = pure dst
     internal idx = do
       let idx' = idx - 1
-      encDstOff <- offset idx' dstOffset
-      encSrcOff <- offset idx' srcOffset
+          encDstOff = offset "copy!dstoff" idx' dstOffset
+          encSrcOff = offset "copy!srcoff" idx' srcOffset
       child <- internal idx'
       pure $ "(store " <> child `sp` encDstOff `sp` "(select copy!src " <> encSrcOff <> "))"
-    offset :: W256 -> Expr EWord -> Err Builder
-    offset o (Lit b) = pure $ wordAsBV $ o + b
-    offset o e = exprToSMTWith arithEnc $ Expr.add (Lit o) e
+    offset :: Builder -> W256 -> Expr EWord -> Builder
+    offset _ o (Lit b) = wordAsBV $ o + b
+    offset name 0 _ = name
+    offset name o _ = "(bvadd " <> name <> " (_ bv" <> fromString (show (into o :: Integer)) <> " 256))"
 copySliceWith _ _ _ _ _ _ = Left "CopySlice with a symbolically sized region not currently implemented, cannot execute SMT solver on this query"
 
 expandExpWith :: ArithEncoding -> Expr EWord -> W256 -> Err Builder
@@ -937,9 +962,10 @@ getBufs getVal bufs = foldM getBuf mempty bufs
 -- concretized storage
 getStore
   :: ValGetter
+  -> Map W256 LogicalStore
   -> StorageReads
   -> MaybeIO (Map (Expr EAddr) (Map W256 W256))
-getStore getVal (StorageReads innerMap) = do
+getStore getVal stores (StorageReads innerMap) = do
   results <- forM (Map.toList innerMap) $ \((addr, idx), slots) -> do
     let name = toLazyText (storeName addr idx)
     raw <- getVal name
@@ -951,9 +977,17 @@ getStore getVal (StorageReads innerMap) = do
     -- create a map by adding only the locations that are read by the program
     store <- foldM (\m slot -> do
       slot' <- queryValue getVal slot
-      pure $ Map.insert slot' (fun slot') m) Map.empty (Set.toList slots)
+      real <- hoistMaybe $ realSlot idx slot'
+      pure $ Map.insert real (fun slot') m) Map.empty (Set.toList slots)
     pure (addr, store)
-  pure $ Map.fromList results
+  pure $ Map.fromListWith Map.union results
+  where
+    -- a decomposed store is indexed by the key within its mapping or array
+    realSlot Nothing key = Just key
+    realSlot (Just idx) key = case Map.lookup idx stores of
+      Just (MapStore p) -> Just $ keccak' (word256Bytes key <> word256Bytes p)
+      Just (ArrayStore p) -> Just $ keccak' (word256Bytes p) + key
+      _ -> Nothing
 
 -- | Ask the solver to give us the concrete value of an arbitrary abstract word
 queryValue :: ValGetter -> Expr EWord -> MaybeIO W256

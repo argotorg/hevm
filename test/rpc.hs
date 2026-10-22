@@ -55,8 +55,8 @@ tests = testGroup "rpc"
 
           assertEqual "coinbase" (LitAddr 0xea674fdde714fd979de3edf0f56aa9716b898ec8) cb
           assertEqual "number" (BlockNumber (forceLit numb)) block
-          assertEqual "basefee" 38572377838 basefee
-          assertEqual "prevRan" 11049842297455506 prevRan
+          assertEqual "basefee" (Lit 38572377838) basefee
+          assertEqual "prevRan" (Lit 11049842297455506) prevRan
     , test "post-merge-block" $ do
         conf <- readConfig
         sess <- mkSessionWithoutCache
@@ -73,8 +73,8 @@ tests = testGroup "rpc"
 
           assertEqual "coinbase" (LitAddr 0x690b9a9e9aa1c9db991c7721a92d351db4fac990) cb
           assertEqual "number" (BlockNumber (forceLit numb)) block
-          assertEqual "basefee" 22163046690 basefee
-          assertEqual "prevRan" 0x2267531ab030ed32fd5f2ef51f81427332d0becbd74fe7f4cd5684ddf4b287e0 prevRan
+          assertEqual "basefee" (Lit 22163046690) basefee
+          assertEqual "prevRan" (Lit 0x2267531ab030ed32fd5f2ef51f81427332d0becbd74fe7f4cd5684ddf4b287e0) prevRan
     ]
   , testGroup "execution with remote state"
     -- execute against remote state from a ds-test harness

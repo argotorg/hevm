@@ -44,14 +44,17 @@ tests = testGroup "Equivalence fuzzing"
   -- each case runs the solver, so the default of 100 cases is lowered; any other count is kept
   [ withResource (newIORef mempty) (printCoverage "eq-fuzz-cex-replays" (filter (/= "CALL") genOpcodes)) $ \cov ->
       adjustOption (\(QuickCheckTests n) -> QuickCheckTests (if n == 100 then 20 else n)) $
-        testProperty "eq-fuzz-cex-replays" (prop_eqReplay cov)
+        testProperty "eq-fuzz-cex-replays" (eqReplay cov)
   , withResource (newIORef mempty) (printCoverage "eq-fuzz-configs" (filter (`notElem` ["STATICCALL", "CALL"]) genOpcodes)) $ \cov ->
       adjustOption (\(QuickCheckTests n) -> QuickCheckTests (if n == 100 then 10 else n)) $
-        testProperty "eq-fuzz-configs" (prop_eqConfigs cov)
+        testProperty "eq-fuzz-configs" (eqConfigs cov)
   , withResource (newIORef mempty) (printCoverage "eq-fuzz-calls" genOpcodes) $ \cov ->
       adjustOption (\(QuickCheckTests n) -> QuickCheckTests (if n == 100 then 10 else n)) $
-        testProperty "eq-fuzz-calls" (prop_eqCalls cov)
-  , testProperty "eq-fuzz-stub-code" prop_stubCode
+        testProperty "eq-fuzz-calls" (eqCalls cov)
+  , withResource (newIORef mempty) (printCoverage "eq-fuzz-create" (filter (`notElem` ["STATICCALL", "CALL"]) genOpcodes)) $ \cov ->
+      adjustOption (\(QuickCheckTests n) -> QuickCheckTests (if n == 100 then 20 else n)) $
+        testProperty "eq-fuzz-create" (eqCreate cov)
+  , testProperty "eq-fuzz-stub-code" stubCodeAnswers
   ]
 
 -- | How many cases generated and executed each opcode
@@ -244,6 +247,9 @@ genW d
       , (1, Sload . Const <$> genSlot)
       , (1, Tload . Const <$> genSlot)
       , (1, Sha3 <$> genOff <*> genSize)
+      -- symbolic addresses must not take precompile values
+      , (1, Bin 0x14 <$> (EnvOp <$> elements [0x30, 0x32, 0x33, 0x41])
+                     <*> (Const <$> elements ([1 .. 0x11] <> [0x100])))
       ]
 
 genSlot :: Gen W256
@@ -351,7 +357,7 @@ mutW w = do
 
 mutBlock :: Calls -> Stmt -> Gen (Stmt, String)
 mutBlock calls = \case
-  Sstore k v -> oneof [first' (`Sstore` v) <$> mutW k, first' (Sstore k) <$> mutW v]
+  Sstore k v -> frequency [(2, first' (`Sstore` v) <$> mutW k), (2, first' (Sstore k) <$> mutW v), (1, pure (Sstore k (Const 0), "store zero"))]
   Tstore k v -> oneof [first' (`Tstore` v) <$> mutW k, first' (Tstore k) <$> mutW v]
   Mstore o v -> oneof [(\o' -> (Mstore o' v, "memory offset")) <$> genOff, first' (Mstore o) <$> mutW v]
   Mstore8 o v -> oneof [(\o' -> (Mstore8 o' v, "memory offset")) <$> genOff, first' (Mstore8 o) <$> mutW v]
@@ -391,6 +397,8 @@ mutBlocks calls bs = do
     [ (6, (\(b, w) -> (take i bs <> [b] <> drop (i + 1) bs, w)) <$> mutBlock calls (bs !! i))
     , (if length bs > 1 then 1 else 0, pure (take i bs <> drop (i + 1) bs, "delete block"))
     , (1, (\b -> (take i bs <> [b] <> drop i bs, "insert block")) <$> genBlock calls 1)
+    -- a slot written with 0 reads like an unwritten one
+    , (1, (\k -> (take i bs <> [Sstore k (Const 0)] <> drop i bs, "insert zero store")) <$> genKey)
     , (if i + 1 < length bs then 1 else 0, pure (take i bs <> [bs !! (i + 1), bs !! i] <> drop (i + 2) bs, "swap blocks"))
     ]
 
@@ -492,6 +500,7 @@ runConcrete s opts = do
             Just _ -> pure (ops, stub, vm)
     opAt vm = case vm.state.code of
       RuntimeCode (ConcreteRuntimeCode bs) | vm.state.pc < BS.length bs -> intToOpName (fromIntegral (BS.index bs vm.state.pc))
+      InitCode bs _ | vm.state.pc < BS.length bs -> intToOpName (fromIntegral (BS.index bs vm.state.pc))
       _ -> "STOP"
 
 outcomeKind :: Either EvmError (Expr Buf) -> String
@@ -525,7 +534,7 @@ bucket n
 -- the replay can't reproduce these, and says so
 expectedCannot :: T.Text -> Bool
 expectedCannot why = any (`T.isInfixOf` why)
-  [ "goes to precompile", "goes to the called contract itself", "answers the same call", "precompile address", "calldata of " ]
+  [ "goes to precompile", "goes to the called contract itself", "answers the same call", "calldata of " ]
 
 -- the solver may give keccak of symbolic data any value, which the replay then can't reproduce
 keccakRan :: Maybe (Run, Run) -> Bool
@@ -602,8 +611,8 @@ showPair a b =
 fuzzConfig :: Effects.Config
 fuzzConfig = Effects.defaultConfig { Effects.maxWidth = 5 }
 
-prop_eqReplay :: IO (IORef Coverage) -> Pair -> Property
-prop_eqReplay cov (Pair a b mutation) = ioProperty $ Effects.runEnv (Effects.Env fuzzConfig) $ withSolvers Bitwuzla 1 (Just 20) defMemLimit $ \s -> do
+eqReplay :: IO (IORef Coverage) -> Pair -> Property
+eqReplay cov (Pair a b mutation) = ioProperty $ Effects.runEnv (Effects.Env fuzzConfig) $ withSolvers Bitwuzla 1 (Just 20) defMemLimit $ \s -> do
   (verdicts, replays) <- checkAndReplay s codeA codeB
   random <- randomRuns s codeA codeB
   let equivalent = verdicts == ["equivalent"]
@@ -664,13 +673,13 @@ variants =
   , Variant "merging off" (\c -> c { Effects.mergeMaxBudget = 0 })
   ]
 
-prop_eqConfigs :: IO (IORef Coverage) -> Property
-prop_eqConfigs = agreement NoCalls baseline (take 2 <$> shuffle variants)
+eqConfigs :: IO (IORef Coverage) -> Property
+eqConfigs = agreement NoCalls baseline (take 2 <$> shuffle variants)
 
 -- | Programs with calls that may change state. With re-entrancy allowed, every
 -- path through such a call is partial, so the baseline promises no re-entrancy.
-prop_eqCalls :: IO (IORef Coverage) -> Property
-prop_eqCalls = agreement AllCalls
+eqCalls :: IO (IORef Coverage) -> Property
+eqCalls = agreement AllCalls
   (Variant "promiseNoReent" (\c -> c { Effects.promiseNoReent = True }))
   (pure [Variant "re-entrancy allowed" (\c -> c { Effects.promiseNoReent = False })])
 
@@ -737,6 +746,72 @@ agreement calls base0 genVariants cov = forAllShrink (genPair calls) shrink $ \(
     $ tabulate "random runs, a callee sent ether back" [show (sentBack x || sentBack y) | calls == AllCalls, (x, y) <- random]
     $ not clash && null bad && null unsound
 
+-- | The programs as constructors, where storage starts concrete and empty. Every
+-- counterexample must replay as a difference, and random concrete runs must
+-- agree when hevm proves A and B equivalent.
+eqCreate :: IO (IORef Coverage) -> Property
+eqCreate cov = forAllShrink genCreatePair shrink $ \(Pair a b mutation) -> ioProperty $ do
+  let codeA = assemble a
+      codeB = assemble b
+      runBoth s cex = (,) <$> runCreate s cex codeA <*> runCreate s cex codeB
+  (verdicts, replays, random) <-Effects.runEnv (Effects.Env fuzzConfig) $ withSolvers Bitwuzla 1 (Just 20) defMemLimit $ \s -> do
+    (calldata, _) <- mkCalldata Nothing []
+    eq <- equivalenceCheck s Nothing codeA codeB defaultVeriOpts calldata True
+    let verdicts = nub $ map (verdict . fst) eq.res
+                    <> ["partial" | not (null eq.partials)]
+                    <> ["identical" | codeA == codeB]
+                    <> ["equivalent" | null eq.res, null eq.partials, codeA /= codeB]
+    replays <- forM (mapMaybe (getCex . fst) eq.res) $ \cex -> (cex,) <$> runBoth s cex
+    envs <- liftIO $ generate (vectorOf 4 genEnv)
+    random <- forM envs $ \(cex, _, _) -> runBoth s cex
+    pure (verdicts, replays, random)
+  let equivalent = verdicts == ["equivalent"]
+      spurious = [(c, x, y) | (c, (x, y)) <- replays, sameRun x y, not (keccakRan (Just (x, y)))]
+      unsound = [(x, y) | equivalent, (x, y) <- random, not (sameRun x y)]
+      runs = concatMap (\(x, y) -> [x, y]) (map snd replays <> random)
+      generated = Set.fromList (opcodesOf codeA <> opcodesOf codeB)
+      executed = Set.unions (map (.ops) runs)
+      replayKind (_, (x, y))
+        | not (sameRun x y) = "differs"
+        | keccakRan (Just (x, y)) = "same, ran SHA3"
+        | otherwise = "SPURIOUS"
+  addCoverage cov generated executed
+  pure
+    $ counterexample (unlines $ showPair a b
+        <> concat [["spurious cex: " <> show c, "concretely: " <> showRun x <> " vs " <> showRun y] | (c, x, y) <- spurious]
+        <> ["equivalent, but concretely: " <> showRun x <> " vs " <> showRun y | (x, y) <- unsound])
+    $ tabulate "mutation" [mutation]
+    $ tabulate "blocks in A" (nub (blockKinds 0 a))
+    $ tabulate "equivalence" verdicts
+    $ tabulate "replay" (map replayKind replays)
+    $ tabulate "random runs (A / B)" [outcomeKind x.outcome <> " / " <> outcomeKind y.outcome | (x, y) <- random]
+    $ tabulate "final stores of A and B" (map storeShape (map snd replays <> random))
+    $ tabulate "zero slots in final stores" [show (any (any (== 0)) x.store) | x <- runs]
+    $ tabulate "executed opcodes" (Set.toList executed)
+    $ null spurious && null unsound
+  where
+    verdict = \case
+      Cex _ -> "cex"
+      Qed -> "qed"
+      Unknown _ -> "unknown"
+      Error e -> "error: " <> take 60 e
+    storeShape (x, y)
+      | x.store == y.store = "equal"
+      | sameRun x { outcome = y.outcome, balances = y.balances } y = "differ only in zero slots"
+      | otherwise = "differ"
+    -- hevm runs constructors with empty calldata
+    runCreate s cex code = runConcrete s (eqReplayVmOpts cex [] code BS.empty)
+      { contract = initialContract (InitCode code (ConcreteBuf BS.empty)), create = True }
+
+-- returned memory becomes the deployed code, which must be concrete
+genCreatePair :: Gen Pair
+genCreatePair = (\(Pair a b m) -> Pair (deployNothing a) (deployNothing b) m) <$> genPair NoCalls
+  where
+    deployNothing = map $ \case
+      Halt 0xf3 off _ -> Halt 0xf3 off 0
+      If c t e -> If c (deployNothing t) (deployNothing e)
+      s -> s
+
 sentBack :: Run -> Bool
 sentBack r = or [v == 0 | (LitAddr a, v) <- Map.toList r.balances, a >= senderBase, a < senderBase + fromIntegral (length callees)]
 
@@ -790,8 +865,8 @@ genEnv = do
 
 -- | 'stubCode' answers each of its calldatas as told, padding the returndata with zeros
 -- to its length, and reverts with no data on any other calldata
-prop_stubCode :: Property
-prop_stubCode = forAll genAnswers $ \answers -> forAll (BS.pack <$> listOf arbitrary) $ \other ->
+stubCodeAnswers :: Property
+stubCodeAnswers = forAll genAnswers $ \answers -> forAll (BS.pack <$> listOf arbitrary) $ \other ->
   ioProperty $ do
     let code = stubCode answers
         run input = stToIO $ do
