@@ -170,15 +170,13 @@ statsProblems before after =
   <> [ name <> " decreased" | (name, f) <- [("commandSecs", (.commandSecs)), ("querySecs", (.querySecs))], f a < f b ]
   <> [ "replayed " <> show a.replayedOpcodes <> " of " <> show a.opcodes <> " opcodes" | a.replayedOpcodes > a.opcodes ]
   <> [ "took " <> show a.branchesTaken <> " of " <> show a.branchesOffered <> " branches offered" | a.branchesTaken > a.branchesOffered ]
-  <> [ "queries " <> show a.queries <> " are not the sum of their kinds" | a.queries /= a.branchQueries + a.solutionQueries + a.fetchQueries + a.otherQueries ]
   <> [ "step " <> show after.step <> " is not the session's" | after.step < 0 ]
   where
     a = after.counters
     b = before.counters
     ints :: [(String, Stats -> Int)]
     ints = [ ("opcodes", (.opcodes)), ("replayedOpcodes", (.replayedOpcodes)), ("queries", (.queries))
-           , ("branchQueries", (.branchQueries)), ("solutionQueries", (.solutionQueries)), ("fetchQueries", (.fetchQueries))
-           , ("otherQueries", (.otherQueries)), ("branchesOffered", (.branchesOffered)), ("branchesTaken", (.branchesTaken))
+           , ("branchesOffered", (.branchesOffered)), ("branchesTaken", (.branchesTaken))
            , ("staticDecisions", (.staticDecisions)), ("infeasibleOptions", (.infeasibleOptions))
            , ("breakpointHits", (.breakpointHits)) ]
 

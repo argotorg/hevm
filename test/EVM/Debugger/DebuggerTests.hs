@@ -149,18 +149,18 @@ tests = testGroup "Debugger"
       s1 <- run "continue" s0
       let c1 = (sessionStats s1).counters
       liftIO $ do
-        assertEqual "one branch query" 1 c1.branchQueries
+        assertEqual "one query" 1 c1.queries
         assertEqual "one branch offered" 1 c1.branchesOffered
         assertEqual "none taken" 0 c1.branchesTaken
       s2 <- run "branch true" s1 >>= run "continue"
       let c2 = (sessionStats s2).counters
       liftIO $ do
-        assertEqual "the second branch was queried too" 2 c2.branchQueries
+        assertEqual "the second branch was queried too" 2 c2.queries
         assertEqual "but decided by the solver" 1 c2.branchesOffered
         assertEqual "one taken" 1 c2.branchesTaken
         assertBool "query time" (c2.querySecs > 0)
       v <- run "stats" s2 >>= liftIO . mkView
-      liftIO $ assertBool "stats command" (maybe False ("2 branch" `T.isInfixOf`) v.output)
+      liftIO $ assertBool "stats command" (maybe False ("queries:   2 in" `T.isInfixOf`) v.output)
   , testCase "http" $ runEnv testEnv $ withSolvers Bitwuzla 1 Nothing defMemLimit $ \solvers -> do
       vm <- liftIO $ concreteVM loopCode
       sess <- liftIO $ newSession emptyDapp vm

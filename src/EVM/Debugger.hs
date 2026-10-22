@@ -34,6 +34,7 @@ module EVM.Debugger
   , Stats(..)
   , StatsView(..)
   , sessionStats
+  , sessionWarnings
   , sessionTrace
   , renderStats
   , isHalted
@@ -183,19 +184,10 @@ data Stats = Stats
   , replayedOpcodes :: Int
   , queries         :: Int
   , querySecs       :: Double
-  , branchQueries   :: Int
-  , solutionQueries :: Int
-  , fetchQueries    :: Int
-  , otherQueries    :: Int
   , branchesOffered :: Int
   , branchesTaken   :: Int
   -- | branches decided without the solver, in 'ExplorerBranches' mode
   , staticDecisions :: Int
-  -- | in 'CheckedBranches' mode: static decisions the solver contradicts, and
-  -- branches the solver could decide but simplification could not
-  , staticWrong     :: Int
-  , staticMissed    :: Int
-  , staticInconclusive :: Int
   -- | values of multi-way branches not offered, as the solver finds them infeasible
   , infeasibleOptions :: Int
   , breakpointHits  :: Int
@@ -210,10 +202,17 @@ data StatsView = StatsView
   deriving (Show, Generic, ToJSON)
 
 emptyStats :: Stats
-emptyStats = Stats 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+emptyStats = Stats 0 0 0 0 0 0 0 0 0 0 0
 
 addStats :: (Stats -> Stats) -> Session t -> Session t
 addStats f s = s { stats = f s.stats }
+
+addWarning :: Text -> Session t -> Session t
+addWarning w s = s { warnings = take 20 (("step " <> tshow s.curStep <> ": " <> w) : s.warnings) }
+
+-- | Problems checked mode found, newest first
+sessionWarnings :: Session t -> [Text]
+sessionWarnings s = s.warnings
 
 sessionStats :: Session t -> StatsView
 sessionStats s = StatsView s.curStep (Map.size s.snapshots) s.stats
@@ -223,14 +222,10 @@ renderStats v = T.unlines
   [ "step " <> tshow v.step <> ", " <> tshow v.snapshotCount <> " snapshots"
   , "commands:  " <> tshow c.commands <> " in " <> secs c.commandSecs
   , "opcodes:   " <> tshow c.opcodes <> " executed, " <> tshow c.replayedOpcodes <> " of them to go back"
-  , "queries:   " <> tshow c.queries <> " in " <> secs c.querySecs <> " (" <> tshow c.branchQueries <> " branch, "
-      <> tshow c.solutionQueries <> " solutions, " <> tshow c.fetchQueries <> " fetch, " <> tshow c.otherQueries <> " other)"
+  , "queries:   " <> tshow c.queries <> " in " <> secs c.querySecs
   , "branches:  " <> tshow c.branchesOffered <> " offered, " <> tshow c.branchesTaken <> " taken, "
       <> tshow c.infeasibleOptions <> " infeasible values not offered, "
       <> tshow c.staticDecisions <> " decided without the solver"
-  , "checked:   " <> tshow c.staticWrong <> " static decisions the solver contradicts, "
-      <> tshow c.staticMissed <> " branches only the solver could decide, "
-      <> tshow c.staticInconclusive <> " the solver could not check"
   , "breakpoint hits: " <> tshow c.breakpointHits
   ]
   where
@@ -325,13 +320,10 @@ resolve fetcher queried s = case s.vm.result of
             _ -> staticBranch c pcs
       Progress.emit "debug-static-decision" $ where_ s <> ["decision" .= T.pack (show decision)]
       checked <- if s.branchMode /= CheckedBranches then pure s else checkStaticBranch fetcher s.vm c pcs decision >>= \case
-        StaticOk -> pure s
-        StaticMissed -> pure $ addStats (\st -> st { staticMissed = st.staticMissed + 1 }) s
-        StaticInconclusive -> pure $ addStats (\st -> st { staticInconclusive = st.staticInconclusive + 1 }) s
         StaticWrong msg -> do
           Progress.emit "debug-static-decision-wrong" $ where_ s <> ["problem" .= T.pack msg]
-          pure $ addStats (\st -> st { staticWrong = st.staticWrong + 1 })
-            s { warnings = take 20 (("step " <> tshow s.curStep <> ": " <> T.pack msg) : s.warnings) }
+          pure $ addWarning (T.pack msg) s
+        _ -> pure s
       vm' <- liftIO $ stToIO $ execStateT (continue decision) checked.vm
       resolve fetcher True $ addStats (\st -> st { staticDecisions = st.staticDecisions + 1 }) checked { vm = vm', lastCond = Just c }
     Left q -> do
@@ -344,13 +336,7 @@ resolve fetcher queried s = case s.vm.result of
       m <- fetcher q
       vm' <- liftIO $ stToIO $ execStateT m s.vm
       t1 <- liftIO getMonotonicTime
-      let count st = case q of
-            PleaseAskSMT {} -> st { branchQueries = st.branchQueries + 1 }
-            PleaseGetSols {} -> st { solutionQueries = st.solutionQueries + 1 }
-            PleaseFetchContract {} -> st { fetchQueries = st.fetchQueries + 1 }
-            PleaseFetchSlot {} -> st { fetchQueries = st.fetchQueries + 1 }
-            _ -> st { otherQueries = st.otherQueries + 1 }
-      resolve fetcher True $ addStats (\st -> count st { queries = st.queries + 1, querySecs = st.querySecs + t1 - t0 })
+      resolve fetcher True $ addStats (\st -> st { queries = st.queries + 1, querySecs = st.querySecs + t1 - t0 })
         s { vm = vm', lastCond = cond }
     Right (Pending c ctx0) -> do
       -- forks over the values of a subterm do not check them against the path

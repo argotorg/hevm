@@ -80,7 +80,7 @@ import EVM.Transaction qualified
 import EVM.Types hiding (Env)
 import EVM.Effects
 import EVM.Dapp (emptyDapp)
-import EVM.Debugger (Session, newSession, setSnapshotInterval, runCommand, Command(..), mkView, View(..), BranchView(..), sessionVM, sessionStep, isHalted, hasPendingBranch
+import EVM.Debugger (Session, newSession, setSnapshotInterval, sessionWarnings, runCommand, Command(..), mkView, View(..), BranchView(..), sessionVM, sessionStep, isHalted, hasPendingBranch
                     , BranchMode(..), setBranchMode, setMerge, sessionStats, StatsView(..), Stats(..))
 import EVM.Tracing (interpretWithTrace, vmTraceStep, VMTraceStep(..))
 
@@ -1379,7 +1379,7 @@ data Lockstep = Lockstep
   , branches :: Int -- ^ branches offered, and taken the concrete run's way
   , retries  :: Int -- ^ sides tried that the concrete run did not take
   , trail    :: [String] -- ^ the latest steps, newest first, for failure reports
-  , static   :: (Int, Int) -- ^ branches decided without the solver, and those it could have decided
+  , static   :: Int -- ^ branches decided without the solver
   , ended    :: Maybe (Int, Int, String) -- ^ pc, depth and kind of result, when both runs halted
   , ops      :: Set String -- ^ the opcodes stepped and compared after
   , merges   :: Int -- ^ symbolic steps that merged a branch
@@ -1395,7 +1395,7 @@ lockstepCase :: App m => SolverGroup -> BranchMode -> Bool -> TestCase -> m (Eit
 lockstepCase solvers mode merging c = Progress.withProgressLogFromEnv "lockstep" $ do
   sc0 <- liftIO $ stToIO (concreteTestVm c) >>= newSession emptyDapp
   ss0 <- liftIO $ setMerge merging . setBranchMode mode <$> (stToIO (symbolicTestVm c) >>= newSession emptyDapp)
-  r <- go sc0 ss0 (Lockstep "" 0 0 0 0 0 [] (0, 0) Nothing mempty 0) Nothing
+  r <- go sc0 ss0 (Lockstep "" 0 0 0 0 0 [] 0 Nothing mempty 0) Nothing
   Progress.emit "lockstep-end" $ case r of
     Left err -> ["failure" JSON..= T.pack err]
     Right l -> ["stopped" JSON..= T.pack l.stopped, "steps" JSON..= l.steps, "compared" JSON..= l.compared, "branches" JSON..= l.branches]
@@ -1442,10 +1442,9 @@ lockstepCase solvers mode merging c = Progress.withProgressLogFromEnv "lockstep"
                            , Nothing <- Expr.maybeLitWordSimp (Expr.simplify target)
                            , length (sessionVM sc').frames > length vs.frames -> stopWith "call to a symbolic address"
                     Left msg -> mismatchAt (sessionVM sc') msg
-                    Right (ss'', _, _) | (sessionStats ss'').counters.staticWrong > 0 -> do
-                      v <- liftIO $ mkView ss''
+                    Right (ss'', _, _) | not (null (sessionWarnings ss'')) ->
                       pure $ Left $ where_ <> "the solver contradicts a branch decided by simplification:\n"
-                        <> unlines (map T.unpack v.warnings)
+                        <> unlines (map T.unpack (sessionWarnings ss''))
                     Right (ss'', tried, took) -> case concretizeProps c c.inputs (sessionVM ss'').constraints of
                       Just False -> mismatch $ "the concrete inputs violate the path conditions after " <> opName'
                         <> ": " <> show (sessionVM ss'').constraints
@@ -1464,7 +1463,7 @@ lockstepCase solvers mode merging c = Progress.withProgressLogFromEnv "lockstep"
                                          , merges = acc.merges + if merged then 1 else 0
                                          , ops = Set.insert opName' acc.ops
                                          , trail = take 30 (entry : acc.trail)
-                                         , static = (counters.staticDecisions, counters.staticMissed) } (Just opName')
+                                         , static = counters.staticDecisions } (Just opName')
     -- an instruction may take several steps, e.g. when it is re-executed after
     -- a query, but always ends at another pc or depth, or halts
     midInstruction :: VM t -> VM t -> Bool
@@ -1903,8 +1902,7 @@ lockstepTests = testGroup "lockstep-fuzz"
                           $ tabulate "merged branches" [bucket r.merges | merging]
                           $ tabulate "opcodes compared after, in cases" (Set.toList r.ops)
                           $ tabulate "branch mode" [show mode]
-                          $ tabulate "decided by simplification" [bucket (fst r.static)]
-                          $ tabulate "only the solver could decide" [bucket (snd r.static)]
+                          $ tabulate "decided by simplification" [bucket r.static]
                           $ tabulate "steps" [bucket r.steps]
                           $ tabulate "branches taken" [bucket r.branches]
                           $ tabulate "sides retried" [bucket r.retries]
