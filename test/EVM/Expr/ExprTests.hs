@@ -395,15 +395,6 @@ storageTests = testGroup "Storage tests"
           (Or (Lit 0x4ac15ae900000000000000000000000000000000000000000000000000000000) (SHR (Lit 32) (Var "arg1")))
           (Expr.simplify (ReadWord (Lit 0) cd))
         assertEqual "the selector" (Lit 0x4ac15ae9) (Expr.simplify (SHR (Lit 224) (ReadWord (Lit 0) cd)))
-    , testCase "read-of-selector-and-argument" $ do
-        -- calldata as hevm test builds it: selector bytes, then the arguments
-        let cd = foldr (\(i, v) acc -> WriteByte (Lit i) (LitByte v) acc)
-                   (WriteWord (Lit 4) (Var "arg1") (WriteWord (Lit 36) (Var "arg2") (AbstractBuf "txdata")))
-                   (zip [0 ..] [0x4a, 0xc1, 0x5a, 0xe9])
-        assertEqual "the selector, then the top of the argument"
-          (Or (Lit 0x4ac15ae900000000000000000000000000000000000000000000000000000000) (SHR (Lit 32) (Var "arg1")))
-          (Expr.simplify (ReadWord (Lit 0) cd))
-        assertEqual "the selector" (Lit 0x4ac15ae9) (Expr.simplify (SHR (Lit 224) (ReadWord (Lit 0) cd)))
     , testCase "read-from-copy-of-zeros" $ do
         -- callee calldata of symbolic size, copied from untouched memory
         let buf = CopySlice (Lit 0) (Lit 0) (ReadWord (Lit 0x20) (AbstractBuf "calldata")) (ConcreteBuf "") (ConcreteBuf "")
