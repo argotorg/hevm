@@ -149,11 +149,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the writes they are disjoint from and resolve the writes they hit.
 
 ## Fixed
-- Retain `NonexistentFork` for source compatibility with callers such as Echidna.
-- Enumerating symbolic values no longer shrinks buffer models and silently drops
-  possible values, which could leave symbolic jump paths unexplored.
 - Storage reads return cached concrete values immediately when folding keccaks
   in the slot resolves the lookup.
+- Storage reads resolve slots computed from concrete keccaks by any arithmetic,
+  such as `keccak(x) & 255`, instead of leaving them symbolic.
 - Equivalence checking treats a storage slot written with 0 as equal to an
   unset one.
 - Equivalence counterexamples now include the initial storage value of slots
