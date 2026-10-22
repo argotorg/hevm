@@ -9,11 +9,11 @@ import Prelude hiding (LT, GT)
 import Test.Tasty
 import Test.Tasty.ExpectedFailure (ignoreTest)
 import Test.Tasty.HUnit
-import Test.Tasty.QuickCheck hiding (Failure, Success)
+import Test.Tasty.QuickCheck hiding (Failure, Success, (.&.))
 
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ReaderT)
-import Data.Bits (shiftL, shiftR, (.|.))
+import Data.Bits (complement, shiftL, shiftR, (.&.), (.|.))
 import Data.ByteString qualified as BS (drop, length, pack, replicate, take)
 import Data.Containers.ListUtils (nubOrd)
 import Data.List qualified as List (nub, sort, tails)
@@ -1208,6 +1208,21 @@ basicSimplificationTests = testGroup "Basic simplification tests"
                else checkSatWith (equivConfig {abstractArith = False}) (full ./= simp)
         pure $ counterexample ("simplified: " <> show simp <> "\nresult: " <> show res) $
           classify (full /= simp) "rewritten" (isQed res)
+  -- strength, not soundness: a read must not keep fields that are overwritten or outside its window
+  , testProperty "simp-packed-field-drops-hidden-fields" $ withMaxSuccess 2000 $ forAll genPackedLayout $ \layout ->
+      forAll (elements [0, 1, 8, 32, 64, 96, 128, 160, 200, 224, 255, 256]) $ \k ->
+      forAll (elements [0, 1, 8, 32, 64, 128, 255, 256]) $ \n ->
+      forAll (elements [Nothing, Just False, Just True]) $ \shiftForm ->
+        let mask = (1 `shiftL` n) - 1 :: W256
+            w = packFields layout
+            (inner, window) = case shiftForm of
+              Nothing -> (w, mask)
+              Just True -> (SHR (Lit (fromIntegral k)) w, mask `shiftL` k)
+              Just False -> (Div w (Lit (1 `shiftL` k)), mask `shiftL` k)
+            simp = Expr.simplify (And (Lit mask) inner)
+            visible = visibleVars window layout
+            extra = nubOrd [v | v <- varsIn simp, v `notElem` visible]
+        in counterexample ("simplified: " <> show simp <> "\nvisible: " <> show visible) $ null extra
   ]
 
 propSimplificationTests :: TestTree
@@ -2817,7 +2832,11 @@ isUnsatOrUnknown res = isQed res || isUnknown res
 
 -- Packed writes may overlap or extend past bit 255.
 genPackedFieldWord :: Gen (Expr EWord)
-genPackedFieldWord = do
+genPackedFieldWord = packFields <$> genPackedLayout
+
+-- | A base word and the fields written over it, the last write first
+genPackedLayout :: Gen (Expr EWord, [(Int, Int, Expr EWord, Bool)])
+genPackedLayout = do
   n <- choose (1 :: Int, 4)
   base <- oneof [pure (Var "old"), Lit <$> arbitrary]
   fields <- vectorOf n $ do
@@ -2826,7 +2845,10 @@ genPackedFieldWord = do
     f <- oneof [Lit <$> arbitrary, elements [Var "a", Var "b", Var "c"]]
     shiftForm <- arbitrary
     pure (j, w, f, shiftForm)
-  pure $ foldr place base fields
+  pure (base, fields)
+
+packFields :: (Expr EWord, [(Int, Int, Expr EWord, Bool)]) -> Expr EWord
+packFields (base, fields) = foldr place base fields
   where
     place (j, w, f, shiftForm) acc =
       let mask = (1 `shiftL` w) - 1 :: W256
@@ -2834,6 +2856,22 @@ genPackedFieldWord = do
           shifted = if shiftForm then SHL (Lit (fromIntegral j)) (And (Lit mask) f)
                                  else Mul (Lit (1 `shiftL` j)) (And (Lit mask) f)
       in Or shifted (And (Lit clear) acc)
+
+-- | The variables that the bits in the window can depend on: those of the topmost write to each bit
+visibleVars :: W256 -> (Expr EWord, [(Int, Int, Expr EWord, Bool)]) -> [Text]
+visibleVars window (base, fields) = go 0 fields
+  where
+    go covered [] = if window .&. complement covered /= 0 then varsIn base else []
+    go covered ((j, w, f, _) : rest) =
+      let bits = ((1 `shiftL` w) - 1) `shiftL` j
+      in (if bits .&. window .&. complement covered /= 0 then varsIn f else []) <> go (covered .|. bits) rest
+
+varsIn :: Expr a -> [Text]
+varsIn = foldExpr go []
+  where
+    go :: Expr b -> [Text]
+    go (Var v) = [v]
+    go _ = []
 genKeccakInput :: Gen (Expr Buf)
 genKeccakInput = do
   n <- elements [32, 64 .. 256 :: Int]
