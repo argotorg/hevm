@@ -148,6 +148,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Fixed
 - MCOPY of a symbolic size now grows memory.
+- A copy within symbolic memory, e.g. an MCOPY in a loop, no longer makes
+  expressions grow exponentially when its source bytes are known.
+- Huge copies, logs and return data in symbolic execution are no longer read or
+  printed byte by byte; traces show their first 64 KiB.
 - A precompile call that runs out of gas now leaves an error trace.
 - A branch side the solver refutes is no longer explored when it could not decide
   the other side, e.g. one it cannot encode.
