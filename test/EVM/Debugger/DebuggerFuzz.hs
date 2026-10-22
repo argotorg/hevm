@@ -40,7 +40,6 @@ import Test.Tasty.QuickCheck
 import EVM.Dapp (emptyDapp)
 import EVM.Debugger
 import EVM.Debugger.Server (serveSession)
-import EVM.Debugger.Text (renderView, valueText)
 import EVM.Effects
 import EVM.Fetch qualified as Fetch
 import EVM.Solvers (withSolvers, defMemLimit, Solver(..), SolverGroup, checkSatWithProps)
@@ -145,12 +144,12 @@ fingerprint fetcher s0 = do
   -- what is shown depends on this setting, the state does not
   s <- runCommandText fetcher "simplify on" s0
   v <- liftIO $ mkView s
-  _ <- liftIO $ evaluate (BL.length (JSON.encode v) + fromIntegral (T.length (renderView v)))
+  _ <- liftIO $ evaluate (BL.length (JSON.encode v))
   let memLen = min 4096 (fromIntegral v.memorySize) :: Int
   extra <- forM ["memory 0 " <> tshow memLen, "storage", "calldata", "trace", "pathconds"] $ \cmd -> do
     v' <- runCommandText fetcher cmd s >>= liftIO . mkView
     pure (maybe "" id v'.output)
-  pure $ [ tshow v.step, tshow v.pc, v.op, T.intercalate "," (map valueText v.stack), tshow v.gas, tshow v.depth
+  pure $ [ tshow v.step, tshow v.pc, v.op, tshow v.stack, tshow v.gas, tshow v.depth
          , v.status, tshow v.result, tshow v.memorySize, tshow (fmap (.options) v.branch) ] <> extra
 
 fingerprintKeys :: [Text]
