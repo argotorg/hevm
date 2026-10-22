@@ -26,14 +26,14 @@ jobs:
       fail-fast: false
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - name: Install Nix
-        uses: nixbuild/nix-quick-install-action@v34
+        uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035 # v34
       - name: Nix cache
         id: cache
-        uses: nix-community/cache-nix-action@v6
+        uses: nix-community/cache-nix-action@135667ec418502fa5a3598af6fb9eb733888ce6a # v6.1.3
         with:
           primary-key: nix-build-${{ matrix.os }}-${{ hashFiles('**/*.nix', '**/flake.lock') }}
           purge: true
@@ -44,7 +44,7 @@ jobs:
       - name: build hevm
         run: nix build .#ci -L
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: hevm-${{ matrix.runtime }}
           path: result/bin/hevm
@@ -56,17 +56,17 @@ jobs:
       fail-fast: false
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
           submodules: recursive
       - uses: ./.github/actions/free-disk-space
 
       - name: Install Nix
-        uses: nixbuild/nix-quick-install-action@v34
+        uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035 # v34
       - name: Nix cache
         id: cache
-        uses: nix-community/cache-nix-action@v6
+        uses: nix-community/cache-nix-action@135667ec418502fa5a3598af6fb9eb733888ce6a # v6.1.3
         with:
           primary-key: nix-tests-${{ matrix.os }}-${{ hashFiles('**/*.nix', '**/flake.lock') }}
           purge: true
@@ -99,16 +99,16 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: foundry-rs/foundry-toolchain@v1
+      - uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
         with:
           version: stable
       - run: |
           echo FOUNDRY_PATH="$(dirname "$(which forge)")" >> "$GITHUB_ENV"
         shell: bash
-      - uses: msys2/setup-msys2@v2
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         id: msys2
         with:
           msystem: CLANG64
@@ -130,7 +130,7 @@ jobs:
             gmp:p
             openssl:p
             go:p
-      - uses: haskell-actions/setup@v2.7.7
+      - uses: haskell-actions/setup@e447c4c045e7744463435b4b731e125861006ebb # v2.7.7
         id: setup
         with:
           ghc-version: '9.8.4'
@@ -186,7 +186,7 @@ jobs:
           # The last step generates dist-newstyle/cache/plan.json for the cache key.
 
       - name: Restore cached dependencies
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         id: cache
         env:
           key: ${{ runner.os }}-ghc-${{ steps.setup.outputs.ghc-version }}-cabal-${{ steps.setup.outputs.cabal-version }}
@@ -202,7 +202,7 @@ jobs:
 
       # Cache dependencies already, so that we do not have to rebuild them should the subsequent steps fail.
       - name: Save cached dependencies
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         # Caches are immutable, trying to save with the same key would error.
         if: ${{ steps.cache.outputs.cache-primary-key != steps.cache.outputs.cache-matched-key }}
         with:
@@ -217,12 +217,12 @@ jobs:
           strip result/hevm.exe
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: hevm-windows-x64
           path: result/hevm.exe
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: argotorg/solidity
           ref: fd3a22656ebe9c91a96ebd846ab7699b5f2e053c
@@ -234,7 +234,7 @@ jobs:
           ARTIFACT_URL="$(grep ethereum/execution-spec-tests flake.nix | cut -f2 -d'"')"
           curl --retry 5 -fsSL "$ARTIFACT_URL" | tar xz "fixtures/blockchain_tests"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: foundry-rs/forge-std
           path: forge-std
@@ -288,15 +288,15 @@ jobs:
   cabal-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - uses: ./.github/actions/free-disk-space
       - name: Install Nix
-        uses: nixbuild/nix-quick-install-action@v34
+        uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035 # v34
       - name: Nix cache
         id: cache
-        uses: nix-community/cache-nix-action@v6
+        uses: nix-community/cache-nix-action@135667ec418502fa5a3598af6fb9eb733888ce6a # v6.1.3
         with:
           primary-key: nix-cabal-check-${{ hashFiles('**/*.nix', '**/flake.lock') }}
           purge: true
