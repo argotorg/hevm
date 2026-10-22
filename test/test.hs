@@ -5083,6 +5083,15 @@ tests = testGroup "hevm"
       assertEqualM "candidate key and field offset" (Set.singleton (ConcreteBuf pre, h)) (concreteKeccaks $ props 0x5eed1234 255)
       assertEqualM "offset outside recovery range" mempty (concreteKeccaks $ props 0x5eed1234 256)
     -- the size is symbolic during execution, and a literal near 2^256 once the keccak is concretized
+    -- the solver cannot encode the true side's exponentiation, but simplification
+    -- refutes the false side, 10 + e == 0 and e <= 2^256 - 11
+    , testCase "branch-side-refuted-as-recorded" $ runEnv testEnv $ do
+      let e = Exp (Lit 0x41) (Xor (Lit 0x3) (ReadWord (Lit 0xa) (AbstractBuf "calldata")))
+          cond = Or (EVM.Types.LT (Lit 0) (Add (Lit 0xa) e)) (EVM.Types.LT (Lit 0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff5) e)
+      r <- withSolvers Z3 1 (Just 10) defMemLimit $ \s -> Fetch.checkBranch s cond (PBool True)
+      liftIO $ case r of
+        Case True -> pure ()
+        other -> assertFailure $ "expected only the true side, got " <> show other
     , testCase "copy-sized-by-concrete-keccak" $ runEnv (testEnv {config = testEnv.config {simp = False}}) $ do
       let copied = CopySlice (Lit 0) (Lit 0) (Keccak (ConcreteBuf (BS.replicate 9 0))) (AbstractBuf "calldata") (ConcreteBuf "")
       res <- withDefaultSolver $ \s -> checkSatWithProps s [PEq (ReadWord (Lit 0) copied) (Lit 1)]
