@@ -405,6 +405,27 @@ deploymentSolidityEquivalenceTests = testGroup "Solidity deployment equivalence"
     let a = wrap aBody
     let b = wrap bBody
     expectDifferent a b
+  -- A writes 0 to slot 1, B leaves it unset; both read as 0
+  , testCase "storage-zero-same-as-unset" $ do
+    let a = [i|
+              contract C {
+                uint a = 1;
+                uint b = 0;
+                function get() public view returns (uint, uint) { return (a, b); }
+              }
+            |]
+    let b = replace $ "uint b = 0;" `with` "uint b;" `on` a
+    expectEquivalent a b
+  , testCase "storage-nonzero-differs-from-unset" $ do
+    let a = [i|
+              contract C {
+                uint a = 1;
+                uint b = 2;
+                function get() public view returns (uint) { return a; }
+              }
+            |]
+    let b = replace $ "uint b = 2;" `with` "uint b;" `on` a
+    expectDifferent a b
   ]
   where
     expectDifferent :: SourceCode -> SourceCode -> IO ()
