@@ -56,11 +56,14 @@ data CexVars = CexVars
   , blockContext :: [Text]
     -- | the names of any tx context variables
   , txContext    :: [Text]
+    -- | the kind of each logical store the storage was decomposed into, keyed by
+    -- the slot the 'AbstractStore' index names
+  , logicalStores :: Map W256 LogicalStore
   }
   deriving (Eq, Show)
 
 instance Semigroup CexVars where
-  (CexVars a b c d e f) <> (CexVars a2 b2 c2 d2 e2 f2) = CexVars (a <> a2) (b <> b2) (c <> c2) (d <> d2) (e <> e2) (f <> f2)
+  (CexVars a b c d e f g) <> (CexVars a2 b2 c2 d2 e2 f2 g2) = CexVars (a <> a2) (b <> b2) (c <> c2) (d <> d2) (e <> e2) (f <> f2) (g <> g2)
 
 instance Monoid CexVars where
     mempty = CexVars
@@ -70,4 +73,5 @@ instance Monoid CexVars where
       , storeReads = mempty
       , blockContext = mempty
       , txContext = mempty
+      , logicalStores = mempty
       }

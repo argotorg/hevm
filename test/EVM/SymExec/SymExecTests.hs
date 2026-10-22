@@ -15,6 +15,7 @@ import Data.List qualified as List (isInfixOf)
 import Data.Maybe (isJust, mapMaybe)
 import Data.Monoid (Any(..))
 import Data.String.Here
+import Data.Vector qualified as V
 
 import EVM.ABI
 import EVM.Effects qualified as Effects
@@ -25,6 +26,7 @@ import EVM.Solidity (solcRuntime)
 import EVM.Solvers (withSolvers, defMemLimit, Solver(..), SolverGroup, checkSatWithProps)
 import EVM.SymExec
 import EVM.Traversals
+import EVM.Test.Asm (AsmOp(..), asm)
 
 
 tests :: TestTree
@@ -34,6 +36,7 @@ tests = testGroup "Symbolic execution"
 solidityExplorationTests :: TestTree
 solidityExplorationTests = testGroup "Exploration of Solidity"
     [ basicTests
+    , keccakTests
     , maxDepthTests
     , copySliceTests
     , storageTests
@@ -44,7 +47,101 @@ solidityExplorationTests = testGroup "Exploration of Solidity"
 
 basicTests :: TestTree
 basicTests = testGroup "simple-checks"
-  [ testCase "symbolic-jump-high-bytes" $ do
+  [ testCase "read-byte-from-word-mapping-key" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          mapping(address => uint256) balances;
+          function read(address dst, uint256 amount) external returns (uint256) {
+            balances[dst] = 7;
+            // The word includes dst's 20 bytes and 12 bytes of the symbolic amount.
+            bytes memory packed = abi.encodePacked(bytes12(0), bytes32(msg.data[16:48]));
+            return balances[address(uint160(uint256(bytes32(packed))))];
+          }
+        }
+      |]
+      let sig = Just (Sig "read(address,uint256)" [AbiAddressType, AbiUIntType 256])
+      paths <- executeWithBitwuzla $ \s ->
+        getExprEmptyStore s c sig ["0x1234567890123456789012345678901234567890"] defaultVeriOpts
+      assertBool "execution finishes" (not (any isPartial paths))
+      assertEqual "the copied address resolves the mapping read" [Lit 7]
+        [Expr.readWord (Lit 0) buf | Success _ _ buf _ <- paths]
+  , testCase "unknown-calls-with-different-gas-may-differ" $ do
+    -- INVALID if staticcall(1000, t) and staticcall(2000, t) to unknown t differ (#1201)
+    let call g = replicate 5 (I OpPush0) <> [I OpCalldataload, I (OpPush (Lit g)), I OpStaticcall]
+        c = asm $ call 1000 <> call 2000 <> [I OpEq, Target 0, I OpJumpi, I (OpUnknown 0xfe), I OpJumpdest, I OpStop]
+    (_, res) <- executeWithBitwuzla $ \s -> verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
+    assertBool "the callee can read GAS, so the results may differ" (any isCex res)
+  , testCase "unknown-call-expands-memory" $ do
+    -- staticcall to unknown t with output at [100, 164), INVALID unless MSIZE is 0xc0
+    let c = asm $ map (I . OpPush . Lit) [64, 100, 32, 4, 0] <> [I OpCalldataload, I (OpPush (Lit 1000)), I OpStaticcall, I OpPop]
+          <> [I OpMsize, I (OpPush (Lit 0xc0)), I OpEq, Target 0, I OpJumpi, I (OpUnknown 0xfe), I OpJumpdest, I OpStop]
+    (_, res) <- executeWithBitwuzla $ \s -> verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
+    assertBool "MSIZE covers the output" (all isQed res)
+  , testCase "mcopy-symbolic-size-expands-memory" $ do
+    -- MCOPY of calldata[0] & 0x3f bytes to 0; INVALID if 32 bytes were copied but MSIZE is not 32
+    let size = [I (OpPush (Lit 0)), I OpCalldataload, I (OpPush (Lit 0x3f)), I OpAnd]
+        c = asm $ size <> [I (OpPush (Lit 0)), I (OpPush (Lit 0)), I OpMcopy]
+          <> [I OpMsize, I (OpPush (Lit 0x20)), I OpEq, I OpIszero]
+          <> size <> [I (OpPush (Lit 0x20)), I OpEq, I OpAnd, Target 0, I OpJumpi, I OpStop, I OpJumpdest, I (OpUnknown 0xfe)]
+    (_, res) <- executeWithBitwuzla $ \s -> verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
+    assertBool "MSIZE covers the copy" (all isQed res)
+  , testCase "merged-gas-reading-not-reused" $ do
+    -- the fall-through of a mergeable forward jump reads GAS, which is then
+    -- compared to a second reading; INVALID if they differ and x == 0 (#1191)
+    let x = [I (OpPush (Lit 0)), I OpCalldataload]
+        c = asm $ x <> [I (OpPush (Lit 0)), I OpMstore, I (OpPush (Lit 7))]
+          <> x <> [Target 0, I OpJumpi, I OpPop, I OpGas]
+          <> [I OpJumpdest, I OpGas, I OpEq, I OpIszero]
+          <> x <> [I OpIszero, I OpAnd, Target 1, I OpJumpi, I OpStop, I OpJumpdest, I (OpUnknown 0xfe)]
+    (_, res) <- executeWithBitwuzla $ \s -> verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
+    assertBool "two GAS readings differ" (any isCex res)
+  , testCase "symbolic-address-high-bytes" $ do
+    -- if x has low 20 bytes 0xdead: BALANCE(x), then INVALID if x has higher bytes set (#1194)
+    let c = asm
+          [ I (OpPush (Lit 0)), I OpCalldataload, I (OpDup 1), I (OpPush (Lit (2 ^ (160 :: Int) - 1))), I OpAnd
+          , I (OpPush (Lit 0xdead)), I OpEq, Target 0, I OpJumpi, I OpStop
+          , I OpJumpdest, I (OpDup 1), I OpBalance, I OpPop
+          , I (OpPush (Lit 160)), I OpShr, Target 1, I OpJumpi, I OpStop
+          , I OpJumpdest, I (OpUnknown 0xfe) ]
+    (_, res) <- executeWithBitwuzla $ \s -> verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
+    assertBool "x = 2^160 + 0xdead reaches INVALID" (any isCex res)
+  , testCase "blockhash-out-of-range-is-zero" $ do
+    -- block 0 is out of range at block 1000 (#1122)
+    (_, res) <- executeWithBitwuzla $ \s -> verifyContract s (blockhashIsZeroAt 0 1000) Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
+    assertBool "blockhash(0) is 0 at block 1000" (any isCex res)
+  , testCase "blockhash-in-range-is-nonzero" $ do
+    (_, res) <- executeWithBitwuzla $ \s -> verifyContract s (blockhashIsZeroAt 5 6) Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
+    assertBool "blockhash(5) is not 0 at block 6" (not (any isCex res))
+  , testCase "short-dynamic-calldata" $ do
+    -- the empty `bytes` is encoded in 68 bytes (#1200)
+    Just c <- solcRuntime "C" [i|
+      contract C {
+        function f(bytes calldata) external pure {
+          assert(msg.data.length >= 132);
+        }
+      }
+      |]
+    (_, res) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just (Sig "f(bytes)" [AbiBytesDynamicType])) [] defaultVeriOpts
+    assertBool "68-byte calldata violates the assert" (any isCex res)
+  , testCase "dynamic-calldata-offsets-follow-lengths" $ do
+    Just c <- solcRuntime "C" [i|
+      contract C {
+        function f(bytes calldata a, bytes calldata b) external pure {
+          assert(!(a.length == 1 && b.length == 2 && b[0] == 0x11 && b[1] == 0x22));
+        }
+      }
+      |]
+    let sig = Sig "f(bytes,bytes)" [AbiBytesDynamicType, AbiBytesDynamicType]
+    Right cd <- executeWithBitwuzla $ \s -> do
+      (_, [Cex (_, ctr)]) <- checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
+      ((buf, _), _) <- mkCalldata (Just sig) []
+      calldataFromCex ctr buf sig
+    let args = BS.drop 4 cd
+        expected = encodeAbiValue (AbiTuple (V.fromList [AbiBytesDynamic "\x00", AbiBytesDynamic "\x11\x22"]))
+    -- the solver picks the contents of `a`, and the padding is unconstrained
+    assertEqual "offsets and length of a" (BS.take 96 expected) (BS.take 96 args)
+    assertEqual "b" (BS.take 34 (BS.drop 128 expected)) (BS.take 34 (BS.drop 128 args))
+  , testCase "symbolic-jump-high-bytes" $ do
     -- jumps to calldata[0:32]: 0x10005 has the JUMPDEST at 5 in its low bytes, but is invalid
     let c = BS.pack [0x60, 0x00, 0x35, 0x56, 0x00, 0x5b, 0x00]
         hits l = PEq (ReadWord (Lit 0) (AbstractBuf "txdata")) (Lit 0x10005) : extractProps l
@@ -188,6 +285,61 @@ basicTests = testGroup "simple-checks"
         assertEqual "all paths return or revert" (length paths) (length returns + length reverts)
         assertBool "the first require can still fail" (revertData "first" `elem` reverts)
         ) [("7", 0), ("8", 1)]
+  ]
+
+keccakTests :: TestTree
+keccakTests = testGroup "Keccak execution"
+  [ testCase "concrete-create2-preimage" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function pairFor(uint256 a, uint256 b) public pure returns (address) {
+            bytes32 salt = keccak256(abi.encode(a, b));
+            return address(uint160(uint256(keccak256(abi.encodePacked(
+              bytes1(0xff), address(1), salt, bytes32(uint256(3))
+            )))));
+          }
+        }
+      |]
+      let sig = Just (Sig "pairFor(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])
+          salt = keccak' (word256Bytes 1 <> word256Bytes 2)
+          preimage = BS.singleton 0xff <> BS.drop 12 (word256Bytes 1) <> word256Bytes salt <> word256Bytes 3
+          unresolved :: Expr a -> Any
+          unresolved (Keccak (ConcreteBuf _)) = mempty
+          unresolved (Keccak _) = Any True
+          unresolved _ = mempty
+      paths <- executeWithBitwuzla $ \s -> getExpr s c sig ["1", "2"] defaultVeriOpts
+      case [out | Success _ _ out _ <- paths] of
+        [out] -> do
+          assertEqual "CREATE2 address" (Lit (keccak' preimage `mod` 2 ^ (160 :: Int)))
+            (Expr.concKeccakSimpExpr (Expr.readWord (Lit 0) out))
+          assertBool "constant hashes have concrete inputs"
+            (not $ getAny $ foldExpr unresolved mempty out)
+        _ -> assertFailure $ "expected one successful path, got " <> show paths
+  , testCase "nested-concrete-keccak-keeps-assumptions" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function hash(uint256 x) internal pure returns (bytes32) {
+            return keccak256(abi.encode(keccak256(abi.encode(x))));
+          }
+          function different(uint256 fixedKey, uint256 key) public pure {
+            require(key != fixedKey);
+            assert(hash(fixedKey) != hash(key));
+          }
+          function same(uint256 fixedKey, uint256 key) public pure {
+            assert(hash(fixedKey) != hash(key));
+          }
+        }
+      |]
+      let sig name = Just (Sig name [AbiUIntType 256, AbiUIntType 256])
+          args = ["1592594996", "<symbolic>"]
+      (_, distinct) <- executeWithShortBitwuzla $ \s ->
+        checkAssert s defaultPanicCodes c (sig "different(uint256,uint256)") args defaultVeriOpts
+      assertEqual "distinct nested hashes must be proved" [] distinct
+      (_, same) <- executeWithShortBitwuzla $ \s ->
+        checkAssert s defaultPanicCodes c (sig "same(uint256,uint256)") args defaultVeriOpts
+      case same of
+        [Cex (_, cex)] -> assertEqual "equal inputs still alias" 1592594996 (SMT.getVar cex "arg2")
+        _ -> assertFailure $ "expected a counterexample, got " <> show same
   ]
 
 copySliceTests :: TestTree
@@ -945,7 +1097,11 @@ cheatCodeTests = testGroup "Cheatcode tests via symbolic execution"
               }
             }
           |]
-      expectAllBranchesFail c Nothing
+      (paths, _) <- executeWithBitwuzla $ \s -> verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
+      let cheatFailed = \case
+            Partial _ _ CheatCodeFailed {} -> True
+            _ -> False
+      assertBool "ffi must leave the path partial" (any cheatFailed paths)
   ]
 
 maxDepthTests :: TestTree
@@ -1445,6 +1601,12 @@ badStoresInExpr exprs = any (getAny . foldExpr match mempty) exprs
   where
       match (SLoad _ (SStore _ _ _)) = Any True
       match _ = Any False
+
+-- | INVALID if blockhash(blk) == 0 and number == n
+blockhashIsZeroAt :: W256 -> W256 -> ByteString
+blockhashIsZeroAt blk n = asm
+  [ I (OpPush (Lit blk)), I OpBlockhash, I OpIszero, I OpNumber, I (OpPush (Lit n)), I OpEq, I OpAnd
+  , Target 0, I OpJumpi, I OpStop, I OpJumpdest, I (OpUnknown 0xfe) ]
 
 symExecTestsConfig :: Effects.Config
 symExecTestsConfig = Effects.defaultConfig

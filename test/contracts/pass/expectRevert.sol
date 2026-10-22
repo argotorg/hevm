@@ -103,6 +103,11 @@ contract CtorMutatingReverter {
     }
 }
 
+contract Halter {
+    function inv() external pure { assembly { invalid() } }
+    function who() external view returns (address) { return msg.sender; }
+}
+
 contract ExpectRevertTest is Test {
     function prove_expectRevertString() public {
         Reverter reverter = new Reverter();
@@ -248,6 +253,26 @@ contract ExpectRevertTest is Test {
         Reverter reverter = new Reverter();
         vm.expectRevert(abi.encodeWithSignature("Error(string)", "msg"));
         reverter.rawRevert(bytes("msg"));
+    }
+
+    function prove_expectRevert_exceptional_halt(uint256 x) public {
+        Halter h = new Halter();
+        vm.expectRevert();
+        h.inv();
+        assertEq(x, x);
+    }
+
+    function prove_expectRevert_failing_precompile() public {
+        vm.expectRevert();
+        (bool ok,) = address(8).staticcall(hex"01");
+        assertTrue(ok);
+    }
+
+    function prove_prank_consumed_by_precompile() public {
+        Halter h = new Halter();
+        vm.prank(address(0xBEEF));
+        ecrecover(bytes32(uint256(1)), 27, bytes32(uint256(1)), bytes32(uint256(1)));
+        assertEq(h.who(), address(this));
     }
 }
 

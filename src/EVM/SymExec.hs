@@ -10,16 +10,17 @@ import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.Async ( mapConcurrently)
 import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
 import Control.Concurrent.Spawn (parMapIO, pool)
-import Control.Concurrent.STM (writeTChan, newTChan, TChan, readTChan, atomically, isEmptyTChan, STM)
+import Control.Concurrent.STM (writeTChan, newTChan, TChan, readTChan, atomically, isEmptyTChan, STM, orElse)
 import Control.Concurrent.STM.TVar (TVar, newTVarIO, modifyTVar, readTVar, readTVarIO, writeTVar)
-import Control.Concurrent.STM.TMVar (TMVar, putTMVar, takeTMVar, newEmptyTMVarIO)
+import Control.Concurrent.STM.TMVar (TMVar, putTMVar, takeTMVar, readTMVar, tryPutTMVar, newEmptyTMVarIO)
 import Control.Monad (when, unless, forM_, forM, forever, void)
 import Control.Monad.Loops (whileM)
-import Control.Exception (evaluate)
+import Control.Exception (evaluate, SomeException, SomeAsyncException, catch, throwIO, fromException)
 import Control.Monad.IO.Unlift (MonadIO, MonadUnliftIO, toIO, withRunInIO)
 import Control.Monad.Operational qualified as Operational
 import Control.Monad.ST (RealWorld, stToIO, ST)
-import Control.Monad.State.Strict (liftIO, runStateT, get)
+import Control.Monad.State.Strict (liftIO, runStateT, get, lift)
+import Data.STRef (newSTRef, readSTRef, writeSTRef)
 import Data.Bits (shiftR)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -28,7 +29,9 @@ import Data.Either (fromRight, rights)
 import Data.Foldable (length, foldl', foldr, toList)
 import Data.List (sortBy, sort)
 import Data.List.NonEmpty qualified as NE
-import Data.Maybe (fromMaybe, listToMaybe, mapMaybe, catMaybes)
+import Data.Maybe (fromMaybe, listToMaybe, mapMaybe, catMaybes, isJust)
+import System.Environment (lookupEnv)
+import System.IO.Unsafe (unsafePerformIO)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Map.Merge.Strict qualified as Map
@@ -146,26 +149,20 @@ symAbiArg maxDynSize name = \case
     Comp . V.toList . V.imap (\(T.pack . show -> i) tp -> symAbiArg maxDynSize (name <> "-a-" <> i) tp) $ (V.replicate sz tps)
   AbiTupleType tps ->
     Comp . V.toList . V.imap (\(T.pack . show -> i) tp -> symAbiArg maxDynSize (name <> "-t-" <> i) tp) $ tps
-  -- Dynamic bytes/string: concretize with bounded symbolic length + abstract buffer
-  AbiBytesDynamicType ->
-    let bufName = AbstractBuf (name <> "-bytes")
-        len = Var (name <> "-bytes-length")
-        maxLit = Lit (fromIntegral maxDynSize)
-        sizeBound = [PLEq len maxLit]
-    in Dy sizeBound len maxDynSize bufName
-  AbiStringType ->
-    let bufName = AbstractBuf (name <> "-string")
-        len = Var (name <> "-string-length")
-        maxLit = Lit (fromIntegral maxDynSize)
-        sizeBound = [PLEq len maxLit]
-    in Dy sizeBound len maxDynSize bufName
+  -- Dynamic bytes/string: a symbolic length bounded by maxDynSize, the contents
+  -- are the calldata bytes that follow the length word
+  AbiBytesDynamicType -> dyn (name <> "-bytes-length")
+  AbiStringType -> dyn (name <> "-string-length")
   t -> internalError $ "TODO: symbolic abi encoding for " <> show t
   where
     v = Var name
+    dyn lenName = let len = Var lenName
+                  in Dy [PLEq len (Lit (fromIntegral maxDynSize))] len
 
 data CalldataFragment
   = St [Prop] (Expr EWord)
-  | Dy [Prop] (Expr EWord) Int (Expr Buf) -- ^ props, symbolic length, max concrete size, buffer
+  | Dy [Prop] (Expr EWord) -- ^ props, symbolic length
+  | DyConc ByteString -- ^ tail encoding of a concrete dynamic argument
   | Comp [CalldataFragment]
   deriving (Show, Eq)
 
@@ -181,12 +178,11 @@ symCalldata sig typesignature concreteArgs base = do
     mkArg :: AbiType -> String -> Int -> CalldataFragment
     mkArg typ "<symbolic>" n = symAbiArg conf.maxDynSize (T.pack $ "arg" <> show n) typ
     mkArg typ arg _ =
-      case makeAbiValue typ arg of
-        AbiUInt _ w -> St [] . Lit . into $ w
-        AbiInt _ w -> St [] . Lit . unsafeInto $ w
-        AbiAddress w -> St [] . Lit . into $ w
-        AbiBool w -> St [] . Lit $ if w then 1 else 0
-        _ -> internalError "TODO"
+      let enc = encodeAbiValue (makeAbiValue typ arg)
+      in case abiKind typ of
+        Static -> Comp [St [] (Lit (word w)) | w <- chunks32 enc]
+        Dynamic -> DyConc enc
+    chunks32 bs = if BS.null bs then [] else let (h, t) = BS.splitAt 32 bs in h : chunks32 t
     calldatas = zipWith3 mkArg typesignature args [1..]
     (cdBuf, props) = combineFragments calldatas base
     withSelector = writeSelector cdBuf sig
@@ -202,29 +198,27 @@ symCalldata sig typesignature concreteArgs base = do
   pure (withSelector, sizeConstraints : props, caveats)
 
 cdLen :: [CalldataFragment] -> Expr EWord
-cdLen frags = Expr.add (headLen frags) (tailLen frags)
+cdLen frags = Expr.add (Expr.add (Lit 4) (countHeadBytes frags)) (tailLen frags)
   where
-    -- Head: 4 bytes selector + 32 bytes per top-level arg (static or dynamic pointer)
-    headLen = go (Lit 4)
-      where
-        go acc = \case
-          [] -> acc
-          (hd:tl) -> case hd of
-            St _ _  -> go (Expr.add acc (Lit 32)) tl
-            Dy {}   -> go (Expr.add acc (Lit 32)) tl
-            Comp xs | all isSt xs -> go acc (xs <> tl)
-            _ -> internalError "unsupported"
-    -- Tail: for each Dy fragment, 32 bytes (length word) + padded data
-    tailLen = go (Lit 0)
-      where
-        go acc = \case
-          [] -> acc
-          (hd:tl) -> case hd of
-            Dy _ _ maxSz _ ->
-              let paddedMax = ((maxSz + 31) `Prelude.div` 32) * 32
-              in go (Expr.add acc (Lit (fromIntegral (32 + paddedMax)))) tl
-            Comp xs | all isSt xs -> go acc (xs <> tl)
-            _ -> go acc tl
+    tailLen = foldl' (\acc f -> case f of
+                         Dy _ len -> Expr.add acc (dynTailSize len)
+                         DyConc bs -> Expr.add acc (Lit (unsafeInto (BS.length bs)))
+                         _ -> acc) (Lit 0)
+
+-- | Bytes a dynamic argument takes in the tail: the length word and the
+-- contents, padded to a multiple of 32
+dynTailSize :: Expr EWord -> Expr EWord
+dynTailSize len = Expr.add (Lit 32) (Expr.mul (Expr.div (Expr.add len (Lit 31)) (Lit 32)) (Lit 32))
+
+-- | Each top-level fragment occupies 32 bytes in the head (value or offset pointer)
+countHeadBytes :: [CalldataFragment] -> Expr EWord
+countHeadBytes = foldl' countFrag (Lit 0)
+  where
+    countFrag acc (St _ _)  = Expr.add acc (Lit 32)
+    countFrag acc (Dy {})   = Expr.add acc (Lit 32)
+    countFrag acc (DyConc _) = Expr.add acc (Lit 32)
+    countFrag acc (Comp xs) | all isSt xs = foldl' countFrag acc xs
+    countFrag _ s = internalError $ "unsupported cd fragment: " <> show s
 
 writeSelector :: Expr Buf -> Text -> Expr Buf
 writeSelector buf sig =
@@ -233,49 +227,34 @@ writeSelector buf sig =
     sel = ConcreteBuf $ selector sig
     writeSel idx = Expr.writeByte idx (Expr.readByte idx sel)
 
+-- | Writes the arguments in the canonical ABI layout. The tail offset of each
+-- dynamic argument depends on the symbolic lengths of the ones before it.
 combineFragments :: [CalldataFragment] -> Expr Buf -> (Expr Buf, [Prop])
 combineFragments fragments base =
   let headBytes = countHeadBytes fragments
-      tailStart = Expr.add (Lit 4) headBytes
-  in go headBytes (Lit 4) tailStart (Lit 0) fragments (base, [])
+  in go headBytes (Lit 4) (Lit 0) fragments (base, [])
   where
-    -- Each top-level fragment occupies 32 bytes in the head (value or offset pointer)
-    countHeadBytes :: [CalldataFragment] -> Expr EWord
-    countHeadBytes = foldl' countFrag (Lit 0)
-      where
-        countFrag acc (St _ _)  = Expr.add acc (Lit 32)
-        countFrag acc (Dy {})   = Expr.add acc (Lit 32)
-        countFrag acc (Comp xs) | all isSt xs = foldl' countFrag acc xs
-        countFrag _ s = internalError $ "unsupported cd fragment: " <> show s
-
-    go :: Expr EWord -> Expr EWord -> Expr EWord -> Expr EWord
+    go :: Expr EWord -> Expr EWord -> Expr EWord
        -> [CalldataFragment] -> (Expr Buf, [Prop]) -> (Expr Buf, [Prop])
-    go _ _ _ _ [] acc = acc
-    go headSz idx tailBase tailAcc (f:rest) (buf, ps) =
+    go _ _ _ [] acc = acc
+    go headSz idx tailAcc (f:rest) (buf, ps) =
       case f of
-        -- static fragments get written as a word in place
-        St p w -> go headSz (Expr.add idx (Lit 32)) tailBase tailAcc rest
+        St p w -> go headSz (Expr.add idx (Lit 32)) tailAcc rest
                     (Expr.writeWord idx w buf, p <> ps)
-        -- compound fragments that contain only static fragments get written in place
-        Comp xs | all isSt xs -> go headSz idx tailBase tailAcc (xs <> rest) (buf, ps)
-        -- dynamic fragments: write offset pointer in head, data in tail
-        Dy p len maxSz dynBuf ->
-          let paddedMax = ((maxSz + 31) `Prelude.div` 32) * 32
-              -- ABI offset is relative to the start of the args (byte 4)
-              offset = Expr.add headSz tailAcc
-              -- Write the offset pointer in the head area
+        Comp xs | all isSt xs -> go headSz idx tailAcc (xs <> rest) (buf, ps)
+        Dy p len ->
+          -- ABI offsets are relative to the start of the args (byte 4)
+          let offset = Expr.add headSz tailAcc
               buf1 = Expr.writeWord idx offset buf
-              -- Write the length word at the tail position
-              dynPos = Expr.add tailBase tailAcc
-              buf2 = Expr.writeWord dynPos len buf1
-              -- Copy maxDynSize bytes from the abstract buffer using concrete
-              -- size to avoid symbolic CopySlice issues
-              dataPos = Expr.add dynPos (Lit 32)
-              buf3 = Expr.copySlice (Lit 0) dataPos (Lit (fromIntegral maxSz)) dynBuf buf2
-              -- Advance tail by 32 (length word) + paddedMax
-              newTailAcc = Expr.add tailAcc (Lit (fromIntegral (32 + paddedMax)))
-          in go headSz (Expr.add idx (Lit 32)) tailBase newTailAcc rest
-               (buf3, p <> ps)
+              buf2 = Expr.writeWord (Expr.add (Lit 4) offset) len buf1
+          in go headSz (Expr.add idx (Lit 32)) (Expr.add tailAcc (dynTailSize len)) rest
+               (buf2, p <> ps)
+        DyConc bs ->
+          let offset = Expr.add headSz tailAcc
+              sz = Lit (unsafeInto (BS.length bs))
+              buf1 = Expr.writeWord idx offset buf
+              buf2 = Expr.copySlice (Lit 0) (Expr.add (Lit 4) offset) sz (ConcreteBuf bs) buf1
+          in go headSz (Expr.add idx (Lit 32)) (Expr.add tailAcc sz) rest (buf2, ps)
         s -> internalError $ "unsupported cd fragment: " <> show s
 
 isSt :: CalldataFragment -> Bool
@@ -321,7 +300,8 @@ loadEmptySymVM x callvalue cd =
     , number = BlockNumber
     , timestamp = Timestamp
     , blockGaslimit = 0
-    , prevRandao = 42069
+    , prevRandao = PrevRandao
+    , baseFee = BaseFee
     })
 
 -- Creates a symbolic VM that has symbolic storage, unlike loadEmptySymVM
@@ -344,7 +324,8 @@ loadSymVM x callvalue cd create =
     , number = BlockNumber
     , timestamp = Timestamp
     , blockGaslimit = 0
-    , prevRandao = 42069
+    , prevRandao = PrevRandao
+    , baseFee = BaseFee
     , create = create
     })
 
@@ -421,13 +402,16 @@ interpret fetcher iterConf vm stepper handler = do
   Progress.setTaskCounter (fromIntegral <$> readTVarIO numTasks)
   numProcs <- liftIO $ newTVarIO 0
   allProcessDone <- liftIO newEmptyTMVarIO
+  -- an exception in a forked worker would otherwise only be printed, leaving
+  -- us waiting on allProcessDone forever
+  workerErr <- liftIO newEmptyTMVarIO
 
   -- spawn task orchestration thread
-  taskOrchestrate' <- toIO $ taskOrchestrate taskQ shouldAbort availableInstances processQ numTasks numProcs allProcessDone
+  taskOrchestrate' <- toIO $ taskOrchestrate taskQ shouldAbort availableInstances processQ numTasks numProcs allProcessDone workerErr
   taskOrchestrateId <- liftIO $ forkIO taskOrchestrate'
 
   -- spawn processing orchestration thread
-  processOrchestrate' <- toIO $ processOrchestrate processQ shouldAbort availableProcs resChan numProcs numTasks allProcessDone
+  processOrchestrate' <- toIO $ processOrchestrate processQ shouldAbort availableProcs resChan numProcs numTasks allProcessDone workerErr
   processOrchestrateId <- liftIO $ forkIO processOrchestrate'
 
   -- Add in the first task, further tasks will be added by the interpreters themselves
@@ -444,9 +428,10 @@ interpret fetcher iterConf vm stepper handler = do
   liftIO $ writeChan taskQ interpTask
 
   -- Wait for all done
-  liftIO . atomically $ takeTMVar allProcessDone
+  done <- liftIO . atomically $ (Left <$> readTMVar workerErr) `orElse` (Right <$> takeTMVar allProcessDone)
   liftIO $ killThread taskOrchestrateId
   liftIO $ killThread processOrchestrateId
+  liftIO $ either throwIO pure done
   res <- liftIO $ atomically (whileM (not <$> isEmptyTChan resChan) (readTChan resChan) :: STM [a])
   when (conf.debug) $ liftIO $ do
     putStrLn $ "Interpretation finished, collected " <> show (length res) <> " results."
@@ -457,8 +442,8 @@ interpret fetcher iterConf vm stepper handler = do
       => Chan (InterpTask m a)
       -> TVar Bool
       -> Chan () -> Chan (Process m a)
-      -> TVar Natural -> TVar Natural -> TMVar () -> m ()
-    taskOrchestrate taskQ shouldAbort avail processQ numTasks numProcs allProcessDone = forever $ do
+      -> TVar Natural -> TVar Natural -> TMVar () -> TMVar SomeException -> m ()
+    taskOrchestrate taskQ shouldAbort avail processQ numTasks numProcs allProcessDone workerErr = forever $ do
       _ <- liftIO $ readChan avail
       task <- liftIO $ readChan taskQ
       abortFlag <- liftIO $ readTVarIO shouldAbort
@@ -468,13 +453,13 @@ interpret fetcher iterConf vm stepper handler = do
           atomically $ modifyTVar numTasks (subtract 1) >> signalIfDone numProcs numTasks allProcessDone
         else do
           runTask' <- toIO $ getOneExpr task avail processQ numTasks numProcs
-          void $ liftIO $ forkIO runTask'
+          void $ liftIO $ forkIO $ reportTo workerErr shouldAbort runTask'
 
     -- processing orchestrator loop
     processOrchestrate :: App m
       => Chan (Process m a) -> TVar Bool -> Chan () -> TChan a
-      -> TVar Natural -> TVar Natural -> TMVar () -> m ()
-    processOrchestrate processQ shouldAbort avail resChan numProcs numTasks allProcessDone = forever $ do
+      -> TVar Natural -> TVar Natural -> TMVar () -> TMVar SomeException -> m ()
+    processOrchestrate processQ shouldAbort avail resChan numProcs numTasks allProcessDone workerErr = forever $ do
       _ <- liftIO $ readChan avail
       proc <- liftIO $ readChan processQ
       abortFlag <- liftIO $ readTVarIO shouldAbort
@@ -484,7 +469,7 @@ interpret fetcher iterConf vm stepper handler = do
           atomically $ modifyTVar numProcs (subtract 1) >> signalIfDone numProcs numTasks allProcessDone
         else do
           runProcess' <- toIO $ processOne proc shouldAbort avail resChan numProcs numTasks allProcessDone
-          void $ liftIO $ forkIO runProcess'
+          void $ liftIO $ forkIO $ reportTo workerErr shouldAbort runProcess'
 
     -- process one task
     processOne :: App m => Process m a -> TVar Bool -> Chan () -> TChan a -> TVar Natural -> TVar Natural -> TMVar () -> m ()
@@ -496,6 +481,11 @@ interpret fetcher iterConf vm stepper handler = do
       liftIO $ writeChan avail ()
 
       liftIO $ atomically $ modifyTVar numProcs (subtract 1) >> signalIfDone numProcs numTasks allProcessDone
+
+    reportTo :: TMVar SomeException -> TVar Bool -> IO () -> IO ()
+    reportTo workerErr shouldAbort io = io `catch` \e -> case fromException e of
+      Just (_ :: SomeAsyncException) -> throwIO e
+      Nothing -> atomically $ writeTVar shouldAbort True >> void (tryPutTMVar workerErr e)
 
     signalIfDone :: TVar Natural -> TVar Natural -> TMVar () -> STM ()
     signalIfDone numProcs numTasks allProcessDone = do
@@ -639,14 +629,71 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
                     -- ask the smt solver about the loop condition
                     performQuery
                   _ -> do
-                    let decision = case Expr.concKeccakSimpProps ((cond ./= Lit 0):preconds) of
-                          [PBool False] -> Case False
-                          [] -> Case True
-                          _ | Expr.concKeccakSimpProps ((cond .== Lit 0):preconds) == [PBool False] -> Case True
-                            | otherwise -> UnknownBranch
+                    let decision = staticBranch cond preconds
+                    conf <- readConfig
+                    when (conf.checkStaticBranches || checkStaticBranchesFromEnv) $
+                      checkStaticBranch fetcher vm cond preconds decision >>= \case
+                        StaticWrong msg -> internalError $ "a branch side was dropped by simplification, but it is reachable: " <> msg
+                        _ -> pure ()
                     (r, vm') <- liftIO $ stToIO $ runStateT (continue decision) vm
                     interpretInternal t { vm = vm', stepper = (k r) }
           _ -> performQuery
+
+-- | How exploration decides a symbolic branch without the solver: a side is
+-- dropped only if simplifying it with the path conditions gives false
+staticBranch :: Expr EWord -> [Prop] -> BranchCondition
+staticBranch cond preconds = case Expr.concKeccakSimpProps ((cond ./= Lit 0):preconds) of
+  [PBool False] -> Case False
+  [] -> Case True
+  _ | Expr.concKeccakSimpProps ((cond .== Lit 0):preconds) == [PBool False] -> Case True
+    | otherwise -> UnknownBranch
+
+-- | Turns on 'checkStaticBranches' for every run, e.g. a whole test suite
+{-# NOINLINE checkStaticBranchesFromEnv #-}
+checkStaticBranchesFromEnv :: Bool
+checkStaticBranchesFromEnv = unsafePerformIO $ isJust <$> lookupEnv "HEVM_CHECK_STATIC_BRANCHES"
+
+-- | What the fetcher, normally the solver, decides about a branch condition
+askBranch :: App m => Fetch.Fetcher Symbolic m -> VM Symbolic -> Expr EWord -> [Prop] -> m BranchCondition
+askBranch fetcher vm cond preconds = askFetcher fetcher vm (PleaseAskSMT cond preconds) UnknownBranch
+
+-- | Whether the fetcher, normally the solver, finds the props satisfiable
+askSat :: App m => Fetch.Fetcher Symbolic m -> VM Symbolic -> [Prop] -> m (Maybe Bool)
+askSat fetcher vm props = askFetcher fetcher vm (PleaseCheckSat props) Nothing
+
+askFetcher :: App m => Fetch.Fetcher Symbolic m -> VM Symbolic -> ((a -> EVM Symbolic ()) -> Query Symbolic) -> a -> m a
+askFetcher fetcher vm mkQuery dflt = do
+  ref <- liftIO $ stToIO $ newSTRef Nothing
+  m <- fetcher (mkQuery (\r -> lift (writeSTRef ref (Just r))))
+  _ <- liftIO $ stToIO $ runStateT m vm
+  fromMaybe dflt <$> liftIO (stToIO (readSTRef ref))
+
+data StaticCheck
+  = StaticOk
+  -- | the solver finds a dropped side satisfiable, or a taken side unsatisfiable
+  | StaticWrong String
+  | StaticInconclusive
+  -- | 'staticBranch' kept both sides, but the solver finds one unsatisfiable
+  | StaticMissed
+  deriving (Show)
+
+-- | Asks the solver whether the sides 'staticBranch' dropped are unsatisfiable
+checkStaticBranch :: App m => Fetch.Fetcher Symbolic m -> VM Symbolic -> Expr EWord -> [Prop] -> BranchCondition -> m StaticCheck
+checkStaticBranch fetcher vm cond preconds decision = case decision of
+  Case b -> askSat fetcher vm (side (not b) : preconds) <&> \case
+    Just False -> StaticOk
+    Nothing -> StaticInconclusive
+    Just True -> StaticWrong $ "simplification decided " <> show b <> ", but the solver finds " <> show (not b) <> " satisfiable"
+      <> " at pc " <> show vm.state.pc <> " of " <> show vm.state.contract
+      <> "\ncondition: " <> T.unpack (formatExpr cond)
+      <> "\npath conditions: " <> T.unpack (T.unlines (map formatProp preconds))
+  _ -> do
+    t <- askSat fetcher vm (side True : preconds)
+    f <- askSat fetcher vm (side False : preconds)
+    pure $ if t == Just False || f == Just False then StaticMissed else StaticOk
+  where
+    side True = cond ./= Lit 0
+    side False = cond .== Lit 0
 
 logQueryExprs :: MonadIO m => Query Symbolic -> m ()
 logQueryExprs = \case
@@ -672,6 +719,7 @@ stepName = \case
     PleaseFetchSlot {} -> "query-fetch-slot"
     PleaseDoFFI {} -> "query-ffi"
     PleaseReadEnv {} -> "query-env"
+    PleaseCheckSat {} -> "query-sat"
 
 maxIterationsReached :: VM Symbolic -> Maybe Integer -> Maybe Bool
 maxIterationsReached _ Nothing = Nothing
@@ -1123,7 +1171,7 @@ replayEqCex solvers create codeA codeB cd cex
         [ "program" .= label, "result" .= T.pack (show end.result), "steps" .= steps
         , "trail" .= [(showAddr a, pc) | (a, pc) <- toList lastSteps] ]
       let finalStore = case (.storage) <$> Map.lookup entry end.env.contracts of
-            Just (ConcreteStore m) -> Right m
+            Just (ConcreteStore m) -> Right (Map.filter (/= 0) m)
             s -> Left (T.pack (show s))
           balances = Map.mapMaybe (\c -> case c.balance of Lit v -> Just v; _ -> Nothing) end.env.contracts
       pure $ case end.result of
@@ -1170,12 +1218,103 @@ eqReplayVmOpts cex others code calldata = (defaultVMOpts @Concrete)
   , number = Lit (ctx BlockNumber cex.blockContext)
   , gas = 0xffffffffffffffff
   , gaslimit = 0xffffffffffffffff
-  , prevRandao = 42069
+  , prevRandao = Lit (ctx PrevRandao cex.blockContext)
+  , baseFee = Lit (ctx BaseFee cex.blockContext)
   }
   where
     addr name def = maybe def LitAddr (Map.lookup (SymAddr name) cex.addrs)
     ctx k m = Map.findWithDefault 0 k m
     store = ConcreteStore $ Map.findWithDefault mempty (SymAddr "entrypoint") cex.store
+
+-- | Replays a counterexample of @leaf@ on a concrete VM set up like @vm0@ with
+-- the model's values. Right True if the concrete run violates @post@ as well.
+replaySymCex :: App m => SolverGroup -> Postcondition -> VM Symbolic -> Expr End -> SMTCex -> m (Either Text Bool)
+replaySymCex solvers post vm0 leaf cex' = case setup of
+  Left why -> pure (Left why)
+  Right opts -> do
+    vm <- liftIO $ stToIO $ makeVm opts
+    conf <- readConfig
+    (_, _, end) <- Stepper.interpret (Fetch.oracle solvers Nothing Fetch.noRpc) vm (runTraced conf 32)
+    let ctx = TraceContext mempty mempty mempty
+    pure $ case end.result of
+      Just (VMFailure e) -> violated (Failure [] ctx e)
+      Just (VMSuccess out) -> violated (Success [] ctx out mempty)
+      r -> Left $ "concrete run did not finish: " <> T.pack (show r)
+  where
+    cex = cex' { unknownCalls = modelUnknownCalls cex' (extractProps leaf) }
+    violated end = case Expr.simplifyProp (post vm0 end) of
+      PBool b -> Right (not b)
+      p -> Left $ "postcondition is not concrete on the replay: " <> T.pack (show p)
+    concrete :: Expr a -> Err (Expr a)
+    concrete = fmap Expr.simplify . defaultSymbolicValues . subModel cex
+    concWord :: Text -> Expr EWord -> Either Text W256
+    concWord what e = case concrete e of
+      Right (Lit w) -> Right w
+      r -> Left $ "the model leaves the " <> what <> " symbolic: " <> T.pack (show r)
+    concStore :: Expr Storage -> Either Text (Expr Storage)
+    concStore st = case concrete st of
+      Right (ConcreteStore m) -> Right (ConcreteStore m)
+      -- the model has no store for storage that is never read
+      Right (AbstractStore {}) -> Right (ConcreteStore mempty)
+      _ -> Left "the model leaves the storage symbolic"
+    addr :: Text -> Expr EAddr -> Either Text (Expr EAddr)
+    addr what e = case concrete e of
+      Right (LitAddr a) -> Right (LitAddr a)
+      _ -> Left $ "the model leaves the " <> what <> " address symbolic"
+    setup = do
+      let entry = vm0.state.contract
+      c <- maybe (Left "no contract at the entry address") Right (Map.lookup entry vm0.env.contracts)
+      code <- case c.code of
+        RuntimeCode (ConcreteRuntimeCode bs) -> Right bs
+        InitCode {} -> Left "contract creation is not replayed"
+        _ -> Left "the code is symbolic"
+      calldata <- maybe (Left "calldata is not concrete") Right (cexCalldata vm0.state.calldata cex)
+      store <- concStore c.storage
+      balance <- concWord "balance" c.balance
+      address <- addr "contract" entry
+      stubs <- stubAccounts address cex.unknownCalls
+      others <- fmap catMaybes . forM (Map.toList (Map.delete entry vm0.env.contracts)) $ \(a, oc) ->
+        case oc.code of
+          RuntimeCode (ConcreteRuntimeCode bs) -> do
+            a' <- addr "account" a
+            st <- concStore oc.storage
+            bal <- concWord "account balance" oc.balance
+            pure $ Just (a', (initialContract (RuntimeCode (ConcreteRuntimeCode bs)))
+              { storage = st, origStorage = st, balance = Lit bal, nonce = oc.nonce })
+          -- e.g. the abstract origin account
+          _ -> pure Nothing
+      when (isPrecompileAddr address) $ Left "the model puts the contract at a precompile address"
+      caller <- addr "caller" vm0.state.caller
+      origin <- addr "origin" vm0.tx.origin
+      coinbase <- addr "coinbase" vm0.block.coinbase
+      value <- concWord "callvalue" vm0.state.callvalue
+      timestamp <- concWord "timestamp" vm0.block.timestamp
+      number <- concWord "block number" vm0.block.number
+      prevRandao <- concWord "prevrandao" vm0.block.prevRandao
+      baseFee <- concWord "basefee" vm0.block.baseFee
+      pure $ (defaultVMOpts @Concrete)
+        { contract = (initialContract (RuntimeCode (ConcreteRuntimeCode code)))
+            { storage = store, origStorage = store, balance = Lit balance, nonce = c.nonce }
+        , otherContracts = stubs <> filter ((`notElem` map fst stubs) . fst) others
+        , calldata = (ConcreteBuf calldata, [])
+        , value = Lit value
+        , address
+        , caller
+        , origin
+        , coinbase
+        , timestamp = Lit timestamp
+        , number = Lit number
+        , gas = 0xffffffffffffffff
+        , gaslimit = vm0.tx.gaslimit
+        , blockGaslimit = vm0.block.gaslimit
+        , gasprice = vm0.tx.gasprice
+        , priorityFee = vm0.tx.priorityFee
+        , chainId = vm0.env.chainId
+        , maxCodeSize = vm0.block.maxCodeSize
+        , schedule = vm0.block.schedule
+        , prevRandao = Lit prevRandao
+        , baseFee = Lit baseFee
+        }
 
 -- | 'Stepper.runFully' that also counts the steps and keeps the code address and
 -- pc of the last @n@ of them
@@ -1504,7 +1643,8 @@ equivalenceCheck' solvers sess branchesA branchesB create = do
         -- TODO: is this sound? do we need a more sophisticated nonce representation?
         noncesDiffer = PBool (ac.nonce /= bc.nonce)
         storesDiffer = case (ac.storage, bc.storage) of
-          (ConcreteStore as, ConcreteStore bs) | not (as == Map.empty || bs == Map.empty) -> PBool $ as /= bs
+          -- a slot written with 0 is the same as an unwritten one
+          (ConcreteStore as, ConcreteStore bs) -> PBool $ Map.filter (/= 0) as /= Map.filter (/= 0) bs
           (as, bs) -> if as == bs then PBool False else as ./= bs
       in balsDiffer .|| storesDiffer .|| noncesDiffer
 
@@ -1678,9 +1818,10 @@ prettyCalldata cex buf sig types = headErr errSig (T.splitOn "(" sig) <> "(" <> 
 -- but it's probably good enough for now
 defaultSymbolicValues :: Err (Expr a) -> Err (Expr a)
 defaultSymbolicValues = \case
-    Right e -> subBufs (foldTerm symbufs mempty e)
-               . subVars (foldTerm symwords mempty e)
-               . subAddrs (foldTerm symaddrs mempty e) $ e
+    -- addresses last, as balances are keyed by symbolic address
+    Right e -> fmap (subAddrs (foldTerm symaddrs mempty e))
+               . subBufs (foldTerm symbufs mempty e)
+               . subVars (foldTerm symwords mempty e) $ e
     Left err -> Left err
   where
     symaddrs :: Expr a -> Map (Expr EAddr) Addr
@@ -1702,18 +1843,21 @@ defaultSymbolicValues = \case
       a@GasLimit -> Map.singleton a 0
       a@ChainId -> Map.singleton a 0
       a@BaseFee -> Map.singleton a 0
+      a@TxValue -> Map.singleton a 0
+      a@(Balance _) -> Map.singleton a 0
       _ -> mempty
 
 -- | Takes an expression and a Cex and replaces all abstract values in the buf with
 -- concrete ones from the Cex.
 subModel :: SMTCex -> Expr a -> Err (Expr a)
 subModel c
-  = subBufs c.buffers
+  -- addresses last: the model keys balances and stores by symbolic address
+  = fmap (subAddrs c.addrs)
+  . subBufs c.buffers
   . subStores c.store
   . subVars c.vars
   . subVars c.blockContext
   . subVars c.txContext
-  . subAddrs c.addrs
 
 subVars :: Map (Expr EWord) W256 -> Expr a -> Expr a
 subVars model b = Map.foldlWithKey subVar b model
@@ -1723,9 +1867,17 @@ subVars model b = Map.foldlWithKey subVar b model
       where
         go :: Expr a -> Expr a
         go = \case
-          v@(Var _) -> if v == var
-                      then Lit val
-                      else v
+          v@(Var _) -> if v == var then Lit val else v
+          v@(Balance _) -> if v == var then Lit val else v
+          v@TxValue -> if v == var then Lit val else v
+          v@Origin -> if v == var then Lit val else v
+          v@Coinbase -> if v == var then Lit val else v
+          v@Timestamp -> if v == var then Lit val else v
+          v@BlockNumber -> if v == var then Lit val else v
+          v@PrevRandao -> if v == var then Lit val else v
+          v@GasLimit -> if v == var then Lit val else v
+          v@ChainId -> if v == var then Lit val else v
+          v@BaseFee -> if v == var then Lit val else v
           e -> e
 
 subAddrs :: Map (Expr EAddr) Addr -> Expr a -> Expr a

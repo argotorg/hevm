@@ -25,16 +25,16 @@ jobs:
     name: Build binary on ${{ matrix.os }}
     runs-on: ${{ matrix.os  }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - name: Install Nix
-        uses: nixbuild/nix-quick-install-action@v34
+        uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035 # v34
       - name: build hevm
         run: |
           nix build .#redistributable --out-link hevm
           cp ./hevm/bin/hevm ./hevm-${{ matrix.suffix }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: hevm-${{ matrix.suffix }}
           path: ./hevm-${{ matrix.suffix }}
@@ -44,18 +44,18 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - uses: ./.github/actions/free-disk-space
       - name: Install Nix
-        uses: nixbuild/nix-quick-install-action@v34
+        uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035 # v34
       - name: download binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           merge-multiple: true
       - name: create github release & upload binaries
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         # scheduled/manual runs should not create a release
         if: github.event_name == 'push'
         with:
@@ -71,7 +71,7 @@ jobs:
           nix develop --command bash -c "cabal sdist --builddir='$RUNNER_TEMP/packages'"
           nix develop --command bash -c "cabal haddock lib:hevm --builddir='$RUNNER_TEMP/docs' --haddock-for-hackage --haddock-option=--hyperlinked-source"
       - name: publish to hackage
-        uses: haskell-actions/hackage-publish@v1
+        uses: haskell-actions/hackage-publish@0fa2122fae62cebe8ba3b0fe9b036cc736337230 # v1
         # scheduled/manual runs should not publish anything
         if: github.event_name == 'push'
         with:

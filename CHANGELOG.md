@@ -8,10 +8,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- `--interactive` for `symbolic`, `exec` and `test` starts an interactive debugger
+  served over HTTP on localhost, with symbolic branches,
+  stepping back, breakpoints, storage, call traces and statistics. Its views
+  are JSON for clients to format.
+  `--interactive-snapshot-every` sets how often it snapshots for stepping back.
+- `--serve` serves the progress of a run over HTTP, at `/progress`.
+- `--check-static-branches` checks branch decisions made without the solver
+  against the solver.
+- The symbolic execution fuzzer runs symbolic and concrete execution in
+  lockstep, also along paths given by solver models, and
+  checks the debugger's stepping, back and forth, against geth.
+- Word reads that straddle literal bytes and written words, such as calldata's
+  selector and first argument, simplify to the written parts shifted and or-ed.
+- Reads of all-zero buffers simplify to zero.
+- `hevm symbolic` replays each counterexample concretely and marks it
+  `[validated]` or `[not reproducible]`, like `hevm test`.
+- The symbolic execution fuzzer generates mapping and array storage accesses,
+  and checks that `hevm symbolic`'s replay of each model agrees with geth.
+- Byte reads through a word read at a concrete offset now resolve against its
+  source buffer, allowing unaligned copies to preserve concrete mapping keys.
+- KECCAK256 folds memory that becomes concrete after simplification, including
+  CREATE2 preimages containing concrete hashes, while retaining nested preimages
+  for the solver's keccak assumptions.
 - The symbolic execution fuzzer runs random programs with abstract calldata,
   storage, callvalue and timestamp, checks the leaf the concrete inputs reach
   against geth, replays solver models of other leaves in geth, and reports
   opcode coverage.
+- The symbolic execution fuzzer also creates contracts whose deployed code size
+  depends on a symbolic CREATE value.
+- Property tests check that `--arg` values parse back to the generated ABI
+  value and encode to the canonical calldata.
 - Equality of a keccak hash with a literal at most 256 now simplifies to false,
   matching the existing SMT assumption.
 - Equality of a keccak hash with a literal above 2^256 - 257 also simplifies to
@@ -63,8 +90,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without parsing ANSI escape codes. Terminal output is unchanged.
 - Hash-consing of symbolic terms, on by default (`hashConsExplore` config
   option); disable it with `--no-hash-cons`.
+- Comparisons of a literal with `c - x`, where `x` is bounded by `c`, now
+  simplify using the lower bound of the difference.
+- The RPC fuzzer fetches all state from a mock JSON-RPC node, with EOAs and
+  nonexistent accounts, symbolic addresses, value transfers, reverting,
+  delegated and static calls, and CREATEs and CREATE2s onto existing accounts.
+- The symbolic execution fuzzer generates BALANCE, EXTCODESIZE, EXTCODEHASH,
+  EXTCODECOPY, CREATE and CREATE2, over a pre-state with EOAs, an empty
+  account and accounts at the addresses the program creates. Each case also
+  runs with all state but the contract's code fetched from a mock RPC node.
+- The equivalence fuzzer checks contract creation, and generates storage
+  writes of zero.
 
 ## Changed
+- Results that revert with `Error(string)` show the decoded message instead of hex.
 - Solver queries for branch conditions and symbolic values also get the keccak
   preimages recorded during concrete execution, as the final queries do.
 - A symbolic value that depends on several symbolic subterms with few possible
@@ -112,6 +151,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the writes they are disjoint from and resolve the writes they hit.
 
 ## Fixed
+- Storage reads return cached concrete values immediately when folding keccaks
+  in the slot resolves the lookup.
+- Storage reads resolve slots computed from concrete keccaks by any arithmetic,
+  such as `keccak(x) & 255`, instead of leaving them symbolic.
+- Equivalence checking treats a storage slot written with 0 as equal to an
+  unset one.
+- Equivalence counterexamples now include the initial storage value of slots
+  that the contracts write but never read, so replaying them reproduces the
+  difference.
+- MCOPY of a symbolic size now grows memory.
+- A copy within symbolic memory, e.g. an MCOPY in a loop, no longer makes
+  expressions grow exponentially when its source bytes are known.
+- Huge copies, logs and return data in symbolic execution are no longer read or
+  printed byte by byte; traces show their first 64 KiB.
+- A precompile call that runs out of gas now leaves an error trace.
+- A branch side the solver refutes is no longer explored when it could not decide
+  the other side, e.g. one it cannot encode.
+- EXTCODEHASH of an account with no code or nonce and a symbolic balance is 0
+  when that balance is 0, instead of the hash of empty code.
+- A copy with a symbolic offset is encoded in SMT once instead of once per byte,
+  and copies over 1 MiB are not encoded, so large copies no longer exhaust memory.
+- An exception during symbolic exploration is now rethrown, instead of being
+  printed and followed by `thread blocked indefinitely in an STM transaction`.
+- Counterexamples found with storage decomposition show each mapping and array
+  entry at its real storage slot, instead of dropping entries and showing keys
+  as slots.
+- Memory accesses whose offset or size is an address (e.g. from CREATE or
+  CALLER) are now charged gas and checked for overflow.
+- Counterexample block and transaction context values (callvalue, balances,
+  timestamp, ...) are now substituted when concretizing expressions.
+- `--arg` accepts negative values for `int<N>` arguments, encoding them
+  sign-extended, and rejects values outside the type's range.
+- `--arg` now works for `bytesN`, `bytes`, `string` and array arguments.
+- A constructor returning deployed code of symbolic size no longer crashes; the
+  size is resolved by the solver, or the path is reported as partial.
+- CALLDATACOPY, CODECOPY and EXTCODECOPY with a symbolic source offset or size
+  reaching past 2^256 no longer wrap around to the start of the source buffer.
+- Concrete copies whose source range ends exactly at 2^256 now simplify.
+- Calls to unknown code with more value than the caller's balance now fail with
+  empty returndata, avoiding spurious counterexamples.
+- Copies out of an empty buffer at a symbolic offset simplify to zeros.
+- Comparisons of literals with concrete keccak hashes, which simplification
+  turns back from literals, now evaluate.
+- Retain `NonexistentFork` for source compatibility with callers such as Echidna.
+- Enumerating symbolic values no longer shrinks buffer models and silently drops
+  possible values, which could leave symbolic jump paths unexplored.
+- Forward jumps whose conditions become concrete after folding keccak hashes
+  skip speculative merging, keeping their results concrete.
+- `--sig` with `bytes` or `string` arguments lays out the calldata by their
+  symbolic lengths, instead of assuming each takes `--max-dyn-size` bytes. Shorter
+  inputs were missed.
+- Without `--rpc`, `hevm symbolic` treats the block number, base fee and
+  prevrandao as symbolic instead of 0. `hevm equivalence` and the library's
+  symbolic VMs treat the base fee and prevrandao as symbolic too.
+- `--basefee` is no longer ignored.
+- BLOCKHASH with a symbolic block number or argument is 0 outside the 256 most
+  recent blocks.
+- State merging no longer merges code that reads GAS, creates a contract or
+  calls unknown code; it reused the variable of that GAS reading, address or
+  call result for the next one.
+- When hevm enumerates the values of a symbolic address, it constrains only its
+  low 20 bytes. Addresses with higher bytes set were on no path.
+- Calls to unknown code with a symbolic target expand the memory over their
+  input and output ranges.
+- `vm.expectRevert` is satisfied by a call that ends in an exceptional halt
+  (e.g. INVALID or out-of-gas), as in forge.
+- A call to a precompile consumes a pending `vm.prank` or `vm.expectRevert`.
+- `assertApproxEqAbs(int256,int256,uint256)` with symbolic operands uses the
+  signed difference.
+- `hevm test` replays counterexamples that depend on `tx.origin` or
+  `block.coinbase` instead of crashing, and replays them with the model's caller.
+- Counterexample decoding follows the ABI offsets of dynamic arguments.
+- `hevm test` skips, with a warning, non-test contracts that use unlinked
+  external libraries, instead of rejecting the whole project.
+- ECRECOVER rejects `v` other than 27 and 28.
+- Restoring a cleared storage slot takes back one refund, not every equal
+  refund of the contract.
+- Precompiles 0x0a-0x11 and 0x100 are pre-warmed, and symbolic addresses can no
+  longer take their values.
+- `hevm symbolic` no longer prints QED when some paths were only partially
+  explored; it prints the partial-exploration warning and exits with an error.
+- `hevm symbolic --create` and `hevm exec --create` run the init code instead of
+  treating the contract being created as an address collision.
+- Calls to unknown code no longer return equal results just because their other
+  inputs are equal: the callee gets unknown gas, which differs between calls.
+- `hevm test` checks the fail flag that forge-std's `fail()` sets in its default
+  mode too; `--assertion-type` has no effect anymore.
+- In `hevm test`, a cheatcode that cannot handle its symbolic arguments, and
+  `expectRevert` with symbolic revert data, leave the path partially explored
+  instead of reverting, which made the test pass.
+- In `hevm test`, `vm.selectFork` with a nonexistent fork fails the test instead
+  of ending the path in an error that counted as passing.
+- Hash-consing no longer segfaults intermittently with several capabilities: GHC's
+  `makeStableName` races with growing the stable name table, so calls are serialized.
+- With `--rpc`, accessing an account without code (an EOA) no longer aborts
+  with an oracle error.
+- With `--rpc`, accounts at addresses up to 0xdeadbeef, such as the burn
+  address and the precompiles, are fetched instead of treated as empty.
+- With `--rpc`, CREATE and CREATE2 fetch the account at the new address, so
+  they keep its balance and detect collisions with accounts on chain,
+  including ones with only storage (EIP-7610), via `eth_getProof`.
+- With `--rpc`, SSTORE gas and refunds use the slot's value on chain, and
+  CALL and SELFDESTRUCT only charge the new account cost when the recipient
+  does not exist on chain.
 - Buffer equality in SMT queries now also compares lengths, so the equivalence
   checker no longer misses return or revert data that differs only in length.
 - Replaying equivalence counterexamples no longer keeps the final VMs of every

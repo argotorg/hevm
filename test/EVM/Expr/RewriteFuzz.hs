@@ -7,6 +7,7 @@ module EVM.Expr.RewriteFuzz
   ( tests
   , genShapedWord
   , genShapedProp
+  , genSpecialLit
   , shrinkWord
   , shrinkProp
   , evalWord
@@ -85,6 +86,8 @@ prop_bounds = forAllShrink (sized $ \n -> genShapedWord (min n 40)) shrinkWord $
                    | (t, v) <- vals, let u = Expr.upperWithBounds bs t ]
                 <> [ counterexample ("upperBound: " <> show t <> " = " <> show v <> " > " <> show u) $ v <= u
                    | (t, v) <- vals, Just u <- [Expr.upperBound t] ]
+                <> [ counterexample ("lowerBound: " <> show t <> " = " <> show v <> " < " <> show l) $ v >= l
+                   | (t, v) <- vals, let l = Expr.lowerBound t ]
                 <> [ counterexample ("possibleOnes: " <> show t <> " = " <> show v) $ v .&. complement (Expr.possibleOnes t) == 0
                    | (t, v) <- vals ]
       in counterexample ("env: " <> show env <> "\nfacts: " <> show facts) $
@@ -505,6 +508,13 @@ genShapedByte n = frequency
   [ (1, LitByte <$> arbitrary)
   , (2, IndexWord <$> (Lit . fromIntegral <$> choose (0 :: Int, 33)) <*> genShapedWord n)
   , (2, ReadByte <$> smallIdxWith (genShapedWord n) <*> genShapedBuf n)
+  , (2, do
+      idx <- Lit . fromIntegral <$> choose (0 :: Int, 33)
+      off <- Lit . fromIntegral <$> choose (0 :: Int, 100)
+      w <- ReadWord off <$> genShapedBuf n
+      oneof [ pure (IndexWord idx w)
+            , pure (ReadByte idx (WriteWord (Lit 0) w (AbstractBuf "buf")))
+            ])
   ]
 
 genShapedBuf :: Int -> Gen (Expr Buf)

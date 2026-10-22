@@ -67,7 +67,7 @@ import EVM.Expr (maybeLitWordSimp, maybeLitByteSimp)
 
 import Control.Applicative ((<|>))
 import Control.Monad (replicateM, replicateM_, forM_, void)
-import Data.Binary.Get (Get, runGet, runGetOrFail, label, getWord8, getWord32be, skip)
+import Data.Binary.Get (Get, runGet, runGetOrFail, label, getWord8, getWord32be, skip, bytesRead, lookAhead)
 import Data.Binary.Put (Put, runPut, putWord8, putWord32be)
 import Data.Bits (shiftL, shiftR, (.&.), testBit, bit, complement, (.|.))
 import Data.ByteString (ByteString)
@@ -89,6 +89,7 @@ import Data.Text qualified as Text
 import Data.Text.Encoding (encodeUtf8)
 import Data.Vector (Vector)
 import Data.Vector qualified as Vector
+import Data.Int (Int32)
 import Data.Word (Word32)
 import GHC.Generics (Generic)
 import Test.QuickCheck hiding ((.&.), label)
@@ -312,18 +313,34 @@ putAbi = \case
 -- | Decode a sequence type (e.g. tuple / array). Will fail for non sequence types
 getAbiSeq :: Int -> [AbiType] -> Get (Vector AbiValue)
 getAbiSeq n ts = label "sequence" $ do
+  start <- bytesRead
   hs <- label "sequence head" (getAbiHead n ts)
-  Vector.fromList <$>
-    label "sequence tail" (mapM (either getAbi pure) hs)
+  headEnd <- bytesRead
+  -- dynamic values are read at their offsets (relative to the head's start);
+  -- the sequence ends after the head or the last value, whichever is later
+  let getTail (Right v) = pure (v, headEnd)
+      getTail (Left (t, off))
+        | off > fromIntegral (maxBound :: Int32) = fail "offset too large"
+        | start + fromIntegral off < headEnd = fail "offset points into the head"
+        | otherwise = lookAhead $ do
+            skip (fromIntegral (start + fromIntegral off - headEnd))
+            v <- getAbi t
+            end <- bytesRead
+            pure (v, end)
+  vs <- label "sequence tail" (mapM getTail hs)
+  skip (fromIntegral (maximum (headEnd : map snd vs) - headEnd))
+  pure $ Vector.fromList (map fst vs)
 
 getAbiHead :: Int -> [AbiType]
-  -> Get [Either AbiType AbiValue]
+  -> Get [Either (AbiType, Word256) AbiValue]
 getAbiHead 0 _      = pure []
 getAbiHead _ []     = fail "ran out of types"
 getAbiHead n (t:ts) =
   case abiKind t of
     Dynamic ->
-      (Left t :) <$> (skip 32 *> getAbiHead (n - 1) ts)
+      do AbiUInt _ off <- getAbi (AbiUIntType 256)
+         xs <- getAbiHead (n - 1) ts
+         pure (Left (t, off) : xs)
     Static ->
       do x  <- getAbi t
          xs <- getAbiHead (n - 1) ts
@@ -502,8 +519,10 @@ makeAbiValue typ str = case readP_to_S (parseAbiValue typ) (padStr str) of
 parseAbiValue :: AbiType -> ReadP AbiValue
 parseAbiValue (AbiUIntType n) = do W256 w <- readS_to_P reads
                                    pure $ AbiUInt n w
-parseAbiValue (AbiIntType n) = do W256 w <- readS_to_P reads
-                                  pure $ AbiInt n (unsafeInto w)
+parseAbiValue (AbiIntType n) = do i <- readS_to_P (reads :: ReadS Integer)
+                                  if -(2 ^ (n - 1)) <= i && i < 2 ^ (n - 1)
+                                    then pure $ AbiInt n (fromInteger i)
+                                    else pfail
 parseAbiValue AbiAddressType = AbiAddress <$> readS_to_P reads
 parseAbiValue AbiBoolType = (do W256 w <- readS_to_P reads
                                 pure $ AbiBool (w /= 0))

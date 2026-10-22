@@ -546,6 +546,7 @@ data CallInputs = CallInputs
   , callerStorage :: Expr Storage
   , callerTStorage :: Expr Storage
   , callerBalance :: Expr EWord
+  , callGas :: Expr EWord -- ^ unknown, as hevm does not model gas
   }
 deriving instance Show CallInputs
 
@@ -620,7 +621,7 @@ data EvmError
   | ReturnDataOutOfBounds
   | NonceOverflow
   | BadCheatCode String FunctionSelector
-  | NonexistentFork Int
+  | NonexistentFork Int -- ^ Retained for callers; selectFork now reverts.
   | AssumeCheatFailed
   deriving (Show)
 
@@ -657,6 +658,7 @@ data PartialExec
   | JumpIntoSymbolicCode  { pc :: Int, addr :: Expr EAddr, jumpDst :: Int }
   | PrecompileMissing     { pc :: Int, addr :: Expr EAddr, preAddr :: Addr }
   | CheatCodeMissing      { pc :: Int, addr :: Expr EAddr, selector :: FunctionSelector }
+  | CheatCodeFailed       { pc :: Int, addr :: Expr EAddr, selector :: FunctionSelector, msg :: String }
   | BranchTooDeep         { pc :: Int, addr :: Expr EAddr}
   deriving (Show)
 
@@ -683,6 +685,8 @@ data Query t where
   PleaseGetSols       :: Expr EWord -> Int -> [Prop] -> (Maybe [W256] -> EVM Symbolic ()) -> Query Symbolic
   PleaseDoFFI         :: [String] -> Map String String -> (ByteString -> EVM t ()) -> Query t
   PleaseReadEnv       :: String -> (String -> EVM t ()) -> Query t
+  -- | Just True: satisfiable, Just False: unsatisfiable, Nothing: unknown
+  PleaseCheckSat      :: [Prop] -> (Maybe Bool -> EVM Symbolic ()) -> Query Symbolic
 
 data BranchContext where
   PleaseRunBoth :: (Bool -> EVM Symbolic ()) -> BranchContext
@@ -714,6 +718,8 @@ instance Show (Query t) where
       (("<EVM.Query: do ffi: " ++ (show cmd) ++ " env: " ++ (show env)) ++)
     PleaseReadEnv variable _ ->
       (("<EVM.Query: read env: " ++ variable) ++)
+    PleaseCheckSat props _ ->
+      (("<EVM.Query: check satisfiability of " ++ show props ++ ">") ++)
 
 instance Show (BranchContext) where
   showsPrec _ = \case
@@ -944,6 +950,7 @@ data Env = Env
   , freshAddresses :: Int
   , freshGasVals :: Int
   , callWorld :: Expr EWord -- ^ token for the state calls to unknown code have left behind, see 'PCall'
+  , callCounts :: Map W256 Int -- ^ how many calls to unknown code with the same inputs this path made, by their hash
   }
   deriving (Show, Generic)
 
@@ -952,12 +959,17 @@ data Block = Block
   { coinbase    :: Expr EAddr
   , timestamp   :: Expr EWord
   , number      :: Expr EWord
-  , prevRandao  :: W256
+  , prevRandao  :: Expr EWord
   , gaslimit    :: Word64
-  , baseFee     :: W256
+  , baseFee     :: Expr EWord
   , maxCodeSize :: W256
   , schedule    :: FeeSchedule Word64
   } deriving (Show, Generic)
+
+-- | The logical sub-store a storage slot belongs to under storage
+-- decomposition: the small slots, or the array or mapping at the given slot
+data LogicalStore = SmallSlots | ArrayStore W256 | MapStore W256
+  deriving (Show, Eq, Ord)
 
 -- | Full contract state
 data Contract = Contract
@@ -970,6 +982,8 @@ data Contract = Contract
   , codehash    :: Expr EWord
   , opIxMap     :: VS.Vector Int -- ^ map from byte index to op index
   , external    :: Bool
+  -- | Fetched via RPC with a non-empty storage root, whose slots may not be fetched yet
+  , chainStorage :: Bool
   }
   deriving (Show)
 
@@ -1002,6 +1016,8 @@ class VMOps (t :: VMType) where
   enoughGas :: Word64 -> Gas t -> Bool
   subGas :: Gas t -> Word64 -> Gas t
   toGas :: Word64 -> Gas t
+  -- | Nothing when gas is not tracked
+  gasWord :: Gas t -> Maybe Word64
 
   whenSymbolicElse :: EVM t a -> EVM t a -> EVM t a
 
@@ -1101,11 +1117,11 @@ data VMOpts (t :: VMType) = VMOpts
   , number :: Expr EWord
   , timestamp :: Expr EWord
   , coinbase :: Expr EAddr
-  , prevRandao :: W256
+  , prevRandao :: Expr EWord
   , maxCodeSize :: W256
   , blockGaslimit :: Word64
   , gasprice :: W256
-  , baseFee :: W256
+  , baseFee :: Expr EWord
   , schedule :: FeeSchedule Word64
   , chainId :: W256
   , create :: Bool

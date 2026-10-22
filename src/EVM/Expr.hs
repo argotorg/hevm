@@ -64,7 +64,9 @@ module EVM.Expr
   , readByte
   , readBytes
   , readWord
+  , readWordFromRuns
   , upperBound
+  , lowerBound
   , maxBytes
   , copySlice
   , canonKeccakBuf
@@ -103,6 +105,7 @@ module EVM.Expr
   , safeToDecomposeProp
   , decomposeStorage
   , decomposeStorageProps
+  , accessedLogicalStores
 
     -- * Simplification
   , simplify
@@ -145,7 +148,7 @@ module EVM.Expr
 
 import Prelude hiding (LT, GT, exp, drop, take, not, and, or, div, mod, min, max)
 import Prelude qualified (div, mod, not, take, min, max)
-import Control.Monad (unless, when)
+import Control.Monad (guard, unless, when)
 import Control.Monad.ST (ST)
 import Control.Monad.State (put, get, execState, State)
 import Data.Bits hiding (And, Xor, xor)
@@ -380,7 +383,7 @@ peq (Lit x) (Lit y) = PBool (x == y)
 peq (LitAddr x) (LitAddr y) = PBool (x == y)
 peq (LitByte x) (LitByte y) = PBool (x == y)
 peq (ConcreteBuf x) (ConcreteBuf y) = PBool (x == y)
-peq (ConcreteStore x) (ConcreteStore y) = PBool (x == y)
+peq (ConcreteStore x) (ConcreteStore y) = PBool (Map.filter (/= 0) x == Map.filter (/= 0) y)
 peq a b
   | a == b = PBool True
   | otherwise = let args = sort [a, b]
@@ -402,6 +405,16 @@ pleq a b
 -- structure, so reads outside of the bounds of a ConcreteBuf return 0. This is
 -- inline with the semantics of calldata and memory, but not of returndata.
 
+-- | Every byte is zero, e.g. a copy of zeros onto zeros: any read gives 0,
+-- whatever the offsets and sizes
+zeroContents :: Expr Buf -> Bool
+zeroContents = \case
+  ConcreteBuf b -> BS.all (== 0) b
+  CopySlice _ _ _ src dst -> zeroContents src && zeroContents dst
+  WriteWord _ (Lit 0) b -> zeroContents b
+  WriteByte _ (LitByte 0) b -> zeroContents b
+  _ -> False
+
 -- fully concrete reads
 readByte :: Expr EWord -> Expr Buf -> Expr Byte
 readByte (Lit x) (ConcreteBuf b)
@@ -413,6 +426,7 @@ readByte (Lit x) (ConcreteBuf b)
     i = case x of
           (W256 (Word256 _ (Word128 _ x'))) -> unsafeInto x'
 
+readByte _ b | zeroContents b = LitByte 0
 readByte i@(Lit x) (WriteByte (Lit idx) val src)
   = if x == idx
     then val
@@ -423,6 +437,7 @@ readByte i@(Lit x) (WriteWord (Lit idx) val src)
   = if x - idx < 32
     then case val of
            (Lit _) -> indexWord (Lit $ x - idx) val
+           ReadWord {} -> indexWord (Lit $ x - idx) val
            _ -> IndexWord (Lit $ x - idx) val
     else readByte i src
 -- reading a byte that is before the CopySlice destination region, so just read from dst
@@ -446,7 +461,6 @@ readByte i@(Lit x) buf@(CopySlice _ (Lit dstOffset) (Lit size) _ dst)
     then readByte i dst
     else ReadByte (Lit x) buf
 
-readByte _ (ConcreteBuf b) | BS.all (== 0) b = LitByte 0
 -- offsets from the same symbolic base
 readByte i (WriteWord j val src)
   | Just d <- offsetDiff i j = if d < 32 then indexWord (Lit d) val else readByte i src
@@ -491,6 +505,14 @@ upperBound e = case (simplifyNoLitToKeccak e) of
           else Nothing
     addBound a b = upperBound b >>= \ub ->
       if a <= (maxBound :: W256) - ub then Just (a + ub) else Nothing
+
+-- | Static lower bound on a word expression (unsigned)
+lowerBound :: Expr EWord -> W256
+lowerBound = \case
+  Lit n -> n
+  Sub (Lit c) b | Just ub <- upperBound b, ub <= c -> c - ub
+  Max a b -> Prelude.max (lowerBound a) (lowerBound b)
+  _ -> 0
 
 -- | The bits of a word expression that can be 1, looking a few levels deep
 possibleOnes :: Expr EWord -> W256
@@ -591,7 +613,7 @@ writeDisjointFromReadWord i = \case
 -- | Reads the word starting at idx from the given buf
 readWord :: Expr EWord -> Expr Buf -> Expr EWord
 readWord idx buf@(AbstractBuf _) = ReadWord idx buf
-readWord _ (ConcreteBuf b) | BS.all (== 0) b = Lit 0
+readWord _ b | zeroContents b = Lit 0
 readWord idx b@(WriteWord idx' val buf)
   -- the word we are trying to read exactly matches a WriteWord
   | idx == idx' = val
@@ -673,6 +695,51 @@ readWordFromBytes i@(Lit idx) buf
      else ReadWord i buf
 readWordFromBytes idx buf = ReadWord idx buf
 
+-- | Consecutive bytes of a word read, by where they come from: literals, bytes of a
+-- written word from byte 'first' on, or bytes of a buffer from 'start' on
+data ByteRun
+  = LitRun [Word8]
+  | WordRun (Expr EWord) W256 W256
+  | BufRun (Expr Buf) W256 W256
+
+-- | A word read that straddles writes, like calldata's selector bytes and its
+-- first argument, as the parts of what was written, shifted into place and or-ed
+-- together, which reads better than the whole buffer under a ReadWord
+readWordFromRuns :: Expr EWord -> Expr Buf -> Maybe (Expr EWord)
+readWordFromRuns (Lit idx) buf | idx + 31 >= idx = do
+  sources <- mapM byteSource [readByte (Lit i) buf | i <- [idx .. idx + 31]]
+  let runs = foldr addByte [] sources
+  guard $ length runs >= 2 && length runs <= 3 && Prelude.not (all isLitRun runs)
+  pure $ foldr1 EVM.Expr.or (zipWith place (scanl (+) 0 (map runLength runs)) runs)
+  where
+    byteSource :: Expr Byte -> Maybe ByteRun
+    byteSource = \case
+      LitByte v -> Just (LitRun [v])
+      IndexWord (Lit j) w | j < 32 -> Just (WordRun w j 1)
+      -- reading the buffer itself would rewrite the read into itself, forever
+      ReadByte (Lit k) b | b /= buf -> Just (BufRun b k 1)
+      _ -> Nothing
+    addByte r [] = [r]
+    addByte r (next : rest) = case (r, next) of
+      (LitRun a, LitRun b) -> LitRun (a <> b) : rest
+      (WordRun w j n, WordRun w' j' n') | w == w', j + n == j' -> WordRun w j (n + n') : rest
+      (BufRun b k n, BufRun b' k' n') | b == b', k + n == k' -> BufRun b k (n + n') : rest
+      _ -> r : next : rest
+    isLitRun = \case LitRun _ -> True; _ -> False
+    runLength = \case
+      LitRun vs -> unsafeInto (length vs)
+      WordRun _ _ n -> n
+      BufRun _ _ n -> n
+    -- a run at byte p of the result: its bytes moved to the top of a word, then down to p
+    place p = \case
+      r@(LitRun vs) -> Lit (bytesToW256 vs `shiftL` unsafeInto (8 * (32 - p - runLength r)))
+      WordRun w j n -> moved p n (if j == 0 then w else shl (Lit (8 * j)) w)
+      BufRun b k n -> moved p n (ReadWord (Lit k) b)
+    moved p n top =
+      let low = if n == 32 then top else shr (Lit (8 * (32 - n))) top
+      in if p + n == 32 then low else shl (Lit (8 * (32 - p - n))) low
+readWordFromRuns _ _ = Nothing
+
 {- | Copies a slice of src into dst.
 
         0           srcOffset       srcOffset + size     length src
@@ -701,6 +768,10 @@ copySlice :: Expr EWord -> Expr EWord -> Expr EWord -> Expr Buf -> Expr Buf -> E
 -- Copying zero bytes is a no-op
 copySlice _ _ (Lit 0) _ dst = dst
 
+-- An empty source reads as zeros at any offset
+copySlice srcOffset dstOffset size src@(ConcreteBuf "") dst
+  | srcOffset /= Lit 0 = copySlice (Lit 0) dstOffset size src dst
+
 -- copying 32 bytes can be rewritten to a WriteWord on dst (e.g. CODECOPY of args during constructors)
 copySlice srcOffset dstOffset (Lit 32) src dst = writeWord dstOffset (readWord srcOffset src) dst
 
@@ -708,7 +779,7 @@ copySlice srcOffset dstOffset (Lit 32) src dst = writeWord dstOffset (readWord s
 copySlice a@(Lit srcOffset) b@(Lit dstOffset) c@(Lit size) d@(ConcreteBuf src) e@(ConcreteBuf dst)
   | dstOffset < maxBytes
   , size < maxBytes
-  , srcOffset + size >= srcOffset -- srcOffset must not wrap
+  , srcOffset + (size - 1) >= srcOffset -- srcOffset must not wrap; size 0 is handled above
   = let hd = padRight (unsafeInto dstOffset) $ BS.take (unsafeInto dstOffset) dst
         sl = if srcOffset > unsafeInto (BS.length src)
           then BS.replicate (unsafeInto size) 0
@@ -716,6 +787,18 @@ copySlice a@(Lit srcOffset) b@(Lit dstOffset) c@(Lit size) d@(ConcreteBuf src) e
         tl = BS.drop (unsafeInto dstOffset + unsafeInto size) dst
     in ConcreteBuf $ hd <> sl <> tl
   | otherwise = CopySlice a b c d e
+
+-- A window of src that reads as literal bytes is copied from those bytes, so src is not kept:
+-- e.g. an MCOPY within memory would otherwise contain the memory twice
+copySlice (Lit srcOffset) d sz@(Lit size) src dst
+  | symbolicSrc src, size <= 256, srcOffset + (size - 1) >= srcOffset
+  , Just bs <- mapM (litByte . (\i -> readByte (Lit i) src)) [srcOffset .. srcOffset + (size - 1)]
+  = copySlice (Lit 0) d sz (ConcreteBuf (BS.pack bs)) dst
+  where
+    symbolicSrc :: Expr Buf -> Bool
+    symbolicSrc = \case ConcreteBuf _ -> False; _ -> True
+    litByte :: Expr Byte -> Maybe Word8
+    litByte = \case LitByte b -> Just b; _ -> Nothing
 
 -- Drop source bytes that a concrete copy window cannot observe.
 copySlice s@(Lit srcOffset) d@(Lit _) sz@(Lit size) src@(WriteWord {}) dst
@@ -729,9 +812,10 @@ copySlice s d@(Lit dstOffset) sz@(Lit size) src dst
   = copySlice s d sz src dst'
 
 -- concrete indices & abstract src (may produce a concrete result if we are
--- copying from a concrete region of src)
+-- copying from a concrete region of src). It reads a byte at a time, and without
+-- gas, symbolic execution can copy hundreds of megabytes.
 copySlice s@(Lit srcOffset) d@(Lit dstOffset) sz@(Lit size) src ds@(ConcreteBuf dst)
-  | dstOffset < maxBytes, size < maxBytes, srcOffset + (size-1) >= srcOffset = let
+  | dstOffset < maxBytes, size <= 65536, srcOffset + (size-1) >= srcOffset = let
     hd = padRight (unsafeInto dstOffset) $ BS.take (unsafeInto dstOffset) dst
     sl = [readByte (Lit i) src | i <- [srcOffset .. srcOffset + (size - 1)]]
     tl = BS.drop (unsafeInto dstOffset + unsafeInto size) dst
@@ -1175,6 +1259,10 @@ readStorage w st = go (simplifyNoLitToKeccak w) (simplifyNoLitToKeccak st)
       Keccak b -> do
         ConcreteBuf bs <- concreteBuf b
         pure $ keccak' bs
+      -- e.g. a fixed-size array indexed by a hash: keccak(x) & 255
+      e | containsNode (\case Keccak _ -> True; _ -> False) e
+        , Lit x <- simplifyNoLitToKeccak (mapExpr (\case k@(Keccak _) -> maybe k Lit (concreteSlot k); k -> k) e)
+        -> Just x
       _ -> Nothing
     concreteBuf :: Expr Buf -> Maybe (Expr Buf)
     concreteBuf b@(ConcreteBuf _) = Just b
@@ -1315,9 +1403,6 @@ safeToDecomposeProp p = isJust $ mapPropM' findPEqStore p
       a -> Just a
 
 -- | A logical sub-store of the storage of a contract
-data LogicalStore = SmallSlots | ArrayStore W256 | MapStore W256
-  deriving (Show, Eq, Ord)
-
 -- | Turns a storage slot expression into a pair (logical store, index within that store)
 inferLogicalStore :: Expr EWord -> Maybe (LogicalStore, Expr EWord)
 inferLogicalStore = \case
@@ -1416,7 +1501,12 @@ decomposeStorageProps props
     -- A logical store is named by its slot alone, so an array and a mapping on the same slot
     -- would be merged into one. Solidity never lays storage out like that, other bytecode can
     noSlotClash = Set.disjoint (Set.fromList [i | ArrayStore i <- stores]) (Set.fromList [i | MapStore i <- stores])
-    stores = concatMap (foldProp accessed []) props
+    stores = accessedLogicalStores props
+
+-- | The logical stores that the storage reads and writes of the props access
+accessedLogicalStores :: [Prop] -> [LogicalStore]
+accessedLogicalStores = concatMap (foldProp accessed [])
+  where
     accessed :: Expr a -> [LogicalStore]
     accessed = \case
       SLoad k _ -> fst <$> maybe [] pure (inferLogicalStore k)
@@ -1472,7 +1562,9 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (SStore slot val store) = writeStorage slot val store
 
     -- simplify buffers
-    go o@(ReadWord (Lit _) _) = simplifyReads o
+    go o@(ReadWord (Lit _) _) = case simplifyReads o of
+      ReadWord i@(Lit _) b | Just w <- readWordFromRuns i b -> w
+      r -> r
     go (ReadWord idx buf) = readWord idx buf
     go o@(ReadByte (Lit _) _) = simplifyReads o
     go (ReadByte idx buf) = readByte idx buf
@@ -1604,8 +1696,10 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     -- every value of one side is below the other
     go (EVM.Types.LT a (Lit c))
       | possibleOnes a < c = Lit 1
+      | lowerBound a >= c = Lit 0
     go (EVM.Types.LT (Lit c) b)
       | possibleOnes b <= c = Lit 0
+      | lowerBound b > c = Lit 1
 
     -- overflow checks: x + c and x - c wrap exactly past these bounds
     go (EVM.Types.LT a (Add (Lit c) b)) | a == b, c /= 0 = lt a (Lit (0 - c))
@@ -1830,6 +1924,8 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (SHR (Lit a) _) | a >= 256 = Lit 0
     -- compose shifts by literals; past 256 the possibleOnes rules above already gave 0
     go (SHR (Lit n) (SHR (Lit m) x)) | n < 256, m < 256, n + m < 256 = shr (Lit (n + m)) x
+    -- e.g. the selector out of a word 'readWordFromRuns' made of it and an argument
+    go (SHR (Lit n) (Or a b)) | n < 256, isJust (maybeLitWordSimp a) || isJust (maybeLitWordSimp b) = EVM.Expr.or (shr (Lit n) a) (shr (Lit n) b)
     go (SHL (Lit n) (SHL (Lit m) x)) | n < 256, m < 256, n + m < 256 = shl (Lit (n + m)) x
     go (SAR (Lit n) (SAR (Lit m) x)) | n < 256, m < 256 = sar (Lit (Prelude.min 255 (n + m))) x
     go (SHL (Lit n) (SHR (Lit m) x)) | n < 256, m < 256, n /= m =
@@ -1967,6 +2063,12 @@ simplifyProp prop =
       LEq{} -> internalError "Should not encounter LEq at this point!"
       GEq{} -> internalError "Should not encounter GEq at this point!"
       _ -> False
+    concWord :: Expr EWord -> Maybe W256
+    concWord = \case
+      Lit v -> Just v
+      Keccak (ConcreteBuf bs) -> Just (keccak' bs)
+      Add (Lit o) (Keccak (ConcreteBuf bs)) -> Just (o + keccak' bs)
+      _ -> Nothing
     go :: Prop -> Prop
 
     -- Rewrite PGT/GEq to PLT/PLEq
@@ -1984,6 +2086,11 @@ simplifyProp prop =
     go (PLT (Lit l) (Lit r)) = PBool (l < r)
     go (PLEq a b) | a == b = PBool True
     go (PLEq (Lit l) (Lit r)) = PBool (l <= r)
+    -- litToKeccak turns some literals back into concrete keccaks, so evaluate those here
+    go (PLT a b) | Just l <- concWord a, Just r <- concWord b = PBool (l < r)
+    go (PLEq a b) | Just l <- concWord a, Just r <- concWord b = PBool (l <= r)
+    go (PEq (Lit l) b) | Just r <- concWord b = PBool (l == r)
+    go (PEq a (Lit r)) | Just l <- concWord a = PBool (l == r)
     go (PLEq a (Max b _)) | a == b = PBool True
     go (PLEq a (Max _ b)) | a == b = PBool True
     go (PLEq (Sub a b) c) | a == c = PLEq b a
@@ -2003,6 +2110,10 @@ simplifyProp prop =
     go (PLT (Lit c) b) | possibleOnes b <= c = PBool False
     go (PLEq a (Lit c)) | possibleOnes a <= c = PBool True
     go (PLEq (Lit c) b) | possibleOnes b < c = PBool False
+    go (PLT a (Lit c)) | lowerBound a >= c = PBool False
+    go (PLT (Lit c) b) | lowerBound b > c = PBool True
+    go (PLEq a (Lit c)) | lowerBound a > c = PBool False
+    go (PLEq (Lit c) b) | lowerBound b >= c = PBool True
 
     -- a comparison with an ITE with literal branches is a condition on its ITE
     go (PEq (Lit k) (ITE c (Lit a) (Lit b))) = onITE c (a == k) (b == k)
@@ -2243,6 +2354,9 @@ indexWord i@(Lit idx) e@(And (Lit mask) w)
 -- indexWord takes the MSB i-th byte when called with (indexWord i).
 indexWord (Lit a) (Or funSel (And (Lit 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffff) _)) | a < 4 =
   indexWord (Lit a) funSel
+-- Read a byte directly from the source of a non-wrapping word read.
+indexWord (Lit idx) (ReadWord (Lit off) buf)
+  | idx <= 31, off <= maxBound - 31 = readByte (Lit (off + idx)) buf
 indexWord (Lit idx) (Lit w)
   | idx <= 31 = LitByte . fromIntegral $ shiftR w (248 - unsafeInto idx * 8)
   | otherwise = LitByte 0
