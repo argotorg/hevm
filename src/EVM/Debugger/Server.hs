@@ -1,5 +1,5 @@
 -- | Minimal HTTP+JSON API for debugging sessions and run progress, bound to
--- localhost. Clients, such as hevm-debug or hevm-web-ui, format what it sends.
+-- localhost. Clients, such as hevm attach or hevm-web-ui, format what it sends.
 -- Hand-rolled on top of 'network' to avoid pulling a web framework into hevm.
 module EVM.Debugger.Server
   ( serveSession
@@ -108,7 +108,7 @@ dispatch routes req = case (req.method, req.path) of
 announce :: Int -> IO ()
 announce port = do
   putStrLn $ "hevm debugger at http://127.0.0.1:" <> show port
-    <> "  (or in a terminal: hevm-debug --port " <> show port <> ")"
+    <> "  (or in a terminal: hevm attach --port " <> show port <> ")"
   hFlush stdout
 
 handleConn :: [ByteString] -> (Request -> IO Response) -> Socket -> IO ()

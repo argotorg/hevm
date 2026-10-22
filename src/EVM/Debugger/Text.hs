@@ -1,4 +1,4 @@
--- | The debugger's views as terminal text, for clients such as hevm-debug
+-- | The debugger's views as terminal text, for clients such as hevm attach
 module EVM.Debugger.Text (renderView, valueText) where
 
 import Data.ByteString qualified as BS

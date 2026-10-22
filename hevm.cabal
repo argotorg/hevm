@@ -222,10 +222,12 @@ executable hevm
   if flag(devel)
     ghc-options: -rtsopts
   other-modules:
+    Attach
     Paths_hevm
   autogen-modules:
     Paths_hevm
   build-depends:
+    aeson,
     base,
     bytestring,
     data-dword,
@@ -242,24 +244,8 @@ executable hevm
     witch,
     unliftio-core,
     split,
-
-executable hevm-debug
-  import: shared
-  default-language: GHC2021
-  hs-source-dirs:
-    cli
-  main-is:
-    hevm-debug.hs
-  ghc-options: -threaded
-  build-depends:
-    aeson,
-    base,
-    bytestring,
     haskeline                         >= 0.8 && < 0.9,
-    hevm,
     http-client                       >= 0.7 && < 0.8,
-    optparse-applicative,
-    text,
 
 --- Test Helpers ---
 
