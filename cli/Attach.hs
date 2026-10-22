@@ -1,6 +1,5 @@
--- Line-based client for the hevm debugger server (hevm ... --debugger)
-
-module Main where
+-- | hevm attach: a line-based client for a debugger started with --debugger
+module Attach (AttachOptions, attachOptions, attach) where
 
 import Control.Exception (SomeException, try)
 import Control.Monad.IO.Class (liftIO)
@@ -18,22 +17,20 @@ import EVM.Debugger (View)
 import EVM.Debugger.Server (defaultDebuggerPort)
 import EVM.Debugger.Text (renderView)
 
-data Opts = Opts
+data AttachOptions = AttachOptions
   { port     :: Int
   , commands :: [String]
   , noClear  :: Bool
   }
 
-opts :: Parser Opts
-opts = Opts
+attachOptions :: Parser AttachOptions
+attachOptions = AttachOptions
   <$> option auto (long "port" <> showDefault <> value defaultDebuggerPort <> help "Port of the hevm debugger")
   <*> many (strOption (long "command" <> short 'c' <> help "Run this command and exit instead of starting the prompt. Can be given multiple times"))
   <*> switch (long "no-clear" <> help "Don't clear the screen before each view")
 
-main :: IO ()
-main = do
-  o <- execParser $ info (opts <**> helper)
-    (fullDesc <> progDesc "Interactive client for the hevm debugger, started with e.g. `hevm test --debugger --match <test>`")
+attach :: AttachOptions -> IO ()
+attach o = do
   mgr <- newManager defaultManagerSettings { managerResponseTimeout = responseTimeoutNone }
   let base = "http://127.0.0.1:" <> show o.port
       call method path body = do

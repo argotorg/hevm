@@ -649,7 +649,7 @@ commandHelp = T.unlines
   , "merge on|off          merge short branches as exploration does (default off): a step"
   , "                      may then run a whole if/else"
   , "show                  just show the current state"
-  , "quit             (q)  stop the debugger (hevm-debug; 'detach' leaves it running)"
+  , "quit             (q)  stop the debugger (hevm attach; 'detach' leaves it running)"
   ]
 
 showBreak :: Breakpoint -> Text

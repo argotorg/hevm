@@ -42,6 +42,7 @@ import JSONL (jsonlBuilder, jsonLine)
 
 import EVM (initialContract, abstractContract, makeVm, defaultVMOpts)
 import EVM.ABI (Sig(..))
+import Attach (attach, attachOptions, AttachOptions)
 import EVM.Debugger (newSession, setSnapshotInterval, snapshotInterval)
 import EVM.Debugger.Server (serveSession, withProgressServer, announce, defaultDebuggerPort)
 import EVM.Dapp (dappInfo, DappInfo, emptyDapp, TestMethodInfo(..))
@@ -155,7 +156,7 @@ commonOptions = CommonOptions
   <*> (optional $ strOption $ long "progress-log" <> help "Write a JSONL log of interpreter and solver progress to this file (default with --verb 3: hevm-progress.jsonl)")
   <*> (switch $ long "progress-exprs" <> help "Also log the expressions and path conditions sent to the solver in the progress log (implied by --verb 4)")
   <*> (switch $ long "no-progress" <> help "Don't show the live status line on stderr")
-  <*> (switch $ long "debugger" <> help "Start the interactive debugger, served over HTTP on localhost. Connect with hevm-debug")
+  <*> (switch $ long "debugger" <> help "Start the interactive debugger, served over HTTP on localhost. Drive it with hevm attach")
   <*> (switch $ long "serve" <> help "Serve the progress of the run over HTTP on localhost, at /progress")
   <*> (option auto $ long "port" <> showDefault <> value defaultDebuggerPort <> help "Port for --debugger and --serve, 0 picks a free one")
   <*> (option auto $ long "debug-snapshot-every" <> showDefault <> value snapshotInterval <> help "Steps between the debugger's snapshots: fewer make going back faster and use more memory")
@@ -294,6 +295,7 @@ data Command
   | Equal      EqOptions CommonOptions
   | Test       TestOptions  CommonOptions
   | Exec       CommonFileOptions ExecOptions CommonExecOptions CommonOptions
+  | Attach     AttachOptions
   | Version
 
 -- Parser for the subcommands
@@ -315,6 +317,9 @@ commandParser = subparser
       (info (Exec <$> commonFileOptions <*> execOptions <*> commonExecOptions <*> commonOptions <**> helper)
         (progDesc "Concretely execute a given program"
         <> footer "For more help, see https://hevm.dev/exec.html" ))
+  <> command "attach"
+      (info (Attach <$> attachOptions <**> helper)
+        (progDesc "Drive a debugger, started with --debugger, from the terminal"))
   <> command "version"
       (info (pure Version)
         (progDesc "Show the version of the tool"))
@@ -351,6 +356,7 @@ main = do
       env <- makeEnv cOpts
       root <- getRoot cOpts
       withCurrentDirectory root $ runEnv env $ withProgress (progressOpts env cOpts) $ serving cOpts $ symbCheck cFileOpts symbOpts cExecOpts cOpts
+    Attach o -> attach o
     Equal eqOpts cOpts -> do
       when cOpts.debugger $ do
         putStrLn "Error: --debugger is not supported for equivalence checking"
