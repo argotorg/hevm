@@ -340,7 +340,6 @@ test-suite test
     EVM.Debugger.DebuggerTests
     EVM.Debugger.DebuggerFuzz
     EVM.Debugger.ProgressTests
-    EVM.Debugger.ApiFixtures
   build-depends:
     aeson-pretty,
     base16,

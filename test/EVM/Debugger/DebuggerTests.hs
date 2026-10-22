@@ -176,6 +176,10 @@ tests = testGroup "Debugger"
         assertEqual "stepped" (Just (JSON.Number 5)) (KM.lookup "step" st')
         st'' <- httpJSON port "POST" "/command" "back 2"
         assertEqual "stepped back" (Just (JSON.Number 3)) (KM.lookup "step" st'')
+        apiText <- http port "GET" "/api" ""
+        assertBool "the API help" ("POST /command" `BS.isInfixOf` apiText)
+        root <- http port "GET" "/" ""
+        assertEqual "the same at /" apiText root
         view <- JSON.decodeStrict <$> http port "GET" "/state" ""
         assertBool "a client can read the view, and show it" (maybe False (("== step 3" `T.isInfixOf`) . renderView) view)
         stats <- httpJSON port "GET" "/stats" ""

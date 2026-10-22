@@ -93,7 +93,6 @@ import EVM.SymExec.SymExecTests qualified as SymExecTests
 import EVM.Debugger.DebuggerTests qualified as DebuggerTests
 import EVM.Debugger.DebuggerFuzz qualified as DebuggerFuzz
 import EVM.Debugger.ProgressTests qualified as ProgressTests
-import EVM.Debugger.ApiFixtures qualified as ApiFixtures
 import EVM.Test.FoundryTests qualified as FoundryTests
 
 testEnv :: Env
@@ -250,7 +249,6 @@ tests = testGroup "hevm"
   , DebuggerTests.tests
   , DebuggerFuzz.tests
   , ProgressTests.tests
-  , ApiFixtures.tests
   , EquivalenceTests.tests
   , EquivFuzz.tests
   , RpcFuzz.tests
