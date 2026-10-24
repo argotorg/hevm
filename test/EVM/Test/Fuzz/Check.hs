@@ -1,4 +1,11 @@
--- | Checking hevm's runs against geth's
+{-|
+Module      : EVM.Test.Fuzz.Check
+Description : Checking hevm's runs of a fuzzed case against geth's
+
+Concrete hevm must match geth's trace and outcome. Substituting the inputs into
+the symbolic leaves must select one leaf with geth's outcome, and models of the
+other leaves must reach them in geth. Also collects opcode coverage.
+-}
 module EVM.Test.Fuzz.Check
   ( Report(..), addCoverage, bucket, checkCase, checkConcrete, concretize, concretizeProps
   , errorKind, hevmErrorKind, modelInputs, printCoverage, test, testEnv, withDir

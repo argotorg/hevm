@@ -1,4 +1,12 @@
--- | Stepping concrete and symbolic debugger sessions side by side
+{-|
+Module      : EVM.Test.Fuzz.Lockstep
+Description : Concrete and symbolic debugger sessions stepped side by side
+
+After every step, the symbolic state with the concrete inputs substituted must
+be the concrete one. Forward jumps are merged on the side and compared where
+the concrete run reaches the jump target. Also steps along solver-chosen paths,
+and checks a concrete session moving back and forth against geth.
+-}
 module EVM.Test.Fuzz.Lockstep
   ( DebuggerVsGeth(..), Deferred(..), Lockstep(..), debuggerVsGeth, lockstepCase, modelGuided
   ) where

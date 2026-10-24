@@ -1,4 +1,12 @@
--- | QuickCheck generators of programs and inputs
+{-|
+Module      : EVM.Test.Fuzz.Gen
+Description : QuickCheck generators of fuzzed programs and inputs
+
+Programs are blocks of straight-line code, branches, loops, calls, creates and
+precompile calls that keep the stack deep enough. Some blocks target one hevm
+feature, e.g. forward jumps that path merging joins. Also generates debugger
+moves.
+-}
 module EVM.Test.Fuzz.Gen
   ( genMove, genSnapEvery
   ) where

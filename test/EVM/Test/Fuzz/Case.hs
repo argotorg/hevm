@@ -1,4 +1,11 @@
--- | Reporting and reproducing failing cases
+{-|
+Module      : EVM.Test.Fuzz.Case
+Description : Reporting and reproducing failing fuzz cases
+
+A failure prints the case as @HEVM_FUZZ_*@ variables, which the @*-from-env@
+tests read back. @HEVM_FUZZ_CASE_FILE@ records the case each property is
+running, to find one that crashes or hangs.
+-}
 module EVM.Test.Fuzz.Case
   ( caseFromEnv, failWith, modeOf, reproduction, splitOn', writeCaseFile
   ) where

@@ -1,4 +1,11 @@
--- | Running a case in hevm, concretely and symbolically
+{-|
+Module      : EVM.Test.Fuzz.Hevm
+Description : Running a fuzzed case in hevm, concretely and symbolically
+
+The symbolic VM leaves calldata, storage, callvalue and timestamp abstract,
+bounded so that solver models replay in geth. Symbolic runs also record which
+opcodes saw symbolic operands and how many forward jumps merged.
+-}
 module EVM.Test.Fuzz.Hevm
   ( HevmRun(..), SymRun(..), concreteTestVm, hevmRun, replayModel, runHevm, runSymbolic
   , symCalldataBuf, symbolicTestVm

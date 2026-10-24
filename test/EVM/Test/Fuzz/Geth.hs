@@ -1,4 +1,10 @@
--- | Running a case in geth's evm
+{-|
+Module      : EVM.Test.Fuzz.Geth
+Description : Running a fuzzed case in geth's evm
+
+Writes the pre-state and transaction as JSON, runs @evm transition@ with
+tracing, and reads back the outcome, storage, logs and step trace.
+-}
 module EVM.Test.Fuzz.Geth
   ( EVMToolTrace(..), GethLog(..), GethRun(..), addrKey, blockHash, fromAddress
   , headMay, mkTx, nonZero, originBalance, preState, prevRandaoVal, runGeth

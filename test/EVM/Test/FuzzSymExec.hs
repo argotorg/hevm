@@ -2,15 +2,14 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 {-|
-Module      : FuzzSymExec
+Module      : EVM.Test.FuzzSymExec
 Description : Differential fuzzing of concrete and symbolic execution against geth's evm
 
-Random programs are run in geth's evm, and in hevm both concretely (comparing
-traces step by step) and symbolically, with calldata, storage, callvalue and
-timestamp left abstract. Substituting the concrete inputs into the symbolic
-leaves must select exactly one leaf, whose outcome must match geth's. For other
-leaves, the solver's model of their path condition is replayed in geth, and
-must reach that leaf.
+Random programs run in geth's evm and in hevm, concretely and symbolically with
+abstract calldata, storage, callvalue and timestamp. The concrete inputs must
+select exactly one symbolic leaf, with geth's outcome, and solver models of the
+other leaves must reach them in geth. The lockstep properties compare concrete
+and symbolic runs after every step.
 -}
 module EVM.Test.FuzzSymExec (tests, lockstepTests) where
 

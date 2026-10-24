@@ -1,4 +1,12 @@
--- | Random programs, the accounts around them, and their assembly
+{-|
+Module      : EVM.Test.Fuzz.Program
+Description : Fuzzed programs, the accounts around them, and their assembly
+
+Programs are opcodes, pushes and labelled jumps. Every case runs against the
+same pre-state: the contract, a callee, and accounts that exercise EIP-161
+emptiness and CREATE collisions. The opcode table lists what the generators
+emit and how many stack items each opcode pops.
+-}
 module EVM.Test.Fuzz.Program
   ( Inputs(..), Item(..), Prog(..), TestCase(..), accountTargets, assembleItems
   , calleeAddr, codeOps, coinbaseAddr, contractAddr, contractBalance, createInitCode

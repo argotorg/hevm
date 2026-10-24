@@ -1,3 +1,7 @@
+{-|
+Module      : EVM.Test.Utils
+Description : Compiling Solidity with forge and running hevm test on it
+-}
 module EVM.Test.Utils where
 
 import Data.List (isInfixOf)
