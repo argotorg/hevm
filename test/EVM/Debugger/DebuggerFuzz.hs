@@ -5,7 +5,7 @@ Module      : DebuggerFuzz
 Description : Fuzzing of the interactive debugger and its HTTP server
 
 Random command sequences drive debugging sessions of the random programs of
-'EVM.Test.FuzzSymExec'. Every state reached must be the one that plainly stepping
+'EVM.Test.Fuzz.Gen'. Every state reached must be the one that plainly stepping
 forward reaches, and every symbolic branch offered must be feasible. The HTTP
 server gets malformed and concurrent requests, and must keep answering.
 -}
@@ -44,7 +44,9 @@ import EVM.Effects
 import EVM.Fetch qualified as Fetch
 import EVM.Solvers (withSolvers, defMemLimit, Solver(..), SolverGroup, checkSatWithProps)
 import EVM.Stepper qualified as Stepper
-import EVM.Test.FuzzSymExec (TestCase, concreteTestVm, symbolicTestVm, genSnapEvery)
+import EVM.Test.Fuzz.Gen (genSnapEvery)
+import EVM.Test.Fuzz.Hevm (concreteTestVm, symbolicTestVm)
+import EVM.Test.Fuzz.Program (TestCase)
 import EVM.Types hiding (Env)
 
 tests :: TestTree
