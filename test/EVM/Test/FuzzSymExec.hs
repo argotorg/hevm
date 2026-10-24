@@ -18,7 +18,7 @@ import Control.Monad (foldM, forM, forM_, unless, void, when, zipWithM)
 import Control.Monad.IO.Unlift
 import Control.Monad.ST (ST, stToIO, RealWorld)
 import Control.Monad.ST.Unsafe (unsafeIOToST)
-import Control.Monad.State.Strict (StateT(..), evalStateT, get, gets, modify, lift)
+import Control.Monad.State.Strict (StateT(..), evalStateT, execStateT, get, gets, modify, lift)
 import Control.Monad.Reader (ReaderT)
 import Data.Aeson ((.:), (.:?))
 import Data.Aeson qualified as JSON
@@ -535,16 +535,42 @@ genMergeable :: G [Item]
 genMergeable = do
   symMem <- concat <$> sequence [push 0, op 1 1 OpCalldataload, push 0x40, op 2 0 OpMstore]
   vals <- liftG (chooseInt (1, 3)) >>= \n -> concat <$> sequence (replicate n (liftG genWord >>= push))
-  cond <- genCalldataCond
+  cond <- liftG (chooseInt (0, 5)) >>= \case
+    0 -> genConcreteCond
+    _ -> genCalldataCond
   modify (\s -> s { sdepth = s.sdepth - 1 })
   l <- gets (.nextLabel)
   modify (\s -> s { nextLabel = l + 1 })
-  k <- liftG $ chooseInt (1, 4)
-  body <- concat <$> sequence (replicate k (do
-    o <- liftG $ elements [OpAdd, OpXor, OpMul, OpSub, OpAnd, OpShl]
-    w <- liftG genWord
-    (<>) <$> push w <*> op 2 1 o))
+  k <- liftG $ chooseInt (0, 4)
+  body <- concat <$> sequence (replicate k genMergeableStep)
   pure (symMem <> vals <> cond <> [IJump True l] <> body <> [ILabel l])
+  where
+    -- operands of 0, 1 and maxBound give identities, and stack shuffles leave
+    -- some or all slots equal on both sides of the merge
+    genMergeableStep = do
+      d <- gets (.sdepth)
+      liftG (chooseInt (0, 3)) >>= \case
+        0 | d >= 2 -> do
+          j <- liftG $ chooseInt (1, min 4 (d - 1))
+          op (j + 1) (j + 1) (OpSwap (unsafeInto j))
+        1 | d >= 1 -> do
+          j <- liftG $ chooseInt (1, min 4 d)
+          (<>) <$> op j (j + 1) (OpDup (unsafeInto j)) <*> op 1 0 OpPop
+        2 -> (<>) <$> (liftG genWord >>= push) <*> op 1 0 OpPop
+        _ -> do
+          o <- liftG $ elements [OpAdd, OpXor, OpMul, OpSub, OpAnd, OpShl]
+          w <- liftG $ frequency [(3, genWord), (1, elements [0, 1, maxBound])]
+          (<>) <$> push w <*> op 2 1 o
+    -- a literal, or a comparison with the keccak of a word in memory, which
+    -- simplification folds to a literal
+    genConcreteCond = liftG (chooseInt (0, 1)) >>= \case
+      0 -> liftG (elements [0, 1, maxBound]) >>= push
+      _ -> do
+        v <- liftG genWord
+        h <- liftG $ elements [keccak' (word256Bytes v), keccak' (word256Bytes v) + 1]
+        concat <$> sequence
+          [ push v, push 0x80, op 2 0 OpMstore, push 0x20, push 0x80, op 2 1 OpSha3
+          , push h, op 2 1 OpEq ]
 
 genBlock :: Bool -> G [Item]
 genBlock isMain = do
@@ -942,23 +968,25 @@ replayModel c leaf cex = do
   where
     isFailure = \case Failure {} -> True; _ -> False
 
--- | The leaves, and the opcodes that ran with a non-literal operand
-runSymbolic :: App m => SolverGroup -> TestCase -> m (Maybe ([Expr End], Set String))
+-- | The leaves, the opcodes that ran with a non-literal operand, and the
+-- number of forward jumps merged
+runSymbolic :: App m => SolverGroup -> TestCase -> m (Maybe ([Expr End], Set String, Int))
 runSymbolic solvers c = do
   conf <- readConfig
   vm0 <- liftIO $ stToIO $ mkVm False () c symbolicVMInputs
   ref <- liftIO $ newIORef mempty
+  merges <- liftIO $ newIORef 0
   let vm = vm0 & set #constraints symProps
   leaves <- withRunInIO $ \runInIO ->
     timeout 60_000_000 $ runInIO $
-      interpret (Fetch.oracle solvers Nothing Fetch.noRpc) symIterConf vm (recording conf ref) noopPathHandler
-  forM leaves $ \ls -> (ls,) <$> liftIO (readIORef ref)
+      interpret (Fetch.oracle solvers Nothing Fetch.noRpc) symIterConf vm (recording conf ref merges) noopPathHandler
+  forM leaves $ \ls -> (ls,,) <$> liftIO (readIORef ref) <*> liftIO (readIORef merges)
 
 -- | 'runExpr', stepping one opcode at a time to record those with a non-literal operand.
 -- Loops on concrete conditions only end when gas runs out, which the symbolic
 -- run does not track, so a path is cut short after 'maxSteps'.
-recording :: Config -> IORef (Set String) -> Stepper.Stepper Symbolic (Expr End)
-recording conf ref = loop (0 :: Int)
+recording :: Config -> IORef (Set String) -> IORef Int -> Stepper.Stepper Symbolic (Expr End)
+recording conf ref merges = loop (0 :: Int)
   where
     maxSteps = 20000
     loop n = do
@@ -967,7 +995,7 @@ recording conf ref = loop (0 :: Int)
         Nothing
           | n >= maxSteps -> pure $ Partial vm.constraints (TraceContext mempty mempty mempty)
                                       (MaxIterationsReached vm.state.pc vm.state.contract)
-          | otherwise -> Stepper.evm (record vm >> exec1 conf) >> loop (n + 1)
+          | otherwise -> Stepper.evm (record vm >> exec1 conf >> countMerge vm) >> loop (n + 1)
         Just (HandleEffect (Query q)) -> Stepper.wait q >> loop n
         Just (HandleEffect (Branch ctx)) -> Stepper.fork ctx >> loop n
         Just _ -> runExpr
@@ -977,6 +1005,16 @@ recording conf ref = loop (0 :: Int)
             isLit = \case Lit _ -> True; _ -> False
         when (any (not . isLit) (take (Map.findWithDefault 0 name opPops) vm.state.stack)) $
           lift $ unsafeIOToST $ atomicModifyIORef' ref (\x -> (Set.insert name x, ()))
+      _ -> pure ()
+    -- a symbolic JUMPI that lands on its target without forking was merged
+    countMerge vm = case (vm.state.code, vm.state.stack) of
+      (RuntimeCode (ConcreteRuntimeCode bs), Lit t : cond : _)
+        | vm.state.pc < BS.length bs, BS.index bs vm.state.pc == 0x57
+        , t < 0x10000, unsafeInto t > vm.state.pc
+        , isNothing (Expr.maybeLitWordSimp (Expr.simplify cond)) -> do
+            vm' <- get
+            when (isNothing vm'.result && vm'.state.pc == unsafeInto t) $
+              lift $ unsafeIOToST $ atomicModifyIORef' merges (\x -> (x + 1, ()))
       _ -> pure ()
 
 -- * Checking
@@ -1286,7 +1324,7 @@ checkCase maxReplays c = Progress.withProgressLogFromEnv "fuzz-symexec" $
   phase "symbolic"
   runSymbolic solvers c >>= \case
     Nothing -> pure $ Report (("symbolic", "timeout") : gethTables) generated (ran g) mempty
-    Just (leaves, symOps) -> do
+    Just (leaves, symOps, merges) -> do
       phase $ "leaves: " <> show (length leaves)
       first <- liftIO $ checkLeaves c c.inputs leaves Nothing g
       let candidates = take maxReplays [ (n, l) | (n, l) <- zip [0 ..] leaves
@@ -1317,6 +1355,7 @@ checkCase maxReplays c = Progress.withProgressLogFromEnv "fuzz-symexec" $
       pure $ Report
         { tables = gethTables
             <> [("leaves", bucket (length leaves)), ("concrete inputs reach", first)]
+            <> [("forward jumps merged", bucket merges)]
             <> [("replayed model reaches", r) | (r, _, _) <- replays]
             <> [("hevm symbolic replay", h) | (_, _, Just h) <- replays]
             <> [("leaf kinds", leafKind l) | l <- leaves]
@@ -1382,6 +1421,10 @@ data Lockstep = Lockstep
   , static   :: Int -- ^ branches decided without the solver
   , ended    :: Maybe (Int, Int, String) -- ^ pc, depth and kind of result, when both runs halted
   , ops      :: Set String -- ^ the opcodes stepped and compared after
+  , merges   :: Int -- ^ merged forward jumps checked against the concrete run
+  -- | the state merging the latest symbolic JUMPI gives, with its target pc,
+  -- depth, and the step by which the concrete run must reach that target
+  , merged   :: Maybe (Int, Int, Int, VM Symbolic)
   }
 
 maxLockstepSteps :: Int
@@ -1390,11 +1433,14 @@ maxLockstepSteps = 2000
 -- | Steps a concrete and a symbolic debugging session of the case side by side,
 -- taking the concrete run's side at every symbolic branch. After every step the
 -- symbolic state, with the concrete inputs substituted, must be the concrete one.
+-- The sessions do not merge forward jumps, so at a symbolic JUMPI the merged
+-- state is computed on the side, and compared when the concrete run reaches the
+-- jump target.
 lockstepCase :: App m => SolverGroup -> BranchMode -> TestCase -> m (Either String Lockstep)
 lockstepCase solvers mode c = Progress.withProgressLogFromEnv "lockstep" $ do
   sc0 <- liftIO $ stToIO (concreteTestVm c) >>= newSession emptyDapp
   ss0 <- liftIO $ setBranchMode mode <$> (stToIO (symbolicTestVm c) >>= newSession emptyDapp)
-  r <- go sc0 ss0 (Lockstep "" 0 0 0 0 0 [] 0 Nothing mempty) Nothing
+  r <- go sc0 ss0 (Lockstep "" 0 0 0 0 0 [] 0 Nothing mempty 0 Nothing) Nothing
   Progress.emit "lockstep-end" $ case r of
     Left err -> ["failure" JSON..= T.pack err]
     Right l -> ["stopped" JSON..= T.pack l.stopped, "steps" JSON..= l.steps, "compared" JSON..= l.compared, "branches" JSON..= l.branches]
@@ -1413,11 +1459,19 @@ lockstepCase solvers mode c = Progress.withProgressLogFromEnv "lockstep" $ do
             | gasDependentRun now = stopWith "gas-dependent"
             | otherwise = pure (Left (where_ <> msg <> "\nlast steps, oldest first:\n" <> unlines (reverse acc.trail)))
       cmp <- liftIO $ compareStates c prevOp vc vs
+      mergeCmp <- case acc.merged of
+        Just (pc, depth, _, vm) | vc.state.pc == pc, length vc.frames == depth -> Just <$> liftIO (compareStates c Nothing vc vm)
+        _ -> pure Nothing
       case cmp of
         _ | Just (Unfinished p) <- vs.result -> stopWith ("symbolic unfinished: " <> unfinishedReason p)
         Left msg -> mismatch msg
+        _ | Just (Left msg) <- mergeCmp -> mismatch ("against the merged state of the latest JUMPI, " <> msg)
+          | Just (_, _, deadline, _) <- acc.merged, isNothing mergeCmp, acc.steps > deadline || isHalted sc ->
+              mismatch "the concrete run did not reach the target of the merged JUMPI"
         Right (n, o) -> do
-          let acc' = acc { compared = acc.compared + n, opaque = acc.opaque + o }
+          let acc' = acc { compared = acc.compared + n, opaque = acc.opaque + o
+                         , merges = acc.merges + length mergeCmp
+                         , merged = if isJust mergeCmp then Nothing else acc.merged }
           case (isHalted sc, isHalted ss) of
             (True, True) -> either mismatch (const (pure (Right acc' { stopped = "halted", ended = Just (endOf vs) }))) (compareEnds c vc vs)
             (True, False) -> mismatch $ "only the concrete run halted: " <> show vc.result
@@ -1425,6 +1479,7 @@ lockstepCase solvers mode c = Progress.withProgressLogFromEnv "lockstep" $ do
             _ | acc.steps >= maxLockstepSteps -> stopWith "step limit"
               | otherwise -> do
                   let opName' = intToOpName (fromIntegral (getOpW8' vc))
+                  merged' <- if opName' == "JUMPI" && isNothing acc'.merged then mergeAt acc'.steps vs else pure acc'.merged
                   sc' <- runCommand fetcher (Step 1) sc >>= settle (4 :: Int) vc
                   ss1 <- runCommand fetcher (Step 1) ss
                   picked <- pickSide vs (sessionVM sc') ss1
@@ -1456,7 +1511,18 @@ lockstepCase solvers mode c = Progress.withProgressLogFromEnv "lockstep" $ do
                         go sc' ss'' acc' { steps = acc.steps + 1, branches = acc.branches + took, retries = acc.retries + tried
                                          , ops = Set.insert opName' acc.ops
                                          , trail = take 30 (entry : acc.trail)
-                                         , static = counters.staticDecisions } (Just opName')
+                                         , static = counters.staticDecisions, merged = merged' } (Just opName')
+    mergeAt :: App m => Int -> VM Symbolic -> m (Maybe (Int, Int, Int, VM Symbolic))
+    mergeAt step vs = case (vs.state.stack, vs.state.memory) of
+      (Lit t : cond : _, SymbolicMemory _)
+        | t < 0x10000, unsafeInto t > vs.state.pc
+        , isNothing (Expr.maybeLitWordSimp (Expr.simplify cond)) -> do
+            conf <- readConfig
+            vm <- liftIO $ stToIO $ execStateT (exec1 conf) vs
+            pure $ if isNothing vm.result && vm.state.pc == unsafeInto t
+              then Just (vm.state.pc, length vs.frames, step + conf.mergeMaxBudget + 1, vm)
+              else Nothing
+      _ -> pure Nothing
     -- an instruction may take several steps, e.g. when it is re-executed after
     -- a query, but always ends at another pc or depth, or halts
     midInstruction :: VM t -> VM t -> Bool
@@ -1893,7 +1959,8 @@ lockstepTests = testGroup "lockstep-fuzz"
                           $ tabulate "branches taken" [bucket r.branches]
                           $ tabulate "sides retried" [bucket r.retries]
                           $ tabulate "values compared" [bucket r.compared]
-                          $ tabulate "stack words left symbolic" [bucket r.opaque] (property True)
+                          $ tabulate "stack words left symbolic" [bucket r.opaque]
+                          $ tabulate "merged jumps checked" [bucket r.merges] (property True)
   ]
   where
     bucket :: Int -> String
@@ -1935,7 +2002,7 @@ tests = testGroup "contract-quickcheck-run"
           let hex = fromJust . hexByteString . Char8.pack
               c = TestCase (Prog [IRaw (hex m)] [IRaw (hex cl)]) (Inputs mempty mempty 0 1) 300000 1
           r <- withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> runSymbolic solvers c
-          liftIO $ putStrLn $ "symbolic leaves: " <> show (length . fst <$> r))
+          liftIO $ putStrLn $ "symbolic leaves: " <> show ((\(ls, _, _) -> length ls) <$> r))
       , after AllFinish "random-contract-concrete-call" $ test "symbolic-jump-calldata-length" $ do
         _ <- checkCase 0 (fixedCase [IOp OpCalldatasize, IOp OpJump] (BS.replicate 5 0))
         pure ()
