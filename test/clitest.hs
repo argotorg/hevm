@@ -108,6 +108,22 @@ main = do
         stdout `shouldContain` "[validated]"
         exitCode `shouldBe` ExitFailure 1
 
+      it "equivalence-cex-with-sig" $ do
+        let torun = splitOn " " "equivalence --code-a 6004355f5500 --code-b 600760043514600435015f5500 --sig f(uint256)"
+        (exitCode, stdout, _) <- readProcessWithExitCode "cabal" (["run", "exe:hevm", "--" ] ++ torun) ""
+        stdout `shouldContain` "Not equivalent"
+        stdout `shouldContain` "0xb3de648b0000000000000000000000000000000000000000000000000000000000000007"
+        stdout `shouldContain` "[validated]"
+        exitCode `shouldBe` ExitFailure 1
+
+      it "equivalence-cex-with-calldata" $ do
+        let torun = splitOn " " "equivalence --code-a 6004355f5500 --code-b 600760043514600435015f5500 --calldata b3de648b0000000000000000000000000000000000000000000000000000000000000007"
+        (exitCode, stdout, _) <- readProcessWithExitCode "cabal" (["run", "exe:hevm", "--" ] ++ torun) ""
+        stdout `shouldContain` "Not equivalent"
+        stdout `shouldNotContain` "Empty"
+        stdout `shouldContain` "[validated]"
+        exitCode `shouldBe` ExitFailure 1
+
       it "hevm equivalence tutorial works -- PASS" $ do
         Just a <- runApp $ solcRuntime (T.pack "MyContract") (T.pack [i|
           contract MyContract {
