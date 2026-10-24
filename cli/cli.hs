@@ -483,7 +483,7 @@ equivalence eqOpts cOpts = do
     sess <- Fetch.mkSession cOpts.cacheDir Nothing
     eq <- equivalenceCheck s (Just sess) (fromJust bytecodeA) (fromJust bytecodeB) veriOpts calldata eqOpts.create
     let anyIssues =  not (null eq.partials) || any (isUnknown . fst) eq.res  || any (isError . fst) eq.res
-        cd = AbstractBuf "txdata"
+        cd = fst calldata
     cexes <- replayEqCexes s eqOpts.create (fromJust bytecodeA) (fromJust bytecodeB) cd (mapMaybe getCexP eq.res)
     let nValidated = length [() | (_, _, Validated {}) <- cexes]
     Progress.markPhase "report" [("cexes", length cexes), ("validated", nValidated), ("partials", length eq.partials)]
@@ -498,7 +498,7 @@ equivalence eqOpts cOpts = do
         when anyIssues exitFailure
         putStrLn "No discrepancies found"
       _ -> liftIO $ do
-        T.putStr . T.unlines $ cexHeader (length cexes) nValidated : concatMap (\c -> ["-----", formatCexes c]) cexes
+        T.putStr . T.unlines $ cexHeader (length cexes) nValidated : concatMap (\c -> ["-----", formatCexes cd c]) cexes
         exitFailure
   where
     decipher = maybe Nothing (hexByteString . strip0x)
@@ -511,7 +511,7 @@ equivalence eqOpts cOpts = do
     cexHeader 1 _ = "Possibly not equivalent: the input below could not be confirmed by running A and B concretely:"
     cexHeader n _ = "Possibly not equivalent: none of these " <> T.pack (show n) <> " inputs could be confirmed by running A and B concretely:"
     bold t = "\x1b[1m" <> t <> "\x1b[0m"
-    formatCexes (cex, reason, replay) = formatCex (AbstractBuf "txdata") Nothing cex <> bold "Difference:" <> " " <> T.pack reason
+    formatCexes cd (cex, reason, replay) = formatCex cd Nothing cex <> bold "Difference:" <> " " <> T.pack reason
       <> "\n" <> bold "Concrete replay:" <> " " <> replayTagColoured replay <> case replay of
         Validated a b -> "\n  A: " <> a <> "\n  B: " <> b
         NotReproducible a b -> "\n  A: " <> a <> "\n  B: " <> b
