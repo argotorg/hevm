@@ -1,3 +1,11 @@
+{-|
+Module      : EVM.Test.BlockchainTests
+Description : Running the ethereum/tests blockchain tests
+
+Loads the JSON cases from @HEVM_ETHEREUM_TESTS_REPO@, runs each transaction
+concretely, and checks the post-state. Known-problematic tests are skipped with
+a reason.
+-}
 module EVM.Test.BlockchainTests (prepareTests, problematicTests, findIgnoreReason, Case, vmForCase, checkExpectation, allTestCases) where
 
 import EVM (initialContract, makeVm, setEIP4788Storage, setEIP2935Storage)

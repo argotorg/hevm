@@ -1,3 +1,10 @@
+{-|
+Module      : EVM.Test.FoundryTests
+Description : hevm test on the Solidity files in test/contracts
+
+Each case compiles a file with forge and checks whether hevm reports
+counterexamples or warnings.
+-}
 module EVM.Test.FoundryTests (tests) where
 
 import Control.Monad (forM_)

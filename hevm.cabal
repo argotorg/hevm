@@ -316,6 +316,13 @@ test-suite test
     EVM.ConcreteExecution.ConcreteExecutionTests
     EVM.SymExec.SymExecTests
     EVM.Test.FuzzSymExec
+    EVM.Test.Fuzz.Program
+    EVM.Test.Fuzz.Gen
+    EVM.Test.Fuzz.Geth
+    EVM.Test.Fuzz.Hevm
+    EVM.Test.Fuzz.Case
+    EVM.Test.Fuzz.Check
+    EVM.Test.Fuzz.Lockstep
     EVM.Test.FoundryTests
     EVM.Test.Asm
     EVM.Debugger.DebuggerTests

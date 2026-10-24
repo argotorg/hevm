@@ -1,4 +1,10 @@
--- | Test programs written as opcodes
+{-|
+Module      : EVM.Test.Asm
+Description : Test programs written as opcodes
+
+Jumps target JUMPDESTs by index. Every push assembles to PUSH32, so offsets do
+not depend on the pushed values.
+-}
 module EVM.Test.Asm (AsmOp(..), asm, offsets) where
 
 import Data.ByteString (ByteString)
