@@ -1,6 +1,6 @@
 -- | Checking hevm's runs against geth's
 module EVM.Test.Fuzz.Check
-  ( Report(..), addCoverage, checkCase, checkConcrete, concretize, concretizeProps
+  ( Report(..), addCoverage, bucket, checkCase, checkConcrete, concretize, concretizeProps
   , errorKind, hevmErrorKind, modelInputs, printCoverage, test, testEnv, withDir
   ) where
 
@@ -296,7 +296,7 @@ checkCase maxReplays c = Progress.withProgressLogFromEnv "fuzz-symexec" $
   phase "symbolic"
   runSymbolic solvers c >>= \case
     Nothing -> pure $ Report (("symbolic", "timeout") : gethTables) generated (ran g) mempty
-    Just (leaves, symOps, merges) -> do
+    Just SymRun { leaves, symbolicOps = symOps, merges } -> do
       phase $ "leaves: " <> show (length leaves)
       first <- liftIO $ checkLeaves c c.inputs leaves Nothing g
       let candidates = take maxReplays [ (n, l) | (n, l) <- zip [0 ..] leaves
@@ -339,11 +339,17 @@ checkCase maxReplays c = Progress.withProgressLogFromEnv "fuzz-symexec" $
     mentionsBlockHash l = getAny $ foldMap (foldProp isBlockHash mempty) (extractProps l)
     isBlockHash :: Expr a -> Any
     isBlockHash = \case BlockHash _ -> Any True; _ -> Any False
-    bucket :: Int -> String
-    bucket n | n <= 1 = show n
-             | n <= 4 = "2-4"
-             | n <= 16 = "5-16"
-             | otherwise = ">16"
+
+-- | A count, in buckets for the coverage tables
+bucket :: Int -> String
+bucket n
+  | n <= 1 = show n
+  | n <= 4 = "2-4"
+  | n <= 16 = "5-16"
+  | n <= 64 = "17-64"
+  | n <= 256 = "65-256"
+  | n <= 1024 = "257-1024"
+  | otherwise = ">1024"
 
 -- | For each opcode: how many cases generated it, ran it in geth, and ran it
 -- symbolically with a non-literal operand

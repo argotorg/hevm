@@ -71,7 +71,7 @@ tests = testGroup "contract-quickcheck-run"
           let hex = fromJust . hexByteString . Char8.pack
               c = TestCase (Prog [IRaw (hex m)] [IRaw (hex cl)]) (Inputs mempty mempty 0 1) 300000 1
           r <- withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> runSymbolic solvers c
-          liftIO $ putStrLn $ "symbolic leaves: " <> show ((\(ls, _, _) -> length ls) <$> r))
+          liftIO $ putStrLn $ "symbolic leaves: " <> show (length . (.leaves) <$> r))
       , after AllFinish "random-contract-concrete-call" $ test "symbolic-jump-calldata-length" $ do
         _ <- checkCase 0 (fixedCase [IOp OpCalldatasize, IOp OpJump] (BS.replicate 5 0))
         pure ()
@@ -213,8 +213,5 @@ lockstepTests = testGroup "lockstep-fuzz"
                           $ tabulate "sides retried" [bucket r.retries]
                           $ tabulate "values compared" [bucket r.compared]
                           $ tabulate "stack words left symbolic" [bucket r.opaque]
-                          $ tabulate "merged jumps checked" [bucket r.merges] (property True)
+                          $ tabulate "deferred comparisons (merged jumps)" [bucket r.deferredChecked] (property True)
   ]
-  where
-    bucket :: Int -> String
-    bucket n | n == 0 = "0" | n < 10 = "1-9" | n < 100 = "10-99" | n < 1000 = "100-999" | otherwise = ">=1000"

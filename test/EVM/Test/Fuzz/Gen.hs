@@ -339,13 +339,18 @@ genMergeable = do
           [ push v, push 0x80, op 2 0 OpMstore, push 0x20, push 0x80, op 2 1 OpSha3
           , push h, op 2 1 OpEq ]
 
+-- | Weighted block generators, and those only the main contract gets
+blockGens, mainBlockGens :: [(Int, G [Item])]
+blockGens =
+  [ (10, genStraight), (4, genBranch), (2, genMergeable), (1, pure [IJumpFwd False]), (1, genHalt)
+  , (1, genDeepStack), (2, genStorageWrite) ]
+mainBlockGens =
+  [ (2, genLoop), (2, genSmallLoop), (2, genCall), (2, genAccountOp), (1, genCreate)
+  , (1, genPrecompileCall), (1, genRefund) ]
+
 genBlock :: Bool -> G [Item]
 genBlock isMain = do
-  inner <- liftG $ frequency $
-    [ (10, pure genStraight), (4, pure genBranch), (2, pure genMergeable), (1, pure (pure [IJumpFwd False])), (1, pure genHalt)
-    , (1, pure genDeepStack), (2, pure genStorageWrite) ] <>
-    (if isMain then [ (2, pure genLoop), (2, pure genSmallLoop), (2, pure genCall), (2, pure genAccountOp), (1, pure genCreate)
-                    , (1, pure genPrecompileCall), (1, pure genRefund) ] else [])
+  inner <- liftG $ frequency [(w, pure g) | (w, g) <- blockGens <> (if isMain then mainBlockGens else [])]
   items <- inner
   addLabel <- liftG $ chooseInt (0, 1)
   if addLabel == 0 then pure items else do

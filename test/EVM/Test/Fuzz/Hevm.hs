@@ -1,6 +1,6 @@
 -- | Running a case in hevm, concretely and symbolically
 module EVM.Test.Fuzz.Hevm
-  ( HevmRun(..), concreteTestVm, hevmRun, replayModel, runHevm, runSymbolic
+  ( HevmRun(..), SymRun(..), concreteTestVm, hevmRun, replayModel, runHevm, runSymbolic
   , symCalldataBuf, symbolicTestVm
   ) where
 
@@ -181,25 +181,28 @@ replayModel c leaf cex = do
   where
     isFailure = \case Failure {} -> True; _ -> False
 
--- | The leaves, the opcodes that ran with a non-literal operand, and the
--- number of forward jumps merged
-runSymbolic :: App m => SolverGroup -> TestCase -> m (Maybe ([Expr End], Set String, Int))
+data SymRun = SymRun
+  { leaves      :: [Expr End]
+  , symbolicOps :: Set String -- ^ opcodes that ran with a non-literal operand
+  , merges      :: Int -- ^ forward jumps merged
+  }
+
+runSymbolic :: App m => SolverGroup -> TestCase -> m (Maybe SymRun)
 runSymbolic solvers c = do
   conf <- readConfig
   vm0 <- liftIO $ stToIO $ mkVm False () c symbolicVMInputs
-  ref <- liftIO $ newIORef mempty
-  merges <- liftIO $ newIORef 0
+  ref <- liftIO $ newIORef (SymRun [] mempty 0)
   let vm = vm0 & set #constraints symProps
   leaves <- withRunInIO $ \runInIO ->
     timeout 60_000_000 $ runInIO $
-      interpret (Fetch.oracle solvers Nothing Fetch.noRpc) symIterConf vm (recording conf ref merges) noopPathHandler
-  forM leaves $ \ls -> (ls,,) <$> liftIO (readIORef ref) <*> liftIO (readIORef merges)
+      interpret (Fetch.oracle solvers Nothing Fetch.noRpc) symIterConf vm (recording conf ref) noopPathHandler
+  forM leaves $ \ls -> (\r -> r { leaves = ls }) <$> liftIO (readIORef ref)
 
 -- | 'runExpr', stepping one opcode at a time to record those with a non-literal operand.
 -- Loops on concrete conditions only end when gas runs out, which the symbolic
 -- run does not track, so a path is cut short after 'maxSteps'.
-recording :: Config -> IORef (Set String) -> IORef Int -> Stepper.Stepper Symbolic (Expr End)
-recording conf ref merges = loop (0 :: Int)
+recording :: Config -> IORef SymRun -> Stepper.Stepper Symbolic (Expr End)
+recording conf ref = loop (0 :: Int)
   where
     maxSteps = 20000
     loop n = do
@@ -217,7 +220,7 @@ recording conf ref merges = loop (0 :: Int)
         let name = intToOpName (into (BS.index bs vm.state.pc))
             isLit = \case Lit _ -> True; _ -> False
         when (any (not . isLit) (take (Map.findWithDefault 0 name opPops) vm.state.stack)) $
-          lift $ unsafeIOToST $ atomicModifyIORef' ref (\x -> (Set.insert name x, ()))
+          lift $ unsafeIOToST $ atomicModifyIORef' ref (\r -> (r { symbolicOps = Set.insert name r.symbolicOps }, ()))
       _ -> pure ()
     -- a symbolic JUMPI that lands on its target without forking was merged
     countMerge vm = case (vm.state.code, vm.state.stack) of
@@ -227,5 +230,5 @@ recording conf ref merges = loop (0 :: Int)
         , isNothing (Expr.maybeLitWordSimp (Expr.simplify cond)) -> do
             vm' <- get
             when (isNothing vm'.result && vm'.state.pc == unsafeInto t) $
-              lift $ unsafeIOToST $ atomicModifyIORef' merges (\x -> (x + 1, ()))
+              lift $ unsafeIOToST $ atomicModifyIORef' ref (\r -> (r { merges = r.merges + 1 }, ()))
       _ -> pure ()

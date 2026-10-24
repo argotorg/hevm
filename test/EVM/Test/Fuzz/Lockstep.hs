@@ -1,6 +1,6 @@
 -- | Stepping concrete and symbolic debugger sessions side by side
 module EVM.Test.Fuzz.Lockstep
-  ( DebuggerVsGeth(..), Lockstep(..), debuggerVsGeth, lockstepCase, modelGuided
+  ( DebuggerVsGeth(..), Deferred(..), Lockstep(..), debuggerVsGeth, lockstepCase, modelGuided
   ) where
 
 import Control.Monad (foldM, forM, void, when, zipWithM)
@@ -57,10 +57,24 @@ data Lockstep = Lockstep
   , static   :: Int -- ^ branches decided without the solver
   , ended    :: Maybe (Int, Int, String) -- ^ pc, depth and kind of result, when both runs halted
   , ops      :: Set String -- ^ the opcodes stepped and compared after
-  , merges   :: Int -- ^ merged forward jumps checked against the concrete run
-  -- | the state merging the latest symbolic JUMPI gives, with its target pc,
-  -- depth, and the step by which the concrete run must reach that target
-  , merged   :: Maybe (Int, Int, Int, VM Symbolic)
+  , deferred :: Maybe Deferred
+  , deferredChecked :: Int
+  }
+
+emptyLockstep :: Lockstep
+emptyLockstep = Lockstep
+  { stopped = "", steps = 0, compared = 0, opaque = 0, branches = 0, retries = 0, trail = []
+  , static = 0, ended = Nothing, ops = mempty, deferred = Nothing, deferredChecked = 0 }
+
+-- | A symbolic state ahead of the concrete run, e.g. after merging a forward
+-- jump, compared when the concrete run reaches its pc at its depth, which it
+-- must by step 'deadline'
+data Deferred = Deferred
+  { what     :: String
+  , pc       :: Int
+  , depth    :: Int
+  , deadline :: Int
+  , vm       :: VM Symbolic
   }
 
 maxLockstepSteps :: Int
@@ -76,7 +90,7 @@ lockstepCase :: App m => SolverGroup -> BranchMode -> TestCase -> m (Either Stri
 lockstepCase solvers mode c = Progress.withProgressLogFromEnv "lockstep" $ do
   sc0 <- liftIO $ stToIO (concreteTestVm c) >>= newSession emptyDapp
   ss0 <- liftIO $ setBranchMode mode <$> (stToIO (symbolicTestVm c) >>= newSession emptyDapp)
-  r <- go sc0 ss0 (Lockstep "" 0 0 0 0 0 [] 0 Nothing mempty 0 Nothing) Nothing
+  r <- go sc0 ss0 emptyLockstep Nothing
   Progress.emit "lockstep-end" $ case r of
     Left err -> ["failure" JSON..= T.pack err]
     Right l -> ["stopped" JSON..= T.pack l.stopped, "steps" JSON..= l.steps, "compared" JSON..= l.compared, "branches" JSON..= l.branches]
@@ -95,19 +109,19 @@ lockstepCase solvers mode c = Progress.withProgressLogFromEnv "lockstep" $ do
             | gasDependentRun now = stopWith "gas-dependent"
             | otherwise = pure (Left (where_ <> msg <> "\nlast steps, oldest first:\n" <> unlines (reverse acc.trail)))
       cmp <- liftIO $ compareStates c prevOp vc vs
-      mergeCmp <- case acc.merged of
-        Just (pc, depth, _, vm) | vc.state.pc == pc, length vc.frames == depth -> Just <$> liftIO (compareStates c Nothing vc vm)
+      deferredCmp <- case acc.deferred of
+        Just d | vc.state.pc == d.pc, length vc.frames == d.depth -> Just <$> liftIO (compareStates c Nothing vc d.vm)
         _ -> pure Nothing
       case cmp of
         _ | Just (Unfinished p) <- vs.result -> stopWith ("symbolic unfinished: " <> unfinishedReason p)
         Left msg -> mismatch msg
-        _ | Just (Left msg) <- mergeCmp -> mismatch ("against the merged state of the latest JUMPI, " <> msg)
-          | Just (_, _, deadline, _) <- acc.merged, isNothing mergeCmp, acc.steps > deadline || isHalted sc ->
-              mismatch "the concrete run did not reach the target of the merged JUMPI"
+        _ | Just d <- acc.deferred, Just (Left msg) <- deferredCmp -> mismatch ("against " <> d.what <> ", " <> msg)
+          | Just d <- acc.deferred, isNothing deferredCmp, acc.steps > d.deadline || isHalted sc ->
+              mismatch ("the concrete run did not reach the pc of " <> d.what)
         Right (n, o) -> do
           let acc' = acc { compared = acc.compared + n, opaque = acc.opaque + o
-                         , merges = acc.merges + length mergeCmp
-                         , merged = if isJust mergeCmp then Nothing else acc.merged }
+                         , deferredChecked = acc.deferredChecked + length deferredCmp
+                         , deferred = if isJust deferredCmp then Nothing else acc.deferred }
           case (isHalted sc, isHalted ss) of
             (True, True) -> either mismatch (const (pure (Right acc' { stopped = "halted", ended = Just (endOf vs) }))) (compareEnds c vc vs)
             (True, False) -> mismatch $ "only the concrete run halted: " <> show vc.result
@@ -115,7 +129,7 @@ lockstepCase solvers mode c = Progress.withProgressLogFromEnv "lockstep" $ do
             _ | acc.steps >= maxLockstepSteps -> stopWith "step limit"
               | otherwise -> do
                   let opName' = intToOpName (fromIntegral (getOpW8' vc))
-                  merged' <- if opName' == "JUMPI" && isNothing acc'.merged then mergeAt acc'.steps vs else pure acc'.merged
+                  deferred' <- if opName' == "JUMPI" && isNothing acc'.deferred then mergeAt acc'.steps vs else pure acc'.deferred
                   sc' <- runCommand fetcher (Step 1) sc >>= settle (4 :: Int) vc
                   ss1 <- runCommand fetcher (Step 1) ss
                   picked <- pickSide vs (sessionVM sc') ss1
@@ -147,8 +161,8 @@ lockstepCase solvers mode c = Progress.withProgressLogFromEnv "lockstep" $ do
                         go sc' ss'' acc' { steps = acc.steps + 1, branches = acc.branches + took, retries = acc.retries + tried
                                          , ops = Set.insert opName' acc.ops
                                          , trail = take 30 (entry : acc.trail)
-                                         , static = counters.staticDecisions, merged = merged' } (Just opName')
-    mergeAt :: App m => Int -> VM Symbolic -> m (Maybe (Int, Int, Int, VM Symbolic))
+                                         , static = counters.staticDecisions, deferred = deferred' } (Just opName')
+    mergeAt :: App m => Int -> VM Symbolic -> m (Maybe Deferred)
     mergeAt step vs = case (vs.state.stack, vs.state.memory) of
       (Lit t : cond : _, SymbolicMemory _)
         | t < 0x10000, unsafeInto t > vs.state.pc
@@ -156,7 +170,8 @@ lockstepCase solvers mode c = Progress.withProgressLogFromEnv "lockstep" $ do
             conf <- readConfig
             vm <- liftIO $ stToIO $ execStateT (exec1 conf) vs
             pure $ if isNothing vm.result && vm.state.pc == unsafeInto t
-              then Just (vm.state.pc, length vs.frames, step + conf.mergeMaxBudget + 1, vm)
+              then Just Deferred { what = "the merged state of the latest JUMPI", pc = vm.state.pc, depth = length vs.frames
+                                 , deadline = step + conf.mergeMaxBudget + 1, vm }
               else Nothing
       _ -> pure Nothing
     -- an instruction may take several steps, e.g. when it is re-executed after
