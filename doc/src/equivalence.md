@@ -129,7 +129,8 @@ succeeds.
 
 Every counterexample is replayed: A and B are run concretely on its input,
 with the values the solver chose for the caller, call value, storage and block,
-and their return data, errors and final storage are compared. A counterexample
+and their return data, errors, final storage and balances, and the code,
+storage and nonce of the other accounts, e.g. created contracts, are compared. A counterexample
 is reported as validated if the two concrete runs differ, as not reproducible
 if they do not, and as not replayable if it cannot be run concretely (e.g. for
 `--create`). hevm only reports that the contracts do not behave equivalently if

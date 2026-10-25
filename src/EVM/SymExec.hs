@@ -1162,7 +1162,7 @@ replayEqCex solvers create codeA codeB cd cex
     logCall m = JSON.object
       [ "callee" .= T.pack (show m.callee), "calldata" .= showBytes (BS.take 256 m.calldata)
       , "success" .= m.success, "returndata" .= showBytes (BS.take 256 m.returndata), "returndataLength" .= m.returndataLength ]
-    run :: App m => Text -> ByteString -> ByteString -> m (Either Text (Either EvmError (Expr Buf), Either Text (Map W256 W256), Map (Expr EAddr) W256))
+    run :: App m => Text -> ByteString -> ByteString -> m (Either Text (Either EvmError (Expr Buf), Either Text (Map W256 W256), Map (Expr EAddr) W256, Map (Expr EAddr) ReplayAccount))
     run label code calldata = do
       vm <- liftIO $ stToIO $ makeVm $ eqReplayVmOpts cex (fromRight [] stubs) code calldata
       conf <- readConfig
@@ -1174,18 +1174,32 @@ replayEqCex solvers create codeA codeB cd cex
             Just (ConcreteStore m) -> Right (Map.filter (/= 0) m)
             s -> Left (T.pack (show s))
           balances = Map.mapMaybe (\c -> case c.balance of Lit v -> Just v; _ -> Nothing) end.env.contracts
+          -- the symbolic check compares these too; the entrypoint's code is A or B by construction
+          accounts = Map.mapWithKey (\a c -> ReplayAccount
+            { code = if a == entry then Nothing else case c.code of
+                RuntimeCode (ConcreteRuntimeCode bs) -> Just bs
+                _ -> Nothing
+            , store = if a == entry then Nothing else case c.storage of
+                ConcreteStore m -> Just (Map.filter (/= 0) m)
+                _ -> Nothing
+            , nonce = c.nonce }) end.env.contracts
       pure $ case end.result of
-        Just (VMSuccess out) -> Right (Right out, finalStore, balances)
-        Just (VMFailure e) -> Right (Left e, finalStore, balances)
+        Just (VMSuccess out) -> Right (Right out, finalStore, balances, accounts)
+        Just (VMFailure e) -> Right (Left e, finalStore, balances, accounts)
         r -> Left $ "concrete run did not finish: " <> T.pack (show r)
     -- the balances are shown where they differ from the other program's
-    outcome (_, _, otherBals) (res, st, bals) = T.intercalate ", " $ (case res of
+    outcome (_, _, otherBals, otherAccts) (res, st, bals, accts) = T.intercalate ", " $ (case res of
         Right (ConcreteBuf bs) -> ["Return " <> showBytes bs] <> storage
         Right _ -> ["Return (symbolic data)"] <> storage
         Left (Revert (ConcreteBuf bs)) -> ["Revert " <> showRevertData bs]
         Left e -> [T.pack (show e)])
       <> ["balance " <> showAddr a <> "=" <> showW v | (a, v) <- Map.toList bals, Map.lookup a otherBals /= Just v]
+      <> [showAccount a acct | (a, acct) <- Map.toList accts, Map.lookup a otherAccts /= Just acct]
       where
+        showAccount a acct = "account " <> showAddr a <> T.concat
+          [ maybe "" ((" code " <>) . showBytes) acct.code
+          , maybe "" (\m -> if Map.null m then "" else " storage " <> T.unwords [showW k <> "=" <> showW v | (k, v) <- take 8 (Map.toList m)]) acct.store
+          , maybe "" ((" nonce " <>) . T.pack . show) acct.nonce ]
         storage = case st of
           Right m | Map.null m -> []
                   | otherwise -> ["storage " <> T.intercalate " " [showW k <> "=" <> showW v | (k, v) <- take 8 (Map.toList m)]
@@ -1198,6 +1212,9 @@ replayEqCex solvers create codeA codeB cd cex
     showAddr = \case
       LitAddr a -> T.pack (show a)
       a -> T.pack (show a)
+
+data ReplayAccount = ReplayAccount { code :: Maybe ByteString, store :: Maybe (Map W256 W256), nonce :: Maybe W64 }
+  deriving (Eq)
 
 eqCexEntry :: SMTCex -> Expr EAddr
 eqCexEntry cex = maybe (LitAddr 0xacab) LitAddr (Map.lookup (SymAddr "entrypoint") cex.addrs)
@@ -1626,7 +1643,7 @@ equivalenceCheck' solvers sess branchesA branchesB create = do
                                              (Map.zipWithMatched (\_ x y -> Just (x, y))) aState bState) of
           -- TODO: consider possibility of aliased symbolic addresses
           Nothing -> PBool True
-          Just merged -> Map.foldl' (\a (ac, bc) -> a .|| contractsDiffer ac bc) (PBool False) merged
+          Just merged -> Map.foldlWithKey' (\a addr (ac, bc) -> a .|| contractsDiffer addr ac bc) (PBool False) merged
       where
         -- a call to unknown code adds its callee to the state of only the program
         -- that made it; the other program sees the callee as it was before
@@ -1635,8 +1652,8 @@ equivalenceCheck' solvers sess branchesA branchesB create = do
           C (UnknownCode k) _ _ _ _ -> Just (C (UnknownCode k) (AbstractStore k Nothing) (ConcreteStore mempty) (Balance k) Nothing)
           _ -> Nothing
 
-    contractsDiffer :: Expr EContract -> Expr EContract -> Prop
-    contractsDiffer ac bc = let
+    contractsDiffer :: Expr EAddr -> Expr EContract -> Expr EContract -> Prop
+    contractsDiffer addr ac bc = let
         balsDiffer = case (ac.balance, bc.balance) of
           (Lit ab, Lit bb) -> PBool $ ab /= bb
           (ab, bb) -> if ab == bb then PBool False else ab ./= bb
@@ -1646,7 +1663,16 @@ equivalenceCheck' solvers sess branchesA branchesB create = do
           -- a slot written with 0 is the same as an unwritten one
           (ConcreteStore as, ConcreteStore bs) -> PBool $ Map.filter (/= 0) as /= Map.filter (/= 0) bs
           (as, bs) -> if as == bs then PBool False else as ./= bs
-      in balsDiffer .|| storesDiffer .|| noncesDiffer
+        -- e.g. of created contracts; the entrypoint's code is A or B by construction
+        codesDiffer = if addr == SymAddr "entrypoint" || ac.code == bc.code then PBool False else case (ac.code, bc.code) of
+          (RuntimeCode a, RuntimeCode b) -> case (bytes a, bytes b) of
+            (as, bs) | length as /= length bs -> PBool True
+                     | otherwise -> foldl' (.||) (PBool False) [x ./= y | (x, y) <- zip as bs, x /= y]
+          _ -> PBool True
+        bytes = \case
+          ConcreteRuntimeCode bs -> map LitByte (BS.unpack bs)
+          SymbolicRuntimeCode v -> V.toList v
+      in balsDiffer .|| storesDiffer .|| noncesDiffer .|| codesDiffer
 
 
 both' :: (a -> b) -> (a, a) -> (b, b)

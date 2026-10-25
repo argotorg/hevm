@@ -2201,7 +2201,7 @@ tests = testGroup "hevm"
             isSuc _ = False
         case filter isSuc paths of
           [Success _ _ _ store] -> do
-            let ca = fromJust (Map.lookup (SymAddr "freshSymAddr1") store)
+            let ca = fromJust (Map.lookup (SymAddr "create-entrypoint-0") store)
             let code = case ca.code of
                   RuntimeCode (ConcreteRuntimeCode c') -> c'
                   _ -> internalError "expected concrete code"
@@ -2352,7 +2352,7 @@ tests = testGroup "hevm"
           check self (SymAddr "entrypoint")
           check origin (SymAddr "origin")
           check caller (SymAddr "caller")
-          check a (SymAddr "freshSymAddr1")
+          check a (SymAddr "create-entrypoint-0")
           check arg (SymAddr "arg1")
     , test "caller can alias anything" $ do
         let addrs = ["address(this)", "tx.origin", "block.coinbase", "a", "arg"] :: [Text]
@@ -2377,7 +2377,7 @@ tests = testGroup "hevm"
           check self (SymAddr "entrypoint")
           check origin (SymAddr "origin")
           check coinbase (SymAddr "coinbase")
-          check a (SymAddr "freshSymAddr1")
+          check a (SymAddr "create-entrypoint-0")
           check arg (SymAddr "arg1")
     , test "vm.load fails for a potentially aliased address" $ do
         Just c <- solcRuntime "C"

@@ -535,6 +535,27 @@ bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
     forM_ replays $ \case
       Validated ra rb -> assertBool "Replay must show the different stores" (ra /= rb)
       r -> assertFailure $ "Counterexample must replay as validated, got: " <> show r
+  , testCase "eq-created-contracts-differ" $ forM_
+    -- create2(0, 0, 0, salt 1) vs salt 2, returning the address (#1193)
+    [ ("60015f5f5ff55f5260205ff3", "60025f5f5ff55f5260205ff3")
+    -- create vs create2 of the same empty init code
+    , ("5f5f5ff05f5260205ff3", "60015f5f5ff55f5260205ff3")
+    -- the child's runtime code is STOP vs INVALID (#1192)
+    , ("69600060005360016000f360b01b5f52600a5f5ff05f5260205ff3", "6960fe60005360016000f360b01b5f52600a5f5ff05f5260205ff3")
+    -- the child's constructor stores 1 vs 2 (#1178)
+    , ("6660015f555f5ff360c81b5f5260075f5ff050", "6660025f555f5ff360c81b5f5260075f5ff050")
+    -- a CREATE bumps the nonce even when it deploys nothing
+    , ("5f5f5ff050", "00")
+    ] $ \(a, b) -> do
+      replays <- replayAll a b
+      assertBool ("Must have a counterexample: " <> show (a, b)) (not (null replays))
+      forM_ replays $ \case
+        Validated {} -> pure ()
+        r -> assertFailure $ "Counterexample must replay as validated, got: " <> show r
+  , testCase "eq-same-create2-equivalent" $ do
+    -- the entrypoints differ, but the created contract and the returned address don't
+    eq <- eqBytecode False "60015f5f5ff55f5260205ff3" "60015f5f5ff55f5260205ff300"
+    assertBool ("Must be equivalent, got: " <> show eq.res) (null eq.res)
   , testCase "eq-replay-zero-write-over-nonzero-slot" $ do
     -- stop vs sstore(1, 0): they differ only if slot 1 starts nonzero, so the model must give its value
     replays <- replayAll "00" "5f600155"

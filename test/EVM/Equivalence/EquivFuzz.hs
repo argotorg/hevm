@@ -113,7 +113,20 @@ data Stmt
   | Stack [W] Bool Int -- ^ push the words, then DUPn (True) or SWAPn, store the top and pop
   | If W [Stmt] [Stmt]
   | Halt Word8 Int Int
+  | Create (Maybe W256) Int Flag -- ^ CREATE, or CREATE2 with the salt, of an 'initCodes' entry
   deriving (Show, Eq)
+
+-- | Init codes deploying STOP or INVALID, writing the new contract's storage,
+-- deploying nothing, and reverting
+initCodes :: [ByteString]
+initCodes = map BS.pack
+  [ [0x60, 0x00, 0x5f, 0x53, 0x60, 0x01, 0x5f, 0xf3]
+  , [0x60, 0xfe, 0x5f, 0x53, 0x60, 0x01, 0x5f, 0xf3]
+  , [0x60, 0x01, 0x5f, 0x55, 0x5f, 0x5f, 0xf3]
+  , [0x60, 0x02, 0x5f, 0x55, 0x5f, 0x5f, 0xf3]
+  , []
+  , [0x5f, 0x5f, 0xfd]
+  ]
 
 binOps, unOps, ternOps, envOps :: [Word8]
 binOps = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x0a, 0x0b, 0x10, 0x11, 0x12, 0x13, 0x14, 0x16, 0x17, 0x18, 0x1a, 0x1b, 0x1c, 0x1d]
@@ -131,7 +144,7 @@ senderBase = 0x5e0d00
 -- | Every opcode the generator can emit
 genOpcodes :: [String]
 genOpcodes = map (intToOpName . fromIntegral) $ binOps <> unOps <> ternOps <> envOps
-  <> [0x00, 0x20, 0x35, 0x37, 0x3e, 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x5b, 0x5c, 0x5d, 0xf1, 0xf3, 0xfa, 0xfd]
+  <> [0x00, 0x20, 0x35, 0x37, 0x3e, 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x5b, 0x5c, 0x5d, 0xf0, 0xf1, 0xf3, 0xf5, 0xfa, 0xfd]
   <> [0x5f .. 0x7f] <> [0x80 .. 0x8f] <> [0x90 .. 0x9f]
 
 data Asm = Bytes [Word8] | PushLabel Int | Label Int
@@ -186,6 +199,13 @@ asmBlock = \case
     pure $ asmW c <> [PushLabel lt, Bytes [0x57]] <> e' <> [PushLabel le, Bytes [0x56], Label lt] <> t' <> [Label le]
   Halt 0 _ _ -> pure [Bytes [0x00]]
   Halt o off sz -> pure [pushI sz, pushI off, Bytes [o]]
+  Create salt i flag -> let code = initCodes !! i in pure $
+    [Bytes (pushW (word (code <> BS.replicate (32 - BS.length code) 0))), pushI 0x200, Bytes [0x52]]
+    <> maybe [] (\x -> [Bytes (pushW x)]) salt
+    <> [pushI (BS.length code), pushI 0x200, Bytes [0x5f], Bytes [maybe 0xf0 (const 0xf5) salt]]
+    <> (case flag of
+          FPop -> [Bytes [0x50]]
+          FStore slot -> [Bytes (pushW slot), Bytes [0x55]])
   where
     fresh = get >>= \l -> modify (+ 1) >> pure l
 
@@ -307,7 +327,14 @@ genBlock calls d = frequency
   , (2, genStack)
   , (if d > 0 then 3 else 0, If <$> genW 2 <*> genBlocks calls (d - 1) <*> genBlocks calls (d - 1))
   , (1, genHalt)
+  , (1, genCreate)
   ]
+
+genCreate :: Gen Stmt
+genCreate = Create
+  <$> frequency [(1, pure Nothing), (2, Just <$> elements [0, 1, 2])]
+  <*> choose (0, length initCodes - 1)
+  <*> frequency [(1, pure FPop), (2, FStore <$> genSlot)]
 
 genHalt :: Gen Stmt
 genHalt = Halt <$> elements [0x00, 0xf3, 0xfd] <*> genOff <*> genSize
@@ -388,6 +415,11 @@ mutBlock calls = \case
     [ (\o -> (Halt o off sz, "halt kind")) <$> elements [0x00, 0xf3, 0xfd]
     , (, "halt region") <$> genHalt
     ]
+  Create salt i f -> oneof
+    [ (\x -> (Create x i f, "create salt")) <$> elements [Nothing, Just 0, Just 1, Just 2]
+    , (\x -> (Create salt x f, "create init code")) <$> choose (0, length initCodes - 1)
+    , (\x -> (Create salt i x, "create flag")) <$> frequency [(1, pure FPop), (2, FStore <$> genSlot)]
+    ]
   where first' f (x, w) = (f x, w)
 
 mutBlocks :: Calls -> [Stmt] -> Gen ([Stmt], String)
@@ -457,14 +489,16 @@ data Run = Run
   , outcome :: Either EvmError (Expr Buf)
   , store :: Maybe (Map W256 W256)
   , balances :: Map (Expr EAddr) W256
+  , accounts :: Map (Expr EAddr) (Maybe ByteString, Maybe (Map W256 W256), Maybe W64)
+    -- ^ code, nonzero storage and nonce, e.g. of created contracts; not the entry's code
   }
 
 sameRun :: Run -> Run -> Bool
-sameRun x y = (x.outcome, nonZero x.store, x.balances) == (y.outcome, nonZero y.store, y.balances)
+sameRun x y = (x.outcome, nonZero x.store, x.balances, x.accounts) == (y.outcome, nonZero y.store, y.balances, y.accounts)
   where nonZero = fmap (Map.filter (/= 0)) -- a slot written with 0 is the same as an unwritten one
 
 showRun :: Run -> String
-showRun x = show x.outcome <> " " <> show x.store <> " " <> show (Map.toList x.balances)
+showRun x = show x.outcome <> " " <> show x.store <> " " <> show (Map.toList x.balances) <> " " <> show (Map.toList x.accounts)
 
 runConcrete :: App m => SolverGroup -> VMOpts Concrete -> m Run
 runConcrete s opts = do
@@ -479,7 +513,13 @@ runConcrete s opts = do
         Just (VMFailure e) -> Left e
         r -> internalError $ "concrete run did not finish: " <> show r
       balances = Map.mapMaybe (\c -> case c.balance of Lit v -> Just v; _ -> Nothing) end.env.contracts
-  pure $ Run ops stub outcome store balances
+      accounts = flip Map.mapWithKey end.env.contracts $ \a c ->
+        ( if a == opts.address then Nothing else case c.code of
+            RuntimeCode (ConcreteRuntimeCode bs) -> Just bs
+            _ -> Nothing
+        , case c.storage of ConcreteStore m -> Just (Map.filter (/= 0) m); _ -> Nothing
+        , c.nonce )
+  pure $ Run ops stub outcome store balances accounts
   where
     traced :: Config -> Stepper Concrete (Set String, Bool, VM Concrete)
     traced conf = go mempty False
@@ -561,6 +601,7 @@ blockKinds depth = concatMap $ \case
   Stack _ dup _ -> [if dup then "DUPn" else "SWAPn"]
   If _ t e -> ("if at depth " <> show depth) : blockKinds (depth + 1) (t <> e)
   Halt o _ _ -> [intToOpName (fromIntegral o)]
+  Create salt _ _ -> [maybe "CREATE" (const "CREATE2") salt]
 
 type Replay = (SMTCex, CexReplay, Maybe (Run, Run))
 
@@ -797,7 +838,7 @@ eqCreate cov = forAllShrink genCreatePair shrink $ \(Pair a b mutation) -> ioPro
       Error e -> "error: " <> take 60 e
     storeShape (x, y)
       | x.store == y.store = "equal"
-      | sameRun x { outcome = y.outcome, balances = y.balances } y = "differ only in zero slots"
+      | sameRun x { outcome = y.outcome, balances = y.balances, accounts = y.accounts } y = "differ only in zero slots"
       | otherwise = "differ"
     -- hevm runs constructors with empty calldata
     runCreate s cex code = runConcrete s (eqReplayVmOpts cex [] code BS.empty)

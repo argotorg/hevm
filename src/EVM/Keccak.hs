@@ -9,6 +9,7 @@ import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.List (tails)
+import Witch (unsafeInto)
 
 import EVM.Traversals
 import EVM.Types
@@ -43,10 +44,34 @@ findKeccakPropsExprs ps bufs stores = (execState action (KeccakStore mempty)).ke
 uniquePairs :: [a] -> [(a,a)]
 uniquePairs xs = [(x,y) | (x:ys) <- Data.List.tails xs, y <- ys]
 
-injProp :: (Expr EWord, Expr EWord) -> Prop
-injProp (k1@(Keccak b1), k2@(Keccak b2)) =
-  PImpl (PEq k1 k2) ((b1 .== b2) .&& (bufLength b1 .== bufLength b2))
-injProp _ = internalError "expected keccak expression"
+injProp :: Map.Map Int (Expr Buf) -> (Expr EWord, Expr EWord) -> Prop
+injProp env (k1@(Keccak b1), k2@(Keccak b2)) = PImpl (PEq k1 k2) (sameInput env b1 b2)
+injProp _ _ = internalError "expected keccak expression"
+
+-- | The solver's arrays may differ past the hashed length, where keccak doesn't
+-- look, so with a concrete length compare only the bytes it hashes, and assert
+-- congruence: comparing whole arrays gives two hashes for one input.
+sameInput :: Map.Map Int (Expr Buf) -> Expr Buf -> Expr Buf -> Prop
+sameInput env a b = case (resolvedLength a, resolvedLength b) of
+  (Lit la, Lit lb) | la /= lb -> PBool False
+  (Lit n, lb) | n <= maxComparedLen -> lb .== Lit n .&& bytesEq n
+  (la, Lit n) | n <= maxComparedLen -> la .== Lit n .&& bytesEq n
+  (la, lb) -> (a .== b) .&& (la .== lb)
+  where
+    bytesEq 0 = PBool True
+    bytesEq n = foldr1 (.&&) [chunk n i a .== chunk n i b | i <- [0, 32 .. n - 1]]
+    chunk n o = readBytes (unsafeInto (Prelude.min 32 (n - o))) (Lit o)
+    maxComparedLen = 1024
+    -- the buffers are often variables, whose definitions have concrete lengths
+    resolvedLength = bufLength . resolve
+    resolve :: Expr Buf -> Expr Buf
+    resolve = mapExpr (\case
+      GVar (BufVar n) | Just def <- Map.lookup n env -> resolve def
+      e -> e)
+
+congruenceProp :: Map.Map Int (Expr Buf) -> (Expr EWord, Expr EWord) -> Prop
+congruenceProp env (k1@(Keccak b1), k2@(Keccak b2)) = PImpl (sameInput env b1 b2) (PEq k1 k2)
+congruenceProp _ _ = internalError "expected keccak expression"
 
 
 -- Takes a list of props, find all keccak occurrences and generates two kinds of assumptions:
@@ -56,12 +81,13 @@ injProp _ = internalError "expected keccak expression"
 --   2. Injectivity: That keccak is an injective function (we avoid quantifiers
 --      here by making this claim for each unique pair of keccak invocations
 --      discovered in the input expressions)
-keccakAssumptions :: [Expr EWord] -> [Prop]
-keccakAssumptions keccaks = injectivity <> minValue <> minDiffOfPairs
+keccakAssumptions :: Map.Map Int (Expr Buf) -> [Expr EWord] -> [Prop]
+keccakAssumptions env keccaks = injectivity <> congruence <> minValue <> minDiffOfPairs
   where
     ks = map concretizeKeccakParam keccaks
     keccakPairs = uniquePairs ks
-    injectivity = map injProp keccakPairs
+    injectivity = map (injProp env) keccakPairs
+    congruence = map (congruenceProp env) keccakPairs
     minValue = map minProp ks
       where
         minProp :: Expr EWord -> Prop
@@ -70,7 +96,7 @@ keccakAssumptions keccaks = injectivity <> minValue <> minDiffOfPairs
     minDiffOfPairs = map minDistance keccakPairs
      where
       minDistance :: (Expr EWord, Expr EWord) -> Prop
-      minDistance (ka@(Keccak a), kb@(Keccak b)) = PImpl ((a ./= b) .|| (bufLength a ./= bufLength b)) (PAnd req1 req2)
+      minDistance (ka@(Keccak a), kb@(Keccak b)) = PImpl (PNeg (sameInput env a b)) (PAnd req1 req2)
         where
           req1 = (PGEq (Sub ka kb) (Lit fieldOffsetWindow))
           req2 = (PGEq (Sub kb ka) (Lit fieldOffsetWindow))

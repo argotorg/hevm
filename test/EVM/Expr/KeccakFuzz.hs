@@ -11,7 +11,6 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Test.QuickCheck
 import Test.Tasty
-import Test.Tasty.ExpectedFailure (expectFailBecause)
 import Test.Tasty.QuickCheck (testProperty, QuickCheckTests(..))
 
 import EVM.Effects (Env(..), Config(..), defaultConfig, runEnv)
@@ -51,16 +50,22 @@ tests = adjustOption (\(QuickCheckTests n) -> QuickCheckTests (if n == 100 then 
         Qed -> property True
         Unknown _ -> label "unknown" True
         Error e -> counterexample e False
-  , expectFailBecause "keccak's SMT encoding depends on bytes past the hashed length (#1188)" $
-    testProperty "keccak-equal-prefix-same-hash" $ forAll genPrefixCase $ \c -> forAll arbitrary $ \simp -> ioProperty $ do
+  , testProperty "keccak-equal-prefix-same-hash" $ forAll genPrefixCase $ \c -> forAll arbitrary $ \simp -> ioProperty $ do
       let p = PNeg (PEq (Keccak c.bufA) (Keccak c.bufB))
       -- bitwuzla answers unknown: it does not support equality over constant arrays
-      res <- checkSatWith Z3 ((if simp then Expr.simplifyProp p else p) : c.lenProps)
+      res <- checkSatWith Z3 ((if simp then Expr.simplifyProp p else p) : c.lenProps <> c.extra)
       pure $ classify simp "simplified" $ case res of
         Cex cex -> counterexample ("spurious counterexample: " <> show cex.buffers <> "\n" <> show c) False
         Qed -> property True
         Unknown u -> label ("unknown: " <> take 80 (show u)) True
         Error e -> counterexample (e <> "\n" <> show c) False
+  , testProperty "keccak-differing-input-may-differ" $ forAll genDifferingCase $ \c -> forAll arbitrary $ \simp -> ioProperty $ do
+      let p = PNeg (PEq (Keccak c.bufA) (Keccak c.bufB))
+      res <- checkSatWith Z3 ((if simp then Expr.simplifyProp p else p) : c.lenProps <> c.extra)
+      pure $ classify simp "simplified" $ case res of
+        Qed -> counterexample ("false proof that the hashes are equal\n" <> show c) False
+        Error e -> counterexample (e <> "\n" <> show c) False
+        _ -> property True
   , testProperty "keccak-slot-no-false-proof" $ forAllShrink genConcreteBaseCase shrinkCase $ \c -> forAll (genEnv c) $ \env -> ioProperty $ do
       let pins = [PEq (Var v) (Lit w) | (v, w) <- Map.toList env]
       res <- checkSat (PEq (loaded c) (Lit (refLoad env c)) : pins <> keyWitnesses c)
@@ -260,6 +265,7 @@ data PrefixCase = PrefixCase
   { bufA :: Expr Buf
   , bufB :: Expr Buf
   , lenProps :: [Prop]
+  , extra :: [Prop] -- ^ mentions another hash, which the pairwise assumptions must not upset
   }
   deriving Show
 
@@ -281,4 +287,32 @@ genPrefixCase = do
     [ foldr (\i -> WriteByte (Lit i) (ReadByte (Lit i) a)) (ConcreteBuf "") [0 .. n - 1]
     | n > 0 ]
   swap <- arbitrary
-  pure $ if swap then PrefixCase copy a lenProps else PrefixCase a copy lenProps
+  extra <- genExtraHash n
+  pure $ if swap then PrefixCase copy a lenProps extra else PrefixCase a copy lenProps extra
+
+-- | Another hash, sometimes pinning the first word of 'a' to it: that makes the
+-- query define 'a''s copies through chains of buffer variables
+genExtraHash :: W256 -> Gen [Prop]
+genExtraHash n = elements $
+  [ []
+  , [PGT (Keccak (AbstractBuf "c")) (Lit 0)]
+  , [PEq (BufLength (AbstractBuf "c")) (Lit 32), PGT (Keccak (AbstractBuf "c")) (Lit 0)]
+  ] <> [ [PEq (ReadWord (Lit 0) (AbstractBuf "a")) (Keccak (ConcreteBuf "x"))] | n >= 32 ]
+
+-- | A copy of the bytes hashed from 'a' with one byte changed, or one byte longer
+genDifferingCase :: Gen PrefixCase
+genDifferingCase = do
+  c0 <- genPrefixCase
+  -- a pinned byte of 'a' could equal the changed one
+  let c = c0 { extra = filter (not . pinsA) c0.extra }
+      pinsA = \case PEq (ReadWord _ (AbstractBuf "a")) _ -> True; _ -> False
+      a = AbstractBuf "a"
+      other = if c.bufA == a then c.bufB else c.bufA
+      n = case c.lenProps of [PEq _ (Lit l)] -> l; _ -> 0
+  i <- chooseBoundedIntegral (0, max 1 n - 1)
+  v <- arbitrary
+  longer <- if n == 0 then pure True else arbitrary
+  pure $ if longer
+    then c { bufA = a, bufB = WriteByte (Lit n) (LitByte 0) other }
+    else c { bufA = a, bufB = WriteByte (Lit i) (LitByte v) other
+           , lenProps = PNeg (PEq (ReadByte (Lit i) a) (LitByte v)) : c.lenProps }

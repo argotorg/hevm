@@ -88,8 +88,9 @@ genCalldataCond = do
 genBranch :: G [Item]
 genBranch = do
   d <- gets (.sdepth)
-  onCalldata <- liftG $ chooseInt (0, 3)
-  cond <- if onCalldata == 3 then genStorageCond
+  onCalldata <- liftG $ chooseInt (0, 4)
+  cond <- if onCalldata == 4 then genHashCond
+          else if onCalldata == 3 then genStorageCond
           else if onCalldata > 0 || d == 0 then genCalldataCond else pure []
   modify (\s -> s { sdepth = s.sdepth - 1 })
   pure (cond <> [IJumpFwd True])
@@ -103,6 +104,25 @@ genHalt = do
             off <- liftG $ frequency [(3, pure 0), (1, chooseBoundedIntegral (0, 0x40))]
             items <- concat <$> mapM maybeFromCalldata [size, off]
             (items <>) <$> op 2 0 kind
+
+-- | Whether two hashes of calldata are equal, pushing one word. The same bytes
+-- reach memory by CALLDATACOPY and by MSTORE of CALLDATALOAD, and are hashed
+-- with literal and calldata-dependent lengths, so equal inputs have different terms.
+genHashCond :: G [Item]
+genHashCond = do
+  copy <- concat <$> sequence [op 0 1 OpCalldatasize, push 0, push 0x100, op 3 0 OpCalldatacopy]
+  stored <- concat <$> sequence [push 0, op 1 1 OpCalldataload, push 0x200, op 2 0 OpMstore]
+  h1 <- hashAt =<< liftG (elements [0x100, 0x200])
+  h2 <- hashAt =<< liftG (elements [0x100, 0x200])
+  eq <- op 2 1 OpEq
+  pure (copy <> stored <> h1 <> h2 <> eq)
+  where
+    hashAt off = do
+      len <- liftG (chooseInt (0, 3)) >>= \case
+        0 -> op 0 1 OpCalldatasize
+        1 -> concat <$> sequence [push 0, op 1 1 OpCalldataload, push 0x3f, op 2 1 OpAnd]
+        _ -> liftG (elements [0, 4, 0x20, 0x24]) >>= push
+      (len <>) <$> ((<>) <$> push off <*> op 2 1 OpSha3)
 
 -- | Push the value, or sometimes a calldata word masked to its bit width, so
 -- that the operand is symbolic but stays as small as the value

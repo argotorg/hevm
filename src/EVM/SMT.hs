@@ -239,7 +239,7 @@ assertPropsHelperWith arithEnc simp extraDecls psPreConc = do
     --      This will make sure concrete values of Keccak are asserted, if they can be computed (i.e. can be concretized)
     concreteKecc = concreteKeccaks psPreConc
     allKeccaks = (findKeccakPropsExprs psElim bufVals storeVals) <> Set.map (Keccak . fst) concreteKecc
-    keccAssump = keccakAssumptions $ Set.toList allKeccaks
+    keccAssump = keccakAssumptions bufs $ Set.toList allKeccaks
     keccComp = [(PEq (Lit l) (Keccak buf)) | (buf, l) <- Set.toList concreteKecc]
     keccakAssertions = do
       assumps <- mapM (assertSMTWith arithEnc) keccAssump
