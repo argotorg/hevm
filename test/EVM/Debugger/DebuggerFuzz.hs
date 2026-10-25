@@ -46,13 +46,15 @@ import EVM.Solvers (withSolvers, defMemLimit, Solver(..), SolverGroup, checkSatW
 import EVM.Stepper qualified as Stepper
 import EVM.Test.Fuzz.Gen (genSnapEvery)
 import EVM.Test.Fuzz.Hevm (concreteTestVm, symbolicTestVm)
-import EVM.Test.Fuzz.Program (TestCase)
+import EVM.Test.Fuzz.Program (TestCase(..), Prog(..), Inputs(..), Item(..))
 import EVM.Types hiding (Env)
 
 tests :: TestTree
 tests = testGroup "debugger-fuzz"
   [ testProperty "concrete-replay" $ mapSize (* 4) $ \(c :: TestCase) ->
       forAll (genCommands False) $ \cmds -> forAll genSnapEvery $ \every -> within 120_000_000 $ ioProperty $ runEnv testEnv $ concreteReplay every c cmds
+  , testProperty "symbolic-branches-infeasible-side" $ once $ ioProperty $ runEnv testEnv $
+      symbolicBranches 6 infeasibleSideCase infeasibleSideCommands infeasibleSideReactions
   , testProperty "symbolic-branches" $ mapSize (* 4) $ \(c :: TestCase) ->
       forAll (genCommands True) $ \cmds -> forAll (vectorOf 40 genReaction) $ \reactions -> forAll genSnapEvery $ \every ->
       within 300_000_000 $ ioProperty $ runEnv testEnv $ symbolicBranches every c cmds reactions
@@ -267,6 +269,16 @@ symbolicBranches every c cmds0 reactions0 = withSession $ \solvers -> do
     Right (taken, status, res) -> tabulate "branches taken" [bucket taken]
                                 $ tabulate "final status" [T.unpack status]
                                 $ tabulate "result" [T.unpack res] (property True)
+
+-- | Found by symbolic-branches: a branch side offered in solver mode was infeasible
+infeasibleSideCase :: TestCase
+infeasibleSideCase = TestCase {prog = Prog {main = [ILabel 0,ILabel 1,IPush 4 0xc0de0000,IOp OpTload,IJump True 1,ILabel 2,ILabel 3,IPush 1 0xa,IPush 1 0x8,ILabel 4,IPush 1 0x1,ILabel 5,IPush 1 0x24,IOp OpCalldataload,IJump True 6,ILabel 6,ILabel 7,IPush 0 0x0,IOp OpSstore,IJump True 28,ILabel 8,ILabel 9,IJump True 9,ILabel 10,ILabel 11,IJump True 11,ILabel 12,ILabel 13,IJump True 13,ILabel 14,IJump True 15,ILabel 15,ILabel 16,ILabel 17,IJump True 17,ILabel 18,ILabel 19,ILabel 20,ILabel 21,IJump True 21,ILabel 22,ILabel 23,IJump True 23,ILabel 24,ILabel 25,IJump True 25,ILabel 26,IJump True 26,ILabel 27,ILabel 28,IOp OpCalldatasize,IPush 2 0x200,IOp OpSha3,IPush 1 0x20,IPush 2 0x200,IOp OpSha3,IOp OpEq,IJump True 35,ILabel 29,ILabel 30,IJump True 31,ILabel 31,ILabel 32,IPush 2 0xe0a2,ILabel 33,ILabel 34,IPush 4 0xc0de0009,IPush 1 0x22,IOp OpGt,IJump True 34,IJump True 35,ILabel 35,ILabel 36,ILabel 37,IPush 1 0x24,IOp OpCalldataload,IJump True 39,IJump True 38,ILabel 38,ILabel 39], callee = [IJump True 0,ILabel 0,IJump False 1,ILabel 1,ILabel 2]}, inputs = Inputs {calldata = "", store = Map.fromList [], callvalue = 0x362, timestamp = 0x8a6c0c8485}, gasLimit = 692947, number = 0x12c}
+
+infeasibleSideCommands :: [Text]
+infeasibleSideCommands = ["back 6","break line 18","continue","Over 239","continue","continue","step 43","back 22","continue","branch false","RESTART 0xffffffffffffffffff","delete 7","branch 1"]
+
+infeasibleSideReactions :: [Maybe Text]
+infeasibleSideReactions = [Just "branch true",Just "branch false",Nothing,Just "branch true",Just "branch true",Just "branch false",Just "branch false",Nothing,Just "branch true",Just "branch false",Just "branch true",Just "branch true",Just "branch false",Just "branch false",Just "branch true",Nothing,Just "branch true",Just "branch true",Just "branch false",Just "branch true",Just "branch false",Just "branch true",Just "branch true",Just "branch true",Just "branch true",Nothing,Nothing,Just "branch false",Nothing,Just "branch true",Just "branch false",Nothing,Just "branch false",Just "branch false",Nothing,Just "branch false",Just "branch true",Just "branch false",Just "branch true",Nothing]
 
 -- * Round trips
 

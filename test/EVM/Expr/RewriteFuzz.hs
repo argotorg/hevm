@@ -567,6 +567,7 @@ genShapedProp n = frequency
   , (2, overflowCheck)
   , (2, mulOverflowCheck)
   , (2, scalingUnderBounds)
+  , (2, complementary)
   , (2, PEq <$> lit <*> ite), (1, PLT <$> lit <*> ite), (1, PLT <$> ite <*> lit)
   , (1, PLEq <$> lit <*> ite), (1, PLEq <$> ite <*> lit)
   , (2, oneLitBranch)
@@ -578,6 +579,11 @@ genShapedProp n = frequency
   where
     lit = Lit <$> genSpecialLit
     ite = ITE <$> w <*> lit <*> lit
+    -- a prop and its negation, as both sides of a branch taken on one path
+    complementary = do
+      q <- p
+      r <- p
+      elements [PAnd q (PNeg q), PAnd (PNeg q) q, PAnd q (PAnd r (PNeg q))]
     -- the literal compared against is often the literal branch
     oneLitBranch = do
       k <- genSpecialLit

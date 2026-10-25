@@ -2248,7 +2248,9 @@ flattenProps (a:ax) = case a of
 remRedundantProps :: [Prop] -> [Prop]
 remRedundantProps p = nubOrd $ collapseFalse . filter (\x -> x /= PBool True) $ p
   where
-    collapseFalse ps = if isJust $ find (== PBool False) ps then [PBool False] else ps
+    collapseFalse ps = if isJust (find (== PBool False) ps) || complementary ps then [PBool False] else ps
+    -- p and its negation, e.g. both sides of a branch taken on one path
+    complementary ps = let set = Set.fromList ps in any (\case PNeg x -> Set.member x set; _ -> False) ps
 
 
 -- ** Conversions ** -------------------------------------------------------------------------------
