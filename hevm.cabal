@@ -272,6 +272,7 @@ common test-base
     optics-core,
     witch,
     unliftio-core,
+    async,
     exceptions
 
 library test-utils

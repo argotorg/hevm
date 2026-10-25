@@ -13,7 +13,6 @@ import Control.Monad.ST (stToIO)
 import Control.Monad.IO.Unlift
 import Control.Exception (try, IOException)
 import Data.ByteString (ByteString)
-import Control.Concurrent.MVar (readMVar)
 import qualified Data.ByteString.Lazy as BS
 import Data.ByteString.Builder (toLazyByteString)
 import qualified Data.ByteString.Char8 as BC
@@ -32,7 +31,7 @@ import Witch (unsafeInto)
 import Options.Generic as OptionsGeneric
 import Options.Applicative as Options
 import Paths_hevm qualified as Paths
-import System.Directory (withCurrentDirectory, getCurrentDirectory, doesDirectoryExist, makeAbsolute, findExecutable)
+import System.Directory (getXdgDirectory, XdgDirectory(..), withCurrentDirectory, getCurrentDirectory, doesDirectoryExist, makeAbsolute, findExecutable)
 import System.FilePath ((</>))
 import System.Exit (exitFailure, exitSuccess, exitWith, ExitCode(..))
 import System.IO (hFlush, stdout)
@@ -105,6 +104,7 @@ data CommonOptions = CommonOptions
   , noSimplify    ::Bool
   , onlyDeployed  ::Bool
   , cacheDir      ::Maybe String
+  , noRpcCache    ::Bool
   , earlyAbort    ::Bool
   , mergeMaxBudget :: Int
   , maxDynSize    ::Int
@@ -146,7 +146,8 @@ commonOptions = CommonOptions
   <*> (optional $ option auto $ long "max-depth" <> help "Limit maximum depth of branching during exploration (default: unlimited)")
   <*> (switch $ long "no-simplify" <> help "Don't perform simplification of expressions")
   <*> (switch $ long "only-deployed" <> help "When trying to resolve unknown addresses, only use addresses of deployed contracts")
-  <*> (optional $ strOption $ long "cache-dir" <> help "Directory to save and load RPC cache")
+  <*> (optional $ strOption $ long "cache-dir" <> help "Directory to save and load the RPC cache in (default: the user's cache directory, for runs at a fixed block)")
+  <*> (switch $ long "no-rpc-cache" <> help "Don't save or load fetched state in the user's cache directory")
   <*> (switch $  long "early-abort" <> help "Stop exploration immediately upon finding the first counterexample")
   <*> (option auto $ long "merge-max-budget" <> showDefault <> value 100 <> help "Max instructions for speculative merge exploration during path merging")
   <*> (option auto $ long "max-dyn-size" <> showDefault <> value 64 <> help "Max byte length for concretized dynamic types (bytes, string) in symbolic arguments")
@@ -369,9 +370,9 @@ main = do
           Left e -> liftIO $ do
             putStrLn $ "Error: " <> e
             exitFailure
-          Right out -> do
+          Right out -> withRpcSession cOpts testOpts.rpc testOpts.number $ \fetchSess -> do
             -- TODO: which functions here actually require a BuildOutput, and which can take it as a Maybe?
-            unitTestOpts <- unitTestOptions testOpts cOpts solvers (Just out)
+            unitTestOpts <- unitTestOptions testOpts cOpts solvers fetchSess (Just out)
             when cOpts.interactive $ do
               debugTestVm unitTestOpts out >>= \case
                 Left err -> liftIO $ T.putStrLn err >> exitFailure
@@ -381,9 +382,6 @@ main = do
               liftIO exitSuccess
             res <- unitTest unitTestOpts out
             Progress.stopStatus
-            liftIO $ forM_ ((,) <$> cOpts.cacheDir <*> testOpts.number) $ \(dir, fetchedBlock) -> do
-              cache <- readMVar (unitTestOpts.sess.sharedCache)
-              Fetch.saveCache dir fetchedBlock cache
             liftIO $ unless (uncurry (&&) res) exitFailure
     Exec cFileOpts execOpts cExecOpts cOpts-> do
       env <- makeEnv cOpts
@@ -584,10 +582,9 @@ buildCalldata cOpts sig arg = case (cOpts.calldata, sig) of
 
 -- If function signatures are known, they should always be given for best results.
 symbCheck :: App m => CommonFileOptions -> SymbolicOptions -> CommonExecOptions -> CommonOptions -> m ()
-symbCheck cFileOpts sOpts cExecOpts cOpts = do
+symbCheck cFileOpts sOpts cExecOpts cOpts = withRpcSession cOpts cExecOpts.rpc cExecOpts.block $ \sess -> do
   let block' = maybe Fetch.Latest Fetch.BlockNumber cExecOpts.block
       blockUrlInfo = (,) block' <$> cExecOpts.rpc
-  sess <- Fetch.mkSession cOpts.cacheDir cExecOpts.block
   (calldata, caveats) <- buildCalldata cOpts sOpts.sig sOpts.arg
   preState <- symvmFromCommand cExecOpts sOpts cFileOpts sess calldata
   errCodes <- case sOpts.assertions of
@@ -617,9 +614,6 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = do
       liftIO exitSuccess
     (expr, res) <- verify solvers fetcher veriOpts preState (checkAssertions errCodes) Nothing
     Progress.stopStatus
-    liftIO $ forM_ ((,) <$> cOpts.cacheDir <*> cExecOpts.block) $ \(dir, block) -> do
-      cache <- readMVar sess.sharedCache
-      Fetch.saveCache dir block cache
     case res of
       [] | any Expr.isPartial expr -> do
         liftIO $ putStrLn "\nNo reachable property violations discovered on the explored paths, but exploration was partial\n"
@@ -681,9 +675,8 @@ areAnyPrefixOf :: [Text] -> Text -> Bool
 areAnyPrefixOf prefixes t = any (flip T.isPrefixOf t) prefixes
 
 launchExec :: App m => CommonFileOptions -> ExecOptions -> CommonExecOptions -> CommonOptions -> m ()
-launchExec cFileOpts execOpts cExecOpts cOpts = do
+launchExec cFileOpts execOpts cExecOpts cOpts = withRpcSession cOpts cExecOpts.rpc cExecOpts.block $ \sess -> do
   dapp <- getSrcInfo execOpts.projectType cOpts
-  sess <- Fetch.mkSession cOpts.cacheDir cExecOpts.block
   vm <- vmFromCommand cOpts cExecOpts cFileOpts execOpts sess
   let
     block = maybe Fetch.Latest Fetch.BlockNumber cExecOpts.block
@@ -713,9 +706,6 @@ launchExec cFileOpts execOpts cExecOpts cOpts = do
              pure vm'
            else EVM.Stepper.interpret fetcher vm EVM.Stepper.runFully
     writeTraceDapp dapp vm'
-    liftIO $ forM_ ((,) <$> cOpts.cacheDir <*> cExecOpts.block) $ \(dir, fetchedBlock) -> do
-      cache <- readMVar sess.sharedCache
-      Fetch.saveCache dir fetchedBlock cache
     case vm'.result of
       Just (VMFailure (Revert msg)) -> liftIO $ do
         let res = case msg of
@@ -944,8 +934,16 @@ symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
     word64 f def = fromMaybe def (f cExecOpts)
     eaddr f def = maybe def LitAddr (f cExecOpts)
 
-unitTestOptions :: App m => TestOptions -> CommonOptions -> SolverGroup -> Maybe BuildOutput -> m (UnitTestOptions)
-unitTestOptions testOpts cOpts solvers buildOutput = do
+withRpcSession :: App m => CommonOptions -> Maybe URL -> Maybe W256 -> (Fetch.Session -> m a) -> m a
+withRpcSession cOpts url block act = do
+  loc <- case cOpts.cacheDir of
+    Just d -> pure $ Just (Fetch.CacheDir d)
+    Nothing | cOpts.noRpcCache -> pure Nothing
+            | otherwise -> liftIO $ Just . Fetch.PerChainUnder <$> getXdgDirectory XdgCache ("hevm" </> "rpc")
+  Fetch.withCachedSession loc url block act
+
+unitTestOptions :: App m => TestOptions -> CommonOptions -> SolverGroup -> Fetch.Session -> Maybe BuildOutput -> m (UnitTestOptions)
+unitTestOptions testOpts cOpts solvers sess buildOutput = do
   root <- liftIO $ getRoot cOpts
 
   let srcInfo = maybe emptyDapp (dappInfo root) buildOutput
@@ -954,7 +952,6 @@ unitTestOptions testOpts cOpts solvers buildOutput = do
           (Nothing, Just url) -> Just (Fetch.Latest, url)
           _ -> Nothing
       rpcDat = Fetch.RpcInfo blockUrlInfo
-  sess <- Fetch.mkSession cOpts.cacheDir testOpts.number
   params <- paramsFromRpc rpcDat sess
   let testn = params.number
       block' = if 0 == testn

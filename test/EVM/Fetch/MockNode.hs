@@ -6,10 +6,11 @@ module EVM.Fetch.MockNode
   , Node (..)
   , Request (..)
   , withMockNode
+  , withSlowMockNode
   , eoa
   ) where
 
-import Control.Concurrent (forkIO, killThread)
+import Control.Concurrent (forkIO, killThread, threadDelay)
 import Control.Exception (bracket, finally)
 import Control.Monad (forever, unless)
 import Data.Aeson (Value(..), (.=), object)
@@ -58,7 +59,12 @@ data Node = Node
 
 -- | Runs a node serving the world at the given block, which is also its "latest"
 withMockNode :: W256 -> World -> (Node -> IO a) -> IO a
-withMockNode blk world act = do
+withMockNode = withSlowMockNode 0
+
+-- | Like 'withMockNode', but taking the given microseconds to answer each request, which is
+-- recorded as it arrives
+withSlowMockNode :: Int -> W256 -> World -> (Node -> IO a) -> IO a
+withSlowMockNode latency blk world act = do
   reqs <- newIORef []
   threads <- newIORef []
   let fork io = forkIO io >>= \t -> atomicModifyIORef' threads (\ts -> (t : ts, ()))
@@ -72,7 +78,7 @@ withMockNode blk world act = do
   bracket open close $ \sock -> do
     fork $ forever $ do
       (conn, _) <- Net.accept sock
-      fork $ serveConn (answer blk world reqs) conn `finally` Net.close conn
+      fork $ serveConn (\body -> answer blk world reqs body <* threadDelay latency) conn `finally` Net.close conn
     port <- Net.socketPort sock
     act (Node ("http://127.0.0.1:" <> T.pack (show port)) blk reqs)
 

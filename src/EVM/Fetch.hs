@@ -19,6 +19,9 @@ module EVM.Fetch
   , FetchCache (..)
   , addFetchCache
   , saveCache
+  , fetchChainId
+  , CacheLocation (..)
+  , withCachedSession
   , RPCContract (..)
   , makeContractFromRPC
   -- Below 4 are needed for Echidna
@@ -45,11 +48,12 @@ import EVM (emptyContract, cheatCode, consoleAddr)
 import Optics.Core
 import GHC.Generics (Generic)
 import System.FilePath ((</>))
-import System.Directory (createDirectoryIfMissing, doesFileExist)
+import System.Directory (createDirectoryIfMissing, doesFileExist, renameFile)
+import System.IO (openTempFile, hClose)
 import Data.Aeson.Encode.Pretty (encodePretty)
 import qualified Data.ByteString.Lazy as BSL
 import Data.Bifunctor (first)
-import Control.Exception (SomeException, SomeAsyncException(..), try, catches, Handler(..), throwIO)
+import Control.Exception (SomeException, SomeAsyncException(..), try, catches, Handler(..), throwIO, mask, uninterruptibleMask_, fromException, finally)
 
 import Data.Aeson hiding (Error)
 import Data.Aeson.Optics
@@ -68,11 +72,12 @@ import Numeric.Natural (Natural)
 import System.Environment (lookupEnv, getEnvironment)
 import System.Process
 import Control.Monad.IO.Class
-import Control.Monad (when)
+import Control.Monad (forM, forM_, when)
+import Control.Monad.IO.Unlift (withRunInIO)
 import EVM.Effects
 import qualified EVM.Expr as Expr
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.MVar (MVar, newMVar, readMVar, modifyMVar_)
+import Control.Concurrent.MVar (MVar, newMVar, newEmptyMVar, putMVar, readMVar, modifyMVar, modifyMVar_)
 import Data.IORef (IORef, newIORef, readIORef, atomicModifyIORef')
 import Data.Time.Clock (UTCTime, getCurrentTime, diffUTCTime, addUTCTime)
 import System.Random (randomRIO)
@@ -100,7 +105,13 @@ data Session = Session
   -- Shared rate limit cooldown across workers. When any worker hits a
   -- rate limit, it sets a deadline; other workers wait before retrying.
   , rpcThrottle     :: IORef (Maybe UTCTime)
+  , slotsInFlight   :: InFlight (Addr, W256) (FetchResult W256)
+  , accountsInFlight :: InFlight Addr (FetchResult RPCContract)
   }
+
+-- | The fetches under way, each with where its result goes, so that callers racing on the
+-- same state share one fetch
+type InFlight k a = MVar (Map.Map k (MVar (Either SomeException a)))
 
 data FetchCache = FetchCache
   { contractCache :: Map.Map Addr RPCContract
@@ -200,9 +211,8 @@ readText :: Read a => Text -> a
 readText = read . unpack
 
 addFetchCache :: Session -> Addr -> RPCContract -> IO ()
-addFetchCache sess address ctrct = do
-  cache <- readMVar sess.sharedCache
-  liftIO $ modifyMVar_ sess.sharedCache $ \c -> pure $ c { contractCache = (Map.insert address ctrct cache.contractCache) }
+addFetchCache sess address ctrct =
+  modifyMVar_ sess.sharedCache $ \c -> pure $ c { contractCache = Map.insert address ctrct c.contractCache }
 
 fetchQuery
   :: Show a
@@ -228,7 +238,7 @@ fetchQuery n f q =
         m <- f (rpc "eth_getStorageAt" [toRPC addr, toRPC slot, toRPC n])
         pure $ m >>= \v -> maybeToRight "Parse error" (readText <$> preview _String v)
     QueryChainId -> do
-        m <- f (rpc "eth_chainId" [toRPC n])
+        m <- f (rpc "eth_chainId" [])
         pure $ m >>= \v -> maybeToRight "Parse error" (readText <$> preview _String v)
     QueryStorageRoot addr -> do
         m <- f (rpc "eth_getProof" [toRPC addr, Array mempty, toRPC n])
@@ -370,53 +380,81 @@ fetchContractWithSession conf sess nPre url addr =
 
 -- | Fetches any account, including ones without code (EOAs and nonexistent accounts)
 fetchAccountWithSession :: Config -> Session -> BlockNumber -> Text -> Addr -> IO (FetchResult RPCContract)
-fetchAccountWithSession conf sess nPre url addr = do
-  n <- getLatestBlockNum conf sess nPre url
-  cache <- readMVar sess.sharedCache
-  case Map.lookup addr cache.contractCache of
-    Just c -> do
-      when (conf.debug) $ putStrLn $ "-> Using cached account at " ++ show addr
-      pure (FetchSuccess c Cached)
+fetchAccountWithSession conf sess nPre url addr =
+  cachedOr sess.accountsInFlight addr cached $ do
+    n <- getLatestBlockNum conf sess nPre url
+    when (conf.debug) $ putStrLn $ "-> Fetching account at " ++ show addr
+    let fetch :: Show a => RpcQuery a -> IO (Either Text a)
+        fetch = fetchQuery n (fetchWithRetry conf.debug url sess)
+
+    codeRes <- fetch (QueryCode addr)
+    nonceRes <- fetch (QueryNonce addr)
+    balRes <- fetch (QueryBalance addr)
+
+    case (codeRes, nonceRes, balRes) of
+      (Right c, Right no, Right ba) -> do
+        -- nodes without eth_getProof are taken to report empty storage
+        root <- if BS.null c && no == 0
+          then either (const Nothing) Just <$> fetch (QueryStorageRoot addr)
+          else pure Nothing
+        let contr = RPCContract (ByteStringS c) no ba root
+        modifyMVar_ sess.sharedCache $ \x -> pure $ x { contractCache = Map.insert addr contr x.contractCache }
+        pure (FetchSuccess contr Fresh)
+      (Left e, _, _) -> pure (FetchError e)
+      (_, Left e, _) -> pure (FetchError e)
+      (_, _, Left e) -> pure (FetchError e)
+  where
+    cached = do
+      cache <- readMVar sess.sharedCache
+      forM (Map.lookup addr cache.contractCache) $ \c -> do
+        when (conf.debug) $ putStrLn $ "-> Using cached account at " ++ show addr
+        pure (FetchSuccess c Cached)
+
+-- | Answers from the cache, or else fetches unless a fetch of the same key is under way, then
+-- sharing its result. The cache is checked again once the key is taken: a fetch may have
+-- filled it in the meantime.
+cachedOr :: Ord k => InFlight k (FetchResult a) -> k -> IO (Maybe (FetchResult a)) -> IO (FetchResult a) -> IO (FetchResult a)
+cachedOr inFlight k cached fetch = cached >>= \case
+  Just r -> pure r
+  Nothing -> singleFlight inFlight k (cached >>= maybe fetch pure) <&> \case
+    (FetchSuccess a Fresh, False) -> FetchSuccess a Cached
+    (r, _) -> r
+
+-- | Runs the action unless one for the same key is under way, then waiting for its result
+-- instead, and returns whether it ran here. Callers that were waiting on a fetch whose thread
+-- was killed run it again, rather than die of the same.
+singleFlight :: Ord k => InFlight k a -> k -> IO a -> IO (a, Bool)
+singleFlight inFlight k act = mask $ \restore -> do
+  (var, owner) <- modifyMVar inFlight $ \m -> case Map.lookup k m of
+    Just var -> pure (m, (var, False))
     Nothing -> do
-      when (conf.debug) $ putStrLn $ "-> Fetching account at " ++ show addr
-      let fetch :: Show a => RpcQuery a -> IO (Either Text a)
-          fetch = fetchQuery n (fetchWithRetry conf.debug url sess)
-
-      codeRes <- fetch (QueryCode addr)
-      nonceRes <- fetch (QueryNonce addr)
-      balRes <- fetch (QueryBalance addr)
-
-      case (codeRes, nonceRes, balRes) of
-        (Right c, Right no, Right ba) -> do
-          -- nodes without eth_getProof are taken to report empty storage
-          root <- if BS.null c && no == 0
-            then either (const Nothing) Just <$> fetch (QueryStorageRoot addr)
-            else pure Nothing
-          let contr = RPCContract (ByteStringS c) no ba root
-          modifyMVar_ sess.sharedCache $ \x -> pure $ x { contractCache = Map.insert addr contr x.contractCache }
-          pure (FetchSuccess contr Fresh)
-        (Left e, _, _) -> pure (FetchError e)
-        (_, Left e, _) -> pure (FetchError e)
-        (_, _, Left e) -> pure (FetchError e)
+      var <- newEmptyMVar
+      pure (Map.insert k var m, (var, True))
+  if owner
+  then do
+    res <- try (restore act)
+    -- waiters would block forever if this were interrupted
+    uninterruptibleMask_ $ modifyMVar_ inFlight (pure . Map.delete k) >> putMVar var res
+    either throwIO (pure . (, True)) res
+  else restore (readMVar var) >>= \case
+    Right a -> pure (a, False)
+    Left e | Just (SomeAsyncException _) <- fromException e -> restore (singleFlight inFlight k act)
+           | otherwise -> throwIO e
 
 -- In case the user asks for Latest, and we have not yet established what Latest is,
 -- we fetch the block to find out. Otherwise, we update Latest to the value we have stored
 getLatestBlockNum :: Config -> Session -> BlockNumber -> Text -> IO BlockNumber
 getLatestBlockNum conf sess n url =
   case n of
-   Latest -> do
-     val <- readMVar sess.latestBlockNum
-     case val of
-        Nothing -> do
-          blk <- internalBlockFetch conf sess Latest url
-          case blk of
-            Nothing -> pure Latest
-            Just b -> do
-              when (conf.debug) $ putStrLn $ "Setting latest block number to " ++ show b.number
-              let m = forceLit b.number
-              modifyMVar_ sess.latestBlockNum $ \_ -> pure $ Just m
-              pure $ EVM.Fetch.BlockNumber m
-        Just v -> pure $ EVM.Fetch.BlockNumber v
+   -- the lock is held while fetching, so that racing callers fetch the block only once
+   Latest -> modifyMVar sess.latestBlockNum $ \case
+     Just v -> pure (Just v, EVM.Fetch.BlockNumber v)
+     Nothing -> internalBlockFetch conf sess Latest url >>= \case
+       Nothing -> pure (Nothing, Latest)
+       Just b -> do
+         when (conf.debug) $ putStrLn $ "Setting latest block number to " ++ show b.number
+         let m = forceLit b.number
+         pure (Just m, EVM.Fetch.BlockNumber m)
    _ -> pure n
 
 makeContractFromRPC :: RPCContract -> Contract
@@ -434,33 +472,31 @@ emptyStorageRoot = 0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e36
 
 -- Needed for Echidna only
 fetchSlotWithCache :: Config -> Session -> BlockNumber -> Text -> Addr -> W256 -> IO (FetchResult W256)
-fetchSlotWithCache conf sess nPre url addr slot = do
-  n <- getLatestBlockNum conf sess nPre url
-  -- Check successful cache
-  cache <- readMVar sess.sharedCache
-  case Map.lookup (addr, slot) cache.slotCache of
-    Just s -> do
-      when (conf.debug) $ putStrLn $ "-> Using cached slot value for slot " <> show slot <> " at " <> show addr
-      pure (FetchSuccess s Cached)
-    Nothing -> do
-      -- Check failure cache
-      failures <- readMVar sess.failedSlots
-      if Set.member (addr, slot) failures
-      then do
-        when (conf.debug) $ putStrLn $ "-> Skipping previously failed slot " <> show slot <> " at " <> show addr
-        pure (FetchFailure Cached)
-      else do
-        -- Attempt fetch
-        when (conf.debug) $ putStrLn $ "-> Fetching slot " <> show slot <> " at " <> show addr
-        ret <- fetchQuery n (fetchWithRetry conf.debug url sess) (QuerySlot addr slot)
-        case ret of
-          Right val -> do
-            -- Success: cache it
-            modifyMVar_ sess.sharedCache $ \c ->
-              pure $ c { slotCache = Map.insert (addr, slot) val c.slotCache }
-            pure (FetchSuccess val Fresh)
-          Left err -> do
-            pure (FetchError err)
+fetchSlotWithCache conf sess nPre url addr slot =
+  cachedOr sess.slotsInFlight (addr, slot) cached $ do
+    n <- getLatestBlockNum conf sess nPre url
+    when (conf.debug) $ putStrLn $ "-> Fetching slot " <> show slot <> " at " <> show addr
+    ret <- fetchQuery n (fetchWithRetry conf.debug url sess) (QuerySlot addr slot)
+    case ret of
+      Right val -> do
+        modifyMVar_ sess.sharedCache $ \c ->
+          pure $ c { slotCache = Map.insert (addr, slot) val c.slotCache }
+        pure (FetchSuccess val Fresh)
+      Left err -> pure (FetchError err)
+  where
+    cached = do
+      cache <- readMVar sess.sharedCache
+      case Map.lookup (addr, slot) cache.slotCache of
+        Just s -> do
+          when (conf.debug) $ putStrLn $ "-> Using cached slot value for slot " <> show slot <> " at " <> show addr
+          pure $ Just (FetchSuccess s Cached)
+        Nothing -> do
+          failures <- readMVar sess.failedSlots
+          if Set.member (addr, slot) failures
+          then do
+            when (conf.debug) $ putStrLn $ "-> Skipping previously failed slot " <> show slot <> " at " <> show addr
+            pure $ Just (FetchFailure Cached)
+          else pure Nothing
 
 -- | Get the complete cache state including both successes and failures
 -- Returns in the format expected by Echidna's UI:
@@ -551,12 +587,26 @@ loadCache dir n = do
     else
       pure emptyCache
 
+-- | Adds what the cache holds to the cache file, unless it holds nothing new. Other runs may
+-- have saved to the file since this one loaded it, so it is merged with, and replaced at once.
 saveCache :: FilePath -> W256 -> FetchCache -> IO ()
 saveCache dir n cache = do
   createDirectoryIfMissing True dir
-  let fp = dir </> cacheFileName n
-  putStrLn $ "Saving RPC cache to " ++ fp
-  BSL.writeFile fp (encodePretty cache)
+  old <- loadCache dir n
+  let new = FetchCache
+        (Map.union cache.contractCache old.contractCache)
+        (Map.union cache.slotCache old.slotCache)
+        (Map.union cache.blockCache old.blockCache)
+      size c = Map.size c.contractCache + Map.size c.slotCache + Map.size c.blockCache
+      fp = dir </> cacheFileName n
+  when (size new > size old) $ do
+    putStrLn $ "Saving RPC cache to " ++ fp
+    (tmp, h) <- openTempFile dir (cacheFileName n)
+    BSL.hPut h (encodePretty new) >> hClose h
+    renameFile tmp fp
+
+fetchChainId :: Config -> Session -> Text -> IO (Either Text W256)
+fetchChainId conf sess url = fetchQuery Latest (fetchWithRetry conf.debug url sess) QueryChainId
 
 mkSession :: App m => Maybe FilePath -> Maybe W256 -> m Session
 mkSession cacheDir mblock = do
@@ -570,10 +620,36 @@ mkSession cacheDir mblock = do
   failedContracts <- liftIO $ newMVar Set.empty
   failedSlots <- liftIO $ newMVar Set.empty
   rpcThrottle <- liftIO $ newIORef Nothing
-  pure $ Session sess latestBlockNum cache cacheDir failedContracts failedSlots rpcThrottle
+  slotsInFlight <- liftIO $ newMVar Map.empty
+  accountsInFlight <- liftIO $ newMVar Map.empty
+  pure $ Session sess latestBlockNum cache cacheDir failedContracts failedSlots rpcThrottle slotsInFlight accountsInFlight
 
 mkSessionWithoutCache :: App m => m Session
 mkSessionWithoutCache = mkSession Nothing Nothing
+
+-- | Where the RPC cache lives: in a directory as given, or in the chain's own under one
+data CacheLocation = CacheDir FilePath | PerChainUnder FilePath
+  deriving (Show)
+
+-- | A session that starts from the state saved at a fixed block, and saves what it fetched
+-- however the action ends, so that runs do not fetch the same state over and over
+withCachedSession :: App m => Maybe CacheLocation -> Maybe Text -> Maybe W256 -> (Session -> m a) -> m a
+withCachedSession loc url block act = do
+  dir <- case (loc, url, block) of
+    (Just (CacheDir d), _, _) -> pure (Just d)
+    (Just (PerChainUnder root), Just u, Just _) -> do
+      conf <- readConfig
+      probe <- mkSessionWithoutCache
+      -- blocks of different chains share numbers
+      liftIO (fetchChainId conf probe u) >>= \case
+        Right chain -> pure $ Just (root </> show (toInteger chain))
+        Left e -> do
+          liftIO $ putStrLn $ "Warning: not caching RPC state, could not fetch the chain id: " <> unpack e
+          pure Nothing
+    _ -> pure Nothing
+  sess <- mkSession dir block
+  withRunInIO $ \run -> run (act sess) `finally` forM_ ((,) <$> dir <*> block) (\(d, b) ->
+    readMVar sess.sharedCache >>= saveCache d b)
 
 -- Only used for testing (test.hs, BlockchainTests.hs)
 zero :: Natural -> Maybe Natural -> Natural -> Fetcher t m
@@ -622,19 +698,11 @@ oracle solvers preSess rpcInfo q = do
       | otherwise -> do
         let sess = fromMaybe (internalError $ "oracle: no session provided for fetch addr: " ++ show addr) preSess
         conf <- readConfig
-        cache <- liftIO $ readMVar sess.sharedCache
-        case Map.lookup addr cache.contractCache of
-          Just c -> do
-            when (conf.debug) $ liftIO $ putStrLn $ "-> Using cached contract at " ++ show addr
-            pure $ continue $ makeContractFromRPC c
-          Nothing -> do
-            when (conf.debug) $ liftIO $ putStrLn $ "Fetching contract at " ++ show addr
-            let (block, url) = fromJust rpcInfo.blockNumURL
-            res <- liftIO $ fetchAccountWithSession conf sess block url addr
-            case res of
-              FetchSuccess x _ -> pure $ continue (makeContractFromRPC x)
-              FetchFailure _ -> internalError $ "oracle error: " ++ show q
-              FetchError e -> internalError $ "oracle error: " ++ show e
+        let (block, url) = fromJust rpcInfo.blockNumURL
+        liftIO (fetchAccountWithSession conf sess block url addr) >>= \case
+          FetchSuccess x _ -> pure $ continue (makeContractFromRPC x)
+          FetchFailure _ -> internalError $ "oracle error: " ++ show q
+          FetchError e -> internalError $ "oracle error: " ++ show e
       where
         nothingContract = case base of
           AbstractBase -> unknownContract (LitAddr addr)
@@ -646,22 +714,11 @@ oracle solvers preSess rpcInfo q = do
       | otherwise -> do
         let sess = fromMaybe (internalError $ "oracle: no session provided for fetch addr: " ++ show addr) preSess
         conf <- readConfig
-        cache <- liftIO $ readMVar sess.sharedCache
-        case Map.lookup (addr, slot) cache.slotCache of
-          Just s -> do
-            when (conf.debug) $ liftIO $ putStrLn $ "-> Using cached slot value for slot " <> show slot <> " at " <> show addr
-            pure $ continue s
-          Nothing -> do
-            when (conf.debug) $ liftIO $ putStrLn $ "Fetching slot " <> (show slot) <> " at " <> (show addr)
-            let (block, url) = fromJust rpcInfo.blockNumURL
-            n <- liftIO $ getLatestBlockNum conf sess block url
-            ret <- liftIO $ fetchQuery n (fetchWithRetry conf.debug url sess) (QuerySlot addr slot)
-            case ret of
-              Right val -> do
-                liftIO $ modifyMVar_ sess.sharedCache $ \c ->
-                  pure $ c { slotCache = Map.insert (addr, slot) val c.slotCache }
-                pure $ continue val
-              Left err -> internalError $ "oracle error: " ++ show err
+        let (block, url) = fromJust rpcInfo.blockNumURL
+        liftIO (fetchSlotWithCache conf sess block url addr slot) >>= \case
+          FetchSuccess val _ -> pure $ continue val
+          FetchFailure _ -> internalError $ "oracle error: " ++ show q
+          FetchError e -> internalError $ "oracle error: " ++ show e
 
     PleaseReadEnv variable continue -> do
       value <- liftIO $ lookupEnv variable
