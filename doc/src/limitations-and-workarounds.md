@@ -26,7 +26,10 @@ recursion may be unbounded or bounded only by a potentially very large number.
 
 Hence, hevm only explores loops and recursions up to fixed depth `k`, a
 parameter that can be adjusted from the command line via the `--max-iterations
-k` parameter. Whenever the limit is hit, hevm warns of the incomplete exploration:
+k` parameter. This applies to loops whose condition depends on symbolic values;
+loops with a concrete condition run until they end, up to
+`--max-concrete-iterations`. Whenever the limit is hit, hevm warns of the
+incomplete exploration:
 
 ```shell
 WARNING: hevm was only able to partially explore the call prefix 0x[...] due to the following issue(s):

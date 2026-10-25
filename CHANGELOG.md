@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- A worked example in the docs: finding the Abracadabra `cook()` exploit on a mainnet fork.
+- `--smt-branch-timeout`, 20 seconds by default, for the queries that decide which
+  branches to explore.
+- `--max-concrete-iterations`, 10000 by default, bounds loops whose condition is
+  concrete. `--max-iterations` now only bounds loops with symbolic conditions.
 - A worked example in the docs: finding the Truebit exploit on a mainnet fork.
 - The symbolic execution fuzzers check that a model reaching another leaf via a
   symbolic keccak gives each hashed input one hash, and generate comparisons of
