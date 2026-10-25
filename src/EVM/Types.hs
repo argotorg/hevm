@@ -855,6 +855,9 @@ data Frame (t :: VMType) = Frame
   { context :: FrameContext
   , state   :: FrameState t
   , logs    :: [Expr Log] -- ^ the logs when the frame was entered, restored if it fails
+  , iterations :: Map CodeLocation (Int, [Expr EWord])
+    -- ^ the caller's loop counts, restored on return: each call counts its own, else
+    -- repeated calls into a contract look like iterations of a loop
   }
 
 deriving instance Show (Frame Symbolic)

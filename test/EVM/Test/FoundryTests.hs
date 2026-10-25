@@ -119,6 +119,9 @@ tests = testGroup "Foundry tests"
           >>= assertRun "test result" [(True, False)]
         runForgeTestResultsCustom testFile (\(TestMethodInfo _ (Sig name _)) -> name == "prove_loop") Nothing (Just 100) False Fetch.noRpc
           >>= assertRun "test result" [(False, False)]
+    , test "Repeated-Calls-Not-Loop" $ do
+        let testFile = "test/contracts/pass/repeated-calls.sol"
+        executeSingleMethod testFile "prove_seven_calls" >>= assertRun "test result" (True, True)
     , test "Cheat-Codes-Pass" $ do
         let testFile = "test/contracts/pass/cheatCodes.sol"
         executeAllMethodsWithPrefix testFile "prove" >>= assertRun "test result" (True, False)
