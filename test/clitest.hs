@@ -321,7 +321,7 @@ main = do
           readProcessWithExitCode "cabal" ["run", "exe:hevm", "--", "symbolic", "--code", Types.bsToHex c] ""
         quietOut `shouldNotContain` "Queries answered:"
       it "symbolic-partial-is-not-qed" $ do
-        -- loops 10 times before INVALID, more than the default max iterations;
+        -- loops 10 times before INVALID, more than --max-concrete-iterations;
         -- OpPush assembles to PUSH32, so the loop head is at 33 and the body at 104
         let loop = asmHex
               [ OpPush (Lit 0), OpJumpdest
@@ -329,7 +329,7 @@ main = do
               , OpInvalid
               , OpJumpdest, OpPush (Lit 1), OpAdd, OpPush (Lit 33), OpJump ]
         (exitCode, stdout, _) <- readProcessWithExitCode "cabal"
-          ["run", "exe:hevm", "--", "symbolic", "--code", loop] ""
+          ["run", "exe:hevm", "--", "symbolic", "--max-concrete-iterations", "5", "--code", loop] ""
         exitCode `shouldBe` ExitFailure 1
         stdout `shouldNotContain` "QED"
         stdout `shouldContain` "[WARNING]"

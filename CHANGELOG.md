@@ -123,6 +123,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes of zero.
 
 ## Changed
+- `hevm test` and `hevm symbolic` stop at the first counterexample, cancelling the
+  solver queries still running. `--no-early-abort` explores every path and
+  replaces `--early-abort`.
 - `hevm test` shows the result of the concrete replay of a validated counterexample,
   so failed assertions on symbolic values show the values.
 - Checked multiplication, `x == (x * d) / d`, is encoded for the SMT solver as an

@@ -49,6 +49,13 @@ shorter timeout, `--smt-branch-timeout`, 20 seconds by default and at most
 sides, so a timeout there costs no counterexamples, only time spent on paths
 that may be impossible.
 
+## Stopping at the First Counterexample, ``--no-early-abort``
+
+By default, hevm stops exploring once it finds a counterexample: the paths
+still being explored stop, and their solver queries are cancelled. With
+`--no-early-abort` it explores every path, to report all counterexamples and
+every path it could not explore fully.
+
 ## Loop Iteration Limits, ``--max-iterations``, ``--max-concrete-iterations``
 
 hevm explores a loop whose condition depends on symbolic values at most
