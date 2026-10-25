@@ -98,6 +98,7 @@ data CommonOptions = CommonOptions
   , dumpUnsolved  ::Maybe String
   , numSolvers    ::Maybe Natural
   , maxIterations ::Integer
+  , maxConcreteIterations ::Integer
   , promiseNoReent::Bool
   , maxBufSize    ::Int
   , maxWidth      ::Int
@@ -142,6 +143,7 @@ commonOptions = CommonOptions
   <*> (optional $ strOption $ long "dump-unsolved" <> help "Dump unsolved SMT queries to this (relative) path")
   <*> (optional $ option auto $ long "num-solvers" <> help "Number of solver instances to use (default: number of cpu cores)")
   <*> (option auto $ long "max-iterations"  <> showDefault <> value 5 <> help "Number of times we may revisit a particular branching point. For no bound, set -1")
+  <*> (option auto $ long "max-concrete-iterations" <> showDefault <> value 10000 <> help "Number of times we may revisit a branching point whose condition is concrete, e.g. in a loop over fetched state. Gas is not tracked, so this stops loops that never end. For no bound, set -1")
   <*> (switch $ long "promise-no-reent"     <> help "Promise no reentrancy is possible into the contract(s) being examined")
   <*> (option auto $ long "max-buf-size"    <> value 24 <> help "Maximum size of buffers such as calldata and returndata in exponents of 2 (default: 24, i.e. 16 MB, more than gas limits allow)")
   <*> (option auto $ long "max-width"      <> showDefault <> value 100 <> help "Max number of concrete values to explore when encountering a symbolic value. This is a form of branch width limitation per symbolic value")
@@ -470,6 +472,7 @@ equivalence eqOpts cOpts = do
     exitFailure
   let veriOpts = (defaultVeriOpts :: VeriOpts) { iterConf = IterConfig {
                             maxIter = parseMaxIters cOpts.maxIterations
+                            , maxConcreteIter = parseMaxIters cOpts.maxConcreteIterations
                             , askSmtIters = cOpts.askSmtIterations
                             , loopHeuristic = cOpts.loopDetectionHeuristic
                             }
@@ -602,6 +605,7 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = withRpcSession cOpts cExecOpts.rpc c
   withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
     let veriOpts = VeriOpts { iterConf = IterConfig {
                               maxIter = parseMaxIters cOpts.maxIterations
+                              , maxConcreteIter = parseMaxIters cOpts.maxConcreteIterations
                               , askSmtIters = cOpts.askSmtIterations
                               , loopHeuristic = cOpts.loopDetectionHeuristic
                               }
@@ -965,6 +969,7 @@ unitTestOptions testOpts cOpts solvers sess buildOutput = do
                      Nothing  -> Nothing
                 in rpcDat { Fetch.blockNumURL = i }
     , maxIter = parseMaxIters cOpts.maxIterations
+    , maxConcreteIter = parseMaxIters cOpts.maxConcreteIterations
     , askSmtIters = cOpts.askSmtIterations
     , smtTimeout = Just cOpts.smtTimeout
     , methodFilter = \(TestMethodInfo _ (Sig name _)) -> testOpts.prefix `T.isPrefixOf` name && maybe True (\match -> regexMatches match name) testOpts.match

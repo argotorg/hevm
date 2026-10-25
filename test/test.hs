@@ -1018,7 +1018,7 @@ tests = testGroup "hevm"
         withSolvers Bitwuzla 1 Nothing defMemLimit $ \s -> do
           let calldata = (WriteWord (Lit 0x0) (Var "u") (ConcreteBuf ""), [])
           initVM <- liftIO $ stToIO $ abstractVM calldata initCode Nothing True
-          let iterConf = IterConfig {maxIter=Nothing, askSmtIters=1, loopHeuristic=StackBased }
+          let iterConf = IterConfig {maxIter=Nothing, maxConcreteIter=Nothing, askSmtIters=1, loopHeuristic=StackBased }
           paths <- interpret (Fetch.noRpcFetcher s) iterConf initVM runExpr noopPathHandler
           let exprSimp = map Expr.simplify paths
           assertBoolM "unexptected partial execution" (not $ any isPartial exprSimp)
@@ -1109,7 +1109,7 @@ tests = testGroup "hevm"
               ])
         withDefaultSolver $ \s -> do
           vm <- liftIO $ stToIO $ loadSymVM runtimecode (Lit 0) initCode False
-          let iterConf = IterConfig {maxIter=Nothing, askSmtIters=1, loopHeuristic=StackBased }
+          let iterConf = IterConfig {maxIter=Nothing, maxConcreteIter=Nothing, askSmtIters=1, loopHeuristic=StackBased }
           paths <- interpret (Fetch.noRpcFetcher s) iterConf vm runExpr noopPathHandler
           let exprSimp = map Expr.simplify paths
           assertBoolM "expected partial execution" (any isPartial exprSimp)
@@ -2098,10 +2098,27 @@ tests = testGroup "hevm"
             }
             |]
         let sig = Just $ Sig "fun()" []
-            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf {maxIter = Just 3 }}
+            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf {maxConcreteIter = Just 3 }}
         (e, []) <- withDefaultSolver $
           \s -> checkAssert s defaultPanicCodes c sig [] opts
         assertBoolM "The expression is not partial" $ any isPartial e
+    -- concrete loops have their own bound, maxIter is for symbolic ones
+    , test "concrete-loops-ignore-max-iterations" $ do
+        Just c <- solcRuntime "C"
+            [i|
+            contract C {
+              function fun() external payable returns (uint) {
+                uint count = 0;
+                for (uint i = 0; i < 255; i++) count++;
+                return count;
+              }
+            }
+            |]
+        let sig = Just $ Sig "fun()" []
+            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf {maxIter = Just 3, maxConcreteIter = Just 10000 }}
+        (e, []) <- withDefaultSolver $
+          \s -> checkAssert s defaultPanicCodes c sig [] opts
+        assertBoolM "The expression is partial" $ not $ any isPartial e
     , test "concrete-loops-not-reached" $ do
         Just c <- solcRuntime "C"
             [i|
@@ -2115,7 +2132,7 @@ tests = testGroup "hevm"
             |]
 
         let sig = Just $ Sig "fun()" []
-            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf {maxIter = Just 6 }}
+            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf {maxConcreteIter = Just 6 }}
         (e, []) <- withDefaultSolver $
           \s -> checkAssert s defaultPanicCodes c sig [] opts
         assertBoolM "The expression is partial" $ not $ any isPartial e
@@ -2558,7 +2575,7 @@ tests = testGroup "hevm"
         let c = fromJust $ hexByteString "00"
             throwingHandler _ _ = liftIO $ throwIO (ErrorCall "worker boom")
         vm <- liftIO $ stToIO $ abstractVM (ConcreteBuf "", []) c Nothing False
-        let iterConf = IterConfig { maxIter = Nothing, askSmtIters = 1, loopHeuristic = StackBased }
+        let iterConf = IterConfig { maxIter = Nothing, maxConcreteIter = Nothing, askSmtIters = 1, loopHeuristic = StackBased }
         res <- withDefaultSolver $ \s -> withRunInIO $ \runInIO -> timeout 30000000 $
                  (try (runInIO (interpret (Fetch.noRpcFetcher s) iterConf vm runExpr throwingHandler)) :: IO (Either ErrorCall [()]))
         case res of

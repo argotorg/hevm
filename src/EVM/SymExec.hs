@@ -99,6 +99,9 @@ groupPartials srcLookupM contracts e = map (\g -> (into (length g), NE.head g)) 
 
 data IterConfig = IterConfig
   { maxIter :: Maybe Integer
+  -- | the bound for branches whose condition is concrete: gas is not tracked, so it
+  -- stops loops that would never end
+  , maxConcreteIter :: Maybe Integer
   , askSmtIters :: Integer
   , loopHeuristic :: LoopHeuristic
   }
@@ -107,6 +110,7 @@ data IterConfig = IterConfig
 defaultIterConf :: IterConfig
 defaultIterConf = IterConfig
   { maxIter = Nothing
+  , maxConcreteIter = Nothing
   , askSmtIters = 1
   , loopHeuristic = StackBased
   }
@@ -601,7 +605,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
               -- is the condition concrete?
               Lit c ->
                 -- have we reached max iterations, are we inside a loop?
-                case (maxIterationsReached vm iterConf.maxIter, isLoopHead iterConf.loopHeuristic vm) of
+                case (maxIterationsReached vm iterConf.maxConcreteIter, isLoopHead iterConf.loopHeuristic vm) of
                   -- Yes. return a partial leaf
                   (Just _, Just True) ->
                     pure $ Partial vm.constraints (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) $ MaxIterationsReached vm.state.pc vm.state.contract

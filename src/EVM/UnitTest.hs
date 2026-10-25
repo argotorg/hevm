@@ -58,6 +58,7 @@ data UnitTestOptions = UnitTestOptions
   , solvers       :: SolverGroup
   , sess          :: Fetch.Session
   , maxIter       :: Maybe Integer
+  , maxConcreteIter :: Maybe Integer
   , askSmtIters   :: Integer
   , smtTimeout    :: Maybe Natural
   , methodFilter  :: TestMethodFilter
@@ -116,7 +117,7 @@ writeTrace vm = do
 -- | Generate VeriOpts from UnitTestOptions
 makeVeriOpts :: UnitTestOptions -> VeriOpts
 makeVeriOpts opts =
-   defaultVeriOpts { iterConf = defaultIterConf {maxIter = opts.maxIter, askSmtIters = opts.askSmtIters, loopHeuristic = opts.loopHeuristic}
+   defaultVeriOpts { iterConf = defaultIterConf {maxIter = opts.maxIter, maxConcreteIter = opts.maxConcreteIter, askSmtIters = opts.askSmtIters, loopHeuristic = opts.loopHeuristic}
                    , rpcInfo = opts.rpcInfo
                    }
 

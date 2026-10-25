@@ -167,7 +167,7 @@ symbolicTestVm :: TestCase -> ST RealWorld (VM Symbolic)
 symbolicTestVm c = set #constraints symProps <$> mkVm False () c symbolicVMInputs
 
 symIterConf :: IterConfig
-symIterConf = IterConfig { maxIter = Just 6, askSmtIters = 1, loopHeuristic = Naive }
+symIterConf = IterConfig { maxIter = Just 6, maxConcreteIter = Just 6, askSmtIters = 1, loopHeuristic = Naive }
 
 -- | Bounds that keep solver models replayable in geth
 symProps :: [Prop]
