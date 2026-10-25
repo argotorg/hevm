@@ -53,7 +53,7 @@ import System.IO (openTempFile, hClose)
 import Data.Aeson.Encode.Pretty (encodePretty)
 import qualified Data.ByteString.Lazy as BSL
 import Data.Bifunctor (first)
-import Control.Exception (SomeException, SomeAsyncException(..), try, catches, Handler(..), throwIO, mask, uninterruptibleMask_, fromException, finally)
+import Control.Exception (Exception, SomeException, SomeAsyncException(..), try, catches, Handler(..), throwIO, mask, uninterruptibleMask_, fromException, finally)
 
 import Data.Aeson hiding (Error)
 import Data.Aeson.Optics
@@ -358,18 +358,43 @@ withRetry debug firstDelay throttle action = go 1
             pure $ Left $ pack $ show e
 
 -- | Like fetchWithSession but with retry + shared cooldown from Session.
+-- JSON-RPC errors that ask to slow down are retried too.
 fetchWithRetry :: Bool -> Text -> Session -> Value -> IO (Either Text Value)
-fetchWithRetry debug url session = withRetry debug session.retryDelay session.rpcThrottle . fetchWithSession url session.sess
+fetchWithRetry debug url session x = withRetry debug session.retryDelay session.rpcThrottle $
+  postRpc url session.sess x >>= \case
+    Left (Just err) | rateLimited err -> throwIO (RateLimited (pack (show err)))
+    r -> pure (first rpcError r)
 
 fetchWithSession :: Text -> NetSession.Session -> Value -> IO (Either Text Value)
-fetchWithSession url sess x = do
+fetchWithSession url sess x = first rpcError <$> postRpc url sess x
+
+-- | The result of a JSON-RPC request, or its error, if any
+postRpc :: Text -> NetSession.Session -> Value -> IO (Either (Maybe Value) Value)
+postRpc url sess x = do
   r <- asValue =<< NetSession.post sess (unpack url) x
   let body = r ^. (lensVL responseBody)
-  case body ^? key "result" of
-    Just val -> pure $ Right val
-    Nothing -> case body ^? key "error" of
-      Just err -> pure $ Left $ pack $ show err
-      Nothing -> pure $ Left "Unknown RPC error"
+  pure $ case body ^? key "result" of
+    Just val -> Right val
+    Nothing -> Left (body ^? key "error")
+
+rpcError :: Maybe Value -> Text
+rpcError = maybe "Unknown RPC error" (pack . show)
+
+newtype RateLimited = RateLimited Text
+
+instance Show RateLimited where
+  show (RateLimited e) = unpack e
+
+instance Exception RateLimited
+
+-- | Whether a JSON-RPC error is a provider's rate limit: Alchemy's 429, Infura's -32005 and
+-- QuickNode's -32007 codes, or a message saying so
+rateLimited :: Value -> Bool
+rateLimited err = code `elem` map Just [429, -32005, -32007]
+  || any (`T.isInfixOf` T.toLower msg) ["rate limit", "too many requests"]
+  where
+    code = err ^? key "code" % _Integer
+    msg = fromMaybe "" (err ^? key "message" % _String)
 
 -- | Like 'fetchAccountWithSession', but an account without code is a 'FetchFailure'
 fetchContractWithSession :: Config -> Session -> BlockNumber -> Text -> Addr -> IO (FetchResult RPCContract)

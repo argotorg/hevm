@@ -61,8 +61,9 @@ data Node = Node
   }
 
 -- | How a node misbehaves: it answers each request after a latency within the given range of
--- microseconds, or fails it, by HTTP 429 or by hanging up, for the given percentage of the
--- first two attempts. Each is decided by hashing the salt, the request and its attempt.
+-- microseconds, or fails it, by HTTP 429, by a JSON-RPC rate limit error or by hanging up,
+-- for the given percentage of the first two attempts. Each is decided by hashing the salt,
+-- the request and its attempt.
 data Faults = Faults { salt :: W256, latency :: (Int, Int), faultPercent :: W256 }
   deriving (Show)
 
@@ -98,7 +99,11 @@ withFaultyMockNode fs blk world act = do
           then do
             atomicModifyIORef' failed (\k -> (k + 1, ()))
             wait
-            pure (if even h then TooManyRequests else HangUp)
+            pure $ case (h `div` 200) `mod` 3 of
+              0 -> TooManyRequests
+              1 -> HangUp
+              _ -> Reply $ object ["jsonrpc" .= ("2.0" :: Text), "id" .= (1 :: Int), "error" .= object
+                ["code" .= (429 :: Int), "message" .= ("Your app has exceeded its compute units per second capacity" :: Text)]]
           else Reply <$> answer blk world reqs body <* wait
   bracket open close $ \sock -> do
     fork $ forever $ do

@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   saved.
 - Concurrent RPC fetches of the same storage slot, account or latest block
   share one request.
-- The RPC fuzzer's mock node delays and fails requests, and the fuzzer races
+- The RPC fuzzer's mock node delays requests and fails them by HTTP 429, JSON-RPC
+  rate limit errors and dropped connections, and the fuzzer races
   8 runs on one session and checks that no session repeats a request.
 - `--interactive` for `symbolic`, `exec` and `test` starts an interactive debugger
   served over HTTP on localhost, with symbolic branches,
@@ -163,6 +164,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Fixed
 - `eth_chainId` requests no longer pass a block number, which nodes reject.
+- JSON-RPC rate limit errors (codes 429, -32005 and -32007) are retried with
+  backoff instead of aborting the run.
 - Contracts added with `addFetchCache` concurrently are no longer lost.
 - `hevm equivalence` with `--sig` or `--calldata` prints and replays the
   counterexample's calldata instead of empty calldata.
