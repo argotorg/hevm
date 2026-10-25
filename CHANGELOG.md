@@ -117,6 +117,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes of zero.
 
 ## Changed
+- `hevm test` shows the result of the concrete replay of a validated counterexample,
+  so failed assertions on symbolic values show the values.
 - Checked multiplication, `x == (x * d) / d`, is encoded for the SMT solver as an
   overflow check instead of a division.
 - `hevm test --coverage`, which did nothing, is removed.

@@ -238,6 +238,12 @@ main = do
         stderr `shouldNotContain` "CallStack"
         stdout `shouldContain` "[FAIL]"
         stdout `shouldContain` "[validated]"
+      -- the message of a symbolic assertion shows the replay's values, not expressions
+      it "symbolic-assert-message" $ do
+        (_, stdout, stderr) <- runForge "test/contracts/fail/symbolic-assert-message.sol" []
+        stderr `shouldNotContain` "CallStack"
+        stdout `shouldContain` "[validated]"
+        stdout `shouldContain` "assertion failed: 2994 > 2000"
       it "dump unsolved" $ do
         -- z3, as bitwuzla solves this within the timeout
         -- >>> (139487132679483*2347234698674) % 982374892374389278894734
