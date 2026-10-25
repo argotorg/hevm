@@ -114,6 +114,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Changed
 - `hevm test --coverage`, which did nothing, is removed.
+- The test suite shows the output of `hevm test` only for failing tests.
 - Results that revert with `Error(string)` show the decoded message instead of hex.
 - Solver queries for branch conditions and symbolic values also get the keccak
   preimages recorded during concrete execution, as the final queries do.

@@ -77,7 +77,7 @@ import EVM.SymExec
 import EVM.Test.FuzzSymExec qualified as FuzzSymExec
 import EVM.Types hiding (Env)
 import EVM.Effects
-import EVM.UnitTest (writeTrace, printWarnings)
+import EVM.UnitTest (writeTrace)
 import EVM.Expr (maybeLitByteSimp)
 import EVM.Keccak (concreteKeccaks)
 
@@ -1071,9 +1071,8 @@ tests = testGroup "hevm"
             }
           |]
         let sig = (Just $ Sig "foo(address,uint256)" [AbiAddressType, AbiUIntType 256])
-        (e, res) <- withDefaultSolver $
+        (_, res) <- withDefaultSolver $
           \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        liftIO $ printWarnings Nothing mempty e res "the contracts under test"
         assertEqualM "Must be QED" [] res
     , test "extcodesize-symbolic2" $ do
         Just c <- solcRuntime "C"
@@ -1089,9 +1088,9 @@ tests = testGroup "hevm"
             }
           |]
         let sig = (Just $ Sig "foo(address,uint256)" [AbiAddressType, AbiUIntType 256])
-        (e, res@[Cex _]) <- withDefaultSolver $
+        (_, [Cex _]) <- withDefaultSolver $
           \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-        liftIO $ printWarnings Nothing mempty e res "the contracts under test"
+        pure ()
     , test "jump-into-symbolic-region" $ do
         let
           -- our initCode just jumps directly to the end

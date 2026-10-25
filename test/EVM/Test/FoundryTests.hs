@@ -19,7 +19,7 @@ import EVM.ABI (Sig(..))
 import EVM.Dapp (TestMethodFilter, TestMethodInfo(..))
 import EVM.Effects
 import EVM.Fetch qualified as Fetch
-import EVM.Test.Utils (runForgeTest, runForgeTestResults, runForgeTestResultsCustom)
+import EVM.Test.Utils (WithOutput, assertRun, runForgeTest, runForgeTestResults, runForgeTestResultsCustom)
 import EVM.Types (regexMatches)
 
 foundryTestConfig :: Config
@@ -33,14 +33,11 @@ testAbstractArith :: TestName -> ReaderT Env IO () -> TestTree
 testAbstractArith a b =
   testCase a $ runEnv (Env (foundryTestConfig { abstractArith = True })) b
 
-assertEqualM :: (MonadIO m, Eq a, Show a, HasCallStack) => String -> a -> a -> m ()
-assertEqualM a b c = liftIO $ assertEqual a b c
-
 tests :: TestTree
 tests = testGroup "Foundry tests"
     [ test "Trivial-Pass" $ do
         let testFile = "test/contracts/pass/trivial.sol"
-        executeSingleMethod testFile "prove_true" >>= assertEqualM "test result" (True, True)
+        executeSingleMethod testFile "prove_true" >>= assertRun "test result" (True, True)
     , test "Foundry" $ do
         -- quick smokecheck to make sure that we can parse ForgeStdLib style build outputs
         -- return is a pair of (No Cex, No Warnings)
@@ -84,7 +81,7 @@ tests = testGroup "Foundry tests"
           assertAllTestMethodsMatching testFile match expected
     , test "Trivial-Fail" $ do
         let testFile = "test/contracts/fail/trivial.sol"
-        executeSingleMethod testFile "prove_false" >>= assertEqualM "test result" (False, False)
+        executeSingleMethod testFile "prove_false" >>= assertRun "test result" (False, False)
     , test "Abstract" $ do
         let testFile = "test/contracts/pass/abstract.sol"
         assertAllMethodsWithPrefix testFile "test" (True, True)
@@ -99,32 +96,32 @@ tests = testGroup "Foundry tests"
         assertAllMethodsWithPrefix testFile "prove" (True, True)
     , test "prefix-check" $ do
         let testFile = "test/contracts/fail/check-prefix.sol"
-        executeSingleMethod testFile "check_trivial" >>= assertEqualM "test result" (False, False)
+        executeSingleMethod testFile "check_trivial" >>= assertRun "test result" (False, False)
     , test "transfer-dapp" $ do
         let testFile = "test/contracts/pass/transfer.sol"
-        executeSingleMethod testFile "prove_transfer" >>= assertEqualM "should prove transfer" (True, True)
+        executeSingleMethod testFile "prove_transfer" >>= assertRun "should prove transfer" (True, True)
     , test "nonce-issues" $ do
         let testFile = "test/contracts/pass/nonce-issues.sol"
-        executeSingleMethod testFile "prove_prank_addr_exists" >>= assertEqualM "should not bail" (True, True)
-        executeSingleMethod testFile "prove_nonce_addr_nonexistent" >>= assertEqualM "should not bail" (True, True)
+        executeSingleMethod testFile "prove_prank_addr_exists" >>= assertRun "should not bail" (True, True)
+        executeSingleMethod testFile "prove_nonce_addr_nonexistent" >>= assertRun "should not bail" (True, True)
     , test "Prove-Tests-Fail" $ do
         let testFile = "test/contracts/fail/dsProveFail.sol"
-        executeSingleMethod testFile "prove_trivial" >>= assertEqualM "prove_trivial" (False, False)
-        executeSingleMethod testFile "prove_trivial_dstest" >>= assertEqualM "prove_trivial_dstest" (False, False)
-        executeSingleMethod testFile "prove_add" >>= assertEqualM "prove_add" (False, True)
+        executeSingleMethod testFile "prove_trivial" >>= assertRun "prove_trivial" (False, False)
+        executeSingleMethod testFile "prove_trivial_dstest" >>= assertRun "prove_trivial_dstest" (False, False)
+        executeSingleMethod testFile "prove_add" >>= assertRun "prove_add" (False, True)
         runForgeTestResultsCustom testFile (\(TestMethodInfo _ (Sig name _)) -> name == "prove_smtTimeout") (Just 1) Nothing False Fetch.noRpc
-          >>= assertEqualM "prove_smtTimeout" [(True, False)]
-        executeSingleMethod testFile "prove_multi" >>= assertEqualM "prove_multi" (False, True)
-        executeSingleMethod testFile "prove_distributivity" >>= assertEqualM "prove_distributivity" (False, True)
+          >>= assertRun "prove_smtTimeout" [(True, False)]
+        executeSingleMethod testFile "prove_multi" >>= assertRun "prove_multi" (False, True)
+        executeSingleMethod testFile "prove_distributivity" >>= assertRun "prove_distributivity" (False, True)
     , test "Loop-Tests" $ do
         let testFile = "test/contracts/pass/loops.sol"
         runForgeTestResultsCustom testFile (\(TestMethodInfo _ (Sig name _)) -> name == "prove_loop") Nothing (Just 10) False Fetch.noRpc
-          >>= assertEqualM "test result" [(True, False)]
+          >>= assertRun "test result" [(True, False)]
         runForgeTestResultsCustom testFile (\(TestMethodInfo _ (Sig name _)) -> name == "prove_loop") Nothing (Just 100) False Fetch.noRpc
-          >>= assertEqualM "test result" [(False, False)]
+          >>= assertRun "test result" [(False, False)]
     , test "Cheat-Codes-Pass" $ do
         let testFile = "test/contracts/pass/cheatCodes.sol"
-        executeAllMethodsWithPrefix testFile "prove" >>= assertEqualM "test result" (True, False)
+        executeAllMethodsWithPrefix testFile "prove" >>= assertRun "test result" (True, False)
     , test "Expect-Revert-Pass" $ do
         let testFile = "test/contracts/pass/expectRevert.sol"
         assertAllMethodsWithPrefix testFile "prove" (True, True)
@@ -133,16 +130,16 @@ tests = testGroup "Foundry tests"
         assertAllMethodsWithPrefix testFile "prove" (False, True)
     , test "Precompile-Cheats-Fail" $ do
         let testFile = "test/contracts/fail/precompileCheats.sol"
-        executeSingleMethod testFile "prove_prank_not_kept_past_precompile" >>= assertEqualM "prank must be used up by the precompile call" (False, False)
-        executeSingleMethod testFile "prove_expectRevert_on_succeeding_precompile" >>= assertEqualM "a succeeding precompile call must fail expectRevert" (False, False)
+        executeSingleMethod testFile "prove_prank_not_kept_past_precompile" >>= assertRun "prank must be used up by the precompile call" (False, False)
+        executeSingleMethod testFile "prove_expectRevert_on_succeeding_precompile" >>= assertRun "a succeeding precompile call must fail expectRevert" (False, False)
     -- the replay used to crash and then hang
     , localOption (mkTimeout 120_000_000) $ test "Tx-Context-Cex" $ do
         let testFile = "test/contracts/fail/txContextCex.sol"
-        executeSingleMethod testFile "prove_origin" >>= assertEqualM "origin cex" (False, True)
-        executeSingleMethod testFile "prove_coinbase" >>= assertEqualM "coinbase cex" (False, True)
+        executeSingleMethod testFile "prove_origin" >>= assertRun "origin cex" (False, True)
+        executeSingleMethod testFile "prove_coinbase" >>= assertRun "coinbase cex" (False, True)
     , test "Unlinked-Library-Skipped" $ do
         let testFile = "test/contracts/pass/unlinkedLibrary.sol"
-        executeSingleMethod testFile "prove_unrelated" >>= assertEqualM "a non-test contract with unlinked libraries must not stop the tests" (True, True)
+        executeSingleMethod testFile "prove_unrelated" >>= assertRun "a non-test contract with unlinked libraries must not stop the tests" (True, True)
     , test "Cheat-Codes-Fork-Pass" $ do
         let testFile = "test/contracts/pass/cheatCodesFork.sol"
         assertAllMethodsWithPrefix testFile "prove" (True, True)
@@ -151,47 +148,47 @@ tests = testGroup "Foundry tests"
         assertAllMethodsWithPrefix testFile "prove" (True, True)
     , test "Keccak" $ do
         let testFile = "test/contracts/pass/keccak.sol"
-        executeSingleMethod testFile "prove_access" >>= assertEqualM "test result" (True, True)
+        executeSingleMethod testFile "prove_access" >>= assertRun "test result" (True, True)
     , test "Symbolic-Key-SLoad" $ do
         -- #1082: without the fix the untouched-mapping read does not complete
         let testFile = "test/contracts/pass/symbolicKeySload.sol"
-        executeSingleMethod testFile "prove_symbolic_key_empty_store" >>= assertEqualM "empty store reads zero" (True, True)
-        executeSingleMethod testFile "prove_symbolic_key_untouched_mapping" >>= assertEqualM "untouched mapping reads zero" (True, True)
+        executeSingleMethod testFile "prove_symbolic_key_empty_store" >>= assertRun "empty store reads zero" (True, True)
+        executeSingleMethod testFile "prove_symbolic_key_untouched_mapping" >>= assertRun "untouched mapping reads zero" (True, True)
     , test "Symbolic-Key-SLoad-Fail" $ do
         -- #1082 soundness: same-mapping entries must be kept, so this falsifies
         let testFile = "test/contracts/fail/symbolicKeySload.sol"
-        executeSingleMethod testFile "prove_same_mapping_falsifiable" >>= assertEqualM "same-mapping read must falsify" (False, True)
+        executeSingleMethod testFile "prove_same_mapping_falsifiable" >>= assertRun "same-mapping read must falsify" (False, True)
     , testAbstractArith "Abstract-Arithmetic-Storage-Reads" $ do
         let testFile = "test/contracts/pass/abstractArithStorage.sol"
         runForgeTestResultsCustom testFile
           (\(TestMethodInfo _ (Sig name _)) -> name == "check_constCancelConcreteKey")
           (Just 10) Nothing False Fetch.noRpc
-          >>= assertEqualM "test result" [(True, True)]
+          >>= assertRun "test result" [(True, True)]
     , test "Mapping-Decomposition" $ do
         let testFile = "test/contracts/pass/mappingDecomposition.sol"
-        executeSingleMethod testFile "prove_unwritten" >>= assertEqualM "unwritten mapping reads zero" (True, True)
+        executeSingleMethod testFile "prove_unwritten" >>= assertRun "unwritten mapping reads zero" (True, True)
     , test "Mapping-Decomposition-Fail" $ do
         let testFile = "test/contracts/fail/mappingDecomposition.sol"
-        executeSingleMethod testFile "prove_written_is_zero" >>= assertEqualM "written mapping read must falsify" (False, True)
+        executeSingleMethod testFile "prove_written_is_zero" >>= assertRun "written mapping read must falsify" (False, True)
     , test "Packed-Storage-Fields" $ do
         let testFile = "test/contracts/pass/packedStorageFields.sol"
-        executeSingleMethod testFile "prove_read_back" >>= assertEqualM "packed fields retain their values" (True, True)
+        executeSingleMethod testFile "prove_read_back" >>= assertRun "packed fields retain their values" (True, True)
     , test "Array-Mapping-Same-Slot" $ do
         let testFile = "test/contracts/pass/arrayMappingSameSlot.sol"
-        executeSingleMethod testFile "prove_array_write_not_read" >>= assertEqualM "array write is not a mapping write" (True, True)
+        executeSingleMethod testFile "prove_array_write_not_read" >>= assertRun "array write is not a mapping write" (True, True)
     , test "Array-Mapping-Same-Slot-Fail" $ do
         let testFile = "test/contracts/fail/arrayMappingSameSlot.sol"
-        executeSingleMethod testFile "prove_array_write_read" >>= assertEqualM "unwritten mapping read must falsify" (False, True)
+        executeSingleMethod testFile "prove_array_write_read" >>= assertRun "unwritten mapping read must falsify" (False, True)
     , test "Keccak-Literal-Slot" $ do
         let testFile = "test/contracts/pass/keccakLiteralSlot.sol"
-        executeSingleMethod testFile "prove_other_mapping" >>= assertEqualM "folded slot literal must not alias another mapping" (True, True)
+        executeSingleMethod testFile "prove_other_mapping" >>= assertRun "folded slot literal must not alias another mapping" (True, True)
     , test "Keccak-Literal-Slot-Fail" $ do
         let testFile = "test/contracts/fail/keccakLiteralSlot.sol"
-        executeSingleMethod testFile "prove_same_mapping" >>= assertEqualM "folded slot literal of the same mapping must falsify" (False, True)
+        executeSingleMethod testFile "prove_same_mapping" >>= assertRun "folded slot literal of the same mapping must falsify" (False, True)
     , test "Recorded-Preimage-Loop" $ do
         let testFile = "test/contracts/pass/recordedPreimageLoop.sol"
         runForgeTestResultsCustom testFile (\(TestMethodInfo _ (Sig name _)) -> name == "prove_loop_bound_from_other_key") Nothing (Just 5) False Fetch.noRpc
-          >>= assertEqualM "the loop must not be entered, so not explored up to the bound" [(True, True)]
+          >>= assertRun "the loop must not be entered, so not explored up to the bound" [(True, True)]
     , test "AssertApproxEqAbs-Pass" $ do
         let testFile = "test/contracts/pass/assertApproxEqAbs.sol"
         assertAllMethodsWithPrefix testFile "prove" (True, True)
@@ -208,7 +205,7 @@ tests = testGroup "Foundry tests"
               , ("prove_approx_eq_abs_int_symbolic_min_max", (False, False))
               ]
         forM_ cases $ \(method, expected) -> do
-          executeSingleMethod testFile method >>= assertEqualM (unpack method) expected
+          executeSingleMethod testFile method >>= assertRun (unpack method) expected
     , test "AssertApproxEqRel-Pass" $ do
         let testFile = "test/contracts/pass/assertApproxEqRel.sol"
         assertAllMethodsWithPrefix testFile "prove" (True, True)
@@ -225,7 +222,7 @@ tests = testGroup "Foundry tests"
               , ("prove_approx_eq_rel_uint_symbolic_fail", (False, True))
               ]
         forM_ cases $ \(method, expected) -> do
-          executeSingleMethod testFile method >>= assertEqualM (unpack method) expected
+          executeSingleMethod testFile method >>= assertRun (unpack method) expected
     , test "AssertMsg-Pass" $ do
         let testFile = "test/contracts/pass/assertMsg.sol"
         assertAllMethodsWithPrefix testFile "prove" (True, True)
@@ -237,19 +234,19 @@ tests = testGroup "Foundry tests"
     , test "Panic-Source-Location" $ do
         -- Regression test for #895: panic in a called contract should not show "<source not found>"
         let testFile = "test/contracts/fail/assertPanic.sol"
-        executeSingleMethod testFile "prove_panic" >>= assertEqualM "prove_panic" (False, False)
+        executeSingleMethod testFile "prove_panic" >>= assertRun "prove_panic" (False, False)
     ]
 
-executeSingleMethod :: (App m, MonadMask m) => FilePath -> Text -> m (Bool, Bool)
+executeSingleMethod :: (App m, MonadMask m) => FilePath -> Text -> m (WithOutput (Bool, Bool))
 executeSingleMethod file methodName = do
-  results <- runForgeTestResults file (\(TestMethodInfo _ (Sig name _)) -> name == methodName)
+  (results, out) <- runForgeTestResults file (\(TestMethodInfo _ (Sig name _)) -> name == methodName)
   case results of
-    [result] -> pure result
+    [result] -> pure (result, out)
     _ -> do
       _ <- liftIO $ assertFailure ("expected exactly one method named " <> unpack methodName <> ", got " <> show (length results))
-      pure (True, True)
+      pure ((True, True), out)
 
-executeAllMethodsWithPrefix :: (App m, MonadMask m) => FilePath -> Text -> m (Bool, Bool)
+executeAllMethodsWithPrefix :: (App m, MonadMask m) => FilePath -> Text -> m (WithOutput (Bool, Bool))
 executeAllMethodsWithPrefix file prefix = runForgeTest file (\(TestMethodInfo _ (Sig name _)) -> prefix `isPrefixOf` name)
 
 assertAllMethodsWithPrefix :: (App m, MonadMask m) => FilePath -> Text -> (Bool, Bool) -> m ()
@@ -262,6 +259,6 @@ assertAllTestMethodsMatching file matcher =
 
 assertAllMethods :: (App m, MonadMask m) => FilePath -> String -> TestMethodFilter -> (Bool, Bool) -> m ()
 assertAllMethods file description methodFilter expected = do
-  results <- runForgeTestResults file methodFilter
+  run@(results, _) <- runForgeTestResults file methodFilter
   liftIO $ assertBool ("no methods matching " <> description) (not $ null results)
-  assertEqualM "test results" (replicate (length results) expected) results
+  assertRun "test results" (replicate (length results) expected) run

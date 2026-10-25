@@ -81,10 +81,9 @@ tests = testGroup "rpc"
     [ test "dapp-test" $ do
         let testFile = "test/contracts/pass/rpc.sol"
         rpcInfo <- liftIO testRpcInfo
-        results <- runForgeTestResultsCustom testFile (\(TestMethodInfo _ (Sig name _)) -> "prove" `isPrefixOf` name) Nothing Nothing False rpcInfo
-        liftIO $ do
-          assertBool "no methods matching prefix: prove" (not $ null results)
-          assertEqual "test results" (replicate (length results) (True, True)) results
+        run@(results, _) <- runForgeTestResultsCustom testFile (\(TestMethodInfo _ (Sig name _)) -> "prove" `isPrefixOf` name) Nothing Nothing False rpcInfo
+        liftIO $ assertBool "no methods matching prefix: prove" (not $ null results)
+        assertRun "test results" (replicate (length results) (True, True)) run
 
     -- concretely exec "transfer" on WETH9 using remote rpc
     -- https://etherscan.io/token/0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2#code
