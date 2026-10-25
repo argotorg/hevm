@@ -32,6 +32,7 @@ import EVM.Effects qualified as Effects
 import EVM.Fetch qualified as Fetch
 import EVM.Format (formatBinary)
 import EVM.Op (intToOpName)
+import EVM.Assembler (assembleBytes)
 import EVM.Progress qualified as Progress
 import EVM.Solvers (withSolvers, defMemLimit, Solver(..), SolverGroup)
 import EVM.Stepper (Stepper)
@@ -78,11 +79,11 @@ addCoverage cov generated executed = do
 
 data W
   = Const W256
-  | EnvOp Word8
+  | EnvOp Op
   | CdLoad W
-  | Un Word8 W
-  | Bin Word8 W W
-  | Tern Word8 W W W
+  | Un Op W
+  | Bin Op W W
+  | Tern Op W W W
   | Mload Int
   | Sload W
   | Tload W
@@ -112,14 +113,29 @@ data Stmt
   | CdCopy Int W Int
   | Stack [W] Bool Int -- ^ push the words, then DUPn (True) or SWAPn, store the top and pop
   | If W [Stmt] [Stmt]
-  | Halt Word8 Int Int
+  | Halt Op Int Int
+  | Create (Maybe W256) Int Flag -- ^ CREATE, or CREATE2 with the salt, of an 'initCodes' entry
   deriving (Show, Eq)
 
-binOps, unOps, ternOps, envOps :: [Word8]
-binOps = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x0a, 0x0b, 0x10, 0x11, 0x12, 0x13, 0x14, 0x16, 0x17, 0x18, 0x1a, 0x1b, 0x1c, 0x1d]
-unOps = [0x15, 0x19]
-ternOps = [0x08, 0x09]
-envOps = [0x30, 0x32, 0x33, 0x34, 0x36, 0x3d, 0x41, 0x42, 0x43, 0x47, 0x59]
+-- | Init codes deploying STOP or INVALID, writing the new contract's storage,
+-- deploying nothing, and reverting
+initCodes :: [ByteString]
+initCodes = map (BS.pack . opBytes)
+  [ deploy OpStop
+  , deploy (OpInvalid)
+  , [push 1, push 0, OpSstore, push 0, push 0, OpReturn]
+  , [push 2, push 0, OpSstore, push 0, push 0, OpReturn]
+  , []
+  , [push 0, push 0, OpRevert]
+  ]
+  where
+    deploy o = [push (fromIntegral (opByte o)), push 0, OpMstore8, push 1, push 0, OpReturn]
+
+binOps, unOps, ternOps, envOps :: [Op]
+binOps = [OpAdd, OpMul, OpSub, OpDiv, OpSdiv, OpMod, OpSmod, OpExp, OpSignextend, OpLt, OpGt, OpSlt, OpSgt, OpEq, OpAnd, OpOr, OpXor, OpByte, OpShl, OpShr, OpSar]
+unOps = [OpIszero, OpNot]
+ternOps = [OpAddmod, OpMulmod]
+envOps = [OpAddress, OpOrigin, OpCaller, OpCallvalue, OpCalldatasize, OpReturndatasize, OpCoinbase, OpTimestamp, OpNumber, OpSelfbalance, OpMsize]
 
 callees :: [Addr]
 callees = [0x1234, 0xabcd]
@@ -130,62 +146,88 @@ senderBase = 0x5e0d00
 
 -- | Every opcode the generator can emit
 genOpcodes :: [String]
-genOpcodes = map (intToOpName . fromIntegral) $ binOps <> unOps <> ternOps <> envOps
-  <> [0x00, 0x20, 0x35, 0x37, 0x3e, 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x5b, 0x5c, 0x5d, 0xf1, 0xf3, 0xfa, 0xfd]
-  <> [0x5f .. 0x7f] <> [0x80 .. 0x8f] <> [0x90 .. 0x9f]
+genOpcodes = map opName (binOps <> unOps <> ternOps <> envOps
+  <> [ OpStop, OpSha3, OpCalldataload, OpCalldatacopy, OpReturndatacopy, OpPop, OpMload, OpMstore, OpMstore8
+     , OpSload, OpSstore, OpJump, OpJumpi, OpJumpdest, OpTload, OpTstore, OpCreate, OpCall, OpReturn, OpCreate2
+     , OpStaticcall, OpRevert ]
+  <> map OpDup [1 .. 16] <> map OpSwap [1 .. 16])
+  <> map (intToOpName . fromIntegral) [0x5f .. 0x7f :: Int]
+
+opBytes :: [Op] -> [Word8]
+opBytes = BS.unpack . assembleBytes
+
+opByte :: Op -> Word8
+opByte o = case opBytes [o] of
+  b : _ -> b
+  [] -> internalError "an op assembles to no bytes"
+
+opName :: Op -> String
+opName = intToOpName . fromIntegral . opByte
+
+push :: W256 -> Op
+push = OpPush . Lit
+
+op :: Op -> Asm
+op o = Bytes (opBytes [o])
 
 data Asm = Bytes [Word8] | PushLabel Int | Label Int
 
 pushW :: W256 -> [Word8]
-pushW 0 = [0x5f]
-pushW w = let bs = BS.unpack (BS.dropWhile (== 0) (word256Bytes w)) in (0x5f + fromIntegral (length bs)) : bs
+pushW w = opBytes [push w]
 
 pushI :: Int -> Asm
 pushI = Bytes . pushW . fromIntegral
 
 asmW :: W -> [Asm]
 asmW = \case
-  Const w -> [Bytes (pushW w)]
-  EnvOp o -> [Bytes [o]]
-  CdLoad e -> asmW e <> [Bytes [0x35]]
-  Un o e -> asmW e <> [Bytes [o]]
-  Bin o a b -> asmW b <> asmW a <> [Bytes [o]]
-  Tern o a b c -> asmW c <> asmW b <> asmW a <> [Bytes [o]]
-  Mload off -> [pushI off, Bytes [0x51]]
-  Sload e -> asmW e <> [Bytes [0x54]]
-  Tload e -> asmW e <> [Bytes [0x5c]]
-  Sha3 off sz -> [pushI sz, pushI off, Bytes [0x20]]
+  Const w -> [op (push w)]
+  EnvOp o -> [op o]
+  CdLoad e -> asmW e <> [op OpCalldataload]
+  Un o e -> asmW e <> [op o]
+  Bin o a b -> asmW b <> asmW a <> [op o]
+  Tern o a b c -> asmW c <> asmW b <> asmW a <> [op o]
+  Mload off -> [pushI off, op OpMload]
+  Sload e -> asmW e <> [op OpSload]
+  Tload e -> asmW e <> [op OpTload]
+  Sha3 off sz -> [pushI sz, pushI off, op OpSha3]
 
 asmBlock :: Stmt -> State Int [Asm]
 asmBlock = \case
-  Sstore k v -> pure $ asmW v <> asmW k <> [Bytes [0x55]]
-  Tstore k v -> pure $ asmW v <> asmW k <> [Bytes [0x5d]]
-  Mstore off v -> pure $ asmW v <> [pushI off, Bytes [0x52]]
-  Mstore8 off v -> pure $ asmW v <> [pushI off, Bytes [0x53]]
+  Sstore k v -> pure $ asmW v <> asmW k <> [op OpSstore]
+  Tstore k v -> pure $ asmW v <> asmW k <> [op OpTstore]
+  Mstore off v -> pure $ asmW v <> [pushI off, op OpMstore]
+  Mstore8 off v -> pure $ asmW v <> [pushI off, op OpMstore8]
   Call k c callId io is oo os flag -> pure $
-    maybe [] (\i -> [Bytes (pushW i), pushI io, Bytes [0x52]]) callId
+    maybe [] (\i -> [op (push i), pushI io, op OpMstore]) callId
     <> [pushI os, pushI oo, pushI is, pushI io]
     <> (case k of Static -> []; WithValue v -> asmW v)
     <> (case c of
-          AtAddr a -> [Bytes (pushW (fromIntegral a))]
-          FromCd off -> [pushI off, Bytes [0x35]])
-    <> [Bytes (pushW 0xffffffff), Bytes [case k of Static -> 0xfa; WithValue _ -> 0xf1]]
+          AtAddr a -> [op (push (fromIntegral a))]
+          FromCd off -> [pushI off, op OpCalldataload])
+    <> [op (push 0xffffffff), op (case k of Static -> OpStaticcall; WithValue _ -> OpCall)]
     <> (case flag of
-          FPop -> [Bytes [0x50]]
-          FStore slot -> [Bytes (pushW slot), Bytes [0x55]])
-  RdCopy dst src sz -> pure [pushI sz, pushI src, pushI dst, Bytes [0x3e]]
-  CdCopy dst src sz -> pure $ [pushI sz] <> asmW src <> [pushI dst, Bytes [0x37]]
+          FPop -> [op OpPop]
+          FStore slot -> [op (push slot), op OpSstore])
+  RdCopy dst src sz -> pure [pushI sz, pushI src, pushI dst, op OpReturndatacopy]
+  CdCopy dst src sz -> pure $ [pushI sz] <> asmW src <> [pushI dst, op OpCalldatacopy]
   Stack ws dup n -> pure $ concatMap asmW ws
-    <> [Bytes [if dup then 0x80 + fromIntegral n - 1 else 0x90 + fromIntegral n - 1], Bytes [0x60, 7, 0x55]]
-    <> replicate (length ws - if dup then 0 else 1) (Bytes [0x50])
+    <> [op (if dup then OpDup (fromIntegral n) else OpSwap (fromIntegral n)), op (push 7), op OpSstore]
+    <> replicate (length ws - if dup then 0 else 1) (op OpPop)
   If c t e -> do
     lt <- fresh
     le <- fresh
     t' <- asmBlocks t
     e' <- asmBlocks e
-    pure $ asmW c <> [PushLabel lt, Bytes [0x57]] <> e' <> [PushLabel le, Bytes [0x56], Label lt] <> t' <> [Label le]
-  Halt 0 _ _ -> pure [Bytes [0x00]]
-  Halt o off sz -> pure [pushI sz, pushI off, Bytes [o]]
+    pure $ asmW c <> [PushLabel lt, op OpJumpi] <> e' <> [PushLabel le, op OpJump, Label lt] <> t' <> [Label le]
+  Halt OpStop _ _ -> pure [op OpStop]
+  Halt o off sz -> pure [pushI sz, pushI off, op o]
+  Create salt i flag -> let code = initCodes !! i in pure $
+    [op (push (word (code <> BS.replicate (32 - BS.length code) 0))), pushI 0x200, op OpMstore]
+    <> maybe [] (\x -> [op (push x)]) salt
+    <> [pushI (BS.length code), pushI 0x200, op (push 0), op (maybe OpCreate (const OpCreate2) salt)]
+    <> (case flag of
+          FPop -> [op OpPop]
+          FStore slot -> [op (push slot), op OpSstore])
   where
     fresh = get >>= \l -> modify (+ 1) >> pure l
 
@@ -204,7 +246,7 @@ assemble prog = BS.pack (concatMap emit asm)
     emit = \case
       Bytes b -> b
       PushLabel l -> let p = labels Map.! l in [0x61, fromIntegral (p `div` 256), fromIntegral (p `mod` 256)]
-      Label _ -> [0x5b]
+      Label _ -> opBytes [OpJumpdest]
 
 opcodesOf :: ByteString -> [String]
 opcodesOf bs = case BS.uncons bs of
@@ -248,7 +290,7 @@ genW d
       , (1, Tload . Const <$> genSlot)
       , (1, Sha3 <$> genOff <*> genSize)
       -- symbolic addresses must not take precompile values
-      , (1, Bin 0x14 <$> (EnvOp <$> elements [0x30, 0x32, 0x33, 0x41])
+      , (1, Bin OpEq <$> (EnvOp <$> elements [OpAddress, OpOrigin, OpCaller, OpCoinbase])
                      <*> (Const <$> elements ([1 .. 0x11] <> [0x100])))
       ]
 
@@ -268,8 +310,8 @@ genValue :: Gen W
 genValue = frequency
   [ (3, pure (Const 0))
   , (3, Const . fromIntegral <$> choose (1 :: Int, 2000))
-  , (1, pure (EnvOp 0x34))
-  , (1, pure (EnvOp 0x47))
+  , (1, pure (EnvOp OpCallvalue))
+  , (1, pure (EnvOp OpSelfbalance))
   , (1, genW 1)
   ]
 
@@ -307,10 +349,17 @@ genBlock calls d = frequency
   , (2, genStack)
   , (if d > 0 then 3 else 0, If <$> genW 2 <*> genBlocks calls (d - 1) <*> genBlocks calls (d - 1))
   , (1, genHalt)
+  , (1, genCreate)
   ]
 
+genCreate :: Gen Stmt
+genCreate = Create
+  <$> frequency [(1, pure Nothing), (2, Just <$> elements [0, 1, 2])]
+  <*> choose (0, length initCodes - 1)
+  <*> frequency [(1, pure FPop), (2, FStore <$> genSlot)]
+
 genHalt :: Gen Stmt
-genHalt = Halt <$> elements [0x00, 0xf3, 0xfd] <*> genOff <*> genSize
+genHalt = Halt <$> elements [OpStop, OpReturn, OpRevert] <*> genOff <*> genSize
 
 genBlocks :: Calls -> Int -> Gen [Stmt]
 genBlocks calls d = choose (1, 4) >>= \n -> vectorOf n (genBlock calls d)
@@ -385,8 +434,13 @@ mutBlock calls = \case
     , pure (If c e t, "swap branches")
     ]
   Halt _ off sz -> oneof
-    [ (\o -> (Halt o off sz, "halt kind")) <$> elements [0x00, 0xf3, 0xfd]
+    [ (\o -> (Halt o off sz, "halt kind")) <$> elements [OpStop, OpReturn, OpRevert]
     , (, "halt region") <$> genHalt
+    ]
+  Create salt i f -> oneof
+    [ (\x -> (Create x i f, "create salt")) <$> elements [Nothing, Just 0, Just 1, Just 2]
+    , (\x -> (Create salt x f, "create init code")) <$> choose (0, length initCodes - 1)
+    , (\x -> (Create salt i x, "create flag")) <$> frequency [(1, pure FPop), (2, FStore <$> genSlot)]
     ]
   where first' f (x, w) = (f x, w)
 
@@ -457,14 +511,16 @@ data Run = Run
   , outcome :: Either EvmError (Expr Buf)
   , store :: Maybe (Map W256 W256)
   , balances :: Map (Expr EAddr) W256
+  , accounts :: Map (Expr EAddr) (Maybe ByteString, Maybe (Map W256 W256), Maybe W64)
+    -- ^ code, nonzero storage and nonce, e.g. of created contracts; not the entry's code
   }
 
 sameRun :: Run -> Run -> Bool
-sameRun x y = (x.outcome, nonZero x.store, x.balances) == (y.outcome, nonZero y.store, y.balances)
+sameRun x y = (x.outcome, nonZero x.store, x.balances, x.accounts) == (y.outcome, nonZero y.store, y.balances, y.accounts)
   where nonZero = fmap (Map.filter (/= 0)) -- a slot written with 0 is the same as an unwritten one
 
 showRun :: Run -> String
-showRun x = show x.outcome <> " " <> show x.store <> " " <> show (Map.toList x.balances)
+showRun x = show x.outcome <> " " <> show x.store <> " " <> show (Map.toList x.balances) <> " " <> show (Map.toList x.accounts)
 
 runConcrete :: App m => SolverGroup -> VMOpts Concrete -> m Run
 runConcrete s opts = do
@@ -479,7 +535,13 @@ runConcrete s opts = do
         Just (VMFailure e) -> Left e
         r -> internalError $ "concrete run did not finish: " <> show r
       balances = Map.mapMaybe (\c -> case c.balance of Lit v -> Just v; _ -> Nothing) end.env.contracts
-  pure $ Run ops stub outcome store balances
+      accounts = flip Map.mapWithKey end.env.contracts $ \a c ->
+        ( if a == opts.address then Nothing else case c.code of
+            RuntimeCode (ConcreteRuntimeCode bs) -> Just bs
+            _ -> Nothing
+        , case c.storage of ConcreteStore m -> Just (Map.filter (/= 0) m); _ -> Nothing
+        , c.nonce )
+  pure $ Run ops stub outcome store balances accounts
   where
     traced :: Config -> Stepper Concrete (Set String, Bool, VM Concrete)
     traced conf = go mempty False
@@ -560,7 +622,8 @@ blockKinds depth = concatMap $ \case
   CdCopy {} -> ["CALLDATACOPY"]
   Stack _ dup _ -> [if dup then "DUPn" else "SWAPn"]
   If _ t e -> ("if at depth " <> show depth) : blockKinds (depth + 1) (t <> e)
-  Halt o _ _ -> [intToOpName (fromIntegral o)]
+  Halt o _ _ -> [opName o]
+  Create salt _ _ -> [maybe "CREATE" (const "CREATE2") salt]
 
 type Replay = (SMTCex, CexReplay, Maybe (Run, Run))
 
@@ -797,7 +860,7 @@ eqCreate cov = forAllShrink genCreatePair shrink $ \(Pair a b mutation) -> ioPro
       Error e -> "error: " <> take 60 e
     storeShape (x, y)
       | x.store == y.store = "equal"
-      | sameRun x { outcome = y.outcome, balances = y.balances } y = "differ only in zero slots"
+      | sameRun x { outcome = y.outcome, balances = y.balances, accounts = y.accounts } y = "differ only in zero slots"
       | otherwise = "differ"
     -- hevm runs constructors with empty calldata
     runCreate s cex code = runConcrete s (eqReplayVmOpts cex [] code BS.empty)
@@ -808,7 +871,7 @@ genCreatePair :: Gen Pair
 genCreatePair = (\(Pair a b m) -> Pair (deployNothing a) (deployNothing b) m) <$> genPair NoCalls
   where
     deployNothing = map $ \case
-      Halt 0xf3 off _ -> Halt 0xf3 off 0
+      Halt OpReturn off _ -> Halt OpReturn off 0
       If c t e -> If c (deployNothing t) (deployNothing e)
       s -> s
 

@@ -1227,6 +1227,7 @@ data GenericOp a
   | OpLog !Word8
   | OpPush0
   | OpPush a
+  | OpInvalid
   | OpUnknown Word8
   deriving (Show, Eq, Ord, Functor)
 

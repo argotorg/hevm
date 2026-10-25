@@ -8,8 +8,21 @@ import EVM.Expr qualified as Expr
 import EVM.Op
 import EVM.Types
 
+import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
+import Data.Maybe (mapMaybe)
 import Data.Vector (Vector)
 import Data.Vector qualified as V
+
+-- | Concrete bytecode with the shortest pushes, unlike 'assemble'
+assembleBytes :: [Op] -> ByteString
+assembleBytes = BS.pack . concatMap go
+  where
+    go = \case
+      OpPush (Lit 0) -> [0x5f]
+      OpPush (Lit w) -> let bs = BS.unpack (BS.dropWhile (== 0) (word256Bytes w))
+                        in (0x5f + fromIntegral (length bs)) : bs
+      o -> mapMaybe Expr.maybeLitByteSimp (V.toList (assemble [o]))
 
 assemble :: [Op] -> Vector (Expr Byte)
 assemble os = V.fromList $ concatMap go os
@@ -110,4 +123,5 @@ assemble os = V.fromList $ concatMap go os
       -- we just always assemble OpPush into PUSH32
       OpPush wrd -> (LitByte 0x7f) : [Expr.indexWord (Lit i) wrd | i <- [0..31]]
       OpPush0 -> [LitByte 0x5f]
+      OpInvalid -> [LitByte 0xfe]
       OpUnknown o -> [LitByte o]

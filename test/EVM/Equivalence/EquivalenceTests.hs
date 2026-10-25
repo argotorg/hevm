@@ -29,7 +29,7 @@ import Text.RE.Replace (replaceAll, captureText, CaptureOrdinal(..), CaptureID(.
 
 
 import EVM (makeVm, initialContract, defaultVMOpts)
-import EVM.Assembler (assemble)
+import EVM.Assembler (assemble, assembleBytes)
 import EVM.Effects qualified as Effects
 import EVM.Exec (exec)
 import EVM.Expr qualified as Expr
@@ -535,6 +535,27 @@ bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
     forM_ replays $ \case
       Validated ra rb -> assertBool "Replay must show the different stores" (ra /= rb)
       r -> assertFailure $ "Counterexample must replay as validated, got: " <> show r
+  , testCase "eq-created-contracts-differ" $ forM_
+    -- the salt (#1193)
+    [ (returnTop (create2 1 []), returnTop (create2 2 []))
+    , (returnTop (create []), returnTop (create2 1 []))
+    -- the child's runtime code (#1192)
+    , (returnTop (create (deploy OpStop)), returnTop (create (deploy OpInvalid)))
+    -- what the child's constructor stores (#1178)
+    , (create (storeAt0 1) <> [OpPop], create (storeAt0 2) <> [OpPop])
+    -- a CREATE bumps the nonce even when it deploys nothing
+    , (create [] <> [OpPop], [OpStop])
+    ] $ \(a, b) -> do
+      replays <- replayCode (assembleBytes a) (assembleBytes b)
+      assertBool ("Must have a counterexample: " <> show (a, b)) (not (null replays))
+      forM_ replays $ \case
+        Validated {} -> pure ()
+        r -> assertFailure $ "Counterexample must replay as validated, got: " <> show r
+  , testCase "eq-same-create2-equivalent" $ do
+    -- the entrypoints differ, but the created contract and the returned address don't
+    let a = returnTop (create2 1 [])
+    eq <- eqCode False (assembleBytes a) (assembleBytes (a <> [OpStop]))
+    assertBool ("Must be equivalent, got: " <> show eq.res) (null eq.res)
   , testCase "eq-replay-zero-write-over-nonzero-slot" $ do
     -- stop vs sstore(1, 0): they differ only if slot 1 starts nonzero, so the model must give its value
     replays <- replayAll "00" "5f600155"
@@ -602,6 +623,15 @@ bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
       ( [OpPush (Lit 32), OpPush (Lit 4), halt]
       , [ OpPush0, OpCalldataload, OpIszero, OpPush0, OpByte, OpPush (Lit 31), OpMstore
         , OpPush (Lit 31), OpPush (Lit 32), halt ] )
+    push = OpPush . Lit
+    -- the init code, at most 32 bytes, is a word in memory; they leave the new address
+    create code = storeCode code <> [push (codeSize code), push 0, push 0, OpCreate]
+    create2 salt code = storeCode code <> [push salt, push (codeSize code), push 0, push 0, OpCreate2]
+    storeCode code = let bs = assembleBytes code in [push (word (bs <> BS.replicate (32 - BS.length bs) 0)), push 0, OpMstore]
+    codeSize = fromIntegral . BS.length . assembleBytes
+    deploy o = [push (fromIntegral (BS.head (assembleBytes [o]))), push 0, OpMstore8, push 1, push 0, OpReturn]
+    storeAt0 v = [push v, push 0, OpSstore, push 0, push 0, OpReturn]
+    returnTop ops = ops <> [push 0, OpMstore, push 0x20, push 0, OpReturn]
     eqOps :: [Op] -> [Op] -> IO EqIssues
     eqOps a b = eqCode False (asm a) (asm b)
       where asm = BS.pack . mapMaybe Expr.maybeLitByteSimp . V.toList . assemble
@@ -614,9 +644,9 @@ bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
         (calldata, _) <- mkCalldata Nothing []
         equivalenceCheck s Nothing a b defaultVeriOpts calldata False
     replayAll :: ByteString -> ByteString -> IO [CexReplay]
-    replayAll ha hb = do
-      let a = fromJust (hexByteString ha)
-          b = fromJust (hexByteString hb)
+    replayAll ha hb = replayCode (fromJust (hexByteString ha)) (fromJust (hexByteString hb))
+    replayCode :: ByteString -> ByteString -> IO [CexReplay]
+    replayCode a b =
       Effects.runApp $ withSolvers Bitwuzla 1 Nothing defMemLimit $ \s -> do
         (calldata, _) <- mkCalldata Nothing []
         eq <- equivalenceCheck s Nothing a b defaultVeriOpts calldata False

@@ -204,7 +204,7 @@ branchProg :: [AsmOp]
 branchProg =
   [ I (OpPush (Lit 0)), I OpCalldataload, I (OpDup 1), I (OpPush (Lit 5)), I OpEq, Target 0, I OpJumpi
   , I OpPop, I OpStop
-  , I OpJumpdest, I (OpPush (Lit 5)), I OpEq, Target 1, I OpJumpi, I (OpUnknown 0xfe)
+  , I OpJumpdest, I (OpPush (Lit 5)), I OpEq, Target 1, I OpJumpi, I (OpInvalid)
   , I OpJumpdest, I OpStop ]
 
 branchCode :: ByteString

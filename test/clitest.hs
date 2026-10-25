@@ -320,7 +320,7 @@ main = do
         let loop = asmHex
               [ OpPush (Lit 0), OpJumpdest
               , OpDup 1, OpPush (Lit 10), OpGt, OpPush (Lit 104), OpJumpi
-              , OpUnknown 0xfe
+              , OpInvalid
               , OpJumpdest, OpPush (Lit 1), OpAdd, OpPush (Lit 33), OpJump ]
         (exitCode, stdout, _) <- readProcessWithExitCode "cabal"
           ["run", "exe:hevm", "--", "symbolic", "--code", loop] ""
@@ -329,15 +329,15 @@ main = do
         stdout `shouldContain` "[WARNING]"
       it "symbolic-create-runs-initcode" $ do
         (symCode, symOut, _) <- readProcessWithExitCode "cabal"
-          ["run", "exe:hevm", "--", "symbolic", "--create", "--code", asmHex [OpUnknown 0xfe]] ""
+          ["run", "exe:hevm", "--", "symbolic", "--create", "--code", asmHex [OpInvalid]] ""
         symCode `shouldBe` ExitFailure 1
         symOut `shouldNotContain` "QED"
         (_, execOut, _) <- readProcessWithExitCode "cabal"
-          ["run", "exe:hevm", "--", "exec", "--create", "--code", asmHex [OpUnknown 0xfe]] ""
+          ["run", "exe:hevm", "--", "exec", "--create", "--code", asmHex [OpInvalid]] ""
         execOut `shouldContain` "UnrecognizedOpcode"
       it "symbolic-block-fields" $ do
         -- INVALID iff the field is nonzero; OpPush assembles to PUSH32, so the JUMPDEST is at 36
-        let code op = asmHex [op, OpPush (Lit 36), OpJumpi, OpStop, OpJumpdest, OpUnknown 0xfe]
+        let code op = asmHex [op, OpPush (Lit 36), OpJumpi, OpStop, OpJumpdest, OpInvalid]
             run args = readProcessWithExitCode "cabal" (["run", "exe:hevm", "--", "symbolic"] <> args) ""
         forM_ [OpNumber, OpBaseFee, OpPrevRandao] $ \op -> do
           (exitCode, stdout, _) <- run ["--code", code op]

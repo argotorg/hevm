@@ -8,7 +8,7 @@ other leaves must reach them in geth. Also collects opcode coverage.
 -}
 module EVM.Test.Fuzz.Check
   ( Report(..), addCoverage, bucket, checkCase, checkConcrete, concretize, concretizeProps
-  , errorKind, hevmErrorKind, modelInputs, printCoverage, test, testEnv, withDir
+  , consistentHashes, errorKind, hevmErrorKind, modelInputs, printCoverage, test, testEnv, withDir
   ) where
 
 import Control.Monad (forM, forM_, unless, when)
@@ -17,7 +17,7 @@ import Control.Monad.Reader (ReaderT)
 import Data.ByteString (ByteString)
 import Data.Char (isDigit, toLower)
 import Data.IORef (IORef, readIORef, atomicModifyIORef')
-import Data.List (isInfixOf, isPrefixOf)
+import Data.List (isInfixOf, isPrefixOf, tails)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Monoid (Any(..))
@@ -25,6 +25,7 @@ import Data.Maybe (fromMaybe, isJust)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (unpack)
+import Data.Text qualified as T
 import System.Directory (removeDirectoryRecursive)
 import System.Environment (lookupEnv)
 import System.IO.Temp (getCanonicalTemporaryDirectory, createTempDirectory)
@@ -32,6 +33,7 @@ import Test.Tasty (TestTree, TestName)
 import Test.Tasty.HUnit (assertFailure, testCase)
 import Witch (into)
 import EVM.Expr qualified as Expr
+import EVM.Keccak.Preimages (keccakMin, keccakMax, fieldOffsetWindow)
 import EVM.Fetch.MockNode (Node(..), withMockNode)
 import EVM.Op (intToOpName)
 import EVM.Progress qualified as Progress
@@ -155,21 +157,23 @@ checkConcrete how c i g h = do
     failed = \case OSuccess {} -> False; _ -> True
     succeeded = \case OSuccess {} -> True; _ -> False
 
+substInputs :: Inputs -> Expr b -> Expr b
+substInputs i = \case
+  AbstractBuf "calldata" -> ConcreteBuf i.calldata
+  AbstractStore (LitAddr a) Nothing | a == contractAddr -> ConcreteStore i.store
+  TxValue -> Lit i.callvalue
+  Timestamp -> Lit i.timestamp
+  e -> e
+
+substBlockHashes :: TestCase -> Expr b -> Expr b
+substBlockHashes c = \case
+  BlockHash (Lit n) -> Lit $ if n + 256 < c.number || n >= c.number then 0 else blockHash n
+  e -> e
+
 -- | Substitute concrete inputs into a symbolic expression and evaluate it
 concretize :: TestCase -> Inputs -> Expr a -> Expr a
-concretize c i = untilFixpointN 4 (Expr.concKeccakSimpExpr . mapExpr blockHashes) . mapExpr inputs
+concretize c i = untilFixpointN 4 (Expr.concKeccakSimpExpr . mapExpr (substBlockHashes c)) . mapExpr (substInputs i)
   where
-    inputs :: Expr b -> Expr b
-    inputs = \case
-      AbstractBuf "calldata" -> ConcreteBuf i.calldata
-      AbstractStore (LitAddr a) Nothing | a == contractAddr -> ConcreteStore i.store
-      TxValue -> Lit i.callvalue
-      Timestamp -> Lit i.timestamp
-      e -> e
-    blockHashes :: Expr b -> Expr b
-    blockHashes = \case
-      BlockHash (Lit n) -> Lit $ if n + 256 < c.number || n >= c.number then 0 else blockHash n
-      e -> e
     untilFixpointN :: Int -> (Expr b -> Expr b) -> Expr b -> Expr b
     untilFixpointN 0 _ e = e
     untilFixpointN k f e = let e' = f e in if e' == e then e else untilFixpointN (k - 1) f e'
@@ -179,6 +183,40 @@ concretizeProps c i ps = case Expr.concKeccakSimpProps (map (mapProp (concretize
   [] -> Just True
   [PBool False] -> Just False
   _ -> Nothing
+
+-- | Whether path conditions can hold on these inputs with each hash a function
+-- of its input. A model may pick any hash of symbolic data, so it can reach
+-- another leaf than the inputs do, but it must not give one input two hashes.
+-- Distinct inputs get fresh hashes in keccak's range and 'fieldOffsetWindow'
+-- apart, as hevm assumes. Nothing if a hash input stays symbolic.
+consistentHashes :: App m => SolverGroup -> TestCase -> Inputs -> [Prop] -> m (Maybe Bool)
+consistentHashes solvers c i ps0
+  | any (getAny . foldProp isKeccak mempty) ps' = pure Nothing
+  | otherwise = checkSatWithProps solvers (ps' <> ranges <> distances) >>= \case
+      Qed -> pure (Just False)
+      Cex _ -> pure (Just True)
+      _ -> pure Nothing
+  where
+    -- hashes are replaced before simplifying, which would compute them
+    ps = map (mapProp (mapExpr (substBlockHashes c) . mapExpr (substInputs i))) ps0
+    preimages = Set.toList $ foldMap (foldProp concreteInput mempty) ps
+    concreteInput :: Expr b -> Set ByteString
+    concreteInput = \case
+      Keccak b | ConcreteBuf bs <- Expr.simplify b -> Set.singleton bs
+      _ -> mempty
+    var n = Var ("fuzzhash" <> T.pack (show n))
+    vars = Map.fromList (zip preimages (map var [0 :: Int ..]))
+    ps' = Expr.simplifyProps $ map (mapProp fresh) ps
+    fresh :: Expr b -> Expr b
+    fresh = \case
+      k@(Keccak b) | ConcreteBuf bs <- Expr.simplify b -> fromMaybe k (Map.lookup bs vars)
+      e -> e
+    isKeccak :: Expr b -> Any
+    isKeccak = \case Keccak _ -> Any True; _ -> Any False
+    hs = Map.elems vars
+    ranges = [PAnd (PGEq h (Lit keccakMin)) (PLEq h (Lit keccakMax)) | h <- hs]
+    distances = [ PAnd (PGEq (Sub a b) (Lit fieldOffsetWindow)) (PGEq (Sub b a) (Lit fieldOffsetWindow))
+                | (a:rest) <- tails hs, b <- rest ]
 
 leafOutcome :: TestCase -> Inputs -> Expr End -> Either String (Maybe Outcome)
 leafOutcome c i = \case
@@ -318,6 +356,11 @@ checkCase maxReplays c = Progress.withProgressLogFromEnv "fuzz-symexec" $
             Right i -> do
               g' <- runBoth i
               r <- liftIO (checkLeaves c i leaves (Just n) g')
+              when ("model via symbolic keccak" `isPrefixOf` r) $
+                consistentHashes solvers c i (extractProps l) >>= \case
+                  Just False -> liftIO $ failWith c i $ "the model of leaf " <> show n
+                    <> " gives one keccak input two hashes\nleaf: " <> show l
+                  _ -> pure ()
               phase ("hevm replay " <> show n)
               replayed <- replayModel c l cex
               -- where geth confirms the model reaches the leaf, so must `hevm symbolic`'s replay

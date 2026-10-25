@@ -487,7 +487,11 @@ modelGuided solvers mode c picks = Progress.withProgressLogFromEnv "model-guided
                 Left err -> liftIO $ failWith c' i err
                 Right l -> case l.ended of
                   -- the solver may pick any hash of symbolic data, which the concrete run does not get
-                  Just e | e /= endOf vs, any mentionsSymbolicKeccak vs.constraints -> skip "model via symbolic keccak"
+                  Just e | e /= endOf vs, any mentionsSymbolicKeccak vs.constraints ->
+                    consistentHashes solvers c' i vs.constraints >>= \case
+                      Just False -> liftIO $ failWith c' i $ "the model gives one keccak input two hashes\npath conditions:\n"
+                        <> unlines (map show vs.constraints)
+                      _ -> skip "model via symbolic keccak"
                   Just e | e /= endOf vs -> liftIO $ failWith c' i $
                     "the inputs from a model of the path conditions end at " <> show e
                     <> ", the path ends at " <> show (endOf vs) <> "\npath conditions:\n" <> unlines (map show vs.constraints)

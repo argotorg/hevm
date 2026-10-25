@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- The symbolic execution fuzzers check that a model reaching another leaf via a
+  symbolic keccak gives each hashed input one hash, and generate comparisons of
+  hashes of calldata. The equivalence fuzzer generates CREATE and CREATE2 and
+  compares all accounts in its concrete runs.
 - With `--rpc` at a fixed block, fetched state is cached by default in the user's
   cache directory, per chain, and reused by later runs. `--no-rpc-cache` turns
   this off. The cache is saved however the run ends, merged with what other runs
@@ -165,6 +169,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of simplifying an ITE of them.
 
 ## Fixed
+- Keccak assumptions compare only the hashed bytes of inputs of concrete length,
+  so one input no longer gets two hashes (spurious counterexamples).
+- Equivalence checking compares the code of contracts the programs create, and
+  CREATE2 with a symbolic deployer gives addresses that depend on the salt and
+  init code, CREATE ones that depend on the nonce.
+- The concrete replay of equivalence counterexamples compares the code, storage
+  and nonce of every account, not only the called contract's storage.
 - `envBytes` cheatcodes take `string` arguments, as in forge-std.
 - `eth_chainId` requests no longer pass a block number, which nodes reject.
 - JSON-RPC rate limit errors (codes 429, -32005 and -32007) are retried with

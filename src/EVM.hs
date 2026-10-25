@@ -1186,6 +1186,7 @@ exec1 conf = do
                 finishFrame (FrameReverted output)
             _ -> underrun
 
+        OpInvalid -> {-# SCC "OpInvalid" #-} vmError $ UnrecognizedOpcode 0xfe
         OpUnknown xxx -> {-# SCC "OpUnknown" #-} vmError $ UnrecognizedOpcode xxx
 
 transfer :: (VMOps t, ?conf::Config) => Expr EAddr -> Expr EAddr -> Expr EWord -> EVM t ()
@@ -3801,11 +3802,15 @@ codeloc = do
 createAddress :: Expr EAddr -> Maybe W64 -> EVM t (Expr EAddr)
 createAddress (LitAddr a) (Just n) = pure $ Concrete.createAddress a n
 createAddress (GVar _) _ = internalError "Unexpected GVar"
+-- a symbolic deployer's new address is named by what determines it, so that
+-- programs compared for equivalence get the same address only for the same nonce
+createAddress (SymAddr d) (Just n) = pure $ SymAddr ("create-" <> d <> "-" <> pack (show (fromIntegral n :: Integer)))
 createAddress _ _ = freshSymAddr
 
 create2Address :: Expr EAddr -> W256 -> ByteString -> EVM t (Expr EAddr)
 create2Address (LitAddr a) s b = pure $ Concrete.create2Address a s b
-create2Address (SymAddr _) _ _ = freshSymAddr
+create2Address (SymAddr d) s b = pure $ SymAddr ("create2-" <> d <> "-" <> pack (bsToHex derived))
+  where derived = BS.drop 12 $ word256Bytes $ keccak' (word256Bytes s <> word256Bytes (keccak' b))
 create2Address (GVar _) _ _ = internalError "Unexpected GVar"
 
 freshSymAddr :: EVM t (Expr EAddr)
