@@ -352,7 +352,7 @@ main = do
         (exitCode, _, _) <- run ["--code", code OpNumber, "--number", "0"]
         exitCode `shouldBe` ExitSuccess
       it "early-abort" $ do
-        (exitCode, stdout, stderr) <- runForge "test/contracts/pass/early-abort.sol" ["--max-iterations", "1000", "--early-abort"]
+        (exitCode, stdout, stderr) <- runForge "test/contracts/pass/early-abort.sol" ["--max-iterations", "1000"]
         stderr `shouldNotContain` "CallStack"
         stderr `shouldNotContain` "blocked indefinitely"
         stdout `shouldContain` "[FAIL]"
@@ -360,7 +360,7 @@ main = do
         stdout `shouldNotContain` "partially explore"
         exitCode `shouldBe` (ExitFailure 1)
       it "no-early-abort" $ do
-        (exitCode, stdout, stderr) <- runForge "test/contracts/pass/early-abort.sol" ["--max-iterations", "1000"]
+        (exitCode, stdout, stderr) <- runForge "test/contracts/pass/early-abort.sol" ["--max-iterations", "1000", "--no-early-abort"]
         stderr `shouldNotContain` "CallStack"
         length (filter (isInfixOf "Counterexample:") (lines stdout)) `shouldSatisfy` (> 1)
         exitCode `shouldBe` (ExitFailure 1)

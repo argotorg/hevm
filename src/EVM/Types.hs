@@ -660,6 +660,8 @@ data PartialExec
   | CheatCodeMissing      { pc :: Int, addr :: Expr EAddr, selector :: FunctionSelector }
   | CheatCodeFailed       { pc :: Int, addr :: Expr EAddr, selector :: FunctionSelector, msg :: String }
   | BranchTooDeep         { pc :: Int, addr :: Expr EAddr}
+  -- | stopped because another path had a counterexample, see 'earlyAbort'
+  | Aborted               { pc :: Int, addr :: Expr EAddr }
   deriving (Show)
 
 -- | A program-wide soundness caveat. Unlike a 'PartialExec', a caveat does not

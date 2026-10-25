@@ -107,7 +107,7 @@ data CommonOptions = CommonOptions
   , onlyDeployed  ::Bool
   , cacheDir      ::Maybe String
   , noRpcCache    ::Bool
-  , earlyAbort    ::Bool
+  , noEarlyAbort  ::Bool
   , mergeMaxBudget :: Int
   , maxDynSize    ::Int
   , noAbstractArith ::Bool
@@ -152,7 +152,7 @@ commonOptions = CommonOptions
   <*> (switch $ long "only-deployed" <> help "When trying to resolve unknown addresses, only use addresses of deployed contracts")
   <*> (optional $ strOption $ long "cache-dir" <> help "Directory to save and load the RPC cache in (default: the user's cache directory, for runs at a fixed block)")
   <*> (switch $ long "no-rpc-cache" <> help "Don't save or load fetched state in the user's cache directory")
-  <*> (switch $  long "early-abort" <> help "Stop exploration immediately upon finding the first counterexample")
+  <*> (switch $  long "no-early-abort" <> help "Keep exploring after the first counterexample, to find all of them. By default, exploration stops at the first one")
   <*> (option auto $ long "merge-max-budget" <> showDefault <> value 100 <> help "Max instructions for speculative merge exploration during path merging")
   <*> (option auto $ long "max-dyn-size" <> showDefault <> value 64 <> help "Max byte length for concretized dynamic types (bytes, string) in symbolic arguments")
   <*> (switch $  long "no-abstract-arith" <> help "Don't abstract symbolic multiplication and division as uninterpreted functions with sound lemmas; use native bitvector arithmetic instead")
@@ -420,7 +420,7 @@ main = do
         , verb = cOpts.verb
         , simp = Prelude.not cOpts.noSimplify
         , onlyDeployed = cOpts.onlyDeployed
-        , earlyAbort = cOpts.earlyAbort
+        , earlyAbort = Prelude.not cOpts.noEarlyAbort
         , mergeMaxBudget = cOpts.mergeMaxBudget
         , maxDynSize = cOpts.maxDynSize
         , abstractArith = Prelude.not cOpts.noAbstractArith

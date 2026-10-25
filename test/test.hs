@@ -13,10 +13,13 @@ import Control.Concurrent.STM (atomically, newTVarIO, writeTVar)
 import Control.Monad
 import System.Environment (getArgs, getExecutablePath)
 import System.IO (hSetBuffering, stdout, BufferMode(..), isEOF)
+import System.Directory (getSymbolicLinkTarget, listDirectory, doesDirectoryExist)
+import GHC.Clock (getMonotonicTimeNSec)
+import Data.IORef (newIORef, atomicModifyIORef')
 import Control.Monad.ST (stToIO)
 import Control.Monad.State.Strict
 import Control.Monad.IO.Unlift
-import Control.Exception (ErrorCall(..), evaluate, throwIO, try)
+import Control.Exception (ErrorCall(..), IOException, evaluate, throwIO, try)
 import System.Timeout (timeout)
 import Control.Monad.Reader (ReaderT)
 import Control.Monad.Trans.Maybe (runMaybeT)
@@ -172,6 +175,68 @@ withHangingSolver cont = do
   -- and stacks, which does not fit in the address space a real solver is limited to
   withSolvers (Custom (TL.pack self) [TL.pack hangingSolverFlag]) 1 Nothing (64 * defMemLimit) cont
 
+earlyAbortRace :: Natural -> Int -> Int -> IO Property
+earlyAbortRace n maxDelay abortAfter = doesDirectoryExist "/proc/self" >>= \case
+  False -> pure $ property Discard
+  True -> do
+    Just c <- runEnv testEnv $ solcRuntime "C" [i|
+      contract C {
+        function f(uint a, uint b) public pure {
+          uint r = 0;
+          for (uint i = 0; i < 6; i++) {
+            if ((a >> i) & 1 == 1) r += b; else r ^= i;
+          }
+          assert(r != 7);
+        }
+      } |]
+    self <- getExecutablePath
+    withSystemTempDirectory "hevm-fake-solver" $ \dir -> do
+      let solver = Custom (TL.pack self) [TL.pack randomSolverFlag, TL.pack dir, TL.pack (show maxDelay)]
+          unsatQuery = SMT2 (SMTScript [SMTCommand "(set-info :status unsat)"]) mempty []
+      start <- getMonotonicTimeNSec
+      res <- timeout 120_000_000 $ runEnv testEnv $ withSolvers solver n Nothing (64 * defMemLimit) $ \s -> do
+        abort <- liftIO $ newTVarIO False
+        _ <- liftIO $ forkIO $ threadDelay (abortAfter * 1000) >> atomically (writeTVar abort True)
+        (calldata, _) <- mkCalldata (Just (Sig "f(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) []
+        vm <- liftIO $ stToIO $ abstractVM calldata c Nothing False
+        (ends, _) <- verifyAbortable abort s (Fetch.oracle s Nothing Fetch.noRpc) defaultVeriOpts vm (checkAssertions defaultPanicCodes) Nothing
+        end <- liftIO getMonotonicTimeNSec
+        free <- liftIO $ timeout 10_000_000 $ checkSat s Nothing (Right unsatQuery)
+        pure (ends, free, end)
+      leftover <- solversLeft dir 50
+      spawned <- length <$> listDirectory dir
+      let bucket k = show (k `div` 20 * 20) <> "-" <> show (k `div` 20 * 20 + 19)
+      pure $ tabulate "solvers spawned" [bucket spawned] $ case res of
+        Nothing -> counterexample "the run did not return" False
+        Just (ends, free, end) ->
+          let afterAbortMs = (fromIntegral (end - start) `div` 1_000_000) - abortAfter :: Int
+          in tabulate "run" [if afterAbortMs < 0 then "finished before the abort" else "aborted"] $ conjoin
+            [ counterexample ("returned " <> show afterAbortMs <> "ms after the abort") (afterAbortMs < 5000)
+            , counterexample ("a solver slot is still taken: " <> show free) (maybe False isQed free)
+            , counterexample ("solver processes left behind (pid, state): " <> show leftover) (null leftover)
+            , counterexample "a path stopped by the abort was reported" (not (any isAborted ends))
+            ]
+  where
+    isAborted = \case
+      Partial _ _ (Aborted {}) -> True
+      _ -> False
+
+-- | The fake solvers recorded in the directory that still exist, alive or not yet reaped, after
+-- waiting up to tries * 100ms for them to go
+solversLeft :: FilePath -> Int -> IO [(String, String)]
+solversLeft dir tries = do
+  pids <- listDirectory dir
+  states <- forM pids $ \pid -> (pid,) <$> procState pid
+  let left = [(pid, st) | (pid, Just st) <- states]
+  if null left || tries <= 0 then pure left else threadDelay 100_000 >> solversLeft dir (tries - 1)
+  where
+    procState pid = do
+      r <- try (readFile ("/proc" </> pid </> "stat") >>= \st -> evaluate (length st) >> pure st)
+      pure $ case r of
+        Left (_ :: IOException) -> Nothing
+        -- the state follows the parenthesised command name
+        Right st -> Just (take 1 (drop 2 (dropWhile (/= ')') st)))
+
 hangingProps :: [Prop]
 hangingProps = [PEq (Var "x") (Lit 1)]
 
@@ -180,8 +245,10 @@ withShortBitwuzlaSolver = withSolvers Bitwuzla 3 (Just 5) defMemLimit
 
 
 main :: IO ()
-main = getArgs >>= \args ->
-  if hangingSolverFlag `elem` args then hangingSolverMain else defaultMain tests
+main = getArgs >>= \args -> case args of
+  _ | hangingSolverFlag `elem` args -> hangingSolverMain
+  _ | (_ : dir : maxDelay : _) <- dropWhile (/= randomSolverFlag) args -> randomSolverMain dir (read maxDelay)
+  _ -> defaultMain tests
 
 -- The test binary doubles as a fake SMT solver, so the fixture works on every OS and is never installed
 hangingSolverFlag :: String
@@ -189,7 +256,29 @@ hangingSolverFlag = "--hevm-fake-hanging-solver"
 
 -- Acks every command and never answers (check-sat), unless the query set :status unsat
 hangingSolverMain :: IO ()
-hangingSolverMain = hSetBuffering stdout LineBuffering >> go False ""
+hangingSolverMain = fakeSolver $ \unsat -> if unsat then putStrLn "unsat" else forever $ threadDelay 1_000_000
+
+randomSolverFlag :: String
+randomSolverFlag = "--hevm-fake-random-solver"
+
+-- Records its pid in the directory, then answers each (check-sat) after up to maxDelay ms with
+-- unsat or unknown at random, or unsat if the query set :status unsat. One in eight hangs for a
+-- minute, so a query that an abort fails to cancel is noticed.
+randomSolverMain :: FilePath -> Int -> IO ()
+randomSolverMain dir maxDelay = do
+  pid <- getSymbolicLinkTarget "/proc/self"
+  writeFile (dir </> pid) ""
+  t <- getMonotonicTimeNSec
+  gen <- newIORef (t * 6364136223846793005 + read pid)
+  fakeSolver $ \unsat -> do
+    r <- atomicModifyIORef' gen (\x -> let x' = x * 6364136223846793005 + 1442695040888963407 in (x', x' `shiftR` 33))
+    threadDelay (fromIntegral (r `mod` fromIntegral (maxDelay + 1)) * 1000)
+    when (not unsat && r `shiftR` 11 `mod` 8 == 0) $ threadDelay 60_000_000
+    putStrLn $ if unsat || even (r `shiftR` 7) then "unsat" else "unknown"
+
+-- Acks every command, and calls the answer to (check-sat) with whether the query set :status unsat
+fakeSolver :: (Bool -> IO ()) -> IO ()
+fakeSolver answer = hSetBuffering stdout LineBuffering >> go False ""
   where
     go unsat pending = do
       eof <- isEOF
@@ -202,8 +291,7 @@ hangingSolverMain = hSetBuffering stdout LineBuffering >> go False ""
     sawUnsat unsat cmd = unsat || "(set-info :status unsat)" `List.isInfixOf` cmd
     reply unsat cmd
       | not ("(check-sat)" `List.isInfixOf` cmd) = putStrLn "success" >> go unsat ""
-      | unsat = putStrLn "unsat" >> go unsat ""
-      | otherwise = forever $ threadDelay 1_000_000
+      | otherwise = answer unsat >> go unsat ""
 
 data ScanState = Normal | InString | InQuoted | InComment
 
@@ -4965,6 +5053,12 @@ tests = testGroup "hevm"
       let unsatQuery = SMT2 (SMTScript [SMTCommand "(set-info :status unsat)\n"]) mempty []
       res <- liftIO $ checkSat s Nothing (Right unsatQuery)
       assertBoolM ("Expected Qed, got: " <> show res) (isQed res)
+    -- aborts a run at a random moment while fake solvers answer after random delays
+    , localOption (mkTimeout 1_800_000_000) $
+      adjustOption (\(QuickCheckTests n) -> QuickCheckTests (if n == 100 then 30 else n)) $
+      testProperty "early-abort-race" $
+        forAll ((,,) <$> choose (1, 4 :: Int) <*> choose (0, 20) <*> choose (0, 400)) $ \(n, maxDelay, abortAfter) ->
+          ioProperty $ earlyAbortRace (fromIntegral n) maxDelay abortAfter
     , test "early-abort-verify" $ do
       Just c <- solcRuntime "C" [i|
           contract C {

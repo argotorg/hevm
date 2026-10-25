@@ -539,6 +539,13 @@ formatPartial = \case
       , "program counter: " <> T.pack (show pc)
       ]
     ]
+  Aborted pc addr -> T.unlines
+    ["Stopped after a counterexample was found."
+    , indent 2 $ T.unlines
+      [ "contract addr: " <> T.pack (show addr)
+      , "program counter: " <> T.pack (show pc)
+      ]
+    ]
   JumpIntoSymbolicCode pc addr idx -> T.unlines
     ["Encountered a jump into a symbolic code region."
     , indent 2 $ T.unlines
@@ -596,6 +603,7 @@ formatPartialDetailed srcLookupM contracts p =
     CheatCodeFailed {..}       -> "Cheat code failed: " <> T.pack msg <> toTxt addr pc
     PrecompileMissing {..}     -> "Precompile at address " <> pack (show preAddr) <> " does not exist, called from" <> toTxt addr pc
     BranchTooDeep {..}         -> "Branches too deep" <> toTxt addr pc
+    Aborted {..}               -> "Stopped after a counterexample was found" <> toTxt addr pc
 
 formatSomeExpr :: SomeExpr -> Text
 formatSomeExpr (SomeExpr e) = formatExpr $ Expr.simplify e

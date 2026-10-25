@@ -175,3 +175,4 @@ mapPartialChildrenM g = \case
   CheatCodeMissing pc a sel -> (\a' -> CheatCodeMissing pc a' sel) <$> g a
   CheatCodeFailed pc a sel m -> (\a' -> CheatCodeFailed pc a' sel m) <$> g a
   BranchTooDeep pc a -> BranchTooDeep pc <$> g a
+  Aborted pc a -> Aborted pc <$> g a
