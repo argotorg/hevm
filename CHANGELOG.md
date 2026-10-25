@@ -117,6 +117,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes of zero.
 
 ## Changed
+- Checked multiplication, `x == (x * d) / d`, is encoded for the SMT solver as an
+  overflow check instead of a division.
 - `hevm test --coverage`, which did nothing, is removed.
 - The test suite shows the output of `hevm test` only for failing tests.
 - Results that revert with `Error(string)` show the decoded message instead of hex.
@@ -169,6 +171,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of simplifying an ITE of them.
 
 ## Fixed
+- Loop iterations are counted per call, so repeated calls into the same contract
+  no longer hit `--max-iterations`.
 - Keccak assumptions compare only the hashed bytes of inputs of concrete length,
   so one input no longer gets two hashes (spurious counterexamples).
 - Equivalence checking compares the code of contracts the programs create, and
