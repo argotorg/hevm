@@ -1589,6 +1589,14 @@ hevm exec --caller $(cast tx $TXHASH from) --address $(cast tx $TXHASH to) \
     --calldata $(cast tx $TXHASH input) --rpc $ETH_RPC_URL \
     --block $(($(cast tx $TXHASH blockNumber)-1)) --gas $(cast tx $TXHASH gas)
 </code></pre>
+<h2 id="rpc-cache"><a class="header" href="#rpc-cache">RPC cache</a></h2>
+<p>State fetched with <code>--rpc</code> at a fixed block (<code>--block</code> for <code>exec</code> and
+<code>symbolic</code>, <code>--number</code> for <code>test</code>) is saved to
+<code>$XDG_CACHE_HOME/hevm/rpc/&lt;chain id&gt;/</code> (usually <code>~/.cache/hevm/rpc/</code>; on
+Windows <code>%LOCALAPPDATA%\hevm\rpc\</code>) and
+reused by later runs at that block, so they don't fetch it again.
+<code>--cache-dir DIR</code> uses <code>DIR</code> instead, and <code>--no-rpc-cache</code> turns the cache off.
+State at the latest block is not cached.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="interactive-debugger"><a class="header" href="#interactive-debugger">Interactive debugger</a></h1>
 <blockquote>
 <p>The debugger is new and still changing: its commands and HTTP API may change
