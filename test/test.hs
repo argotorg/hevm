@@ -1636,6 +1636,39 @@ tests = testGroup "hevm"
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertBoolM "Expected counterexample" (any isCex res)
     ]
+  -- x == (x * d) / d is encoded with bvumulo instead of the division
+  , testGroup "Checked-Mul-Encoding" $ flip concatMap [Bitwuzla, Z3, CVC5] $ \solver ->
+    let
+      x = Var "x"
+      d = Var "d"
+      check a b = PEq a (Div (Mul a b) b)
+      sat props = runEnv (Env { config = testEnv.config { simp = False } }) $
+        withSolvers solver 1 (Just 30) defMemLimit $ \s -> checkSatWithProps s props
+      name n = n <> "-" <> show solver
+    in
+    [ testCase (name "checked-mul-overflow") $ do
+        res <- sat [check x d, PGT x (Lit (2^(128 :: Int))), PGT d (Lit (2^(128 :: Int)))]
+        assertEqual "the check fails on overflow" Qed res
+    , testCase (name "checked-mul-zero-divisor") $ do
+        res <- sat [check x d, PEq d (Lit 0), PGT x (Lit 0)]
+        assertEqual "(x * 0) / 0 is 0" Qed res
+    , testCase (name "checked-mul-no-overflow") $ do
+        res <- sat [PNeg (check x d), PLT x (Lit 1000), PLT d (Lit 1000), PGT d (Lit 0)]
+        assertEqual "the check holds without overflow" Qed res
+    , testCase (name "checked-mul-cex") $ do
+        res <- sat [PNeg (check x d), PEq x (Lit (2^(255 :: Int)))]
+        assertBool "the check can fail" (isCex res)
+    -- literals folded: 100 == (100c * y) / (c * y)
+    , testCase (name "checked-mul-folded") $ do
+        let y = Var "y"
+            c = 8539408935947150350830
+            foldedCheck = PEq (Lit 100) (Div (Mul (Lit (100 * c)) y) (Mul (Lit c) y))
+        noOverflow <- sat [PNeg foldedCheck, PLT y (Lit 1000), PGT y (Lit 0)]
+        assertEqual "the folded check holds without overflow" Qed noOverflow
+        -- c * y must not wrap for 100 * (c * y) to overflow
+        overflow <- sat [foldedCheck, PGT y (Lit (2^(177 :: Int))), PLT y (Lit (2^(182 :: Int)))]
+        assertEqual "the folded check fails on overflow" Qed overflow
+    ]
   , testGroup "Mul-Abstraction"
     -- Symbolic*symbolic multiplication is abstracted as an uninterpreted
     -- function (abst_evm_bvmul) with sound lemmas (commutativity, 0/1
@@ -2031,12 +2064,12 @@ tests = testGroup "hevm"
     -- checked arithmetic: the overflow check is itself a division of the product
     , provesAbstractly "checked-muldiv-cap" "uint256 a, uint256 n, uint256 d"
         "require(a < (1<<128) && d < (1<<128) && n <= d && d != 0); uint256 r = a * n / d; assert(r <= a);"
+    , provesAbstractly "checked-mul-div-cancel" "uint256 x, uint256 y"
+        "require(y != 0); uint256 r = x * y / y; assert(r == x);"
     , provesAbstractly "muldiv-monotone-literal-divisor" "uint256 a1, uint256 a2, uint256 p"
         "require(a1 <= a2 && a2 < (1<<128) && p < (1<<128)); uint256 r1; uint256 r2; assembly { r1 := div(mul(a1, p), 1000000000000000000) r2 := div(mul(a2, p), 1000000000000000000) } assert(r1 <= r2);"
     , abstractArithGap "gap-divmod-identity" "uint256 a, uint256 b"
         "require(b != 0); uint256 r; assembly { r := add(mul(div(a, b), b), mod(a, b)) } assert(r == a);"
-    , abstractArithGap "gap-checked-mul-div-cancel" "uint256 x, uint256 y"
-        "require(y != 0); uint256 r = x * y / y; assert(r == x);"
     -- the lemmas would need the cross term x2*w1, which the query never mentions
     , abstractArithGap "gap-monotone-in-both-factors" "uint256 x1, uint256 x2, uint256 w1, uint256 w2"
         "require(x1 <= x2 && w1 <= w2 && x2 < (1<<100) && w2 < (1<<100)); uint256 r1; uint256 r2; assembly { r1 := div(mul(x1, w1), 1000000000000000000) r2 := div(mul(x2, w2), 1000000000000000000) } assert(r1 <= r2);"
@@ -2547,7 +2580,7 @@ tests = testGroup "hevm"
                   st = Map.findWithDefault mempty (SymAddr "entrypoint") cex.store
               assertEqualM "m[x] at its real slot" (Just 3) (Map.lookup (slot 0) st)
               assertEqualM "n[x] at its real slot" (Just 4) (Map.lookup (slot 1) st)
-              replayed <- replaySymCex s post vm leaf cex
+              replayed <- replaySymCex (Fetch.oracle s Nothing Fetch.noRpc) post vm leaf cex
               assertEqualM "replay" (Right True) replayed
             r -> liftIO $ assertFailure $ "expected one counterexample, got " <> show r
     , test "require-test" $ do

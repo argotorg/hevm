@@ -176,7 +176,7 @@ validateCex :: forall m . App m
   -> VM Concrete
   -> Map (Expr EAddr) Addr
   -> ReproducibleCex
-  -> m Bool
+  -> m (Bool, Either EvmError (Expr Buf))
 validateCex uTestOpts fetcher vm0 cexAddrs repCex = do
   let concAddr dflt a = case a of
         SymAddr _ -> LitAddr $ Map.findWithDefault dflt a cexAddrs
@@ -213,7 +213,7 @@ validateCex uTestOpts fetcher vm0 cexAddrs repCex = do
                      in (sel `BS.isPrefixOf` msg) && ("assertion failed" `BS.isPrefixOf` (BS.drop (4+32+32) msg))
                 _ -> False
               Right _ -> utoConc.checkFailBit && (dsTestFailedConc vm3.env.contracts)
-  pure (ret /= shouldFail)
+  pure (ret /= shouldFail, res)
 
 -- Returns tuple of (No Cex, No warnings)
 runUnitTestContract
@@ -442,7 +442,7 @@ getReproFailure sig@(Sig testName _) cd cex = do
 
 symFailure :: App m =>
   UnitTestOptions -> Text -> Expr Buf -> [AbiType] ->
-  (Expr End, SMTCex, Err Bool) ->
+  (Expr End, SMTCex, Err (Bool, Either EvmError (Expr Buf))) ->
   m Text
 symFailure UnitTestOptions {..} testName cd types failure = do
   conf <- readConfig
@@ -459,16 +459,21 @@ symFailure UnitTestOptions {..} testName cd types failure = do
         ["Counterexample:   " <> reproToText repro
         ,"  calldata: " <> let ?context = dappContext (traceContext leaf)
                            in prettyCalldata cex cd testName types
-        ,"  result:   " <> showRes leaf
+        ,"  result:   " <> showRes (replayed leaf repro)
         ] <> verbText conf leaf
+      -- symbolic assertions render their operands as expressions, the replay has the values
+      replayed leaf = \case
+        Right (True, Left e) -> Failure [] (traceContext leaf) e
+        Right (True, Right out) -> Success [] (traceContext leaf) out mempty
+        _ -> leaf
       verbText conf leaf = if conf.verb <= 1 then mempty
                            else [Text.unlines [ indentLines 2 (showTraceTree' dapp leaf)]]
       dappContext TraceContext { contracts, labels } =
         DappContext { info = dapp, contracts, labels }
 
-      reproToText :: Err Bool -> Text
+      reproToText :: Err (Bool, a) -> Text
       reproToText (Left err) = "\x1b[33m[error attempting to reproduce: " <> pack err <> "]\x1b[0m"
-      reproToText (Right repro) = if repro then "\x1b[90m[validated]\x1b[0m" else "\x1b[31m[not reproducible]\x1b[0m"
+      reproToText (Right (repro, _)) = if repro then "\x1b[90m[validated]\x1b[0m" else "\x1b[31m[not reproducible]\x1b[0m"
 
 indentLines :: Int -> Text -> Text
 indentLines n s =

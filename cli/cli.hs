@@ -625,9 +625,8 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = withRpcSession cOpts cExecOpts.rpc c
         showExtras solvers sOpts calldata expr
       _ -> do
         let cexs = mapMaybe getCex res
-        replays <- forM cexs $ \(leaf, cex) -> case cExecOpts.rpc of
-          Just _ -> pure $ Left "state fetched over RPC is not replayed"
-          Nothing -> replaySymCex solvers (checkAssertions errCodes) preState leaf cex
+        replays <- forM cexs $ \(leaf, cex) ->
+          replaySymCex (Fetch.oracle solvers (Just sess) veriOpts.rpcInfo) (checkAssertions errCodes) preState leaf cex
         let counterexamples
               | null cexs = []
               | otherwise =

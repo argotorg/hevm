@@ -9,6 +9,7 @@
 - [Forge std-test tutorial](./std-test-tutorial.md)
 - [Equivalence checking tutorial](./equivalence-checking-tutorial.md)
 - [Symbolic execution tutorial](./symbolic-execution-tutorial.md)
+- [Worked example: finding the Truebit exploit](./exploit-tutorial.md)
 <!-- [Discovering reachable assertion violations]() -->
 
 # Reference

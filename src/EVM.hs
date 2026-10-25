@@ -2094,7 +2094,9 @@ cheat gas (inOffset, inSize) (outOffset, outSize) xs = do
                     { state = vm1.state { stack = xs }
                     , context = newContext
                     , logs = vm1.logs
+                    , iterations = vm1.iterations
                     }
+  assign #iterations mempty
   case maybeLitWordSimp abi of
     -- 4-byte function selector
     Nothing -> manySolutions (?conf).maxDepth (?conf).maxWidth abi 4 $ \case
@@ -2868,7 +2870,9 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
             { state = vm1.state { stack = xs }
             , context = newContext
             , logs = vm1.logs
+            , iterations = vm1.iterations
             }
+          assign #iterations mempty
 
           let clearInitCode = \case
                 (InitCode _ _) -> InitCode mempty mempty
@@ -3010,7 +3014,9 @@ create' self this xSize xGas xValue xs newAddr initCode = do
               { context = newContext
               , state   = vm1.state { stack = xs }
               , logs    = vm1.logs
+              , iterations = vm1.iterations
               }
+            assign #iterations mempty
 
             state :: FrameState t <- lift blankState
             assign #state $ state
@@ -3236,6 +3242,7 @@ finishFrameNoExpectation how = do
       assign #frames remainingFrames
       -- Install the state of the frame to which we shall return.
       assign #state nextFrame.state
+      assign #iterations nextFrame.iterations
 
       -- Now dispatch on whether we were creating or calling,
       -- and whether we shall return, revert, or internalError(six cases).
