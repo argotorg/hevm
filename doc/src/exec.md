@@ -52,7 +52,8 @@ hevm exec --caller $(cast tx $TXHASH from) --address $(cast tx $TXHASH to) \
 
 State fetched with `--rpc` at a fixed block (`--block` for `exec` and
 `symbolic`, `--number` for `test`) is saved to
-`$XDG_CACHE_HOME/hevm/rpc/<chain id>/` (usually `~/.cache/hevm/rpc/`) and
+`$XDG_CACHE_HOME/hevm/rpc/<chain id>/` (usually `~/.cache/hevm/rpc/`; on
+Windows `%LOCALAPPDATA%\hevm\rpc\`) and
 reused by later runs at that block, so they don't fetch it again.
 `--cache-dir DIR` uses `DIR` instead, and `--no-rpc-cache` turns the cache off.
 State at the latest block is not cached.
