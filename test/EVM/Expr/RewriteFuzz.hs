@@ -12,6 +12,8 @@ module EVM.Expr.RewriteFuzz
   , shrinkProp
   , evalWord
   , evalProp
+  , genEnvProp
+  , substitute
   , FuzzEnv(..)
   ) where
 

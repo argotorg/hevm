@@ -24,7 +24,8 @@ module EVM.SMT
   getVars,
   queryMaxReads,
   getBufs,
-  getStore
+  getStore,
+  checkedMul
 ) where
 
 import Prelude hiding (LT, GT, Foldable(..))
@@ -664,6 +665,15 @@ exprToSMTWith arithEnc = \case
       ConcreteArith -> op2CheckZero (concFnName kind) a b
       AbstractArith -> op2 (abstFnName kind) a b
 
+-- | Matches @x == n / d@ where @n@ is @x * d@, as in checked multiplication, returning @x@ and @d@.
+-- @(x * d mod 2^256) / d == x@ iff @d /= 0@ and @x * d@ does not overflow, or @d == 0@ and @x == 0@.
+checkedMul :: Expr EWord -> Expr EWord -> Maybe (Expr EWord, Expr EWord)
+checkedMul a b = case (a, b) of
+  (x, Div n d) | isProduct x d n -> Just (x, d)
+  (Div n d, x) | isProduct x d n -> Just (x, d)
+  _ -> Nothing
+  where isProduct x d n = Expr.simplify (Mul x d) == Expr.simplify n
+
 propToSMTWith :: ArithEncoding -> Prop -> Err Builder
 propToSMTWith arithEnc = \case
   -- array equality alone ignores length: all-zero buffers of different lengths would be equal
@@ -671,6 +681,11 @@ propToSMTWith arithEnc = \case
     arrEq <- op2 "=" a b
     lenEq <- op2 "=" (BufLength a) (BufLength b)
     pure $ "(and " <> arrEq <> " " <> lenEq <> ")"
+  -- checked multiplication's x == (x * d) / d, without the costly division
+  PEq (a :: Expr x) b | Just Refl <- eqT @x @EWord, Just (x, d) <- checkedMul a b -> do
+    xe <- encE x
+    de <- encE d
+    pure $ "(and (or (not (= " <> de <> " (_ bv0 256))) (= " <> xe <> " (_ bv0 256))) (not (bvumulo " <> xe <> " " <> de <> ")))"
   PEq a b -> op2 "=" a b
   PLT a b -> op2 "bvult" a b
   PGT a b -> op2 "bvugt" a b

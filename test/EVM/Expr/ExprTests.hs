@@ -19,7 +19,7 @@ import Data.Containers.ListUtils (nubOrd)
 import Data.List qualified as List (nub, sort, tails)
 import Data.Map.Strict qualified as Map
 import Control.Exception (evaluate)
-import Data.Maybe (isJust, fromMaybe)
+import Data.Maybe (isJust, fromMaybe, listToMaybe)
 import System.Timeout qualified as Timeout
 import Data.Monoid (All(..))
 import Data.Text (Text)
@@ -29,12 +29,12 @@ import Numeric.Natural (Natural)
 import EVM.Effects
 import EVM.Expr qualified as Expr
 import EVM.Expr.Generator
-import EVM.Expr.RewriteFuzz (genShapedWord, genShapedProp, genSpecialLit, shrinkWord, shrinkProp)
+import EVM.Expr.RewriteFuzz (genShapedWord, genShapedProp, genSpecialLit, shrinkWord, shrinkProp, evalProp, genEnvProp, substitute)
 import EVM.Expr.Probe (probes, contract)
 import EVM.HashCons qualified as HC
 import EVM.Keccak.Preimages (fromBytes)
 import EVM.Format (hexText)
-import EVM.SMT (AbstractQuery(..), SMT2(..), SMTScript(..), assertPropsAbstract)
+import EVM.SMT (AbstractQuery(..), SMT2(..), SMTScript(..), assertPropsAbstract, checkedMul)
 import EVM.Solvers hiding (checkSat)
 import EVM.Solvers qualified as Solvers (checkSat)
 import EVM.SymExec (subModel)
@@ -2382,6 +2382,19 @@ simplifierFuzzTests cfg = testGroup "SimplifierPropertyTests"
         let e = smtEncodable e' in within 20_000_000 $ ioProperty $ proveEquivExprWith cfg e (Expr.simplify e)
     , testProperty "shaped-prop-simplification" $ forAllShrink (sized $ \n -> genShapedProp (min n 16)) shrinkProp $ \p' ->
         let p = mapProp smtEncodable p' in within 20_000_000 $ ioProperty $ proveEquivPropWith cfg p (Expr.simplifyProp p)
+    -- the encoder turns x == (x * d) / d into an overflow check: on concrete values it must agree
+    -- with the reference semantics, and symbolically with the division it replaces
+    , testProperty "checked-mul-encoding-concrete" $ forAll genCheckedMul $ \p ->
+        forAll (genEnvProp p) $ \env -> case evalProp env p of
+          Nothing -> property Discard
+          Just v -> coverCheckedMul p $ within 20_000_000 $ ioProperty $ do
+            res <- checkSatWith cfg (mapProp (substitute env) p)
+            pure $ counterexample (show (v, res)) $ if v then isSat res else isQed res
+    , testProperty "checked-mul-encoding-symbolic" $ forAll genCheckedMul $ \p ->
+        let (same, hidden) = hideCheckedMul p
+        in coverCheckedMul p $ within 20_000_000 $ ioProperty $ do
+          res <- checkSatWith cfg (PAnd same (PNeg ((PImpl p hidden) .&& (PImpl hidden p))))
+          pure $ counterexample (show res) (isUnsatOrUnknown res)
     , testProperty "store-simplification" $ \(expr :: Expr Storage) -> ioProperty $ proveEquivExprWith cfg expr (Expr.simplify expr)
     , testProperty "load-simplification" $ \(GenWriteStorageLoad expr) -> ioProperty $ proveEquivExprWith cfg expr (Expr.simplify expr)
     , testProperty "folded-mapping-load" $ forAll genFoldedMappingLoad $ \(expr, expected) ->
@@ -2690,6 +2703,44 @@ checkLemmasAtPoint solvers props = case assertPropsAbstract abstractConfig props
     res <- liftIO $ Solvers.checkSat solvers Nothing (Right (q.query <> SMT2 (SMTScript q.saturatedTruth) mempty mempty))
     pure (q.lemmaFamilies, res)
 
+
+-- | Checked multiplications @x == (x * d) / d@, also with literals folded, as the simplifier leaves them
+genCheckedMul :: Gen Prop
+genCheckedMul = do
+  x <- sized $ \n -> genShapedWord (min n 8)
+  d <- sized $ \n -> genShapedWord (min n 8)
+  y <- sized $ \n -> genShapedWord (min n 8)
+  k <- genSpecialLit
+  c <- genSpecialLit
+  check <- elements
+    [ PEq x (Div (Mul x d) d), PEq x (Div (Mul d x) d), PEq (Div (Mul x d) d) x
+    , PEq (Lit k) (Div (Mul (Lit (k * c)) y) (Mul (Lit c) y)) ]
+  mapProp smtEncodable <$> elements [check, PNeg check, PAnd check (PLT x d), POr (PNeg check) (PEq d (Lit 0))]
+
+coverCheckedMul :: Testable t => Prop -> t -> Property
+coverCheckedMul p = cover 90 (not (null (checkedMuls p))) "rewritten"
+
+checkedMuls :: Prop -> [(Expr EWord, Expr EWord)]
+checkedMuls = \case
+  PEq (a :: Expr x) b | Just Refl <- eqT @x @EWord -> maybe [] pure (checkedMul a b)
+  PNeg a -> checkedMuls a
+  PAnd a b -> checkedMuls a <> checkedMuls b
+  POr a b -> checkedMuls a <> checkedMuls b
+  _ -> []
+
+-- | The props with the divisor behind a fresh variable, so they keep the division, and that the
+-- variable equals the divisor
+hideCheckedMul :: Prop -> (Prop, Prop)
+hideCheckedMul p = (PEq (Var "hiddenDivisor") divisor, go p)
+  where
+    divisor = maybe (Lit 0) snd (listToMaybe (checkedMuls p))
+    go = \case
+      PEq (Div n d) x | d == divisor -> PEq (Div n (Var "hiddenDivisor")) x
+      PEq x (Div n d) | d == divisor -> PEq x (Div n (Var "hiddenDivisor"))
+      PNeg a -> PNeg (go a)
+      PAnd a b -> PAnd (go a) (go b)
+      POr a b -> POr (go a) (go b)
+      q -> q
 
 proveEquivPropWith :: Config -> Prop -> Prop -> IO Bool
 proveEquivPropWith cfg a b

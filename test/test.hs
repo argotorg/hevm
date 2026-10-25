@@ -1636,6 +1636,39 @@ tests = testGroup "hevm"
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertBoolM "Expected counterexample" (any isCex res)
     ]
+  -- x == (x * d) / d is encoded with bvumulo instead of the division
+  , testGroup "Checked-Mul-Encoding" $ flip concatMap [Bitwuzla, Z3, CVC5] $ \solver ->
+    let
+      x = Var "x"
+      d = Var "d"
+      check a b = PEq a (Div (Mul a b) b)
+      sat props = runEnv (Env { config = testEnv.config { simp = False } }) $
+        withSolvers solver 1 (Just 5) defMemLimit $ \s -> checkSatWithProps s props
+      name n = n <> "-" <> show solver
+    in
+    [ testCase (name "checked-mul-overflow") $ do
+        res <- sat [check x d, PGT x (Lit (2^(128 :: Int))), PGT d (Lit (2^(128 :: Int)))]
+        assertEqual "the check fails on overflow" Qed res
+    , testCase (name "checked-mul-zero-divisor") $ do
+        res <- sat [check x d, PEq d (Lit 0), PGT x (Lit 0)]
+        assertEqual "(x * 0) / 0 is 0" Qed res
+    , testCase (name "checked-mul-no-overflow") $ do
+        res <- sat [PNeg (check x d), PLT x (Lit 1000), PLT d (Lit 1000), PGT d (Lit 0)]
+        assertEqual "the check holds without overflow" Qed res
+    , testCase (name "checked-mul-cex") $ do
+        res <- sat [PNeg (check x d), PEq x (Lit (2^(255 :: Int)))]
+        assertBool "the check can fail" (isCex res)
+    -- literals folded: 100 == (100c * y) / (c * y)
+    , testCase (name "checked-mul-folded") $ do
+        let y = Var "y"
+            c = 8539408935947150350830
+            foldedCheck = PEq (Lit 100) (Div (Mul (Lit (100 * c)) y) (Mul (Lit c) y))
+        noOverflow <- sat [PNeg foldedCheck, PLT y (Lit 1000), PGT y (Lit 0)]
+        assertEqual "the folded check holds without overflow" Qed noOverflow
+        -- c * y must not wrap for 100 * (c * y) to overflow
+        overflow <- sat [foldedCheck, PGT y (Lit (2^(177 :: Int))), PLT y (Lit (2^(182 :: Int)))]
+        assertEqual "the folded check fails on overflow" Qed overflow
+    ]
   , testGroup "Mul-Abstraction"
     -- Symbolic*symbolic multiplication is abstracted as an uninterpreted
     -- function (abst_evm_bvmul) with sound lemmas (commutativity, 0/1
