@@ -68,13 +68,13 @@ basicTests = testGroup "simple-checks"
   , testCase "unknown-calls-with-different-gas-may-differ" $ do
     -- INVALID if staticcall(1000, t) and staticcall(2000, t) to unknown t differ (#1201)
     let call g = replicate 5 (I OpPush0) <> [I OpCalldataload, I (OpPush (Lit g)), I OpStaticcall]
-        c = asm $ call 1000 <> call 2000 <> [I OpEq, Target 0, I OpJumpi, I (OpUnknown 0xfe), I OpJumpdest, I OpStop]
+        c = asm $ call 1000 <> call 2000 <> [I OpEq, Target 0, I OpJumpi, I (OpInvalid), I OpJumpdest, I OpStop]
     (_, res) <- executeWithBitwuzla $ \s -> verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
     assertBool "the callee can read GAS, so the results may differ" (any isCex res)
   , testCase "unknown-call-expands-memory" $ do
     -- staticcall to unknown t with output at [100, 164), INVALID unless MSIZE is 0xc0
     let c = asm $ map (I . OpPush . Lit) [64, 100, 32, 4, 0] <> [I OpCalldataload, I (OpPush (Lit 1000)), I OpStaticcall, I OpPop]
-          <> [I OpMsize, I (OpPush (Lit 0xc0)), I OpEq, Target 0, I OpJumpi, I (OpUnknown 0xfe), I OpJumpdest, I OpStop]
+          <> [I OpMsize, I (OpPush (Lit 0xc0)), I OpEq, Target 0, I OpJumpi, I (OpInvalid), I OpJumpdest, I OpStop]
     (_, res) <- executeWithBitwuzla $ \s -> verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
     assertBool "MSIZE covers the output" (all isQed res)
   , testCase "mcopy-symbolic-size-expands-memory" $ do
@@ -82,7 +82,7 @@ basicTests = testGroup "simple-checks"
     let size = [I (OpPush (Lit 0)), I OpCalldataload, I (OpPush (Lit 0x3f)), I OpAnd]
         c = asm $ size <> [I (OpPush (Lit 0)), I (OpPush (Lit 0)), I OpMcopy]
           <> [I OpMsize, I (OpPush (Lit 0x20)), I OpEq, I OpIszero]
-          <> size <> [I (OpPush (Lit 0x20)), I OpEq, I OpAnd, Target 0, I OpJumpi, I OpStop, I OpJumpdest, I (OpUnknown 0xfe)]
+          <> size <> [I (OpPush (Lit 0x20)), I OpEq, I OpAnd, Target 0, I OpJumpi, I OpStop, I OpJumpdest, I (OpInvalid)]
     (_, res) <- executeWithBitwuzla $ \s -> verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
     assertBool "MSIZE covers the copy" (all isQed res)
   , testCase "merged-gas-reading-not-reused" $ do
@@ -92,7 +92,7 @@ basicTests = testGroup "simple-checks"
         c = asm $ x <> [I (OpPush (Lit 0)), I OpMstore, I (OpPush (Lit 7))]
           <> x <> [Target 0, I OpJumpi, I OpPop, I OpGas]
           <> [I OpJumpdest, I OpGas, I OpEq, I OpIszero]
-          <> x <> [I OpIszero, I OpAnd, Target 1, I OpJumpi, I OpStop, I OpJumpdest, I (OpUnknown 0xfe)]
+          <> x <> [I OpIszero, I OpAnd, Target 1, I OpJumpi, I OpStop, I OpJumpdest, I (OpInvalid)]
     (_, res) <- executeWithBitwuzla $ \s -> verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
     assertBool "two GAS readings differ" (any isCex res)
   , testCase "symbolic-address-high-bytes" $ do
@@ -102,7 +102,7 @@ basicTests = testGroup "simple-checks"
           , I (OpPush (Lit 0xdead)), I OpEq, Target 0, I OpJumpi, I OpStop
           , I OpJumpdest, I (OpDup 1), I OpBalance, I OpPop
           , I (OpPush (Lit 160)), I OpShr, Target 1, I OpJumpi, I OpStop
-          , I OpJumpdest, I (OpUnknown 0xfe) ]
+          , I OpJumpdest, I (OpInvalid) ]
     (_, res) <- executeWithBitwuzla $ \s -> verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
     assertBool "x = 2^160 + 0xdead reaches INVALID" (any isCex res)
   , testCase "blockhash-out-of-range-is-zero" $ do
@@ -1603,7 +1603,7 @@ badStoresInExpr exprs = any (getAny . foldExpr match mempty) exprs
 blockhashIsZeroAt :: W256 -> W256 -> ByteString
 blockhashIsZeroAt blk n = asm
   [ I (OpPush (Lit blk)), I OpBlockhash, I OpIszero, I OpNumber, I (OpPush (Lit n)), I OpEq, I OpAnd
-  , Target 0, I OpJumpi, I OpStop, I OpJumpdest, I (OpUnknown 0xfe) ]
+  , Target 0, I OpJumpi, I OpStop, I OpJumpdest, I (OpInvalid) ]
 
 symExecTestsConfig :: Effects.Config
 symExecTestsConfig = Effects.defaultConfig

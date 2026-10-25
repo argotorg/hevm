@@ -110,4 +110,5 @@ assemble os = V.fromList $ concatMap go os
       -- we just always assemble OpPush into PUSH32
       OpPush wrd -> (LitByte 0x7f) : [Expr.indexWord (Lit i) wrd | i <- [0..31]]
       OpPush0 -> [LitByte 0x5f]
+      OpInvalid -> [LitByte 0xfe]
       OpUnknown o -> [LitByte o]

@@ -1186,6 +1186,7 @@ exec1 conf = do
                 finishFrame (FrameReverted output)
             _ -> underrun
 
+        OpInvalid -> {-# SCC "OpInvalid" #-} vmError $ UnrecognizedOpcode 0xfe
         OpUnknown xxx -> {-# SCC "OpUnknown" #-} vmError $ UnrecognizedOpcode xxx
 
 transfer :: (VMOps t, ?conf::Config) => Expr EAddr -> Expr EAddr -> Expr EWord -> EVM t ()
