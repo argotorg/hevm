@@ -2358,7 +2358,7 @@ cheatActions = Map.fromList
   , $(envReadSingleCheat "envAddress(string)") AbiAddress stringToAddress
   , $(envReadSingleCheat "envBytes32(string)") (AbiBytes 32) stringToBytes32
   , $(envReadSingleCheat "envString(string)") (\x -> AbiTuple $ V.fromList [AbiString x]) stringToByteString
-  , $(envReadSingleCheat "envBytes(bytes)") (\x -> AbiTuple $ V.fromList [AbiBytesDynamic x]) stringHexToByteString
+  , $(envReadSingleCheat "envBytes(string)") (\x -> AbiTuple $ V.fromList [AbiBytesDynamic x]) stringHexToByteString
 
   -- Multi-value environment read cheat actions
   , $(envReadMultipleCheat "envBool(string,string)" AbiBoolType) stringToBool
@@ -2367,7 +2367,7 @@ cheatActions = Map.fromList
   , $(envReadMultipleCheat "envAddress(string,string)" AbiAddressType) stringToAddress
   , $(envReadMultipleCheat "envBytes32(string,string)" $ AbiBytesType 32) stringToBytes32
   , $(envReadMultipleCheat "envString(string,string)" AbiStringType) stringToByteString
-  , $(envReadMultipleCheat "envBytes(bytes,bytes)" AbiBytesDynamicType) stringHexToByteString
+  , $(envReadMultipleCheat "envBytes(string,string)" AbiBytesDynamicType) stringHexToByteString
   , action "assertTrue(bool)" $ assertTrue
   , action "assertFalse(bool)" $ assertFalse
   , action "assertEq(bool,bool)"       $ assertEq AbiBoolType

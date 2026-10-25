@@ -23,24 +23,39 @@ import EVM.SymExec qualified as SymExec
 import Control.Monad.IO.Unlift
 import Control.Monad.Catch (MonadMask)
 import EVM.Effects
+import Control.Monad (unless)
+import Data.IORef
 import Data.Maybe (fromMaybe)
+import Data.Text (Text)
+import Data.Text qualified as T
+import GHC.Stack (HasCallStack)
+import Test.Tasty.HUnit (assertFailure)
 import EVM.Types (internalError)
 import System.Environment (lookupEnv)
 import EVM.Fetch (RpcInfo, noRpc)
 import EVM.Fetch qualified as Fetch
 
+-- | A run's result, with what hevm printed during it
+type WithOutput a = (a, Text)
+
+-- | Fails with the run's output, which is otherwise not shown
+assertRun :: (MonadIO m, Eq a, Show a, HasCallStack) => String -> a -> WithOutput a -> m ()
+assertRun msg expected (actual, out) = liftIO $ unless (actual == expected) $
+  assertFailure $ msg <> "\nexpected: " <> show expected <> "\n but got: " <> show actual
+    <> "\n\nhevm output:\n" <> T.unpack out
+
 -- Returns tuple of (No cex, No warnings)
 runForgeTestCustom
   :: (MonadMask m, App m)
-  => FilePath -> TestMethodFilter -> Maybe Natural -> Maybe Integer -> Bool -> RpcInfo -> m (Bool, Bool)
+  => FilePath -> TestMethodFilter -> Maybe Natural -> Maybe Integer -> Bool -> RpcInfo -> m (WithOutput (Bool, Bool))
 runForgeTestCustom testFile methodFilter timeout maxIter ffiAllowed rpcinfo = do
-  results <- runForgeTestResultsCustom testFile methodFilter timeout maxIter ffiAllowed rpcinfo
+  (results, out) <- runForgeTestResultsCustom testFile methodFilter timeout maxIter ffiAllowed rpcinfo
   let (firsts, seconds) = unzip results
-  pure (and firsts, and seconds)
+  pure ((and firsts, and seconds), out)
 
 runForgeTestResultsCustom
   :: (MonadMask m, App m)
-  => FilePath -> TestMethodFilter -> Maybe Natural -> Maybe Integer -> Bool -> RpcInfo -> m [(Bool, Bool)]
+  => FilePath -> TestMethodFilter -> Maybe Natural -> Maybe Integer -> Bool -> RpcInfo -> m (WithOutput [(Bool, Bool)])
 runForgeTestResultsCustom testFile methodFilter timeout maxIter ffiAllowed rpcinfo = do
   withSystemTempDirectory "dapp-test" $ \root -> do
     compileWithForge root testFile >>= \case
@@ -49,23 +64,27 @@ runForgeTestResultsCustom testFile methodFilter timeout maxIter ffiAllowed rpcin
         internalError $ "Error compiling test file " <> show testFile <> " in directory "
           <> show root
       Right buildOut -> do
-        withSolvers Bitwuzla 3 timeout defMemLimit $ \solvers -> do
-          opts <- testOpts solvers root (Just buildOut) methodFilter maxIter ffiAllowed rpcinfo
+        outRef <- liftIO $ newIORef []
+        let printOut t = atomicModifyIORef' outRef (\ts -> (t:ts, ()))
+        results <- withSolvers Bitwuzla 3 timeout defMemLimit $ \solvers -> do
+          opts <- testOpts solvers root (Just buildOut) methodFilter maxIter ffiAllowed rpcinfo printOut
           unitTestResults opts buildOut
+        out <- liftIO $ readIORef outRef
+        pure (results, T.concat (reverse out))
 
 -- Returns tuple of (No cex, No warnings)
 runForgeTest
   :: (MonadMask m, App m)
-  => FilePath -> TestMethodFilter -> m (Bool, Bool)
+  => FilePath -> TestMethodFilter -> m (WithOutput (Bool, Bool))
 runForgeTest testFile methodFilter = runForgeTestCustom testFile methodFilter Nothing Nothing False noRpc
 
 runForgeTestResults
   :: (MonadMask m, App m)
-  => FilePath -> TestMethodFilter -> m [(Bool, Bool)]
+  => FilePath -> TestMethodFilter -> m (WithOutput [(Bool, Bool)])
 runForgeTestResults testFile methodFilter = runForgeTestResultsCustom testFile methodFilter Nothing Nothing False noRpc
 
-testOpts :: forall m . App m => SolverGroup -> FilePath -> Maybe BuildOutput -> TestMethodFilter -> Maybe Integer -> Bool -> RpcInfo -> m (UnitTestOptions)
-testOpts solvers root buildOutput methodFilter maxIter allowFFI rpcinfo = do
+testOpts :: forall m . App m => SolverGroup -> FilePath -> Maybe BuildOutput -> TestMethodFilter -> Maybe Integer -> Bool -> RpcInfo -> (Text -> IO ()) -> m (UnitTestOptions)
+testOpts solvers root buildOutput methodFilter maxIter allowFFI rpcinfo printOut = do
   let srcInfo = maybe emptyDapp (dappInfo root) buildOutput
   sess <- Fetch.mkSessionWithoutCache
   params <- paramsFromRpc rpcinfo sess
@@ -83,6 +102,7 @@ testOpts solvers root buildOutput methodFilter maxIter allowFFI rpcinfo = do
     , ffiAllowed = allowFFI
     , checkFailBit = True
     , loopHeuristic = SymExec.StackBased
+    , printOut = printOut
     }
 
 processFailedException :: String -> String -> [String] -> Int -> IO a

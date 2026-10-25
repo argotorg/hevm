@@ -218,7 +218,6 @@ data TestOptions = TestOptions
   { projectType   ::ProjectType
   , rpc           ::Maybe URL
   , number        ::Maybe W256
-  , coverage      ::Bool
   , match         ::Maybe Text
   , prefix        ::Text
   , ffi           ::Bool
@@ -229,7 +228,6 @@ testOptions = TestOptions
   <$> projectTypeParser
   <*> rpcParser
   <*> (optional $ option auto $ long "number" <> help "Block: number")
-  <*> (switch $ long "coverage" <> help "Coverage analysis")
   <*> (optional $ strOption $ long "match" <> help "Test case filter - only run methods matching regex")
   <*> (strOption $ long "prefix"  <> showDefault <> value "prove" <> help "Prefix for test cases to prove")
   <*> (switch $ long "ffi" <> help "Allow the usage of the hevm.ffi() cheatcode (WARNING: this allows test authors to execute arbitrary code on your machine)")
@@ -490,7 +488,7 @@ equivalence eqOpts cOpts = do
       (True, _) -> putStrLn "   \x1b[31m[FAIL]\x1b[0m Contracts do not behave equivalently"
       (_, True) -> putStrLn "   \x1b[32m[PASS]\x1b[0m Contracts behave equivalently"
       _         -> putStrLn "   \x1b[31m[FAIL]\x1b[0m Contracts may not behave equivalently"
-    liftIO $ printWarnings Nothing mempty eq.partials (map fst eq.res) "the contracts under test"
+    liftIO $ printWarnings Progress.printOut Nothing mempty eq.partials (map fst eq.res) "the contracts under test"
     case cexes of
       [] -> liftIO $ do
         when anyIssues exitFailure
@@ -617,13 +615,13 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = withRpcSession cOpts cExecOpts.rpc c
     case res of
       [] | any Expr.isPartial expr -> do
         liftIO $ putStrLn "\nNo reachable property violations discovered on the explored paths, but exploration was partial\n"
-        liftIO $ printWarnings Nothing mempty expr res "symbolically"
-        liftIO $ printCaveats caveats
+        liftIO $ printWarnings Progress.printOut Nothing mempty expr res "symbolically"
+        liftIO $ printCaveats Progress.printOut caveats
         showExtras solvers sOpts calldata expr
         liftIO exitFailure
       [] -> do
         liftIO $ putStrLn "\nQED: No reachable property violations discovered\n"
-        liftIO $ printCaveats caveats
+        liftIO $ printCaveats Progress.printOut caveats
         showExtras solvers sOpts calldata expr
       _ -> do
         let cexs = mapMaybe getCex res
@@ -643,8 +641,8 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = withRpcSession cOpts cExecOpts.rpc c
               Right False -> "\x1b[31m[not reproducible]\x1b[0m"
               Left why -> "\x1b[33m[cannot replay: " <> why <> "]\x1b[0m"
         liftIO $ T.putStrLn $ T.unlines counterexamples
-        liftIO $ printWarnings Nothing mempty expr res "symbolically"
-        liftIO $ printCaveats caveats
+        liftIO $ printWarnings Progress.printOut Nothing mempty expr res "symbolically"
+        liftIO $ printCaveats Progress.printOut caveats
         showExtras solvers sOpts calldata expr
         liftIO exitFailure
 
@@ -973,6 +971,7 @@ unitTestOptions testOpts cOpts solvers sess buildOutput = do
     , ffiAllowed = testOpts.ffi
     , checkFailBit = True
     , loopHeuristic = cOpts.loopDetectionHeuristic
+    , printOut = Progress.printOut
     }
 parseInitialStorage :: InitialStorage -> BaseState
 parseInitialStorage Empty = EmptyBase

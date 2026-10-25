@@ -66,6 +66,7 @@ data UnitTestOptions = UnitTestOptions
   , ffiAllowed    :: Bool
   , checkFailBit  :: Bool
   , loopHeuristic :: LoopHeuristic
+  , printOut      :: Text -> IO ()
   }
 
 data TestVMParams = TestVMParams
@@ -224,7 +225,7 @@ runUnitTestContract
 runUnitTestContract
   opts@(UnitTestOptions {..}) buildOut (contract, testSigs) = do
   unless (Map.member contract.contractName (getContractsMap buildOut.contracts)) $ internalError $ "Contract " ++ unpack contract.contractName ++ " not found"
-  Progress.printOut $ "Checking " <> Text.pack (show (length testSigs)) <> " function(s) in contract " <> contract.contractName <> "\n"
+  liftIO $ printOut $ "Checking " <> Text.pack (show (length testSigs)) <> " function(s) in contract " <> contract.contractName <> "\n"
   -- Construct the initial VM and begin the contract's constructor
   vm0 :: VM Concrete <- liftIO $ stToIO $ initialUnitTestVm opts contract
   vm1 <- Stepper.interpret (Fetch.oracle solvers (Just sess) rpcInfo) vm0 $ do
@@ -236,7 +237,7 @@ runUnitTestContract
   failOut <- failOutput vm1 opts "setUp()"
   case vm1.result of
     Just (VMFailure _) -> do
-      Progress.printOut $ "   \x1b[31m[BAIL]\x1b[0m setUp() \n" <> indentLines 3 failOut
+      liftIO $ printOut $ "   \x1b[31m[BAIL]\x1b[0m setUp() \n" <> indentLines 3 failOut
       pure [(True, False)]
     Just (VMSuccess _) -> do
       forM (zip [1..] testSigs) $ \(i, s) -> symRun opts vm1 (i, length testSigs) s buildOut.sources
@@ -284,7 +285,7 @@ dsTestFailedConc store = case Map.lookup cheatCode store of
 symRun :: forall m . App m => UnitTestOptions -> VM Concrete -> (Int, Int) -> Sig -> SourceCache -> m (Bool, Bool)
 symRun opts@UnitTestOptions{..} vm (nth, numTests) sig@(Sig testName types) sourceCache = do
     let cs = callSig sig
-    Progress.printOut $ "\x1b[96m[RUNNING]\x1b[0m " <> cs <> "\n"
+    liftIO $ printOut $ "\x1b[96m[RUNNING]\x1b[0m " <> cs <> "\n"
     (cdBuf, cdProps, caveats) <- symCalldata cs types [] (AbstractBuf "txdata")
     let cd = (cdBuf, cdProps)
     let shouldFail = "proveFail" `isPrefixOf` cs
@@ -363,13 +364,13 @@ symRun opts@UnitTestOptions{..} vm (nth, numTests) sig@(Sig testName types) sour
         -- No cexes/errors/unknowns/partials, but all branches reverted
         pure $ "   \x1b[31m[FAIL]\x1b[0m " <> Text.unpack testName <> "\n"
           <> "   No reachable assertion violations, but all branches reverted\n"
-    Progress.printOut $ Text.pack txtResult
+    liftIO $ printOut $ Text.pack txtResult
     when (unexpectedAllRevert && (warnings || (any isCex results))) $ do
       -- if we display a FAILED due to Cex/warnings, we should also mention everything reverted
-      Progress.printOut $ "   \x1b[33m[WARNING]\x1b[0m " <> testName <> " all branches reverted\n\n"
+      liftIO $ printOut $ "   \x1b[33m[WARNING]\x1b[0m " <> testName <> " all branches reverted\n\n"
     let sl = Just $ makeSrcLookup dapp sourceCache
-    liftIO $ printWarnings sl vm'.env.contracts ends results $ "the test " <> Text.unpack testName
-    liftIO $ printCaveats caveats
+    liftIO $ printWarnings printOut sl vm'.env.contracts ends results $ "the test " <> Text.unpack testName
+    liftIO $ printCaveats printOut caveats
     pure (not (any isCex results), not (warnings || unexpectedAllRevert))
     where
       cexHandler :: (Expr 'Buf, [Prop])
@@ -386,7 +387,7 @@ symRun opts@UnitTestOptions{..} vm (nth, numTests) sig@(Sig testName types) sour
               failsToRepro <- getReproFailure (Sig testName types) (fst cd) smtCex
               validation <- traverse (validateCex opts fetcherConc vm smtCex.addrs) failsToRepro
               txtFail <- symFailure opts testName (fst cd) types (cexEnd, smtCex, validation)
-              Progress.printOut txtFail
+              liftIO $ printOut txtFail
 
       -- The offset of the text is: the selector (4B), the offset value (aligned to 32B), and the length of the string (aligned to 32B)
       txtOffset = 4+32+32
@@ -413,24 +414,24 @@ symRun opts@UnitTestOptions{..} vm (nth, numTests) sig@(Sig testName types) sour
               lhs = LitByte (c2w a)
               rhs = Expr.readByte (Lit (fromIntegral n)) b
 --
-printWarnings :: Maybe SrcLookup -> Map (Expr EAddr) Contract -> GetUnknownStr b => [Expr 'End] -> [ProofResult a b] -> String -> IO ()
-printWarnings srcLookupM contracts e results testName = do
+printWarnings :: (Text -> IO ()) -> Maybe SrcLookup -> Map (Expr EAddr) Contract -> GetUnknownStr b => [Expr 'End] -> [ProofResult a b] -> String -> IO ()
+printWarnings printOut srcLookupM contracts e results testName = do
   when (any isUnknown results || any isError results || any Expr.isPartial e) $ do
     out $ "   \x1b[33m[WARNING]\x1b[0m hevm was only able to partially explore " <> testName <> " due to: "
     forM_ (groupIssues (filter isError results)) $ \(num, str) -> out $ "      " <> show num <> "x -> " <> str
     forM_ (groupIssues (filter isUnknown results)) $ \(num, str) -> out $ "      " <> show num <> "x -> " <> str
     forM_ (groupPartials srcLookupM contracts e) $ \(num, str) -> out $ "      " <> show num <> "x -> " <> str
   out ""
-  where out l = Progress.printOut (Text.pack l <> "\n")
+  where out l = printOut (Text.pack l <> "\n")
 
 -- | Print any program-wide soundness caveats (see 'Caveat'). Unlike
 -- 'printWarnings' this is not about unexplored paths: it tells the user the
 -- input domain was restricted, so a "no counterexample" result is only valid
 -- within that restriction.
-printCaveats :: [Caveat] -> IO ()
-printCaveats caveats =
+printCaveats :: (Text -> IO ()) -> [Caveat] -> IO ()
+printCaveats printOut caveats =
   forM_ caveats $ \c ->
-    Progress.printOut $ "   \x1b[33m[CAVEAT]\x1b[0m " <> formatCaveat c <> "\n"
+    printOut $ "   \x1b[33m[CAVEAT]\x1b[0m " <> formatCaveat c <> "\n"
 
 getReproFailure :: App m => Sig -> Expr Buf -> SMTCex -> m (Err ReproducibleCex)
 getReproFailure sig@(Sig testName _) cd cex = do

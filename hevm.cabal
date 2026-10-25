@@ -266,6 +266,7 @@ common test-base
     process,
     tasty,
     tasty-hunit,
+    text,
     tasty-expected-failure,
     temporary,
     witherable,

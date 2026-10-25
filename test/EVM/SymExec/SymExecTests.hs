@@ -465,7 +465,6 @@ storageDecompositionTests = testGroup "Storage decomposition"
         |]
       paths <- executeWithBitwuzla $ \s -> getExpr s c (Just (Sig "prove_array(uint256,uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
       let simpExpr = map (mapExprM Expr.decomposeStorage) paths
-      -- putStrLnM $ T.unpack $ formatExpr (fromJust simpExpr)
       assertBool "Decompose did not succeed." (all isJust simpExpr)
     , testCase "decompose-5-mixed" $ do
       Just c <- solcRuntime "MyContract"
@@ -749,7 +748,6 @@ storageSimplificationTests = testGroup "Storage simplification"
        --       is not stripped. This is due to us not doing all we can in this case, see
        --       note above readStorage. Decompose remedies this (when it can be decomposed)
        -- paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "fun(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
-       -- putStrLnM $ T.unpack $ formatExpr paths
        (_, [Cex _]) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just (Sig "fun(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
        assertBool "" True
     ,
@@ -815,7 +813,6 @@ panicCodeTests = testGroup "Panic code tests via symbolic execution"
             |]
         (_, [Cex (_, ctr)]) <- executeWithBitwuzla $ \s -> checkAssert s [0x12] c (Just (Sig "fun(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
         assertEqual "Division by 0 needs b=0" (SMT.getVar ctr "arg2") 0
-        -- putStrLnM "expected counterexample found"
   , testCase "unused-args-fail" $ do
          Just c <- solcRuntime "C"
              [i|
