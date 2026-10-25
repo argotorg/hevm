@@ -34,7 +34,7 @@ import Network.Socket
 import Network.Socket.ByteString (recv, sendAll)
 import System.Timeout (timeout)
 import Test.QuickCheck.Instances.ByteString ()
-import Test.Tasty (TestTree, testGroup)
+import Test.Tasty (TestTree, testGroup, adjustOption)
 import Test.Tasty.QuickCheck
 
 import EVM.Dapp (emptyDapp)
@@ -60,10 +60,12 @@ tests = testGroup "debugger-fuzz"
       forAll genRoundTrips $ \(start, ks) -> forAll genSnapEvery $ \every -> within 120_000_000 $ ioProperty $ runEnv testEnv $ withSession $ \solvers -> do
         s0 <- liftIO $ setSnapshotInterval every <$> (stToIO (concreteTestVm c) >>= newSession emptyDapp)
         roundTrips (Fetch.oracle solvers Nothing Fetch.noRpc) (repeat Nothing) start ks s0
-  , testProperty "forward-back-symbolic" $ mapSize (* 4) $ \(c :: TestCase) ->
+  -- large cases take minutes, so fewer and shorter ones keep the suite's time bounded
+  , adjustOption (\(QuickCheckTests n) -> QuickCheckTests (if n == 100 then 50 else n)) $
+    testProperty "forward-back-symbolic" $ mapSize (* 4) $ \(c :: TestCase) ->
       forAll genRoundTrips $ \(start, ks) -> forAll (vectorOf 100 genReaction) $ \reactions -> \explorer ->
       forAll genSnapEvery $ \every ->
-      within 300_000_000 $ ioProperty $ runEnv testEnv $ withSession $ \solvers -> do
+      within 50_000_000 $ ioProperty $ runEnv testEnv $ withSession $ \solvers -> do
         s0 <- liftIO $ setSnapshotInterval every <$> (stToIO (symbolicTestVm c) >>= newSession emptyDapp)
         let mode = if explorer then ExplorerBranches else SolverBranches
         tabulate "branch mode" [show mode] <$>

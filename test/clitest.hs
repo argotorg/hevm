@@ -321,7 +321,7 @@ main = do
           readProcessWithExitCode "cabal" ["run", "exe:hevm", "--", "symbolic", "--code", Types.bsToHex c] ""
         quietOut `shouldNotContain` "Queries answered:"
       it "symbolic-partial-is-not-qed" $ do
-        -- loops 10 times before INVALID, more than the default max iterations;
+        -- loops 10 times before INVALID, more than --max-concrete-iterations;
         -- OpPush assembles to PUSH32, so the loop head is at 33 and the body at 104
         let loop = asmHex
               [ OpPush (Lit 0), OpJumpdest
@@ -329,7 +329,7 @@ main = do
               , OpInvalid
               , OpJumpdest, OpPush (Lit 1), OpAdd, OpPush (Lit 33), OpJump ]
         (exitCode, stdout, _) <- readProcessWithExitCode "cabal"
-          ["run", "exe:hevm", "--", "symbolic", "--code", loop] ""
+          ["run", "exe:hevm", "--", "symbolic", "--max-concrete-iterations", "5", "--code", loop] ""
         exitCode `shouldBe` ExitFailure 1
         stdout `shouldNotContain` "QED"
         stdout `shouldContain` "[WARNING]"
@@ -352,7 +352,7 @@ main = do
         (exitCode, _, _) <- run ["--code", code OpNumber, "--number", "0"]
         exitCode `shouldBe` ExitSuccess
       it "early-abort" $ do
-        (exitCode, stdout, stderr) <- runForge "test/contracts/pass/early-abort.sol" ["--max-iterations", "1000", "--early-abort"]
+        (exitCode, stdout, stderr) <- runForge "test/contracts/pass/early-abort.sol" ["--max-iterations", "1000"]
         stderr `shouldNotContain` "CallStack"
         stderr `shouldNotContain` "blocked indefinitely"
         stdout `shouldContain` "[FAIL]"
@@ -360,7 +360,7 @@ main = do
         stdout `shouldNotContain` "partially explore"
         exitCode `shouldBe` (ExitFailure 1)
       it "no-early-abort" $ do
-        (exitCode, stdout, stderr) <- runForge "test/contracts/pass/early-abort.sol" ["--max-iterations", "1000"]
+        (exitCode, stdout, stderr) <- runForge "test/contracts/pass/early-abort.sol" ["--max-iterations", "1000", "--no-early-abort"]
         stderr `shouldNotContain` "CallStack"
         length (filter (isInfixOf "Counterexample:") (lines stdout)) `shouldSatisfy` (> 1)
         exitCode `shouldBe` (ExitFailure 1)

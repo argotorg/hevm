@@ -68,7 +68,7 @@ import EVM.Keccak.Preimages qualified as Preimages
 import EVM.Progress qualified as Progress
 import EVM.Format (formatExpr, formatPartial, formatPartialDetailed, showVal, indent, formatBinary, formatProp, formatState, formatError)
 import EVM.SMT qualified as SMT
-import EVM.Solvers (SolverGroup, checkSatWithProps, checkSatWithPropsAbortable)
+import EVM.Solvers (SolverGroup, checkSatWithProps, checkSatWithPropsAbortable, withRunAbort)
 import EVM.Stepper (Stepper)
 import EVM.Stepper qualified as Stepper
 import EVM.Traversals (mapExpr, mapExprM, foldTerm)
@@ -99,6 +99,9 @@ groupPartials srcLookupM contracts e = map (\g -> (into (length g), NE.head g)) 
 
 data IterConfig = IterConfig
   { maxIter :: Maybe Integer
+  -- | the bound for branches whose condition is concrete: gas is not tracked, so it
+  -- stops loops that would never end
+  , maxConcreteIter :: Maybe Integer
   , askSmtIters :: Integer
   , loopHeuristic :: LoopHeuristic
   }
@@ -107,6 +110,7 @@ data IterConfig = IterConfig
 defaultIterConf :: IterConfig
 defaultIterConf = IterConfig
   { maxIter = Nothing
+  , maxConcreteIter = Just 10000
   , askSmtIters = 1
   , loopHeuristic = StackBased
   }
@@ -379,6 +383,18 @@ interpret :: forall m a . App m
   -> m [a]
 interpret fetcher iterConf vm stepper handler = do
   shouldAbort <- liftIO $ newTVarIO False
+  interpretAbortable shouldAbort fetcher iterConf vm stepper handler
+
+-- | Like 'interpret', stopping every path at its next step once the flag is set
+interpretAbortable :: forall m a . App m
+  => TVar Bool
+  -> Fetch.Fetcher Symbolic m
+  -> IterConfig
+  -> VM Symbolic
+  -> Stepper Symbolic (Expr End)
+  -> PathHandler m a
+  -> m [a]
+interpretAbortable runFlag fetcher iterConf vm stepper handler = do
   conf <- readConfig
   -- the flag is process-wide and outlives this exploration
   liftIO $ do HashCons.setHashConsEnabled conf.hashConsExplore
@@ -407,11 +423,11 @@ interpret fetcher iterConf vm stepper handler = do
   workerErr <- liftIO newEmptyTMVarIO
 
   -- spawn task orchestration thread
-  taskOrchestrate' <- toIO $ taskOrchestrate taskQ shouldAbort availableInstances processQ numTasks numProcs allProcessDone workerErr
+  taskOrchestrate' <- toIO $ taskOrchestrate taskQ runFlag availableInstances processQ numTasks numProcs allProcessDone workerErr
   taskOrchestrateId <- liftIO $ forkIO taskOrchestrate'
 
   -- spawn processing orchestration thread
-  processOrchestrate' <- toIO $ processOrchestrate processQ shouldAbort availableProcs resChan numProcs numTasks allProcessDone workerErr
+  processOrchestrate' <- toIO $ processOrchestrate processQ runFlag availableProcs resChan numProcs numTasks allProcessDone workerErr
   processOrchestrateId <- liftIO $ forkIO processOrchestrate'
 
   -- Add in the first task, further tasks will be added by the interpreters themselves
@@ -423,7 +439,7 @@ interpret fetcher iterConf vm stepper handler = do
         , numTasks = numTasks
         , stepper = stepper
         , handler = handler
-        , shouldAbort = shouldAbort
+        , shouldAbort = runFlag
         }
   liftIO $ writeChan taskQ interpTask
 
@@ -531,7 +547,11 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
   where
   eval :: Operational.ProgramView (Stepper.Action Symbolic) (Expr End) -> m (Expr End)
   eval (Operational.Return x) = pure x
-  eval (action Operational.:>>= k) = do
+  eval (action Operational.:>>= k) = liftIO (readTVarIO shouldAbort) >>= \case
+    True -> pure $ Partial vm.constraints (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) (Aborted vm.state.pc vm.state.contract)
+    False -> step action k
+  step :: Stepper.Action Symbolic r -> (r -> Stepper Symbolic (Expr End)) -> m (Expr End)
+  step action k = do
     Progress.setWorker
       [ "pc" .= vm.state.pc
       , "addr" .= T.pack (show vm.state.contract)
@@ -601,7 +621,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
               -- is the condition concrete?
               Lit c ->
                 -- have we reached max iterations, are we inside a loop?
-                case (maxIterationsReached vm iterConf.maxIter, isLoopHead iterConf.loopHeuristic vm) of
+                case (maxIterationsReached vm iterConf.maxConcreteIter, isLoopHead iterConf.loopHeuristic vm) of
                   -- Yes. return a partial leaf
                   (Just _, Just True) ->
                     pure $ Partial vm.constraints (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) $ MaxIterationsReached vm.state.pc vm.state.contract
@@ -966,7 +986,22 @@ verify :: App m
   -> Maybe (VM Symbolic -> SMTResult -> Expr End -> m ())
   -> m ([Expr End], [VerifyResult])
 verify solvers fetcher opts preState post cexHandler = do
-  (ends1, partials) <- verifyInputsWithHandler solvers opts fetcher preState post cexHandler
+  abort <- liftIO $ newTVarIO False
+  verifyAbortable abort solvers fetcher opts preState post cexHandler
+
+-- | Like 'verify', stopping exploration and cancelling every solver query of the run once the
+-- flag is set. With 'earlyAbort', the first counterexample sets it.
+verifyAbortable :: App m
+  => TVar Bool
+  -> SolverGroup
+  -> Fetch.Fetcher Symbolic m
+  -> VeriOpts
+  -> VM Symbolic
+  -> Postcondition
+  -> Maybe (VM Symbolic -> SMTResult -> Expr End -> m ())
+  -> m ([Expr End], [VerifyResult])
+verifyAbortable abort solvers fetcher opts preState post cexHandler = do
+  (ends1, partials) <- verifyInputsWithHandler abort solvers opts fetcher preState post cexHandler
   let (ends2, results) = unzip $ map (verifyResult preState) ends1
   pure (ends2 <> fmap snd partials, filter (not . isQed) results)
 
@@ -983,21 +1018,25 @@ verifyResult preState res = (snd res, toVRes res)
 -- | Symbolically execute the VM with optional custom handler for immediate Cex processing
 verifyInputsWithHandler
   :: App m
-  => SolverGroup
+  => TVar Bool
+  -> SolverGroup
   -> VeriOpts
   -> Fetch.Fetcher Symbolic m
   -> VM Symbolic
   -> Postcondition
   -> Maybe (VM Symbolic -> SMTResult -> Expr End -> m ())
   -> m ([(SMTResult, Expr End)], [(PartialExec, Expr End)])
-verifyInputsWithHandler solvers opts fetcher preState post cexHandler = do
+verifyInputsWithHandler runAbort solvers opts fetcher preState post cexHandler = do
   conf <- readConfig
   let call = mconcat ["prefix 0x", getCallPrefix preState.state.calldata]
   when conf.debug $ liftIO $ do
     putStrLn $ "   Keccak preimages in state: " <> (show $ length preState.keccakPreImgs)
     putStrLn $ "   Exploring call " <> call
 
-  results <- executeVM fetcher opts.iterConf preState $ \leaf shouldAbort -> do
+  -- every query of the run, branch queries too, is cancelled when the flag is set
+  results <- withRunAbort solvers runAbort $ interpretAbortable runAbort fetcher opts.iterConf preState runExpr $ \leaf shouldAbort -> liftIO (readTVarIO shouldAbort) >>= \case
+   True -> pure Nothing
+   False -> do
     -- Extract partial if applicable
     let mPartial = case leaf of
           Partial _ _ p -> Just (p, leaf)
@@ -1007,14 +1046,13 @@ verifyInputsWithHandler solvers opts fetcher preState post cexHandler = do
     let props = toProps leaf preState.keccakPreImgs post
     smtResult <- if canBeSat (props, leaf)
       then do
-        res <- checkSatWithPropsAbortable solvers (if conf.earlyAbort then Just shouldAbort else Nothing) props
+        res <- checkSatWithPropsAbortable solvers (Just shouldAbort) props
         when (conf.debug && conf.verb >=2) $ liftIO $ putStrLn $ "   Checking leaf with props: " <> show props <> " SMT result: " <> show res
         -- Call custom handler if provided (for immediate Cex processing/validation/printing)
+        -- stop the other paths first: the handler may replay the counterexample, which takes a while
+        when (conf.earlyAbort && isCex res) $ liftIO $ atomically $ writeTVar shouldAbort True
         case (cexHandler, res) of
-          (Just handler, cex@(Cex _)) -> do
-            handler preState cex leaf
-            when conf.earlyAbort $ liftIO $ atomically $ writeTVar shouldAbort True
-          (_, (Cex _)) -> when conf.earlyAbort $ liftIO $ atomically $ writeTVar shouldAbort True
+          (Just handler, cex@(Cex _)) -> handler preState cex leaf
           _ -> pure ()
         pure (res, leaf)
       else pure (Qed, leaf)

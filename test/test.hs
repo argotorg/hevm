@@ -8,15 +8,18 @@ module Main where
 import Prelude hiding (LT, GT)
 
 import GHC.TypeLits
-import Control.Concurrent (forkIO, threadDelay)
-import Control.Concurrent.STM (atomically, newTVarIO, writeTVar)
+import Control.Concurrent (forkIO, threadDelay, ThreadId, myThreadId)
+import Control.Concurrent.STM (atomically, newTVarIO, readTVarIO, writeTVar)
 import Control.Monad
 import System.Environment (getArgs, getExecutablePath)
 import System.IO (hSetBuffering, stdout, BufferMode(..), isEOF)
+import System.Directory (getSymbolicLinkTarget, listDirectory, doesDirectoryExist)
+import GHC.Clock (getMonotonicTimeNSec)
+import Data.IORef (newIORef, readIORef, atomicModifyIORef')
 import Control.Monad.ST (stToIO)
 import Control.Monad.State.Strict
 import Control.Monad.IO.Unlift
-import Control.Exception (ErrorCall(..), evaluate, throwIO, try)
+import Control.Exception (ErrorCall(..), IOException, evaluate, throwIO, try)
 import System.Timeout (timeout)
 import Control.Monad.Reader (ReaderT)
 import Control.Monad.Trans.Maybe (runMaybeT)
@@ -172,6 +175,116 @@ withHangingSolver cont = do
   -- and stacks, which does not fit in the address space a real solver is limited to
   withSolvers (Custom (TL.pack self) [TL.pack hangingSolverFlag]) 1 Nothing (64 * defMemLimit) cont
 
+earlyAbortRace :: Natural -> Int -> Int -> IO Property
+earlyAbortRace n maxDelay abortAfter = doesDirectoryExist "/proc/self" >>= \case
+  False -> pure $ property Discard
+  True -> do
+    Just c <- runEnv testEnv $ solcRuntime "C" raceContract
+    self <- getExecutablePath
+    withSystemTempDirectory "hevm-fake-solver" $ \dir -> do
+      let solver = Custom (TL.pack self) [TL.pack randomSolverFlag, TL.pack dir, TL.pack (show maxDelay)]
+          unsatQuery = SMT2 (SMTScript [SMTCommand "(set-info :status unsat)"]) mempty []
+      start <- getMonotonicTimeNSec
+      res <- timeout 120_000_000 $ runEnv testEnv $ withSolvers solver n Nothing (64 * defMemLimit) $ \s -> do
+        abort <- liftIO $ newTVarIO False
+        _ <- liftIO $ forkIO $ threadDelay (abortAfter * 1000) >> atomically (writeTVar abort True)
+        (calldata, _) <- mkCalldata (Just (Sig "f(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) []
+        vm <- liftIO $ stToIO $ abstractVM calldata c Nothing False
+        lateQueries <- liftIO $ newIORef (Map.empty :: Map.Map ThreadId Int)
+        allQueries <- liftIO $ newIORef (0 :: Int)
+        -- each path runs in a thread of its own; it may have checked the flag just before it was
+        -- set, but must stop after one more query
+        let fetcher q = do
+              case q of
+                PleaseAskSMT {} -> liftIO $ do
+                  atomicModifyIORef' allQueries (\k -> (k + 1, ()))
+                  tid <- myThreadId
+                  readTVarIO abort >>= \a -> when a $ atomicModifyIORef' lateQueries (\m -> (Map.insertWith (+) tid 1 m, ()))
+                _ -> pure ()
+              Fetch.oracle s Nothing Fetch.noRpc q
+        (ends, _) <- verifyAbortable abort s fetcher defaultVeriOpts vm (checkAssertions defaultPanicCodes) Nothing
+        end <- liftIO getMonotonicTimeNSec
+        free <- liftIO $ timeout 10_000_000 $ checkSat s Nothing (Right unsatQuery)
+        late <- liftIO $ maximum . (0 :) . Map.elems <$> readIORef lateQueries
+        nQueries <- liftIO $ readIORef allQueries
+        pure (ends, free, end, late, nQueries)
+      leftover <- solversLeft dir 50
+      spawned <- length <$> listDirectory dir
+      let bucket k = show (k `div` 20 * 20) <> "-" <> show (k `div` 20 * 20 + 19)
+      pure $ tabulate "solvers spawned" [bucket spawned] $ case res of
+        Nothing -> counterexample "the run did not return" False
+        Just (ends, free, end, late, nQueries) -> tabulate "branch queries" [bucket nQueries] $ tabulate "most queries of a path after the abort" [show late] $
+          let afterAbortMs = (fromIntegral (end - start) `div` 1_000_000) - abortAfter :: Int
+          in tabulate "run" [if afterAbortMs < 0 then "finished before the abort" else "aborted"] $ conjoin
+            [ counterexample ("returned " <> show afterAbortMs <> "ms after the abort") (afterAbortMs < 5000)
+            , counterexample ("a solver slot is still taken: " <> show free) (maybe False isQed free)
+            , counterexample ("solver processes left behind (pid, state): " <> show leftover) (null leftover)
+            , counterexample "a path stopped by the abort was reported" (not (any isAborted ends))
+            , counterexample (show late <> " branch queries of one path after the abort") (late <= 1)
+            ]
+  where
+    isAborted = \case
+      Partial _ _ (Aborted {}) -> True
+      _ -> False
+
+earlyAbortInterpretRace :: Natural -> Int -> Int -> IO Property
+earlyAbortInterpretRace n maxDelay abortAfter = doesDirectoryExist "/proc/self" >>= \case
+  False -> pure $ property Discard
+  True -> do
+    Just c <- runEnv testEnv $ solcRuntime "C" raceContract
+    self <- getExecutablePath
+    withSystemTempDirectory "hevm-fake-solver" $ \dir -> do
+      let solver = Custom (TL.pack self) [TL.pack randomSolverFlag, TL.pack dir, TL.pack (show maxDelay)]
+      start <- getMonotonicTimeNSec
+      res <- timeout 120_000_000 $ runEnv testEnv $ withSolvers solver n Nothing (64 * defMemLimit) $ \s -> do
+        abort <- liftIO $ newTVarIO False
+        _ <- liftIO $ forkIO $ threadDelay (abortAfter * 1000) >> atomically (writeTVar abort True)
+        (calldata, _) <- mkCalldata (Just (Sig "f(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) []
+        vm <- liftIO $ stToIO $ abstractVM calldata c Nothing False
+        leaves <- withRunAbort s abort $
+          interpretAbortable abort (Fetch.oracle s Nothing Fetch.noRpc) defaultIterConf vm runExpr noopPathHandler
+        end <- liftIO getMonotonicTimeNSec
+        pure (leaves, end)
+      leftover <- solversLeft dir 50
+      pure $ case res of
+        Nothing -> counterexample "the run did not return" False
+        Just (_, end) ->
+          let afterAbortMs = (fromIntegral (end - start) `div` 1_000_000) - abortAfter :: Int
+          in tabulate "ms from the abort to the return" [show (afterAbortMs `div` 100 * 100)] $ conjoin
+            [ counterexample ("returned " <> show afterAbortMs <> "ms after the abort") (afterAbortMs < 5000)
+            , counterexample ("solver processes left behind (pid, state): " <> show leftover) (null leftover)
+            ]
+
+raceContract :: Text
+raceContract = [i|
+  contract C {
+    function f(uint a, uint b) public pure {
+      uint r = 0;
+      for (uint i = 0; i < 10; i++) {
+        if ((a >> i) & 1 == 1) r += b; else r ^= i;
+        // concrete work, which a path that ignores the abort keeps doing
+        for (uint j = 0; j < 900; j++) r = uint(keccak256(abi.encode(r, j)));
+      }
+      assert(r != 7);
+    }
+  } |]
+
+-- | The fake solvers recorded in the directory that still exist, alive or not yet reaped, after
+-- waiting up to tries * 100ms for them to go
+solversLeft :: FilePath -> Int -> IO [(String, String)]
+solversLeft dir tries = do
+  pids <- listDirectory dir
+  states <- forM pids $ \pid -> (pid,) <$> procState pid
+  let left = [(pid, st) | (pid, Just st) <- states]
+  if null left || tries <= 0 then pure left else threadDelay 100_000 >> solversLeft dir (tries - 1)
+  where
+    procState pid = do
+      r <- try (readFile ("/proc" </> pid </> "stat") >>= \st -> evaluate (length st) >> pure st)
+      pure $ case r of
+        Left (_ :: IOException) -> Nothing
+        -- the state follows the parenthesised command name
+        Right st -> Just (take 1 (drop 2 (dropWhile (/= ')') st)))
+
 hangingProps :: [Prop]
 hangingProps = [PEq (Var "x") (Lit 1)]
 
@@ -180,8 +293,10 @@ withShortBitwuzlaSolver = withSolvers Bitwuzla 3 (Just 5) defMemLimit
 
 
 main :: IO ()
-main = getArgs >>= \args ->
-  if hangingSolverFlag `elem` args then hangingSolverMain else defaultMain tests
+main = getArgs >>= \args -> case args of
+  _ | hangingSolverFlag `elem` args -> hangingSolverMain
+  _ | (_ : dir : maxDelay : _) <- dropWhile (/= randomSolverFlag) args -> randomSolverMain dir (read maxDelay)
+  _ -> defaultMain tests
 
 -- The test binary doubles as a fake SMT solver, so the fixture works on every OS and is never installed
 hangingSolverFlag :: String
@@ -189,7 +304,29 @@ hangingSolverFlag = "--hevm-fake-hanging-solver"
 
 -- Acks every command and never answers (check-sat), unless the query set :status unsat
 hangingSolverMain :: IO ()
-hangingSolverMain = hSetBuffering stdout LineBuffering >> go False ""
+hangingSolverMain = fakeSolver $ \unsat -> if unsat then putStrLn "unsat" else forever $ threadDelay 1_000_000
+
+randomSolverFlag :: String
+randomSolverFlag = "--hevm-fake-random-solver"
+
+-- Records its pid in the directory, then answers each (check-sat) after up to maxDelay ms with
+-- unsat or unknown at random, or unsat if the query set :status unsat. One in eight hangs for a
+-- minute, so a query that an abort fails to cancel is noticed.
+randomSolverMain :: FilePath -> Int -> IO ()
+randomSolverMain dir maxDelay = do
+  pid <- getSymbolicLinkTarget "/proc/self"
+  writeFile (dir </> pid) ""
+  t <- getMonotonicTimeNSec
+  gen <- newIORef (t * 6364136223846793005 + read pid)
+  fakeSolver $ \unsat -> do
+    r <- atomicModifyIORef' gen (\x -> let x' = x * 6364136223846793005 + 1442695040888963407 in (x', x' `shiftR` 33))
+    threadDelay (fromIntegral (r `mod` fromIntegral (maxDelay + 1)) * 1000)
+    when (not unsat && r `shiftR` 11 `mod` 8 == 0) $ threadDelay 60_000_000
+    putStrLn $ if unsat || even (r `shiftR` 7) then "unsat" else "unknown"
+
+-- Acks every command, and calls the answer to (check-sat) with whether the query set :status unsat
+fakeSolver :: (Bool -> IO ()) -> IO ()
+fakeSolver answer = hSetBuffering stdout LineBuffering >> go False ""
   where
     go unsat pending = do
       eof <- isEOF
@@ -202,8 +339,7 @@ hangingSolverMain = hSetBuffering stdout LineBuffering >> go False ""
     sawUnsat unsat cmd = unsat || "(set-info :status unsat)" `List.isInfixOf` cmd
     reply unsat cmd
       | not ("(check-sat)" `List.isInfixOf` cmd) = putStrLn "success" >> go unsat ""
-      | unsat = putStrLn "unsat" >> go unsat ""
-      | otherwise = forever $ threadDelay 1_000_000
+      | otherwise = answer unsat >> go unsat ""
 
 data ScanState = Normal | InString | InQuoted | InComment
 
@@ -1018,7 +1154,7 @@ tests = testGroup "hevm"
         withSolvers Bitwuzla 1 Nothing defMemLimit $ \s -> do
           let calldata = (WriteWord (Lit 0x0) (Var "u") (ConcreteBuf ""), [])
           initVM <- liftIO $ stToIO $ abstractVM calldata initCode Nothing True
-          let iterConf = IterConfig {maxIter=Nothing, askSmtIters=1, loopHeuristic=StackBased }
+          let iterConf = IterConfig {maxIter=Nothing, maxConcreteIter=Nothing, askSmtIters=1, loopHeuristic=StackBased }
           paths <- interpret (Fetch.noRpcFetcher s) iterConf initVM runExpr noopPathHandler
           let exprSimp = map Expr.simplify paths
           assertBoolM "unexptected partial execution" (not $ any isPartial exprSimp)
@@ -1109,7 +1245,7 @@ tests = testGroup "hevm"
               ])
         withDefaultSolver $ \s -> do
           vm <- liftIO $ stToIO $ loadSymVM runtimecode (Lit 0) initCode False
-          let iterConf = IterConfig {maxIter=Nothing, askSmtIters=1, loopHeuristic=StackBased }
+          let iterConf = IterConfig {maxIter=Nothing, maxConcreteIter=Nothing, askSmtIters=1, loopHeuristic=StackBased }
           paths <- interpret (Fetch.noRpcFetcher s) iterConf vm runExpr noopPathHandler
           let exprSimp = map Expr.simplify paths
           assertBoolM "expected partial execution" (any isPartial exprSimp)
@@ -1669,6 +1805,17 @@ tests = testGroup "hevm"
         overflow <- sat [foldedCheck, PGT y (Lit (2^(177 :: Int))), PLT y (Lit (2^(182 :: Int)))]
         assertEqual "the folded check fails on overflow" Qed overflow
     ]
+  , testCase "smt-branch-timeout" $ do
+      -- factoring a product of two 64-bit primes is far beyond the 1s branch timeout
+      let x = Var "x"
+          y = Var "y"
+          n = 17324573639174612641 * 16789950873655392269
+          props = [PEq (Mul x y) (Lit n), PGT x (Lit 1), PGT y (Lit 1), PLT x (Lit (2^(64 :: Int))), PLT y (Lit (2^(64 :: Int)))]
+          env = Env { config = testEnv.config { smtBranchTimeout = Just 1 } }
+      res <- timeout 60_000_000 $ runEnv env $ withSolvers Bitwuzla 1 (Just 300) defMemLimit $ \s -> checkBranchSat s props
+      case res of
+        Nothing -> assertFailure "the branch query ignored the branch timeout"
+        Just r -> assertBool ("expected unknown, got " <> show r) (isUnknown r)
   , testGroup "Mul-Abstraction"
     -- Symbolic*symbolic multiplication is abstracted as an uninterpreted
     -- function (abst_evm_bvmul) with sound lemmas (commutativity, 0/1
@@ -2087,10 +2234,27 @@ tests = testGroup "hevm"
             }
             |]
         let sig = Just $ Sig "fun()" []
-            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf {maxIter = Just 3 }}
+            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf {maxConcreteIter = Just 3 }}
         (e, []) <- withDefaultSolver $
           \s -> checkAssert s defaultPanicCodes c sig [] opts
         assertBoolM "The expression is not partial" $ any isPartial e
+    -- concrete loops have their own bound, maxIter is for symbolic ones
+    , test "concrete-loops-ignore-max-iterations" $ do
+        Just c <- solcRuntime "C"
+            [i|
+            contract C {
+              function fun() external payable returns (uint) {
+                uint count = 0;
+                for (uint i = 0; i < 255; i++) count++;
+                return count;
+              }
+            }
+            |]
+        let sig = Just $ Sig "fun()" []
+            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf {maxIter = Just 3, maxConcreteIter = Just 10000 }}
+        (e, []) <- withDefaultSolver $
+          \s -> checkAssert s defaultPanicCodes c sig [] opts
+        assertBoolM "The expression is partial" $ not $ any isPartial e
     , test "concrete-loops-not-reached" $ do
         Just c <- solcRuntime "C"
             [i|
@@ -2104,7 +2268,7 @@ tests = testGroup "hevm"
             |]
 
         let sig = Just $ Sig "fun()" []
-            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf {maxIter = Just 6 }}
+            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf {maxConcreteIter = Just 6 }}
         (e, []) <- withDefaultSolver $
           \s -> checkAssert s defaultPanicCodes c sig [] opts
         assertBoolM "The expression is partial" $ not $ any isPartial e
@@ -2547,7 +2711,7 @@ tests = testGroup "hevm"
         let c = fromJust $ hexByteString "00"
             throwingHandler _ _ = liftIO $ throwIO (ErrorCall "worker boom")
         vm <- liftIO $ stToIO $ abstractVM (ConcreteBuf "", []) c Nothing False
-        let iterConf = IterConfig { maxIter = Nothing, askSmtIters = 1, loopHeuristic = StackBased }
+        let iterConf = IterConfig { maxIter = Nothing, maxConcreteIter = Nothing, askSmtIters = 1, loopHeuristic = StackBased }
         res <- withDefaultSolver $ \s -> withRunInIO $ \runInIO -> timeout 30000000 $
                  (try (runInIO (interpret (Fetch.noRpcFetcher s) iterConf vm runExpr throwingHandler)) :: IO (Either ErrorCall [()]))
         case res of
@@ -4937,6 +5101,18 @@ tests = testGroup "hevm"
       let unsatQuery = SMT2 (SMTScript [SMTCommand "(set-info :status unsat)\n"]) mempty []
       res <- liftIO $ checkSat s Nothing (Right unsatQuery)
       assertBoolM ("Expected Qed, got: " <> show res) (isQed res)
+    -- aborts a run at a random moment while fake solvers answer after random delays
+    , localOption (mkTimeout 1_800_000_000) $
+      adjustOption (\(QuickCheckTests n) -> QuickCheckTests (if n == 100 then 30 else n)) $
+      testProperty "early-abort-race" $
+        forAll ((,,) <$> choose (1, 4 :: Int) <*> choose (0, 20) <*> choose (0, 400)) $ \(n, maxDelay, abortAfter) ->
+          ioProperty $ earlyAbortRace (fromIntegral n) maxDelay abortAfter
+    -- the same, exploring without checking leaves: paths running at the abort stop at their next step
+    , localOption (mkTimeout 1_800_000_000) $
+      adjustOption (\(QuickCheckTests n) -> QuickCheckTests (if n == 100 then 30 else n)) $
+      testProperty "early-abort-race-interpret" $
+        forAll ((,,) <$> choose (1, 4 :: Int) <*> choose (0, 20) <*> choose (0, 400)) $ \(n, maxDelay, abortAfter) ->
+          ioProperty $ earlyAbortInterpretRace (fromIntegral n) maxDelay abortAfter
     , test "early-abort-verify" $ do
       Just c <- solcRuntime "C" [i|
           contract C {

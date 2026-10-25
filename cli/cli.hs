@@ -92,11 +92,13 @@ data CommonOptions = CommonOptions
   , root          ::Maybe String
   , assertionType ::AssertionType
   , smtTimeout    ::Natural
+  , smtBranchTimeout ::Natural
   , smtMemory     ::Natural
   , smtDebug      ::Bool
   , dumpUnsolved  ::Maybe String
   , numSolvers    ::Maybe Natural
   , maxIterations ::Integer
+  , maxConcreteIterations ::Integer
   , promiseNoReent::Bool
   , maxBufSize    ::Int
   , maxWidth      ::Int
@@ -105,7 +107,7 @@ data CommonOptions = CommonOptions
   , onlyDeployed  ::Bool
   , cacheDir      ::Maybe String
   , noRpcCache    ::Bool
-  , earlyAbort    ::Bool
+  , noEarlyAbort  ::Bool
   , mergeMaxBudget :: Int
   , maxDynSize    ::Int
   , noAbstractArith ::Bool
@@ -135,11 +137,13 @@ commonOptions = CommonOptions
   <*> (optional $ strOption $ long "root"   <> help "Path to  project root directory")
   <*> (option auto $ long "assertion-type"  <> showDefault <> value Forge <> help "Deprecated, has no effect: failing assertions are detected both by reverts and by the fail flag that forge-std's fail() and DSTest set")
   <*> (option auto $ long "smt-timeout"     <> value 300 <> help "Timeout given to SMT solver in seconds. Not available on Windows")
+  <*> (option auto $ long "smt-branch-timeout" <> showDefault <> value 20 <> help "Timeout in seconds for the SMT queries that decide which branches to explore, at most --smt-timeout. A branch the solver cannot decide is explored on both sides")
   <*> (option auto $ long "smt-memory"      <> value defMemLimit <> help "Maximum memory limit for SMT solver in MB. Only available on Linux")
   <*> (switch $ long "smt-debug"            <> help "Print smt queries sent to the solver")
   <*> (optional $ strOption $ long "dump-unsolved" <> help "Dump unsolved SMT queries to this (relative) path")
   <*> (optional $ option auto $ long "num-solvers" <> help "Number of solver instances to use (default: number of cpu cores)")
   <*> (option auto $ long "max-iterations"  <> showDefault <> value 5 <> help "Number of times we may revisit a particular branching point. For no bound, set -1")
+  <*> (option auto $ long "max-concrete-iterations" <> showDefault <> value 10000 <> help "Number of times we may revisit a branching point whose condition is concrete, e.g. in a loop over fetched state. Gas is not tracked, so this stops loops that never end. For no bound, set -1")
   <*> (switch $ long "promise-no-reent"     <> help "Promise no reentrancy is possible into the contract(s) being examined")
   <*> (option auto $ long "max-buf-size"    <> value 24 <> help "Maximum size of buffers such as calldata and returndata in exponents of 2 (default: 24, i.e. 16 MB, more than gas limits allow)")
   <*> (option auto $ long "max-width"      <> showDefault <> value 100 <> help "Max number of concrete values to explore when encountering a symbolic value. This is a form of branch width limitation per symbolic value")
@@ -148,7 +152,7 @@ commonOptions = CommonOptions
   <*> (switch $ long "only-deployed" <> help "When trying to resolve unknown addresses, only use addresses of deployed contracts")
   <*> (optional $ strOption $ long "cache-dir" <> help "Directory to save and load the RPC cache in (default: the user's cache directory, for runs at a fixed block)")
   <*> (switch $ long "no-rpc-cache" <> help "Don't save or load fetched state in the user's cache directory")
-  <*> (switch $  long "early-abort" <> help "Stop exploration immediately upon finding the first counterexample")
+  <*> (switch $  long "no-early-abort" <> help "Keep exploring after the first counterexample, to find all of them. By default, exploration stops at the first one")
   <*> (option auto $ long "merge-max-budget" <> showDefault <> value 100 <> help "Max instructions for speculative merge exploration during path merging")
   <*> (option auto $ long "max-dyn-size" <> showDefault <> value 64 <> help "Max byte length for concretized dynamic types (bytes, string) in symbolic arguments")
   <*> (switch $  long "no-abstract-arith" <> help "Don't abstract symbolic multiplication and division as uninterpreted functions with sound lemmas; use native bitvector arithmetic instead")
@@ -416,7 +420,7 @@ main = do
         , verb = cOpts.verb
         , simp = Prelude.not cOpts.noSimplify
         , onlyDeployed = cOpts.onlyDeployed
-        , earlyAbort = cOpts.earlyAbort
+        , earlyAbort = Prelude.not cOpts.noEarlyAbort
         , mergeMaxBudget = cOpts.mergeMaxBudget
         , maxDynSize = cOpts.maxDynSize
         , abstractArith = Prelude.not cOpts.noAbstractArith
@@ -424,6 +428,7 @@ main = do
         , progressLog = progressFile cOpts
         , progressExprs = cOpts.progressExprs || cOpts.verb >= 4
         , checkStaticBranches = cOpts.checkStaticBranches
+        , smtBranchTimeout = Just cOpts.smtBranchTimeout
         } }
     serving :: MonadUnliftIO m => CommonOptions -> m a -> m a
     serving cOpts
@@ -467,6 +472,7 @@ equivalence eqOpts cOpts = do
     exitFailure
   let veriOpts = (defaultVeriOpts :: VeriOpts) { iterConf = IterConfig {
                             maxIter = parseMaxIters cOpts.maxIterations
+                            , maxConcreteIter = parseMaxIters cOpts.maxConcreteIterations
                             , askSmtIters = cOpts.askSmtIterations
                             , loopHeuristic = cOpts.loopDetectionHeuristic
                             }
@@ -599,6 +605,7 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = withRpcSession cOpts cExecOpts.rpc c
   withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
     let veriOpts = VeriOpts { iterConf = IterConfig {
                               maxIter = parseMaxIters cOpts.maxIterations
+                              , maxConcreteIter = parseMaxIters cOpts.maxConcreteIterations
                               , askSmtIters = cOpts.askSmtIterations
                               , loopHeuristic = cOpts.loopDetectionHeuristic
                               }
@@ -962,6 +969,7 @@ unitTestOptions testOpts cOpts solvers sess buildOutput = do
                      Nothing  -> Nothing
                 in rpcDat { Fetch.blockNumURL = i }
     , maxIter = parseMaxIters cOpts.maxIterations
+    , maxConcreteIter = parseMaxIters cOpts.maxConcreteIterations
     , askSmtIters = cOpts.askSmtIterations
     , smtTimeout = Just cOpts.smtTimeout
     , methodFilter = \(TestMethodInfo _ (Sig name _)) -> testOpts.prefix `T.isPrefixOf` name && maybe True (\match -> regexMatches match name) testOpts.match

@@ -94,6 +94,7 @@ testOpts solvers root buildOutput methodFilter maxIter allowFFI rpcinfo printOut
     , sess = sess
     , rpcInfo = rpcinfo
     , maxIter = maxIter
+    , maxConcreteIter = Just 10000
     , askSmtIters = 1
     , smtTimeout = Nothing
     , methodFilter = methodFilter

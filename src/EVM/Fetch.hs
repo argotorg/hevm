@@ -783,7 +783,7 @@ checkBranch solvers cond pathconditions = do
   let condSimp = Expr.simplify cond
       true = Expr.simplifyProp (Lit 0 ./= condSimp)
       false = Expr.simplifyProp (Lit 0 .== condSimp)
-      ask side = checkSatWithProps solvers [pathconditions .&& side]
+      ask side = checkBranchSat solvers [pathconditions .&& side]
   ask true >>= \case
     -- the condition is unsatisfiable: it is false, unless the path conditions are too
     Qed -> ask false <&> \case

@@ -13,6 +13,8 @@ module EVM.Solvers
   , checkSatWithProps
   , checkSatWithPropsAbortable
   , checkSatWithPropsPhase
+  , checkBranchSat
+  , withRunAbort
   , SolvePhase(..)
   , checkMulti
   , defMemLimit
@@ -29,7 +31,7 @@ import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.QSem (QSem, newQSem, waitQSem, signalQSem)
 import Control.Exception (bracket, bracket_, finally, try, IOException)
 import Control.Concurrent.Async (race)
-import Control.Concurrent.STM (writeTChan, newTChan, TChan, tryReadTChan, atomically, TVar, readTVar, readTVarIO, newTVarIO, modifyTVar', check)
+import Control.Concurrent.STM (writeTChan, newTChan, TChan, tryReadTChan, atomically, TVar, readTVar, readTVarIO, newTVarIO, modifyTVar', writeTVar, check)
 import Control.Monad
 import Control.Monad.Trans.Maybe (MaybeT(..), runMaybeT)
 import Control.Monad.State.Strict
@@ -91,7 +93,8 @@ data SolverInstance = SolverInstance
   ProcessHandle
 
 -- | A channel representing a group of solvers
-data SolverGroup = SolverGroup (Chan Task) (TVar SolveStats)
+-- | The last field is the abort flag of the current run, see 'withRunAbort'
+data SolverGroup = SolverGroup (Chan Task) (TVar SolveStats) (TVar (Maybe (TVar Bool)))
 
 data MultiSol = MultiSol
   { maxSols :: Int
@@ -110,6 +113,7 @@ data MultiData = MultiData
   MultiSol
   (IO ()) -- called when a solver takes the query up
   (Chan (Either TStrict.Text [W256])) -- result channel: the solutions, or why there are none
+  (Maybe (TVar Bool)) -- abort flag; if set, the query is cancelled and its solver killed
 
 data SingleData = SingleData
   SMT2
@@ -118,6 +122,7 @@ data SingleData = SingleData
   (Maybe (TVar Bool)) -- shared abort flag; if another thread sets it, the query is cancelled and its solver killed
   (IO ()) -- called when a solver takes the query up
   (Chan (SMTResult, SolvePhase)) -- result channel
+  (Maybe Natural) -- caps the solver timeout for this query
 
 -- | Which query produced an answer
 data SolvePhase
@@ -135,7 +140,7 @@ data SolveStats = SolveStats
   }
 
 recordAnswer :: SolverGroup -> [String] -> (SMTResult, SolvePhase) -> IO ()
-recordAnswer (SolverGroup _ stats) families (res, phase) = atomically $ modifyTVar' stats $ \s -> SolveStats
+recordAnswer (SolverGroup _ stats _) families (res, phase) = atomically $ modifyTVar' stats $ \s -> SolveStats
   { answers = Map.insertWith (+) (phase, verdict) 1 s.answers
   , lemmas = foldr (\f -> Map.insertWith (+) f 1) s.lemmas families
   }
@@ -170,14 +175,15 @@ supersetAny :: Set Prop -> [Set Prop] -> Bool
 supersetAny a bs = any (`isSubsetOf` a) bs
 
 checkMulti :: SolverGroup -> Err SMT2 -> MultiSol -> IO (Maybe [W256])
-checkMulti (SolverGroup taskq _) smt2 multiSol = do
+checkMulti (SolverGroup taskq _ current) smt2 multiSol = do
+  shouldAbort <- readTVarIO current
   if isLeft smt2 then pure Nothing
   else fmap (either (const Nothing) Just) $ Progress.timedQuery "multi" ["numBytes" .= multiSol.numBytes, "maxSols" .= multiSol.maxSols] []
          (either ("gave up: " <>) (\vs -> TStrict.pack (show (length vs)) <> " solutions")) $ \started -> do
     -- prepare result channel
     resChan <- newChan
     -- send task to solver group
-    writeChan taskq (TaskMulti (MultiData (getNonError smt2) multiSol started resChan))
+    writeChan taskq (TaskMulti (MultiData (getNonError smt2) multiSol started resChan shouldAbort))
     -- collect result
     readChan resChan
 
@@ -187,8 +193,17 @@ checkSatWithProps sg = checkSatWithPropsAbortable sg Nothing
 checkSatWithPropsAbortable :: App m => SolverGroup -> Maybe (TVar Bool) -> [Prop] -> m (SMTResult)
 checkSatWithPropsAbortable sg shouldAbort props = fst <$> checkSatWithPropsPhase sg shouldAbort props
 
+-- | For the queries that decide which branches to explore: their timeout is 'smtBranchTimeout'
+checkBranchSat :: App m => SolverGroup -> [Prop] -> m SMTResult
+checkBranchSat sg props = do
+  conf <- readConfig
+  fst <$> checkSatWithPropsCapped conf.smtBranchTimeout sg Nothing props
+
 checkSatWithPropsPhase :: App m => SolverGroup -> Maybe (TVar Bool) -> [Prop] -> m (SMTResult, SolvePhase)
-checkSatWithPropsPhase sg shouldAbort props = do
+checkSatWithPropsPhase = checkSatWithPropsCapped Nothing
+
+checkSatWithPropsCapped :: App m => Maybe Natural -> SolverGroup -> Maybe (TVar Bool) -> [Prop] -> m (SMTResult, SolvePhase)
+checkSatWithPropsCapped cap sg shouldAbort props = do
   conf <- readConfig
   let psSimp = if conf.simp then simplifyProps props else props
       answered families answer = liftIO (recordAnswer sg families answer) >> pure answer
@@ -196,12 +211,12 @@ checkSatWithPropsPhase sg shouldAbort props = do
   else do
     let concreteKeccaks = fmap (\(buf,val) -> PEq (Lit val) (Keccak buf)) (toList $ Keccak.concreteKeccaks props)
     let allProps = if conf.simp then psSimp <> concreteKeccaks else psSimp
-        native = liftIO $ checkSat' sg (Just props) (Just allProps) shouldAbort mempty (assertProps conf allProps)
+        native = liftIO $ checkSat' sg cap (Just props) (Just allProps) shouldAbort mempty (assertProps conf allProps)
     if not conf.abstractArith then native >>= answered []
     else case assertPropsAbstract conf allProps of
       Left err -> answered [] (Error err, PhaseNone)
       Right q -> do
-        (res, phase) <- liftIO $ checkSat' sg (Just props) (Just allProps) shouldAbort (SMTScript q.refinement) (Right q.query)
+        (res, phase) <- liftIO $ checkSat' sg cap (Just props) (Just allProps) shouldAbort (SMTScript q.refinement) (Right q.query)
         aborted <- liftIO $ maybe (pure False) readTVarIO shouldAbort
         case res of
           -- the abstract path can be harder for the solver than the native
@@ -213,17 +228,18 @@ checkSatWithPropsPhase sg shouldAbort props = do
 
 -- When props is Nothing, the cache will not be filled or used
 checkSat :: SolverGroup -> Maybe [Prop] -> Err SMT2 -> IO SMTResult
-checkSat sg props smt2 = fst <$> checkSat' sg props Nothing Nothing mempty smt2
+checkSat sg props smt2 = fst <$> checkSat' sg Nothing props Nothing Nothing mempty smt2
 
 -- | @sent@ are the props the query was built from, for the progress log
-checkSat' :: SolverGroup -> Maybe [Prop] -> Maybe [Prop] -> Maybe (TVar Bool) -> SMTScript -> Err SMT2 -> IO (SMTResult, SolvePhase)
-checkSat' (SolverGroup taskq _) props sent shouldAbort refinement smt2 = do
+checkSat' :: SolverGroup -> Maybe Natural -> Maybe [Prop] -> Maybe [Prop] -> Maybe (TVar Bool) -> SMTScript -> Err SMT2 -> IO (SMTResult, SolvePhase)
+checkSat' (SolverGroup taskq _ current) cap props sent shouldAbort' refinement smt2 = do
+  shouldAbort <- maybe (readTVarIO current) (pure . Just) shouldAbort'
   if isLeft smt2 then pure (Error $ getError smt2, PhaseNone)
   else Progress.timedQuery "sat" ["props" .= maybe 0 length props] sentFs showRes $ \started -> do
     -- prepare result channel
     resChan <- newChan
     -- send task to solver group
-    writeChan taskq (TaskSingle (SingleData (getNonError smt2) refinement props shouldAbort started resChan))
+    writeChan taskq (TaskSingle (SingleData (getNonError smt2) refinement props shouldAbort started resChan cap))
     -- collect result
     readChan resChan
 
@@ -253,6 +269,7 @@ withSolvers solver count timeout maxMemory cont = do
 
     -- run continuation with task queue
     stats <- liftIO $ newTVarIO (SolveStats mempty mempty)
+    current <- liftIO $ newTVarIO Nothing
     conf <- readConfig
     let summarise = do
           final <- readTVarIO stats
@@ -261,7 +278,7 @@ withSolvers solver count timeout maxMemory cont = do
     -- a failing run leaves through an exit exception, and should still clean
     -- up and report
     withRunInIO $ \run ->
-      run (cont (SolverGroup taskq stats)) `finally` (killThread orchestrateId >> summarise)
+      run (cont (SolverGroup taskq stats current)) `finally` (killThread orchestrateId >> summarise)
   where
     orchestrate :: App m => Chan Task -> TChan CacheEntry -> QSem -> [Set Prop] -> Int -> m b
     orchestrate taskq cacheq solverSlots knownUnsat fileCounter = do
@@ -275,19 +292,19 @@ withSolvers solver count timeout maxMemory cont = do
         Nothing -> do
           task <- liftIO $ readChan taskq
           case task of
-            TaskSingle (SingleData _ _ props _ _ r) | isJust props && supersetAny (fromList (fromJust props)) knownUnsat -> do
+            TaskSingle (SingleData _ _ props _ _ r _) | isJust props && supersetAny (fromList (fromJust props)) knownUnsat -> do
               liftIO $ writeChan r (Qed, PhaseNone)
               when conf.debug $ liftIO $ putStrLn "   Qed found via cache!"
               orchestrate taskq cacheq solverSlots knownUnsat fileCounter
             _ -> do
               runTask' <- case task of
-                TaskSingle (SingleData smt2 refinement props shouldAbort started r) -> toIO $ getOneSol solver timeout maxMemory smt2 refinement props shouldAbort started r cacheq solverSlots fileCounter
-                TaskMulti (MultiData smt2 multiSol started r) -> toIO $ getMultiSol solver timeout maxMemory smt2 multiSol started r solverSlots fileCounter
+                TaskSingle (SingleData smt2 refinement props shouldAbort started r cap) -> toIO $ getOneSol solver (capTimeout cap timeout) maxMemory smt2 refinement props shouldAbort started r cacheq solverSlots fileCounter
+                TaskMulti (MultiData smt2 multiSol started r shouldAbort) -> toIO $ getMultiSol solver timeout maxMemory smt2 multiSol started r shouldAbort solverSlots fileCounter
               _ <- liftIO $ forkIO runTask'
               orchestrate taskq cacheq solverSlots knownUnsat (fileCounter + 1)
 
-getMultiSol :: forall m. (MonadIO m, ReadConfig m) => Solver -> Maybe Natural -> Natural -> SMT2 -> MultiSol -> IO () -> Chan (Either TStrict.Text [W256]) -> QSem -> Int -> m ()
-getMultiSol solver timeout maxMemory smt2@(SMT2 cmds _ _) multiSol started r solverSlots fileCounter = do
+getMultiSol :: forall m. (MonadIO m, ReadConfig m) => Solver -> Maybe Natural -> Natural -> SMT2 -> MultiSol -> IO () -> Chan (Either TStrict.Text [W256]) -> Maybe (TVar Bool) -> QSem -> Int -> m ()
+getMultiSol solver timeout maxMemory smt2@(SMT2 cmds _ _) multiSol started r shouldAbort solverSlots fileCounter = do
   conf <- readConfig
   let
     maskFromBytesCount k
@@ -341,7 +358,7 @@ getMultiSol solver timeout maxMemory smt2@(SMT2 cmds _ _) multiSol started r sol
         err -> do
           when conf.debug $ putStrLn $ "Error while writing SMT to solver: " <> (T.unpack err)
           writeChan r (Left $ "solver error: " <> TStrict.take 300 (T.toStrict err))
-  liftIO $ bracket_
+  aborted <- liftIO $ abortable shouldAbort True $ fmap (const False) $ bracket_
     (waitQSem solverSlots >> started)
     (signalQSem solverSlots)
     (do
@@ -363,6 +380,13 @@ getMultiSol solver timeout maxMemory smt2@(SMT2 cmds _ _) multiSol started r sol
                 subRun inst [] smt2 sat
           )
     )
+  liftIO $ when aborted $ writeChan r (Left "query aborted")
+
+-- | Queries sent through the group while the action runs, without an abort flag of their
+-- own, are cancelled when the flag is set. Only one run may use a group at a time.
+withRunAbort :: MonadUnliftIO m => SolverGroup -> TVar Bool -> m a -> m a
+withRunAbort (SolverGroup _ _ current) flag act = withRunInIO $ \run ->
+  bracket_ (atomically $ writeTVar current (Just flag)) (atomically $ writeTVar current Nothing) (run act)
 
 getOneSol
   :: (MonadIO m, ReadConfig m)
@@ -540,6 +564,10 @@ getModel inst cexvars = runMaybeT $ do
 -- Takes Maybe seconds, returns seconds
 mkTimeout :: Maybe Natural -> Natural
 mkTimeout = fromMaybe 300
+
+capTimeout :: Maybe Natural -> Maybe Natural -> Maybe Natural
+capTimeout Nothing timeout = timeout
+capTimeout (Just cap) timeout = Just (min cap (mkTimeout timeout))
 
 -- | Arguments used when spawning a solver instance
 solverArgs :: Solver -> Maybe Natural -> [Text]

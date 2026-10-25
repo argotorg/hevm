@@ -35,13 +35,36 @@ certain contracts. This is because value transfer is usually done via a `CALL`,
 which can be reentrant. By promising no reentrancy, the system can assume that
 no reentrancy will occur and can explore the contract more fully.
 
-## Timeout for SMT queries, ``--smttimeout``
+## Timeout for SMT queries, ``--smt-timeout``, ``--smt-branch-timeout``
 
 Some queries take too long. With a timeout, we ensure that hevm eventually
 terminates. However, endstates where the timeout was reached are considered
 inditerminate, and will lead to a `WARNING` in the output. It is worthwhile
 trying to switch to a different SMT solver such as bitwuzla, or increasing the
-timeout if this happens.
+timeout if this happens. The default is 300 seconds.
+
+The queries that decide which side of a branch can be taken have their own,
+shorter timeout, `--smt-branch-timeout`, 20 seconds by default and at most
+`--smt-timeout`. When the solver cannot decide a branch, hevm explores both
+sides, so a timeout there costs no counterexamples, only time spent on paths
+that may be impossible.
+
+## Stopping at the First Counterexample, ``--no-early-abort``
+
+By default, hevm stops exploring once it finds a counterexample: the paths
+still being explored stop, and their solver queries are cancelled. With
+`--no-early-abort` it explores every path, to report all counterexamples and
+every path it could not explore fully.
+
+## Loop Iteration Limits, ``--max-iterations``, ``--max-concrete-iterations``
+
+hevm explores a loop whose condition depends on symbolic values at most
+`--max-iterations` times, 5 by default, and warns that the exploration was
+partial when it stops there. Loops whose condition is concrete, such as a
+loop over state fetched with `--rpc`, run until they end, up to
+`--max-concrete-iterations`, 10000 by default. That limit only exists because
+hevm does not track gas symbolically, so a loop that never ends would
+otherwise never stop. Set either to -1 for no limit.
 
 ## Loop Iteration Limit, ``--ask-smt-iterations``
 

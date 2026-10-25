@@ -20,6 +20,7 @@ import Control.Monad.Reader
 import Control.Monad.IO.Unlift
 import Data.Text (Text)
 import Data.Text.IO qualified as T
+import Numeric.Natural (Natural)
 import System.IO (stderr)
 
 
@@ -56,6 +57,9 @@ data Config = Config
   -- | Internal check: ask the solver to confirm every branch side that
   -- exploration drops by simplification alone
   , checkStaticBranches :: Bool
+  -- | Timeout in seconds for the queries that decide which branches to explore, capped by the
+  -- solver timeout. A branch the solver cannot decide is explored on both sides.
+  , smtBranchTimeout :: Maybe Natural
   }
   deriving (Show, Eq)
 
@@ -83,6 +87,7 @@ defaultConfig = Config
   , progressLog = Nothing
   , progressExprs = False
   , checkStaticBranches = False
+  , smtBranchTimeout = Just 20
   }
 
 -- Write to the console

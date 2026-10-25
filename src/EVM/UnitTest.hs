@@ -58,6 +58,7 @@ data UnitTestOptions = UnitTestOptions
   , solvers       :: SolverGroup
   , sess          :: Fetch.Session
   , maxIter       :: Maybe Integer
+  , maxConcreteIter :: Maybe Integer
   , askSmtIters   :: Integer
   , smtTimeout    :: Maybe Natural
   , methodFilter  :: TestMethodFilter
@@ -116,7 +117,7 @@ writeTrace vm = do
 -- | Generate VeriOpts from UnitTestOptions
 makeVeriOpts :: UnitTestOptions -> VeriOpts
 makeVeriOpts opts =
-   defaultVeriOpts { iterConf = defaultIterConf {maxIter = opts.maxIter, askSmtIters = opts.askSmtIters, loopHeuristic = opts.loopHeuristic}
+   defaultVeriOpts { iterConf = defaultIterConf {maxIter = opts.maxIter, maxConcreteIter = opts.maxConcreteIter, askSmtIters = opts.askSmtIters, loopHeuristic = opts.loopHeuristic}
                    , rpcInfo = opts.rpcInfo
                    }
 
@@ -357,6 +358,7 @@ symRun opts@UnitTestOptions{..} vm (nth, numTests) sig@(Sig testName types) sour
         pure $ "   \x1b[32m[PASS]\x1b[0m " <> Text.unpack testName <> "\n"
       (True, _, _) -> do
         pure $ "   \x1b[31m[FAIL]\x1b[0m " <> Text.unpack testName <> "\n"
+          <> (if conf.earlyAbort then "   Stopped at the first counterexample, --no-early-abort finds all of them\n" else "")
       (_, True, _) -> do
         -- There are errors/unknowns/partials, we fail them
         pure $ "   \x1b[31m[FAIL]\x1b[0m " <> Text.unpack testName <> "\n"
