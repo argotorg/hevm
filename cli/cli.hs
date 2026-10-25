@@ -218,7 +218,6 @@ data TestOptions = TestOptions
   { projectType   ::ProjectType
   , rpc           ::Maybe URL
   , number        ::Maybe W256
-  , coverage      ::Bool
   , match         ::Maybe Text
   , prefix        ::Text
   , ffi           ::Bool
@@ -229,7 +228,6 @@ testOptions = TestOptions
   <$> projectTypeParser
   <*> rpcParser
   <*> (optional $ option auto $ long "number" <> help "Block: number")
-  <*> (switch $ long "coverage" <> help "Coverage analysis")
   <*> (optional $ strOption $ long "match" <> help "Test case filter - only run methods matching regex")
   <*> (strOption $ long "prefix"  <> showDefault <> value "prove" <> help "Prefix for test cases to prove")
   <*> (switch $ long "ffi" <> help "Allow the usage of the hevm.ffi() cheatcode (WARNING: this allows test authors to execute arbitrary code on your machine)")

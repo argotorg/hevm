@@ -113,6 +113,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes of zero.
 
 ## Changed
+- `hevm test --coverage`, which did nothing, is removed.
 - Results that revert with `Error(string)` show the decoded message instead of hex.
 - Solver queries for branch conditions and symbolic values also get the keccak
   preimages recorded during concrete execution, as the final queries do.
@@ -163,6 +164,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of simplifying an ITE of them.
 
 ## Fixed
+- `envBytes` cheatcodes take `string` arguments, as in forge-std.
 - `eth_chainId` requests no longer pass a block number, which nodes reject.
 - JSON-RPC rate limit errors (codes 429, -32005 and -32007) are retried with
   backoff instead of aborting the run.
