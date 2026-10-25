@@ -1669,6 +1669,17 @@ tests = testGroup "hevm"
         overflow <- sat [foldedCheck, PGT y (Lit (2^(177 :: Int))), PLT y (Lit (2^(182 :: Int)))]
         assertEqual "the folded check fails on overflow" Qed overflow
     ]
+  , testCase "smt-branch-timeout" $ do
+      -- factoring a product of two 64-bit primes is far beyond the 1s branch timeout
+      let x = Var "x"
+          y = Var "y"
+          n = 17324573639174612641 * 16789950873655392269
+          props = [PEq (Mul x y) (Lit n), PGT x (Lit 1), PGT y (Lit 1), PLT x (Lit (2^(64 :: Int))), PLT y (Lit (2^(64 :: Int)))]
+          env = Env { config = testEnv.config { smtBranchTimeout = Just 1 } }
+      res <- timeout 60_000_000 $ runEnv env $ withSolvers Bitwuzla 1 (Just 300) defMemLimit $ \s -> checkBranchSat s props
+      case res of
+        Nothing -> assertFailure "the branch query ignored the branch timeout"
+        Just r -> assertBool ("expected unknown, got " <> show r) (isUnknown r)
   , testGroup "Mul-Abstraction"
     -- Symbolic*symbolic multiplication is abstracted as an uninterpreted
     -- function (abst_evm_bvmul) with sound lemmas (commutativity, 0/1
