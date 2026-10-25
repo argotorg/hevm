@@ -381,7 +381,7 @@ fetchContractWithSession conf sess nPre url addr =
 -- | Fetches any account, including ones without code (EOAs and nonexistent accounts)
 fetchAccountWithSession :: Config -> Session -> BlockNumber -> Text -> Addr -> IO (FetchResult RPCContract)
 fetchAccountWithSession conf sess nPre url addr =
-  cachedOr sess.accountsInFlight addr cached $ do
+  fetchOnce sess.accountsInFlight addr cached $ do
     n <- getLatestBlockNum conf sess nPre url
     when (conf.debug) $ putStrLn $ "-> Fetching account at " ++ show addr
     let fetch :: Show a => RpcQuery a -> IO (Either Text a)
@@ -413,8 +413,8 @@ fetchAccountWithSession conf sess nPre url addr =
 -- | Answers from the cache, or else fetches unless a fetch of the same key is under way, then
 -- sharing its result. The cache is checked again once the key is taken: a fetch may have
 -- filled it in the meantime.
-cachedOr :: Ord k => InFlight k (FetchResult a) -> k -> IO (Maybe (FetchResult a)) -> IO (FetchResult a) -> IO (FetchResult a)
-cachedOr inFlight k cached fetch = cached >>= \case
+fetchOnce :: Ord k => InFlight k (FetchResult a) -> k -> IO (Maybe (FetchResult a)) -> IO (FetchResult a) -> IO (FetchResult a)
+fetchOnce inFlight k cached fetch = cached >>= \case
   Just r -> pure r
   Nothing -> singleFlight inFlight k (cached >>= maybe fetch pure) <&> \case
     (FetchSuccess a Fresh, False) -> FetchSuccess a Cached
@@ -473,7 +473,7 @@ emptyStorageRoot = 0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e36
 -- Needed for Echidna only
 fetchSlotWithCache :: Config -> Session -> BlockNumber -> Text -> Addr -> W256 -> IO (FetchResult W256)
 fetchSlotWithCache conf sess nPre url addr slot =
-  cachedOr sess.slotsInFlight (addr, slot) cached $ do
+  fetchOnce sess.slotsInFlight (addr, slot) cached $ do
     n <- getLatestBlockNum conf sess nPre url
     when (conf.debug) $ putStrLn $ "-> Fetching slot " <> show slot <> " at " <> show addr
     ret <- fetchQuery n (fetchWithRetry conf.debug url sess) (QuerySlot addr slot)
