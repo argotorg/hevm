@@ -203,7 +203,10 @@ create a new execution path for each potential value of <code>n</code>, which ca
 large. The same principle applies to recursion, where the depth of the
 recursion may be unbounded or bounded only by a potentially very large number.</p>
 <p>Hence, hevm only explores loops and recursions up to fixed depth <code>k</code>, a
-parameter that can be adjusted from the command line via the <code>--max-iterations k</code> parameter. Whenever the limit is hit, hevm warns of the incomplete exploration:</p>
+parameter that can be adjusted from the command line via the <code>--max-iterations k</code> parameter. This applies to loops whose condition depends on symbolic values;
+loops with a concrete condition run until they end, up to
+<code>--max-concrete-iterations</code>. Whenever the limit is hit, hevm warns of the
+incomplete exploration:</p>
 <pre><code class="language-shell">WARNING: hevm was only able to partially explore the call prefix 0x[...] due to the following issue(s):
   - Max Iterations Reached in contract: 0x[...] pc: [...]
 </code></pre>

