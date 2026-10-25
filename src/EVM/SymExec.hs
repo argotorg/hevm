@@ -1245,13 +1245,13 @@ eqReplayVmOpts cex others code calldata = (defaultVMOpts @Concrete)
 
 -- | Replays a counterexample of @leaf@ on a concrete VM set up like @vm0@ with
 -- the model's values. Right True if the concrete run violates @post@ as well.
-replaySymCex :: App m => SolverGroup -> Postcondition -> VM Symbolic -> Expr End -> SMTCex -> m (Either Text Bool)
-replaySymCex solvers post vm0 leaf cex' = case setup of
+replaySymCex :: App m => Fetch.Fetcher Concrete m -> Postcondition -> VM Symbolic -> Expr End -> SMTCex -> m (Either Text Bool)
+replaySymCex fetcher post vm0 leaf cex' = case setup of
   Left why -> pure (Left why)
   Right opts -> do
     vm <- liftIO $ stToIO $ makeVm opts
     conf <- readConfig
-    (_, _, end) <- Stepper.interpret (Fetch.oracle solvers Nothing Fetch.noRpc) vm (runTraced conf 32)
+    (_, _, end) <- Stepper.interpret fetcher vm (runTraced conf 32)
     let ctx = TraceContext mempty mempty mempty
     pure $ case end.result of
       Just (VMFailure e) -> violated (Failure [] ctx e)
@@ -1297,7 +1297,8 @@ replaySymCex solvers post vm0 leaf cex' = case setup of
             st <- concStore oc.storage
             bal <- concWord "account balance" oc.balance
             pure $ Just (a', (initialContract (RuntimeCode (ConcreteRuntimeCode bs)))
-              { storage = st, origStorage = st, balance = Lit bal, nonce = oc.nonce })
+              { storage = st, origStorage = st, balance = Lit bal, nonce = oc.nonce
+              , external = oc.external, chainStorage = oc.chainStorage })
           -- e.g. the abstract origin account
           _ -> pure Nothing
       when (isPrecompileAddr address) $ Left "the model puts the contract at a precompile address"
@@ -1311,7 +1312,9 @@ replaySymCex solvers post vm0 leaf cex' = case setup of
       baseFee <- concWord "basefee" vm0.block.baseFee
       pure $ (defaultVMOpts @Concrete)
         { contract = (initialContract (RuntimeCode (ConcreteRuntimeCode code)))
-            { storage = store, origStorage = store, balance = Lit balance, nonce = c.nonce }
+            -- fetched accounts hold only the slots read so far, the replay fetches the rest
+            { storage = store, origStorage = store, balance = Lit balance, nonce = c.nonce
+            , external = c.external, chainStorage = c.chainStorage }
         , otherContracts = stubs <> filter ((`notElem` map fst stubs) . fst) others
         , calldata = (ConcreteBuf calldata, [])
         , value = Lit value

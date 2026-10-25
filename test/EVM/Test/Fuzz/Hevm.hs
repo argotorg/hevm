@@ -184,7 +184,7 @@ replayModel :: App m => TestCase -> Expr End -> SMTCex -> m (Either Text Bool)
 replayModel c leaf cex = do
   vm0 <- liftIO $ stToIO $ mkVm False () c symbolicVMInputs
   withSolvers Z3 1 (Just 10) defMemLimit $ \solvers ->
-    replaySymCex solvers (\_ e -> PBool (isFailure e /= isFailure leaf)) (vm0 & set #constraints symProps) leaf cex
+    replaySymCex (Fetch.oracle solvers Nothing Fetch.noRpc) (\_ e -> PBool (isFailure e /= isFailure leaf)) (vm0 & set #constraints symProps) leaf cex
   where
     isFailure = \case Failure {} -> True; _ -> False
 
