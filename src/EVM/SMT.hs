@@ -672,7 +672,23 @@ checkedMul a b = case (a, b) of
   (x, Div n d) | isProduct x d n -> Just (x, d)
   (Div n d, x) | isProduct x d n -> Just (x, d)
   _ -> Nothing
-  where isProduct x d n = Expr.simplify (Mul x d) == Expr.simplify n
+  where
+    -- matched locally, without simplifying: terms may hold placeholders of shared subterms
+    isProduct x d n =
+      let (cx, rx) = factor x
+          (cd, rd) = factor d
+          (cn, rn) = factor n
+      in cn == cx * cd && case (rx, rd) of
+           (Nothing, r) -> rn == r
+           (r, Nothing) -> rn == r
+           (Just p, Just q) -> rn `elem` [Just (Mul p q), Just (Mul q p)]
+    -- the literal coefficient of a term, and the rest of it if it is not 1
+    factor :: Expr EWord -> (W256, Maybe (Expr EWord))
+    factor = \case
+      Lit c -> (c, Nothing)
+      Mul (Lit c) r -> (c, Just r)
+      Mul r (Lit c) -> (c, Just r)
+      r -> (1, Just r)
 
 propToSMTWith :: ArithEncoding -> Prop -> Err Builder
 propToSMTWith arithEnc = \case
