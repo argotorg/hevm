@@ -14,7 +14,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Control.Concurrent.MVar (readMVar, modifyMVar_)
 import Data.IORef (readIORef)
-import Data.List (zip6)
+import Data.List (zip5)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
@@ -37,7 +37,7 @@ import EVM.Concrete qualified as Concrete
 import EVM.Effects (App, Env(..), defaultConfig, runEnv)
 import EVM.Expr qualified as Expr
 import EVM.Fetch qualified as Fetch
-import EVM.Fetch.MockNode (Account(..), World, Node(..), Request(..), withMockNode, withSlowMockNode, eoa)
+import EVM.Fetch.MockNode (Account(..), World, Node(..), Request(..), withMockNode, Faults(..), noFaults, withFaultyMockNode, eoa)
 import EVM.Format (formatBinary)
 import EVM.Progress qualified as Progress
 import EVM.Solvers (withSolvers, defMemLimit, Solver(..))
@@ -59,12 +59,12 @@ tests = testGroup "RPC fuzzing"
             , OpPush0, OpMstore, OpPush (Lit 0x20), OpPush0, OpReturn ]
       res <- withMockNode 16 (Map.singleton addr (eoa 1 0x1234)) $ \node ->
         runEnv (Env {config = defaultConfig}) $ withSolvers Bitwuzla 1 Nothing defMemLimit $ \solvers -> do
-          sess <- Fetch.mkSessionWithoutCache
+          sess <- fastRetrying
           let rpcInfo = Fetch.RpcInfo (Just (Fetch.BlockNumber 16, node.url))
           runConcrete (Fetch.oracle solvers (Just sess) rpcInfo) mempty (initialContract (RuntimeCode (ConcreteRuntimeCode code))) [] mempty
       fmap (\(o, _, _) -> o) res @?= Right (Right (word256Bytes 0x1234))
-  , testCase "rpc-racing-fetches-share-one" $ withSlowMockNode 100_000 16 slotWorld $ \node -> runEnv (Env {config = defaultConfig}) $ do
-      sess <- Fetch.mkSessionWithoutCache
+  , testCase "rpc-racing-fetches-share-one" $ withFaultyMockNode (slow 100_000) 16 slotWorld $ \node -> runEnv (Env {config = defaultConfig}) $ do
+      sess <- fastRetrying
       slots <- liftIO $ mapConcurrently (const (fetchSlot sess node 16)) [1 .. 8 :: Int]
       accs <- liftIO $ mapConcurrently (const (Fetch.fetchAccountWithSession defaultConfig sess Fetch.Latest node.url remote)) [1 .. 8 :: Int]
       liftIO $ do
@@ -73,8 +73,8 @@ tests = testGroup "RPC fuzzing"
         length [() | Fetch.FetchSuccess _ Fetch.Fresh <- accs] @?= 1
         reqs <- readIORef node.requests
         repeats reqs @?= []
-  , testCase "rpc-racing-fetches-share-errors" $ withSlowMockNode 100_000 16 slotWorld $ \node -> runEnv (Env {config = defaultConfig}) $ do
-      sess <- Fetch.mkSessionWithoutCache
+  , testCase "rpc-racing-fetches-share-errors" $ withFaultyMockNode (slow 100_000) 16 slotWorld $ \node -> runEnv (Env {config = defaultConfig}) $ do
+      sess <- fastRetrying
       -- the node serves another block, so every request fails
       res <- liftIO $ mapConcurrently (const (fetchSlot sess node 17)) [1 .. 8 :: Int]
       liftIO $ do
@@ -83,8 +83,8 @@ tests = testGroup "RPC fuzzing"
         -- failures are not cached
         _ <- fetchSlot sess node 17
         (length <$> readIORef node.requests) >>= (@?= 2)
-  , testCase "rpc-killed-fetch-is-taken-over" $ withSlowMockNode 300_000 16 slotWorld $ \node -> runEnv (Env {config = defaultConfig}) $ do
-      sess <- Fetch.mkSessionWithoutCache
+  , testCase "rpc-killed-fetch-is-taken-over" $ withFaultyMockNode (slow 300_000) 16 slotWorld $ \node -> runEnv (Env {config = defaultConfig}) $ do
+      sess <- fastRetrying
       liftIO $ do
         owner <- async (fetchSlot sess node 16)
         threadDelay 50_000
@@ -94,6 +94,13 @@ tests = testGroup "RPC fuzzing"
         res <- wait waiter
         res @?= Fetch.FetchSuccess 0x1234 Fetch.Fresh
         (length <$> readIORef node.requests) >>= (@?= 2)
+  , testCase "rpc-failed-requests-are-retried" $ withFaultyMockNode (Faults 1 (1_000, 1_000) 100) 16 slotWorld $ \node -> runEnv (Env {config = defaultConfig}) $ do
+      sess <- fastRetrying
+      res <- liftIO $ mapConcurrently (const (fetchSlot sess node 16)) [1 .. 8 :: Int]
+      liftIO $ do
+        [v | Fetch.FetchSuccess v _ <- res] @?= replicate 8 0x1234
+        (length <$> readIORef node.requests) >>= (@?= 1)
+        readIORef node.faults >>= (@?= 2)
   , testCase "rpc-cache-is-reused" $ withSystemTempDirectory "rpc-cache" $ \dir -> withMockNode 16 slotWorld $ \node -> runEnv (Env {config = defaultConfig}) $ do
       let run = Fetch.withCachedSession (Just (Fetch.PerChainUnder dir)) (Just node.url) (Just 16) $ \sess -> liftIO $ do
             _ <- fetchSlot sess node 16
@@ -135,6 +142,13 @@ tests = testGroup "RPC fuzzing"
             [Success _ _ out _] -> Expr.readWord (Lit 0) out @?= expected
             _ -> assertFailure $ "expected one successful read, got " <> show leaves
   ]
+
+slow :: Int -> Faults
+slow us = noFaults { latency = (us, us) }
+
+-- | A session that retries failed requests after a millisecond rather than half a second
+fastRetrying :: App m => m Fetch.Session
+fastRetrying = (\s -> s { Fetch.retryDelay = 1_000 }) <$> Fetch.mkSessionWithoutCache
 
 slotWorld :: World
 slotWorld = Map.singleton remote (Account mempty 1 remoteBalance (Map.singleton 1 0x1234))
@@ -393,6 +407,11 @@ shrinkWorld :: World -> [World]
 shrinkWorld w = [Map.delete t w | t <- targets <> created, Map.member t w]
   <> [Map.adjust (\(Account c n b _) -> Account c n b mempty) a w | (a, acc) <- Map.toList w, not (null acc.storage)]
 
+genFaults :: Gen Faults
+genFaults = Faults <$> (word . BS.pack <$> vectorOf 32 arbitrary)
+  <*> elements [(0, 0), (0, 1_000), (0, 5_000)]
+  <*> elements [0, 0, 10, 30]
+
 genCalldata :: Gen ByteString
 genCalldata = BS.concat <$> vectorOf (length cdOffs) (word256Bytes <$> genWord)
 
@@ -510,7 +529,7 @@ repeats rs = [r | (r, n) <- Map.elems counts, n > (1 :: Int)]
 -- | A session whose cache went through the JSON form it is saved to disk in
 reloaded :: App m => Fetch.Session -> m Fetch.Session
 reloaded old = do
-  new <- Fetch.mkSessionWithoutCache
+  new <- fastRetrying
   cache <- liftIO $ readMVar old.sharedCache
   case JSON.eitherDecode @Fetch.FetchCache (JSON.encode cache) of
     Left e -> internalError ("cannot reload RPC cache: " <> e)
@@ -523,7 +542,8 @@ prop_rpc =
   forAllShrink genWorld shrinkWorld $ \world ->
   forAllBlind (vectorOf 3 genCalldata) $ \cds ->
   forAll ((,) . fromIntegral <$> choose (1 :: Int, 100) <*> arbitrary) $ \(blk, latest) ->
-  forAll arbitrary $ \reload -> ioProperty $ withMockNode blk world $ \node -> do
+  forAll arbitrary $ \reload ->
+  forAll genFaults $ \faults -> ioProperty $ withFaultyMockNode faults blk world $ \node -> do
     let code = assemble prog
         rpcInfo = Fetch.RpcInfo (Just (if latest then Fetch.Latest else Fetch.BlockNumber blk, node.url))
         known = [(LitAddr a, contractOf acc False) | (a, acc) <- Map.toList world, a /= remote]
@@ -533,15 +553,16 @@ prop_rpc =
         (runConcrete (Fetch.oracle solvers Nothing Fetch.noRpc) world (remoteContract code world False) known) cds
       let mark = liftIO $ length <$> readIORef node.requests
           runFetching sess = runConcrete (Fetch.oracle solvers (Just sess) rpcInfo) world (remoteContract code world True) []
-      concSess <- Fetch.mkSessionWithoutCache
+      concSess <- fastRetrying
       fetched <- Progress.withPhase "concrete-rpc" [] (const []) $ mapM (runFetching concSess) cds
       afterConc <- mark
       -- the runs race on the same state through one session, as Echidna's workers do
+      let racing = take 8 (cycle (zip cds truths))
       raced <- Progress.withPhase "concurrent-rpc" [] (const []) $ do
-        sess <- Fetch.mkSessionWithoutCache
-        withRunInIO $ \run -> mapConcurrently (run . runFetching sess) cds
+        sess <- fastRetrying
+        withRunInIO $ \run -> mapConcurrently (run . runFetching sess . fst) racing
       afterRaced <- mark
-      symSess <- if reload then reloaded concSess else Fetch.mkSessionWithoutCache
+      symSess <- if reload then reloaded concSess else fastRetrying
       symVm <- liftIO $ stToIO $ makeVm (defaultVMOpts @Symbolic)
         { contract = remoteContract code world True, address = LitAddr remote
         , calldata = (AbstractBuf "txdata", []) }
@@ -563,13 +584,16 @@ prop_rpc =
           partials = length [() | Nothing <- symbolic]
           mismatches =
             [ "calldata " <> T.unpack (formatBinary cd) <> "\n  " <> what <> ":\n" <> d
-            | (cd, truth, conc, race, sym, symConc) <- zip6 cds truths fetched raced symbolic symConcrete
+            | (cd, truth, conc, sym, symConc) <- zip5 cds truths fetched symbolic symConcrete
             , (what, Just d) <-
                 [ ("concrete via RPC", diff world conc truth) ]
-                <> [ ("concurrently via RPC", diff world race truth) ]
                 <> [ ("symbolic via RPC", diff world got truth) | Just got <- [sym] ]
                 <> [ ("symbolic on concrete calldata via RPC", diff world got truth) | Just got <- [symConc] ]
             ]
+      failures <- liftIO $ readIORef node.faults
+      let raceMismatches =
+            [ "calldata " <> T.unpack (formatBinary cd) <> "\n  concurrently via RPC:\n" <> d
+            | ((cd, truth), race) <- zip racing raced, Just d <- [diff world race truth] ]
       pure
         $ tabulate "statements" [show (length prog)]
         $ tabulate "statement kinds" [takeWhile (/= ' ') (show st) | st <- prog]
@@ -582,8 +606,10 @@ prop_rpc =
         $ counterexample ("code: " <> T.unpack (formatBinary code))
         $ counterexample ("unexpected requests: " <> show unexp)
         $ counterexample ("requests repeated within a session: " <> show repeated)
-        $ counterexample (unlines mismatches)
-        $ null unexp && null repeated && null mismatches
+        $ tabulate "failed requests" [show (min 10 failures)]
+        $ counterexample (show faults)
+        $ counterexample (unlines (mismatches <> raceMismatches))
+        $ null unexp && null repeated && null mismatches && null raceMismatches
   where
     kind = \case
       Nothing -> "absent"

@@ -105,6 +105,8 @@ data Session = Session
   -- Shared rate limit cooldown across workers. When any worker hits a
   -- rate limit, it sets a deadline; other workers wait before retrying.
   , rpcThrottle     :: IORef (Maybe UTCTime)
+  -- | Microseconds before the first retry of a failed request, doubling for each further one
+  , retryDelay      :: Int
   , slotsInFlight   :: InFlight (Addr, W256) (FetchResult W256)
   , accountsInFlight :: InFlight Addr (FetchResult RPCContract)
   }
@@ -329,8 +331,8 @@ setCooldown ref delayUs = do
 -- Only retries synchronous exceptions (network errors, HTTP 429, etc.).
 -- Re-throws all async exceptions (Timeout, ThreadKilled).
 -- RPC-level errors (Left) are NOT retried — they pass through.
-withRetry :: Bool -> IORef (Maybe UTCTime) -> IO (Either Text a) -> IO (Either Text a)
-withRetry debug throttle action = go 1
+withRetry :: Bool -> Int -> IORef (Maybe UTCTime) -> IO (Either Text a) -> IO (Either Text a)
+withRetry debug firstDelay throttle action = go 1
   where
   maxRetries = 5 :: Int
   go attempt = do
@@ -343,7 +345,7 @@ withRetry debug throttle action = go 1
       Right r -> pure r
       Left e
         | attempt <= maxRetries -> do
-            let baseDelayUs = 500_000 * (2 ^ (attempt - 1)) :: Int
+            let baseDelayUs = firstDelay * (2 ^ (attempt - 1)) :: Int
             jitter <- randomRIO (0, baseDelayUs)
             let delayUs = baseDelayUs + jitter
             setCooldown throttle delayUs
@@ -357,7 +359,7 @@ withRetry debug throttle action = go 1
 
 -- | Like fetchWithSession but with retry + shared cooldown from Session.
 fetchWithRetry :: Bool -> Text -> Session -> Value -> IO (Either Text Value)
-fetchWithRetry debug url session = withRetry debug session.rpcThrottle . fetchWithSession url session.sess
+fetchWithRetry debug url session = withRetry debug session.retryDelay session.rpcThrottle . fetchWithSession url session.sess
 
 fetchWithSession :: Text -> NetSession.Session -> Value -> IO (Either Text Value)
 fetchWithSession url sess x = do
@@ -622,7 +624,7 @@ mkSession cacheDir mblock = do
   rpcThrottle <- liftIO $ newIORef Nothing
   slotsInFlight <- liftIO $ newMVar Map.empty
   accountsInFlight <- liftIO $ newMVar Map.empty
-  pure $ Session sess latestBlockNum cache cacheDir failedContracts failedSlots rpcThrottle slotsInFlight accountsInFlight
+  pure $ Session sess latestBlockNum cache cacheDir failedContracts failedSlots rpcThrottle 500_000 slotsInFlight accountsInFlight
 
 mkSessionWithoutCache :: App m => m Session
 mkSessionWithoutCache = mkSession Nothing Nothing

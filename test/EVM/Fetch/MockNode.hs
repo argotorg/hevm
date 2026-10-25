@@ -6,7 +6,9 @@ module EVM.Fetch.MockNode
   , Node (..)
   , Request (..)
   , withMockNode
-  , withSlowMockNode
+  , Faults (..)
+  , noFaults
+  , withFaultyMockNode
   , eoa
   ) where
 
@@ -54,18 +56,30 @@ data Request = Request { method :: Text, params :: [Value] }
 data Node = Node
   { url :: Text
   , block :: W256
-  , requests :: IORef [Request] -- ^ every request served, latest first
+  , requests :: IORef [Request] -- ^ every request answered, latest first
+  , faults :: IORef Int -- ^ how many requests failed instead
   }
+
+-- | How a node misbehaves: it answers each request after a latency within the given range of
+-- microseconds, or fails it, by HTTP 429 or by hanging up, for the given percentage of the
+-- first two attempts. Each is decided by hashing the salt, the request and its attempt.
+data Faults = Faults { salt :: W256, latency :: (Int, Int), faultPercent :: W256 }
+  deriving (Show)
+
+noFaults :: Faults
+noFaults = Faults 0 (0, 0) 0
+
+data Reply = Reply Value | TooManyRequests | HangUp
 
 -- | Runs a node serving the world at the given block, which is also its "latest"
 withMockNode :: W256 -> World -> (Node -> IO a) -> IO a
-withMockNode = withSlowMockNode 0
+withMockNode = withFaultyMockNode noFaults
 
--- | Like 'withMockNode', but taking the given microseconds to answer each request, which is
--- recorded as it arrives
-withSlowMockNode :: Int -> W256 -> World -> (Node -> IO a) -> IO a
-withSlowMockNode latency blk world act = do
+withFaultyMockNode :: Faults -> W256 -> World -> (Node -> IO a) -> IO a
+withFaultyMockNode fs blk world act = do
   reqs <- newIORef []
+  failed <- newIORef 0
+  attempts <- newIORef (Map.empty :: Map ByteString Int)
   threads <- newIORef []
   let fork io = forkIO io >>= \t -> atomicModifyIORef' threads (\ts -> (t : ts, ()))
       open = do
@@ -75,25 +89,42 @@ withSlowMockNode latency blk world act = do
         pure sock
       -- connection threads block in recv for as long as the client keeps the connection alive
       close sock = readIORef threads >>= mapM_ killThread >> Net.close sock
+      respond body = do
+        n <- atomicModifyIORef' attempts (\m -> (Map.insertWith (+) body 1 m, Map.findWithDefault 0 body m))
+        let h = keccak' (word256Bytes fs.salt <> body <> word256Bytes (fromIntegral n))
+            (minL, maxL) = fs.latency
+            wait = threadDelay (minL + fromIntegral (h `mod` fromIntegral (maxL - minL + 1)))
+        if n < 2 && (h `div` 2) `mod` 100 < fs.faultPercent
+          then do
+            atomicModifyIORef' failed (\k -> (k + 1, ()))
+            wait
+            pure (if even h then TooManyRequests else HangUp)
+          else Reply <$> answer blk world reqs body <* wait
   bracket open close $ \sock -> do
     fork $ forever $ do
       (conn, _) <- Net.accept sock
-      fork $ serveConn (\body -> answer blk world reqs body <* threadDelay latency) conn `finally` Net.close conn
+      fork $ serveConn respond conn `finally` Net.close conn
     port <- Net.socketPort sock
-    act (Node ("http://127.0.0.1:" <> T.pack (show port)) blk reqs)
+    act (Node ("http://127.0.0.1:" <> T.pack (show port)) blk reqs failed)
 
 -- | Serves the requests of one keep-alive connection
-serveConn :: (ByteString -> IO Value) -> Net.Socket -> IO ()
+serveConn :: (ByteString -> IO Reply) -> Net.Socket -> IO ()
 serveConn respond conn = go mempty
   where
     go buf = do
       (headers, rest) <- readUntil buf
       unless (BS.null headers) $ do
         (body, rest') <- readN rest (contentLength headers)
-        resp <- JSON.encode <$> respond body
-        sendAll conn $ "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
-          <> Char8.pack (show (BSL.length resp)) <> "\r\n\r\n" <> BSL.toStrict resp
-        go rest'
+        respond body >>= \case
+          Reply v -> do
+            let resp = JSON.encode v
+            sendAll conn $ "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+              <> Char8.pack (show (BSL.length resp)) <> "\r\n\r\n" <> BSL.toStrict resp
+            go rest'
+          TooManyRequests -> do
+            sendAll conn "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\n\r\n"
+            go rest'
+          HangUp -> pure ()
     readUntil buf = case BS.breakSubstring "\r\n\r\n" buf of
       (h, t) | not (BS.null t) -> pure (h, BS.drop 4 t)
       _ -> more buf >>= maybe (pure (mempty, mempty)) readUntil

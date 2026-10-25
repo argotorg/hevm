@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   saved.
 - Concurrent RPC fetches of the same storage slot, account or latest block
   share one request.
+- The RPC fuzzer's mock node delays and fails requests, and the fuzzer races
+  8 runs on one session and checks that no session repeats a request.
 - `--interactive` for `symbolic`, `exec` and `test` starts an interactive debugger
   served over HTTP on localhost, with symbolic branches,
   stepping back, breakpoints, storage, call traces and statistics. Its views
