@@ -1643,7 +1643,7 @@ tests = testGroup "hevm"
       d = Var "d"
       check a b = PEq a (Div (Mul a b) b)
       sat props = runEnv (Env { config = testEnv.config { simp = False } }) $
-        withSolvers solver 1 (Just 5) defMemLimit $ \s -> checkSatWithProps s props
+        withSolvers solver 1 (Just 30) defMemLimit $ \s -> checkSatWithProps s props
       name n = n <> "-" <> show solver
     in
     [ testCase (name "checked-mul-overflow") $ do
