@@ -19,7 +19,6 @@ import Data.Maybe (isNothing, mapMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text qualified as T
-import Data.Vector qualified as V
 import Data.Word (Word8)
 import System.Environment (lookupEnv)
 import Test.QuickCheck
@@ -33,8 +32,7 @@ import EVM.Effects qualified as Effects
 import EVM.Fetch qualified as Fetch
 import EVM.Format (formatBinary)
 import EVM.Op (intToOpName)
-import EVM.Assembler qualified as Assembler
-import EVM.Expr qualified as Expr
+import EVM.Assembler (assembleBytes)
 import EVM.Progress qualified as Progress
 import EVM.Solvers (withSolvers, defMemLimit, Solver(..), SolverGroup)
 import EVM.Stepper (Stepper)
@@ -155,11 +153,8 @@ genOpcodes = map opName (binOps <> unOps <> ternOps <> envOps
   <> map OpDup [1 .. 16] <> map OpSwap [1 .. 16])
   <> map (intToOpName . fromIntegral) [0x5f .. 0x7f :: Int]
 
--- | Assembles with the shortest pushes, unlike 'EVM.Assembler.assemble'
 opBytes :: [Op] -> [Word8]
-opBytes = concatMap $ \case
-  OpPush (Lit w) -> pushW w
-  o -> mapMaybe Expr.maybeLitByteSimp (V.toList (Assembler.assemble [o]))
+opBytes = BS.unpack . assembleBytes
 
 opByte :: Op -> Word8
 opByte o = case opBytes [o] of
@@ -178,8 +173,7 @@ op o = Bytes (opBytes [o])
 data Asm = Bytes [Word8] | PushLabel Int | Label Int
 
 pushW :: W256 -> [Word8]
-pushW 0 = [0x5f]
-pushW w = let bs = BS.unpack (BS.dropWhile (== 0) (word256Bytes w)) in (0x5f + fromIntegral (length bs)) : bs
+pushW w = opBytes [push w]
 
 pushI :: Int -> Asm
 pushI = Bytes . pushW . fromIntegral
