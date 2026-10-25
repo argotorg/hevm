@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- A worked example in the docs: finding the Truebit exploit on a mainnet fork.
 - The symbolic execution fuzzers check that a model reaching another leaf via a
   symbolic keccak gives each hashed input one hash, and generate comparisons of
   hashes of calldata. The equivalence fuzzer generates CREATE and CREATE2 and
