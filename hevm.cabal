@@ -327,6 +327,7 @@ test-suite test
     EVM.Test.Fuzz.Check
     EVM.Test.Fuzz.Lockstep
     EVM.Test.FoundryTests
+    EVM.Invariant.InvariantTests
     EVM.Test.Asm
     EVM.Debugger.DebuggerTests
     EVM.Debugger.DebuggerFuzz

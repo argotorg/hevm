@@ -18,6 +18,7 @@ import EVM.Debugger.DebuggerTests qualified as DebuggerTests
 import EVM.Debugger.DebuggerFuzz qualified as DebuggerFuzz
 import EVM.Debugger.ProgressTests qualified as ProgressTests
 import EVM.Test.FoundryTests qualified as FoundryTests
+import EVM.Invariant.InvariantTests qualified as InvariantTests
 import EVM.Encoding.EncodingTests qualified as EncodingTests
 import EVM.Solidity.SolidityTests qualified as SolidityTests
 import EVM.SymExec.ArithTests qualified as ArithTests
@@ -55,6 +56,7 @@ tests = testGroup "hevm" $
   , EquivFuzz.tests
   , RpcFuzz.tests
   , FoundryTests.tests
+  , InvariantTests.tests
   ]
   ++ EncodingTests.tests
   ++ SolidityTests.tests
