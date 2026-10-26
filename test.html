@@ -190,7 +190,7 @@
 </code></pre>
 <p>Execute all unit tests that make use of the <code>std-test</code> assertion library
 a.k.a <a href="https://book.getfoundry.sh/forge/forge-std">Foundry tests</a> on functions that
-start with <code>prove_</code>. This command supports both Foundry- and
+start with <code>prove_</code>, and <a href="#invariant-tests">invariants</a>. This command supports both Foundry- and
 <a href="https://dapp.tools/">Dapptools-</a>based projects. For a full listing of options,
 see <code>hevm test --help</code>. For common options, see <a href="./common-options.html">here</a>.</p>
 <h2 id="simple-example-usage"><a class="header" href="#simple-example-usage">Simple example usage</a></h2>
@@ -201,6 +201,47 @@ Checking 1 function(s) in contract src/badvault-test.sol:BadVault
    [PASS] prove_mytest(uint256)
 </code></pre>
 <p>To prove all function that start with <code>prove_</code> in all contracts.</p>
+<h2 id="invariant-tests"><a class="header" href="#invariant-tests">Invariant tests</a></h2>
+<p>Functions that start with <code>invariant_</code> are invariants: hevm checks them after
+<code>setUp()</code>, and after every sequence of at most <code>--invariant-depth</code> (default: 2)
+calls to the target functions, with symbolic arguments and callers. Between
+calls, the block timestamp may move forward. The target functions are the
+non-view functions of the contracts deployed in <code>setUp()</code>, other than the test
+contract. As in Foundry, <code>targetContract</code>, <code>excludeContract</code>, <code>targetSelector</code>
+and <code>excludeSelector</code> change them, and <code>targetSender</code> and <code>excludeSender</code> the
+callers. A minimal proxy (EIP-1167 clone) gets the functions of the contract it
+delegates to. A state that another sequence of calls already reached is not
+explored again. An assertion that fails in one of the calls fails the test too.</p>
+<pre><code class="language-solidity">contract Counter {
+    uint256 public count;
+    function incr(uint256 x) public {
+        require(x &lt;= count);
+        count += 1;
+    }
+}
+
+contract CounterTest is Test {
+    Counter c;
+    function setUp() public {
+        c = new Counter();
+    }
+    function invariant_below_two() public view {
+        assertLt(c.count(), 2);
+    }
+}
+</code></pre>
+<pre><code class="language-shell">$ hevm test --match invariant_below_two
+Checking 1 function(s) in contract test/Counter.t.sol:CounterTest
+[RUNNING] invariant_below_two()
+   Counterexample:   [validated]
+     calls:    Counter.incr(0)
+               Counter.incr(0)
+     calldata: invariant_below_two()
+     result:   Revert: Error("assertion failed: 2 &gt;= 2")
+   [FAIL] invariant_below_two
+</code></pre>
+<p>Functions with arguments that cannot be symbolic, such as dynamic arrays, are
+not called, and hevm warns about them.</p>
 <h2 id="further-reading"><a class="header" href="#further-reading">Further reading</a></h2>
 <p>See our
 <a href="std-test-tutorial.html">tutorial here</a> for more details. An overview of using
