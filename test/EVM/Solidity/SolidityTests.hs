@@ -2,6 +2,7 @@
 
 module EVM.Solidity.SolidityTests (tests) where
 
+import Control.Monad (forM_)
 import Control.Monad.ST (stToIO)
 import Control.Monad.State.Strict
 import Control.Monad.Reader (ReaderT)
@@ -14,6 +15,7 @@ import Data.Maybe
 import Data.String.Here
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding (encodeUtf8)
 import Data.Tuple.Extra
 import Data.Vector qualified as V
 import Test.Tasty
@@ -633,6 +635,59 @@ tests =
           paths <- interpret (Fetch.noRpcFetcher s) iterConf vm runExpr noopPathHandler
           let exprSimp = map Expr.simplify paths
           assertBoolM "expected partial execution" (any isPartial exprSimp)
+    ]
+  , testGroup "ABI signatures"
+    [ test "struct-overloads" $ do
+        Right (Contracts contracts) <- readStdJSON <$> liftIO (solc Solidity [i|
+          contract C {
+            struct A { uint256 value; }
+            struct B { address owner; }
+            function f(A calldata a) external pure returns (uint256) { return a.value; }
+            function f(B calldata b) external pure returns (uint256) { return uint160(b.owner); }
+          }
+        |] False)
+        let c = contracts Map.! "hevm.sol:C"
+            sigs = ["f((uint256))", "f((address))"]
+        assertEqualM "both overloads retain their canonical selectors"
+          (Map.fromList [(abiKeccak (encodeUtf8 sig), sig) | sig <- sigs])
+          (Map.map (.methodSignature) c.abiMap)
+        forM_ (Map.elems c.abiMap) $ \method -> do
+          result <- runSimpleVM c.creationCode (abiMethod method.methodSignature (AbiUInt 256 42))
+          assertEqualM "the ABI selector calls the intended function"
+            (Just (encodeAbiValue (AbiUInt 256 42))) result
+    , test "nested-struct-arrays" $ do
+        Right (Contracts contracts) <- readStdJSON <$> liftIO (solc Solidity [i|
+          contract C {
+            struct Item { uint256 value; }
+            struct Nested { Item[][2] items; address owner; }
+            event Seen(Nested item);
+            error Bad(Nested item);
+            function f(Nested[2][] calldata) external pure {}
+          }
+        |] False)
+        let c = contracts Map.! "hevm.sol:C"
+            sig = "f(((uint256)[][2],address)[2][])"
+        assertEqualM "nested tuples preserve array dimensions"
+          (Map.singleton (abiKeccak (encodeUtf8 sig)) sig)
+          (Map.map (.methodSignature) c.abiMap)
+        assertEqualM "event topic uses tuple components"
+          [keccak' (encodeUtf8 "Seen(((uint256)[][2],address))")]
+          (Map.keys c.eventMap)
+        assertEqualM "error selector uses tuple components"
+          [fromIntegral (abiKeccak (encodeUtf8 "Bad(((uint256)[][2],address))")).unFunctionSelector]
+          (Map.keys c.errorMap)
+    , test "library-enum-name" $ do
+        Right (Contracts contracts) <- readStdJSON <$> liftIO (solc Solidity [i|
+          library L {
+            enum Choice { A, B }
+            function choose(Choice c) external pure returns (uint256) { return uint256(c); }
+          }
+        |] False)
+        let c = contracts Map.! "hevm.sol:L"
+            sig = "choose(L.Choice)"
+        assertEqualM "library enum names are preserved in selectors"
+          (Map.singleton (abiKeccak (encodeUtf8 sig)) sig)
+          (Map.map (.methodSignature) c.abiMap)
     ]
   , testGroup "Unresolved link detection"
     [ testCase "holes-detected" $
