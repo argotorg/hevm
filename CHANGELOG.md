@@ -130,6 +130,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes of zero.
 
 ## Changed
+- The default number of solvers is at most half of the available memory divided
+  by `--smt-memory`, so that the solvers running at once fit in memory.
 - Checked multiplications by a literal simplify to a bound on the multiplied
   value, and the overflow checks of multiplications use bounds that hold
   through comparisons with other bounded values.
