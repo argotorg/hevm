@@ -189,6 +189,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of simplifying an ITE of them.
 
 ## Fixed
+- ABI signatures expand tuple components, fixing selectors and event topics for
+  struct arguments and preventing struct overloads from being lost.
 - Constant propagation checks disequalities and disjunctions against the
   constants of all path conditions, not only of those before them. The debugger
   no longer offers an infeasible branch side when the solver cannot encode the
