@@ -177,7 +177,7 @@ withHangingSolver cont = do
 
 earlyAbortRace :: Natural -> Int -> Int -> IO Property
 earlyAbortRace n maxDelay abortAfter = doesDirectoryExist "/proc/self" >>= \case
-  False -> pure $ property Discard
+  False -> pure $ label "skipped: no /proc" True
   True -> do
     Just c <- runEnv testEnv $ solcRuntime "C" raceContract
     self <- getExecutablePath
@@ -229,7 +229,7 @@ earlyAbortRace n maxDelay abortAfter = doesDirectoryExist "/proc/self" >>= \case
 
 earlyAbortInterpretRace :: Natural -> Int -> Int -> IO Property
 earlyAbortInterpretRace n maxDelay abortAfter = doesDirectoryExist "/proc/self" >>= \case
-  False -> pure $ property Discard
+  False -> pure $ label "skipped: no /proc" True
   True -> do
     Just c <- runEnv testEnv $ solcRuntime "C" raceContract
     self <- getExecutablePath
