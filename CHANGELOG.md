@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- Arithmetic abstraction now handles `MULMOD`, with exact 512-bit refinement,
+  and adds cancellation, div/mod identity and multiplication/division round-trip lemmas.
 - A worked example in the docs: finding the Abracadabra `cook()` exploit on a mainnet fork.
 - `--smt-branch-timeout`, 20 seconds by default, for the queries that decide which
   branches to explore.
