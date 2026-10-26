@@ -105,6 +105,7 @@ library
     EVM.Format,
     EVM.ConsoleLog,
     EVM.Fetch,
+    EVM.Invariant,
     EVM.FeeSchedule,
     EVM.Op,
     EVM.Precompiled,

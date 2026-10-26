@@ -9,7 +9,7 @@ Usage: hevm test [--root STRING] [--project-type PROJECTTYPE] [--rpc TEXT]
 
 Execute all unit tests that make use of the `std-test` assertion library
 a.k.a [Foundry tests](https://book.getfoundry.sh/forge/forge-std) on functions that
-start with `prove_`. This command supports both Foundry- and
+start with `prove_`, and [invariants](#invariant-tests). This command supports both Foundry- and
 [Dapptools-](https://dapp.tools/)based projects. For a full listing of options,
 see `hevm test --help`. For common options, see [here](./common-options.md).
 
@@ -26,6 +26,53 @@ Checking 1 function(s) in contract src/badvault-test.sol:BadVault
 ```
 
 To prove all function that start with `prove_` in all contracts.
+
+## Invariant tests
+
+Functions that start with `invariant_` are invariants: hevm checks them after
+`setUp()`, and after every sequence of at most `--invariant-depth` (default: 2)
+calls to the target functions, with symbolic arguments and callers. Between
+calls, the block timestamp may move forward. The target functions are the
+non-view functions of the contracts deployed in `setUp()`, other than the test
+contract. As in Foundry, `targetContract`, `excludeContract`, `targetSelector`
+and `excludeSelector` change them, and `targetSender` and `excludeSender` the
+callers. A state that another sequence of calls already reached is not explored
+again.
+
+```solidity
+contract Counter {
+    uint256 public count;
+    function incr(uint256 x) public {
+        require(x <= count);
+        count += 1;
+    }
+}
+
+contract CounterTest is Test {
+    Counter c;
+    function setUp() public {
+        c = new Counter();
+    }
+    function invariant_below_two() public view {
+        assertLt(c.count(), 2);
+    }
+}
+```
+
+```shell
+$ hevm test --match invariant_below_two
+Checking 1 function(s) in contract test/Counter.t.sol:CounterTest
+[RUNNING] invariant_below_two()
+   Counterexample:   [validated]
+     calls:    Counter.incr(0)
+               Counter.incr(0)
+     calldata: invariant_below_two()
+     result:   Revert: Error("assertion failed: 2 >= 2")
+   [FAIL] invariant_below_two
+```
+
+Functions with arguments that cannot be symbolic, such as dynamic arrays, are
+not called, and hevm warns about them.
 
 ## Further reading
 
