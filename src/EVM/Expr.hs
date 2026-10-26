@@ -2190,11 +2190,16 @@ simplifyProp prop =
     go (PEq (Lit 0) (Sub a b)) = peq a b
     go (PEq (Lit 0) (Or a b)) = peq (Lit 0) a `PAnd` peq (Lit 0) b
     go (PEq a1 (Add a2 y)) | a1 == a2 = peq (Lit 0) y
+    -- the same check once y == 0 is ruled out: it then also says y is nonzero
+    go (PEq (Lit c) (Div num y)) | c > 0, timesC c num y = PAnd (PNeg (PEq (Lit 0) y)) (PLEq y (Lit (maxLit `Prelude.div` c)))
     go (PEq l r) = peq l r
 
-    -- checked multiplication y * c, i.e. y == 0 || (y * c) / y == c, exactly when it doesn't wrap
-    go (POr a b) | Just g <- mulGuard a b = g
-                 | Just g <- mulGuard b a = g
+    -- (not p && b) || p is b || p, as in y == 0 || (y * c) / y == c once its second half is rewritten
+    go (POr (PAnd (PNeg p) b) q) | p == q = POr b q
+    go (POr q (PAnd (PNeg p) b)) | p == q = POr q b
+    -- y <= k already holds when y == 0
+    go (POr l@(PLEq y (Lit _)) (PEq (Lit 0) y')) | y == y' = l
+    go (POr (PEq (Lit 0) y') l@(PLEq y (Lit _))) | y == y' = l
 
     go (POr (PLEq a1 (Lit b)) (PLEq (Lit c) a2)) | a1 == a2 && c == b+1 = PBool True
 
@@ -2240,13 +2245,8 @@ simplifyProp prop =
     go p = p
 
     -- also when c * (b * x) was folded into a * x
-    mulGuard :: Prop -> Prop -> Maybe Prop
-    mulGuard (PEq (Lit c) (Div (Mul (Lit a) x) y)) (PEq (Lit 0) y')
-      | c > 0, y == y', a == c && x == y || folded = Just (PLEq y (Lit (maxLit `Prelude.div` c)))
-      where folded = case y of
-              Mul (Lit b) x' -> x' == x && a == b * c
-              _ -> False
-    mulGuard _ _ = Nothing
+    -- num is c * y in simplified form, which may fold or distribute it
+    timesC c num y = num == simplify (Mul (Lit c) y)
 
     onITE :: Expr EWord -> Bool -> Bool -> Prop
     onITE c t f

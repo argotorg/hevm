@@ -685,7 +685,12 @@ genShapedProp n = frequency
             let eq = PEq (Lit c) (Div num v)
                 z = PEq (Lit 0) v
             elements [POr eq z, POr z eq]
-      g <- oneof [backEq, guardOn x (Mul (Lit c) x), guardOn y (Mul (Lit (b * c)) x), guardOn y (Mul (Lit c) y)]
+      -- y = d + x, where simplification distributes c * y, and the check without its y == 0 half
+      d <- k
+      let shifted = Add (Lit d) x
+          lone v = pure (PEq (Lit c) (Div (Expr.simplify (Mul (Lit c) v)) v))
+      g <- oneof [ backEq, guardOn x (Mul (Lit c) x), guardOn y (Mul (Lit (b * c)) x), guardOn y (Mul (Lit c) y)
+                 , guardOn shifted (Expr.simplify (Mul (Lit c) shifted)), lone x, lone y, lone shifted ]
       o <- elements [-1, 0, 1]
       bv <- elements [x, y]
       let near = if c == 0 then Lit 0 else Lit (Expr.maxLit `div` c + o)

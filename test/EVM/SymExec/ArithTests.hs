@@ -525,6 +525,37 @@ tests =
           } |]
         (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
         assertBoolM "Wrong closed form must not be QED" (not (null res))
+    , testAbstractArith "ceildiv-symbolic-divisor" $ do
+        -- dividend step: ceilDiv(a, r) is a/r or one more, for a symbolic divisor r,
+        -- as in previewSwapExactOut's round-up against a round-down expectation
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function ceilDiv(uint256 a, uint256 b) internal pure returns (uint256) {
+              return a == 0 ? 0 : (a - 1) / b + 1;
+            }
+            function prove_ceildiv_step(uint256 x, uint256 r) external pure {
+              require(x < (1<<128) && r != 0);
+              uint256 a = x * 1000000000000000000000000000;
+              assert(ceilDiv(a, r) - a / r <= 1);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertEqualM "Must be QED" [] res
+    , testAbstractArith "ceildiv-symbolic-divisor-cex" $ do
+        -- soundness guard: rounding up is not always the same as rounding down
+        Just c <- solcRuntime "C" [i|
+          contract C {
+            function ceilDiv(uint256 a, uint256 b) internal pure returns (uint256) {
+              return a == 0 ? 0 : (a - 1) / b + 1;
+            }
+            function prove_ceildiv_step_wrong(uint256 x, uint256 r) external pure {
+              require(x < (1<<128) && r != 0);
+              uint256 a = x * 1000000000000000000000000000;
+              assert(ceilDiv(a, r) == a / r);
+            }
+          } |]
+        (_, res) <- withBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertBoolM "Expected a counterexample" (any isCex res)
     , testAbstractArith "scaled-product-telescope" $ do
         -- scaled-product telescoping: a*b/c - a*(b-k)/c == a*(k/c) when c | k (here
         -- c == k == 1e27, so the coefficient is a). This is the ONLY lemma that
@@ -576,6 +607,9 @@ tests =
         "require(y != 0); uint256 r = x * y / y; assert(r == x);"
     , provesAbstractly "muldiv-monotone-literal-divisor" "uint256 a1, uint256 a2, uint256 p"
         "require(a1 <= a2 && a2 < (1<<128) && p < (1<<128)); uint256 r1; uint256 r2; assembly { r1 := div(mul(a1, p), 1000000000000000000) r2 := div(mul(a2, p), 1000000000000000000) } assert(r1 <= r2);"
+    -- PSM3's previewSwapExactOut: a ceilDiv by a symbolic rate, scaled up and back, against the round-down
+    , provesAbstractly "ceildiv-rate-vs-floor" "uint256 x, uint256 r"
+        "require(x <= type(uint128).max && r >= 1e23 && r <= 1e30); uint256 a = x * 1e27; uint256 e = a / r; uint256 u = a == 0 ? 0 : (a - 1) / r + 1; uint256 v = u * 1e18; uint256 w = v == 0 ? 0 : (v - 1) / 1e18 + 1; assert(w - e <= 1);"
     , abstractArithGap "gap-divmod-identity" "uint256 a, uint256 b"
         "require(b != 0); uint256 r; assembly { r := add(mul(div(a, b), b), mod(a, b)) } assert(r == a);"
     -- the lemmas would need the cross term x2*w1, which the query never mentions

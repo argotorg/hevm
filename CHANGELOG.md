@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- Abstract arithmetic lemmas for dividends a literal apart over one divisor,
+  `(x-k)/z <= x/z <= (x-k)/z + k`, as in a `ceilDiv` next to a round-down, and
+  for `(r + c*q)/c == q` when `r < c`.
 - The progress log gives the source location of forks and of the locations in
   its summaries, when there is debug info.
 - Invariant testing: `hevm test` checks `invariant_` functions after every
@@ -133,6 +136,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The default number of solvers is at most half of the available memory divided
   by `--smt-memory`, so that the solvers running at once fit in memory.
 - Solidity's overflow check of a multiplication by a literal, `y == 0 || (y * c) / y == c`,
+  also once simplification has distributed `y * c` or dropped `y == 0`,
   simplifies to a bound on `y`, and the overflow checks of multiplications use bounds that hold
   through comparisons with other bounded values.
 - Constant propagation substitutes any term that the props fix to a constant,

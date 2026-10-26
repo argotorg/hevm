@@ -42,6 +42,8 @@ data LemmaInst
   | FracReduce    (Expr EWord) W256 W256 (Expr EWord)                  -- ^ (c1*x)/c2 == x/(c2/c1)
   | CeilDivCancel (Expr EWord) W256 W256 (Expr EWord)                  -- ^ ceilDiv(c1*x,c2) inner divide
   | Telescope     (Expr EWord) (Expr EWord) W256 W256                  -- ^ (a*b)/c - (a*(b-k))/c == a*(k/c)
+  | DivStep       (Expr EWord) W256 (Expr EWord)                       -- ^ (x-k)/z <= x/z <= (x-k)/z + k
+  | RemCancel     (Expr EWord) W256 W256 (Expr EWord)                  -- ^ (r + c*q)/c == q for r < c
   deriving (Eq, Ord)
 
 -- | The family an instance belongs to, for reporting which lemmas fired.
@@ -60,6 +62,8 @@ lemmaFamily = \case
   FracReduce{} -> "fraction reduction"
   CeilDivCancel{} -> "ceilDiv cancellation"
   Telescope{} -> "telescope"
+  DivStep{} -> "dividend step"
+  RemCancel{} -> "remainder cancellation"
 
 -- | Divisions an instance's assertion mentions that are neither in the goal
 -- nor in the saturated set.
@@ -102,6 +106,12 @@ collectLemmas ctx =
      , Lit c2 <- [b], c2 /= 0, c1 `mod` c2 == 0 ]
      -- scaled-product telescoping (the only cross-product lemma)
   <> [ Telescope a b k c | (a, b, k, c) <- telescopes ]
+     -- dividends a literal apart over one divisor, as ceilDiv's (a - 1)/b next to a/b
+  <> nubOrd [ DivStep x k z | (T.Sub x (Lit k), z) <- ctx.acUDivs, k /= 0, (x, z) `elem` ctx.acUDivs ]
+     -- a multiple of the divisor plus less than it, as a ceilDiv(c*q, c) after simplification
+  <> [ RemCancel a r c q
+     | (a@(T.Add (Lit r) m), Lit c) <- ctx.acUDivs, Just (c', q) <- [asConstMul m]
+     , c == c', r < c ]
   where
     telescopes = nubOrd
       [ (a, b, k, c)
@@ -262,6 +272,27 @@ emitLemma enc (Telescope a b k c) = do
       rhs     = "(bvadd" `sp` dStep `sp` coeff <> ")"
   pure [ SMTCommand $ "(assert (=> (and" `sp` mulNoOverflow ae be
          <> " (bvuge" `sp` be `sp` wordAsBV k <> ")) (=" `sp` dFull `sp` rhs <> ")))" ]
+
+-- dividend step (sound, guarded): dividends k apart give quotients at most
+-- ceil(k/z) <= k apart, so with k = 1 a ceilDiv (x - 1)/z + 1 is at least x/z.
+--   z != 0 && x >= k  =>  (x-k)/z <= x/z <= (x-k)/z + k
+-- The sum cannot wrap: (x-k)/z + k <= x.
+emitLemma enc (DivStep x k z) = do
+  xe <- enc x; ze <- enc z; se <- enc (T.Sub x (Lit k))
+  let kbv  = wordAsBV k
+      dx   = udivSMT xe ze
+      ds   = udivSMT se ze
+      grd  = "(and (distinct" `sp` ze `sp` zero <> ") (bvuge" `sp` xe `sp` kbv <> "))"
+  pure [ SMTCommand $ "(assert (=>" `sp` grd `sp` "(bvule" `sp` ds `sp` dx <> ")))"
+       , SMTCommand $ "(assert (=>" `sp` grd `sp` "(bvule" `sp` dx `sp` "(bvadd" `sp` ds `sp` kbv <> "))))" ]
+
+-- remainder cancellation (sound, no-overflow guarded): when c*q + r is exact
+-- and r < c, floor((c*q + r)/c) = q. `a` is the (r + c*q) dividend expr.
+emitLemma enc (RemCancel a r c q) = do
+  ae <- enc a; qe <- enc q
+  let dv  = udivSMT ae (wordAsBV c)
+      bnd = wordAsBV (((maxBound :: W256) - r) `div` c)  -- largest q with c*q + r < 2^256
+  pure [ SMTCommand $ "(assert (=> (bvule" `sp` qe `sp` bnd <> ") (=" `sp` dv `sp` qe <> ")))" ]
 
 -- | Both operand orders of each product, so monotonicity fires regardless of
 -- how the simplifier ordered the operands.
