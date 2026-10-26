@@ -130,6 +130,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes of zero.
 
 ## Changed
+- Checked multiplications by a literal simplify to a bound on the multiplied
+  value, and the overflow checks of multiplications use bounds that hold
+  through comparisons with other bounded values.
+- Constant propagation substitutes any term that the props fix to a constant,
+  not only variables.
 - Invariant tests print the paths they only partially explored grouped by
   source location, as `prove` tests do, instead of printing their expressions.
 - `EVM.SymExec` is split: concrete replay of counterexamples moves to
@@ -197,6 +202,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of simplifying an ITE of them.
 
 ## Fixed
+- Source locations of contracts with immutables are found in Foundry projects.
 - Source locations are right after an incremental `forge build`, whose
   build-infos number the source files independently.
 - `prank` and `startPrank` with a symbolic address, e.g. one picked from a list

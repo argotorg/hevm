@@ -2190,7 +2190,14 @@ simplifyProp prop =
     go (PEq (Lit 0) (Sub a b)) = peq a b
     go (PEq (Lit 0) (Or a b)) = peq (Lit 0) a `PAnd` peq (Lit 0) b
     go (PEq a1 (Add a2 y)) | a1 == a2 = peq (Lit 0) y
+    -- checked multiplication by a literal: (c * x) / c == x exactly when c * x doesn't wrap
+    go (PEq (Div (Mul (Lit c) x) (Lit c')) y) | c == c', c > 0, x == y = PLEq x (Lit (maxLit `Prelude.div` c))
+    go (PEq y (Div (Mul (Lit c) x) (Lit c'))) | c == c', c > 0, x == y = PLEq x (Lit (maxLit `Prelude.div` c))
     go (PEq l r) = peq l r
+
+    -- checked multiplication y * c, i.e. y == 0 || (y * c) / y == c, exactly when it doesn't wrap
+    go (POr a b) | Just g <- mulGuard a b = g
+                 | Just g <- mulGuard b a = g
 
     go (POr (PLEq a1 (Lit b)) (PLEq (Lit c) a2)) | a1 == a2 && c == b+1 = PBool True
 
@@ -2234,6 +2241,15 @@ simplifyProp prop =
 
 
     go p = p
+
+    -- also when c * (b * x) was folded into a * x
+    mulGuard :: Prop -> Prop -> Maybe Prop
+    mulGuard (PEq (Lit c) (Div (Mul (Lit a) x) y)) (PEq (Lit 0) y')
+      | c > 0, y == y', a == c && x == y || folded = Just (PLEq y (Lit (maxLit `Prelude.div` c)))
+      where folded = case y of
+              Mul (Lit b) x' -> x' == x && a == b * c
+              _ -> False
+    mulGuard _ _ = Nothing
 
     onITE :: Expr EWord -> Bool -> Bool -> Prop
     onITE c t f
@@ -2512,12 +2528,16 @@ constPropagate ps =
     -- NOTE: will create PEq (Lit x) (Lit x) if x is a constant
     --       hence we need the fixVals function to add them back in
     substitute :: ConstState -> [Prop] -> [Prop]
-    substitute cs ps2 = map (mapProp (subsGo cs)) ps2
-    subsGo :: ConstState -> Expr a -> Expr a
-    subsGo cs (Var v) = case Map.lookup (Var v) cs.values of
-      Just x -> Lit x
-      Nothing -> Var v
-    subsGo _ x = x
+    substitute cs ps2 = map (mapProp (if all isVar (Map.keys cs.values) then subsVar cs else subsTerm cs)) ps2
+    isVar = \case Var _ -> True; _ -> False
+    subsVar :: ConstState -> Expr a -> Expr a
+    subsVar cs (Var v) = maybe (Var v) Lit (Map.lookup (Var v) cs.values)
+    subsVar _ x = x
+    -- any term known to be constant, e.g. the index @x % n@ a path picked a value for
+    subsTerm :: ConstState -> Expr a -> Expr a
+    subsTerm cs e = case asWordRefl e of
+      Just Refl | Prelude.not (isLitWord e), Just x <- Map.lookup e cs.values -> Lit x
+      _ -> e
 
     -- Collects all the constants in the given props, and sets canBeSat to False if UNSAT.
     -- Repeated until nothing changes: a disequality or disjunction is only checked against
@@ -2754,7 +2774,7 @@ data Bounds = Bounds W256 W256 (Set.Set W256)
 boundedMulChecks :: [Prop] -> [Prop]
 boundedMulChecks ps = map (\p -> if Map.null (propBounds [p]) then go p else p) ps
   where
-    bounds = propBounds ps
+    bounds = chainedBounds ps
     -- top-down, so that a whole guard is matched before its equality
     go = \case
       POr (PEq a b) (PEq (Lit 0) d) | Just (_, d') <- noOverflow a b, d == d' -> PBool True
@@ -2784,7 +2804,7 @@ boundedScaling = go []
   where
     go done [] = reverse done
     go done (p : rest)
-      | getAny (foldProp (Any . isSite) mempty p) = go (mapProp (rewrite (bounds (done <> rest))) p : done) rest
+      | getAny (foldProp (Any . isSite) mempty p) = go (mapProp (rewrite (chainedBounds (done <> rest))) p : done) rest
       | otherwise = go (p : done) rest
     isSite :: Expr a -> Bool
     isSite = \case
@@ -2796,12 +2816,15 @@ boundedScaling = go []
         | a /= 0, b /= 0, g <- gcd a b, g > 1, upperWithBounds bs x <= maxLit `Prelude.div` a
         -> Div (mul (Lit (a `Prelude.div` g)) x) (Lit (b `Prelude.div` g))
       e -> e
-    -- also through t <= u, a few steps deep
-    bounds ps = iterate (\m -> foldl through m (chains ps)) (propBounds ps) !! 3
-    chains ps = [c | p <- ps, c <- case p of
-                                      PLEq t u -> [(t, u, 0)]
-                                      PLT t u -> [(t, u, 1)]
-                                      _ -> []]
+
+-- | 'propBounds', also through @t <= u@, a few steps deep
+chainedBounds :: [Prop] -> Map.Map (Expr EWord) Bounds
+chainedBounds ps = iterate (\m -> foldl through m chains) (propBounds ps) !! 3
+  where
+    chains = [c | p <- ps, c <- case p of
+                                  PLEq t u -> [(t, u, 0)]
+                                  PLT t u -> [(t, u, 1)]
+                                  _ -> []]
     through m (t, u, k)
       | ub <- upperWithBounds m u, ub < maxLit, ub >= k, Prelude.not (isLitWord t)
       = Map.alter (Just . (\(Bounds lb ub' ex) -> Bounds lb (Prelude.min ub' (ub - k)) ex) . fromMaybe (Bounds 0 maxLit mempty)) t m
