@@ -27,6 +27,7 @@ import EVM.Format (hexByteString)
 import EVM.Solidity
 import EVM.Stepper qualified as Stepper
 import EVM.SymExec
+import EVM.CexReplay
 import EVM.Types hiding (Env)
 import EVM.Effects
 

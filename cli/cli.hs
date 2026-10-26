@@ -52,6 +52,8 @@ import EVM.Solidity
 import EVM.Solvers
 import EVM.Stepper qualified
 import EVM.SymExec
+import EVM.CexReplay
+import EVM.Equivalence
 import EVM.Transaction qualified
 import EVM.Types hiding (word, Env, Symbolic)
 import EVM.Types qualified

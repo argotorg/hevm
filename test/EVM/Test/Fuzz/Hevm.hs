@@ -38,6 +38,7 @@ import EVM.Op (intToOpName)
 import EVM.Solvers
 import EVM.Stepper qualified as Stepper
 import EVM.SymExec
+import EVM.CexReplay
 import EVM.Transaction qualified
 import EVM.Types hiding (Env)
 import EVM.Effects
