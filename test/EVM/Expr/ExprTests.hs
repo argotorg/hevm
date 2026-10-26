@@ -2401,7 +2401,12 @@ simplifierFuzzTests cfg = testGroup "SimplifierPropertyTests"
         forAll (genEnvProp p) $ \env -> case evalProp env p of
           Nothing -> property Discard
           Just v -> coverCheckedMul p $ within 20_000_000 $ ioProperty $ do
-            res <- checkSatWith cfg (mapProp (substitute env) p)
+            let concrete = mapProp (substitute env) p
+            first <- checkSatWith cfg concrete
+            -- Z3 can decide concrete arithmetic that times out in Bitwuzla.
+            res <- if isUnknown first
+              then runEnv (Env cfg) $ withSolvers Z3 1 (Just 5) defMemLimit $ \s -> checkSatWithProps s [concrete]
+              else pure first
             pure $ counterexample (show (v, res)) $ if v then isSat res else isQed res
     , testProperty "checked-mul-encoding-symbolic" $ forAll genCheckedMul $ \p ->
         let (same, hidden) = hideCheckedMul p
