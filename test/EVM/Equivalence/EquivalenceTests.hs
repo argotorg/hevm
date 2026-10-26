@@ -39,8 +39,6 @@ import EVM.Solidity (solcRuntime, solidity, yul)
 import EVM.Solidity qualified as Solidity (CodeType(..))
 import EVM.Solvers (withSolvers, defMemLimit, Solver(..))
 import EVM.SymExec
-import EVM.SymExec.Calldata
-import EVM.SymExec.Cex
 import EVM.CexReplay
 import EVM.Equivalence
 

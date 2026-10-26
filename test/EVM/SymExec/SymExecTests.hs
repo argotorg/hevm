@@ -25,8 +25,6 @@ import EVM.SMT qualified as SMT (getVar)
 import EVM.Solidity (solcRuntime)
 import EVM.Solvers (withSolvers, defMemLimit, Solver(..), SolverGroup, checkSatWithProps)
 import EVM.SymExec
-import EVM.SymExec.Calldata
-import EVM.SymExec.Cex
 import EVM.Traversals
 import EVM.Test.Asm (AsmOp(..), asm)
 import EVM.SymExec.ArithTests (arithmeticTests)

@@ -2,7 +2,11 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE DisambiguateRecordFields #-}
 
-module EVM.SymExec where
+module EVM.SymExec
+  ( module EVM.SymExec
+  , module EVM.SymExec.Calldata
+  , module EVM.SymExec.Cex
+  ) where
 
 import Prelude hiding (Foldable(..))
 
@@ -59,7 +63,8 @@ import EVM.Format (formatExpr, formatPartial, formatPartialDetailed, indent, for
 import EVM.Solvers (SolverGroup, checkSatWithProps, checkSatWithPropsAbortable, withRunAbort)
 import EVM.Stepper (Stepper)
 import EVM.Stepper qualified as Stepper
-import EVM.SymExec.Calldata (mkCalldata)
+import EVM.SymExec.Calldata
+import EVM.SymExec.Cex
 import EVM.HashCons qualified as HashCons
 import EVM.Types
 

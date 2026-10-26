@@ -35,7 +35,6 @@ import EVM.Format (formatExpr, formatProp, formatState, formatError)
 import EVM.Progress qualified as Progress
 import EVM.Solvers (SolverGroup, checkSatWithProps)
 import EVM.SymExec
-import EVM.SymExec.Calldata (mkCalldata)
 import EVM.Traversals (mapExpr)
 import EVM.Types
 

@@ -52,8 +52,6 @@ import EVM.Solidity
 import EVM.Solvers
 import EVM.Stepper qualified
 import EVM.SymExec
-import EVM.SymExec.Calldata
-import EVM.SymExec.Cex
 import EVM.CexReplay
 import EVM.Equivalence
 import EVM.Transaction qualified
