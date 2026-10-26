@@ -2005,6 +2005,13 @@ forceConcreteAddr n msg continue = case maybeLitAddrSimp n of
   Just c -> continue c
   where fallback = unexpectedSymArg msg [n]
 
+-- | A symbolic prank address (e.g. picked from an actor list by a symbolic index)
+-- is split into one branch per possible concrete value
+prankAddr :: (?conf :: Config, VMOps t) => Expr EWord -> String -> (Expr EAddr -> EVM t ()) -> EVM t ()
+prankAddr addr msg continue = case wordToAddr addr of
+  Just a -> continue a
+  Nothing -> forceConcreteLimitSz addr 20 msg (continue . LitAddr . truncateToAddr)
+
 forceConcreteAddr2 :: VMOps t => (Expr EAddr, Expr EAddr) -> String -> ((Addr, Addr) -> EVM t ()) -> EVM t ()
 forceConcreteAddr2 (n,m) msg continue = case (maybeLitAddrSimp n, maybeLitAddrSimp m) of
   (Just c, Just d) -> continue (c,d)
@@ -2212,22 +2219,18 @@ cheatActions = Map.fromList
 
   , action "prank(address)" $
       \sig input -> case decodeStaticArgs 0 1 input of
-        [addr]  -> case wordToAddr addr of
-          Just a -> do
-            doStop
-            assign (#state % #overrideCaller) (Just a)
-            assign (#state % #resetCaller) True
-          Nothing -> vmError (BadCheatCode "prank(address), could not decode address provided" sig)
+        [addr]  -> prankAddr addr "prank(address), could not decode address provided" $ \a -> do
+          doStop
+          assign (#state % #overrideCaller) (Just a)
+          assign (#state % #resetCaller) True
         _ -> vmError (BadCheatCode "prank(address) parameter decoding failed" sig)
 
   , action "startPrank(address)" $
       \sig input -> case decodeStaticArgs 0 1 input of
-        [addr]  -> case wordToAddr addr of
-          Just a -> do
-            doStop
-            assign (#state % #overrideCaller) (Just a)
-            assign (#state % #resetCaller) False
-          Nothing -> vmError (BadCheatCode "startPrank(address), could not decode address provided" sig)
+        [addr]  -> prankAddr addr "startPrank(address), could not decode address provided" $ \a -> do
+          doStop
+          assign (#state % #overrideCaller) (Just a)
+          assign (#state % #resetCaller) False
         _ -> vmError (BadCheatCode "startPrank(address) parameter decoding failed" sig)
 
   , action "stopPrank()" $

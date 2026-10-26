@@ -130,6 +130,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes of zero.
 
 ## Changed
+- Invariant tests print the paths they only partially explored grouped by
+  source location, as `prove` tests do, instead of printing their expressions.
 - Concrete ADDMOD and MULMOD are computed with `Integer` instead of `Word512`,
   which is several times faster in code that uses them heavily, such as `mulDiv`.
 - `EVM.SymExec` is split: concrete replay of counterexamples moves to
@@ -197,6 +199,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of simplifying an ITE of them.
 
 ## Fixed
+- `prank` and `startPrank` with a symbolic address, e.g. one picked from a list
+  by a symbolic index, explore each possible address instead of failing.
 - ABI signatures expand tuple components, fixing selectors and event topics for
   struct arguments and preventing struct overloads from being lost.
 - SMT queries skip assumptions between concrete keccak hashes, whose values
