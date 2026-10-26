@@ -7,6 +7,7 @@ module EVM.Invariant
   , Call(..)
   , InvState(..)
   , Senders(..)
+  , Probe(..)
   , StateKey
   , stateKey
   , startCall
@@ -34,7 +35,9 @@ import EVM (loadContract, resetState, pushTrace)
 import EVM.ABI (Sig(..), callSig)
 import EVM.Effects
 import EVM.Fetch qualified as Fetch
-import EVM.SymExec (IterConfig, interpretVMAbortable, runExpr, symCalldataNamed, freezeVM)
+import EVM.Keccak.Preimages qualified as Preimages
+import EVM.Solvers (SolverGroup, checkSatWithProps)
+import EVM.SymExec (IterConfig, Postcondition, interpretVMAbortable, runExpr, symCalldataNamed, freezeVM, extractProps, verifyResult)
 import EVM.Transaction (initTx)
 import EVM.Traversals (foldExpr, foldProp)
 import EVM.Types
@@ -51,6 +54,13 @@ data Call = Call
   , caller :: Expr EAddr
   , calldata :: Expr Buf
   , timestamp :: Expr EWord
+  }
+
+-- | A call that can fail an assertion: the calls up to and including it, from the state before it
+data Probe = Probe
+  { state :: InvState
+  , leaf :: Expr End
+  , cex :: SMTCex
   }
 
 -- | Who may send the calls, from targetSender and excludeSender
@@ -112,12 +122,12 @@ startCall target caller gas entry (cd, props) = do
   pushTrace (EntryTrace entry)
   modify initTx
 
--- | The states after one more call to any of the targets, and the partially
--- explored paths of those calls
+-- | The states after one more call to any of the targets, the partially
+-- explored paths of those calls, and the calls that can fail the postcondition
 nextStates :: App m
-  => Fetch.Fetcher Symbolic m -> IterConfig -> Word64 -> Senders -> [Target] -> InvState
-  -> m ([InvState], [Expr End])
-nextStates fetcher iterConf gas senders targets st = do
+  => SolverGroup -> Postcondition -> Fetch.Fetcher Symbolic m -> IterConfig -> Word64 -> Senders -> [Target] -> InvState
+  -> m ([InvState], [Expr End], [Probe])
+nextStates solvers post fetcher iterConf gas senders targets st = do
   results <- forM targets $ \target -> do
     let Sig _ types = target.sig
         -- each call of a sequence needs its own variables, and they are on one path
@@ -142,7 +152,16 @@ nextStates fetcher iterConf gas senders targets st = do
       Success {} -> do
         frozen <- liftIO $ stToIO $ freezeVM endVm
         pure $ Just $ Left InvState { vm = frozen, calls = st.calls <> [call] }
-      Partial {} -> pure $ Just $ Right leaf
+      Partial {} -> pure $ Just $ Right (Left leaf)
+      Failure {} -> case post vm leaf of
+        PBool True -> pure Nothing
+        p -> do
+          res <- checkSatWithProps solvers (PNeg p : extractProps leaf <> Preimages.recordedProps vm.keccakPreImgs)
+          pure $ case snd (verifyResult vm (res, leaf)) of
+            Cex (l, cex) -> Just $ Right $ Right Probe { state = st { calls = st.calls <> [call] }, leaf = l, cex }
+            _ -> Nothing
       _ -> pure Nothing
-    pure $ partitionEithers (catMaybes leaves)
-  pure (concatMap fst results, concatMap snd results)
+    let (states, others) = partitionEithers (catMaybes leaves)
+        (partials, probes) = partitionEithers others
+    pure (states, partials, probes)
+  pure (concatMap (\(a, _, _) -> a) results, concatMap (\(_, b, _) -> b) results, concatMap (\(_, _, c) -> c) results)

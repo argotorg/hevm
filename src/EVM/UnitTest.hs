@@ -215,16 +215,18 @@ validateCex uTestOpts fetcher vm0 cexAddrs repCex = do
     putStrLn $ "vm res: " <> show res
     putStrLn $ "vm res: " <> show vm3.result
   let shouldFail = "proveFail" `isPrefixOf` repCex.testName
-  let ret = case res of
-              Left err -> case err of
-                (UnrecognizedOpcode 0xfe) -> True
-                (Revert (ConcreteBuf msg)) ->
-                   msg == panicMsg 0x01 ||
-                     let sel = selector "Error(string)"
-                     in (sel `BS.isPrefixOf` msg) && ("assertion failed" `BS.isPrefixOf` (BS.drop (4+32+32) msg))
-                _ -> False
-              Right _ -> utoConc.checkFailBit && (dsTestFailedConc vm3.env.contracts)
-  pure (ret /= shouldFail, res)
+  pure (assertionFailedConc utoConc.checkFailBit res vm3.env.contracts /= shouldFail, res)
+
+-- | Whether a concrete run failed an assertion
+assertionFailedConc :: Bool -> Either EvmError (Expr Buf) -> Map (Expr EAddr) Contract -> Bool
+assertionFailedConc checkFailBit res contracts = case res of
+  Left (UnrecognizedOpcode 0xfe) -> True
+  Left (Revert (ConcreteBuf msg)) ->
+    msg == panicMsg 0x01 ||
+      let sel = selector "Error(string)"
+      in (sel `BS.isPrefixOf` msg) && ("assertion failed" `BS.isPrefixOf` (BS.drop (4+32+32) msg))
+  Left _ -> False
+  Right _ -> checkFailBit && dsTestFailedConc contracts
 
 -- Returns tuple of (No Cex, No warnings)
 runUnitTestContract
@@ -383,7 +385,7 @@ symRun opts@UnitTestOptions{..} vm (nth, numTests) sig@(Sig testName types) sour
             Just (cexEnd, smtCex) -> do
               failsToRepro <- getReproFailure (Sig testName types) (fst cd) smtCex
               validation <- traverse (validateCex opts fetcherConc vm smtCex.addrs) failsToRepro
-              txtFail <- symFailure opts testName (fst cd) types [] (cexEnd, smtCex, validation)
+              txtFail <- symFailure opts testName (Just (fst cd, types)) [] (cexEnd, smtCex, validation)
               liftIO $ printOut txtFail
 
 -- | What a test must satisfy at the end of each path: no failed assertion,
@@ -459,11 +461,12 @@ getReproFailure sig@(Sig testName _) cd cex = do
     Left err -> Left err
     Right fullCD -> Right $ ReproducibleCex { testName = testName, callData = fullCD}) bs
 
+-- | Without calldata, the failure is in the last of the calls shown before
 symFailure :: App m =>
-  UnitTestOptions -> Text -> Expr Buf -> [AbiType] -> [Text] ->
+  UnitTestOptions -> Text -> Maybe (Expr Buf, [AbiType]) -> [Text] ->
   (Expr End, SMTCex, Err (Bool, Either EvmError (Expr Buf))) ->
   m Text
-symFailure UnitTestOptions {..} testName cd types before failure = do
+symFailure UnitTestOptions {..} testName calldata before failure = do
   conf <- readConfig
   pure $ mconcat [ indentLines 3 $ mkMsg conf failure ]
   where
@@ -475,10 +478,10 @@ symFailure UnitTestOptions {..} testName cd types before failure = do
           let ?context = dappContext (traceContext res)
           in Text.pack $ prettyvmresult res
       mkMsg conf (leaf, cex, repro) = intercalate "\n" $
-        (["Counterexample:   " <> reproToText repro] <> before <>
+        ([maybe "Assertion failure in a call:   " (const "Counterexample:   ") calldata <> reproToText repro] <> before <>
         ["  calldata: " <> let ?context = dappContext (traceContext leaf)
-                           in prettyCalldata cex cd testName types
-        ,"  result:   " <> showRes (replayed leaf repro)
+                           in prettyCalldata cex cd testName types | Just (cd, types) <- [calldata]] <>
+        ["  result:   " <> showRes (replayed leaf repro)
         ]) <> verbText conf leaf
       -- symbolic assertions render their operands as expressions, the replay has the values
       replayed leaf = \case
@@ -715,6 +718,8 @@ data InvariantContext = InvariantContext
   -- | the states reached so far, a state reached again is not explored again
   , visited :: IORef (Set StateKey)
   , partials :: IORef [Expr End]
+  -- | the first call found to fail an assertion, of each target function
+  , probes :: IORef [Probe]
   }
 
 invariantContext :: App m => UnitTestOptions -> VM Concrete -> SolcContract -> SourceCache -> m InvariantContext
@@ -735,8 +740,8 @@ invariantContext opts vm testContract sourceCache = do
       targetAddrs = List.nub (picked <> map fst selected)
       targetsOf a = case Map.lookup (LitAddr a) vm.env.contracts >>= sourceOf of
         Nothing -> Left $ "no source for target contract " <> Text.pack (show a)
-        Just c -> Right
-          [ (Target { addr = LitAddr a, contractName = Text.takeWhileEnd (/= ':') c.contractName, sig = mkSig m }
+        Just (c, name) -> Right
+          [ (Target { addr = LitAddr a, contractName = name, sig = mkSig m }
             , all (symAbiArgSupported . snd) m.inputs)
           | m <- Map.elems c.abiMap
           -- as in Foundry, excludeSelector is ignored for a contract with targetSelector
@@ -757,7 +762,8 @@ invariantContext opts vm testContract sourceCache = do
   levels <- liftIO $ newIORef [[start]]
   visited <- liftIO $ newIORef (Set.singleton (stateKey start.vm))
   partials <- liftIO $ newIORef []
-  pure InvariantContext { setupVm = vm, targets, skipped, senders, levels, visited, partials }
+  probes <- liftIO $ newIORef []
+  pure InvariantContext { setupVm = vm, targets, skipped, senders, levels, visited, partials, probes }
   where
     getter sig ty
       | Map.notMember (abiKeccak (encodeUtf8 sig)) testContract.abiMap = pure Nothing
@@ -780,7 +786,20 @@ invariantContext opts vm testContract sourceCache = do
       _ -> []
     selectorsType = AbiArrayDynamicType (AbiTupleType (V.fromList [AbiAddressType, AbiArrayDynamicType (AbiBytesType 4)]))
     -- an account without code has the code hash of every interface
-    sourceOf c = mfilter (not . BS.null . (.runtimeCode)) (findSrc c opts.dapp)
+    sourceOf c = case cloneOf c of
+      Just impl -> do
+        (src, name) <- Map.lookup (LitAddr impl) vm.env.contracts >>= sourceOf
+        pure (src, name <> "(clone)")
+      Nothing -> (\src -> (src, Text.takeWhileEnd (/= ':') src.contractName))
+        <$> mfilter (not . BS.null . (.runtimeCode)) (findSrc c opts.dapp)
+    -- an EIP-1167 minimal proxy, which has the functions of the contract it delegates to
+    cloneOf c = case c.code of
+      RuntimeCode (ConcreteRuntimeCode bs)
+        | BS.length bs == 45
+        , BS.take 10 bs == BS.pack "\x36\x3d\x3d\x37\x3d\x3d\x3d\x36\x3d\x73"
+        , BS.drop 30 bs == BS.pack "\x5a\xf4\x3d\x82\x80\x3e\x90\x3d\x91\x60\x2b\x57\xfd\x5b\xf3"
+        -> Just $ truncateToAddr (word (BS.take 20 (BS.drop 10 bs)))
+      _ -> Nothing
     reserved name = any (`isPrefixOf` name) ["test", "prove", "check", "invariant_", "setUp", "afterInvariant"]
 
 -- | The states reached by exactly @d@ calls, computed once per test contract
@@ -792,8 +811,9 @@ invariantLevel opts ctx targets d = do
     [] -> do
       prev <- invariantLevel opts ctx targets (d - 1)
       let fetcher = Fetch.oracle opts.solvers (Just opts.sess) opts.rpcInfo
-      results <- mapM (nextStates fetcher (makeVeriOpts opts).iterConf opts.testParams.gasCall ctx.senders targets) prev
-      let reached = concatMap fst results
+      results <- mapM (nextStates opts.solvers (testPostcondition opts.checkFailBit False) fetcher
+        (makeVeriOpts opts).iterConf opts.testParams.gasCall ctx.senders targets) prev
+      let reached = concatMap (\(a, _, _) -> a) results
       states <- liftIO $ filterM (\st -> atomicModifyIORef' ctx.visited $ \seen ->
         let k = stateKey st.vm in if Set.member k seen then (seen, False) else (Set.insert k seen, True)) reached
       conf <- readConfig
@@ -801,8 +821,16 @@ invariantLevel opts ctx targets d = do
         <> show (length states) <> " new, " <> show (length reached - length states) <> " seen before"
       liftIO $ do
         modifyIORef ctx.levels (<> [states])
-        modifyIORef ctx.partials (<> concatMap snd results)
+        modifyIORef ctx.partials (<> concatMap (\(_, b, _) -> b) results)
+        modifyIORef ctx.probes $ \found -> foldl' (\ps p -> if any (sameFunction p) ps then ps else ps <> [p]) found
+          (concatMap (\(_, _, c) -> c) results)
       pure states
+
+sameFunction :: Probe -> Probe -> Bool
+sameFunction a b = case (lastCall a, lastCall b) of
+  (Just x, Just y) -> x.target.addr == y.target.addr && callSig x.target.sig == callSig y.target.sig
+  _ -> False
+  where lastCall p = listToMaybe (reverse p.state.calls)
 
 -- | Checks an invariant in every state reached by at most 'invariantDepth' calls
 -- Returns tuple of (No Cex, No warnings)
@@ -816,43 +844,49 @@ invariantRun opts ctx (nth, numTests) sig@(Sig testName types) = do
       pure (True, False)
     Right targets -> do
       (cdBuf, cdProps, caveats) <- symCalldata cs types [] (AbstractBuf "txdata")
-      let check :: InvState -> m (Bool, Maybe (InvState, Expr End, SMTCex))
+      let check :: InvState -> m ([Text], Maybe (InvState, Expr End, SMTCex))
           check st = do
             vm <- liftIO $ stToIO $ execStateT (startCall opts.testParams.address opts.testParams.caller opts.testParams.gasCall testName (cdBuf, cdProps)) st.vm
             let fetcher = Fetch.oracle opts.solvers (Just opts.sess) opts.rpcInfo
             (ends, results) <- verify opts.solvers fetcher (makeVeriOpts opts) vm (testPostcondition opts.checkFailBit False) Nothing
-            let warn = any Expr.isPartial ends || any isUnknown results || any isError results
-            pure (warn, (\(leaf, cex) -> (st, leaf, cex)) <$> listToMaybe (mapMaybe extractCex results))
-          go d warned
-            | d > opts.invariantDepth = pure (Nothing, warned)
+            let issues = [formatPartial p | Partial _ _ p <- ends]
+                  <> [Text.pack (getUnknownStr u) | Unknown u <- results] <> [Text.pack e | Error e <- results]
+            pure (issues, (\(leaf, cex) -> (st, leaf, cex)) <$> listToMaybe (mapMaybe extractCex results))
+          go d issues
+            | d > opts.invariantDepth = pure (Nothing, issues)
             | otherwise = do
                 states <- invariantLevel opts ctx targets d
-                let firstCex w [] = go (d + 1) w
-                    firstCex w (st:rest) = check st >>= \case
-                      (w', Just c) -> pure (Just c, w || w')
-                      (w', Nothing) -> firstCex (w || w') rest
-                firstCex warned states
-      (found, warned) <- Progress.withPhase "test" ["test" JSON..= cs] (const []) $ do
+                let firstCex is [] = go (d + 1) is
+                    firstCex is (st:rest) = check st >>= \case
+                      (is', Just c) -> pure (Just c, is <> is')
+                      (is', Nothing) -> firstCex (is <> is') rest
+                firstCex issues states
+      (found, issues) <- Progress.withPhase "test" ["test" JSON..= cs] (const []) $ do
         Progress.phaseTotal numTests
         Progress.phaseAt nth
-        go 0 False
+        go 0 []
       framePartials <- liftIO $ readIORef ctx.partials
+      probes <- filter (\p -> length p.state.calls <= opts.invariantDepth) <$> liftIO (readIORef ctx.probes)
+      forM_ probes $ \p -> do
+        validation <- validateProbe opts ctx p
+        txt <- symFailure opts testName Nothing (callLines p.cex p.state.calls) (p.leaf, p.cex, validation)
+        liftIO $ opts.printOut txt
       numStates <- liftIO $ sum . map length . take (opts.invariantDepth + 1) <$> readIORef ctx.levels
-      let incomplete = warned || not (null framePartials) || not (null ctx.skipped)
+      let incomplete = not (null issues) || not (null framePartials) || not (null ctx.skipped)
       case found of
+        Nothing | not (null probes) -> liftIO $ opts.printOut $ "   \x1b[31m[FAIL]\x1b[0m " <> testName <> "\n"
         Just (st, leaf, cex) -> do
           validation <- validateInvariantCex opts ctx st cex sig cdBuf
-          let seqLines = zipWith (<>) ("  calls:    " : repeat "            ") $ flip map st.calls $ \call ->
-                let Sig _ argTypes = call.target.sig
-                    from = maybe "" (\a -> " from " <> Text.pack (show a)) (Map.lookup call.caller cex.addrs)
-                in call.target.contractName <> "." <> prettyCalldata cex call.calldata (callSig call.target.sig) argTypes <> from
-          txt <- symFailure opts testName cdBuf types seqLines (leaf, cex, validation)
+          txt <- symFailure opts testName (Just (cdBuf, types)) (callLines cex st.calls) (leaf, cex, validation)
           liftIO $ opts.printOut $ txt <> "   \x1b[31m[FAIL]\x1b[0m " <> testName <> "\n"
         Nothing -> liftIO $ opts.printOut $
           (if incomplete then "   \x1b[31m[FAIL]\x1b[0m " else "   \x1b[32m[PASS]\x1b[0m ")
           <> testName <> " (" <> Text.pack (show numStates) <> " states, up to "
           <> Text.pack (show opts.invariantDepth) <> " calls deep)\n"
       liftIO $ do
+        unless (null issues) $ opts.printOut $
+          indentLines 3 "\x1b[33m[WARNING]\x1b[0m some checks of the invariant were inconclusive:"
+          <> Text.unlines (List.nub [indentLines 5 ("- " <> i) | i <- issues])
         unless (null framePartials) $ opts.printOut $
           indentLines 3 "\x1b[33m[WARNING]\x1b[0m the calls before the invariant were only partially explored:"
           <> Text.unlines (List.nub [indentLines 5 ("- " <> formatPartial p) | Partial _ _ p <- framePartials])
@@ -860,36 +894,63 @@ invariantRun opts ctx (nth, numTests) sig@(Sig testName types) = do
           indentLines 3 "\x1b[33m[WARNING]\x1b[0m these functions were not called, their arguments cannot be symbolic:"
           <> Text.unlines [indentLines 5 ("- " <> f) | f <- ctx.skipped]
         printCaveats opts.printOut caveats
-      pure (isNothing found, not (incomplete || not (null caveats)))
+      pure (isNothing found && null probes, not (incomplete || not (null caveats)))
+
+-- | Shows the calls of a counterexample, with their callers when they matter
+callLines :: SMTCex -> [Call] -> [Text]
+callLines cex calls = zipWith (<>) ("  calls:    " : repeat "            ") $ flip map calls $ \call ->
+  let Sig _ argTypes = call.target.sig
+      from = maybe "" (\a -> " from " <> Text.pack (show a)) (Map.lookup call.caller cex.addrs)
+  in call.target.contractName <> "." <> prettyCalldata cex call.calldata (callSig call.target.sig) argTypes <> from
+
+-- | Runs one call of a counterexample concretely
+replayCall :: App m => UnitTestOptions -> SMTCex -> VM Concrete -> Call -> m (Err (VM Concrete, Either EvmError (Expr Buf)))
+replayCall opts cex vm call = calldataFromCex cex call.calldata call.target.sig >>= \case
+  Left e -> pure $ Left e
+  Right bs -> do
+    let fetcher = Fetch.oracle opts.solvers (Just opts.sess) opts.rpcInfo
+        time = maybe vm.block.timestamp Lit $ case call.timestamp of
+          v@(Var _) -> Map.lookup v cex.vars
+          _ -> Nothing
+    (res, vm') <- Stepper.interpret fetcher (vm & set (#block % #timestamp) time) $ do
+      Stepper.evm $ startCall call.target.addr (concreteAddr cex call.caller) opts.testParams.gasCall
+        (callSig call.target.sig) (ConcreteBuf bs, [])
+      res <- Stepper.execFully
+      (res,) <$> Stepper.evm get
+    pure $ Right (vm', res)
+
+concreteAddr :: SMTCex -> Expr EAddr -> Expr EAddr
+concreteAddr cex = \case
+  a@(SymAddr _) -> LitAddr $ Map.findWithDefault 0xdeadbeef a cex.addrs
+  a -> a
+
+-- | The state after the given calls of a counterexample, run concretely after setUp()
+replayCalls :: App m => UnitTestOptions -> InvariantContext -> SMTCex -> [Call] -> m (Err (VM Concrete))
+replayCalls opts ctx cex calls = foldM replay (Right vm0) (zip [1 :: Int ..] calls)
+  where
+    vm0 = ctx.setupVm & set (#tx % #origin) (concreteAddr cex opts.testParams.origin)
+    replay (Left e) _ = pure (Left e)
+    replay (Right vm) (i, call) = replayCall opts cex vm call <&> \case
+      Right (vm', Right _) -> Right vm'
+      Right _ -> Left $ "call " <> show i <> " failed in the concrete replay"
+      Left e -> Left e
 
 -- | Replays the calls of a counterexample concretely, then checks the invariant
 validateInvariantCex :: App m
   => UnitTestOptions -> InvariantContext -> InvState -> SMTCex -> Sig -> Expr Buf
   -> m (Err (Bool, Either EvmError (Expr Buf)))
-validateInvariantCex opts ctx st cex sig cd = do
-  let fetcher = Fetch.oracle opts.solvers (Just opts.sess) opts.rpcInfo
-      concAddr a = case a of
-        SymAddr _ -> LitAddr $ Map.findWithDefault 0xdeadbeef a cex.addrs
-        _ -> a
-      vm0 = ctx.setupVm & set (#tx % #origin) (concAddr opts.testParams.origin)
-      replay (Left e) _ = pure (Left e)
-      replay (Right vm) (i, call) = calldataFromCex cex call.calldata call.target.sig >>= \case
-        Left e -> pure $ Left e
-        Right bs -> do
-          let time = maybe vm.block.timestamp Lit $ case call.timestamp of
-                v@(Var _) -> Map.lookup v cex.vars
-                _ -> Nothing
-          vm' <- Stepper.interpret fetcher (vm & set (#block % #timestamp) time) $ do
-            Stepper.evm $ startCall call.target.addr (concAddr call.caller) opts.testParams.gasCall
-              (callSig call.target.sig) (ConcreteBuf bs, [])
-            void Stepper.execFully
-            Stepper.evm get
-          pure $ case vm'.result of
-            Just (VMSuccess _) -> Right vm'
-            _ -> Left $ "call " <> show (i :: Int) <> " failed in the concrete replay"
-  after <- foldM replay (Right vm0) (zip [1..] st.calls)
-  case after of
+validateInvariantCex opts ctx st cex sig cd = replayCalls opts ctx cex st.calls >>= \case
+  Left e -> pure $ Left e
+  Right vm -> do
+    let fetcher = Fetch.oracle opts.solvers (Just opts.sess) opts.rpcInfo
+    repro <- getReproFailure sig cd cex
+    traverse (validateCex opts fetcher vm cex.addrs) repro
+
+-- | Replays the calls of a probe concretely, the last one must fail an assertion
+validateProbe :: App m => UnitTestOptions -> InvariantContext -> Probe -> m (Err (Bool, Either EvmError (Expr Buf)))
+validateProbe opts ctx p = case reverse p.state.calls of
+  [] -> pure $ Left "no calls"
+  (lastCall:before) -> replayCalls opts ctx p.cex (reverse before) >>= \case
     Left e -> pure $ Left e
-    Right vm -> do
-      repro <- getReproFailure sig cd cex
-      traverse (validateCex opts fetcher vm cex.addrs) repro
+    Right vm -> replayCall opts p.cex vm lastCall <&> fmap (\(vm', res) ->
+      (assertionFailedConc opts.checkFailBit res vm'.env.contracts, res))

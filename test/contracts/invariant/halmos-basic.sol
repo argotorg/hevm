@@ -3,7 +3,7 @@ pragma solidity >=0.8.0 <0.9.0;
 
 import "forge-std/Test.sol";
 
-// from halmos: tests/regression/test/Invariant.t.sol, TStore.t.sol
+// from halmos: tests/regression/test/Invariant.t.sol, TStore.t.sol, with Clones.clone inlined
 
 contract C {
     uint public num;
@@ -28,6 +28,33 @@ contract InvariantTest is Test {
     }
 
     function invariant_2() public {
+        assert(c.num() != 3);
+    }
+}
+
+// OpenZeppelin's Clones.clone (v5), an EIP-1167 minimal proxy
+function clone(address implementation) returns (address instance) {
+    assembly {
+        mstore(0x00, or(shr(0xe8, shl(0x60, implementation)), 0x3d602d80600a3d3981f3363d3d373d3d3d363d73000000))
+        mstore(0x20, or(shl(0x78, implementation), 0x5af43d82803e903d91602b57fd5bf3))
+        instance := create(0, 0x09, 0x37)
+    }
+    require(instance != address(0));
+}
+
+contract InvariantProxyTest is Test {
+    C impl = new C();
+    C c;
+
+    function setUp() public {
+        c = C(clone(address(impl)));
+    }
+
+    function invariant_proxy_1() public {
+        console.log(c.num());
+    }
+
+    function invariant_proxy_2() public {
         assert(c.num() != 3);
     }
 }

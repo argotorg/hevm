@@ -203,7 +203,11 @@ symCalldataNamed prefix exact sig typesignature concreteArgs base = do
         Dynamic -> DyConc enc
     chunks32 bs = if BS.null bs then [] else let (h, t) = BS.splitAt 32 bs in h : chunks32 t
     calldatas = zipWith3 mkArg typesignature args [1..]
-    (cdBuf, props) = combineFragments calldatas base
+    -- with an exact, concrete length, calldatasize is concrete too
+    base' = case (exact, cdLen calldatas) of
+      (True, Lit n) -> ConcreteBuf (BS.replicate (unsafeInto n) 0)
+      _ -> base
+    (cdBuf, props) = combineFragments calldatas base'
     withSelector = writeSelector cdBuf sig
     sizeConstraints
       | exact = Expr.bufLength withSelector .== cdLen calldatas
