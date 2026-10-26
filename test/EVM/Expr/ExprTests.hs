@@ -83,7 +83,7 @@ rewriteRuleTests = testGroup "Rewrite rules"
       assertEqual "prop: a bool is at most 1" [] (Expr.simplifyProps [PLEq (Eq x (Lit 3)) (Lit 1)])
       assertEqual "prop: wider than a byte" [PBool False] (Expr.simplifyProps [PEq (Lit 0x1ff) (And (Lit 0xff) x)])
       let cd = ReadWord (Lit 0x24) (AbstractBuf "calldata")
-      assertEqual "prop: both sides of a branch" [PBool False]
+      assertEqual "prop: a disequality before its equality" [PBool False]
         (Expr.simplifyProps [PNeg (PEq (Lit 0) cd), PLEq (BufLength (AbstractBuf "calldata")) (Lit 0x80), PEq (Lit 0) cd])
   , testProperty "odd-inverse" $ \(k :: W256) -> let o = k .|. 1 in o * Expr.oddInverse o === 1
   , testCase "injective-cancellation" $ do

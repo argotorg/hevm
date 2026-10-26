@@ -2248,9 +2248,7 @@ flattenProps (a:ax) = case a of
 remRedundantProps :: [Prop] -> [Prop]
 remRedundantProps p = nubOrd $ collapseFalse . filter (\x -> x /= PBool True) $ p
   where
-    collapseFalse ps = if isJust (find (== PBool False) ps) || complementary ps then [PBool False] else ps
-    -- p and its negation, e.g. both sides of a branch taken on one path
-    complementary ps = let set = Set.fromList ps in any (\case PNeg x -> Set.member x set; _ -> False) ps
+    collapseFalse ps = if isJust $ find (== PBool False) ps then [PBool False] else ps
 
 
 -- ** Conversions ** -------------------------------------------------------------------------------
@@ -2475,7 +2473,7 @@ data ConstState = ConstState
   , upperBounds :: Map.Map (Expr EWord) W256
   , canBeSat :: Bool
   }
-  deriving (Show)
+  deriving (Show, Eq)
 
 -- | Performs constant propagation
 constPropagate :: [Prop] -> [Prop]
@@ -2499,8 +2497,12 @@ constPropagate ps =
       Nothing -> Var v
     subsGo _ x = x
 
-    -- Collects all the constants in the given props, and sets canBeSat to False if UNSAT
-    collectConsts ps2 startState = execState (mapM go ps2) startState
+    -- Collects all the constants in the given props, and sets canBeSat to False if UNSAT.
+    -- Repeated until nothing changes: a disequality or disjunction is only checked against
+    -- what is known when it is visited, which may come from a later prop.
+    collectConsts ps2 startState =
+      let next = execState (mapM go ps2) startState
+      in if Prelude.not next.canBeSat || next == startState then next else collectConsts ps2 next
     emptyState = ConstState mempty mempty mempty True
     conflictState = ConstState mempty mempty mempty False
     conflict = put conflictState
