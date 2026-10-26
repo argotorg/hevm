@@ -4,6 +4,7 @@ module EVM.Solvers.SolverTests (tests, hangingSolverFlag, hangingSolverMain, ran
 
 import GHC.TypeLits
 import Control.Concurrent (forkIO, threadDelay, ThreadId, myThreadId)
+import GHC.Conc (getNumProcessors)
 import Control.Concurrent.STM (atomically, newTVarIO, readTVarIO, writeTVar)
 import Control.Monad
 import System.Environment (getExecutablePath)
@@ -59,7 +60,13 @@ import EVM.Test.Helpers
 
 tests :: [TestTree]
 tests =
-  [ testGroup "SMT-encoding"
+  [ testCase "default-solver-count" $ do
+      cores <- fromIntegral <$> getNumProcessors
+      n <- defaultSolverCount defMemLimit
+      assertBool "at least one, at most one per core" (n >= 1 && n <= cores)
+      huge <- defaultSolverCount (10 ^ (9 :: Int))
+      assertEqual "a limit beyond the memory still leaves one" 1 huge
+  , testGroup "SMT-encoding"
   [ testProperty "collapse-matches-writeByte-within-length" $ \(baseByte, NonNegative sz, ws) ->
       let base = W256 (fromIntegral (sz `mod` 200 :: Int))
           writes = [(W256 (fromIntegral (pos `mod` 300 :: Int)), b) | (NonNegative pos, b) <- take 20 ws]

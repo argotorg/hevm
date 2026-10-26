@@ -136,6 +136,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes of zero.
 
 ## Changed
+- The default number of solvers is at most half of the available memory divided
+  by `--smt-memory`, so that the solvers running at once fit in memory.
 - Invariant tests print the paths they only partially explored grouped by
   source location, as `prove` tests do, instead of printing their expressions.
 - Concrete ADDMOD and MULMOD are computed with `Integer` instead of `Word512`,
