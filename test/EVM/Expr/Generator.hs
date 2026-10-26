@@ -488,6 +488,32 @@ instance Arbitrary GenWriteStorageExpr where
     store <- mkStore
     pure $ GenWriteStorageExpr (slot, store)
 
+-- | A read and a write chain whose keys come from one small pool of literal and symbolic
+-- slots, so that symbolic writes block the read above writes that cannot alias it or are
+-- overwritten higher up
+newtype GenAliasingLoad = GenAliasingLoad (Expr EWord, Expr Storage)
+  deriving (Show, Eq)
+
+instance Arbitrary GenAliasingLoad where
+  arbitrary = do
+    let key = elements
+          [ Lit 1, Lit 2, Lit 3, Var "a", Var "b", Add (Lit 1) (Var "a")
+          , Expr.MappingSlot (BS.replicate 64 0) (Var "a"), Expr.MappingSlot (BS.replicate 64 0) (Lit 1) ]
+        val = oneof [genLit 4, elements [Var "c", Var "d"]]
+    base <- oneof
+      [ pure $ AbstractStore (SymAddr "") Nothing
+      , ConcreteStore . Map.fromList <$> listOf ((,) <$> elements [1, 2, 3] <*> (fromIntegral <$> choose (0, 3 :: Int)))
+      ]
+    n <- choose (1, 8 :: Int)
+    writes <- vectorOf n ((,) <$> key <*> val)
+    slot <- key
+    pure $ GenAliasingLoad (slot, foldr (\(k, v) s -> SStore k v s) base writes)
+  shrink (GenAliasingLoad (slot, s)) = [GenAliasingLoad (slot, s') | s' <- dropOne s]
+    where
+      dropOne :: Expr Storage -> [Expr Storage]
+      dropOne (SStore k v prev) = prev : [SStore k v p | p <- dropOne prev]
+      dropOne _ = []
+
 -- WriteWordBuf
 newtype WriteWordBuf = WriteWordBuf (Expr Buf)
   deriving (Show, Eq)
