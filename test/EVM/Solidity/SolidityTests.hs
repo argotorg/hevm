@@ -37,6 +37,7 @@ import EVM.Effects
 import EVM.Expr (maybeLitByteSimp)
 
 import EVM.Test.Helpers
+import EVM.Test.Asm (AsmOp(..), asm)
 
 tests :: [TestTree]
 tests =
@@ -633,6 +634,40 @@ tests =
           let exprSimp = map Expr.simplify paths
           assertBoolM "expected partial execution" (any isPartial exprSimp)
     ]
+  , testGroup "Unresolved link detection"
+    [ testCase "holes-detected" $
+        assertBool "linker hole not detected" (containsLinkerHole "608060405273__$f3cbc3eb14e5bd0705af404abcf6f741ec$__63ab5c1ffe")
+    , testCase "no-false-positives" $
+        assertBool "false positive" (not $ containsLinkerHole "0x6080604052348015600f57600080fd5b50")
+    , testCase "hole-of-the-wrong-length" $
+        assertBool "false positive" (not $ containsLinkerHole "73__$f3cbc3eb14e5bd0705af404abcf6f741e$__")
+    ]
+
+  , testGroup "metadata stripper" $
+    [ testCase ("strips-" <> name) $ do
+        let code = asm [I (OpPush (Lit 1)), I OpPop, I OpStop] <> hex "fe"
+        assertEqual "failed to strip metadata" code (stripBytecodeMetadata (code <> meta))
+    | (name, meta) <-
+      [ ("bzzr0-solc-0.5.8", hex "a165627a7a72305820" <> metadataHash 32 <> hex "0029")
+      , ("bzzr0-solc-0.5.9", hex "a265627a7a72305820" <> metadataHash 32 <> solcVersion "000509" <> hex "0032")
+      , ("bzzr1-solc-0.5.11", hex "a265627a7a72315820" <> metadataHash 32 <> solcVersion "00050b" <> hex "0032")
+      , ("ipfs-solc-0.6.0", hex "a264697066735822" <> metadataHash 34 <> solcVersion "000606" <> hex "0033")
+      ]
+    ] ++
+    [ testCase "strips-metadata-before-constructor-args" $ do
+        let srccode =
+              [i|
+                contract A {
+                  uint y;
+                  constructor(uint x) public {
+                    y = x;
+                  }
+                }
+                |]
+
+        Just initCode <- solidity "A" srccode
+        assertEqual "constructor args screwed up metadata stripping" (stripBytecodeMetadata (initCode <> encodeAbiValue (AbiUInt 256 1))) (stripBytecodeMetadata initCode)
+    ]
   ]
   where
     (===>) = assertSolidityComputation
@@ -761,3 +796,10 @@ expectedConcVals nm val = case val of
   _ -> internalError $ "unsupported Abi type " <> show nm <> " val: " <> show val <> " val type: " <> showAlter val
   where
     mkWord = word . encodeAbiValue
+
+-- | Stands in for the swarm or ipfs hash in solc's CBOR metadata
+metadataHash :: Int -> ByteString
+metadataHash n = BS.replicate n 0xab
+
+solcVersion :: ByteString -> ByteString
+solcVersion v = hex ("64736f6c6343" <> v)

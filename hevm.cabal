@@ -331,7 +331,7 @@ test-suite test
     EVM.Debugger.DebuggerFuzz
     EVM.Debugger.ProgressTests
     EVM.Test.Helpers
-    EVM.Basic.BasicTests
+    EVM.Encoding.EncodingTests
     EVM.Solidity.SolidityTests
     EVM.SymExec.ArithTests
     EVM.SymExec.LoopTests
