@@ -1295,7 +1295,7 @@ End State:
 the <code>assert</code> tested for. Notice that the panic exception is of type <code>01</code>, which
 is what's expected for an <a href="https://docs.soliditylang.org/en/latest/control-structures.html"><code>assert</code> failure in
 solidity</a>.</p>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="worked-example-finding-the-truebit-exploit"><a class="header" href="#worked-example-finding-the-truebit-exploit">Worked Example: Finding the Truebit Exploit</a></h1>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="example-truebit-exploit"><a class="header" href="#example-truebit-exploit">Example: Truebit Exploit</a></h1>
 <p>On 8 January 2026 an attacker drained 8535 ETH (about $26.6M) from Truebit's
 token purchase contract in a single transaction. This page shows how hevm
 finds that exploit on its own, given only the deployed bytecode and a property
@@ -1442,7 +1442,7 @@ the contract's state is different, and the RPC cache is not used.</li>
 each solver query and how long it took, and <code>--dump-unsolved DIR</code> saves the
 queries the solver could not answer as SMT2 files.</li>
 </ul>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="worked-example-finding-the-abracadabra-cook-exploit"><a class="header" href="#worked-example-finding-the-abracadabra-cook-exploit">Worked Example: Finding the Abracadabra <code>cook()</code> Exploit</a></h1>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="example-abracadabra-cook-exploit"><a class="header" href="#example-abracadabra-cook-exploit">Example: Abracadabra <code>cook()</code> Exploit</a></h1>
 <p>On 4 October 2025 an attacker borrowed about 1.79 million MIM (about $1.8M)
 from six Abracadabra lending markets ("cauldrons") without putting up any
 collateral. This page shows how a developer could have found that bug with
