@@ -32,6 +32,8 @@ import EVM.Solidity
 import EVM.Solvers
 import EVM.Stepper qualified as Stepper
 import EVM.SymExec
+import EVM.SymExec.Calldata
+import EVM.SymExec.Cex
 import EVM.Types hiding (Env)
 import EVM.Effects
 import EVM.Expr (maybeLitByteSimp)

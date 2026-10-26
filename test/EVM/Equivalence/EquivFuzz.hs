@@ -38,6 +38,10 @@ import EVM.Solvers (withSolvers, defMemLimit, Solver(..), SolverGroup)
 import EVM.Stepper (Stepper)
 import EVM.Stepper qualified as Stepper
 import EVM.SymExec
+import EVM.SymExec.Calldata
+import EVM.SymExec.Cex
+import EVM.CexReplay
+import EVM.Equivalence
 import EVM.Types
 
 tests :: TestTree

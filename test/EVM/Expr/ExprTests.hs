@@ -37,7 +37,7 @@ import EVM.Format (hexText)
 import EVM.SMT (AbstractQuery(..), SMT2(..), SMTScript(..), assertPropsAbstract, checkedMul)
 import EVM.Solvers hiding (checkSat)
 import EVM.Solvers qualified as Solvers (checkSat)
-import EVM.SymExec (subModel)
+import EVM.SymExec.Cex (subModel)
 import EVM.Traversals (foldExpr, foldProp, mapExpr, mapExprM, mapProp)
 import EVM.Types hiding (Env)
 

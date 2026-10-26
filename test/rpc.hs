@@ -20,6 +20,7 @@ import EVM.SMT
 import EVM.Solvers
 import EVM.Stepper qualified as Stepper
 import EVM.SymExec
+import EVM.SymExec.Calldata
 import EVM.Test.Utils
 import EVM.Types hiding (BlockNumber, Env)
 import Control.Monad.ST (stToIO)

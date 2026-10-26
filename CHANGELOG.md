@@ -128,6 +128,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes of zero.
 
 ## Changed
+- `EVM.SymExec` is split: symbolic calldata moves to `EVM.SymExec.Calldata`,
+  counterexample models and printing to `EVM.SymExec.Cex`, concrete replay of
+  counterexamples to `EVM.CexReplay`, and equivalence checking to `EVM.Equivalence`.
 - A storage read blocked by a write to a symbolic slot drops the writes below it that
   cannot alias the slot read, or are overwritten by a later write to the same slot.
 - `hevm test` and `hevm symbolic` stop at the first counterexample, cancelling the
