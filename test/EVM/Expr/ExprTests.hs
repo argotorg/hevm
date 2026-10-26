@@ -259,6 +259,16 @@ storageTests = testGroup "Storage tests"
     , testCase "read-past-write" $ assertEqual errorMsg
         (Lit 0xab)
         (Expr.readStorage' (Lit 0x0) (SStore (Lit 0x1) (Var "b") (ConcreteStore $ Map.fromList [(0x0, 0xab)])))
+    , testCase "read-drops-shadowed-writes" $ assertEqual errorMsg
+        (SLoad (Var "x") (SStore (Var "a") (Lit 4) (SStore (Var "b") (Var "c") (AbstractStore (LitAddr 0x0) Nothing))))
+        (Expr.readStorage' (Var "x")
+          (SStore (Var "a") (Lit 4) (SStore (Var "b") (Var "c") (SStore (Var "a") (Lit 0)
+            (AbstractStore (LitAddr 0x0) Nothing)))))
+    , testCase "read-drops-distinct-writes-below-blocking-write" $ assertEqual errorMsg
+        (SLoad (Lit 0x3) (SStore (Var "a") (Lit 4) (AbstractStore (LitAddr 0x0) Nothing)))
+        (Expr.readStorage' (Lit 0x3)
+          (SStore (Var "a") (Lit 4) (SStore (Lit 0x1) (Var "c") (SStore (Var "a") (Lit 0)
+            (SStore (Lit 0x1) (Var "b") (AbstractStore (LitAddr 0x0) Nothing))))))
     -- #1082: an empty ConcreteStore is total, so a symbolic slot reads 0
     , testCase "read-symbolic-slot-empty-concrete-store" $ assertEqual errorMsg
         (Lit 0)
@@ -2432,6 +2442,20 @@ simplifierFuzzTests cfg = testGroup "SimplifierPropertyTests"
         let simplified = Expr.readStorage' slot store
             full = SLoad slot store
         proveEquivExprWith cfg full simplified
+    , testProperty "readStorage-pruned-equivalence" $ \(GenAliasingLoad (slot, store)) -> ioProperty $ do
+        let simplified = Expr.readStorage' slot store
+            writes :: Expr Storage -> Int
+            writes (SStore _ _ p) = 1 + writes p
+            writes _ = 0
+            from :: Expr EWord -> Expr EWord -> Expr Storage -> Expr Storage
+            from k v s@(SStore k' v' p) = if k == k' && v == v' then s else from k v p
+            from _ _ s = s
+            kind = case simplified of
+              SLoad _ s@(SStore k v _) | writes s < writes (from k v store) -> "pruned"
+              SLoad _ _ -> "blocked, not pruned"
+              _ -> "read through"
+        cover 20 (kind == "pruned") "pruned" . tabulate "result" [kind]
+          <$> proveEquivExprWith cfg (SLoad slot store) simplified
     , testProperty "writeStorage-equivalance" $ \(val, GenWriteStorageExpr (slot, store)) -> ioProperty $ do
         let simplified = Expr.writeStorage slot val store
             full = SStore slot val store

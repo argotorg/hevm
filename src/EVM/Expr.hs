@@ -1171,6 +1171,8 @@ filterStoreByReadSlot preMap slot (ConcreteStore m)
       in ConcreteStore (Map.filterWithKey (\k _ -> keep k) m)
 filterStoreByReadSlot _ _ st = st
 
+data Aliasing = SameSlot | DistinctSlot | MayAlias
+
 -- | Reads the word at the given slot from the given storage expression.
 --
 -- Note that we return a Nothing instead of a 0x0 if we are reading from a
@@ -1179,12 +1181,8 @@ filterStoreByReadSlot _ _ st = st
 -- storage lookups much easier. If the store is backed by an AbstractStore we
 -- always return a symbolic value.
 --
--- This does not strip writes that cannot possibly match a read, in case there are
--- some write(s) in between that it cannot statically determine to be removable, because
--- it will early-abort. So (load idx1 (store idx1 (store idx1 (store idx0)))) will not strip
--- the idx0 store, in case things in between cannot be stripped. See simplify-storage-map-todo
--- test for an example where this happens. Note that decomposition solves this, though late in
--- the simplification lifecycle (just before SMT generation, which can be too late)
+-- When a write blocks the read, the writes below it that cannot alias the slot, or are
+-- overwritten by a write above them, are dropped from the returned SLoad.
 readStorage :: Expr EWord -> Expr Storage -> Maybe (Expr EWord)
 readStorage w st = go (simplifyNoLitToKeccak w) (simplifyNoLitToKeccak st)
   where
@@ -1193,79 +1191,93 @@ readStorage w st = go (simplifyNoLitToKeccak w) (simplifyNoLitToKeccak st)
     go slot s@(AbstractStore _ _) = Just $ SLoad slot s
     go slot (ConcreteStore s) | Just l <- concreteSlot slot = Lit <$> Map.lookup l s
     go slot store@(ConcreteStore _) = Just $ SLoad slot store
-    go slot s@(SStore prevSlot val prev) = case (prevSlot, slot) of
+    go slot (SStore prevSlot val prev) = case aliasing prevSlot slot of
+      SameSlot -> Just val
+      DistinctSlot -> go slot prev
+      -- the writes below that cannot alias are dropped, they only make the term bigger
+      MayAlias -> Just $ SLoad slot (dropShadowedWrites (SStore prevSlot val (dropDistinct slot prev)))
+
+    dropDistinct :: Expr EWord -> Expr Storage -> Expr Storage
+    dropDistinct slot (SStore k v prev)
+      | DistinctSlot <- aliasing k slot = dropDistinct slot prev
+      | otherwise = SStore k v (dropDistinct slot prev)
+    dropDistinct _ s = s
+
+    -- whether a write to the first slot is seen by a read of the second
+    aliasing :: Expr EWord -> Expr EWord -> Aliasing
+    aliasing prevSlot slot = case (prevSlot, slot) of
       -- if address and slot match then we return the val in this write
-      _ | prevSlot == slot -> Just val
+      _ | prevSlot == slot -> SameSlot
       -- distinct literal slots never alias; skip the simplifier-backed checks below
-      (Lit _, Lit _) -> go slot prev
+      (Lit _, Lit _) -> DistinctSlot
       (a, b) | Just x <- concreteSlot a, Just y <- concreteSlot b ->
-        if x == y then Just val else go slot prev
-      -- Distinct keccaks are at least 256 apart under keccakAssumptions.
+        if x == y then SameSlot else DistinctSlot
+      -- DistinctSlot keccaks are at least 256 apart under keccakAssumptions.
       (keccakBase -> Just a, keccakBase -> Just b)
-        | keccakInputsDiffer a b -> go slot prev
-      (a, b) | surelyEqual a b -> Just val
-      (a, b) | surelyNotEqual a b -> go slot prev
+        | keccakInputsDiffer a b -> DistinctSlot
+      (a, b) | surelyEqual a b -> SameSlot
+      (a, b) | surelyNotEqual a b -> DistinctSlot
 
       -- slot is for a map + map -> skip write
-      (MappingSlot idA _, MappingSlot idB _)       | isMap' idB, isMap' idA, idsDontMatch idA idB  -> go slot prev
-      (MappingSlot idA keyA, MappingSlot idB keyB) | isMap' idB, isMap' idA, surelyNotEqual keyA keyB -> go slot prev
+      (MappingSlot idA _, MappingSlot idB _)       | isMap' idB, isMap' idA, idsDontMatch idA idB  -> DistinctSlot
+      (MappingSlot idA keyA, MappingSlot idB keyB) | isMap' idB, isMap' idA, surelyNotEqual keyA keyB -> DistinctSlot
 
       -- special case of array + map -> skip write
-      (ArraySlotWithOffs idA _, Keccak k)          | isMap k, isArray idA -> go slot prev
-      (ArraySlotWithOffs2 idA _ _, Keccak k)       | isMap k, isArray idA -> go slot prev
-      (ArraySlotZero idA, Keccak k)                | isMap k, isArray idA -> go slot prev
+      (ArraySlotWithOffs idA _, Keccak k)          | isMap k, isArray idA -> DistinctSlot
+      (ArraySlotWithOffs2 idA _ _, Keccak k)       | isMap k, isArray idA -> DistinctSlot
+      (ArraySlotZero idA, Keccak k)                | isMap k, isArray idA -> DistinctSlot
 
       -- special case of map + array -> skip write
-      (Keccak k, ArraySlotWithOffs idA _)          | isMap k, isArray idA -> go slot prev
-      (Keccak k, ArraySlotWithOffs2 idA _ _)       | isMap k, isArray idA -> go slot prev
-      (ArraySlotWithOffs idA _, Keccak k)          | isMap k, isArray idA -> go slot prev
-      (ArraySlotWithOffs2 idA _ _, Keccak k)       | isMap k, isArray idA -> go slot prev
+      (Keccak k, ArraySlotWithOffs idA _)          | isMap k, isArray idA -> DistinctSlot
+      (Keccak k, ArraySlotWithOffs2 idA _ _)       | isMap k, isArray idA -> DistinctSlot
+      (ArraySlotWithOffs idA _, Keccak k)          | isMap k, isArray idA -> DistinctSlot
+      (ArraySlotWithOffs2 idA _ _, Keccak k)       | isMap k, isArray idA -> DistinctSlot
 
       -- Fixed SMALL value will never match Keccak (well, it might, but that's VERY low chance)
-      (Lit a, Keccak _) | a < 256 -> go slot prev
-      (Keccak _, Lit a) | a < 256 -> go slot prev
+      (Lit a, Keccak _) | a < 256 -> DistinctSlot
+      (Keccak _, Lit a) | a < 256 -> DistinctSlot
 
       -- the chance of adding a value <= 2^32 to any given keccack output
       -- leading to an overflow is effectively zero. the chance of an overflow
       -- occurring here is 2^32/2^256 = 2^-224, which is close enough to zero
       -- for our purposes. This lets us completely simplify reads from write
       -- chains involving writes to arrays at literal offsets.
-      (Lit a, Add (Lit b) (Keccak _)) | a < 256, b < maxW32 -> go slot prev
-      (Add (Lit a) (Keccak _) ,Lit b) | b < 256, a < maxW32 -> go slot prev
+      (Lit a, Add (Lit b) (Keccak _)) | a < 256, b < maxW32 -> DistinctSlot
+      (Add (Lit a) (Keccak _) ,Lit b) | b < 256, a < maxW32 -> DistinctSlot
 
       -- Finding two Keccaks that are < 256 away from each other should be VERY hard
       -- This simplification allows us to deal with maps of structs
-      (Add (Lit a2) (Keccak _), Add (Lit b2) (Keccak _)) | a2 /= b2, (if a2 > b2 then a2 - b2 else b2 - a2) < 256 -> go slot prev
-      (Add (Lit a2) (Keccak _), (Keccak _)) | a2 > 0, a2 < 256 -> go slot prev
-      ((Keccak _), Add (Lit b2) (Keccak _)) | b2 > 0, b2 < 256 -> go slot prev
+      (Add (Lit a2) (Keccak _), Add (Lit b2) (Keccak _)) | a2 /= b2, (if a2 > b2 then a2 - b2 else b2 - a2) < 256 -> DistinctSlot
+      (Add (Lit a2) (Keccak _), (Keccak _)) | a2 > 0, a2 < 256 -> DistinctSlot
+      ((Keccak _), Add (Lit b2) (Keccak _)) | b2 > 0, b2 < 256 -> DistinctSlot
 
       -- zero offs vs zero offs
-      (ArraySlotZero idA, ArraySlotZero idB)                   | isArray idA, isArray idB, idA /= idB -> go slot prev
+      (ArraySlotZero idA, ArraySlotZero idB)                   | isArray idA, isArray idB, idA /= idB -> DistinctSlot
 
       -- zero offs vs non-zero offs
-      (ArraySlotZero idA, ArraySlotWithOffs idB _)             | isArray idA, isArray idB, idA /= idB -> go slot prev
-      (ArraySlotZero idA, ArraySlotWithOffs idB (Lit offB))    | isArray idA, idA == idB, offB /= 0  -> go slot prev
-      (ArraySlotZero idA, ArraySlotWithOffs2 idB _ _)          | isArray idA, isArray idB, idA /= idB -> go slot prev
+      (ArraySlotZero idA, ArraySlotWithOffs idB _)             | isArray idA, isArray idB, idA /= idB -> DistinctSlot
+      (ArraySlotZero idA, ArraySlotWithOffs idB (Lit offB))    | isArray idA, idA == idB, offB /= 0  -> DistinctSlot
+      (ArraySlotZero idA, ArraySlotWithOffs2 idB _ _)          | isArray idA, isArray idB, idA /= idB -> DistinctSlot
 
       -- non-zero offs vs zero offs
-      (ArraySlotWithOffs idA _, ArraySlotZero idB)             | isArray idA, isArray idB, idA /= idB -> go slot prev
-      (ArraySlotWithOffs idA (Lit offA), ArraySlotZero idB)    | isArray idA, idA == idB, offA /= 0  -> go slot prev
+      (ArraySlotWithOffs idA _, ArraySlotZero idB)             | isArray idA, isArray idB, idA /= idB -> DistinctSlot
+      (ArraySlotWithOffs idA (Lit offA), ArraySlotZero idB)    | isArray idA, idA == idB, offA /= 0  -> DistinctSlot
 
       -- non-zero offs vs non-zero offs, different ids
-      (ArraySlotWithOffs idA _, ArraySlotWithOffs idB _)       | isArray idA, isArray idB, idA /= idB -> go slot prev
+      (ArraySlotWithOffs idA _, ArraySlotWithOffs idB _)       | isArray idA, isArray idB, idA /= idB -> DistinctSlot
 
       -- non-zero offs vs non-zero offs, same ids
       (ArraySlotWithOffs idA a, ArraySlotWithOffs idB b)                       | isArray idA, idA == idB,
-        surelyNotEqual a b -> go slot prev
+        surelyNotEqual a b -> DistinctSlot
       (ArraySlotWithOffs idB offB2, ArraySlotWithOffs2 idA offA1 offA2)        | isArray idA, idA == idB,
-        surelyNotEqual (Add (Lit offA1) offA2) offB2 -> go slot prev
+        surelyNotEqual (Add (Lit offA1) offA2) offB2 -> DistinctSlot
       (ArraySlotWithOffs2 idA offA1 offA2, ArraySlotWithOffs idB offB2)        | isArray idA, idA == idB,
-        surelyNotEqual (Add (Lit offA1) offA2) offB2 -> go slot prev
+        surelyNotEqual (Add (Lit offA1) offA2) offB2 -> DistinctSlot
       (ArraySlotWithOffs2 idA offA1 offA2, ArraySlotWithOffs2 idB offB1 offB2) | isArray idA, idA == idB,
-        surelyNotEqual (Add (Lit offA1) offA2) (Add (Lit offB1) offB2) -> go slot prev
+        surelyNotEqual (Add (Lit offA1) offA2) (Add (Lit offB1) offB2) -> DistinctSlot
 
-      -- we are unable to determine statically whether or not we can safely move deeper in the write chain, so return an abstract term
-      _ -> Just $ SLoad slot s
+      -- we are unable to determine statically whether the read can see the write
+      _ -> MayAlias
 
     -- Evaluate known slots without changing the symbolic preimages used below.
     concreteSlot :: Expr EWord -> Maybe W256
@@ -1306,6 +1318,16 @@ readStorage w st = go (simplifyNoLitToKeccak w) (simplifyNoLitToKeccak st)
     surelyEqual :: Expr EWord -> Expr EWord -> Bool
     surelyEqual a b = simplifyNoLitToKeccak (Sub a b) == Lit 0
 
+
+-- | Drops writes overwritten by a write to the same key above them, whatever lies in between
+dropShadowedWrites :: Expr Storage -> Expr Storage
+dropShadowedWrites = go Set.empty
+  where
+    go :: Set.Set (Expr EWord) -> Expr Storage -> Expr Storage
+    go seen (SStore k v prev)
+      | k `Set.member` seen = go seen prev
+      | otherwise = SStore k v (go (Set.insert k seen) prev)
+    go _ s = s
 
 -- storage slots for maps are determined by (keccak (bytes32(key) ++ bytes32(id)))
 pattern MappingSlot :: ByteString -> Expr EWord -> Expr EWord
