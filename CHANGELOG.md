@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- Invariant testing: `hevm test` checks `invariant_` functions after every
+  sequence of at most `--invariant-depth` calls to the target contracts, with
+  symbolic arguments, callers and timestamps. States reached before are not
+  explored again. Assertion failures in the calls fail the test, and minimal
+  proxies (EIP-1167 clones) can be targets.
 - A worked example in the docs: finding the Abracadabra `cook()` exploit on a mainnet fork.
 - `--smt-branch-timeout`, 20 seconds by default, for the queries that decide which
   branches to explore.

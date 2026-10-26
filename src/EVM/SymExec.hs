@@ -163,6 +163,15 @@ symAbiArg maxDynSize name = \case
     dyn lenName = let len = Var lenName
                   in Dy [PLEq len (Lit (fromIntegral maxDynSize))] len
 
+-- | Whether 'symAbiArg' can make an argument of this type symbolic
+symAbiArgSupported :: AbiType -> Bool
+symAbiArgSupported = \case
+  AbiArrayType _ t -> symAbiArgSupported t
+  AbiTupleType ts -> all symAbiArgSupported ts
+  AbiArrayDynamicType _ -> False
+  AbiFunctionType -> False
+  _ -> True
+
 data CalldataFragment
   = St [Prop] (Expr EWord)
   | Dy [Prop] (Expr EWord) -- ^ props, symbolic length
@@ -175,12 +184,18 @@ data CalldataFragment
 -- Any argument given as "<symbolic>" or omitted at the tail of the list are
 -- kept symbolic.
 symCalldata :: App m => Text -> [AbiType] -> [String] -> Expr Buf -> m (Expr Buf, [Prop], [Caveat])
-symCalldata sig typesignature concreteArgs base = do
+symCalldata = symCalldataNamed "" False
+
+-- | Like 'symCalldata', with the argument variables' names prefixed, so that
+-- the calldata of several calls on one path do not share variables, and
+-- optionally without trailing bytes after the arguments
+symCalldataNamed :: App m => Text -> Bool -> Text -> [AbiType] -> [String] -> Expr Buf -> m (Expr Buf, [Prop], [Caveat])
+symCalldataNamed prefix exact sig typesignature concreteArgs base = do
   conf <- readConfig
   let
     args = concreteArgs <> replicate (length typesignature - length concreteArgs) "<symbolic>"
     mkArg :: AbiType -> String -> Int -> CalldataFragment
-    mkArg typ "<symbolic>" n = symAbiArg conf.maxDynSize (T.pack $ "arg" <> show n) typ
+    mkArg typ "<symbolic>" n = symAbiArg conf.maxDynSize (prefix <> T.pack ("arg" <> show n)) typ
     mkArg typ arg _ =
       let enc = encodeAbiValue (makeAbiValue typ arg)
       in case abiKind typ of
@@ -188,11 +203,16 @@ symCalldata sig typesignature concreteArgs base = do
         Dynamic -> DyConc enc
     chunks32 bs = if BS.null bs then [] else let (h, t) = BS.splitAt 32 bs in h : chunks32 t
     calldatas = zipWith3 mkArg typesignature args [1..]
-    (cdBuf, props) = combineFragments calldatas base
+    -- with an exact, concrete length, calldatasize is concrete too
+    base' = case (exact, cdLen calldatas) of
+      (True, Lit n) -> ConcreteBuf (BS.replicate (unsafeInto n) 0)
+      _ -> base
+    (cdBuf, props) = combineFragments calldatas base'
     withSelector = writeSelector cdBuf sig
     sizeConstraints
-      = (Expr.bufLength withSelector .>= cdLen calldatas)
-      .&& (Expr.bufLength withSelector .< (Lit (2 ^ conf.maxBufSize)))
+      | exact = Expr.bufLength withSelector .== cdLen calldatas
+      | otherwise = (Expr.bufLength withSelector .>= cdLen calldatas)
+          .&& (Expr.bufLength withSelector .< (Lit (2 ^ conf.maxBufSize)))
     -- A dynamic (bytes/string) argument is turned into a 'Dy' fragment with its
     -- length bounded to maxDynSize. That is a restriction of the input domain
     -- (every path is still explored fully), so we record it as a program-wide
@@ -354,6 +374,9 @@ freezeVM vm = do
 
 type PathHandler m a = Expr End -> TVar Bool -> m a
 
+-- | Like 'PathHandler', also given the VM the path ended in
+type VMPathHandler m a = Expr End -> VM Symbolic -> TVar Bool -> m a
+
 data InterpTask m a = InterpTask
   {fetcher :: Fetch.Fetcher Symbolic m
   , iterConf :: IterConfig
@@ -361,13 +384,14 @@ data InterpTask m a = InterpTask
   , taskQ :: Chan (InterpTask m a)
   , numTasks :: TVar Natural
   , stepper :: Stepper Symbolic (Expr End)
-  , handler :: PathHandler m a
+  , handler :: VMPathHandler m a
   , shouldAbort :: TVar Bool
   }
 
 data Process m a = Process
   { result :: Expr End
-  , handler :: PathHandler m a
+  , vm :: VM Symbolic
+  , handler :: VMPathHandler m a
   }
 
 -- returns back the input path/branch of the program
@@ -394,7 +418,19 @@ interpretAbortable :: forall m a . App m
   -> Stepper Symbolic (Expr End)
   -> PathHandler m a
   -> m [a]
-interpretAbortable runFlag fetcher iterConf vm stepper handler = do
+interpretAbortable runFlag fetcher iterConf vm stepper handler =
+  interpretVMAbortable runFlag fetcher iterConf vm stepper (\leaf _ -> handler leaf)
+
+-- | Like 'interpretAbortable', the handler also gets the VM each path ended in
+interpretVMAbortable :: forall m a . App m
+  => TVar Bool
+  -> Fetch.Fetcher Symbolic m
+  -> IterConfig
+  -> VM Symbolic
+  -> Stepper Symbolic (Expr End)
+  -> VMPathHandler m a
+  -> m [a]
+interpretVMAbortable runFlag fetcher iterConf vm stepper handler = do
   conf <- readConfig
   -- the flag is process-wide and outlives this exploration
   liftIO $ do HashCons.setHashConsEnabled conf.hashConsExplore
@@ -490,7 +526,7 @@ interpretAbortable runFlag fetcher iterConf vm stepper handler = do
     -- process one task
     processOne :: App m => Process m a -> TVar Bool -> Chan () -> TChan a -> TVar Natural -> TVar Natural -> TMVar () -> m ()
     processOne task shouldAbort avail resChan numProcs numTasks allProcessDone = do
-      processed <- task.handler task.result shouldAbort
+      processed <- task.handler task.result task.vm shouldAbort
       liftIO . atomically $ writeTChan resChan processed
 
       -- Return instance to pool immediately after processing
@@ -517,7 +553,7 @@ getOneExpr :: forall m a . App m
   -> TVar Natural
   -> m ()
 getOneExpr task availableInstances processQ numTasks numProcs = do
-  out <- interpretInternal task
+  (out, endVm) <- interpretInternal task
   Progress.clearWorker
   Progress.pathDone (isPartial out)
   Progress.emit "path-end" $ case out of
@@ -527,7 +563,7 @@ getOneExpr task availableInstances processQ numTasks numProcs = do
     _ -> ["leaf" .= T.take 200 (T.pack (show out))]
 
   -- Enqueue for processing
-  let process = Process { result = out, handler = task.handler }
+  let process = Process { result = out, vm = endVm, handler = task.handler }
   liftIO . atomically $ modifyTVar numProcs (+1)
 
   -- Return instance to pool & decrement tasks
@@ -539,18 +575,18 @@ getOneExpr task availableInstances processQ numTasks numProcs = do
   liftIO $ writeChan processQ process
 
 -- | Symbolic interpreter that explores all paths. Returns an
--- '[Expr End]' representing the possible execution leafs.
+-- '[Expr End]' representing the possible execution leafs, each with the VM it ended in.
 interpretInternal :: forall m a . App m
   => InterpTask m a
-  -> m (Expr End)
+  -> m (Expr End, VM Symbolic)
 interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
   where
-  eval :: Operational.ProgramView (Stepper.Action Symbolic) (Expr End) -> m (Expr End)
-  eval (Operational.Return x) = pure x
+  eval :: Operational.ProgramView (Stepper.Action Symbolic) (Expr End) -> m (Expr End, VM Symbolic)
+  eval (Operational.Return x) = pure (x, vm)
   eval (action Operational.:>>= k) = liftIO (readTVarIO shouldAbort) >>= \case
-    True -> pure $ Partial vm.constraints (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) (Aborted vm.state.pc vm.state.contract)
+    True -> pure (Partial vm.constraints (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) (Aborted vm.state.pc vm.state.contract), vm)
     False -> step action k
-  step :: Stepper.Action Symbolic r -> (r -> Stepper Symbolic (Expr End)) -> m (Expr End)
+  step :: Stepper.Action Symbolic r -> (r -> Stepper Symbolic (Expr End)) -> m (Expr End, VM Symbolic)
   step action k = do
     Progress.setWorker
       [ "pc" .= vm.state.pc
@@ -575,7 +611,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
         let newDepth = vm.exploreDepth+1
         runOne frozen newDepth vals
         where
-          runOne :: App m => VM 'Symbolic -> Int -> [Expr EWord] -> m (Expr End)
+          runOne :: App m => VM 'Symbolic -> Int -> [Expr EWord] -> m (Expr End, VM Symbolic)
           runOne frozen newDepth [v] = do
             conf <- readConfig
             (ra, vma) <- liftIO $ stToIO $ runStateT (continue v) frozen { result = Nothing, exploreDepth = newDepth }
@@ -624,7 +660,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
                 case (maxIterationsReached vm iterConf.maxConcreteIter, isLoopHead iterConf.loopHeuristic vm) of
                   -- Yes. return a partial leaf
                   (Just _, Just True) ->
-                    pure $ Partial vm.constraints (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) $ MaxIterationsReached vm.state.pc vm.state.contract
+                    pure (Partial vm.constraints (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) $ MaxIterationsReached vm.state.pc vm.state.contract, vm)
                   -- No. keep executing
                   _ -> do
                     (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case (c > 0))) vm

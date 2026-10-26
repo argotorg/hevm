@@ -24,6 +24,7 @@ import Control.Monad.IO.Unlift
 import Control.Monad.Catch (MonadMask)
 import EVM.Effects
 import Control.Monad (unless)
+import Data.Bifunctor (first)
 import Data.IORef
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -56,7 +57,16 @@ runForgeTestCustom testFile methodFilter timeout maxIter ffiAllowed rpcinfo = do
 runForgeTestResultsCustom
   :: (MonadMask m, App m)
   => FilePath -> TestMethodFilter -> Maybe Natural -> Maybe Integer -> Bool -> RpcInfo -> m (WithOutput [(Bool, Bool)])
-runForgeTestResultsCustom testFile methodFilter timeout maxIter ffiAllowed rpcinfo = do
+runForgeTestResultsCustom testFile methodFilter timeout maxIter ffiAllowed rpcinfo =
+  first (map snd) <$> runForgeTestResultsWith id testFile methodFilter timeout maxIter ffiAllowed rpcinfo
+
+-- | Like 'runForgeTestResultsCustom', with the options changed by the given
+-- function, each result with its contract and test name
+runForgeTestResultsWith
+  :: (MonadMask m, App m)
+  => (UnitTestOptions -> UnitTestOptions) -> FilePath -> TestMethodFilter -> Maybe Natural -> Maybe Integer -> Bool -> RpcInfo
+  -> m (WithOutput [((Text, Text), (Bool, Bool))])
+runForgeTestResultsWith modOpts testFile methodFilter timeout maxIter ffiAllowed rpcinfo = do
   withSystemTempDirectory "dapp-test" $ \root -> do
     compileWithForge root testFile >>= \case
       Left e -> liftIO $ do
@@ -68,7 +78,7 @@ runForgeTestResultsCustom testFile methodFilter timeout maxIter ffiAllowed rpcin
         let printOut t = atomicModifyIORef' outRef (\ts -> (t:ts, ()))
         results <- withSolvers Bitwuzla 3 timeout defMemLimit $ \solvers -> do
           opts <- testOpts solvers root (Just buildOut) methodFilter maxIter ffiAllowed rpcinfo printOut
-          unitTestResults opts buildOut
+          unitTestResultsNamed (modOpts opts) buildOut
         out <- liftIO $ readIORef outRef
         pure (results, T.concat (reverse out))
 
@@ -104,6 +114,7 @@ testOpts solvers root buildOutput methodFilter maxIter allowFFI rpcinfo printOut
     , checkFailBit = True
     , loopHeuristic = SymExec.StackBased
     , printOut = printOut
+    , invariantDepth = 2
     }
 
 processFailedException :: String -> String -> [String] -> Int -> IO a

@@ -225,6 +225,7 @@ data TestOptions = TestOptions
   , match         ::Maybe Text
   , prefix        ::Text
   , ffi           ::Bool
+  , invariantDepth ::Int
   }
 
 testOptions :: Parser TestOptions
@@ -235,6 +236,7 @@ testOptions = TestOptions
   <*> (optional $ strOption $ long "match" <> help "Test case filter - only run methods matching regex")
   <*> (strOption $ long "prefix"  <> showDefault <> value "prove" <> help "Prefix for test cases to prove")
   <*> (switch $ long "ffi" <> help "Allow the usage of the hevm.ffi() cheatcode (WARNING: this allows test authors to execute arbitrary code on your machine)")
+  <*> (option auto $ long "invariant-depth" <> showDefault <> value 2 <> help "Check invariant_ tests in every state reached by at most this many calls to the target contracts")
 
 data EqOptions = EqOptions
   { codeA         ::Maybe ByteString
@@ -972,13 +974,15 @@ unitTestOptions testOpts cOpts solvers sess buildOutput = do
     , maxConcreteIter = parseMaxIters cOpts.maxConcreteIterations
     , askSmtIters = cOpts.askSmtIterations
     , smtTimeout = Just cOpts.smtTimeout
-    , methodFilter = \(TestMethodInfo _ (Sig name _)) -> testOpts.prefix `T.isPrefixOf` name && maybe True (\match -> regexMatches match name) testOpts.match
+    , methodFilter = \(TestMethodInfo _ (Sig name _)) -> (testOpts.prefix `T.isPrefixOf` name || "invariant_" `T.isPrefixOf` name)
+        && maybe True (\match -> regexMatches match name) testOpts.match
     , testParams = params
     , dapp = srcInfo
     , ffiAllowed = testOpts.ffi
     , checkFailBit = True
     , loopHeuristic = cOpts.loopDetectionHeuristic
     , printOut = Progress.printOut
+    , invariantDepth = testOpts.invariantDepth
     }
 parseInitialStorage :: InitialStorage -> BaseState
 parseInitialStorage Empty = EmptyBase
