@@ -128,6 +128,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes of zero.
 
 ## Changed
+- Invariant tests print the paths they only partially explored grouped by
+  source location, as `prove` tests do, instead of printing their expressions.
 - `EVM.SymExec` is split: concrete replay of counterexamples moves to
   `EVM.CexReplay`, and equivalence checking to `EVM.Equivalence`. Symbolic
   calldata (`EVM.SymExec.Calldata`) and counterexample models and printing
@@ -193,6 +195,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of simplifying an ITE of them.
 
 ## Fixed
+- `prank` and `startPrank` with a symbolic address, e.g. one picked from a list
+  by a symbolic index, explore each possible address instead of failing.
 - SMT queries skip assumptions between concrete keccak hashes, whose values
   are already known, avoiding unnecessary quadratic growth.
 - Constant propagation checks disequalities and disjunctions against the

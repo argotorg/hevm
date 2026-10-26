@@ -851,7 +851,7 @@ invariantRun opts ctx (nth, numTests) sig@(Sig testName types) = do
             vm <- liftIO $ stToIO $ execStateT (startCall opts.testParams.address opts.testParams.caller opts.testParams.gasCall testName (cdBuf, cdProps)) st.vm
             let fetcher = Fetch.oracle opts.solvers (Just opts.sess) opts.rpcInfo
             (ends, results) <- verify opts.solvers fetcher (makeVeriOpts opts) vm (testPostcondition opts.checkFailBit False) Nothing
-            let issues = [formatPartial p | Partial _ _ p <- ends]
+            let issues = [Text.pack str | (_, str) <- groupPartials vm.srcLookup vm.env.contracts ends]
                   <> [Text.pack (getUnknownStr u) | Unknown u <- results] <> [Text.pack e | Error e <- results]
             pure (issues, (\(leaf, cex) -> (st, leaf, cex)) <$> listToMaybe (mapMaybe extractCex results))
           go d issues
@@ -891,7 +891,8 @@ invariantRun opts ctx (nth, numTests) sig@(Sig testName types) = do
           <> Text.unlines (List.nub [indentLines 5 ("- " <> i) | i <- issues])
         unless (null framePartials) $ opts.printOut $
           indentLines 3 "\x1b[33m[WARNING]\x1b[0m the calls before the invariant were only partially explored:"
-          <> Text.unlines (List.nub [indentLines 5 ("- " <> formatPartial p) | Partial _ _ p <- framePartials])
+          <> Text.unlines [indentLines 5 ("- " <> Text.pack (show num) <> "x -> " <> Text.pack str)
+                          | (num, str) <- groupPartials ctx.setupVm.srcLookup ctx.setupVm.env.contracts framePartials]
         unless (null ctx.skipped) $ opts.printOut $
           indentLines 3 "\x1b[33m[WARNING]\x1b[0m these functions were not called, their arguments cannot be symbolic:"
           <> Text.unlines [indentLines 5 ("- " <> f) | f <- ctx.skipped]

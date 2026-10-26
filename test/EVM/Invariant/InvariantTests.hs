@@ -59,6 +59,14 @@ tests = testGroup "invariant"
       out <- runInvariant 4 "halmos-probes.sol" "invariant_probes_found"
       assertRun "assertion failures in the calls" [(False, True)] out
       liftIO $ assertEqual "all three are found" 3 (length (filter ("Assertion failure in a call" `isInfixOf`) (T.lines (snd out))))
+  , test "prank-from-list" $ do
+      runInvariant 1 "actors.sol" "invariant_actor_from_list" >>= assertRun "one branch per actor" [(True, True)]
+      runInvariant 1 "actors.sol" "invariant_not_third_actor" >>= assertRun "the third actor breaks it" [(False, True)]
+  , test "partial-warnings-short" $ do
+      out <- runInvariant 1 "actors.sol" "invariant_named"
+      assertRun "partially explored" [(True, False)] out
+      liftIO $ assertBool "grouped by location" (" -> " `isInfixOf` snd out)
+      liftIO $ assertBool "no expressions printed" (not ("ReadWord" `isInfixOf` snd out))
   , testGroup "halmos" [ test file $ do
       (results, out) <- runInvariants depth file (const True)
       let expect = [((c, n), outcome) | (c, cases) <- expected, (n, outcome) <- cases]
