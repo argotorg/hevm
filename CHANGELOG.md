@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- The progress log gives the source location of forks and of the locations in
+  its summaries, when there is debug info.
 - Exponentiation over conditional constants folds to conditional powers, allowing
   packed-array writes with a conditionally selected index to reach the SMT solver.
 - Invariant testing: `hevm test` checks `invariant_` functions after every
@@ -199,6 +201,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of simplifying an ITE of them.
 
 ## Fixed
+- Source locations are right after an incremental `forge build`, whose
+  build-infos number the source files independently.
 - `prank` and `startPrank` with a symbolic address, e.g. one picked from a list
   by a symbolic index, explore each possible address instead of failing.
 - ABI signatures expand tuple components, fixing selectors and event topics for
