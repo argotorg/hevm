@@ -138,6 +138,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Changed
 - The default number of solvers is at most half of the available memory divided
   by `--smt-memory`, so that the solvers running at once fit in memory.
+- Solidity's overflow check of a multiplication by a literal, `y == 0 || (y * c) / y == c`,
+  simplifies to a bound on `y`, and the overflow checks of multiplications use bounds that hold
   through comparisons with other bounded values.
 - Constant propagation substitutes any term that the props fix to a constant,
   not only variables.
