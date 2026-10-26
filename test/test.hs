@@ -12,8 +12,10 @@ import Control.Concurrent (forkIO, threadDelay, ThreadId, myThreadId)
 import Control.Concurrent.STM (atomically, newTVarIO, readTVarIO, writeTVar)
 import Control.Monad
 import System.Environment (getArgs, getExecutablePath)
-import System.IO (hSetBuffering, stdout, BufferMode(..), isEOF)
-import System.Directory (getSymbolicLinkTarget, listDirectory, doesDirectoryExist)
+import System.IO (hSetBuffering, stdout, BufferMode(..), isEOF, withFile, openFile, hClose, IOMode(..))
+import GHC.IO.Handle.Lock (hLock, hTryLock, LockMode(..))
+import System.Directory (listDirectory)
+import System.Process (getCurrentPid)
 import GHC.Clock (getMonotonicTimeNSec)
 import Data.IORef (newIORef, readIORef, atomicModifyIORef')
 import Control.Monad.ST (stToIO)
@@ -176,84 +178,80 @@ withHangingSolver cont = do
   withSolvers (Custom (TL.pack self) [TL.pack hangingSolverFlag]) 1 Nothing (64 * defMemLimit) cont
 
 earlyAbortRace :: Natural -> Int -> Int -> IO Property
-earlyAbortRace n maxDelay abortAfter = doesDirectoryExist "/proc/self" >>= \case
-  False -> pure $ label "skipped: no /proc" True
-  True -> do
-    Just c <- runEnv testEnv $ solcRuntime "C" raceContract
-    self <- getExecutablePath
-    withSystemTempDirectory "hevm-fake-solver" $ \dir -> do
-      let solver = Custom (TL.pack self) [TL.pack randomSolverFlag, TL.pack dir, TL.pack (show maxDelay)]
-          unsatQuery = SMT2 (SMTScript [SMTCommand "(set-info :status unsat)"]) mempty []
-      start <- getMonotonicTimeNSec
-      res <- timeout 120_000_000 $ runEnv testEnv $ withSolvers solver n Nothing (64 * defMemLimit) $ \s -> do
-        abort <- liftIO $ newTVarIO False
-        _ <- liftIO $ forkIO $ threadDelay (abortAfter * 1000) >> atomically (writeTVar abort True)
-        (calldata, _) <- mkCalldata (Just (Sig "f(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) []
-        vm <- liftIO $ stToIO $ abstractVM calldata c Nothing False
-        lateQueries <- liftIO $ newIORef (Map.empty :: Map.Map ThreadId Int)
-        allQueries <- liftIO $ newIORef (0 :: Int)
-        -- each path runs in a thread of its own; it may have checked the flag just before it was
-        -- set, but must stop after one more query
-        let fetcher q = do
-              case q of
-                PleaseAskSMT {} -> liftIO $ do
-                  atomicModifyIORef' allQueries (\k -> (k + 1, ()))
-                  tid <- myThreadId
-                  readTVarIO abort >>= \a -> when a $ atomicModifyIORef' lateQueries (\m -> (Map.insertWith (+) tid 1 m, ()))
-                _ -> pure ()
-              Fetch.oracle s Nothing Fetch.noRpc q
-        (ends, _) <- verifyAbortable abort s fetcher defaultVeriOpts vm (checkAssertions defaultPanicCodes) Nothing
-        end <- liftIO getMonotonicTimeNSec
-        free <- liftIO $ timeout 10_000_000 $ checkSat s Nothing (Right unsatQuery)
-        late <- liftIO $ maximum . (0 :) . Map.elems <$> readIORef lateQueries
-        nQueries <- liftIO $ readIORef allQueries
-        pure (ends, free, end, late, nQueries)
-      leftover <- solversLeft dir 50
-      spawned <- length <$> listDirectory dir
-      let bucket k = show (k `div` 20 * 20) <> "-" <> show (k `div` 20 * 20 + 19)
-      pure $ tabulate "solvers spawned" [bucket spawned] $ case res of
-        Nothing -> counterexample "the run did not return" False
-        Just (ends, free, end, late, nQueries) -> tabulate "branch queries" [bucket nQueries] $ tabulate "most queries of a path after the abort" [show late] $
-          let afterAbortMs = (fromIntegral (end - start) `div` 1_000_000) - abortAfter :: Int
-          in tabulate "run" [if afterAbortMs < 0 then "finished before the abort" else "aborted"] $ conjoin
-            [ counterexample ("returned " <> show afterAbortMs <> "ms after the abort") (afterAbortMs < 5000)
-            , counterexample ("a solver slot is still taken: " <> show free) (maybe False isQed free)
-            , counterexample ("solver processes left behind (pid, state): " <> show leftover) (null leftover)
-            , counterexample "a path stopped by the abort was reported" (not (any isAborted ends))
-            , counterexample (show late <> " branch queries of one path after the abort") (late <= 1)
-            ]
+earlyAbortRace n maxDelay abortAfter = do
+  Just c <- runEnv testEnv $ solcRuntime "C" raceContract
+  self <- getExecutablePath
+  withSystemTempDirectory "hevm-fake-solver" $ \dir -> do
+    let solver = Custom (TL.pack self) [TL.pack randomSolverFlag, TL.pack dir, TL.pack (show maxDelay)]
+        unsatQuery = SMT2 (SMTScript [SMTCommand "(set-info :status unsat)"]) mempty []
+    start <- getMonotonicTimeNSec
+    res <- timeout 120_000_000 $ runEnv testEnv $ withSolvers solver n Nothing (64 * defMemLimit) $ \s -> do
+      abort <- liftIO $ newTVarIO False
+      _ <- liftIO $ forkIO $ threadDelay (abortAfter * 1000) >> atomically (writeTVar abort True)
+      (calldata, _) <- mkCalldata (Just (Sig "f(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) []
+      vm <- liftIO $ stToIO $ abstractVM calldata c Nothing False
+      lateQueries <- liftIO $ newIORef (Map.empty :: Map.Map ThreadId Int)
+      allQueries <- liftIO $ newIORef (0 :: Int)
+      -- each path runs in a thread of its own; it may have checked the flag just before it was
+      -- set, but must stop after one more query
+      let fetcher q = do
+            case q of
+              PleaseAskSMT {} -> liftIO $ do
+                atomicModifyIORef' allQueries (\k -> (k + 1, ()))
+                tid <- myThreadId
+                readTVarIO abort >>= \a -> when a $ atomicModifyIORef' lateQueries (\m -> (Map.insertWith (+) tid 1 m, ()))
+              _ -> pure ()
+            Fetch.oracle s Nothing Fetch.noRpc q
+      (ends, _) <- verifyAbortable abort s fetcher defaultVeriOpts vm (checkAssertions defaultPanicCodes) Nothing
+      end <- liftIO getMonotonicTimeNSec
+      free <- liftIO $ timeout 10_000_000 $ checkSat s Nothing (Right unsatQuery)
+      late <- liftIO $ maximum . (0 :) . Map.elems <$> readIORef lateQueries
+      nQueries <- liftIO $ readIORef allQueries
+      pure (ends, free, end, late, nQueries)
+    leftover <- solversLeft dir 50
+    spawned <- length <$> listDirectory dir
+    let bucket k = show (k `div` 20 * 20) <> "-" <> show (k `div` 20 * 20 + 19)
+    pure $ tabulate "solvers spawned" [bucket spawned] $ case res of
+      Nothing -> counterexample "the run did not return" False
+      Just (ends, free, end, late, nQueries) -> tabulate "branch queries" [bucket nQueries] $ tabulate "most queries of a path after the abort" [show late] $
+        let afterAbortMs = (fromIntegral (end - start) `div` 1_000_000) - abortAfter :: Int
+        in tabulate "run" [if afterAbortMs < 0 then "finished before the abort" else "aborted"] $ conjoin
+          [ counterexample ("returned " <> show afterAbortMs <> "ms after the abort") (afterAbortMs < 5000)
+          , counterexample ("a solver slot is still taken: " <> show free) (maybe False isQed free)
+          , counterexample ("solver processes left behind (pid, state): " <> show leftover) (null leftover)
+          , counterexample "a path stopped by the abort was reported" (not (any isAborted ends))
+          , counterexample (show late <> " branch queries of one path after the abort") (late <= 1)
+          ]
   where
     isAborted = \case
       Partial _ _ (Aborted {}) -> True
       _ -> False
 
 earlyAbortInterpretRace :: Natural -> Int -> Int -> IO Property
-earlyAbortInterpretRace n maxDelay abortAfter = doesDirectoryExist "/proc/self" >>= \case
-  False -> pure $ label "skipped: no /proc" True
-  True -> do
-    Just c <- runEnv testEnv $ solcRuntime "C" raceContract
-    self <- getExecutablePath
-    withSystemTempDirectory "hevm-fake-solver" $ \dir -> do
-      let solver = Custom (TL.pack self) [TL.pack randomSolverFlag, TL.pack dir, TL.pack (show maxDelay)]
-      start <- getMonotonicTimeNSec
-      res <- timeout 120_000_000 $ runEnv testEnv $ withSolvers solver n Nothing (64 * defMemLimit) $ \s -> do
-        abort <- liftIO $ newTVarIO False
-        _ <- liftIO $ forkIO $ threadDelay (abortAfter * 1000) >> atomically (writeTVar abort True)
-        (calldata, _) <- mkCalldata (Just (Sig "f(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) []
-        vm <- liftIO $ stToIO $ abstractVM calldata c Nothing False
-        leaves <- withRunAbort s abort $
-          interpretAbortable abort (Fetch.oracle s Nothing Fetch.noRpc) defaultIterConf vm runExpr noopPathHandler
-        end <- liftIO getMonotonicTimeNSec
-        pure (leaves, end)
-      leftover <- solversLeft dir 50
-      pure $ case res of
-        Nothing -> counterexample "the run did not return" False
-        Just (_, end) ->
-          let afterAbortMs = (fromIntegral (end - start) `div` 1_000_000) - abortAfter :: Int
-          in tabulate "ms from the abort to the return" [show (afterAbortMs `div` 100 * 100)] $ conjoin
-            [ counterexample ("returned " <> show afterAbortMs <> "ms after the abort") (afterAbortMs < 5000)
-            , counterexample ("solver processes left behind (pid, state): " <> show leftover) (null leftover)
-            ]
+earlyAbortInterpretRace n maxDelay abortAfter = do
+  Just c <- runEnv testEnv $ solcRuntime "C" raceContract
+  self <- getExecutablePath
+  withSystemTempDirectory "hevm-fake-solver" $ \dir -> do
+    let solver = Custom (TL.pack self) [TL.pack randomSolverFlag, TL.pack dir, TL.pack (show maxDelay)]
+    start <- getMonotonicTimeNSec
+    res <- timeout 120_000_000 $ runEnv testEnv $ withSolvers solver n Nothing (64 * defMemLimit) $ \s -> do
+      abort <- liftIO $ newTVarIO False
+      _ <- liftIO $ forkIO $ threadDelay (abortAfter * 1000) >> atomically (writeTVar abort True)
+      (calldata, _) <- mkCalldata (Just (Sig "f(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) []
+      vm <- liftIO $ stToIO $ abstractVM calldata c Nothing False
+      leaves <- withRunAbort s abort $
+        interpretAbortable abort (Fetch.oracle s Nothing Fetch.noRpc) defaultIterConf vm runExpr noopPathHandler
+      end <- liftIO getMonotonicTimeNSec
+      pure (leaves, end)
+    leftover <- solversLeft dir 50
+    pure $ case res of
+      Nothing -> counterexample "the run did not return" False
+      Just (_, end) ->
+        let afterAbortMs = (fromIntegral (end - start) `div` 1_000_000) - abortAfter :: Int
+        in tabulate "ms from the abort to the return" [show (afterAbortMs `div` 100 * 100)] $ conjoin
+          [ counterexample ("returned " <> show afterAbortMs <> "ms after the abort") (afterAbortMs < 5000)
+          , counterexample ("solver processes left behind (pid, state): " <> show leftover) (null leftover)
+          ]
 
 raceContract :: Text
 raceContract = [i|
@@ -269,15 +267,22 @@ raceContract = [i|
     }
   } |]
 
--- | The fake solvers recorded in the directory that still exist, alive or not yet reaped, after
--- waiting up to tries * 100ms for them to go
+-- | The fake solvers recorded in the directory that still exist after waiting up to tries * 100ms
+-- for them to go: alive ones still hold the lock on their file, and on Linux /proc also shows the
+-- exited ones not yet reaped
 solversLeft :: FilePath -> Int -> IO [(String, String)]
 solversLeft dir tries = do
   pids <- listDirectory dir
-  states <- forM pids $ \pid -> (pid,) <$> procState pid
+  states <- forM pids $ \pid -> (pid,) <$> solverState pid
   let left = [(pid, st) | (pid, Just st) <- states]
   if null left || tries <= 0 then pure left else threadDelay 100_000 >> solversLeft dir (tries - 1)
   where
+    solverState pid = do
+      -- on Windows, opening a file another process holds locked can fail
+      locked <- try (withFile (dir </> pid) ReadWriteMode (\h -> hTryLock h ExclusiveLock)) >>= \case
+        Left (_ :: IOException) -> pure True
+        Right got -> pure (not got)
+      if locked then pure (Just "locked") else procState pid
     procState pid = do
       r <- try (readFile ("/proc" </> pid </> "stat") >>= \st -> evaluate (length st) >> pure st)
       pure $ case r of
@@ -309,13 +314,14 @@ hangingSolverMain = fakeSolver $ \unsat -> if unsat then putStrLn "unsat" else f
 randomSolverFlag :: String
 randomSolverFlag = "--hevm-fake-random-solver"
 
--- Records its pid in the directory, then answers each (check-sat) after up to maxDelay ms with
+-- Records its pid in the directory, holding a lock on that file until it exits, then answers each (check-sat) after up to maxDelay ms with
 -- unsat or unknown at random, or unsat if the query set :status unsat. One in eight hangs for a
 -- minute, so a query that an abort fails to cancel is noticed.
 randomSolverMain :: FilePath -> Int -> IO ()
 randomSolverMain dir maxDelay = do
-  pid <- getSymbolicLinkTarget "/proc/self"
-  writeFile (dir </> pid) ""
+  pid <- show <$> getCurrentPid
+  h <- openFile (dir </> pid) ReadWriteMode
+  hLock h ExclusiveLock
   t <- getMonotonicTimeNSec
   gen <- newIORef (t * 6364136223846793005 + read pid)
   fakeSolver $ \unsat -> do
@@ -323,6 +329,7 @@ randomSolverMain dir maxDelay = do
     threadDelay (fromIntegral (r `mod` fromIntegral (maxDelay + 1)) * 1000)
     when (not unsat && r `shiftR` 11 `mod` 8 == 0) $ threadDelay 60_000_000
     putStrLn $ if unsat || even (r `shiftR` 7) then "unsat" else "unknown"
+  hClose h
 
 -- Acks every command, and calls the answer to (check-sat) with whether the query set :status unsat
 fakeSolver :: (Bool -> IO ()) -> IO ()
