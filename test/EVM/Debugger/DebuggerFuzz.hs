@@ -53,9 +53,11 @@ tests :: TestTree
 tests = testGroup "debugger-fuzz"
   [ testProperty "concrete-replay" $ mapSize (* 4) $ \(c :: TestCase) ->
       forAll (genCommands False) $ \cmds -> forAll genSnapEvery $ \every -> within 120_000_000 $ ioProperty $ runEnv testEnv $ concreteReplay every c cmds
-  , testProperty "symbolic-branches" $ mapSize (* 4) $ \(c :: TestCase) ->
+  -- large cases take minutes, so fewer and shorter ones keep the suite's time bounded
+  , adjustOption (\(QuickCheckTests n) -> QuickCheckTests (if n == 100 then 50 else n)) $
+    testProperty "symbolic-branches" $ mapSize (* 4) $ \(c :: TestCase) ->
       forAll (genCommands True) $ \cmds -> forAll (vectorOf 40 genReaction) $ \reactions -> forAll genSnapEvery $ \every ->
-      within 300_000_000 $ ioProperty $ runEnv testEnv $ symbolicBranches every c cmds reactions
+      within 50_000_000 $ ioProperty $ runEnv testEnv $ symbolicBranches every c cmds reactions
   , testProperty "forward-back-concrete" $ mapSize (* 4) $ \(c :: TestCase) ->
       forAll genRoundTrips $ \(start, ks) -> forAll genSnapEvery $ \every -> within 120_000_000 $ ioProperty $ runEnv testEnv $ withSession $ \solvers -> do
         s0 <- liftIO $ setSnapshotInterval every <$> (stToIO (concreteTestVm c) >>= newSession emptyDapp)

@@ -182,6 +182,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of simplifying an ITE of them.
 
 ## Fixed
+- Constant propagation checks disequalities and disjunctions against the
+  constants of all path conditions, not only of those before them. The debugger
+  no longer offers an infeasible branch side when the solver cannot encode the
+  path conditions.
 - Loop iterations are counted per call, so repeated calls into the same contract
   no longer hit `--max-iterations`.
 - Keccak assumptions compare only the hashed bytes of inputs of concrete length,

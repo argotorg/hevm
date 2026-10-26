@@ -49,6 +49,8 @@ tests = testGroup "Rewrite fuzzing"
       testProperty "rewrite-fuzz-eval-matches-folding" prop_folding
   , adjustOption (\(QuickCheckTests n) -> QuickCheckTests (if n == 100 then 10000 else n)) $
       testProperty "bounds-fuzz" prop_bounds
+  , adjustOption (\(QuickCheckTests n) -> QuickCheckTests (if n == 100 then 10000 else n)) $
+      testProperty "const-propagate-fuzz" prop_constPropagate
   ]
 
 prop_word :: Property
@@ -95,6 +97,46 @@ prop_bounds = forAllShrink (sized $ \n -> genShapedWord (min n 40)) shrinkWord $
       in counterexample ("env: " <> show env <> "\nfacts: " <> show facts) $
            tabulate "bounded subterms" [show (length inBounds)] $
            conjoin (inBounds <> uppers)
+
+-- | Constant propagation keeps the meaning of the props, only finds them unsatisfiable when
+-- they are, and does not depend on their order. Every assignment of the variables from values
+-- around the literals is checked.
+prop_constPropagate :: Property
+prop_constPropagate = forAllShrink (chooseInt (1, 8) >>= flip vectorOf genConstProp) (shrinkList (const [])) $ \ps ->
+  forAll (shuffle ps) $ \shuffled ->
+    let out = Expr.constPropagate ps
+        unsat qs = Expr.constPropagate qs == [PBool False]
+        holds env qs = and <$> mapM (evalProp env) qs
+        envs = [FuzzEnv (Map.fromList [("a", a), ("b", b)]) mempty | a <- constValues, b <- constValues]
+        sat = any (\env -> holds env ps == Just True) envs
+    in tabulate "result" [if unsat ps then "unsatisfiable" else if sat then "satisfiable" else "unsatisfiable, not found"] $
+       conjoin
+         [ counterexample ("satisfiable, but found unsatisfiable: " <> show out) (Prelude.not (unsat ps && sat))
+         , counterexample ("depends on the order: " <> show shuffled) (unsat ps == unsat shuffled)
+         , conjoin [ counterexample ("env: " <> show env <> "\nout: " <> show out) (a == b)
+                   | env <- envs, Just a <- [holds env ps], Just b <- [holds env out] ]
+         ]
+
+constValues :: [W256]
+constValues = [0 .. 6] <> [Expr.maxLit - 3 .. Expr.maxLit]
+
+-- | Comparisons of a few terms with literals, the shapes that constant propagation reads
+genConstProp :: Gen Prop
+genConstProp = frequency
+  [ (8, atom)
+  , (1, PAnd <$> atom <*> atom)
+  , (2, POr <$> atom <*> atom)
+  , (1, PBool <$> arbitrary)
+  ]
+  where
+    term = elements [Var "a", Var "b", Add (Lit 1) (Var "a")]
+    lit = Lit <$> elements [0, 1, 2, 3, Expr.maxLit - 1, Expr.maxLit]
+    atom = do
+      t <- term
+      l <- lit
+      elements
+        [ PEq l t, PEq t l, PNeg (PEq l t), PNeg (PEq t l)
+        , PLT t l, PLT l t, PLEq t l, PLEq l t, PGT t l, PGT l t, PGEq t l, PGEq l t ]
 
 -- | Props that hold for subterms with these values, in the shapes that bounds are read from
 genFacts :: [(Expr EWord, W256)] -> Gen [Prop]
@@ -567,6 +609,7 @@ genShapedProp n = frequency
   , (2, overflowCheck)
   , (2, mulOverflowCheck)
   , (2, scalingUnderBounds)
+  , (2, complementary)
   , (2, PEq <$> lit <*> ite), (1, PLT <$> lit <*> ite), (1, PLT <$> ite <*> lit)
   , (1, PLEq <$> lit <*> ite), (1, PLEq <$> ite <*> lit)
   , (2, oneLitBranch)
@@ -578,6 +621,11 @@ genShapedProp n = frequency
   where
     lit = Lit <$> genSpecialLit
     ite = ITE <$> w <*> lit <*> lit
+    -- a prop and its negation, as both sides of a branch taken on one path
+    complementary = do
+      q <- p
+      r <- p
+      elements [PAnd q (PNeg q), PAnd (PNeg q) q, PAnd q (PAnd r (PNeg q))]
     -- the literal compared against is often the literal branch
     oneLitBranch = do
       k <- genSpecialLit
