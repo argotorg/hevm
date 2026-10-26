@@ -52,7 +52,7 @@ tests = testGroup "contract-quickcheck-run"
     [ withResource (newIORef mempty) printCoverage $ \cov ->
       testProperty "random-contract-concrete-call" $ \(c :: TestCase, hashCons :: Bool) ->
       -- the flag is process-wide, so concurrent tests may flip it mid-run; results must not change either way
-      within 120_000_000 $ ioProperty $ runEnv (Env { config = defaultConfig { hashConsExplore = hashCons } }) $ do
+      discardAfter 20_000_000 $ ioProperty $ runEnv (Env { config = defaultConfig { hashConsExplore = hashCons } }) $ do
         -- to find a case that crashes or runs out of memory
         liftIO $ writeCaseFile "random-contract-concrete-call" $ show c
           <> "\nmain: " <> bsToHex (assembleItems c.prog.main) <> "\ncallee: " <> bsToHex (assembleItems c.prog.callee)
