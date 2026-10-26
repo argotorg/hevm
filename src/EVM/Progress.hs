@@ -30,6 +30,7 @@ module EVM.Progress
   , clearWorker
   , timedQuery
   , fork
+  , noteSrc
   , currentProgress
   ) where
 
@@ -128,6 +129,8 @@ data St = St
   , closed :: IORef Bool
   -- | the phases that ended, newest first
   , finished :: IORef [JSON.Value]
+  -- | the source location of each code location seen, when there is debug info
+  , srcs :: IORef (Map Loc Text)
   }
 
 -- Global so that pure-ish IO code deep in the solver layer can report progress
@@ -148,7 +151,7 @@ withProgress opts act
       st <- St h opts.logExprs tty
         <$> newMVar () <*> getMonotonicTime <*> newIORef mempty <*> newIORef mempty <*> newIORef 0 <*> newIORef 0 <*> newIORef (PhaseStats mempty mempty Nothing)
         <*> newIORef (Phase "starting" 0 0) <*> newIORef (0, 0) <*> newIORef (pure 0) <*> newIORef opts.statusLine <*> newIORef False
-        <*> newIORef []
+        <*> newIORef [] <*> newIORef mempty
       writeIORef global (Just st)
       write st "start" []
       threads <- sequence $ catMaybes
@@ -236,8 +239,10 @@ withPhase name fs summary act = do
     Just st -> do
       writeSummary st
       ps <- readIORef st.phaseStats
-      pure $ [("hottest", JSON.String (showLoc l <> T.pack (printf " %.1fs/%dq" ls.lSolveSecs ls.lQueries))) | (l, ls) <- take 1 (hottest ps.byLoc), ls.lSolveSecs >= 1]
-          <> [("slowest", JSON.String (T.pack (printf "%.1fs" secs) <> maybe "" ((" @" <>) . showLoc) l)) | Just (secs, l) <- [ps.slowest], secs >= 1]
+      srcs <- readIORef st.srcs
+      let showLoc' l = showLoc l <> maybe "" (" " <>) (Map.lookup l srcs)
+      pure $ [("hottest", JSON.String (showLoc' l <> T.pack (printf " %.1fs/%dq" ls.lSolveSecs ls.lQueries))) | (l, ls) <- take 1 (hottest ps.byLoc), ls.lSolveSecs >= 1]
+          <> [("slowest", JSON.String (T.pack (printf "%.1fs" secs) <> maybe "" ((" @" <>) . showLoc') l)) | Just (secs, l) <- [ps.slowest], secs >= 1]
   emit "phase-end" (["phase" .= name, "secs" .= (t1 - t0)] <> fs <> summary r)
   liftIO $ readIORef global >>= mapM_ (\st -> atomicModifyIORef' st.finished $ \ps ->
     (take 1000 (JSON.object (["phase" .= name, "secs" .= (t1 - t0)] <> fs <> summary r <> hot) : ps), ()))
@@ -259,9 +264,10 @@ writeSummary st = do
   let top = take 10 (hottest ps.byLoc)
       forky = take 5 $ sortOn (Down . (.lForks) . snd) [x | x@(_, ls) <- Map.toList ps.byLoc, ls.lForks > 0]
       locs = top <> [x | x@(l, _) <- forky, l `notElem` map fst top]
+  srcs <- readIORef st.srcs
   unless (Map.null ps.byLoc && Map.null ps.byResult) $ write st "summary"
-    [ "locations" .= [ JSON.object ["addr" .= a, "pc" .= pc, "queries" .= ls.lQueries, "solveSecs" .= ls.lSolveSecs, "forks" .= ls.lForks]
-                     | ((a, pc), ls) <- locs ]
+    [ "locations" .= [ JSON.object (["addr" .= a, "pc" .= pc, "queries" .= ls.lQueries, "solveSecs" .= ls.lSolveSecs, "forks" .= ls.lForks] <> locFields srcs l)
+                     | (l@(a, pc), ls) <- locs ]
     , "queries" .= [ JSON.object ["kind" .= k, "result" .= res, "count" .= n, "waitSecs" .= w, "solveSecs" .= sv]
                    | ((k, res), (n, w, sv)) <- sortOn (\(_, (_, _, sv)) -> Down sv) (Map.toList ps.byResult) ]
     ]
@@ -378,11 +384,32 @@ timedQuery kind fs exprFs showRes act = readIORef global >>= \case
       Just (JSON.Number n) -> Just (round n)
       _ -> Nothing
 
--- | Logs that execution forks at the given code address and pc
-fork :: MonadIO m => Text -> Int -> [Pair] -> m ()
-fork addr pc fs = liftIO $ readIORef global >>= mapM_ (\st -> do
+-- | Logs that execution forks at the given code address and pc, with its
+-- source location (lazy: only evaluated the first time the location is seen)
+fork :: MonadIO m => Text -> Int -> Text -> [Pair] -> m ()
+fork addr pc src fs = liftIO $ readIORef global >>= mapM_ (\st -> do
   atomicModifyIORef' st.phaseStats $ \ps -> (ps { byLoc = Map.insertWith (<>) (addr, pc) (LocStats 0 0 1) ps.byLoc }, ())
-  write st "fork" (["addr" .= addr, "pc" .= pc] <> fs))
+  s <- remember st (addr, pc) src
+  write st "fork" (["addr" .= addr, "pc" .= pc] <> srcField s <> fs))
+
+-- | Records the source location of a code location, e.g. where a query is issued
+noteSrc :: MonadIO m => Text -> Int -> Text -> m ()
+noteSrc addr pc src = liftIO $ readIORef global >>= mapM_ (\st -> () <$ remember st (addr, pc) src)
+
+remember :: St -> Loc -> Text -> IO (Maybe Text)
+remember st l src = Map.lookup l <$> readIORef st.srcs >>= \case
+  Just s -> pure (Just s)
+  Nothing | T.null src -> pure Nothing
+          | otherwise -> do
+    let !s = src
+    atomicModifyIORef' st.srcs $ \m -> (Map.insert l s m, ())
+    pure (Just s)
+
+srcField :: Maybe Text -> [Pair]
+srcField = maybe [] (\s -> ["src" .= s])
+
+locFields :: Map Loc Text -> Loc -> [Pair]
+locFields srcs l = srcField (Map.lookup l srcs)
 
 -- | The current state, as the status line and the summary show it. Not
 -- running unless inside 'withProgress'.
@@ -396,6 +423,7 @@ currentProgress = readIORef global >>= \case
     tasks <- join (readIORef st.taskCounter)
     ws <- Map.toList <$> readIORef st.workers
     qs <- Map.elems <$> readIORef st.queries
+    srcs <- readIORef st.srcs
     qDone <- readIORef st.queriesDone
     ps <- readIORef st.phaseStats
     done <- readIORef st.finished
@@ -412,8 +440,8 @@ currentProgress = readIORef global >>= \case
           , "byResult" .= [ JSON.object ["kind" .= k, "result" .= res, "count" .= n, "waitSecs" .= w, "solveSecs" .= sv]
                           | ((k, res), (n, w, sv)) <- sortOn (\(_, (_, _, sv)) -> Down sv) (Map.toList ps.byResult) ]
           ]
-      , "hottest" .= [ JSON.object ["addr" .= a, "pc" .= pc, "queries" .= ls.lQueries, "solveSecs" .= ls.lSolveSecs, "forks" .= ls.lForks]
-                     | ((a, pc), ls) <- take 10 (hottest ps.byLoc) ]
+      , "hottest" .= [ JSON.object (["addr" .= a, "pc" .= pc, "queries" .= ls.lQueries, "solveSecs" .= ls.lSolveSecs, "forks" .= ls.lForks] <> locFields srcs l)
+                     | (l@(a, pc), ls) <- take 10 (hottest ps.byLoc) ]
       , "phases" .= reverse done
       ]
 

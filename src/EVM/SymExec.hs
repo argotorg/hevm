@@ -438,7 +438,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
         interpretInternal t { vm = vm', stepper = (k r) }
       Stepper.Fork (PleaseRunAll vals continue) -> do
         when (length vals < 2) $ internalError "PleaseRunAll requires at least 2 branches"
-        Progress.fork (T.pack (show vm.state.contract)) vm.state.pc
+        Progress.fork (T.pack (show vm.state.contract)) vm.state.pc (srcOf vm)
           ["branches" .= length vals, "values" .= map (T.pack . show) (take 20 vals)]
         frozen <- liftIO $ stToIO $ freezeVM vm
         let newDepth = vm.exploreDepth+1
@@ -462,7 +462,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
             runOne frozen newDepth rest
           runOne _ _ [] = internalError "unreachable"
       Stepper.Fork (PleaseRunBoth continue) -> do
-        Progress.fork (T.pack (show vm.state.contract)) vm.state.pc ["branches" .= (2 :: Int)]
+        Progress.fork (T.pack (show vm.state.contract)) vm.state.pc (srcOf vm) ["branches" .= (2 :: Int)]
         conf <- readConfig
         frozen <- liftIO $ stToIO $ freezeVM vm
         let newDepth = vm.exploreDepth+1
@@ -479,6 +479,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
         interpretInternal t { vm = vmb, stepper = (k rb) }
       Stepper.Wait q -> do
         let performQuery = do
+              Progress.noteSrc (T.pack (show vm.state.contract)) vm.state.pc (srcOf vm)
               logQueryExprs q
               m <- fetcher q
               (r, vm') <- liftIO$ stToIO $ runStateT m vm
@@ -527,6 +528,12 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
                     (r, vm') <- liftIO $ stToIO $ runStateT (continue decision) vm
                     interpretInternal t { vm = vm', stepper = (k r) }
           _ -> performQuery
+
+-- | The source location of the current pc, if there is debug info for it
+srcOf :: VM t -> Text
+srcOf vm = case vm.srcLookup of
+  Nothing -> ""
+  Just _ -> fromMaybe "" $ T.stripPrefix " in file " $ T.pack $ runSrcLookup vm.srcLookup vm.env.contracts vm.state.contract vm.state.pc
 
 -- | How exploration decides a symbolic branch without the solver: a side is
 -- dropped only if simplifying it with the path conditions gives false

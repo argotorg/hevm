@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- The progress log gives the source location of forks and of the locations in
+  its summaries, when there is debug info.
 - Invariant testing: `hevm test` checks `invariant_` functions after every
   sequence of at most `--invariant-depth` calls to the target contracts, with
   symbolic arguments, callers and timestamps. States reached before are not
@@ -195,6 +197,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of simplifying an ITE of them.
 
 ## Fixed
+- Source locations are right after an incremental `forge build`, whose
+  build-infos number the source files independently.
 - `prank` and `startPrank` with a symbolic address, e.g. one picked from a list
   by a symbolic index, explore each possible address instead of failing.
 - SMT queries skip assumptions between concrete keccak hashes, whose values
