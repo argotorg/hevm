@@ -2190,9 +2190,6 @@ simplifyProp prop =
     go (PEq (Lit 0) (Sub a b)) = peq a b
     go (PEq (Lit 0) (Or a b)) = peq (Lit 0) a `PAnd` peq (Lit 0) b
     go (PEq a1 (Add a2 y)) | a1 == a2 = peq (Lit 0) y
-    -- checked multiplication by a literal: (c * x) / c == x exactly when c * x doesn't wrap
-    go (PEq (Div (Mul (Lit c) x) (Lit c')) y) | c == c', c > 0, x == y = PLEq x (Lit (maxLit `Prelude.div` c))
-    go (PEq y (Div (Mul (Lit c) x) (Lit c'))) | c == c', c > 0, x == y = PLEq x (Lit (maxLit `Prelude.div` c))
     go (PEq l r) = peq l r
 
     -- checked multiplication y * c, i.e. y == 0 || (y * c) / y == c, exactly when it doesn't wrap
