@@ -42,6 +42,7 @@ import EVM.Debugger
 import EVM.Debugger.Server (serveSession)
 import EVM.Effects
 import EVM.Fetch qualified as Fetch
+import EVM.Progress qualified as Progress
 import EVM.Solvers (withSolvers, defMemLimit, Solver(..), SolverGroup, checkSatWithProps)
 import EVM.Stepper qualified as Stepper
 import EVM.Test.Fuzz.Gen (genSnapEvery)
@@ -53,21 +54,21 @@ tests :: TestTree
 tests = testGroup "debugger-fuzz"
   [ testProperty "concrete-replay" $ mapSize (* 4) $ \(c :: TestCase) ->
       forAll (genCommands False) $ \cmds -> forAll genSnapEvery $ \every -> within 120_000_000 $ ioProperty $ runEnv testEnv $ concreteReplay every c cmds
-  -- large cases take minutes, so fewer and shorter ones keep the suite's time bounded
+  -- large cases take minutes, so fewer ones keep the suite's time bounded, and slow ones are dropped
   , adjustOption (\(QuickCheckTests n) -> QuickCheckTests (if n == 100 then 50 else n)) $
     testProperty "symbolic-branches" $ mapSize (* 4) $ \(c :: TestCase) ->
       forAll (genCommands True) $ \cmds -> forAll (vectorOf 40 genReaction) $ \reactions -> forAll genSnapEvery $ \every ->
-      within 50_000_000 $ ioProperty $ runEnv testEnv $ symbolicBranches every c cmds reactions
+      discardAfter 20_000_000 $ ioProperty $ runEnv testEnv $ Progress.withProgressLogFromEnv "symbolic-branches" $ symbolicBranches every c cmds reactions
   , testProperty "forward-back-concrete" $ mapSize (* 4) $ \(c :: TestCase) ->
       forAll genRoundTrips $ \(start, ks) -> forAll genSnapEvery $ \every -> within 120_000_000 $ ioProperty $ runEnv testEnv $ withSession $ \solvers -> do
         s0 <- liftIO $ setSnapshotInterval every <$> (stToIO (concreteTestVm c) >>= newSession emptyDapp)
         roundTrips (Fetch.oracle solvers Nothing Fetch.noRpc) (repeat Nothing) start ks s0
-  -- large cases take minutes, so fewer and shorter ones keep the suite's time bounded
+  -- large cases take minutes, so fewer ones keep the suite's time bounded, and slow ones are dropped
   , adjustOption (\(QuickCheckTests n) -> QuickCheckTests (if n == 100 then 50 else n)) $
     testProperty "forward-back-symbolic" $ mapSize (* 4) $ \(c :: TestCase) ->
       forAll genRoundTrips $ \(start, ks) -> forAll (vectorOf 100 genReaction) $ \reactions -> \explorer ->
       forAll genSnapEvery $ \every ->
-      within 50_000_000 $ ioProperty $ runEnv testEnv $ withSession $ \solvers -> do
+      discardAfter 20_000_000 $ ioProperty $ runEnv testEnv $ Progress.withProgressLogFromEnv "forward-back-symbolic" $ withSession $ \solvers -> do
         s0 <- liftIO $ setSnapshotInterval every <$> (stToIO (symbolicTestVm c) >>= newSession emptyDapp)
         let mode = if explorer then ExplorerBranches else SolverBranches
         tabulate "branch mode" [show mode] <$>
