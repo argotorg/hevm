@@ -608,6 +608,8 @@ genShapedProp n = frequency
   , (2, PNeg <$> p), (2, PAnd <$> p <*> p), (2, POr <$> p <*> p), (1, PImpl <$> p <*> p)
   , (2, overflowCheck)
   , (2, mulOverflowCheck)
+  , (2, literalMulCheck)
+  , (2, pinnedTerm)
   , (2, scalingUnderBounds)
   , (2, complementary)
   , (2, PEq <$> lit <*> ite), (1, PLT <$> lit <*> ite), (1, PLT <$> ite <*> lit)
@@ -649,6 +651,10 @@ genShapedProp n = frequency
       bd <- case bx of
         Lit c | c > 0 -> frequency [(3, (\o -> Lit (Expr.maxLit `div` c + o)) <$> elements [-1, 0, 1]), (1, lit)]
         _ -> lit
+      -- d bounded directly or through another variable
+      dBound <- do
+        y <- var
+        elements [PLEq d bd, PAnd (PLEq d y) (PLEq y bd)]
       -- bounds on the variables, which bound compound x and d through their structure
       va <- var
       ba <- frequency [(3, Lit . (\k -> 2 ^ k - 1) <$> choose (0 :: Int, 256)), (1, lit)]
@@ -657,7 +663,33 @@ genShapedProp n = frequency
       let z = PEq (Lit 0) d
           guardW = Or (Eq x (Div prod d)) (IsZero d)
       g <- elements [POr eq z, POr z eq, eq, PNeg eq, PEq (Lit 0) guardW, PNeg (PEq (Lit 0) guardW)]
-      pure $ PAnd (PLEq va ba) (PAnd (PLEq x bx) (PAnd (PLEq d bd) g))
+      pure $ PAnd (PLEq va ba) (PAnd (PLEq x bx) (PAnd dBound g))
+    -- a compound term fixed by one prop and used in another, as an index a path picked
+    pinnedTerm = do
+      t <- frequency [(2, Mod <$> w <*> lit), (1, w)]
+      c <- frequency [(2, Lit <$> elements [0, 1, 2]), (1, lit)]
+      v <- w
+      q <- elements [PLT t v, PLEq v t, PEq v (Add t v), PEq (Lit 0) (Sub t v), PLT (Add (Lit 7) t) v]
+      elements [PAnd (PEq c t) q, PAnd q (PEq t c), PAnd (PNeg (PEq c t)) q, POr (PEq c t) q]
+    -- Solidity's checked multiplication by a literal, also with c * (b * x) folded into
+    -- (b * c) * x, next to a bound around where it overflows so values there are tried
+    literalMulCheck = do
+      let power = (10 ^) <$> choose (0 :: Int, 40)
+          k = frequency [(3, power), (2, genSpecialLit), (1, fromIntegral <$> choose (1 :: Int, 300))]
+      x <- frequency [(3, Var <$> elements varNames), (1, w)]
+      c <- k
+      b <- k
+      let y = Mul (Lit b) x
+          backEq = elements [PEq (Div (Mul (Lit c) x) (Lit c)) x, PEq x (Div (Mul (Lit c) x) (Lit c))]
+          guardOn v num = do
+            let eq = PEq (Lit c) (Div num v)
+                z = PEq (Lit 0) v
+            elements [POr eq z, POr z eq]
+      g <- oneof [backEq, guardOn x (Mul (Lit c) x), guardOn y (Mul (Lit (b * c)) x), guardOn y (Mul (Lit c) y)]
+      o <- elements [-1, 0, 1]
+      bv <- elements [x, y]
+      let near = if c == 0 then Lit 0 else Lit (Expr.maxLit `div` c + o)
+      elements [g, PNeg g, PAnd (PLEq bv near) g, PAnd (PLEq bv near) (PNeg g)]
     -- literal scaling of a variable bounded directly or through another one, around where it overflows
     scalingUnderBounds = do
       let var = Var <$> elements varNames

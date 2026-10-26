@@ -138,6 +138,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Changed
 - The default number of solvers is at most half of the available memory divided
   by `--smt-memory`, so that the solvers running at once fit in memory.
+  through comparisons with other bounded values.
+- Constant propagation substitutes any term that the props fix to a constant,
+  not only variables.
 - Invariant tests print the paths they only partially explored grouped by
   source location, as `prove` tests do, instead of printing their expressions.
 - Concrete ADDMOD and MULMOD are computed with `Integer` instead of `Word512`,
@@ -214,6 +217,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   structurally, so every symbolic size failed as too large and the path was
   dropped. The size is now simplified and compared as a number, and one that stays
   symbolic ends the path as partial.
+- Source locations of contracts with immutables are found in Foundry projects.
 - Source locations are right after an incremental `forge build`, whose
   build-infos number the source files independently.
 - `prank` and `startPrank` with a symbolic address, e.g. one picked from a list
