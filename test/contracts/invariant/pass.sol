@@ -105,3 +105,24 @@ contract ToggleTest is Test {
         assertTrue(on || !on);
     }
 }
+
+contract Cycle {
+    bool public both;
+
+    function set(uint256 x, uint256 y, uint256 z) public {
+        if (x < y && y < z && z < x) both = true;
+    }
+}
+
+// the state after the infeasible branch is not reached
+contract CycleTest is Test {
+    Cycle p;
+
+    function setUp() public {
+        p = new Cycle();
+    }
+
+    function invariant_neither() public view {
+        assertFalse(p.both());
+    }
+}

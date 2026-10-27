@@ -3457,7 +3457,8 @@ accessUnboundedMemoryRange _ 0 continue = continue
 accessUnboundedMemoryRange f l continue = do
   m0 <- use (#state % #memorySize)
   fees <- gets (.block.schedule)
-  let m1 = 32 * ceilDiv (max m0 (f + l)) 32
+  -- lazily, each memory access would keep the previous frame states alive
+  let !m1 = 32 * ceilDiv (max m0 (f + l)) 32
   burn (memoryCost fees m1 - memoryCost fees m0) $ do
     assign (#state % #memorySize) m1
     modifying' (#state % #symMemorySize) (fmap (Expr.max (Lit (into m1))))
@@ -3575,11 +3576,13 @@ readMemory offset' size' = do
 withTraceLocation :: TraceData -> EVM t Trace
 withTraceLocation x = do
   vm <- get
-  let this = fromJust $ currentContract vm
+  -- lazily, every trace would keep the whole VM it was made in alive
+  let !this = fromJust $ currentContract vm
+      !opIx = fromMaybe 0 $ this.opIxMap VS.!? vm.state.pc
   pure Trace
     { tracedata = x
     , contract = this
-    , opIx = fromMaybe 0 $ this.opIxMap VS.!? vm.state.pc
+    , opIx
     }
 
 pushTrace :: TraceData -> EVM t ()
@@ -3930,7 +3933,7 @@ create2Address (GVar _) _ _ = internalError "Unexpected GVar"
 
 freshSymAddr :: EVM t (Expr EAddr)
 freshSymAddr = do
-  modifying (#env % #freshAddresses) (+ 1)
+  modifying' (#env % #freshAddresses) (+ 1)
   n <- use (#env % #freshAddresses)
   pure $ SymAddr ("freshSymAddr" <> (pack $ show n))
 
@@ -3979,8 +3982,17 @@ writeMemory memory offset buf = do
       pure memory
 
 freezeMemory :: MutableMemory -> EVM t (Expr Buf)
-freezeMemory memory =
-  ConcreteBuf . vectorToByteString <$> VS.freeze memory
+freezeMemory memory = ConcreteBuf <$> lift (memoryBytes memory)
+
+-- | Without the zeros past the last written byte, which a 'ConcreteBuf' reads
+-- anyway: memory grows by doubling, at least 8k at a time
+memoryBytes :: MutableMemory -> ST RealWorld ByteString
+memoryBytes memory = do
+  let used i
+        | i < 0 = pure 0
+        | otherwise = VS.Mutable.unsafeRead memory i >>= \b -> if b /= 0 then pure (i + 1) else used (i - 1)
+  n <- used (VS.Mutable.length memory - 1)
+  vectorToByteString <$> VS.freeze (VS.Mutable.slice 0 n memory)
 
 
 instance VMOps Symbolic where
@@ -4001,7 +4013,7 @@ instance VMOps Symbolic where
   reclaimRemainingGasAllowance _ = pure ()
   payRefunds = pure ()
   pushGas = do
-    modifying (#env % #freshGasVals) (+ 1)
+    modifying' (#env % #freshGasVals) (+ 1)
     n <- use (#env % #freshGasVals)
     let g = Expr.Gas "" n
     -- GAS costs gas, so the readings within one call frame strictly decrease
@@ -4030,7 +4042,8 @@ instance VMOps Symbolic where
         (iteration, _) <- use (#iterations % at loc % non (0,[]))
         stack <- use (#state % #stack)
         assign (#pathsVisited % at (loc, iteration)) (Just v)
-        assign (#iterations % at loc) (Just (iteration + 1, stack))
+        let !visits = iteration + 1
+        assign (#iterations % at loc) (Just (visits, stack))
         continue v
       -- ends like a failed vm.assume: the leaf is skipped without a solver query
       runBothPaths _ _ Infeasible = do
@@ -4174,7 +4187,7 @@ instance VMOps Concrete where
   reclaimRemainingGasAllowance oldVm = do
     let remainingGas = oldVm.state.gas
     modifying #burned (subtract remainingGas)
-    modifying (#state % #gas) (+ remainingGas)
+    modifying' (#state % #gas) (+ remainingGas)
 
   payRefunds = do
     -- compute and pay the refund to the caller and the

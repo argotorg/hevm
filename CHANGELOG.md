@@ -186,6 +186,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which keeps fewer paths pending.
 - The Solidity ASTs are no longer kept after reading the build output:
   `SourceCache` has no `asts`, `DappInfo` no `astIdMap` and `astSrcMap`.
+- Invariant testing keeps only the states of feasible calls, checked by the
+  solver, and drops the states seen before as soon as they are reached. It keeps
+  the state after a call without that call's memory and traces.
 - The default number of solvers is at most half of the available memory divided
   by `--smt-memory`, so that the solvers running at once fit in memory.
 - Solidity's overflow check of a multiplication by a literal, `y == 0 || (y * c) / y == c`,
@@ -273,6 +276,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   structurally, so every symbolic size failed as too large and the path was
   dropped. The size is now simplified and compared as a number, and one that stays
   symbolic ends the path as partial.
+- Symbolic execution leaked memory: every trace kept the whole VM it was made
+  in, and memory size and loop visit counters kept the earlier frame states.
+- Memory snapshots at forks no longer copy the unused zeros of the memory buffer.
 - Source locations of contracts with immutables are found in Foundry projects.
 - Source locations are right after an incremental `forge build`, whose
   build-infos number the source files independently.
