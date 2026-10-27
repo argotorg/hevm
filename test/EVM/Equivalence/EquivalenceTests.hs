@@ -444,7 +444,12 @@ deploymentSolidityEquivalenceTests = testGroup "Solidity deployment equivalence"
 
 bytecodeEquivalenceTests :: TestTree
 bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
-  [ testCase "eq-issue-with-length-cex-bug679" $ do -- check bug https://github.com/argotorg/hevm/issues/679
+  [ testCase "constructor-crossed-paths-do-not-compare-impossible-deployments" $ do
+      let a = "34600c5760fe5f5360015ff35b60005f5360015ff3"
+          b = "3415600d5760005f5360015ff35b60fe5f5360015ff3"
+      eq <- eqBytecode False a b
+      assertEqual "impossible constructor paths must not create a difference" [] (map fst eq.res)
+  , testCase "eq-issue-with-length-cex-bug679" $ do -- check bug https://github.com/argotorg/hevm/issues/679
     let a = fromJust (hexByteString "5f610100526020610100f3")
         b = fromJust (hexByteString "5f356101f40115610100526020610100f3")
     eq <- Effects.runApp $ withSolvers Z3 1 Nothing defMemLimit $ \s -> do
