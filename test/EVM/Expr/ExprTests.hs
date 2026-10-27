@@ -1955,6 +1955,11 @@ concretizationTests = testGroup "Concretization tests"
   , testCase "conc-ite-same-branches" $ do
       let simp = Expr.simplify $ ITE (Var "c") (Lit 42) (Lit 42)
       assertEqual "ITE with same branches" (Lit 42) simp
+  , testCase "ite-else-is-then-at-zero" $ do
+      let xy = Mul (Var "x") (Var "y")
+      assertEqual "x * y is 0 where y is" xy (Expr.simplify $ ITE (Var "y") xy (Lit 0))
+      assertEqual "x + y is not 0 where y is" (ITE (Var "y") (Add (Var "x") (Var "y")) (Lit 0))
+        (Expr.simplify $ ITE (Var "y") (Add (Var "x") (Var "y")) (Lit 0))
 
     -- Eq in simplifier (structural equality)
   , testCase "conc-eq-self" $ do

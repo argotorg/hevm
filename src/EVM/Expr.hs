@@ -1680,6 +1680,8 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (ITE c (IsZero c') f) | c == c' = ITE c (Lit 0) f
     go (ITE c t (IsZero c')) | c == c' = ITE c t (Lit 1)
     go (ITE c t c') | c == c' = ITE c t (Lit 0)
+    -- the else branch is where c is 0, e.g. ITE y (x * y) 0 is x * y
+    go (ITE c t f@(Lit _)) | simplify (zeroing c t) == f = t
 
     -- syntactic Eq reduction
     -- a literal with a bit the other side can not have
@@ -2871,6 +2873,12 @@ propBounds = foldl go mempty
       PLEq (Lit c) t -> atLeast t c m
       PLT (Lit c) t | c < maxLit -> atLeast t (c + 1) m
       _ -> m
+
+-- | e with every occurrence of the word c replaced by 0
+zeroing :: Expr EWord -> Expr a -> Expr a
+zeroing c = mapExpr $ \e -> case asWordRefl e of
+  Just Refl | e == c -> Lit 0
+  _ -> e
 
 asWordRefl :: Expr a -> Maybe (a :~: EWord)
 asWordRefl e = case exprType e of

@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Abstract arithmetic lemmas relating `a/c` to `x` when `a` is bounded by `c*x`,
   bounding `ceilDiv(c1*x, c2)` by `x/(c2/c1)` when `c1` divides `c2`, and bounding
   remainders: `a%b <= a` and `a%b < b`.
+- The simplifier drops an `ITE c t k` whose literal `k` is what `t` is when `c` is 0,
+  such as the product a short-circuited overflow check leaves after a merge.
 - The progress log gives the source location of forks and of the locations in
   its summaries, when there is debug info.
 - Invariant testing: `hevm test` checks `invariant_` functions after every
