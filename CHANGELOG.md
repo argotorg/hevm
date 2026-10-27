@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Abstract arithmetic lemmas for dividends a literal apart over one divisor,
   `(x-k)/z <= x/z <= (x-k)/z + k`, as in a `ceilDiv` next to a round-down, and
   for `(r + c*q)/c == q` when `r < c`.
+- Abstract arithmetic lemmas relating `a/c` to `x` when `a` is bounded by `c*x`,
+  bounding `ceilDiv(c1*x, c2)` by `x/(c2/c1)` when `c1` divides `c2`, and bounding
+  remainders: `a%b <= a` and `a%b < b`.
 - `test` takes `--run-log FILE`, appending a line when each test starts and ends,
   and `--yul-verbosity N`. Tests time out after 10 minutes by default.
 - The progress log gives the source location of forks and of the locations in
