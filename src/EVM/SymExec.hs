@@ -13,8 +13,8 @@ import Prelude hiding (Foldable(..))
 import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.Async ( mapConcurrently)
 import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
-import Control.Concurrent.STM (writeTChan, newTChan, TChan, readTChan, atomically, isEmptyTChan, STM, orElse)
-import Control.Concurrent.STM.TVar (TVar, newTVarIO, modifyTVar, readTVar, readTVarIO, writeTVar)
+import Control.Concurrent.STM (writeTChan, newTChan, TChan, readTChan, atomically, isEmptyTChan, STM, orElse, retry)
+import Control.Concurrent.STM.TVar (TVar, newTVarIO, modifyTVar, modifyTVar', readTVar, readTVarIO, writeTVar)
 import Control.Concurrent.STM.TMVar (TMVar, putTMVar, takeTMVar, readTMVar, tryPutTMVar, newEmptyTMVarIO)
 import Control.Monad (when, unless, forM_, forM, forever, void)
 import Control.Monad.Loops (whileM)
@@ -212,12 +212,15 @@ data InterpTask m a = InterpTask
   {fetcher :: Fetch.Fetcher Symbolic m
   , iterConf :: IterConfig
   , vm :: VM Symbolic
-  , taskQ :: Chan (InterpTask m a)
+  , taskQ :: TVar [InterpTask m a]
   , numTasks :: TVar Natural
   , stepper :: Stepper Symbolic (Expr End)
   , handler :: VMPathHandler m a
   , shouldAbort :: TVar Bool
   }
+
+pushTask :: TVar [t] -> t -> IO ()
+pushTask q t = atomically $ modifyTVar' q (t :)
 
 data Process m a = Process
   { result :: Expr End
@@ -266,7 +269,8 @@ interpretVMAbortable runFlag fetcher iterConf vm stepper handler = do
   -- the flag is process-wide and outlives this exploration
   liftIO $ do HashCons.setHashConsEnabled conf.hashConsExplore
               HashCons.resetHashCons
-  taskQ <- liftIO newChan
+  -- newest first: depth-first exploration keeps the pending paths few
+  taskQ <- liftIO $ newTVarIO []
   processQ <- liftIO newChan
 
   -- spawn interpreters and process instances
@@ -308,7 +312,7 @@ interpretVMAbortable runFlag fetcher iterConf vm stepper handler = do
         , handler = handler
         , shouldAbort = runFlag
         }
-  liftIO $ writeChan taskQ interpTask
+  liftIO $ pushTask taskQ interpTask
 
   -- Wait for all done
   done <- liftIO . atomically $ (Left <$> readTMVar workerErr) `orElse` (Right <$> takeTMVar allProcessDone)
@@ -322,13 +326,15 @@ interpretVMAbortable runFlag fetcher iterConf vm stepper handler = do
   where
     -- orchestrator loop
     taskOrchestrate :: App m
-      => Chan (InterpTask m a)
+      => TVar [InterpTask m a]
       -> TVar Bool
       -> Chan () -> Chan (Process m a)
       -> TVar Natural -> TVar Natural -> TMVar () -> TMVar SomeException -> m ()
     taskOrchestrate taskQ shouldAbort avail processQ numTasks numProcs allProcessDone workerErr = forever $ do
       _ <- liftIO $ readChan avail
-      task <- liftIO $ readChan taskQ
+      task <- liftIO $ atomically $ readTVar taskQ >>= \case
+        [] -> retry
+        t:rest -> writeTVar taskQ rest >> pure t
       abortFlag <- liftIO $ readTVarIO shouldAbort
       if abortFlag
         then liftIO $ do
@@ -456,7 +462,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
             unless abortFlag $ do
               liftIO $ atomically $ modifyTVar numTasks (+1)
               when (conf.debug && conf.verb >=2) $ liftIO $ putStrLn $ "Queuing new task for ForkMany at depth " <> show newDepth
-              liftIO $ writeChan taskQ t { vm = vma, stepper = (k ra) }
+              liftIO $ pushTask taskQ t { vm = vma, stepper = (k ra) }
             runOne frozen newDepth rest
           runOne _ _ [] = internalError "unreachable"
       Stepper.Fork (PleaseRunBoth continue) -> do
@@ -469,7 +475,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
         abortFlag <- liftIO $ readTVarIO shouldAbort
         unless abortFlag $ do
           liftIO $ atomically $ modifyTVar numTasks (+1)
-          liftIO $ writeChan taskQ $ t { vm = vma, stepper = (k ra) }
+          liftIO $ pushTask taskQ $ t { vm = vma, stepper = (k ra) }
           when (conf.debug && conf.verb >= 2) $ liftIO $ putStrLn $ "Queued new task for Fork at depth " <> show newDepth
 
         (rb, vmb) <- liftIO $ stToIO $ runStateT (continue False) frozen { result = Nothing, exploreDepth = newDepth }
@@ -509,7 +515,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
                     let taken = Expr.simplifyProp $ if n then Lit 0 ./= cond else Lit 0 .== cond
                         partialLeaf = Partial (taken : vm.constraints) (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) (MaxIterationsReached vm.state.pc vm.state.contract)
                     liftIO $ atomically $ modifyTVar numTasks (+1)
-                    liftIO $ writeChan taskQ $ t { vm = vm, stepper = pure partialLeaf }
+                    liftIO $ pushTask taskQ $ t { vm = vm, stepper = pure partialLeaf }
                     (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case $ not n)) vm
                     interpretInternal t { vm = vm', stepper = (k r) }
                   -- we're in a loop and askSmtIters has been reached

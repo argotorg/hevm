@@ -133,6 +133,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes of zero.
 
 ## Changed
+- Symbolic execution explores the newest pending path first, depth-first,
+  which keeps fewer paths pending.
 - The Solidity ASTs are no longer kept after reading the build output:
   `SourceCache` has no `asts`, `DappInfo` no `astIdMap` and `astSrcMap`.
 - Invariant testing keeps only the states of feasible calls, checked by the
