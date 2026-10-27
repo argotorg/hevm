@@ -46,6 +46,10 @@ tests = testGroup "invariant"
       out <- runInvariant 4 "pass.sol" "invariant_bool"
       assertRun "toggle" [(True, True)] out
       liftIO $ assertBool "states seen before are not explored again" ("(2 states, up to 4 calls deep)" `isInfixOf` snd out)
+  , test "infeasible-states-dropped" $ do
+      out <- runInvariant 2 "pass.sol" "invariant_neither"
+      assertRun "unreachable" [(True, True)] out
+      liftIO $ assertBool "only the initial state" ("(1 states, up to 2 calls deep)" `isInfixOf` snd out)
   , test "fail" $ do
       runInvariant 1 "fail.sol" "invariant_below_two" >>= assertRun "one call is not enough" [(True, True)]
       out <- runInvariant 2 "fail.sol" "invariant_below_two"
