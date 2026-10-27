@@ -138,6 +138,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes of zero.
 
 ## Changed
+- State merging also merges if/else branches and ternaries, where the two
+  sides meet after the jump target, and follows the branches inside a merged
+  side that its own condition decides, such as the overflow check of `a - b`
+  under `a > b`. A branch reached again in a loop is not merged, so the loop
+  bound applies. `MergeState` has `msAssume` instead of `msRemainingBudget`.
 - Invariant testing merges the states after a call that differ only in their
   path conditions into one state with the disjunction of those conditions, and
   drops the logs of earlier calls. The disjunction drops conditions whose
