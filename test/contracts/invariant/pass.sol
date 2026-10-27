@@ -126,3 +126,29 @@ contract CycleTest is Test {
         assertFalse(p.both());
     }
 }
+
+contract Spread {
+    event Up();
+    event Down();
+    uint256 public last;
+
+    function put(uint256 x, uint256 y) public {
+        if (x > y) emit Up();
+        else emit Down();
+        last = x;
+    }
+}
+
+// both branches of put end in the same state
+contract SpreadTest is Test {
+    Spread s;
+
+    function setUp() public {
+        s = new Spread();
+    }
+
+    function invariant_any() public view {
+        uint256 l = s.last();
+        assertTrue(l >= 0);
+    }
+}

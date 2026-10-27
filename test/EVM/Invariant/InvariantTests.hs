@@ -50,6 +50,11 @@ tests = testGroup "invariant"
       out <- runInvariant 2 "pass.sol" "invariant_neither"
       assertRun "unreachable" [(True, True)] out
       liftIO $ assertBool "only the initial state" ("(1 states, up to 2 calls deep)" `isInfixOf` snd out)
+  , test "same-states-merged" $ do
+      out <- runInvariant 1 "pass.sol" "invariant_any"
+      assertRun "holds" [(True, True)] out
+      liftIO $ assertBool "both branches give one state" ("(2 states, up to 1 calls deep)" `isInfixOf` snd out)
+      runInvariant 1 "fail.sol" "invariant_last_small" >>= assertRun "fails in a merged state" [(False, True)]
   , test "fail" $ do
       runInvariant 1 "fail.sol" "invariant_below_two" >>= assertRun "one call is not enough" [(True, True)]
       out <- runInvariant 2 "fail.sol" "invariant_below_two"
