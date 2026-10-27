@@ -610,6 +610,20 @@ tests =
     -- PSM3's previewSwapExactOut: a ceilDiv by a symbolic rate, scaled up and back, against the round-down
     , provesAbstractly "ceildiv-rate-vs-floor" "uint256 x, uint256 r"
         "require(x <= type(uint128).max && r >= 1e23 && r <= 1e30); uint256 a = x * 1e27; uint256 e = a / r; uint256 u = a == 0 ? 0 : (a - 1) / r + 1; uint256 v = u * 1e18; uint256 w = v == 0 ? 0 : (v - 1) / 1e18 + 1; assert(w - e <= 1);"
+    -- PSM3's swap round trip usds -> susds -> usds
+    , provesAbstractly "const-div-roundtrip" "uint256 x, uint256 r"
+        "require(x <= type(uint128).max && r != 0 && r <= type(uint128).max); uint256 o; uint256 b; assembly { o := div(mul(x, 1000000000000000000000000000), r) b := div(mul(r, o), 1000000000000000000000000000) } assert(b <= x);"
+    -- previewSwapExactOut with a concrete rate: the round-up divisor is a multiple of the scale
+    , provesAbstractly "ceildiv-fraction-reduce" "uint256 x"
+        "require(x <= type(uint128).max); uint256 a = x * 1e27; uint256 e = a / 1e30; uint256 u = a == 0 ? 0 : (a - 1) / 1e30 + 1; uint256 v = u * 1e18; uint256 w = v == 0 ? 0 : (v - 1) / 1e18 + 1; assert(w - e <= 1);"
+    -- the same, with x from forge-std's bound(), a remainder
+    , provesAbstractly "ceildiv-fraction-reduce-bounded" "uint256 y"
+        "uint256 x = 1 + y % 1e30; uint256 a = x * 1e27; uint256 e = a / 1e30; uint256 u = (a - 1) / 1e30 + 1; uint256 v = u * 1e18; uint256 w = (v - 1) / 1e18 + 1; assert(w - e <= 1);"
+    , testAbstractArith "ceildiv-fraction-reduce-cex" $ do
+        Just c <- abstractArithContract "uint256 x"
+          "require(x <= type(uint128).max); uint256 a = x * 1e27; uint256 e = a / 1e30; uint256 u = a == 0 ? 0 : (a - 1) / 1e30 + 1; assert(u == e);"
+        (_, res) <- withShortBitwuzlaSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
+        assertBoolM "Expected a counterexample" (any isCex res)
     , abstractArithGap "gap-divmod-identity" "uint256 a, uint256 b"
         "require(b != 0); uint256 r; assembly { r := add(mul(div(a, b), b), mod(a, b)) } assert(r == a);"
     -- the lemmas would need the cross term x2*w1, which the query never mentions
