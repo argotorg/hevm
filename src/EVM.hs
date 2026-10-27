@@ -934,19 +934,30 @@ exec1 conf = do
                           False -> assign' (#state % #stack) xs >> next
                           True -> vmError BadJumpDestination
                       Right jumpTarget -> do
+                        let jumpSym :: Bool -> EVM Symbolic ()
+                            jumpSym False = assign' (#state % #stack) xs >> next
+                            jumpSym _    = checkJump jumpTarget xs
                         -- Check if we're already in merge mode (speculative execution)
                         ms <- use #mergeState
                         if ms.msActive then
-                          -- Inside speculation: nested branch, bail out
-                          -- This will cause speculateLoop to return Nothing
-                          assign #result $ Just $ VMFailure BadJumpDestination
+                          -- Inside speculation: follow a nested branch the side's
+                          -- assumption decides, bail out on any other
+                          case Merge.decide ms.msAssume cond of
+                            Just c -> jumpSym c
+                            Nothing -> assign #result $ Just $ VMFailure BadJumpDestination
                         else do
-                          merged <- Merge.tryMergeForwardJump conf (exec1 conf) vm.state.pc jumpTarget cond xs
-                          unless merged $ do
-                            let jumpSym :: Bool -> EVM Symbolic ()
-                                jumpSym False = assign' (#state % #stack) xs >> next
-                                jumpSym _    = checkJump jumpTarget xs
-                            branchBounded conf cond jumpSym
+                          loc <- codeloc
+                          seen <- use (#iterations % at loc)
+                          let returnAddrs = filter $ \case
+                                Lit w -> w <= unsafeInto (maxBound :: Int) && isValidJumpDest vm (unsafeInto w)
+                                _ -> False
+                              -- reached again from the same call site: a loop, which must fork
+                              -- for the loop bound to apply, as its condition may be concrete
+                              inLoop = maybe False (\(_, old) -> returnAddrs old == returnAddrs vm.state.stack) seen
+                          merged <- if inLoop then pure False
+                            else Merge.tryMergeForwardJump conf (exec1 conf) (isValidJumpDest vm) vm.state.pc jumpTarget cond xs
+                          when merged $ assign (#iterations % at loc) (Just (maybe 1 ((+ 1) . fst) seen, vm.state.stack))
+                          unless merged $ branchBounded conf cond jumpSym
                 in case eqT @t @Symbolic of
                      Just Refl -> symbolicMerge
                      Nothing -> branch conf.maxDepth cond jump

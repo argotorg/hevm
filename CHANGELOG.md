@@ -155,6 +155,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Changed
 - `mapExpr` visits each hash-consed node once per call, and the simplifier's
   searches for subterms fold over each node once, instead of over every path to it.
+- State merging also merges if/else branches and ternaries, where the two
+  sides meet after the jump target, and follows the branches inside a merged
+  side that its own condition decides, such as the overflow check of `a - b`
+  under `a > b`. A branch reached again in a loop is not merged, so the loop
+  bound applies. `MergeState` has `msAssume` instead of `msRemainingBudget`.
 - The default number of solvers is at most half of the available memory divided
   by `--smt-memory`, so that the solvers running at once fit in memory.
 - Solidity's overflow check of a multiplication by a literal, `y == 0 || (y * c) / y == c`,
