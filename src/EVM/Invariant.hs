@@ -20,7 +20,7 @@ import Control.Monad.ST (stToIO)
 import Data.IORef (IORef, readIORef, atomicModifyIORef')
 import Control.Monad.State.Strict (execStateT, execState, get, put, liftIO, modify)
 import Data.Either (partitionEithers)
-import Data.List (partition)
+import Data.List (partition, sortOn)
 import Data.Map qualified as Map
 import Data.Maybe (catMaybes)
 import Data.Set (Set)
@@ -80,16 +80,23 @@ data InvState = InvState
 data StateKey = StateKey [(Expr EAddr, Expr EWord, Expr Storage, Expr EWord, Maybe W64)] (Set Prop)
   deriving (Eq, Ord)
 
-stateKey :: VM Symbolic -> StateKey
-stateKey vm = StateKey accounts (Set.fromList (connected (foldMap accountAtoms accounts) conds))
+type Account = (Expr EAddr, Expr EWord, Expr Storage, Expr EWord, Maybe W64)
+
+accountsOf :: VM Symbolic -> [Account]
+accountsOf vm =
+  -- every transaction bumps the origin's nonce, which no contract can read
+  [ (a, c.codehash, zeroless c.storage, c.balance, if a == vm.tx.origin then Nothing else c.nonce)
+  | (a, c) <- Map.toList vm.env.contracts ]
   where
-    -- every transaction bumps the origin's nonce, which no contract can read
-    accounts = [ (a, c.codehash, zeroless c.storage, c.balance, if a == vm.tx.origin then Nothing else c.nonce)
-               | (a, c) <- Map.toList vm.env.contracts ]
     -- a slot written back to zero is the same as one never written
     zeroless = \case
       ConcreteStore m -> ConcreteStore (Map.filter (/= 0) m)
       st -> st
+
+stateKey :: VM Symbolic -> StateKey
+stateKey vm = StateKey accounts (Set.fromList (connected (foldMap accountAtoms accounts) conds))
+  where
+    accounts = accountsOf vm
     accountAtoms (a, h, st, b, _) = foldExpr atom mempty a <> foldExpr atom mempty h
       <> foldExpr atom mempty st <> foldExpr atom mempty b
     conds = [(p, foldProp atom mempty p) | p <- vm.constraints]
@@ -136,6 +143,25 @@ endState vm = vm
   & set #traces (Zipper.fromForest [])
   & set #iterations mempty
   & set #pathsVisited mempty
+  & set #logs []
+
+-- | Merges the end states of paths that differ only in their path conditions,
+-- such as the branches of an assertion: the paths of one state continue alike
+mergeStates :: [VM Symbolic] -> [VM Symbolic]
+mergeStates vms = map (merge . snd) $ sortOn fst $ Map.elems $
+  Map.fromListWith (\(_, new) (i, old) -> (i, old <> new)) [(sameAs vm, (i, [vm])) | (i, vm) <- zip [0 :: Int ..] vms]
+  where
+    sameAs vm = (accountsOf vm, vm.block.timestamp, vm.block.number, vm.env.callWorld,
+                 vm.env.callCounts, vm.env.freshAddresses, vm.freshVar)
+    merge [vm] = vm
+    merge group@(vm:_) =
+      let conds = map (Set.fromList . (.constraints)) group
+          common = foldr1 Set.intersection conds
+          rest = map (`Set.difference` common) conds
+          shared = filter (`Set.member` common) vm.constraints
+      in vm & set #constraints (if any Set.null rest then shared else shared <> [por (map (pand . Set.toList) rest)])
+            & set #keccakPreImgs (foldMap (.keccakPreImgs) group)
+    merge [] = internalError "empty group"
 
 -- | The feasible states not in @visited@ after one more call to any of the
 -- targets, the partially explored paths of those calls, and the calls that
@@ -167,15 +193,13 @@ nextStates solvers post fetcher iterConf gas senders targets visited st = do
     abort <- liftIO $ newTVarIO False
     leaves <- interpretVMAbortable abort fetcher iterConf vm runExpr $ \leaf endVm _ -> case leaf of
       Success {} -> do
-        let k = stateKey endVm
-        known <- liftIO $ Set.member k <$> readIORef visited
+        known <- liftIO $ Set.member (stateKey endVm) <$> readIORef visited
         if known then pure Nothing else do
           -- branches were only decided by the simplifier
           res <- checkBranchSat solvers (extractProps leaf <> Preimages.recordedProps endVm.keccakPreImgs)
-          new <- case res of
-            Qed -> pure False
-            _ -> liftIO $ atomicModifyIORef' visited $ \seen -> (Set.insert k seen, Set.notMember k seen)
-          pure $ if new then Just $ Left InvState { vm = endState endVm, calls = st.calls <> [call] } else Nothing
+          pure $ case res of
+            Qed -> Nothing
+            _ -> Just $ Left (endState endVm)
       Partial {} -> pure $ Just $ Right (Left leaf)
       Failure {} -> case post vm leaf of
         PBool True -> pure Nothing
@@ -185,7 +209,13 @@ nextStates solvers post fetcher iterConf gas senders targets visited st = do
             Cex (l, cex) -> Just $ Right $ Right Probe { state = st { calls = st.calls <> [call] }, leaf = l, cex }
             _ -> Nothing
       _ -> pure Nothing
-    let (states, others) = partitionEithers (catMaybes leaves)
+    let (ends, others) = partitionEithers (catMaybes leaves)
         (partials, probes) = partitionEithers others
+    states <- liftIO $ fmap catMaybes $ forM (mergeStates ends) $ \end -> do
+      let k = stateKey end
+      atomicModifyIORef' visited $ \seen ->
+        (Set.insert k seen, if Set.member k seen then Nothing else Just InvState { vm = end, calls = st.calls <> [call] })
+    -- a merged state covers each of its paths
+    liftIO $ atomicModifyIORef' visited $ \seen -> (seen <> Set.fromList (map stateKey ends), ())
     pure (states, partials, probes)
   pure (concatMap (\(a, _, _) -> a) results, concatMap (\(_, b, _) -> b) results, concatMap (\(_, _, c) -> c) results)

@@ -133,6 +133,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes of zero.
 
 ## Changed
+- Invariant testing merges the states after a call that differ only in their
+  path conditions into one state with the disjunction of those conditions, and
+  drops the logs of earlier calls.
 - Symbolic execution explores the newest pending path first, depth-first,
   which keeps fewer paths pending.
 - The Solidity ASTs are no longer kept after reading the build output:
