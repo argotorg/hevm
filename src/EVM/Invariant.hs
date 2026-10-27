@@ -17,6 +17,7 @@ module EVM.Invariant
 import Control.Concurrent.STM.TVar (newTVarIO)
 import Control.Monad (forM)
 import Control.Monad.ST (stToIO)
+import Data.IORef (IORef, readIORef, atomicModifyIORef')
 import Control.Monad.State.Strict (execStateT, execState, get, put, liftIO, modify)
 import Data.Either (partitionEithers)
 import Data.List (partition)
@@ -27,6 +28,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Word (Word64)
+import Data.Tree.Zipper qualified as Zipper
 import Optics.Core
 import Optics.State
 import Optics.State.Operators
@@ -36,8 +38,8 @@ import EVM.ABI (Sig(..), callSig)
 import EVM.Effects
 import EVM.Fetch qualified as Fetch
 import EVM.Keccak.Preimages qualified as Preimages
-import EVM.Solvers (SolverGroup, checkSatWithProps)
-import EVM.SymExec (IterConfig, Postcondition, interpretVMAbortable, runExpr, freezeVM, extractProps, verifyResult)
+import EVM.Solvers (SolverGroup, checkSatWithProps, checkBranchSat)
+import EVM.SymExec (IterConfig, Postcondition, interpretVMAbortable, runExpr, extractProps, verifyResult)
 import EVM.SymExec.Calldata (symCalldataNamed)
 import EVM.Transaction (initTx)
 import EVM.Traversals (foldExpr, foldProp)
@@ -123,12 +125,26 @@ startCall target caller gas entry (cd, props) = do
   pushTrace (EntryTrace entry)
   modify initTx
 
--- | The states after one more call to any of the targets, the partially
--- explored paths of those calls, and the calls that can fail the postcondition
+-- | What of a VM at the end of a successful call the next call can see
+endState :: VM Symbolic -> VM Symbolic
+endState vm = vm
+  & set #result Nothing
+  & set #frames []
+  & set (#state % #memory) (SymbolicMemory mempty)
+  & set (#state % #stack) []
+  & set (#state % #returndata) mempty
+  & set #traces (Zipper.fromForest [])
+  & set #iterations mempty
+  & set #pathsVisited mempty
+
+-- | The feasible states not in @visited@ after one more call to any of the
+-- targets, the partially explored paths of those calls, and the calls that
+-- can fail the postcondition
 nextStates :: App m
-  => SolverGroup -> Postcondition -> Fetch.Fetcher Symbolic m -> IterConfig -> Word64 -> Senders -> [Target] -> InvState
+  => SolverGroup -> Postcondition -> Fetch.Fetcher Symbolic m -> IterConfig -> Word64 -> Senders -> [Target]
+  -> IORef (Set StateKey) -> InvState
   -> m ([InvState], [Expr End], [Probe])
-nextStates solvers post fetcher iterConf gas senders targets st = do
+nextStates solvers post fetcher iterConf gas senders targets visited st = do
   results <- forM targets $ \target -> do
     let Sig _ types = target.sig
         -- each call of a sequence needs its own variables, and they are on one path
@@ -151,8 +167,15 @@ nextStates solvers post fetcher iterConf gas senders targets st = do
     abort <- liftIO $ newTVarIO False
     leaves <- interpretVMAbortable abort fetcher iterConf vm runExpr $ \leaf endVm _ -> case leaf of
       Success {} -> do
-        frozen <- liftIO $ stToIO $ freezeVM endVm
-        pure $ Just $ Left InvState { vm = frozen, calls = st.calls <> [call] }
+        let k = stateKey endVm
+        known <- liftIO $ Set.member k <$> readIORef visited
+        if known then pure Nothing else do
+          -- branches were only decided by the simplifier
+          res <- checkBranchSat solvers (extractProps leaf <> Preimages.recordedProps endVm.keccakPreImgs)
+          new <- case res of
+            Qed -> pure False
+            _ -> liftIO $ atomicModifyIORef' visited $ \seen -> (Set.insert k seen, Set.notMember k seen)
+          pure $ if new then Just $ Left InvState { vm = endState endVm, calls = st.calls <> [call] } else Nothing
       Partial {} -> pure $ Just $ Right (Left leaf)
       Failure {} -> case post vm leaf of
         PBool True -> pure Nothing

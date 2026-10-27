@@ -41,8 +41,6 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as T
 import Data.Tree.Zipper qualified as Zipper
 import Data.Tuple (swap)
-import Data.Vector.Storable qualified as VS
-import Data.Vector.Storable.ByteString (vectorToByteString)
 import GHC.Conc (numCapabilities)
 import GHC.Generics (Generic)
 import GHC.Num.Natural (Natural)
@@ -51,7 +49,7 @@ import Options.Generic (ParseField, ParseFields, ParseRecord)
 import Text.Printf (printf)
 import Witch (into, unsafeInto)
 
-import EVM (makeVm, abstractContract, initialContract, getCodeLocation, isValidJumpDest, defaultVMOpts)
+import EVM (makeVm, memoryBytes, abstractContract, initialContract, getCodeLocation, isValidJumpDest, defaultVMOpts)
 import EVM.Exec (exec)
 import EVM.Fetch qualified as Fetch
 import EVM.ABI
@@ -202,7 +200,7 @@ freezeVM vm = do
       }
   where
     freeze = \case
-      ConcreteMemory m -> SymbolicMemory . ConcreteBuf . vectorToByteString <$> VS.freeze m
+      ConcreteMemory m -> SymbolicMemory . ConcreteBuf <$> memoryBytes m
       m@(SymbolicMemory _) -> pure m
 
 type PathHandler m a = Expr End -> TVar Bool -> m a

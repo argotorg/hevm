@@ -26,7 +26,7 @@ import EVM.Expr (maybeLitWordSimp)
 import EVM.Progress qualified as Progress
 import EVM.Invariant
 
-import Control.Monad (void, when, unless, forM, forM_, foldM, mfilter, filterM)
+import Control.Monad (void, when, unless, forM, forM_, foldM, mfilter)
 import Control.Monad.ST (RealWorld, ST, stToIO)
 import Control.Monad.State.Strict (execState, execStateT, get, put, liftIO, runStateT)
 import Optics.Core
@@ -40,7 +40,7 @@ import Data.ByteString.Internal (c2w)
 import Data.ByteString.Lazy qualified as BSLazy
 import Data.Decimal (DecimalRaw(..))
 import Data.Foldable (Foldable(..), toList)
-import Data.IORef (IORef, newIORef, readIORef, modifyIORef, atomicModifyIORef')
+import Data.IORef (IORef, newIORef, readIORef, modifyIORef)
 import Data.List qualified as List
 import Data.Map (Map)
 import Data.Map qualified as Map
@@ -814,13 +814,11 @@ invariantLevel opts ctx targets d = do
       prev <- invariantLevel opts ctx targets (d - 1)
       let fetcher = Fetch.oracle opts.solvers (Just opts.sess) opts.rpcInfo
       results <- mapM (nextStates opts.solvers (testPostcondition opts.checkFailBit False) fetcher
-        (makeVeriOpts opts).iterConf opts.testParams.gasCall ctx.senders targets) prev
-      let reached = concatMap (\(a, _, _) -> a) results
-      states <- liftIO $ filterM (\st -> atomicModifyIORef' ctx.visited $ \seen ->
-        let k = stateKey st.vm in if Set.member k seen then (seen, False) else (Set.insert k seen, True)) reached
+        (makeVeriOpts opts).iterConf opts.testParams.gasCall ctx.senders targets ctx.visited) prev
+      let states = concatMap (\(a, _, _) -> a) results
       conf <- readConfig
       when conf.debug $ liftIO $ putStrLn $ "Invariant states after " <> show d <> " calls: "
-        <> show (length states) <> " new, " <> show (length reached - length states) <> " seen before"
+        <> show (length states) <> " new"
       liftIO $ do
         modifyIORef ctx.levels (<> [states])
         modifyIORef ctx.partials (<> concatMap (\(_, b, _) -> b) results)
