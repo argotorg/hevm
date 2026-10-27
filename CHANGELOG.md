@@ -182,6 +182,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   side that its own condition decides, such as the overflow check of `a - b`
   under `a > b`. A branch reached again in a loop is not merged, so the loop
   bound applies. `MergeState` has `msAssume` instead of `msRemainingBudget`.
+- Invariant testing merges the states after a call that differ only in their
+  path conditions into one state with the disjunction of those conditions, and
 - Symbolic execution explores the newest pending path first, depth-first,
   which keeps fewer paths pending.
 - The Solidity ASTs are no longer kept after reading the build output:
