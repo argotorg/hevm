@@ -12,6 +12,7 @@ module EVM.Invariant
   , stateKey
   , startCall
   , nextStates
+  , disjoin
   ) where
 
 import Control.Concurrent.STM.TVar (newTVarIO)
@@ -22,7 +23,7 @@ import Control.Monad.State.Strict (execStateT, execState, get, put, liftIO, modi
 import Data.Either (partitionEithers)
 import Data.List (partition, sortOn)
 import Data.Map qualified as Map
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, mapMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -36,6 +37,7 @@ import Optics.State.Operators
 import EVM (loadContract, resetState, pushTrace)
 import EVM.ABI (Sig(..), callSig)
 import EVM.Effects
+import EVM.Expr (simplifyProp)
 import EVM.Fetch qualified as Fetch
 import EVM.Keccak.Preimages qualified as Preimages
 import EVM.Solvers (SolverGroup, checkSatWithProps, checkBranchSat)
@@ -157,11 +159,28 @@ mergeStates vms = map (merge . snd) $ sortOn fst $ Map.elems $
     merge group@(vm:_) =
       let conds = map (Set.fromList . (.constraints)) group
           common = foldr1 Set.intersection conds
-          rest = map (`Set.difference` common) conds
+          rest = disjoin $ map (`Set.difference` common) conds
           shared = filter (`Set.member` common) vm.constraints
       in vm & set #constraints (if any Set.null rest then shared else shared <> [por (map (pand . Set.toList) rest)])
             & set #keccakPreImgs (foldMap (.keccakPreImgs) group)
     merge [] = internalError "empty group"
+
+-- | Shortens a disjunction of conjunctions: two that differ only in one
+-- condition and its negation become one without it, and a conjunction that
+-- implies another is dropped
+disjoin :: [Set Prop] -> [Set Prop]
+disjoin = untilFixpoint (absorb . resolve) . mapMaybe simp
+  where
+    simp r = let ps = Set.delete (PBool True) (Set.map simplifyProp r)
+             in if Set.member (PBool False) ps then Nothing else Just ps
+    resolve rs = case [ (i, j, Set.delete p r) | (i, r) <- zip [0 :: Int ..] rs, (j, r') <- zip [0..] rs, i < j
+                      , p <- Set.toList r, let q = simplifyProp (PNeg p)
+                      , Set.member q r', Set.delete p r == Set.delete q r' ] of
+      (i, j, s):_ -> s : [r | (k, r) <- zip [0..] rs, k /= i, k /= j]
+      [] -> rs
+    -- of equal conjunctions, the first one stays
+    absorb rs = [ r | (i, r) <- zip [0 :: Int ..] rs
+                , not (or [r' `Set.isSubsetOf` r && (r' /= r || j < i) | (j, r') <- zip [0..] rs, j /= i]) ]
 
 -- | The feasible states not in @visited@ after one more call to any of the
 -- targets, the partially explored paths of those calls, and the calls that
