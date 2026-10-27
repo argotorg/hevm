@@ -344,6 +344,7 @@ test-suite test
     EVM.SymExec.CallTests
     EVM.SymExec.OpcodeTests
     EVM.Solvers.SolverTests
+    EVM.Test.RunLog
   build-depends:
     aeson-pretty,
     base16,

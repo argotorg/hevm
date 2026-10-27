@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remainders: `a%b <= a` and `a%b < b`.
 - The simplifier drops an `ITE c t k` whose literal `k` is what `t` is when `c` is 0,
   such as the product a short-circuited overflow check leaves after a merge.
+- `test` takes `--run-log FILE`, appending a line when each test starts and ends,
+  and `--yul-verbosity N`. Tests time out after 10 minutes by default.
 - The progress log gives the source location of forks and of the locations in
   its summaries, when there is debug info.
 - Invariant testing: `hevm test` checks `invariant_` functions after every
