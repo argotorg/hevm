@@ -133,6 +133,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes of zero.
 
 ## Changed
+- The Solidity ASTs are no longer kept after reading the build output:
+  `SourceCache` has no `asts`, `DappInfo` no `astIdMap` and `astSrcMap`.
 - Invariant testing keeps only the states of feasible calls, checked by the
   solver, and drops the states seen before as soon as they are reached. It keeps
   the state after a call without that call's memory and traces.

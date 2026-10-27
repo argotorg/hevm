@@ -35,8 +35,6 @@ module EVM.Solidity
   , stdjson
   , parseMethodInput
   , lineSubrange
-  , astIdMap
-  , astSrcMap
   , containsLinkerHole
   , makeSourceCache
   , getContractsMap
@@ -166,10 +164,6 @@ newtype Contracts = Contracts (Map Text SolcContract)
 getContractsMap :: Contracts -> Map Text SolcContract
 getContractsMap (Contracts m) = m
 
--- | A mapping from contract identifiers (filepath:name) to their ast json
-newtype Asts = Asts (Map Text Value)
-  deriving newtype (Show, Eq, Semigroup, Monoid)
-
 -- | Solidity source files are identified either by their location in the vfs, or by a src map identifier
 data SrcFile = SrcFile
   { id :: Int
@@ -200,7 +194,6 @@ data ProjectType = CombinedJSON | Foundry
 data SourceCache = SourceCache
   { files  :: Map Int (FilePath, ByteString) -- ^ map from src id to (filepath, contents)
   , lines  :: Map Int (Vector ByteString)
-  , asts   :: Map Text Value
   } deriving (Show, Eq, Generic)
 
 data Reference = Reference
@@ -216,10 +209,10 @@ instance FromJSON Reference where
     typeMismatch "Transaction" invalid
 
 instance Semigroup SourceCache where
-  SourceCache a b c <> SourceCache d e f = SourceCache (a <> d) (b <> e) (c <> f)
+  SourceCache a b <> SourceCache c d = SourceCache (a <> c) (b <> d)
 
 instance Monoid SourceCache where
-  mempty = SourceCache mempty mempty mempty
+  mempty = SourceCache mempty mempty
 
 data JumpType = JumpInto | JumpFrom | JumpRegular
   deriving (Show, Eq, Ord, Generic)
@@ -317,7 +310,7 @@ readFilteredBuildOutput root jsonFilter _ = do
     js -> do
       (offsets, buildSrcs) <- liftIO $ srcIdOffsets root
       outputs <- sequence <$> mapM (\j -> readSolcShifted (Map.findWithDefault 0 j offsets) Foundry root (outDir </> j)) js
-      extra <- liftIO $ makeSourceCache root buildSrcs mempty
+      extra <- liftIO $ makeSourceCache root buildSrcs
       pure $ (<> BuildOutput mempty extra) . mconcat <$> outputs
 
 -- | Source ids are only unique within one build of forge, and an incremental
@@ -359,9 +352,8 @@ srcIdOffsets root = do
 
 shiftSrcIds :: Int -> BuildArtifacts -> BuildArtifacts
 shiftSrcIds 0 a = a
-shiftSrcIds off (Contracts cs, asts, Sources srcs) =
+shiftSrcIds off (Contracts cs, Sources srcs) =
   ( Contracts (fmap (\c -> c { runtimeSrcmap = fmap sm c.runtimeSrcmap, creationSrcmap = fmap sm c.creationSrcmap }) cs)
-  , asts
   , Sources (Map.mapKeys (\f -> f { id = f.id + off }) srcs) )
   where sm m = if m.file >= 0 then m { file = m.file + off } else m
 
@@ -379,8 +371,8 @@ findJsonFiles root =  filter (doesNotContain ["build-info", "kompiled"])
 filterMetadata :: [FilePath] -> [FilePath]
 filterMetadata = filter (not . isSuffixOf ".metadata.json")
 
-makeSourceCache :: FilePath -> Sources -> Asts -> IO SourceCache
-makeSourceCache root (Sources sources) (Asts asts) = do
+makeSourceCache :: FilePath -> Sources -> IO SourceCache
+makeSourceCache root (Sources sources) = do
   files <- Map.fromList <$> forM (Map.toList sources) (\x@(SrcFile id' fp, _) -> do
       contents <- case x of
         (_,  Just content) -> pure content
@@ -390,7 +382,6 @@ makeSourceCache root (Sources sources) (Asts asts) = do
   pure $! SourceCache
     { files = files
     , lines = fmap (Vector.fromList . BS.split 0xa . snd) files
-    , asts  = asts
     }
 
 lineSubrange ::
@@ -424,10 +415,10 @@ readSolcShifted off pt root fp = do
         pure (Right mempty)
       Left err -> pure . Left $ "unable to parse " <> show pt <> " project JSON: " <> fp
         <> " Contract: " <> show contractName <> "\nError: " <> show err
-      Right (contracts, asts, sources) -> do
+      Right (contracts, sources) -> do
         conf <- readConfig
         when (conf.debug) $ liftIO $ putStrLn $ "Parsed contract: " <> show contractName <> " file: " <> fp
-        sourceCache <- liftIO $ makeSourceCache root sources asts
+        sourceCache <- liftIO $ makeSourceCache root sources
         pure (Right (BuildOutput contracts sourceCache))
 
 isTestContractJson :: Text -> Bool
@@ -499,7 +490,7 @@ instance Show BytecodeReadingError where
   show (UnlinkedLibrary contract) = "Unlinked libraries detected in bytecode of contract " <> (T.unpack contract)
   show (OtherError contract errMsg) = "Error when reading bytecode of " <> (T.unpack contract) <> ": " <> T.unpack errMsg
 
-type BuildArtifacts = (Contracts, Asts, Sources)
+type BuildArtifacts = (Contracts, Sources)
 
 readJSON :: ProjectType -> Text -> Text -> Either BytecodeReadingError BuildArtifacts
 readJSON CombinedJSON _ json = readCombinedJSON json
@@ -547,7 +538,6 @@ readFoundryJSON contractName json = do
               _ -> Nothing
         }
   Right ( Contracts $ Map.singleton (path <> ":" <> contractName) contract
-        , Asts      $ Map.singleton path ast
         , Sources   $ Map.singleton (SrcFile id' (T.unpack path)) Nothing
         )
 
@@ -634,9 +624,7 @@ readCombinedJSON json = do
   rawContracts <- maybeToEither (MissingOrInvalidJsonField "contracts") (json ^? key "contracts" % _Object)
   contracts <- Map.traverseWithKey extractContract $ KeyMap.toMapText rawContracts
   sources <- maybeToEither (MissingOrInvalidJsonField "sourceList") $ toList . fmap (preview _String) <$> json ^? key "sourceList" % _Array
-  astsPre <- maybeToEither (MissingJsonField "sources") $ json ^? key "sources" % _Object
   pure ( Contracts contracts
-       , Asts (KeyMap.toMapText astsPre)
        , Sources $ Map.fromList $
            (\(path, id') -> (SrcFile id' (T.unpack path), Nothing)) <$>
              zip (catMaybes sources) [0..]
@@ -877,38 +865,6 @@ knownBzzrPrefixes = [
   -- a2 64 "ipfs" 0x58 0x22 (solc >= 0.6.0)
   BS.pack [0xa2, 0x64, 0x69, 0x70, 0x66, 0x73, 0x58, 0x22]
   ]
-
--- | Every node in the AST has an ID, and other nodes reference those
--- IDs.  This function recurses through the tree looking for objects
--- with the "id" key and makes a big map from ID to value.
-astIdMap :: Foldable f => f Value -> Map Int Value
-astIdMap = foldMap f
-  where
-    f :: Value -> Map Int Value
-    f (Array x) = foldMap f x
-    f v@(Object x) =
-      let t = foldMap f (KeyMap.elems x)
-      in case KeyMap.lookup "id" x of
-        Nothing         -> t
-        Just (Number i) -> t <> Map.singleton (round i) v
-        Just _          -> t
-    f _ = mempty
-
-astSrcMap :: Map Int Value -> (SrcMap -> Maybe Value)
-astSrcMap astIds =
-  \(SM i n f _ _)  -> Map.lookup (i, n, f) tmp
-  where
-    tmp :: Map (Int, Int, Int) Value
-    tmp =
-       Map.fromList
-      . mapMaybe
-        (\v -> do
-          src <- preview (key "src" % _String) v
-          [i, n, f] <- mapM (readMaybe . T.unpack) (T.split (== ':') src)
-          pure ((i, n, f), v)
-        )
-      . Map.elems
-      $ astIds
 
 -- needs to be here not Format due to cyclic module deps
 strip0x'' :: Text -> Text
