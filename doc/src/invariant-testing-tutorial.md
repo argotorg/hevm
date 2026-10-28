@@ -142,12 +142,16 @@ change this; call them in `setUp()`:
 
 | Function | Effect |
 |---|---|
-| `targetContract(addr)` | Call only these contracts. The test contract itself can also be targeted, then its `test`, `prove`, `check`, `invariant_` and `setUp` functions are not called. |
-| `excludeContract(addr)` | Do not call these contracts. |
-| `targetSelector(FuzzSelector)` | Call only these functions of a contract. Overrides `excludeSelector` for that contract. View functions may be selected explicitly. |
-| `excludeSelector(FuzzSelector)` | Do not call these functions of a contract. |
-| `targetSender(addr)` | Only these addresses send the calls. |
-| `excludeSender(addr)` | These addresses never send the calls. |
+| `targetContract(addr)` | Call only these contracts |
+| `excludeContract(addr)` | Never call these contracts |
+| `targetSelector(FuzzSelector)` | Call only these functions of a contract |
+| `excludeSelector(FuzzSelector)` | Never call these functions of a contract |
+| `targetSender(addr)` | Only these addresses send calls |
+| `excludeSender(addr)` | These addresses never send calls |
+
+The test contract itself can be targeted too; its `test`, `prove`, `check`,
+`invariant_` and `setUp` functions are then not called. `targetSelector` can
+select view functions, and overrides `excludeSelector` for that contract.
 
 For example, to call only `mint` and `transfer` of a token, and never from the
 zero address:
