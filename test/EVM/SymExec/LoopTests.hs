@@ -355,6 +355,27 @@ tests =
         let sig = Just (Sig "f(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])
         (_, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
         assertBoolM "the merged ternary keeps its counterexample" (exactlyCex 1 ret)
+    , test "merged-length-splits-at-memory-access" $ do
+        -- the merged ternary sizes an array: unless memory accesses fork on it, every
+        -- later allocation is at a symbolic offset and the loop never becomes concrete
+        Just c <- solcRuntime "C"
+          [i|
+          contract C {
+            function f(bool two, uint256 x) public pure {
+              uint256 n = two ? 2 : 1;
+              uint256[] memory a = new uint256[](n);
+              for (uint256 i = 0; i < a.length; i++) a[i] = x + i;
+              uint256[] memory b = new uint256[](3);
+              b[0] = x;
+              bytes memory e = abi.encode(a, b);
+              assert(e.length == 224 + 32 * n);
+              assert(b[0] == x);
+            }
+          }
+          |]
+        let sig = Just (Sig "f(bool,uint256)" [AbiBoolType, AbiUIntType 256])
+        (e, []) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        assertBoolM "The expression is partial" $ not $ any isPartial e
     , testCase "merge-decides-nested-branches" $ do
         let a = Var "a"
             b = Var "b"
