@@ -18,6 +18,7 @@ module EVM.Solvers
   , SolvePhase(..)
   , checkMulti
   , defMemLimit
+  , defaultSolverCount
   ) where
 
 
@@ -28,6 +29,8 @@ import GHC.Natural
 import GHC.IO.Handle (Handle, hFlush, hSetBuffering, BufferMode(..))
 import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
 import Control.Concurrent (forkIO, killThread)
+import GHC.Conc (getNumProcessors)
+import Text.Read (readMaybe)
 import Control.Concurrent.QSem (QSem, newQSem, waitQSem, signalQSem)
 import Control.Exception (bracket, bracket_, finally, try, IOException)
 import Control.Concurrent.Async (race)
@@ -68,6 +71,21 @@ import EVM.Types
 -- In megabytes, i.e. 1GB
 defMemLimit :: Natural
 defMemLimit = 1024
+
+-- | One solver per core, but no more than half of the available memory can hold
+-- at the given per-solver limit (in MB): a solver is spawned per query, so the
+-- count bounds the solvers alive at once
+defaultSolverCount :: Natural -> IO Natural
+defaultSolverCount memLimit = do
+  cores <- fromIntegral <$> getNumProcessors
+  avail <- either (const Nothing) memAvailableMB <$> (try (readFile "/proc/meminfo") :: IO (Either IOException String))
+  pure $ case avail of
+    Just mb | memLimit > 0 -> max 1 (min cores (mb `div` 2 `div` memLimit))
+    _ -> cores
+  where
+    memAvailableMB info = case [ws | ("MemAvailable:" : ws) <- map words (lines info)] of
+      ((kb : _) : _) -> (`div` 1024) <$> readMaybe kb
+      _ -> Nothing
 
 -- | Supported solvers
 data Solver

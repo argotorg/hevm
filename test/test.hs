@@ -1,8 +1,14 @@
 module Main where
 
+import Data.Proxy (Proxy(..))
 import System.Environment (getArgs)
 import Test.Tasty
+import Test.Tasty.QuickCheck (QuickCheckTests(..))
+import Test.Tasty.Ingredients (composeReporters)
+import Test.Tasty.Options (OptionDescription(..))
 import Test.Tasty.Runners
+
+import EVM.Test.RunLog (runLogReporter)
 
 import EVM.Test.FuzzSymExec qualified as FuzzSymExec
 import EVM.Expr.ExprTests qualified as ExprTests
@@ -11,6 +17,7 @@ import EVM.Expr.KeccakFuzz qualified as KeccakFuzz
 import EVM.Expr.HashConsTests qualified as HashConsTests
 import EVM.ConcreteExecution.ConcreteExecutionTests qualified as ConcreteExecutionTests
 import EVM.Equivalence.EquivalenceTests qualified as EquivalenceTests
+import EVM.Equivalence.EquivalenceTests (YulVerbosity)
 import EVM.Equivalence.EquivFuzz qualified as EquivFuzz
 import EVM.Fetch.RpcFuzz qualified as RpcFuzz
 import EVM.SymExec.SymExecTests qualified as SymExecTests
@@ -32,7 +39,17 @@ main :: IO ()
 main = getArgs >>= \args -> case args of
   _ | hangingSolverFlag `elem` args -> hangingSolverMain
   _ | (_ : dir : maxDelay : _) <- dropWhile (/= randomSolverFlag) args -> randomSolverMain dir (read maxDelay)
-  _ -> defaultMain tests
+  _ -> defaultMainWithIngredients
+    [ listingTests
+    , includingOptions [Option (Proxy :: Proxy YulVerbosity)]
+    , runLogReporter `composeReporters` consoleTestReporter
+    ] (withDefaultTimeout tests)
+
+-- | 10 minutes per test, more for more QuickCheck tests, unless --timeout says otherwise
+withDefaultTimeout :: TestTree -> TestTree
+withDefaultTimeout t = askOption $ \(QuickCheckTests n) -> flip adjustOption t $ \case
+  NoTimeout -> Timeout (600 * 1000000 * max 1 (toInteger n `div` 100)) "default"
+  given -> given
 
 -- | run a subset of tests in the repl. p is a tasty pattern:
 -- https://github.com/UnkindPartition/tasty/tree/ee6fe7136fbcc6312da51d7f1b396e1a2d16b98a#patterns

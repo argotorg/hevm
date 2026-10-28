@@ -1,7 +1,7 @@
 {-# LANGUAGE QuasiQuotes #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
 
-module EVM.Equivalence.EquivalenceTests (tests) where
+module EVM.Equivalence.EquivalenceTests (tests, YulVerbosity) where
 
 import Control.Monad (when, unless, forM_)
 import Control.Monad.ST (stToIO)
@@ -19,6 +19,8 @@ import Data.Text qualified as T
 import Data.Time (diffUTCTime, getCurrentTime)
 import Data.Vector qualified as V
 import System.Environment (lookupEnv)
+import Text.Read (readMaybe)
+import Test.Tasty.Options (IsOption(..))
 import System.FilePath (makeRelative, normalise)
 import System.FilePath.Find (find, always, filePath, fileType, (&&?), FileType(RegularFile))
 import Test.Tasty
@@ -676,8 +678,16 @@ yulEquivalenceTests = testGroup "Yul equivalence"
   , yulOptimizationsSolcTests
   ]
 
+newtype YulVerbosity = YulVerbosity Int
+
+instance IsOption YulVerbosity where
+  defaultValue = YulVerbosity 0
+  parseValue = fmap YulVerbosity . readMaybe
+  optionName = pure "yul-verbosity"
+  optionHelp = pure "eq-all-yul-optimization-tests: 1 prints each file before checking it, 2 also its programs"
+
 yulOptimizationsSolcTests :: TestTree
-yulOptimizationsSolcTests = testCase "eq-all-yul-optimization-tests" $ do
+yulOptimizationsSolcTests = askOption $ \(YulVerbosity verbosity) -> testCase "eq-all-yul-optimization-tests" $ do
         let opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf {maxIter = Just 5, askSmtIters = 20, loopHeuristic = Naive }}
             ignoredTests = fmap normalise
                     -- unbounded loop --
@@ -780,7 +790,6 @@ yulOptimizationsSolcTests = testCase "eq-all-yul-optimization-tests" $ do
                   False -> ""
                   True-> success
           start <- getCurrentTime
-          let verbosity :: Int = 0
           when (verbosity > 0) $ putStrLn $ "Checking file: " <> f
           when (verbosity > 1) $ do
             putStrLn "-------------Original Below-----------------"

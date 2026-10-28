@@ -8,11 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- Abstract arithmetic lemmas for dividends a literal apart over one divisor,
+  `(x-k)/z <= x/z <= (x-k)/z + k`, as in a `ceilDiv` next to a round-down, and
+  for `(r + c*q)/c == q` when `r < c`.
+- Abstract arithmetic lemmas relating `a/c` to `x` when `a` is bounded by `c*x`,
+  bounding `ceilDiv(c1*x, c2)` by `x/(c2/c1)` when `c1` divides `c2`, and bounding
+  remainders: `a%b <= a` and `a%b < b`.
+- The simplifier drops an `ITE c t k` whose literal `k` is what `t` is when `c` is 0,
+  such as the product a short-circuited overflow check leaves after a merge.
+- The simplifier splits `b ** ITE c x y` with literal `b`, `x` and `y` into two
+  constants, and folds `x < x - x % c`, also masked to `uintN`, to false.
+- A memory offset or size that depends on a merged condition, such as an array
+  length picked by a ternary, forks on that condition, so memory stays concrete.
+- `test` takes `--run-log FILE`, appending a line when each test starts and ends,
+  and `--yul-verbosity N`. Tests time out after 10 minutes by default.
+- The progress log gives the source location of forks and of the locations in
+  its summaries, when there is debug info.
 - Invariant testing: `hevm test` checks `invariant_` functions after every
   sequence of at most `--invariant-depth` calls to the target contracts, with
   symbolic arguments, callers and timestamps. States reached before are not
   explored again. Assertion failures in the calls fail the test, and minimal
   proxies (EIP-1167 clones) can be targets.
+- An invariant testing tutorial in the docs.
 - A worked example in the docs: finding the Abracadabra `cook()` exploit on a mainnet fork.
 - `--smt-branch-timeout`, 20 seconds by default, for the queries that decide which
   branches to explore.
@@ -128,6 +145,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes of zero.
 
 ## Changed
+- Deciding a branch without the solver reuses the simplified path conditions
+  of the earlier branches on the path, kept in the new `VM` field
+  `simpConstraints`, and first tries the branch condition alone, which
+  simplification can decide where it cannot with the path conditions.
+- State merging also merges if/else branches and ternaries, where the two
+  sides meet after the jump target, and follows the branches inside a merged
+  side that its own condition decides, such as the overflow check of `a - b`
+  under `a > b`. A branch reached again in a loop is not merged, so the loop
+  bound applies. `MergeState` has `msAssume` instead of `msRemainingBudget`.
+- Invariant testing merges the states after a call that differ only in their
+  path conditions into one state with the disjunction of those conditions, and
+  drops the logs of earlier calls. The disjunction drops conditions whose
+  negation is the only difference between two of its parts.
+- Symbolic execution explores the newest pending path first, depth-first,
+  which keeps fewer paths pending.
+- The Solidity ASTs are no longer kept after reading the build output:
+  `SourceCache` has no `asts`, `DappInfo` no `astIdMap` and `astSrcMap`.
+- Invariant testing keeps only the states of feasible calls, checked by the
+  solver, and drops the states seen before as soon as they are reached. It keeps
+  the state after a call without that call's memory and traces.
+- The default number of solvers is at most half of the available memory divided
+  by `--smt-memory`, so that the solvers running at once fit in memory.
+- Solidity's overflow check of a multiplication by a literal, `y == 0 || (y * c) / y == c`,
+  also once simplification has distributed `y * c` or dropped `y == 0`,
+  simplifies to a bound on `y`, and the overflow checks of multiplications use bounds that hold
+  through comparisons with other bounded values.
+- Constant propagation substitutes any term that the props fix to a constant,
+  not only variables.
+- Invariant tests print the paths they only partially explored grouped by
+  source location, as `prove` tests do, instead of printing their expressions.
 - `EVM.SymExec` is split: concrete replay of counterexamples moves to
   `EVM.CexReplay`, and equivalence checking to `EVM.Equivalence`. Symbolic
   calldata (`EVM.SymExec.Calldata`) and counterexample models and printing
@@ -193,6 +240,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of simplifying an ITE of them.
 
 ## Fixed
+- Symbolic execution leaked memory: every trace kept the whole VM it was made
+  in, and memory size and loop visit counters kept the earlier frame states.
+- Memory snapshots at forks no longer copy the unused zeros of the memory buffer.
+- Source locations of contracts with immutables are found in Foundry projects.
+- Source locations are right after an incremental `forge build`, whose
+  build-infos number the source files independently.
+- `prank` and `startPrank` with a symbolic address, e.g. one picked from a list
+  by a symbolic index, explore each possible address instead of failing.
 - SMT queries skip assumptions between concrete keccak hashes, whose values
   are already known, avoiding unnecessary quadratic growth.
 - Constant propagation checks disequalities and disjunctions against the

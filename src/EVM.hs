@@ -50,7 +50,7 @@ import Data.List (delete, find, isPrefixOf)
 import Data.List.Split (splitOn)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, fromJust, isJust, isNothing, mapMaybe)
+import Data.Maybe (fromMaybe, fromJust, isJust, isNothing, listToMaybe, mapMaybe)
 import Data.Set (insert, member, fromList)
 import Data.Sequence (Seq)
 import Data.Sequence qualified as Seq
@@ -196,6 +196,7 @@ makeVm o = do
     , env = env
     , burned = initialGas
     , constraints = snd o.calldata
+    , simpConstraints = ([], [])
     , iterations = mempty
     , config = RuntimeConfig
       { allowFFI = o.allowFFI
@@ -355,6 +356,44 @@ getOpW8 state = case state.code of
 getOpName :: forall (t :: VMType) . FrameState t -> [Char]
 getOpName state = intToOpName $ fromEnum $ getOpW8 state
 
+-- | A merge can leave an ITE between literals where a memory offset or size is
+-- expected, e.g. a length picked by a ternary. Accessing memory there would make
+-- it symbolic for the rest of the path, so the path forks on the ITE instead,
+-- and the instruction runs again with each literal.
+splitMergedMemArg :: forall (t :: VMType). Typeable t => Config -> VM t -> Maybe (EVM t ())
+splitMergedMemArg conf vm = case eqT @t @Symbolic of
+  Just Refl | not vm.mergeState.msActive, vm.state.pc < opslen vm.state.code -> listToMaybe
+    [ forkOnSubterm conf.maxDepth [atom] [(v, [[v]]) | (v, _) <- cases] $ \v ->
+        assign' (#state % #stack % ix i) (fromJust (lookup v cases))
+    | i <- memArgs (getOp (getOpW8 vm.state))
+    , Just x <- [preview (ix i) vm.state.stack]
+    , isNothing (maybeLitWordSimp x)
+    , Just (atom, cases) <- [Expr.splitLitIte x]
+    ]
+  _ -> Nothing
+  where
+    memArgs :: GenericOp Word8 -> [Int]
+    memArgs = \case
+      OpMload -> [0]
+      OpMstore -> [0]
+      OpMstore8 -> [0]
+      OpSha3 -> [0, 1]
+      OpCalldatacopy -> [0, 2]
+      OpCodecopy -> [0, 2]
+      OpReturndatacopy -> [0, 2]
+      OpExtcodecopy -> [1, 3]
+      OpMcopy -> [0, 1, 2]
+      OpReturn -> [0, 1]
+      OpRevert -> [0, 1]
+      OpLog _ -> [0, 1]
+      OpCall -> [3, 4, 5, 6]
+      OpCallcode -> [3, 4, 5, 6]
+      OpDelegatecall -> [2, 3, 4, 5]
+      OpStaticcall -> [2, 3, 4, 5]
+      OpCreate -> [1, 2]
+      OpCreate2 -> [1, 2]
+      _ -> []
+
 -- | Executes the EVM one step
 exec1 :: forall (t :: VMType). (VMOps t, Typeable t) => Config ->  EVM t ()
 exec1 conf = do
@@ -394,7 +433,9 @@ exec1 conf = do
   else if vm.state.pc >= opslen vm.state.code
     then doStop
 
-    else do
+    else case splitMergedMemArg conf vm of
+     Just split -> split
+     Nothing -> do
       let ?conf = conf
       let ?op = getOpW8 vm.state
       case getOp (?op) of
@@ -934,19 +975,30 @@ exec1 conf = do
                           False -> assign' (#state % #stack) xs >> next
                           True -> vmError BadJumpDestination
                       Right jumpTarget -> do
+                        let jumpSym :: Bool -> EVM Symbolic ()
+                            jumpSym False = assign' (#state % #stack) xs >> next
+                            jumpSym _    = checkJump jumpTarget xs
                         -- Check if we're already in merge mode (speculative execution)
                         ms <- use #mergeState
                         if ms.msActive then
-                          -- Inside speculation: nested branch, bail out
-                          -- This will cause speculateLoop to return Nothing
-                          assign #result $ Just $ VMFailure BadJumpDestination
+                          -- Inside speculation: follow a nested branch the side's
+                          -- assumption decides, bail out on any other
+                          case Merge.decide ms.msAssume cond of
+                            Just c -> jumpSym c
+                            Nothing -> assign #result $ Just $ VMFailure BadJumpDestination
                         else do
-                          merged <- Merge.tryMergeForwardJump conf (exec1 conf) vm.state.pc jumpTarget cond xs
-                          unless merged $ do
-                            let jumpSym :: Bool -> EVM Symbolic ()
-                                jumpSym False = assign' (#state % #stack) xs >> next
-                                jumpSym _    = checkJump jumpTarget xs
-                            branchBounded conf cond jumpSym
+                          loc <- codeloc
+                          seen <- use (#iterations % at loc)
+                          let returnAddrs = filter $ \case
+                                Lit w -> w <= unsafeInto (maxBound :: Int) && isValidJumpDest vm (unsafeInto w)
+                                _ -> False
+                              -- reached again from the same call site: a loop, which must fork
+                              -- for the loop bound to apply, as its condition may be concrete
+                              inLoop = maybe False (\(_, old) -> returnAddrs old == returnAddrs vm.state.stack) seen
+                          merged <- if inLoop then pure False
+                            else Merge.tryMergeForwardJump conf (exec1 conf) (isValidJumpDest vm) vm.state.pc jumpTarget cond xs
+                          when merged $ assign (#iterations % at loc) (Just (maybe 1 ((+ 1) . fst) seen, vm.state.stack))
+                          unless merged $ branchBounded conf cond jumpSym
                 in case eqT @t @Symbolic of
                      Just Refl -> symbolicMerge
                      Nothing -> branch conf.maxDepth cond jump
@@ -2005,6 +2057,13 @@ forceConcreteAddr n msg continue = case maybeLitAddrSimp n of
   Just c -> continue c
   where fallback = unexpectedSymArg msg [n]
 
+-- | A symbolic prank address (e.g. picked from an actor list by a symbolic index)
+-- is split into one branch per possible concrete value
+prankAddr :: (?conf :: Config, VMOps t) => Expr EWord -> String -> (Expr EAddr -> EVM t ()) -> EVM t ()
+prankAddr addr msg continue = case wordToAddr addr of
+  Just a -> continue a
+  Nothing -> forceConcreteLimitSz addr 20 msg (continue . LitAddr . truncateToAddr)
+
 forceConcreteAddr2 :: VMOps t => (Expr EAddr, Expr EAddr) -> String -> ((Addr, Addr) -> EVM t ()) -> EVM t ()
 forceConcreteAddr2 (n,m) msg continue = case (maybeLitAddrSimp n, maybeLitAddrSimp m) of
   (Just c, Just d) -> continue (c,d)
@@ -2212,22 +2271,18 @@ cheatActions = Map.fromList
 
   , action "prank(address)" $
       \sig input -> case decodeStaticArgs 0 1 input of
-        [addr]  -> case wordToAddr addr of
-          Just a -> do
-            doStop
-            assign (#state % #overrideCaller) (Just a)
-            assign (#state % #resetCaller) True
-          Nothing -> vmError (BadCheatCode "prank(address), could not decode address provided" sig)
+        [addr]  -> prankAddr addr "prank(address), could not decode address provided" $ \a -> do
+          doStop
+          assign (#state % #overrideCaller) (Just a)
+          assign (#state % #resetCaller) True
         _ -> vmError (BadCheatCode "prank(address) parameter decoding failed" sig)
 
   , action "startPrank(address)" $
       \sig input -> case decodeStaticArgs 0 1 input of
-        [addr]  -> case wordToAddr addr of
-          Just a -> do
-            doStop
-            assign (#state % #overrideCaller) (Just a)
-            assign (#state % #resetCaller) False
-          Nothing -> vmError (BadCheatCode "startPrank(address), could not decode address provided" sig)
+        [addr]  -> prankAddr addr "startPrank(address), could not decode address provided" $ \a -> do
+          doStop
+          assign (#state % #overrideCaller) (Just a)
+          assign (#state % #resetCaller) False
         _ -> vmError (BadCheatCode "startPrank(address) parameter decoding failed" sig)
 
   , action "stopPrank()" $
@@ -3349,7 +3404,8 @@ accessUnboundedMemoryRange _ 0 continue = continue
 accessUnboundedMemoryRange f l continue = do
   m0 <- use (#state % #memorySize)
   fees <- gets (.block.schedule)
-  let m1 = 32 * ceilDiv (max m0 (f + l)) 32
+  -- lazily, each memory access would keep the previous frame states alive
+  let !m1 = 32 * ceilDiv (max m0 (f + l)) 32
   burn (memoryCost fees m1 - memoryCost fees m0) $ do
     assign (#state % #memorySize) m1
     modifying' (#state % #symMemorySize) (fmap (Expr.max (Lit (into m1))))
@@ -3467,11 +3523,13 @@ readMemory offset' size' = do
 withTraceLocation :: TraceData -> EVM t Trace
 withTraceLocation x = do
   vm <- get
-  let this = fromJust $ currentContract vm
+  -- lazily, every trace would keep the whole VM it was made in alive
+  let !this = fromJust $ currentContract vm
+      !opIx = fromMaybe 0 $ this.opIxMap VS.!? vm.state.pc
   pure Trace
     { tracedata = x
     , contract = this
-    , opIx = fromMaybe 0 $ this.opIxMap VS.!? vm.state.pc
+    , opIx
     }
 
 pushTrace :: TraceData -> EVM t ()
@@ -3822,7 +3880,7 @@ create2Address (GVar _) _ _ = internalError "Unexpected GVar"
 
 freshSymAddr :: EVM t (Expr EAddr)
 freshSymAddr = do
-  modifying (#env % #freshAddresses) (+ 1)
+  modifying' (#env % #freshAddresses) (+ 1)
   n <- use (#env % #freshAddresses)
   pure $ SymAddr ("freshSymAddr" <> (pack $ show n))
 
@@ -3871,8 +3929,17 @@ writeMemory memory offset buf = do
       pure memory
 
 freezeMemory :: MutableMemory -> EVM t (Expr Buf)
-freezeMemory memory =
-  ConcreteBuf . vectorToByteString <$> VS.freeze memory
+freezeMemory memory = ConcreteBuf <$> lift (memoryBytes memory)
+
+-- | Without the zeros past the last written byte, which a 'ConcreteBuf' reads
+-- anyway: memory grows by doubling, at least 8k at a time
+memoryBytes :: MutableMemory -> ST RealWorld ByteString
+memoryBytes memory = do
+  let used i
+        | i < 0 = pure 0
+        | otherwise = VS.Mutable.unsafeRead memory i >>= \b -> if b /= 0 then pure (i + 1) else used (i - 1)
+  n <- used (VS.Mutable.length memory - 1)
+  vectorToByteString <$> VS.freeze (VS.Mutable.slice 0 n memory)
 
 
 instance VMOps Symbolic where
@@ -3893,7 +3960,7 @@ instance VMOps Symbolic where
   reclaimRemainingGasAllowance _ = pure ()
   payRefunds = pure ()
   pushGas = do
-    modifying (#env % #freshGasVals) (+ 1)
+    modifying' (#env % #freshGasVals) (+ 1)
     n <- use (#env % #freshGasVals)
     let g = Expr.Gas "" n
     -- GAS costs gas, so the readings within one call frame strictly decrease
@@ -3922,7 +3989,8 @@ instance VMOps Symbolic where
         (iteration, _) <- use (#iterations % at loc % non (0,[]))
         stack <- use (#state % #stack)
         assign (#pathsVisited % at (loc, iteration)) (Just v)
-        assign (#iterations % at loc) (Just (iteration + 1, stack))
+        let !visits = iteration + 1
+        assign (#iterations % at loc) (Just (visits, stack))
         continue v
       -- ends like a failed vm.assume: the leaf is skipped without a solver query
       runBothPaths _ _ Infeasible = do
@@ -4066,7 +4134,7 @@ instance VMOps Concrete where
   reclaimRemainingGasAllowance oldVm = do
     let remainingGas = oldVm.state.gas
     modifying #burned (subtract remainingGas)
-    modifying (#state % #gas) (+ remainingGas)
+    modifying' (#state % #gas) (+ remainingGas)
 
   payRefunds = do
     -- compute and pay the refund to the caller and the

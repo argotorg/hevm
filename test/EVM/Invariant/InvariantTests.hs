@@ -12,15 +12,21 @@ import Control.Monad.Reader (ReaderT)
 import Data.Bifunctor (first)
 import Data.List (sort)
 import Data.Text (Text, isPrefixOf, isInfixOf)
+import Data.Set qualified as Set
 import Data.Text qualified as T
 import Test.Tasty
 import Test.Tasty.HUnit
+import Test.Tasty.QuickCheck hiding (Failure, Success, disjoin)
 
 import EVM.ABI (Sig(..))
 import EVM.Dapp (TestMethodInfo(..))
 import EVM.Effects
 import EVM.Fetch qualified as Fetch
+import EVM.Invariant (disjoin)
 import EVM.Test.Utils (WithOutput, assertRun, runForgeTestResultsWith)
+import EVM.Expr (simplifyProp)
+import EVM.Traversals (mapProp)
+import EVM.Types (Expr(..), Prop(..), W256)
 import EVM.UnitTest (UnitTestOptions(..))
 
 test :: TestName -> ReaderT Env IO () -> TestTree
@@ -46,6 +52,28 @@ tests = testGroup "invariant"
       out <- runInvariant 4 "pass.sol" "invariant_bool"
       assertRun "toggle" [(True, True)] out
       liftIO $ assertBool "states seen before are not explored again" ("(2 states, up to 4 calls deep)" `isInfixOf` snd out)
+  , test "infeasible-states-dropped" $ do
+      out <- runInvariant 2 "pass.sol" "invariant_neither"
+      assertRun "unreachable" [(True, True)] out
+      liftIO $ assertBool "only the initial state" ("(1 states, up to 2 calls deep)" `isInfixOf` snd out)
+  , test "same-states-merged" $ do
+      out <- runInvariant 1 "pass.sol" "invariant_any"
+      assertRun "holds" [(True, True)] out
+      liftIO $ assertBool "both branches give one state" ("(2 states, up to 1 calls deep)" `isInfixOf` snd out)
+      runInvariant 1 "fail.sol" "invariant_last_small" >>= assertRun "fails in a merged state" [(False, True)]
+  , testCase "merged-conditions-shortened" $ do
+      let p = PLT (Var "a") (Var "b")
+          q = PEq (Lit 1) (Var "c")
+          r = PLT (Var "d") (Lit 5)
+      assertEqual "branches on p and q cover everything" [Set.empty]
+        (disjoin [Set.fromList [p, q], Set.fromList [p, PNeg q], Set.fromList [PLEq (Var "b") (Var "a")]])
+      assertEqual "r is implied by r and q" [Set.fromList [r]]
+        (disjoin [Set.fromList [r, q], Set.fromList [r]])
+  , testProperty "disjoin-same-meaning" $ forAll genDisjunction $ \rs ->
+      let out = disjoin rs
+      in classify (length out < length rs) "shortened" $ classify (any Set.null out) "always true" $
+         counterexample ("disjoin: " <> show out) $
+           length out <= length rs .&&. conjoin [holds env rs === holds env out | env <- envs]
   , test "fail" $ do
       runInvariant 1 "fail.sol" "invariant_below_two" >>= assertRun "one call is not enough" [(True, True)]
       out <- runInvariant 2 "fail.sol" "invariant_below_two"
@@ -59,6 +87,14 @@ tests = testGroup "invariant"
       out <- runInvariant 4 "halmos-probes.sol" "invariant_probes_found"
       assertRun "assertion failures in the calls" [(False, True)] out
       liftIO $ assertEqual "all three are found" 3 (length (filter ("Assertion failure in a call" `isInfixOf`) (T.lines (snd out))))
+  , test "prank-from-list" $ do
+      runInvariant 1 "actors.sol" "invariant_actor_from_list" >>= assertRun "one branch per actor" [(True, True)]
+      runInvariant 1 "actors.sol" "invariant_not_third_actor" >>= assertRun "the third actor breaks it" [(False, True)]
+  , test "partial-warnings-short" $ do
+      out <- runInvariant 1 "actors.sol" "invariant_named"
+      assertRun "partially explored" [(True, False)] out
+      liftIO $ assertBool "grouped by location" (" -> " `isInfixOf` snd out)
+      liftIO $ assertBool "no expressions printed" (not ("ReadWord" `isInfixOf` snd out))
   , testGroup "halmos" [ test file $ do
       (results, out) <- runInvariants depth file (const True)
       let expect = [((c, n), outcome) | (c, cases) <- expected, (n, outcome) <- cases]
@@ -67,6 +103,38 @@ tests = testGroup "invariant"
   ]
 
 -- | halmos' invariant tests, with the results halmos expects (tests/expected/all.json)
+-- | Disjunctions of conjunctions over a few comparisons, often all sign
+-- combinations of some of them, which 'disjoin' can shorten
+genDisjunction :: Gen [Set.Set Prop]
+genDisjunction = oneof [random, split]
+  where
+    literal = do
+      a <- elements atoms
+      elements [a, PNeg a]
+    random = resize 6 $ listOf1 (Set.fromList <$> resize 3 (listOf literal))
+    split = do
+      ctx <- resize 2 (listOf literal)
+      k <- choose (1, 3)
+      as <- take k <$> shuffle atoms
+      signs <- sublistOf (mapM (\a -> [a, PNeg a]) as)
+      extra <- resize 2 (listOf (Set.fromList <$> resize 3 (listOf literal)))
+      pure $ [Set.fromList (ctx <> ls) | ls <- signs] <> extra
+    atoms = [ PLT (Var "a") (Var "b"), PLEq (Var "b") (Var "c"), PEq (Lit 1) (Var "c")
+            , PLT (Var "a") (Lit 1), PEq (Var "a") (Var "c") ]
+
+envs :: [Text -> W256]
+envs = [\v -> if v == "a" then a else if v == "b" then b else c | a <- [0..2], b <- [0..2], c <- [0..2]]
+
+holds :: (Text -> W256) -> [Set.Set Prop] -> Bool
+holds env rs = or [all eval (Set.toList r) | r <- rs]
+  where
+    eval p = case simplifyProp (mapProp subst p) of
+      PBool b -> b
+      q -> error ("not evaluated: " <> show q)
+    subst :: Expr a -> Expr a
+    subst (Var v) = Lit (env v)
+    subst e = e
+
 halmosInvariants :: [(FilePath, Int, [(Text, [(Text, (Bool, Bool))])])]
 halmosInvariants =
   [ ("halmos-basic.sol", 2,

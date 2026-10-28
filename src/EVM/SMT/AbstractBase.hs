@@ -215,6 +215,7 @@ data AbstractCtx = AbstractCtx
     -- ^ Symbolic*symbolic products, including the div-mul link products.
   , acConstMuls :: [(W256, Expr EWord)]
     -- ^ Products @c*x@ by a non-trivial literal constant.
+  , acURems     :: [(Expr EWord, Expr EWord)]
   }
 
 -- | Close the set of div/mul terms the lemmas range over. Beyond the raw terms
@@ -233,7 +234,8 @@ data AbstractCtx = AbstractCtx
 --     fires for a literal divisor, emitting a native @bvmul@.
 saturate :: [Prop] -> AbstractCtx
 saturate props =
-  let udivs = [ (a, b) | (IsUDiv, a, b) <- collectFrom collectDivMods props ]
+  let divMods = collectFrom collectDivMods props
+      udivs = [ (a, b) | (IsUDiv, a, b) <- divMods ]
       muls  = collectFrom collectMuls props
       constMuls = collectFrom collectConstMuls props
       divisors  = nubOrd [ b | (_, b) <- udivs ]
@@ -249,7 +251,8 @@ saturate props =
       -- it must not enter the families that range over abstract products
       linkMuls  = [ (q, b) | (a, b) <- udivsAll, let q = T.Div a b, isAbstractMul q b ]
       allMuls   = nubOrd (muls <> linkMuls)
-  in AbstractCtx { acUDivs = udivsAll, acMuls = allMuls, acConstMuls = constMuls }
+  in AbstractCtx { acUDivs = udivsAll, acMuls = allMuls, acConstMuls = constMuls
+                 , acURems = [ (a, b) | (IsUMod, a, b) <- divMods ] }
 
 -- | Names for the arithmetic terms of the props, smallest first, each defined
 -- over the names of the terms inside it. The lemmas mention an operand many

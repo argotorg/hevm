@@ -26,7 +26,7 @@ import EVM.Expr (maybeLitWordSimp)
 import EVM.Progress qualified as Progress
 import EVM.Invariant
 
-import Control.Monad (void, when, unless, forM, forM_, foldM, mfilter, filterM)
+import Control.Monad (void, when, unless, forM, forM_, foldM, mfilter)
 import Control.Monad.ST (RealWorld, ST, stToIO)
 import Control.Monad.State.Strict (execState, execStateT, get, put, liftIO, runStateT)
 import Optics.Core
@@ -40,7 +40,7 @@ import Data.ByteString.Internal (c2w)
 import Data.ByteString.Lazy qualified as BSLazy
 import Data.Decimal (DecimalRaw(..))
 import Data.Foldable (Foldable(..), toList)
-import Data.IORef (IORef, newIORef, readIORef, modifyIORef, atomicModifyIORef')
+import Data.IORef (IORef, newIORef, readIORef, modifyIORef)
 import Data.List qualified as List
 import Data.Map (Map)
 import Data.Map qualified as Map
@@ -814,13 +814,11 @@ invariantLevel opts ctx targets d = do
       prev <- invariantLevel opts ctx targets (d - 1)
       let fetcher = Fetch.oracle opts.solvers (Just opts.sess) opts.rpcInfo
       results <- mapM (nextStates opts.solvers (testPostcondition opts.checkFailBit False) fetcher
-        (makeVeriOpts opts).iterConf opts.testParams.gasCall ctx.senders targets) prev
-      let reached = concatMap (\(a, _, _) -> a) results
-      states <- liftIO $ filterM (\st -> atomicModifyIORef' ctx.visited $ \seen ->
-        let k = stateKey st.vm in if Set.member k seen then (seen, False) else (Set.insert k seen, True)) reached
+        (makeVeriOpts opts).iterConf opts.testParams.gasCall ctx.senders targets ctx.visited) prev
+      let states = concatMap (\(a, _, _) -> a) results
       conf <- readConfig
       when conf.debug $ liftIO $ putStrLn $ "Invariant states after " <> show d <> " calls: "
-        <> show (length states) <> " new, " <> show (length reached - length states) <> " seen before"
+        <> show (length states) <> " new"
       liftIO $ do
         modifyIORef ctx.levels (<> [states])
         modifyIORef ctx.partials (<> concatMap (\(_, b, _) -> b) results)
@@ -851,7 +849,7 @@ invariantRun opts ctx (nth, numTests) sig@(Sig testName types) = do
             vm <- liftIO $ stToIO $ execStateT (startCall opts.testParams.address opts.testParams.caller opts.testParams.gasCall testName (cdBuf, cdProps)) st.vm
             let fetcher = Fetch.oracle opts.solvers (Just opts.sess) opts.rpcInfo
             (ends, results) <- verify opts.solvers fetcher (makeVeriOpts opts) vm (testPostcondition opts.checkFailBit False) Nothing
-            let issues = [formatPartial p | Partial _ _ p <- ends]
+            let issues = [Text.pack str | (_, str) <- groupPartials vm.srcLookup vm.env.contracts ends]
                   <> [Text.pack (getUnknownStr u) | Unknown u <- results] <> [Text.pack e | Error e <- results]
             pure (issues, (\(leaf, cex) -> (st, leaf, cex)) <$> listToMaybe (mapMaybe extractCex results))
           go d issues
@@ -891,7 +889,8 @@ invariantRun opts ctx (nth, numTests) sig@(Sig testName types) = do
           <> Text.unlines (List.nub [indentLines 5 ("- " <> i) | i <- issues])
         unless (null framePartials) $ opts.printOut $
           indentLines 3 "\x1b[33m[WARNING]\x1b[0m the calls before the invariant were only partially explored:"
-          <> Text.unlines (List.nub [indentLines 5 ("- " <> formatPartial p) | Partial _ _ p <- framePartials])
+          <> Text.unlines [indentLines 5 ("- " <> Text.pack (show num) <> "x -> " <> Text.pack str)
+                          | (num, str) <- groupPartials ctx.setupVm.srcLookup ctx.setupVm.env.contracts framePartials]
         unless (null ctx.skipped) $ opts.printOut $
           indentLines 3 "\x1b[33m[WARNING]\x1b[0m these functions were not called, their arguments cannot be symbolic:"
           <> Text.unlines [indentLines 5 ("- " <> f) | f <- ctx.skipped]

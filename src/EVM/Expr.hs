@@ -142,6 +142,7 @@ module EVM.Expr
   , maybeLitByteSimp
   , maybeLitWordSimp
   , enumerateViaSmallSubterm
+  , splitLitIte
   , maybeLitAddrSimp
   , maybeConcStoreSimp
   ) where
@@ -1680,6 +1681,8 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (ITE c (IsZero c') f) | c == c' = ITE c (Lit 0) f
     go (ITE c t (IsZero c')) | c == c' = ITE c t (Lit 1)
     go (ITE c t c') | c == c' = ITE c t (Lit 0)
+    -- the else branch is where c is 0, e.g. ITE y (x * y) 0 is x * y
+    go (ITE c t f@(Lit _)) | simplify (zeroing c t) == f = t
 
     -- syntactic Eq reduction
     -- a literal with a bit the other side can not have
@@ -1744,6 +1747,11 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go (EVM.Types.LT (Add (Lit c) a) b) | a == b, c /= 0 = lt (Lit (maxLit - c)) a
     go (EVM.Types.LT a (Sub b (Lit c))) | a == b, c /= 0 = lt a (Lit c)
     go (EVM.Types.LT (Sub a (Lit c)) b) | a == b, c /= 0 = iszero (lt a (Lit c))
+    -- rounding down to a multiple never goes above: x - x % c <= x (x % 0 is 0). Solidity's uintN
+    -- version masks both sides: x = t & m, and (t - x % c) & m = x - x % c for m = 2^n - 1
+    go (EVM.Types.LT a (Sub b (Mod a' _))) | a == b, a == a' = Lit 0
+    go (EVM.Types.LT a@(And (Lit m) t) (And (Lit m') (Sub t' (Mod a' _))))
+      | m == m', m .&. (m + 1) == 0, a == a', t == t' || a == t' = Lit 0
     go (EVM.Types.LT a b) | a == b = Lit 0
     go (SLT a b) | a == b = Lit 0
 
@@ -2047,6 +2055,9 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
       | a < 32 && m < 32 && a * m < 32 = shl (mul (Lit 8) offset) (Lit 1)
     go (Exp (Lit 0x100) offset@(And (Lit m) _)) | m < 32 = shl (mul (Lit 8) offset) (Lit 1)
     go (Exp (Lit 2) k) = shl k (Lit 1)
+    -- an exponent picked between two constants (a packed array element's offset) splits into two
+    -- concrete powers, which SMT can encode
+    go (Exp a@(Lit _) (ITE c x@(Lit _) y@(Lit _))) = ITE c (EVM.Expr.exp a x) (EVM.Expr.exp a y)
     go (Exp a b) = EVM.Expr.exp a b
 
     go (Div (Div x (Lit a)) (Lit b))
@@ -2190,7 +2201,16 @@ simplifyProp prop =
     go (PEq (Lit 0) (Sub a b)) = peq a b
     go (PEq (Lit 0) (Or a b)) = peq (Lit 0) a `PAnd` peq (Lit 0) b
     go (PEq a1 (Add a2 y)) | a1 == a2 = peq (Lit 0) y
+    -- the same check once y == 0 is ruled out: it then also says y is nonzero
+    go (PEq (Lit c) (Div num y)) | c > 0, timesC c num y = PAnd (PNeg (PEq (Lit 0) y)) (PLEq y (Lit (maxLit `Prelude.div` c)))
     go (PEq l r) = peq l r
+
+    -- (not p && b) || p is b || p, as in y == 0 || (y * c) / y == c once its second half is rewritten
+    go (POr (PAnd (PNeg p) b) q) | p == q = POr b q
+    go (POr q (PAnd (PNeg p) b)) | p == q = POr q b
+    -- y <= k already holds when y == 0
+    go (POr l@(PLEq y (Lit _)) (PEq (Lit 0) y')) | y == y' = l
+    go (POr (PEq (Lit 0) y') l@(PLEq y (Lit _))) | y == y' = l
 
     go (POr (PLEq a1 (Lit b)) (PLEq (Lit c) a2)) | a1 == a2 && c == b+1 = PBool True
 
@@ -2234,6 +2254,10 @@ simplifyProp prop =
 
 
     go p = p
+
+    -- also when c * (b * x) was folded into a * x
+    -- num is c * y in simplified form, which may fold or distribute it
+    timesC c num y = num == simplify (Mul (Lit c) y)
 
     onITE :: Expr EWord -> Bool -> Bool -> Prop
     onITE c t f
@@ -2512,12 +2536,16 @@ constPropagate ps =
     -- NOTE: will create PEq (Lit x) (Lit x) if x is a constant
     --       hence we need the fixVals function to add them back in
     substitute :: ConstState -> [Prop] -> [Prop]
-    substitute cs ps2 = map (mapProp (subsGo cs)) ps2
-    subsGo :: ConstState -> Expr a -> Expr a
-    subsGo cs (Var v) = case Map.lookup (Var v) cs.values of
-      Just x -> Lit x
-      Nothing -> Var v
-    subsGo _ x = x
+    substitute cs ps2 = map (mapProp (if all isVar (Map.keys cs.values) then subsVar cs else subsTerm cs)) ps2
+    isVar = \case Var _ -> True; _ -> False
+    subsVar :: ConstState -> Expr a -> Expr a
+    subsVar cs (Var v) = maybe (Var v) Lit (Map.lookup (Var v) cs.values)
+    subsVar _ x = x
+    -- any term known to be constant, e.g. the index @x % n@ a path picked a value for
+    subsTerm :: ConstState -> Expr a -> Expr a
+    subsTerm cs e = case asWordRefl e of
+      Just Refl | Prelude.not (isLitWord e), Just x <- Map.lookup e cs.values -> Lit x
+      _ -> e
 
     -- Collects all the constants in the given props, and sets canBeSat to False if UNSAT.
     -- Repeated until nothing changes: a disequality or disjunction is only checked against
@@ -2745,6 +2773,29 @@ enumerateViaSmallSubterm limit props e0 = listToMaybe $ mapMaybe tryAtoms (map p
       Just Refl | x == atom -> k
       _ -> x
 
+-- | A subterm of @e@ with two possible values, an ITE between two literals or
+-- a comparison, and @e@ with each of them in its place
+splitLitIte :: Expr EWord -> Maybe (Expr EWord, [(W256, Expr EWord)])
+splitLitIte e0 = do
+  (atom, vs) <- listToMaybe $ foldExpr twoValued [] e
+  pure (atom, [(v, simplify $ mapExpr (subst atom (Lit v)) e) | v <- vs])
+  where
+    e = simplify e0
+    twoValued :: Expr a -> [(Expr EWord, [W256])]
+    twoValued = \case
+      x@(ITE _ (Lit a) (Lit b)) | a /= b -> [(x, [a, b])]
+      x@(LT _ _) -> [(x, [0, 1])]
+      x@(GT _ _) -> [(x, [0, 1])]
+      x@(SLT _ _) -> [(x, [0, 1])]
+      x@(SGT _ _) -> [(x, [0, 1])]
+      x@(Eq _ _) -> [(x, [0, 1])]
+      x@(IsZero _) -> [(x, [0, 1])]
+      _ -> []
+    subst :: Expr EWord -> Expr EWord -> Expr a -> Expr a
+    subst atom k x = case asWordRefl x of
+      Just Refl | x == atom -> k
+      _ -> x
+
 data Bounds = Bounds W256 W256 (Set.Set W256)
 
 -- | Decides @x == (x * d) / d@, as in Solidity's checked-multiplication guard
@@ -2754,7 +2805,7 @@ data Bounds = Bounds W256 W256 (Set.Set W256)
 boundedMulChecks :: [Prop] -> [Prop]
 boundedMulChecks ps = map (\p -> if Map.null (propBounds [p]) then go p else p) ps
   where
-    bounds = propBounds ps
+    bounds = chainedBounds ps
     -- top-down, so that a whole guard is matched before its equality
     go = \case
       POr (PEq a b) (PEq (Lit 0) d) | Just (_, d') <- noOverflow a b, d == d' -> PBool True
@@ -2784,7 +2835,7 @@ boundedScaling = go []
   where
     go done [] = reverse done
     go done (p : rest)
-      | getAny (foldProp (Any . isSite) mempty p) = go (mapProp (rewrite (bounds (done <> rest))) p : done) rest
+      | getAny (foldProp (Any . isSite) mempty p) = go (mapProp (rewrite (chainedBounds (done <> rest))) p : done) rest
       | otherwise = go (p : done) rest
     isSite :: Expr a -> Bool
     isSite = \case
@@ -2796,12 +2847,15 @@ boundedScaling = go []
         | a /= 0, b /= 0, g <- gcd a b, g > 1, upperWithBounds bs x <= maxLit `Prelude.div` a
         -> Div (mul (Lit (a `Prelude.div` g)) x) (Lit (b `Prelude.div` g))
       e -> e
-    -- also through t <= u, a few steps deep
-    bounds ps = iterate (\m -> foldl through m (chains ps)) (propBounds ps) !! 3
-    chains ps = [c | p <- ps, c <- case p of
-                                      PLEq t u -> [(t, u, 0)]
-                                      PLT t u -> [(t, u, 1)]
-                                      _ -> []]
+
+-- | 'propBounds', also through @t <= u@, a few steps deep
+chainedBounds :: [Prop] -> Map.Map (Expr EWord) Bounds
+chainedBounds ps = iterate (\m -> foldl through m chains) (propBounds ps) !! 3
+  where
+    chains = [c | p <- ps, c <- case p of
+                                  PLEq t u -> [(t, u, 0)]
+                                  PLT t u -> [(t, u, 1)]
+                                  _ -> []]
     through m (t, u, k)
       | ub <- upperWithBounds m u, ub < maxLit, ub >= k, Prelude.not (isLitWord t)
       = Map.alter (Just . (\(Bounds lb ub' ex) -> Bounds lb (Prelude.min ub' (ub - k)) ex) . fromMaybe (Bounds 0 maxLit mempty)) t m
@@ -2851,6 +2905,12 @@ propBounds = foldl go mempty
       PLEq (Lit c) t -> atLeast t c m
       PLT (Lit c) t | c < maxLit -> atLeast t (c + 1) m
       _ -> m
+
+-- | e with every occurrence of the word c replaced by 0
+zeroing :: Expr EWord -> Expr a -> Expr a
+zeroing c = mapExpr $ \e -> case asWordRefl e of
+  Just Refl | e == c -> Lit 0
+  _ -> e
 
 asWordRefl :: Expr a -> Maybe (a :~: EWord)
 asWordRefl e = case exprType e of

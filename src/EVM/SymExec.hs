@@ -13,8 +13,8 @@ import Prelude hiding (Foldable(..))
 import Control.Concurrent (forkIO, killThread)
 import Control.Concurrent.Async ( mapConcurrently)
 import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
-import Control.Concurrent.STM (writeTChan, newTChan, TChan, readTChan, atomically, isEmptyTChan, STM, orElse)
-import Control.Concurrent.STM.TVar (TVar, newTVarIO, modifyTVar, readTVar, readTVarIO, writeTVar)
+import Control.Concurrent.STM (writeTChan, newTChan, TChan, readTChan, atomically, isEmptyTChan, STM, orElse, retry)
+import Control.Concurrent.STM.TVar (TVar, newTVarIO, modifyTVar, modifyTVar', readTVar, readTVarIO, writeTVar)
 import Control.Concurrent.STM.TMVar (TMVar, putTMVar, takeTMVar, readTMVar, tryPutTMVar, newEmptyTMVarIO)
 import Control.Monad (when, unless, forM_, forM, forever, void)
 import Control.Monad.Loops (whileM)
@@ -41,8 +41,6 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as T
 import Data.Tree.Zipper qualified as Zipper
 import Data.Tuple (swap)
-import Data.Vector.Storable qualified as VS
-import Data.Vector.Storable.ByteString (vectorToByteString)
 import GHC.Conc (numCapabilities)
 import GHC.Generics (Generic)
 import GHC.Num.Natural (Natural)
@@ -51,7 +49,7 @@ import Options.Generic (ParseField, ParseFields, ParseRecord)
 import Text.Printf (printf)
 import Witch (into, unsafeInto)
 
-import EVM (makeVm, abstractContract, initialContract, getCodeLocation, isValidJumpDest, defaultVMOpts)
+import EVM (makeVm, memoryBytes, abstractContract, initialContract, getCodeLocation, isValidJumpDest, defaultVMOpts)
 import EVM.Exec (exec)
 import EVM.Fetch qualified as Fetch
 import EVM.ABI
@@ -202,7 +200,7 @@ freezeVM vm = do
       }
   where
     freeze = \case
-      ConcreteMemory m -> SymbolicMemory . ConcreteBuf . vectorToByteString <$> VS.freeze m
+      ConcreteMemory m -> SymbolicMemory . ConcreteBuf <$> memoryBytes m
       m@(SymbolicMemory _) -> pure m
 
 type PathHandler m a = Expr End -> TVar Bool -> m a
@@ -214,12 +212,15 @@ data InterpTask m a = InterpTask
   {fetcher :: Fetch.Fetcher Symbolic m
   , iterConf :: IterConfig
   , vm :: VM Symbolic
-  , taskQ :: Chan (InterpTask m a)
+  , taskQ :: TVar [InterpTask m a]
   , numTasks :: TVar Natural
   , stepper :: Stepper Symbolic (Expr End)
   , handler :: VMPathHandler m a
   , shouldAbort :: TVar Bool
   }
+
+pushTask :: TVar [t] -> t -> IO ()
+pushTask q t = atomically $ modifyTVar' q (t :)
 
 data Process m a = Process
   { result :: Expr End
@@ -268,7 +269,8 @@ interpretVMAbortable runFlag fetcher iterConf vm stepper handler = do
   -- the flag is process-wide and outlives this exploration
   liftIO $ do HashCons.setHashConsEnabled conf.hashConsExplore
               HashCons.resetHashCons
-  taskQ <- liftIO newChan
+  -- newest first: depth-first exploration keeps the pending paths few
+  taskQ <- liftIO $ newTVarIO []
   processQ <- liftIO newChan
 
   -- spawn interpreters and process instances
@@ -310,7 +312,7 @@ interpretVMAbortable runFlag fetcher iterConf vm stepper handler = do
         , handler = handler
         , shouldAbort = runFlag
         }
-  liftIO $ writeChan taskQ interpTask
+  liftIO $ pushTask taskQ interpTask
 
   -- Wait for all done
   done <- liftIO . atomically $ (Left <$> readTMVar workerErr) `orElse` (Right <$> takeTMVar allProcessDone)
@@ -324,13 +326,15 @@ interpretVMAbortable runFlag fetcher iterConf vm stepper handler = do
   where
     -- orchestrator loop
     taskOrchestrate :: App m
-      => Chan (InterpTask m a)
+      => TVar [InterpTask m a]
       -> TVar Bool
       -> Chan () -> Chan (Process m a)
       -> TVar Natural -> TVar Natural -> TMVar () -> TMVar SomeException -> m ()
     taskOrchestrate taskQ shouldAbort avail processQ numTasks numProcs allProcessDone workerErr = forever $ do
       _ <- liftIO $ readChan avail
-      task <- liftIO $ readChan taskQ
+      task <- liftIO $ atomically $ readTVar taskQ >>= \case
+        [] -> retry
+        t:rest -> writeTVar taskQ rest >> pure t
       abortFlag <- liftIO $ readTVarIO shouldAbort
       if abortFlag
         then liftIO $ do
@@ -438,7 +442,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
         interpretInternal t { vm = vm', stepper = (k r) }
       Stepper.Fork (PleaseRunAll vals continue) -> do
         when (length vals < 2) $ internalError "PleaseRunAll requires at least 2 branches"
-        Progress.fork (T.pack (show vm.state.contract)) vm.state.pc
+        Progress.fork (T.pack (show vm.state.contract)) vm.state.pc (srcOf vm)
           ["branches" .= length vals, "values" .= map (T.pack . show) (take 20 vals)]
         frozen <- liftIO $ stToIO $ freezeVM vm
         let newDepth = vm.exploreDepth+1
@@ -458,11 +462,11 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
             unless abortFlag $ do
               liftIO $ atomically $ modifyTVar numTasks (+1)
               when (conf.debug && conf.verb >=2) $ liftIO $ putStrLn $ "Queuing new task for ForkMany at depth " <> show newDepth
-              liftIO $ writeChan taskQ t { vm = vma, stepper = (k ra) }
+              liftIO $ pushTask taskQ t { vm = vma, stepper = (k ra) }
             runOne frozen newDepth rest
           runOne _ _ [] = internalError "unreachable"
       Stepper.Fork (PleaseRunBoth continue) -> do
-        Progress.fork (T.pack (show vm.state.contract)) vm.state.pc ["branches" .= (2 :: Int)]
+        Progress.fork (T.pack (show vm.state.contract)) vm.state.pc (srcOf vm) ["branches" .= (2 :: Int)]
         conf <- readConfig
         frozen <- liftIO $ stToIO $ freezeVM vm
         let newDepth = vm.exploreDepth+1
@@ -471,7 +475,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
         abortFlag <- liftIO $ readTVarIO shouldAbort
         unless abortFlag $ do
           liftIO $ atomically $ modifyTVar numTasks (+1)
-          liftIO $ writeChan taskQ $ t { vm = vma, stepper = (k ra) }
+          liftIO $ pushTask taskQ $ t { vm = vma, stepper = (k ra) }
           when (conf.debug && conf.verb >= 2) $ liftIO $ putStrLn $ "Queued new task for Fork at depth " <> show newDepth
 
         (rb, vmb) <- liftIO $ stToIO $ runStateT (continue False) frozen { result = Nothing, exploreDepth = newDepth }
@@ -479,6 +483,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
         interpretInternal t { vm = vmb, stepper = (k rb) }
       Stepper.Wait q -> do
         let performQuery = do
+              Progress.noteSrc (T.pack (show vm.state.contract)) vm.state.pc (srcOf vm)
               logQueryExprs q
               m <- fetcher q
               (r, vm') <- liftIO$ stToIO $ runStateT m vm
@@ -510,7 +515,7 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
                     let taken = Expr.simplifyProp $ if n then Lit 0 ./= cond else Lit 0 .== cond
                         partialLeaf = Partial (taken : vm.constraints) (TraceContext (Zipper.toForest vm.traces) vm.env.contracts vm.labels) (MaxIterationsReached vm.state.pc vm.state.contract)
                     liftIO $ atomically $ modifyTVar numTasks (+1)
-                    liftIO $ writeChan taskQ $ t { vm = vm, stepper = pure partialLeaf }
+                    liftIO $ pushTask taskQ $ t { vm = vm, stepper = pure partialLeaf }
                     (r, vm') <- liftIO $ stToIO $ runStateT (continue (Case $ not n)) vm
                     interpretInternal t { vm = vm', stepper = (k r) }
                   -- we're in a loop and askSmtIters has been reached
@@ -518,24 +523,52 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
                     -- ask the smt solver about the loop condition
                     performQuery
                   _ -> do
-                    let decision = staticBranch cond preconds
+                    let base = simplifiedPathConds vm.constraints vm.simpConstraints (drop (length vm.constraints) preconds)
+                        decision = staticBranchOn base cond
                     conf <- readConfig
                     when (conf.checkStaticBranches || checkStaticBranchesFromEnv) $
                       checkStaticBranch fetcher vm cond preconds decision >>= \case
                         StaticWrong msg -> internalError $ "a branch side was dropped by simplification, but it is reachable: " <> msg
                         _ -> pure ()
-                    (r, vm') <- liftIO $ stToIO $ runStateT (continue decision) vm
+                    (r, vm') <- liftIO $ stToIO $ runStateT (continue decision) (vm & set #simpConstraints (vm.constraints, base))
                     interpretInternal t { vm = vm', stepper = (k r) }
           _ -> performQuery
+
+-- | The source location of the current pc, if there is debug info for it
+srcOf :: VM t -> Text
+srcOf vm = case vm.srcLookup of
+  Nothing -> ""
+  Just _ -> fromMaybe "" $ T.stripPrefix " in file " $ T.pack $ runSrcLookup vm.srcLookup vm.env.contracts vm.state.contract vm.state.pc
 
 -- | How exploration decides a symbolic branch without the solver: a side is
 -- dropped only if simplifying it with the path conditions gives false
 staticBranch :: Expr EWord -> [Prop] -> BranchCondition
-staticBranch cond preconds = case Expr.concKeccakSimpProps ((cond ./= Lit 0):preconds) of
-  [PBool False] -> Case False
-  [] -> Case True
-  _ | Expr.concKeccakSimpProps ((cond .== Lit 0):preconds) == [PBool False] -> Case True
-    | otherwise -> UnknownBranch
+staticBranch cond preconds = staticBranchOn (Expr.concKeccakSimpProps preconds) cond
+
+-- | 'staticBranch' on path conditions that are already simplified. The
+-- condition is tried alone first: with the path conditions, simplification may
+-- rewrite it into a form it no longer decides.
+staticBranchOn :: [Prop] -> Expr EWord -> BranchCondition
+staticBranchOn base cond = case decideWith [] of
+  UnknownBranch -> decideWith base
+  decided -> decided
+  where
+    decideWith ps = case Expr.concKeccakSimpProps ((cond ./= Lit 0):ps) of
+      [PBool False] -> Case False
+      [] -> Case True
+      _ | Expr.concKeccakSimpProps ((cond .== Lit 0):ps) == [PBool False] -> Case True
+        | otherwise -> UnknownBranch
+
+-- | The simplified path conditions, reusing the cached simplification of the
+-- earlier ones while only props were prepended to them. @extra@ are further
+-- facts, e.g. keccak preimages, which hold on every path.
+simplifiedPathConds :: [Prop] -> ([Prop], [Prop]) -> [Prop] -> [Prop]
+simplifiedPathConds constraints (raw, simp) extra = Expr.concKeccakSimpProps (added <> cached <> extra)
+  where
+    k = length constraints - length raw
+    (added, cached)
+      | k >= 0 && drop k constraints == raw = (take k constraints, simp)
+      | otherwise = (constraints, [])
 
 -- | Turns on 'checkStaticBranches' for every run, e.g. a whole test suite
 {-# NOINLINE checkStaticBranchesFromEnv #-}

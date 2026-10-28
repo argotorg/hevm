@@ -35,8 +35,6 @@ module EVM.Solidity
   , stdjson
   , parseMethodInput
   , lineSubrange
-  , astIdMap
-  , astSrcMap
   , containsLinkerHole
   , makeSourceCache
   , getContractsMap
@@ -53,7 +51,7 @@ import EVM.Expr (maybeLitByteSimp)
 import Control.Applicative
 import Control.Monad
 import Control.Monad.IO.Unlift
-import Data.Aeson (encode)
+import Data.Aeson (encode, decodeStrict)
 import Data.Aeson.Types
 import Data.Aeson.Optics
 import Data.Aeson.Key qualified as Key
@@ -67,7 +65,7 @@ import Data.Char (isDigit)
 import Data.Foldable
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.List (isPrefixOf, isInfixOf, isSuffixOf, elemIndex, tails, findIndex)
+import Data.List (isPrefixOf, isInfixOf, isSuffixOf, elemIndex, tails, findIndex, sort)
 import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NonEmpty
 import Data.Maybe
@@ -86,6 +84,8 @@ import System.FilePath.Posix
 import System.Process
 import Text.Read (readMaybe)
 import Witch (unsafeInto)
+import Control.Exception (IOException, try)
+import System.Directory (doesFileExist)
 import Data.Either.Extra (maybeToEither, fromRight)
 import qualified Data.Bifunctor as Bifunctor (first)
 
@@ -164,10 +164,6 @@ newtype Contracts = Contracts (Map Text SolcContract)
 getContractsMap :: Contracts -> Map Text SolcContract
 getContractsMap (Contracts m) = m
 
--- | A mapping from contract identifiers (filepath:name) to their ast json
-newtype Asts = Asts (Map Text Value)
-  deriving newtype (Show, Eq, Semigroup, Monoid)
-
 -- | Solidity source files are identified either by their location in the vfs, or by a src map identifier
 data SrcFile = SrcFile
   { id :: Int
@@ -198,7 +194,6 @@ data ProjectType = CombinedJSON | Foundry
 data SourceCache = SourceCache
   { files  :: Map Int (FilePath, ByteString) -- ^ map from src id to (filepath, contents)
   , lines  :: Map Int (Vector ByteString)
-  , asts   :: Map Text Value
   } deriving (Show, Eq, Generic)
 
 data Reference = Reference
@@ -214,10 +209,10 @@ instance FromJSON Reference where
     typeMismatch "Transaction" invalid
 
 instance Semigroup SourceCache where
-  SourceCache a b c <> SourceCache d e f = SourceCache (a <> d) (b <> e) (c <> f)
+  SourceCache a b <> SourceCache c d = SourceCache (a <> c) (b <> d)
 
 instance Monoid SourceCache where
-  mempty = SourceCache mempty mempty mempty
+  mempty = SourceCache mempty mempty
 
 data JumpType = JumpInto | JumpFrom | JumpRegular
   deriving (Show, Eq, Ord, Generic)
@@ -313,8 +308,54 @@ readFilteredBuildOutput root jsonFilter _ = do
   case (filterMetadata jsons) of
     [] -> pure . Left $ "no json files found in: " <> outDir
     js -> do
-      outputs <- sequence <$> mapM (readSolc Foundry root) ((fmap ((</>) (outDir))) js)
-      pure . (fmap mconcat) $ outputs
+      (offsets, buildSrcs) <- liftIO $ srcIdOffsets root
+      outputs <- sequence <$> mapM (\j -> readSolcShifted (Map.findWithDefault 0 j offsets) Foundry root (outDir </> j)) js
+      extra <- liftIO $ makeSourceCache root buildSrcs
+      pure $ (<> BuildOutput mempty extra) . mconcat <$> outputs
+
+-- | Source ids are only unique within one build of forge, and an incremental
+-- build adds a build-info of its own. Each artifact gets the offset that moves
+-- the ids of its build out of the way of the others, from forge's cache, and
+-- the sources of every build are added at their shifted ids, as an artifact
+-- may refer to a file whose own artifact is from another build.
+srcIdOffsets :: FilePath -> IO (Map FilePath Int, Sources)
+srcIdOffsets root = do
+  builds <- sort . fmap takeBaseName <$> getDirectoryFiles buildDir ["*.json"]
+  cache <- readJson (root </> "cache" </> "solidity-files-cache.json")
+  case (builds, cache) of
+    (_:_:_, Just v) -> do
+      srcs <- forM (zip [0..] builds) $ \(i, b) -> do
+        info <- readJson (buildDir </> b <.> "json")
+        filterM (doesFileExist . (root </>) . (.filepath) . fst)
+          [ (SrcFile (n + i * offset) (T.unpack path), Nothing)
+          | Just (Object m) <- [info >>= preview (key "source_id_to_path")]
+          , (k, String path) <- KeyMap.toList m
+          , Just n <- [readMaybe (Key.toString k)] ]
+      pure ( Map.fromList
+               [ (T.unpack path, i * offset)
+               | o <- universeObjects v
+               , Just (String path) <- [KeyMap.lookup "path" o]
+               , Just (String b) <- [KeyMap.lookup "build_id" o]
+               , Just i <- [elemIndex (T.unpack b) builds] ]
+           , Sources (Map.fromList (concat srcs)) )
+    _ -> pure mempty
+  where
+    offset = 1000000
+    buildDir = root </> "out" </> "build-info"
+    readJson :: FilePath -> IO (Maybe Value)
+    readJson f = (decodeStrict =<<) . either (const Nothing) Just <$> (try (BS.readFile f) :: IO (Either IOException ByteString))
+    universeObjects :: Value -> [Object]
+    universeObjects = \case
+      Object o -> o : concatMap universeObjects (KeyMap.elems o)
+      Array a -> concatMap universeObjects a
+      _ -> []
+
+shiftSrcIds :: Int -> BuildArtifacts -> BuildArtifacts
+shiftSrcIds 0 a = a
+shiftSrcIds off (Contracts cs, Sources srcs) =
+  ( Contracts (fmap (\c -> c { runtimeSrcmap = fmap sm c.runtimeSrcmap, creationSrcmap = fmap sm c.creationSrcmap }) cs)
+  , Sources (Map.mapKeys (\f -> f { id = f.id + off }) srcs) )
+  where sm m = if m.file >= 0 then m { file = m.file + off } else m
 
 -- | Finds all json files under the provided filepath, searches recursively
 -- Filtering out:  * "kompiled" which gets added to `out` by `kontrol`
@@ -330,8 +371,8 @@ findJsonFiles root =  filter (doesNotContain ["build-info", "kompiled"])
 filterMetadata :: [FilePath] -> [FilePath]
 filterMetadata = filter (not . isSuffixOf ".metadata.json")
 
-makeSourceCache :: FilePath -> Sources -> Asts -> IO SourceCache
-makeSourceCache root (Sources sources) (Asts asts) = do
+makeSourceCache :: FilePath -> Sources -> IO SourceCache
+makeSourceCache root (Sources sources) = do
   files <- Map.fromList <$> forM (Map.toList sources) (\x@(SrcFile id' fp, _) -> do
       contents <- case x of
         (_,  Just content) -> pure content
@@ -341,7 +382,6 @@ makeSourceCache root (Sources sources) (Asts asts) = do
   pure $! SourceCache
     { files = files
     , lines = fmap (Vector.fromList . BS.split 0xa . snd) files
-    , asts  = asts
     }
 
 lineSubrange ::
@@ -357,13 +397,16 @@ lineSubrange xs (s1, n1) i =
     else Just (s1 - s2, min (s2 + n2 - s1) n1)
 
 readSolc :: App m => ProjectType -> FilePath -> FilePath -> m (Err BuildOutput)
-readSolc pt root fp = do
+readSolc = readSolcShifted 0
+
+readSolcShifted :: App m => Int -> ProjectType -> FilePath -> FilePath -> m (Err BuildOutput)
+readSolcShifted off pt root fp = do
   -- NOTE: we cannot and must not use Data.Text.IO.readFile because that takes the locale
   --       and may fail with very strange errors when the JSON it's reading
   --       contains any UTF-8 character -- which it will with foundry
   fileContents <- liftIO $ fmap Data.Text.Encoding.decodeUtf8 $ Data.ByteString.readFile fp
   let contractName = T.pack $ takeBaseName fp
-  case readJSON pt contractName fileContents of
+  case shiftSrcIds off <$> readJSON pt contractName fileContents of
       -- forge links libraries at test time; we cannot, so only a test contract
       -- that needs one is fatal
       Left (UnlinkedLibrary _) | Foundry <- pt, not (isTestContractJson fileContents) -> do
@@ -372,10 +415,10 @@ readSolc pt root fp = do
         pure (Right mempty)
       Left err -> pure . Left $ "unable to parse " <> show pt <> " project JSON: " <> fp
         <> " Contract: " <> show contractName <> "\nError: " <> show err
-      Right (contracts, asts, sources) -> do
+      Right (contracts, sources) -> do
         conf <- readConfig
         when (conf.debug) $ liftIO $ putStrLn $ "Parsed contract: " <> show contractName <> " file: " <> fp
-        sourceCache <- liftIO $ makeSourceCache root sources asts
+        sourceCache <- liftIO $ makeSourceCache root sources
         pure (Right (BuildOutput contracts sourceCache))
 
 isTestContractJson :: Text -> Bool
@@ -447,7 +490,7 @@ instance Show BytecodeReadingError where
   show (UnlinkedLibrary contract) = "Unlinked libraries detected in bytecode of contract " <> (T.unpack contract)
   show (OtherError contract errMsg) = "Error when reading bytecode of " <> (T.unpack contract) <> ": " <> T.unpack errMsg
 
-type BuildArtifacts = (Contracts, Asts, Sources)
+type BuildArtifacts = (Contracts, Sources)
 
 readJSON :: ProjectType -> Text -> Text -> Either BytecodeReadingError BuildArtifacts
 readJSON CombinedJSON _ json = readCombinedJSON json
@@ -488,10 +531,13 @@ readFoundryJSON contractName json = do
         , creationSrcmap      = creationSrcMap
         , constructorInputs   = mkConstructor abi
         , storageLayout       = mkStorageLayout $ json ^? key "storageLayout"
-        , immutableReferences = mempty -- TODO: foundry doesn't expose this?
+        , immutableReferences = fromMaybe mempty $ do
+            x <- runtime ^? key "immutableReferences"
+            case fromJSON x of
+              Success a -> pure a
+              _ -> Nothing
         }
   Right ( Contracts $ Map.singleton (path <> ":" <> contractName) contract
-        , Asts      $ Map.singleton path ast
         , Sources   $ Map.singleton (SrcFile id' (T.unpack path)) Nothing
         )
 
@@ -578,9 +624,7 @@ readCombinedJSON json = do
   rawContracts <- maybeToEither (MissingOrInvalidJsonField "contracts") (json ^? key "contracts" % _Object)
   contracts <- Map.traverseWithKey extractContract $ KeyMap.toMapText rawContracts
   sources <- maybeToEither (MissingOrInvalidJsonField "sourceList") $ toList . fmap (preview _String) <$> json ^? key "sourceList" % _Array
-  astsPre <- maybeToEither (MissingJsonField "sources") $ json ^? key "sources" % _Object
   pure ( Contracts contracts
-       , Asts (KeyMap.toMapText astsPre)
        , Sources $ Map.fromList $
            (\(path, id') -> (SrcFile id' (T.unpack path), Nothing)) <$>
              zip (catMaybes sources) [0..]
@@ -821,38 +865,6 @@ knownBzzrPrefixes = [
   -- a2 64 "ipfs" 0x58 0x22 (solc >= 0.6.0)
   BS.pack [0xa2, 0x64, 0x69, 0x70, 0x66, 0x73, 0x58, 0x22]
   ]
-
--- | Every node in the AST has an ID, and other nodes reference those
--- IDs.  This function recurses through the tree looking for objects
--- with the "id" key and makes a big map from ID to value.
-astIdMap :: Foldable f => f Value -> Map Int Value
-astIdMap = foldMap f
-  where
-    f :: Value -> Map Int Value
-    f (Array x) = foldMap f x
-    f v@(Object x) =
-      let t = foldMap f (KeyMap.elems x)
-      in case KeyMap.lookup "id" x of
-        Nothing         -> t
-        Just (Number i) -> t <> Map.singleton (round i) v
-        Just _          -> t
-    f _ = mempty
-
-astSrcMap :: Map Int Value -> (SrcMap -> Maybe Value)
-astSrcMap astIds =
-  \(SM i n f _ _)  -> Map.lookup (i, n, f) tmp
-  where
-    tmp :: Map (Int, Int, Int) Value
-    tmp =
-       Map.fromList
-      . mapMaybe
-        (\v -> do
-          src <- preview (key "src" % _String) v
-          [i, n, f] <- mapM (readMaybe . T.unpack) (T.split (== ':') src)
-          pure ((i, n, f), v)
-        )
-      . Map.elems
-      $ astIds
 
 -- needs to be here not Format due to cyclic module deps
 strip0x'' :: Text -> Text

@@ -795,6 +795,8 @@ genBaseArithCase = oneof
   , fracReduceCase
   , ceilDivCase
   , telescopeCase
+  , divStepCase
+  , remCancelCase
   , withBindings "signed division and modulo"
       (Expr.add (SDiv arithA arithB) (SMod arithA arithB)) signedEdges
   , withBindings "unsigned modulo" (Mod (Expr.mul arithA arithB) arithC) []
@@ -858,6 +860,23 @@ genBaseArithCase = oneof
           full = Div (Expr.mul arithA arithB) (Lit divisor)
           stepped = Div (Expr.mul arithA (Sub arithB (Lit step))) (Lit divisor)
       withBindings "scaled-product telescope" (Sub full stepped) [nearValue arithBName step]
+
+    -- ceilDiv's (a - k)/c next to a/c, with a around k and c around zero
+    divStepCase = do
+      step <- frequency [(3, pure 1), (1, genSmallNonZero)]
+      let lower = Div (Sub arithA (Lit step)) arithC
+          upper = Div arithA arithC
+      e <- elements [Sub upper lower, Expr.add (Lit 1) lower, Sub (Expr.add (Lit 1) lower) upper]
+      withBindings "dividend step" (Expr.add e upper)
+        [nearValue arithAName step, nearValue arithCName 1]
+
+    -- a multiple of a literal plus less than it, divided by the literal, near where it overflows
+    remCancelCase = do
+      divisor <- frequency [(3, genArithConst), (1, (10 ^) <$> chooseInteger (1, 27))]
+      r <- elements [0, 1, divisor - 1, divisor, divisor + 1]
+      withBindings "remainder cancellation"
+        (Div (Add (Lit r) (Expr.mul (Lit divisor) arithA)) (Lit divisor))
+        [nearValue arithAName ((maxBound - r) `div` divisor)]
 
     -- dividend a left shift, divisor around 2^k: the div/mod shift bounds
     shiftDividendCase = do
