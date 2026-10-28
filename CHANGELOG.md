@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remainders: `a%b <= a` and `a%b < b`.
 - The simplifier drops an `ITE c t k` whose literal `k` is what `t` is when `c` is 0,
   such as the product a short-circuited overflow check leaves after a merge.
+- The simplifier splits `b ** ITE c x y` with literal `b`, `x` and `y` into two
+  constants, and folds `x < x - x % c`, also masked to `uintN`, to false.
+- A memory offset or size that depends on a merged condition, such as an array
+  length picked by a ternary, forks on that condition, so memory stays concrete.
 - `test` takes `--run-log FILE`, appending a line when each test starts and ends,
   and `--yul-verbosity N`. Tests time out after 10 minutes by default.
 - The progress log gives the source location of forks and of the locations in

@@ -50,7 +50,7 @@ import Data.List (delete, find, isPrefixOf)
 import Data.List.Split (splitOn)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, fromJust, isJust, isNothing, mapMaybe)
+import Data.Maybe (fromMaybe, fromJust, isJust, isNothing, listToMaybe, mapMaybe)
 import Data.Set (insert, member, fromList)
 import Data.Sequence (Seq)
 import Data.Sequence qualified as Seq
@@ -356,6 +356,44 @@ getOpW8 state = case state.code of
 getOpName :: forall (t :: VMType) . FrameState t -> [Char]
 getOpName state = intToOpName $ fromEnum $ getOpW8 state
 
+-- | A merge can leave an ITE between literals where a memory offset or size is
+-- expected, e.g. a length picked by a ternary. Accessing memory there would make
+-- it symbolic for the rest of the path, so the path forks on the ITE instead,
+-- and the instruction runs again with each literal.
+splitMergedMemArg :: forall (t :: VMType). Typeable t => Config -> VM t -> Maybe (EVM t ())
+splitMergedMemArg conf vm = case eqT @t @Symbolic of
+  Just Refl | not vm.mergeState.msActive, vm.state.pc < opslen vm.state.code -> listToMaybe
+    [ forkOnSubterm conf.maxDepth [atom] [(v, [[v]]) | (v, _) <- cases] $ \v ->
+        assign' (#state % #stack % ix i) (fromJust (lookup v cases))
+    | i <- memArgs (getOp (getOpW8 vm.state))
+    , Just x <- [preview (ix i) vm.state.stack]
+    , isNothing (maybeLitWordSimp x)
+    , Just (atom, cases) <- [Expr.splitLitIte x]
+    ]
+  _ -> Nothing
+  where
+    memArgs :: GenericOp Word8 -> [Int]
+    memArgs = \case
+      OpMload -> [0]
+      OpMstore -> [0]
+      OpMstore8 -> [0]
+      OpSha3 -> [0, 1]
+      OpCalldatacopy -> [0, 2]
+      OpCodecopy -> [0, 2]
+      OpReturndatacopy -> [0, 2]
+      OpExtcodecopy -> [1, 3]
+      OpMcopy -> [0, 1, 2]
+      OpReturn -> [0, 1]
+      OpRevert -> [0, 1]
+      OpLog _ -> [0, 1]
+      OpCall -> [3, 4, 5, 6]
+      OpCallcode -> [3, 4, 5, 6]
+      OpDelegatecall -> [2, 3, 4, 5]
+      OpStaticcall -> [2, 3, 4, 5]
+      OpCreate -> [1, 2]
+      OpCreate2 -> [1, 2]
+      _ -> []
+
 -- | Executes the EVM one step
 exec1 :: forall (t :: VMType). (VMOps t, Typeable t) => Config ->  EVM t ()
 exec1 conf = do
@@ -395,7 +433,9 @@ exec1 conf = do
   else if vm.state.pc >= opslen vm.state.code
     then doStop
 
-    else do
+    else case splitMergedMemArg conf vm of
+     Just split -> split
+     Nothing -> do
       let ?conf = conf
       let ?op = getOpW8 vm.state
       case getOp (?op) of

@@ -142,6 +142,7 @@ module EVM.Expr
   , maybeLitByteSimp
   , maybeLitWordSimp
   , enumerateViaSmallSubterm
+  , splitLitIte
   , maybeLitAddrSimp
   , maybeConcStoreSimp
   ) where
@@ -2767,6 +2768,29 @@ enumerateViaSmallSubterm limit props e0 = listToMaybe $ mapMaybe tryAtoms (map p
       res <- mapM (\ks -> (,[ks]) <$> maybeLitWordSimp (foldr (\(a, k) -> mapExpr (subst a (Lit k))) e (zip atoms ks)))
         (sequence vss)
       pure (atoms, Map.toList $ Map.fromListWith (flip (++)) res)
+    subst :: Expr EWord -> Expr EWord -> Expr a -> Expr a
+    subst atom k x = case asWordRefl x of
+      Just Refl | x == atom -> k
+      _ -> x
+
+-- | A subterm of @e@ with two possible values, an ITE between two literals or
+-- a comparison, and @e@ with each of them in its place
+splitLitIte :: Expr EWord -> Maybe (Expr EWord, [(W256, Expr EWord)])
+splitLitIte e0 = do
+  (atom, vs) <- listToMaybe $ foldExpr twoValued [] e
+  pure (atom, [(v, simplify $ mapExpr (subst atom (Lit v)) e) | v <- vs])
+  where
+    e = simplify e0
+    twoValued :: Expr a -> [(Expr EWord, [W256])]
+    twoValued = \case
+      x@(ITE _ (Lit a) (Lit b)) | a /= b -> [(x, [a, b])]
+      x@(LT _ _) -> [(x, [0, 1])]
+      x@(GT _ _) -> [(x, [0, 1])]
+      x@(SLT _ _) -> [(x, [0, 1])]
+      x@(SGT _ _) -> [(x, [0, 1])]
+      x@(Eq _ _) -> [(x, [0, 1])]
+      x@(IsZero _) -> [(x, [0, 1])]
+      _ -> []
     subst :: Expr EWord -> Expr EWord -> Expr a -> Expr a
     subst atom k x = case asWordRefl x of
       Just Refl | x == atom -> k
