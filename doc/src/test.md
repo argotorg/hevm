@@ -73,7 +73,9 @@ Checking 1 function(s) in contract test/Counter.t.sol:CounterTest
 ```
 
 Functions with arguments that cannot be symbolic, such as dynamic arrays, are
-not called, and hevm warns about them.
+not called, and hevm warns about them. See the [invariant testing
+tutorial](./invariant-testing-tutorial.md) for a longer example and all the
+options.
 
 ## Further reading
 
