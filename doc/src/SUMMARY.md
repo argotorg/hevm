@@ -7,6 +7,7 @@
 # Tutorials
 
 - [Forge std-test tutorial](./std-test-tutorial.md)
+- [Invariant testing tutorial](./invariant-testing-tutorial.md)
 - [Equivalence checking tutorial](./equivalence-checking-tutorial.md)
 - [Symbolic execution tutorial](./symbolic-execution-tutorial.md)
 - [Example: Truebit exploit](./exploit-tutorial.md)
