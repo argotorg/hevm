@@ -140,6 +140,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes of zero.
 
 ## Changed
+- Deciding a branch without the solver reuses the simplified path conditions
+  of the earlier branches on the path, kept in the new `VM` field
+  `simpConstraints`, and first tries the branch condition alone, which
+  simplification can decide where it cannot with the path conditions.
 - State merging also merges if/else branches and ternaries, where the two
   sides meet after the jump target, and follows the branches inside a merged
   side that its own condition decides, such as the overflow check of `a - b`

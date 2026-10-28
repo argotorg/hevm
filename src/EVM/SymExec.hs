@@ -523,13 +523,14 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
                     -- ask the smt solver about the loop condition
                     performQuery
                   _ -> do
-                    let decision = staticBranch cond preconds
+                    let base = simplifiedPathConds vm.constraints vm.simpConstraints (drop (length vm.constraints) preconds)
+                        decision = staticBranchOn base cond
                     conf <- readConfig
                     when (conf.checkStaticBranches || checkStaticBranchesFromEnv) $
                       checkStaticBranch fetcher vm cond preconds decision >>= \case
                         StaticWrong msg -> internalError $ "a branch side was dropped by simplification, but it is reachable: " <> msg
                         _ -> pure ()
-                    (r, vm') <- liftIO $ stToIO $ runStateT (continue decision) vm
+                    (r, vm') <- liftIO $ stToIO $ runStateT (continue decision) (vm & set #simpConstraints (vm.constraints, base))
                     interpretInternal t { vm = vm', stepper = (k r) }
           _ -> performQuery
 
@@ -542,11 +543,32 @@ srcOf vm = case vm.srcLookup of
 -- | How exploration decides a symbolic branch without the solver: a side is
 -- dropped only if simplifying it with the path conditions gives false
 staticBranch :: Expr EWord -> [Prop] -> BranchCondition
-staticBranch cond preconds = case Expr.concKeccakSimpProps ((cond ./= Lit 0):preconds) of
-  [PBool False] -> Case False
-  [] -> Case True
-  _ | Expr.concKeccakSimpProps ((cond .== Lit 0):preconds) == [PBool False] -> Case True
-    | otherwise -> UnknownBranch
+staticBranch cond preconds = staticBranchOn (Expr.concKeccakSimpProps preconds) cond
+
+-- | 'staticBranch' on path conditions that are already simplified. The
+-- condition is tried alone first: with the path conditions, simplification may
+-- rewrite it into a form it no longer decides.
+staticBranchOn :: [Prop] -> Expr EWord -> BranchCondition
+staticBranchOn base cond = case decideWith [] of
+  UnknownBranch -> decideWith base
+  decided -> decided
+  where
+    decideWith ps = case Expr.concKeccakSimpProps ((cond ./= Lit 0):ps) of
+      [PBool False] -> Case False
+      [] -> Case True
+      _ | Expr.concKeccakSimpProps ((cond .== Lit 0):ps) == [PBool False] -> Case True
+        | otherwise -> UnknownBranch
+
+-- | The simplified path conditions, reusing the cached simplification of the
+-- earlier ones while only props were prepended to them. @extra@ are further
+-- facts, e.g. keccak preimages, which hold on every path.
+simplifiedPathConds :: [Prop] -> ([Prop], [Prop]) -> [Prop] -> [Prop]
+simplifiedPathConds constraints (raw, simp) extra = Expr.concKeccakSimpProps (added <> cached <> extra)
+  where
+    k = length constraints - length raw
+    (added, cached)
+      | k >= 0 && drop k constraints == raw = (take k constraints, simp)
+      | otherwise = (constraints, [])
 
 -- | Turns on 'checkStaticBranches' for every run, e.g. a whole test suite
 {-# NOINLINE checkStaticBranchesFromEnv #-}
