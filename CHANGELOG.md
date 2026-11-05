@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- With `--check-static-branches`, a branch that simplification keeps both ways but
+  the solver decides is logged as a `static-missed` event in the progress log, with
+  its condition and path conditions under `--progress-exprs`, and counted per
+  location in the summary.
 - Bounds from path conditions carry through `c + x`, `c - x` and `~x`, also when
   they wrap past 2^256 as signed range checks do, and through small signed values
   such as `-k + y % n`. The simplifier clears the bits of a mask above the bound of

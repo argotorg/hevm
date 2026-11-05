@@ -529,6 +529,10 @@ interpretInternal t@InterpTask{..} = eval (Operational.view stepper)
                     when (conf.checkStaticBranches || checkStaticBranchesFromEnv) $
                       checkStaticBranch fetcher vm cond preconds decision >>= \case
                         StaticWrong msg -> internalError $ "a branch side was dropped by simplification, but it is reachable: " <> msg
+                        StaticMissed side -> Progress.staticMissed (T.pack (show vm.state.contract)) vm.state.pc (srcOf vm) side $
+                          Progress.bigText "cond" (formatExpr cond)
+                          <> Progress.bigText "simplified" (formatExpr (Expr.simplify cond))
+                          <> ["pathconds" .= map (JSON.object . Progress.bigText "prop" . formatProp) base]
                         _ -> pure ()
                     (r, vm') <- liftIO $ stToIO $ runStateT (continue decision) (vm & set #simpConstraints (vm.constraints, base))
                     interpretInternal t { vm = vm', stepper = (k r) }
@@ -595,8 +599,8 @@ data StaticCheck
   -- | the solver finds a dropped side satisfiable, or a taken side unsatisfiable
   | StaticWrong String
   | StaticInconclusive
-  -- | 'staticBranch' kept both sides, but the solver finds one unsatisfiable
-  | StaticMissed
+  -- | 'staticBranch' kept both sides, but the solver finds this one unsatisfiable
+  | StaticMissed Bool
   deriving (Show)
 
 -- | Asks the solver whether the sides 'staticBranch' dropped are unsatisfiable
@@ -612,7 +616,10 @@ checkStaticBranch fetcher vm cond preconds decision = case decision of
   _ -> do
     t <- askSat fetcher vm (side True : preconds)
     f <- askSat fetcher vm (side False : preconds)
-    pure $ if t == Just False || f == Just False then StaticMissed else StaticOk
+    pure $ case (t, f) of
+      (Just False, _) -> StaticMissed True
+      (_, Just False) -> StaticMissed False
+      _ -> StaticOk
   where
     side True = cond ./= Lit 0
     side False = cond .== Lit 0
