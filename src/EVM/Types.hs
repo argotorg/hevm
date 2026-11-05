@@ -670,7 +670,7 @@ data PartialExec
 -- result is only valid within that restriction. It is therefore attached to the
 -- verification result as a whole, not to an individual 'Expr End' leaf.
 data Caveat
-  = DynArgBounded { maxSize :: Int }  -- ^ dynamic (bytes/string) calldata args were bounded to this many bytes
+  = DynArgBounded { maxSize :: Int }  -- ^ dynamic calldata args were bounded to this many bytes (bytes, string) or elements (arrays)
   deriving (Show, Eq, Ord)
 
 -- | Effect types used by the vm implementation for side effects & control flow

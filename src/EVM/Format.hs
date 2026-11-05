@@ -589,8 +589,8 @@ formatPartial = \case
 formatCaveat :: Caveat -> Text
 formatCaveat = \case
   DynArgBounded maxSz ->
-    "Dynamic (bytes/string) arguments were bounded to " <> pack (show maxSz) <>
-    " bytes; counterexamples requiring longer inputs may be missed."
+    "Dynamic arguments were bounded to " <> pack (show maxSz) <>
+    " bytes (bytes, string) or elements (arrays); counterexamples requiring longer inputs may be missed."
 
 formatPartialDetailed :: Maybe SrcLookup -> Map.Map (Expr EAddr) Contract -> PartialExec -> Text
 formatPartialDetailed srcLookupM contracts p =
