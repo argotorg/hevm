@@ -83,8 +83,8 @@ prop_bounds = forAllShrink (sized $ \n -> oneof [genShapedWord (min n 40), genSi
   forAll (genEnv e) $ \env ->
     let vals = [(t, v) | t <- take 30 (nub (foldExpr (maybe [] pure . Expr.asWord) [] e)), Just v <- [evalWord env t]]
     in forAll (genFacts vals) $ \facts ->
-      let bs = Expr.propBounds facts
-          inBounds = [ counterexample ("propBounds: " <> show t <> " = " <> show v <> " outside " <> show (lb, ub, ex)) $
+      let bs = Expr.shiftedBounds facts
+          inBounds = [ counterexample ("shiftedBounds: " <> show t <> " = " <> show v <> " outside " <> show (lb, ub, ex)) $
                          lb <= v && v <= ub && Prelude.not (v `elem` ex)
                      | (t, v) <- vals, Just (Expr.Bounds lb ub ex) <- [Map.lookup t bs] ]
           uppers = [ counterexample ("upperWithBounds: " <> show t <> " = " <> show v <> " > " <> show u) $ v <= u
