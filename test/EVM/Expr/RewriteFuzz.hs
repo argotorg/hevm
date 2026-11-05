@@ -19,6 +19,7 @@ module EVM.Expr.RewriteFuzz
 
 import Prelude hiding (LT, GT)
 
+import Control.Monad (foldM)
 import Data.Bits (shiftL, shiftR, testBit, (.&.), (.|.), xor, complement, countLeadingZeros)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -476,6 +477,9 @@ genTemplate s shiftAmt = oneof
   , LT <$> lit <*> (And <$> lit <*> s)
   , litOp' <*> lit <*> ite, litOp' <*> ite <*> lit, litOp' <*> ite <*> ite
   , IsZero <$> ite, Not <$> ite
+  , litOp' <*> lit <*> iteTree, litOp' <*> iteTree <*> lit, litOp' <*> iteTree <*> iteTree
+  , IsZero <$> iteTree, Not <$> iteTree
+  , litOp' <*> mergedChain <*> elements [Lit 0, Lit 1, Lit 128]
   , ITE <$> (IsZero <$> s) <*> s <*> s
   , ITE <$> s <*> elements [Lit 0, Lit 1] <*> elements [Lit 0, Lit 1]
   , shared
@@ -520,8 +524,22 @@ genTemplate s shiftAmt = oneof
       ys' <- shuffle ys
       pure $ Sub (foldr1 Add (take 6 xs')) (foldr1 Add (take 6 ys'))
     -- literal branches, sharing a condition from a small set so that ITEs pair up
-    ite = ITE <$> elements [Var "a", LT (Var "a") (Var "b"), IsZero (Var "c")] <*> lit <*> lit
-    litOp' = elements [Add, Sub, Mul, Exp, Div, Mod, And, Or, Xor, Eq, LT, SLT, SHL, SHR, SAR]
+    ite = ITE <$> iteCond <*> lit <*> lit
+    iteCond = elements [Var "a", LT (Var "a") (Var "b"), IsZero (Var "c")]
+    iteTree = choose (1, 3 :: Int) >>= tree
+      where tree 0 = lit
+            tree d = oneof [lit, ITE <$> iteCond <*> tree (d - 1) <*> tree (d - 1)]
+    -- a value updated under a condition per step, as merging the branches of
+    -- `if (x & bit != 0) r = r * c >> 128` makes it
+    mergedChain = do
+      n <- choose (1, 5 :: Int)
+      start <- lit
+      foldM (\r c -> do
+                op <- litOp'
+                k <- lit
+                pure (ITE c (SHR (Lit 128) (op r k)) r))
+            start =<< vectorOf n iteCond
+    litOp' =elements [Add, Sub, Mul, Exp, Div, Mod, And, Or, Xor, Eq, LT, SLT, SHL, SHR, SAR]
     lit = Lit <$> genSpecialLit
     pow2 = Lit . (2 ^) <$> choose (0 :: Int, 255)
     litOp = elements [Add, Sub, Xor, Mul]

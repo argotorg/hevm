@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Added
 - Arithmetic abstraction now handles `MULMOD`, with exact 512-bit refinement,
   and adds cancellation, div/mod identity and multiplication/division round-trip lemmas.
+- The simplifier folds arithmetic, comparisons and bit operations through nested
 - `test/scripts/fuzz-coverage.sh` reports which source lines a fuzz run never
   reaches, using HPC.
 - Abstract arithmetic lemmas for dividends a literal apart over one divisor,
