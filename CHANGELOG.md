@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- Bounds from path conditions carry through `c + x`, `c - x` and `~x`, also when
+  they wrap past 2^256 as signed range checks do, and through small signed values
+- The simplifier folds `c + ~x` to `(c - 1) - x` and `c - ~x` to `(c + 1) + x`.
 - The simplifier folds arithmetic, comparisons and bit operations through nested
 - `test/scripts/fuzz-coverage.sh` reports which source lines a fuzz run never
   reaches, using HPC.
