@@ -161,7 +161,7 @@ import Data.DoubleWord (Int256, Word256(Word256), Word128(Word128))
 import Data.List (sort, sortOn, find, (\\))
 import Data.Map qualified as LMap
 import Data.Map.Strict qualified as Map
-import Data.Maybe (mapMaybe, isJust, fromMaybe, listToMaybe)
+import Data.Maybe (mapMaybe, isJust, isNothing, fromMaybe, listToMaybe)
 import Data.Semigroup (Any, Any(..), getAny)
 import Data.Set qualified as Set
 import Data.Typeable
@@ -603,7 +603,7 @@ liftLitITE = \case
       _ | Just n <- leaves a, Just m <- leaves b, n * m <= maxLeaves ->
         Just (onLeaves (\x -> onLeaves (op x) b) a)
       _ -> Nothing
-    maxLeaves = 16
+    maxLeaves = 128
     leaves :: Expr EWord -> Maybe Int
     leaves = \case
       Lit _ -> Just 1
@@ -2102,8 +2102,9 @@ simplifyProps :: [Prop] -> [Prop]
 simplifyProps ps = if cannotBeSat then [PBool False] else simplified
   where
     simplified = untilFixpoint goOne ps
-    cannotBeSat = PBool False `elem` simplified
-      || any (\(Bounds l h _) -> l > h) (propBounds simplified)
+    cannotBeSat = PBool False `elem` simplified || contradicts (propBounds simplified)
+    -- a term's bounds exclude each other, or every value its structure allows
+    contradicts bs = any (\(Bounds l h _) -> l > h) bs || any (isNothing . wrapInterval bs) (Map.keys bs)
     goOne :: [Prop] -> [Prop]
     goOne = remRedundantProps . map simplifyProp . boundedMasks . boundedScaling . boundedMulChecks . constPropagate . flattenProps
 
@@ -2952,12 +2953,11 @@ wrapInterval bs = go (6 :: Int)
         (a, b) -> (c - b, c - a)
       SEx (Lit k) x | k < 31 -> go (d - 1) x <&> \case
         i@(a, b) | fitsSigned k a b -> i
-        _ -> full
+        _ -> let half = signedHalf k in (negate half, half - 1)
       _ -> Just full
     -- every value is in [-2^(n-1), 2^(n-1)) for n = 8 (k + 1) bits, where sign extension keeps it
-    fitsSigned k a b =
-      let half = 2 ^ (8 * (unsafeInto k + 1 :: Int) - 1) :: W256
-      in a + half <= b + half && b + half <= 2 * half - 1
+    fitsSigned k a b = let half = signedHalf k in a + half <= b + half && b + half <= 2 * half - 1
+    signedHalf k = 2 ^ (8 * (unsafeInto k + 1 :: Int) - 1) :: W256
     withBounds t i@(a, b) = case Map.lookup t bs of
       Nothing -> Just i
       Just (Bounds l h _)

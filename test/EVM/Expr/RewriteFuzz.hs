@@ -495,6 +495,8 @@ genTemplate s shiftAmt = oneof
   , litOp' <*> lit <*> ite, litOp' <*> ite <*> lit, litOp' <*> ite <*> ite
   , IsZero <$> ite, Not <$> ite
   , litOp' <*> lit <*> iteTree, litOp' <*> iteTree <*> lit, litOp' <*> iteTree <*> iteTree
+  -- past the leaf limit of folding into ITEs, alone and as a product
+  , litOp' <*> fullTree 4 <*> fullTree 4, IsZero <$> fullTree 8
   , IsZero <$> iteTree, Not <$> iteTree
   , litOp' <*> mergedChain <*> elements [Lit 0, Lit 1, Lit 128]
   , ITE <$> (IsZero <$> s) <*> s <*> s
@@ -543,9 +545,13 @@ genTemplate s shiftAmt = oneof
     -- literal branches, sharing a condition from a small set so that ITEs pair up
     ite = ITE <$> iteCond <*> lit <*> lit
     iteCond = elements [Var "a", LT (Var "a") (Var "b"), IsZero (Var "c")]
-    iteTree = choose (1, 3 :: Int) >>= tree
+    iteTree = choose (1, 4 :: Int) >>= tree
       where tree 0 = lit
             tree d = oneof [lit, ITE <$> iteCond <*> tree (d - 1) <*> tree (d - 1)]
+    -- distinct conditions per level, so no branches merge
+    fullTree :: Int -> Gen (Expr EWord)
+    fullTree 0 = lit
+    fullTree d = ITE (Var (varNames !! (d `mod` 4)) `Eq` Lit (fromIntegral d)) <$> fullTree (d - 1) <*> fullTree (d - 1)
     -- a value updated under a condition per step, as merging the branches of
     -- `if (x & bit != 0) r = r * c >> 128` makes it
     mergedChain = do
