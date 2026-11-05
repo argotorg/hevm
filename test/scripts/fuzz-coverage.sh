@@ -22,9 +22,10 @@ hpc sum --union --output="$out/all.tix" "$out"/[0-9]*.tix
 hpc report --hpcdir="$mix" --include="$module" "$out/all.tix"
 hpc markup --hpcdir="$mix" --srcdir=. --include="$module" --destdir="$out/html" "$out/all.tix" > /dev/null
 
-# lines holding a never-evaluated expression, or a guard seen only one way
+# lines holding a never-evaluated expression, or a guard seen only one way (but `otherwise`, always true)
 html=$(ls "$out"/html/*/"$module".hs.html)
-grep -E 'nottickedoff|tickonly(true|false)' "$html" \
+sed 's|<span class="tickonlytrue">otherwise</span>|otherwise|g' "$html" \
+  | grep -E 'nottickedoff|tickonly(true|false)' \
   | sed -E 's/.*class="lineno"> *([0-9]+) <\/span>(.*)/\1:\2/; s/<[^>]*>//g; s/&gt;/>/g; s/&lt;/</g; s/&amp;/\&/g' \
   | grep -E '^[0-9]+:' > "$out/untaken.txt" || true
 echo "$(wc -l < "$out/untaken.txt") lines with untaken code: $out/untaken.txt, annotated source: $html"
