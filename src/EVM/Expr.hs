@@ -2843,9 +2843,9 @@ boundedScaling = go []
         -> Div (mul (Lit (a `Prelude.div` g)) x) (Lit (b `Prelude.div` g))
       e -> e
 
--- | Clears the bits of @m@ in @m & x@ above what the bounds of the other props allow
--- for @x@, e.g. the tests of high bits of a tick bounded to a small range. One prop at a
--- time, as in 'boundedScaling'.
+-- | Drops @m & x@ to 0 when the bounds of the other props leave @x@ none of the bits of
+-- @m@, e.g. the tests of high bits of a tick bounded to a small range, and to @x@ when
+-- they leave it only bits of @m@. One prop at a time, as in 'boundedScaling'.
 boundedMasks :: [Prop] -> [Prop]
 boundedMasks ps
   | Prelude.not (any (getAny . foldPropOnce (Any . isSite) mempty) ps) = ps
@@ -2861,10 +2861,10 @@ boundedMasks ps
       _ -> False
     rewrite :: Map.Map (Expr EWord) Bounds -> Expr a -> Expr a
     rewrite bs = \case
-      And (Lit m) x
-        | ub <- upperWithBounds bs x, ub < maxLit
-        , m' <- m .&. lowMask ub, m' /= m
-        -> EVM.Expr.and (Lit m') x
+      -- only when the mask goes away: a narrowed mask, e.g. of an address, would hide it from other rules
+      e@(And (Lit m) x)
+        | ub <- upperWithBounds bs x, ub < maxLit, ones <- lowMask ub ->
+          if m .&. ones == 0 then Lit 0 else if ones .&. complement m == 0 then x else e
       e -> e
     -- the bits a value at most ub can have set
     lowMask ub = if ub == 0 then 0 else maxLit `shiftR` countLeadingZeros ub
