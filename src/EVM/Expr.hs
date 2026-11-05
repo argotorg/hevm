@@ -570,7 +570,8 @@ dropHidden visible = \case
 oddInverse :: W256 -> W256
 oddInverse k = iterate (\i -> i * (2 - k * i)) k !! 7
 
--- | Moves an operation into the branches of ITEs with literal branches, where it folds
+-- | Moves an operation into the leaves of ITE trees with literal leaves, where it folds.
+-- Merged branches nest such trees, e.g. a value multiplied by a constant per set bit.
 liftLitITE :: Expr EWord -> Maybe (Expr EWord)
 liftLitITE = \case
   Add a b -> two add a b
@@ -588,16 +589,30 @@ liftLitITE = \case
   SHL a b -> two shl a b
   SHR a b -> two shr a b
   SAR a b -> two sar a b
-  IsZero (ITE c t@(Lit _) f@(Lit _)) -> Just (ITE c (iszero t) (iszero f))
-  Not (ITE c t@(Lit _) f@(Lit _)) -> Just (ITE c (EVM.Expr.not t) (EVM.Expr.not f))
+  IsZero a@(ITE {}) | Just _ <- leaves a -> Just (onLeaves iszero a)
+  Not a@(ITE {}) | Just _ <- leaves a -> Just (onLeaves EVM.Expr.not a)
   _ -> Nothing
   where
     two :: (Expr EWord -> Expr EWord -> Expr EWord) -> Expr EWord -> Expr EWord -> Maybe (Expr EWord)
     two op a b = case (a, b) of
-      (Lit _, ITE c t@(Lit _) f@(Lit _)) -> Just (ITE c (op a t) (op a f))
-      (ITE c t@(Lit _) f@(Lit _), Lit _) -> Just (ITE c (op t b) (op f b))
-      (ITE c t@(Lit _) f@(Lit _), ITE c' t'@(Lit _) f'@(Lit _)) | c == c' -> Just (ITE c (op t t') (op f f'))
+      (Lit _, Lit _) -> Nothing
+      (ITE c t f, ITE c' t' f') | c == c', Just _ <- leaves a, Just _ <- leaves b ->
+        Just (ite c (fromMaybe (op t t') (two op t t')) (fromMaybe (op f f') (two op f f')))
+      _ | Just n <- leaves a, Just m <- leaves b, n * m <= maxLeaves ->
+        Just (onLeaves (\x -> onLeaves (op x) b) a)
       _ -> Nothing
+    maxLeaves = 16
+    leaves :: Expr EWord -> Maybe Int
+    leaves = \case
+      Lit _ -> Just 1
+      ITE _ t f -> do
+        n <- (+) <$> leaves t <*> leaves f
+        if n <= maxLeaves then Just n else Nothing
+      _ -> Nothing
+    onLeaves :: (Expr EWord -> Expr EWord) -> Expr EWord -> Expr EWord
+    onLeaves g (ITE c t f) = ite c (onLeaves g t) (onLeaves g f)
+    onLeaves g l = g l
+    ite c t f = if t == f then t else ITE c t f
 
 -- | The difference of two offsets from the same base, mod 2^256
 offsetDiff :: Expr EWord -> Expr EWord -> Maybe W256

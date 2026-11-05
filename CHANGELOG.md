@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- The simplifier folds arithmetic, comparisons and bit operations through nested
 - `test/scripts/fuzz-coverage.sh` reports which source lines a fuzz run never
   reaches, using HPC.
 - Abstract arithmetic lemmas for dividends a literal apart over one divisor,
