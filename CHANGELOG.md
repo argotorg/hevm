@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- `test/scripts/fuzz-coverage.sh` reports which source lines a fuzz run never
+  reaches, using HPC.
 - `test` takes `--run-log FILE`, appending a line when each test starts and ends,
   and `--yul-verbosity N`. Tests time out after 10 minutes by default.
 - The progress log gives the source location of forks and of the locations in
