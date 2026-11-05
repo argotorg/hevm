@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Added
 - The simplifier folds arithmetic, comparisons and bit operations through nested
   ITEs whose leaves are literals, as merged branches build them, up to 16 leaves.
+- `test/scripts/fuzz-coverage.sh` reports which source lines a fuzz run never
+  reaches, using HPC.
 - Abstract arithmetic lemmas for dividends a literal apart over one divisor,
   `(x-k)/z <= x/z <= (x-k)/z + k`, as in a `ceilDiv` next to a round-down, and
   for `(r + c*q)/c == q` when `r < c`.
