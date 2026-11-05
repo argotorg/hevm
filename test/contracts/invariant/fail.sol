@@ -92,7 +92,7 @@ contract OwnedTest is Test {
 contract Unsupported {
     uint256 public x;
 
-    function setX(uint256[] calldata xs) public {
+    function setX(bytes[] calldata xs) public {
         x = xs.length;
     }
 }
