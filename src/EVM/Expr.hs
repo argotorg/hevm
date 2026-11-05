@@ -33,6 +33,7 @@ module EVM.Expr
   , Bounds(..)
   , propBounds
   , upperWithBounds
+  , wrapInterval
   , asWord
   , sex
 
@@ -179,6 +180,7 @@ import EVM.Keccak.Preimages (Preimage(..), Table, fromBytes, lookupSlot, smallAr
 import EVM.Traversals
 import EVM.Traversals.Children (mapPropChildrenM)
 import Data.Functor.Identity (Identity(..))
+import Data.Functor ((<&>))
 import EVM.Types
 
 -- ** Constants **
@@ -1943,6 +1945,8 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
 
     -- Negation: ~x + 1 = 0 - x (two's complement)
     go (Add (Lit 1) (Not b)) = Sub (Lit 0) b
+    go (Add (Lit c) (Not b)) = sub (Lit (c - 1)) b
+    go (Sub (Lit c) (Not b)) = add (Lit (c + 1)) b
 
     -- add / sub identities
     go (Add a b)
@@ -2099,8 +2103,9 @@ simplifyProps ps = if cannotBeSat then [PBool False] else simplified
   where
     simplified = untilFixpoint goOne ps
     cannotBeSat = PBool False `elem` simplified
+      || any (\(Bounds l h _) -> l > h) (propBounds simplified)
     goOne :: [Prop] -> [Prop]
-    goOne = remRedundantProps . map simplifyProp . boundedScaling . boundedMulChecks . constPropagate . flattenProps
+    goOne = remRedundantProps . map simplifyProp . boundedMasks . boundedScaling . boundedMulChecks . constPropagate . flattenProps
 
 
 -- | Evaluate the provided proposition down to its most concrete result
@@ -2863,6 +2868,32 @@ boundedScaling = go []
         -> Div (mul (Lit (a `Prelude.div` g)) x) (Lit (b `Prelude.div` g))
       e -> e
 
+-- | Clears the bits of @m@ in @m & x@ above what the bounds of the other props allow
+-- for @x@, e.g. the tests of high bits of a tick bounded to a small range. One prop at a
+-- time, as in 'boundedScaling'.
+boundedMasks :: [Prop] -> [Prop]
+boundedMasks ps
+  | Prelude.not (any (getAny . foldPropOnce (Any . isSite) mempty) ps) = ps
+  | otherwise = go [] ps
+  where
+    go done [] = reverse done
+    go done (p : rest)
+      | getAny (foldPropOnce (Any . isSite) mempty p) = go (mapProp (rewrite (chainedBounds (done <> rest))) p : done) rest
+      | otherwise = go (p : done) rest
+    isSite :: Expr a -> Bool
+    isSite = \case
+      And (Lit _) x -> Prelude.not (isLitWord x)
+      _ -> False
+    rewrite :: Map.Map (Expr EWord) Bounds -> Expr a -> Expr a
+    rewrite bs = \case
+      And (Lit m) x
+        | ub <- upperWithBounds bs x, ub < maxLit
+        , m' <- m .&. lowMask ub, m' /= m
+        -> EVM.Expr.and (Lit m') x
+      e -> e
+    -- the bits a value at most ub can have set
+    lowMask ub = if ub == 0 then 0 else maxLit `shiftR` countLeadingZeros ub
+
 -- | 'propBounds', also through @t <= u@, a few steps deep
 chainedBounds :: [Prop] -> Map.Map (Expr EWord) Bounds
 chainedBounds ps = iterate (\m -> foldl through m chains) (propBounds ps) !! 3
@@ -2879,8 +2910,13 @@ chainedBounds ps = iterate (\m -> foldl through m chains) (propBounds ps) !! 3
 -- | An upper bound on a word, from its structure and the bounds @bs@ put on its
 -- subterms, looking a few levels deep
 upperWithBounds :: Map.Map (Expr EWord) Bounds -> Expr EWord -> W256
-upperWithBounds bs = go (8 :: Int)
+upperWithBounds bs t0 = case wrapInterval bs t0 of
+  -- no value satisfies the bounds, so any bound holds
+  Nothing -> 0
+  Just (a, b) | a <= b -> Prelude.min b (structural t0)
+  _ -> structural t0
   where
+    structural = go (8 :: Int)
     go 0 t = known t
     go d t = Prelude.min (known t) $ let r = go (d - 1) in case t of
       Add a b -> let x = r a; y = r b in if x <= maxLit - y then x + y else maxLit
@@ -2896,9 +2932,73 @@ upperWithBounds bs = go (8 :: Int)
       _ -> maxLit
     known t = Prelude.min (possibleOnes t) (maybe maxLit (\(Bounds _ ub _) -> ub) (Map.lookup t bs))
 
+-- | The values of a word as an interval that may wrap past 2^256: @Just (a, b)@ is
+-- @[a, b]@ if @a <= b@, otherwise @[a, max] ∪ [0, b]@, and @Nothing@ is no value, when
+-- the bounds contradict. Small signed values are such intervals, e.g. @-101 + (y % 201)@,
+-- which the bounds on the word can cut to one side.
+wrapInterval :: Map.Map (Expr EWord) Bounds -> Expr EWord -> Maybe (W256, W256)
+wrapInterval bs = go (6 :: Int)
+  where
+    full = (0, maxLit)
+    go 0 t = withBounds t full
+    go d t = withBounds t =<< case t of
+      Lit x -> Just (x, x)
+      Mod _ (Lit n) | n > 0 -> Just (0, n - 1)
+      Add (Lit c) x -> go (d - 1) x <&> \case
+        i | i == full -> full
+        (a, b) -> (a + c, b + c)
+      Sub (Lit c) x -> go (d - 1) x <&> \case
+        i | i == full -> full
+        (a, b) -> (c - b, c - a)
+      SEx (Lit k) x | k < 31 -> go (d - 1) x <&> \case
+        i@(a, b) | fitsSigned k a b -> i
+        _ -> full
+      _ -> Just full
+    -- every value is in [-2^(n-1), 2^(n-1)) for n = 8 (k + 1) bits, where sign extension keeps it
+    fitsSigned k a b =
+      let half = 2 ^ (8 * (unsafeInto k + 1 :: Int) - 1) :: W256
+      in a + half <= b + half && b + half <= 2 * half - 1
+    withBounds t i@(a, b) = case Map.lookup t bs of
+      Nothing -> Just i
+      Just (Bounds l h _)
+        | l > h -> Nothing
+        | a <= b -> nonEmpty (Prelude.max a l) (Prelude.min b h)
+        | h < a -> nonEmpty l (Prelude.min h b)
+        | l > b -> nonEmpty (Prelude.max l a) h
+        | otherwise -> Just (l, h)
+    nonEmpty a b = if a <= b then Just (a, b) else Nothing
+
 -- | Interval and excluded values that @props@ put on word subterms.
 propBounds :: [Prop] -> Map.Map (Expr EWord) Bounds
-propBounds = foldl go mempty
+propBounds ps = shiftBounds (shiftBounds (directBounds ps))
+
+-- | Moves the interval of @c + x@, @c - x@ or @~x@ to @x@. The moved interval may wrap
+-- past 2^256, when @x@ is in @[a, max] ∪ [0, b]@: then the side the other bounds of @x@
+-- rule out is dropped, as Solidity's signed range checks need, e.g. @2^255 - k <= 2^255 + x@.
+shiftBounds :: Map.Map (Expr EWord) Bounds -> Map.Map (Expr EWord) Bounds
+shiftBounds m = Map.foldlWithKey' shiftOne m m
+  where
+    shiftOne :: Map.Map (Expr EWord) Bounds -> Expr EWord -> Bounds -> Map.Map (Expr EWord) Bounds
+    shiftOne acc t (Bounds l h _)
+      | l == 0 && h == maxLit = acc
+      | otherwise = case t of
+          Add (Lit c) x -> narrow acc x (l - c) (h - c)
+          Sub (Lit c) x -> narrow acc x (c - h) (c - l)
+          Not x -> narrow acc x (complement h) (complement l)
+          _ -> acc
+    narrow acc x a b
+      | isLitWord x = acc
+      | otherwise =
+        let Bounds xlo xhi ex = Map.findWithDefault (Bounds 0 maxLit mempty) x acc
+            narrowed
+              | a <= b = Just (Bounds (Prelude.max xlo a) (Prelude.min xhi b) ex)
+              | xhi < a = Just (Bounds xlo (Prelude.min xhi b) ex)
+              | xlo > b = Just (Bounds (Prelude.max xlo a) xhi ex)
+              | otherwise = Nothing
+        in maybe acc (\bx -> Map.insert x bx acc) narrowed
+
+directBounds :: [Prop] -> Map.Map (Expr EWord) Bounds
+directBounds = foldl go mempty
   where
     upd t f = Map.alter (Just . f . fromMaybe (Bounds 0 maxLit mempty)) t
     eqTo t c = upd t (\(Bounds lb ub ex) -> Bounds (Prelude.max lb c) (Prelude.min ub c) ex)
