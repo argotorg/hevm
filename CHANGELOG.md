@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--max-mem-arg-split` values (default 8), such as the length of a short dynamic
   argument, forks the path on those values, each substituted into the state, so
   memory stays concrete.
+- With `--check-static-branches`, a branch that simplification keeps both ways but
+  the solver decides is logged as a `static-missed` event in the progress log, with
+  its condition and path conditions under `--progress-exprs`, and counted per
+  location in the summary.
 - Bounds from path conditions carry through `c + x`, `c - x` and `~x`, also when
   they wrap past 2^256 as signed range checks do, and through small signed values
   such as `-k + y % n`. The simplifier drops `m & x` to 0 when the bound of `x`

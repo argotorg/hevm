@@ -31,6 +31,7 @@ module EVM.Progress
   , timedQuery
   , fork
   , noteSrc
+  , staticMissed
   , currentProgress
   ) where
 
@@ -92,10 +93,12 @@ data LocStats = LocStats
   { lQueries :: !Int
   , lSolveSecs :: !Double
   , lForks :: !Int
+  -- | branches kept both ways that the solver could decide, see 'staticMissed'
+  , lMissed :: !Int
   }
 
 instance Semigroup LocStats where
-  LocStats a b c <> LocStats a' b' c' = LocStats (a + a') (b + b') (c + c')
+  LocStats a b c d <> LocStats a' b' c' d' = LocStats (a + a') (b + b') (c + c') (d + d')
 
 -- | Queries and forks of the current phase, for its summary
 data PhaseStats = PhaseStats
@@ -263,10 +266,12 @@ writeSummary st = do
   ps <- readIORef st.phaseStats
   let top = take 10 (hottest ps.byLoc)
       forky = take 5 $ sortOn (Down . (.lForks) . snd) [x | x@(_, ls) <- Map.toList ps.byLoc, ls.lForks > 0]
-      locs = top <> [x | x@(l, _) <- forky, l `notElem` map fst top]
+      missed = take 10 $ sortOn (Down . (.lMissed) . snd) [x | x@(_, ls) <- Map.toList ps.byLoc, ls.lMissed > 0]
+      locs = foldl (\acc x@(l, _) -> if l `elem` map fst acc then acc else acc <> [x]) top (forky <> missed)
   srcs <- readIORef st.srcs
   unless (Map.null ps.byLoc && Map.null ps.byResult) $ write st "summary"
-    [ "locations" .= [ JSON.object (["addr" .= a, "pc" .= pc, "queries" .= ls.lQueries, "solveSecs" .= ls.lSolveSecs, "forks" .= ls.lForks] <> locFields srcs l)
+    [ "locations" .= [ JSON.object (["addr" .= a, "pc" .= pc, "queries" .= ls.lQueries, "solveSecs" .= ls.lSolveSecs, "forks" .= ls.lForks]
+                                    <> (if ls.lMissed > 0 then ["missed" .= ls.lMissed] else []) <> locFields srcs l)
                      | (l@(a, pc), ls) <- locs ]
     , "queries" .= [ JSON.object ["kind" .= k, "result" .= res, "count" .= n, "waitSecs" .= w, "solveSecs" .= sv]
                    | ((k, res), (n, w, sv)) <- sortOn (\(_, (_, _, sv)) -> Down sv) (Map.toList ps.byResult) ]
@@ -370,7 +375,7 @@ timedQuery kind fs exprFs showRes act = readIORef global >>= \case
         solve = t1 - solveStart
         res = showRes r
     atomicModifyIORef' st.phaseStats $ \ps -> (ps
-      { byLoc = maybe id (\l -> Map.insertWith (<>) l (LocStats 1 solve 0)) loc ps.byLoc
+      { byLoc = maybe id (\l -> Map.insertWith (<>) l (LocStats 1 solve 0 0)) loc ps.byLoc
       , slowest = if maybe True ((solve >) . fst) ps.slowest then Just (solve, loc) else ps.slowest
       , byResult = Map.insertWith (\(a, b, c) (a', b', c') -> (a + a', b + b', c + c')) (kind, T.takeWhile (/= ':') res) (1, wait, solve) ps.byResult
       }, ())
@@ -388,9 +393,18 @@ timedQuery kind fs exprFs showRes act = readIORef global >>= \case
 -- source location (lazy: only evaluated the first time the location is seen)
 fork :: MonadIO m => Text -> Int -> Text -> [Pair] -> m ()
 fork addr pc src fs = liftIO $ readIORef global >>= mapM_ (\st -> do
-  atomicModifyIORef' st.phaseStats $ \ps -> (ps { byLoc = Map.insertWith (<>) (addr, pc) (LocStats 0 0 1) ps.byLoc }, ())
+  atomicModifyIORef' st.phaseStats $ \ps -> (ps { byLoc = Map.insertWith (<>) (addr, pc) (LocStats 0 0 1 0) ps.byLoc }, ())
   s <- remember st (addr, pc) src
   write st "fork" (["addr" .= addr, "pc" .= pc] <> srcField s <> fs))
+
+-- | Logs a branch that simplification kept both ways, but whose @unsat@ side the solver
+-- finds unsatisfiable: a rule the simplifier misses. @exprs@ (the condition and path
+-- conditions) are only rendered when expressions are logged.
+staticMissed :: MonadIO m => Text -> Int -> Text -> Bool -> [Pair] -> m ()
+staticMissed addr pc src unsat exprs = liftIO $ readIORef global >>= mapM_ (\st -> do
+  atomicModifyIORef' st.phaseStats $ \ps -> (ps { byLoc = Map.insertWith (<>) (addr, pc) (LocStats 0 0 0 1) ps.byLoc }, ())
+  s <- remember st (addr, pc) src
+  write st "static-missed" (["addr" .= addr, "pc" .= pc, "unsatSide" .= unsat] <> srcField s <> (if st.exprs then exprs else [])))
 
 -- | Records the source location of a code location, e.g. where a query is issued
 noteSrc :: MonadIO m => Text -> Int -> Text -> m ()
@@ -511,7 +525,7 @@ statusSegments st = do
   let solving = length (filter (isJust . (.qSolveStart)) qs)
       queued = length qs - solving
       -- a query still being solved counts too, so a hanging one shows up
-      locs = foldr (\(l, s) -> Map.insertWith (<>) l (LocStats 1 s 0)) ps.byLoc
+      locs = foldr (\(l, s) -> Map.insertWith (<>) l (LocStats 1 s 0 0)) ps.byLoc
                [(l, now - s) | q <- qs, Just l <- [q.qLoc], Just s <- [q.qSolveStart]]
       hot = case hottest locs of
         ((_, pc), ls) : _ | ls.lSolveSecs > 0 -> "@pc " <> pad 5 pc <> T.pack (printf " %6.1fs" ls.lSolveSecs) <> " " <> pad 4 ls.lQueries <> "q"
