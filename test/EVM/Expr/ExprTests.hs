@@ -1117,6 +1117,19 @@ basicSimplificationTests = testGroup "Basic simplification tests"
         a = successPath [PEq (Add (Lit 1) (Lit 2)) (Sub (Lit 4) (Lit 1))]
         b = Expr.simplify a
       assertEqual "Must simplify down" (successPath []) b
+  , testCase "simp-exp-ite-lits" $ do
+      let c = Var "c"
+          choices = ITE c (Lit 3) (Lit 5)
+      assertEqual "packed-array byte offsets"
+        (ITE c (Lit (1 `shiftL` 224)) (Lit (1 `shiftL` 32)))
+        (Expr.simplify (Exp (Lit 256) (ITE c (Lit 28) (Lit 4))))
+      assertEqual "powers wrap at 256 bits"
+        (ITE c (Lit (1 `shiftL` 248)) (Lit 0))
+        (Expr.simplify (Exp (Lit 256) (ITE c (Lit 31) (Lit 32))))
+      assertEqual "conditional base" (ITE c (Lit 9) (Lit 25))
+        (Expr.simplify (Exp choices (Lit 2)))
+      assertEqual "shared condition" (ITE c (Lit 27) (Lit 3125))
+        (Expr.simplify (Exp choices choices))
   , testCase "simp-mul-neg1" $ do
       let simp = Expr.simplify $ Mul (Lit Expr.maxLit) (Var "x")
       assertEqual "mul by -1 is negation" (Sub (Lit 0) (Var "x")) simp

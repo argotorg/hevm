@@ -48,7 +48,24 @@ solidityExplorationTests = testGroup "Exploration of Solidity"
 
 basicTests :: TestTree
 basicTests = testGroup "simple-checks"
-  [ testCase "read-byte-from-word-mapping-key" $ do
+  [ testCase "packed-array-conditional-index" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          uint32[8] values;
+          function f(bool high) external {
+            uint256 index = 1;
+            if (high) index = 7;
+            values[0] = 42;
+            values[index] = 99;
+            assert(values[0] == 42);
+          }
+        }
+        |]
+      (paths, results) <- executeWithBitwuzla $ \s ->
+        checkAssert s defaultPanicCodes c (Just (Sig "f(bool)" [AbiBoolType])) [] defaultVeriOpts
+      assertEqual "the other packed element is unchanged" [] results
+      assertBool "no partial paths" (not (any isPartial paths))
+  , testCase "read-byte-from-word-mapping-key" $ do
       Just c <- solcRuntime "C" [i|
         contract C {
           mapping(address => uint256) balances;

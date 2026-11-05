@@ -576,6 +576,7 @@ liftLitITE = \case
   Add a b -> two add a b
   Sub a b -> two sub a b
   Mul a b -> two mul a b
+  Exp a b -> two EVM.Expr.exp a b
   Div a b -> two EVM.Expr.div a b
   Mod a b -> two EVM.Expr.mod a b
   And a b -> two EVM.Expr.and a b
@@ -1570,6 +1571,7 @@ simplifyNoLitToKeccak e = untilFixpoint (mapExprShared (static (HC.Rewrite go)))
     go o@(Add {}) | Just r <- liftLitITE o = r
     go o@(Sub {}) | Just r <- liftLitITE o = r
     go o@(Mul {}) | Just r <- liftLitITE o = r
+    go o@(Exp {}) | Just r <- liftLitITE o = r
     go o@(Div {}) | Just r <- liftLitITE o = r
     go o@(Mod {}) | Just r <- liftLitITE o = r
     go o@(And {}) | Just r <- liftLitITE o = r
