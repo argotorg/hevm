@@ -6,13 +6,15 @@ module EVM.Traversals where
 
 import Prelude hiding (LT, GT)
 
-import Control.Monad (void)
+import Control.Monad (void, when)
+import Data.IORef (newIORef, modifyIORef', readIORef)
+import System.IO.Unsafe (unsafePerformIO)
 import Control.Monad.Identity (Identity(Identity), runIdentity)
 import Data.Functor.Const (Const(..))
 import GHC.StaticPtr (StaticPtr, deRefStaticPtr)
 
 import EVM.Types
-import EVM.HashCons (Rewrite, runRewrite, hashConsExpr, memoFixTraverse, hashConsEnabled)
+import EVM.HashCons (Rewrite, runRewrite, memoFixTraverse, memoMapExpr, hashConsEnabled, newSeen, firstVisit)
 import EVM.Traversals.Children
 
 foldProp :: forall b . Monoid b => (forall a . Expr a -> b) -> b -> Prop -> b
@@ -26,6 +28,32 @@ foldExpr f acc expr = acc <> go expr
     go :: forall a . Expr a -> b
     go e = self <> getConst (mapChildrenM (Const . go) e)
       where self = case e of { C {} -> mempty; _ -> f e }
+
+-- | 'foldExpr' that visits each shared node once, so it is linear in the DAG instead of the
+-- tree. Only for a monoid where repeating a value changes nothing, e.g. 'Any', or a list
+-- that is deduplicated afterwards: first occurrences come in the same order as 'foldExpr'.
+foldExprOnce :: forall b c . Monoid b => (forall a . Expr a -> b) -> b -> Expr c -> b
+foldExprOnce f acc expr = acc <> unsafePerformIO (foldOnce f (\g -> void (g expr)))
+{-# NOINLINE foldExprOnce #-}
+
+-- | 'foldProp' that visits each shared node once, see 'foldExprOnce'
+foldPropOnce :: forall b . Monoid b => (forall a . Expr a -> b) -> b -> Prop -> b
+foldPropOnce f acc p = acc <> unsafePerformIO (foldOnce f (\g -> void (mapPropChildrenM g p)))
+{-# NOINLINE foldPropOnce #-}
+
+foldOnce :: forall b . Monoid b => (forall a . Expr a -> b) -> ((forall a . Expr a -> IO (Expr a)) -> IO ()) -> IO b
+foldOnce f walk = do
+  seen <- newSeen
+  out <- newIORef []
+  let go :: forall a . Expr a -> IO (Expr a)
+      go e = do
+        first <- firstVisit seen e
+        when first $ do
+          case e of { C {} -> pure (); _ -> modifyIORef' out (f e :) }
+          void (mapChildrenM go e)
+        pure e
+  walk go
+  mconcat . reverse <$> readIORef out
 
 mapProp :: (forall a . Expr a -> Expr a) -> Prop -> Prop
 mapProp f = \case
@@ -81,9 +109,11 @@ mapPropM' f = \case
     f $ PImpl x y
   p@PCall {} -> f p
 
--- | Hash-conses every rebuilt node, when hash-consing is on
+-- | Hash-conses every rebuilt node, and visits each shared node once, when hash-consing is on
 mapExpr :: (forall a . Expr a -> Expr a) -> Expr b -> Expr b
-mapExpr f expr = runIdentity (mapExprM (Identity . hashConsExpr . f) expr)
+mapExpr f expr
+  | hashConsEnabled expr = memoMapExpr f expr
+  | otherwise = runIdentity (mapExprM (Identity . f) expr)
 
 -- | 'mapExpr' memoized per pass when hash-consing is on, see 'memoFixTraverse'
 mapExprShared :: StaticPtr Rewrite -> Expr b -> Expr b
