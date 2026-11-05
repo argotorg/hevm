@@ -14,8 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   location in the summary.
 - Bounds from path conditions carry through `c + x`, `c - x` and `~x`, also when
   they wrap past 2^256 as signed range checks do, and through small signed values
-  such as `-k + y % n`. The simplifier clears the bits of a mask above the bound of
-  the masked word, and props whose bounds contradict simplify to false.
+  such as `-k + y % n`. The simplifier drops `m & x` to 0 when the bound of `x`
+  leaves it none of the bits of `m`, and to `x` when it leaves only bits of `m`, and
+  props whose bounds contradict simplify to false.
 - The simplifier folds `c + ~x` to `(c - 1) - x` and `c - ~x` to `(c + 1) + x`.
 - The simplifier folds arithmetic, comparisons and bit operations through nested
   ITEs whose leaves are literals, as merged branches build them, up to 16 leaves.

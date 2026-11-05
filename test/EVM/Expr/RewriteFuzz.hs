@@ -79,7 +79,7 @@ prop_folding = forAll (sized $ \n -> genShapedWord (min n 40)) $ \e -> forAll (g
 -- | The bounds that the simplifier derives are sound: under bound props that
 -- hold in the environment, every subterm's value is within them
 prop_bounds :: Property
-prop_bounds = forAllShrink (sized $ \n -> genShapedWord (min n 40)) shrinkWord $ \e ->
+prop_bounds = forAllShrink (sized $ \n -> oneof [genShapedWord (min n 40), genSignedWord]) shrinkWord $ \e ->
   forAll (genEnv e) $ \env ->
     let vals = [(t, v) | t <- take 30 (nub (foldExpr (maybe [] pure . Expr.asWord) [] e)), Just v <- [evalWord env t]]
     in forAll (genFacts vals) $ \facts ->
@@ -412,6 +412,23 @@ shrinkProp = \case
 varNames :: [Text]
 varNames = ["a", "b", "c", "d"]
 
+-- | Words as Solidity's signed range checks build them: sign-extended values, offset
+-- by literals, and small signed values reduced mod a small number
+genSignedWord :: Gen (Expr EWord)
+genSignedWord = do
+  v <- Var <$> elements varNames
+  k <- Lit <$> elements [0, 1, 2, 3]
+  small <- Lit . fromIntegral <$> choose (-300, 300 :: Int)
+  small' <- Lit . fromIntegral <$> choose (-300, 300 :: Int)
+  n <- Lit . fromIntegral <$> choose (1, 300 :: Int)
+  big <- Lit <$> elements [2 ^ (255 :: Int), 2 ^ (23 :: Int), 2 ^ (255 :: Int) - 1, 0]
+  let s = SEx k v
+  elements
+    [ s, Add big s, Sub big s, Not s, Sub big (Not s)
+    , SEx k (Add small (Mod (Add small' s) n))
+    , Sub (Lit 0) (SEx k (Add small (Mod v n)))
+    ]
+
 genSpecialLit :: Gen W256
 genSpecialLit = frequency
   [ (3, fromIntegral <$> choose (0 :: Int, 40))
@@ -629,6 +646,7 @@ genShapedProp n = frequency
   , (2, literalMulCheck)
   , (2, pinnedTerm)
   , (2, scalingUnderBounds)
+  , (2, maskUnderBounds)
   , (2, complementary)
   , (2, PEq <$> lit <*> ite), (1, PLT <$> lit <*> ite), (1, PLT <$> ite <*> lit)
   , (1, PLEq <$> lit <*> ite), (1, PLEq <$> ite <*> lit)
@@ -727,6 +745,23 @@ genShapedProp n = frequency
       side <- elements [op (Div (Mul (Lit a) x) (Lit b)) other, op other (Div (Mul (Lit a) x) (Lit b))]
       bound <- elements [PLEq x (Lit bx), PAnd (PLEq y (Lit bx)) (PLEq x y), PAnd (PLT y (Lit bx)) (PLT x y)]
       pure $ PAnd bound side
+    -- a bit test of a signed word under a range check, as a bounded tick's bits are tested
+    maskUnderBounds = do
+      x <- genSignedWord
+      l <- choose (-300, 300 :: Int)
+      h <- choose (l, 300)
+      off <- elements [2 ^ (255 :: Int), 2 ^ (23 :: Int), 0]
+      let at i = Lit (off + fromIntegral i)
+          shifted = Add (Lit off) x
+      range <- elements
+        [ PAnd (PLEq (at l) shifted) (PLEq shifted (at h))
+        , PAnd (PLT (at l) shifted) (PLT shifted (at h))
+        , PAnd (PLEq x (Lit Expr.maxLitSigned)) (PLEq (at l) shifted) ]
+      bit <- (2 ^) <$> choose (0 :: Int, 24)
+      test <- elements
+        [ PEq (Lit 0) (And (Lit bit) x), PNeg (PEq (Lit 0) (And (Lit bit) x))
+        , PEq (Lit 0) (And (Lit (bit - 1)) x), PLT (And (Lit (2 * bit - 1)) x) (Lit bit) ]
+      pure (PAnd range test)
     w = genShapedWord (n `div` 2)
     p = genShapedProp (n `div` 2)
 
