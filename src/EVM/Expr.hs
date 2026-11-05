@@ -32,6 +32,7 @@ module EVM.Expr
   , possibleOnes
   , Bounds(..)
   , propBounds
+  , shiftedBounds
   , upperWithBounds
   , wrapInterval
   , asWord
@@ -2100,7 +2101,7 @@ simplifyProps :: [Prop] -> [Prop]
 simplifyProps ps = if cannotBeSat then [PBool False] else simplified
   where
     simplified = untilFixpoint goOne ps
-    cannotBeSat = PBool False `elem` simplified || contradicts (propBounds simplified)
+    cannotBeSat = PBool False `elem` simplified || contradicts (shiftedBounds simplified)
     -- a term's bounds exclude each other, or every value its structure allows
     contradicts bs = any (\(Bounds l h _) -> l > h) bs || any (isNothing . wrapInterval bs) (Map.keys bs)
     goOne :: [Prop] -> [Prop]
@@ -2872,7 +2873,7 @@ boundedMasks ps
 
 -- | 'propBounds', also through @t <= u@, a few steps deep
 chainedBounds :: [Prop] -> Map.Map (Expr EWord) Bounds
-chainedBounds ps = iterate (\m -> foldl through m chains) (propBounds ps) !! 3
+chainedBounds ps = iterate (\m -> foldl through m chains) (shiftedBounds ps) !! 3
   where
     chains = [c | p <- ps, c <- case p of
                                   PLEq t u -> [(t, u, 0)]
@@ -2945,7 +2946,12 @@ wrapInterval bs = go (6 :: Int)
 
 -- | Interval and excluded values that @props@ put on word subterms.
 propBounds :: [Prop] -> Map.Map (Expr EWord) Bounds
-propBounds ps = shiftBounds (shiftBounds (directBounds ps))
+propBounds = directBounds
+
+-- | 'propBounds', also moved through @c + x@, @c - x@ and @~x@. For rewriting and pruning
+-- only: enumerating small subterms with them forks loops into many more paths.
+shiftedBounds :: [Prop] -> Map.Map (Expr EWord) Bounds
+shiftedBounds ps = shiftBounds (shiftBounds (directBounds ps))
 
 -- | Moves the interval of @c + x@, @c - x@ or @~x@ to @x@. The moved interval may wrap
 -- past 2^256, when @x@ is in @[a, max] ∪ [0, b]@: then the side the other bounds of @x@
