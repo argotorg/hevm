@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- The simplifier folds arithmetic, comparisons and bit operations through nested
+  ITEs whose leaves are literals, as merged branches build them, up to 16 leaves.
 - Abstract arithmetic lemmas for dividends a literal apart over one divisor,
   `(x-k)/z <= x/z <= (x-k)/z + k`, as in a `ceilDiv` next to a round-down, and
   for `(r + c*q)/c == q` when `r < c`.
