@@ -521,7 +521,7 @@ genTemplate s shiftAmt = oneof
       pure $ Sub (foldr1 Add (take 6 xs')) (foldr1 Add (take 6 ys'))
     -- literal branches, sharing a condition from a small set so that ITEs pair up
     ite = ITE <$> elements [Var "a", LT (Var "a") (Var "b"), IsZero (Var "c")] <*> lit <*> lit
-    litOp' = elements [Add, Sub, Mul, Div, Mod, And, Or, Xor, Eq, LT, SLT, SHL, SHR, SAR]
+    litOp' = elements [Add, Sub, Mul, Exp, Div, Mod, And, Or, Xor, Eq, LT, SLT, SHL, SHR, SAR]
     lit = Lit <$> genSpecialLit
     pow2 = Lit . (2 ^) <$> choose (0 :: Int, 255)
     litOp = elements [Add, Sub, Xor, Mul]
