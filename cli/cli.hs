@@ -154,7 +154,7 @@ commonOptions = CommonOptions
   <*> (switch $ long "no-rpc-cache" <> help "Don't save or load fetched state in the user's cache directory")
   <*> (switch $  long "no-early-abort" <> help "Keep exploring after the first counterexample, to find all of them. By default, exploration stops at the first one")
   <*> (option auto $ long "merge-max-budget" <> showDefault <> value 100 <> help "Max instructions for speculative merge exploration during path merging")
-  <*> (option auto $ long "max-dyn-size" <> showDefault <> value 64 <> help "Max byte length for concretized dynamic types (bytes, string) in symbolic arguments")
+  <*> (option auto $ long "max-dyn-size" <> showDefault <> value 64 <> help "Max length of dynamic symbolic arguments: bytes for bytes and string, elements for arrays")
   <*> (switch $  long "no-abstract-arith" <> help "Don't abstract symbolic multiplication and division as uninterpreted functions with sound lemmas; use native bitvector arithmetic instead")
   <*> (switch $ long "no-hash-cons" <> help "Don't hash-cons (share equal subterms of) the symbolic VM state during exploration")
   <*> (optional $ strOption $ long "progress-log" <> help "Write a JSONL log of interpreter and solver progress to this file (default with --verb 3: hevm-progress.jsonl)")

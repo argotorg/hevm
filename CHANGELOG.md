@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- Dynamic arrays of static types (e.g. `uint16[]`) can be symbolic arguments, with
+  a symbolic length of at most `--max-dyn-size` elements, under the same caveat as
+  `bytes` and `string`. They used to stop the run with an internal error.
 - With `--check-static-branches`, a branch that simplification keeps both ways but
   the solver decides is logged as a `static-missed` event in the progress log, with
   its condition and path conditions under `--progress-exprs`, and counted per
