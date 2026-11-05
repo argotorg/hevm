@@ -257,6 +257,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of simplifying an ITE of them.
 
 ## Fixed
+- `CREATE` and `CREATE2` compared a symbolic init code size with the maximum
+  structurally, so every symbolic size failed as too large and the path was
+  dropped. The size is now simplified and compared as a number, and one that stays
+  symbolic ends the path as partial.
 - Symbolic execution leaked memory: every trace kept the whole VM it was made
   in, and memory size and loop visit counters kept the earlier frame states.
 - Memory snapshots at forks no longer copy the unused zeros of the memory buffer.

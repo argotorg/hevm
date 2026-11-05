@@ -2987,8 +2987,13 @@ create' :: forall t. (?op :: Word8, ?conf::Config, VMOps t)
   -> Expr EWord -> Gas t -> Expr EWord -> [Expr EWord] -> Expr EAddr -> Expr Buf -> EVM t ()
 create' self this xSize xGas xValue xs newAddr initCode = do
   vm0 <- get
-  -- are we exceeding the max init code size
-  if xSize > Lit (vm0.block.maxCodeSize * 2)
+  -- are we exceeding the max init code size. Compared as a number: the derived Ord on
+  -- Expr is structural, and would take every symbolic size, e.g. end - start of a
+  -- buffer after a symbolic-length allocation, for an oversized one.
+  let litSize = Expr.maybeLitWordSimp xSize
+  if isNothing litSize
+  then unexpectedSymArg "init code size that does not simplify to a literal" [xSize]
+  else if litSize > Just (vm0.block.maxCodeSize * 2)
   then do
     assign' (#state % #stack) (Lit 0 : xs)
     assign (#state % #returndata) mempty
