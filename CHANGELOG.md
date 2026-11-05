@@ -201,6 +201,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of simplifying an ITE of them.
 
 ## Fixed
+- `CREATE` and `CREATE2` compared a symbolic init code size with the maximum
+  structurally, so every symbolic size failed as too large and the path was
+  dropped. The size is now simplified and compared as a number, and one that stays
+  symbolic ends the path as partial.
 - Source locations are right after an incremental `forge build`, whose
   build-infos number the source files independently.
 - `prank` and `startPrank` with a symbolic address, e.g. one picked from a list
