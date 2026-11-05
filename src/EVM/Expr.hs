@@ -1559,7 +1559,7 @@ decomposeStorageProps props
 
 -- | The logical stores that the storage reads and writes of the props access
 accessedLogicalStores :: [Prop] -> [LogicalStore]
-accessedLogicalStores = concatMap (foldProp accessed [])
+accessedLogicalStores = concatMap (foldPropOnce accessed [])
   where
     accessed :: Expr a -> [LogicalStore]
     accessed = \case
@@ -2517,7 +2517,7 @@ max x y = normArgs Max Prelude.max x y
 -- | True if the given expression contains any node that satisfies the
 -- input predicate
 containsNode :: (forall a. Expr a -> Bool) -> Expr b -> Bool
-containsNode p = getAny . foldExpr go (Any False)
+containsNode p = getAny . foldExprOnce go (Any False)
   where
     go :: Expr a -> Any
     go node | p node  = Any True
@@ -2739,7 +2739,7 @@ enumerateViaSmallSubterm limit props e0 = listToMaybe $ mapMaybe tryAtoms (map p
     -- on them once @e0@ is in the same normal form
     e = simplify e0
     bounds = propBounds props
-    candidates = nubOrd $ foldExpr candidate [] e
+    candidates = nubOrd $ foldExprOnce candidate [] e
     candidate :: Expr a -> [Expr EWord]
     candidate a = case asWord a of
       Just w | Prelude.not (isLitWord w), Just vs <- values w, length vs <= limit -> [w]
@@ -2825,7 +2825,7 @@ boundedScaling = go []
   where
     go done [] = reverse done
     go done (p : rest)
-      | getAny (foldProp (Any . isSite) mempty p) = go (mapProp (rewrite (chainedBounds (done <> rest))) p : done) rest
+      | getAny (foldPropOnce (Any . isSite) mempty p) = go (mapProp (rewrite (chainedBounds (done <> rest))) p : done) rest
       | otherwise = go (p : done) rest
     isSite :: Expr a -> Bool
     isSite = \case

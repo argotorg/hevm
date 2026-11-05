@@ -145,6 +145,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes of zero.
 
 ## Changed
+- `mapExpr` visits each hash-consed node once per call, and the simplifier's
+  searches for subterms fold over each node once, instead of over every path to it.
 - The default number of solvers is at most half of the available memory divided
   by `--smt-memory`, so that the solvers running at once fit in memory.
 - Solidity's overflow check of a multiplication by a literal, `y == 0 || (y * c) / y == c`,
