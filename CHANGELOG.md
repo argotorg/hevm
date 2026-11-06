@@ -268,6 +268,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of simplifying an ITE of them.
 
 ## Fixed
+- An account whose balance is a term equal to 0, e.g. after a transfer of `x & 0`,
+  counted as non-empty, so `EXTCODEHASH` gave the hash of the empty code instead
+  of 0, and the account was not cleared at the end of the transaction.
 - A memory instruction with fewer stack items than it takes could fork on a merged
   memory offset before underrunning the stack, so the path went on where it should
   have halted.

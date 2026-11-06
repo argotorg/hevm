@@ -1770,8 +1770,9 @@ accountEmpty :: Contract -> Bool
 accountEmpty c =
   codeEmpty c
   && c.nonce == (Just 0)
-  -- TODO: handle symbolic balance...
-  && c.balance == Lit 0
+  -- a symbolic balance that simplifies to 0, e.g. after transferring x & 0, is 0 too;
+  -- EXTCODEHASH handles one that stays symbolic
+  && maybeLitWordSimp c.balance == Just 0
 
 codeEmpty :: Contract -> Bool
 codeEmpty c = case c.code of
