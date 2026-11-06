@@ -199,6 +199,15 @@ lockstepTests = testGroup "lockstep-fuzz"
         lockstepCase solvers mode c >>= \case
           Left err -> liftIO $ failWith c c.inputs (show mode <> ": " <> err)
           Right r -> liftIO $ unless (r.stopped == "halted") $ assertFailure ("stopped: " <> r.stopped)
+  , -- RETURN at an offset with two values: splitting it forked instead of halting
+    test "lockstep-return-small-offset" $ do
+      let hex = fromJust . hexByteString . Char8.pack
+          c = TestCase (Prog [IRaw (hex "6060602435600116f35b5b5b61000b575b610027575b5b610016575b610020575b5b610021575b5b5b5b610045575b5b61002f57610038575b5b61003f565b5b61003f575b5b5b5b")] [IRaw (hex "5b5b5b")])
+                (Inputs mempty mempty 0 0xda14568fee) 130206 0x100
+      withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> forM_ [SolverBranches, ExplorerBranches, CheckedBranches] $ \mode ->
+        lockstepCase solvers mode c >>= \case
+          Left err -> liftIO $ failWith c c.inputs (show mode <> ": " <> err)
+          Right r -> liftIO $ unless (r.stopped == "halted") $ assertFailure ("stopped: " <> r.stopped)
   , -- the case from the HEVM_FUZZ_* variables that a failure prints, in every branch mode
     test "lockstep-from-env" $ liftIO caseFromEnv >>= mapM_ (\c ->
       withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> forM_ [SolverBranches, ExplorerBranches, CheckedBranches] $ \mode ->
