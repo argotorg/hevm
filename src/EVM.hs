@@ -362,37 +362,42 @@ getOpName state = intToOpName $ fromEnum $ getOpW8 state
 -- and the instruction runs again with each literal.
 splitMergedMemArg :: forall (t :: VMType). Typeable t => Config -> VM t -> Maybe (EVM t ())
 splitMergedMemArg conf vm = case eqT @t @Symbolic of
-  Just Refl | not vm.mergeState.msActive, vm.state.pc < opslen vm.state.code -> listToMaybe
+  -- with fewer items than the op takes, it underruns the stack: forking first would only
+  -- delay that, and a fork on an argument it never reads splits the path for nothing
+  Just Refl | not vm.mergeState.msActive, vm.state.pc < opslen vm.state.code
+            , let (arity, args) = memArgs (getOp (getOpW8 vm.state))
+            , length vm.state.stack >= arity -> listToMaybe
     [ forkOnSubterm conf.maxDepth [atom] [(v, [[v]]) | (v, _) <- cases] $ \v ->
         assign' (#state % #stack % ix i) (fromJust (lookup v cases))
-    | i <- memArgs (getOp (getOpW8 vm.state))
+    | i <- args
     , Just x <- [preview (ix i) vm.state.stack]
     , isNothing (maybeLitWordSimp x)
     , Just (atom, cases) <- [Expr.splitLitIte x]
     ]
   _ -> Nothing
   where
-    memArgs :: GenericOp Word8 -> [Int]
+    -- the items an op takes, and which of them are memory offsets or sizes
+    memArgs :: GenericOp Word8 -> (Int, [Int])
     memArgs = \case
-      OpMload -> [0]
-      OpMstore -> [0]
-      OpMstore8 -> [0]
-      OpSha3 -> [0, 1]
-      OpCalldatacopy -> [0, 2]
-      OpCodecopy -> [0, 2]
-      OpReturndatacopy -> [0, 2]
-      OpExtcodecopy -> [1, 3]
-      OpMcopy -> [0, 1, 2]
-      OpReturn -> [0, 1]
-      OpRevert -> [0, 1]
-      OpLog _ -> [0, 1]
-      OpCall -> [3, 4, 5, 6]
-      OpCallcode -> [3, 4, 5, 6]
-      OpDelegatecall -> [2, 3, 4, 5]
-      OpStaticcall -> [2, 3, 4, 5]
-      OpCreate -> [1, 2]
-      OpCreate2 -> [1, 2]
-      _ -> []
+      OpMload -> (1, [0])
+      OpMstore -> (2, [0])
+      OpMstore8 -> (2, [0])
+      OpSha3 -> (2, [0, 1])
+      OpCalldatacopy -> (3, [0, 2])
+      OpCodecopy -> (3, [0, 2])
+      OpReturndatacopy -> (3, [0, 2])
+      OpExtcodecopy -> (4, [1, 3])
+      OpMcopy -> (3, [0, 1, 2])
+      OpReturn -> (2, [0, 1])
+      OpRevert -> (2, [0, 1])
+      OpLog n -> (2 + fromIntegral n, [0, 1])
+      OpCall -> (7, [3, 4, 5, 6])
+      OpCallcode -> (7, [3, 4, 5, 6])
+      OpDelegatecall -> (6, [2, 3, 4, 5])
+      OpStaticcall -> (6, [2, 3, 4, 5])
+      OpCreate -> (3, [1, 2])
+      OpCreate2 -> (4, [1, 2])
+      _ -> (0, [])
 
 -- | Executes the EVM one step
 exec1 :: forall (t :: VMType). (VMOps t, Typeable t) => Config ->  EVM t ()
