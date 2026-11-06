@@ -258,21 +258,21 @@ assertPropsHelperWith arithEnc simp extraDecls psPreConc = do
 
 
 referencedAbstractStores :: TraversableTerm a => a -> Set Builder
-referencedAbstractStores term = foldTerm go mempty term
+referencedAbstractStores term = foldTermOnce go mempty term
   where
     go = \case
       AbstractStore s idx -> Set.singleton (storeName s idx)
       _ -> mempty
 
 referencedAddrs :: TraversableTerm a => a -> Set Builder
-referencedAddrs term = foldTerm go mempty term
+referencedAddrs term = foldTermOnce go mempty term
   where
     go = \case
       SymAddr a -> Set.singleton (formatEAddr (SymAddr a))
       _ -> mempty
 
 referencedBufs :: TraversableTerm a => a -> [Builder]
-referencedBufs expr = nubOrd $ foldTerm go [] expr
+referencedBufs expr = nubOrd $ foldTermOnce go [] expr
   where
     go :: Expr a -> [Builder]
     go = \case
@@ -280,7 +280,7 @@ referencedBufs expr = nubOrd $ foldTerm go [] expr
       _ -> []
 
 referencedVars :: TraversableTerm a => a -> [Builder]
-referencedVars expr = nubOrd $ foldTerm go [] expr
+referencedVars expr = nubOrd $ foldTermOnce go [] expr
   where
     go :: Expr a -> [Builder]
     go = \case
@@ -288,7 +288,7 @@ referencedVars expr = nubOrd $ foldTerm go [] expr
       _ -> []
 
 referencedFrameContext :: TraversableTerm a => ArithEncoding -> a -> [(Builder, [Prop])]
-referencedFrameContext enc expr = nubOrd $ foldTerm go [] expr
+referencedFrameContext enc expr = nubOrd $ foldTermOnce go [] expr
   where
     go :: Expr a -> [(Builder, [Prop])]
     go = \case
@@ -301,7 +301,7 @@ referencedFrameContext enc expr = nubOrd $ foldTerm go [] expr
     exprToSMT = exprToSMTWith enc
 
 referencedBlockContext :: TraversableTerm a => a -> [(Builder, [Prop])]
-referencedBlockContext expr = nubOrd $ foldTerm go [] expr
+referencedBlockContext expr = nubOrd $ foldTermOnce go [] expr
   where
     go :: Expr a -> [(Builder, [Prop])]
     go = \case
@@ -322,7 +322,7 @@ referencedBlockContext expr = nubOrd $ foldTerm go [] expr
 -- However, we expect that most of such reads will have been
 -- simplified away.
 findStorageReads :: Prop -> StorageReads
-findStorageReads p = foldProp go mempty p
+findStorageReads p = foldPropOnce go mempty p
   where
     go :: Expr a -> StorageReads
     go = \case
@@ -343,7 +343,7 @@ findStorageReads p = foldProp go mempty p
     baseIsAbstractStore (GVar _) = internalError "Unexpected GVar"
 
 findBufferAccess :: TraversableTerm a => [a] -> [(Expr EWord, Expr EWord, Expr Buf)]
-findBufferAccess = foldl' (foldTerm go) mempty
+findBufferAccess = foldl' (foldTermOnce go) mempty
   where
     go :: Expr a -> [(Expr EWord, Expr EWord, Expr Buf)]
     go = \case
