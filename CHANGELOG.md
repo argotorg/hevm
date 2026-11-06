@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Added
 - Arithmetic abstraction now handles `MULMOD`, with exact 512-bit refinement,
   and adds cancellation, div/mod identity and multiplication/division round-trip lemmas.
+- A memory offset or size that depends on a subterm with at most
+  `--max-mem-arg-split` values (default 8), such as the length of a short dynamic
+  argument, forks the path on those values, each substituted into the state, so
+  memory stays concrete.
 - Bounds from path conditions carry through `c + x`, `c - x` and `~x`, also when
   they wrap past 2^256 as signed range checks do, and through small signed values
   such as `-k + y % n`. The simplifier drops `m & x` to 0 when the bound of `x`

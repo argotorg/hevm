@@ -43,6 +43,8 @@ data Config = Config
   , promiseNoReent   :: Bool
   , maxBufSize       :: Int
   , maxWidth         :: Int
+  -- | at most this many values of a subterm a memory offset or size depends on are explored one by one
+  , maxMemArgSplit   :: Int
   , maxDepth         :: Maybe Int
   , verb             :: Int
   , simp             :: Bool
@@ -75,6 +77,7 @@ defaultConfig = Config
   , promiseNoReent = False
   , maxBufSize = 24
   , maxWidth = 100
+  , maxMemArgSplit = 8
   , maxDepth = Nothing
   , verb = 0
   , simp = True
