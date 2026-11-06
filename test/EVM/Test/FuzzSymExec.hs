@@ -189,6 +189,16 @@ lockstepTests = testGroup "lockstep-fuzz"
         lockstepCase solvers mode c >>= \case
           Left err -> liftIO $ failWith c c.inputs (show mode <> ": " <> err)
           Right r -> liftIO $ unless (r.stopped == "halted") $ assertFailure ("stopped: " <> r.stopped)
+  , -- RETURN with a single, symbolic item: splitting its offset forked before the underrun,
+    -- so the symbolic run went on where the concrete one halted
+    test "lockstep-return-underrun" $ do
+      let hex = fromJust . hexByteString . Char8.pack
+          c = TestCase (Prog [IRaw (hex "600969000000000000000000321261002b575b6002600314610030576400000000605b6040600361003a575b61002b575b5b61003157610054575b143463c0de00025c6001018063c0de00025d60031161003a575b5b5b5b5b61005857610061565bf3")] [IRaw (hex "610005565b5b")])
+                (Inputs mempty mempty 0 0xa6f54bae64) 804860 1
+      withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> forM_ [SolverBranches, ExplorerBranches, CheckedBranches] $ \mode ->
+        lockstepCase solvers mode c >>= \case
+          Left err -> liftIO $ failWith c c.inputs (show mode <> ": " <> err)
+          Right r -> liftIO $ unless (r.stopped == "halted") $ assertFailure ("stopped: " <> r.stopped)
   , -- the case from the HEVM_FUZZ_* variables that a failure prints, in every branch mode
     test "lockstep-from-env" $ liftIO caseFromEnv >>= mapM_ (\c ->
       withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> forM_ [SolverBranches, ExplorerBranches, CheckedBranches] $ \mode ->

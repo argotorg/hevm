@@ -262,6 +262,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of simplifying an ITE of them.
 
 ## Fixed
+- A memory instruction with fewer stack items than it takes could fork on a merged
+  memory offset before underrunning the stack, so the path went on where it should
+  have halted.
 - `CREATE` and `CREATE2` compared a symbolic init code size with the maximum
   structurally, so every symbolic size failed as too large and the path was
   dropped. The size is now simplified and compared as a number, and one that stays
