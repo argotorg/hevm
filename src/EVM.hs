@@ -404,12 +404,19 @@ splitMergedMemArg conf vm = case eqT @t @Symbolic of
              modify' (substVM atom (Lit k))
              assign' (#state % #stack % ix i) (Lit (fromJust (lookup k vals)))
          | conf.maxMemArgSplit > 0
+         -- memory staying concrete is of no use to an op that ends the frame
+         , not (halts (getOp (getOpW8 vm.state)))
          , (i, x) <- symArgs
          , Just ([atom], groups) <- [Expr.enumerateViaSmallSubterm conf.maxMemArgSplit vm.constraints x]
          , let vals = nubOrdOn fst [(k, ev) | (ev, kss) <- groups, [k] <- kss]
          , not (null vals) ]
   _ -> Nothing
   where
+    halts :: GenericOp Word8 -> Bool
+    halts = \case
+      OpReturn -> True
+      OpRevert -> True
+      _ -> False
     -- the items an op takes, and which of them are memory offsets or sizes
     memArgs :: GenericOp Word8 -> (Int, [Int])
     memArgs = \case
