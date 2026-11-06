@@ -46,7 +46,8 @@ import Data.DoubleWord (Int256, Word256)
 import Data.Either (partitionEithers)
 import Data.Either.Extra (maybeToEither)
 import Data.Foldable (Foldable(..))
-import Data.List (delete, find, isPrefixOf, nub)
+import Data.Containers.ListUtils (nubOrdOn)
+import Data.List (delete, find, isPrefixOf)
 import Data.List.Split (splitOn)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -398,11 +399,15 @@ splitMergedMemArg conf vm = case eqT @t @Symbolic of
       [ forkOnSubterm conf.maxDepth [atom] [(v, [[v]]) | (v, _) <- cases] $ \v ->
           assign' (#state % #stack % ix i) (fromJust (lookup v cases))
       | (i, x) <- symArgs, Just (atom, cases) <- [Expr.splitLitIte x] ]
-      <> [ forkOnSubterm conf.maxDepth [atom] [(v, [[v]]) | v <- vals] $ \v -> modify' (substVM atom (Lit v))
+      -- the argument is set to its value too: the atom is a subterm of the argument simplified,
+      -- which the stack may not hold as is, and then substituting it would change nothing
+      <> [ forkOnSubterm conf.maxDepth [atom] [(k, [[k]]) | (k, _) <- vals] $ \k -> do
+             modify' (substVM atom (Lit k))
+             assign' (#state % #stack % ix i) (Lit (fromJust (lookup k vals)))
          | conf.maxMemArgSplit > 0
-         , (_, x) <- symArgs
+         , (i, x) <- symArgs
          , Just ([atom], groups) <- [Expr.enumerateViaSmallSubterm conf.maxMemArgSplit vm.constraints x]
-         , let vals = nub [k | (_, kss) <- groups, [k] <- kss]
+         , let vals = nubOrdOn fst [(k, ev) | (ev, kss) <- groups, [k] <- kss]
          , not (null vals) ]
   _ -> Nothing
   where
