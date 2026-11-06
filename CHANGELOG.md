@@ -163,6 +163,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes of zero.
 
 ## Changed
+- A word subterm that a solver query uses more than once is defined once with
+  `define-fun` and referred to by name, instead of being written out at every use.
 - `mapExpr` visits each hash-consed node once per call, and the simplifier's
   searches for subterms fold over each node once, instead of over every path to it.
   So do common subexpression elimination and the collection of variables, buffers,
