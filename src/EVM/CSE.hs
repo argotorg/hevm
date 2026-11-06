@@ -173,11 +173,21 @@ shareWords ps = (ps', reverse st.defs)
           modify' (\s -> s { done = IntMap.insert i (AnyExpr r) s.done })
           pure r
 
+    -- arithmetic stays in place: the encoder matches it structurally, e.g. a checked
+    -- multiplication @x == (x * d) / d@, and the abstract encoding names it itself
     isComposite :: Expr a -> Bool
     isComposite e = case exprType e of
       WordRep -> case e of
         Lit _ -> False
         Var _ -> False
+        Mul {} -> False
+        Div {} -> False
+        SDiv {} -> False
+        Mod {} -> False
+        SMod {} -> False
+        AddMod {} -> False
+        MulMod {} -> False
+        Exp {} -> False
         _ -> True
       _ -> False
 
