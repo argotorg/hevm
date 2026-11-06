@@ -197,8 +197,11 @@ assertPropsAbstract conf ps = do
 -- passes through property-based testing.
 assertPropsHelperWith :: ArithEncoding -> Bool -> [SMTEntry] -> [Prop]  -> Err SMT2
 assertPropsHelperWith arithEnc simp extraDecls psPreConc = do
- encs <- mapM (propToSMTWith arithEnc) psElim
+ encs <- mapM (propToSMTWith arithEnc) psShared
  intermediates <- declareIntermediatesWith arithEnc bufs stores
+ sharedDefs <- mapM (\(name, body) -> do
+   encoded <- exprToSMTWith arithEnc body
+   pure $ SMTCommand $ "(define-fun " <> fromText name <> " () (_ BitVec 256) " <> encoded <> ")") wordDefs
  readAssumes' <- readAssumes
  keccakAssertions' <- keccakAssertions
  frameCtxs <- (declareFrameContext . nubOrd $ foldl' (<>) [] frameCtx)
@@ -212,6 +215,7 @@ assertPropsHelperWith arithEnc simp extraDecls psPreConc = do
   <> frameCtxs
   <> blockCtxs
   <> SMT2 (SMTScript intermediates) mempty mempty
+  <> SMT2 (SMTScript sharedDefs) mempty mempty
   <> SMT2 (SMTScript keccakAssertions') mempty mempty
   <> SMT2 (SMTScript readAssumes') mempty mempty
   <> SMT2 (SMTScript (fmap (\p -> SMTCommand("(assert " <> p <> ")")) encs)) (cexInfo storageReads) ps
@@ -219,6 +223,8 @@ assertPropsHelperWith arithEnc simp extraDecls psPreConc = do
   where
     ps = if simp then Expr.concKeccakSimpProps psPreConc else Expr.concKeccakProps psPreConc
     (psElim, bufs, stores) = eliminateProps ps
+    -- declarations come from psElim: the shared names are defined, not declared
+    (psShared, wordDefs) = shareWords psElim
 
     -- Props storing info that need declaration(s)
     toDeclarePs     = ps <> keccAssump <> keccComp
