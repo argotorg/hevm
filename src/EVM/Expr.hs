@@ -255,12 +255,12 @@ smod = op2 SMod (\x y ->
 addmod :: Expr EWord -> Expr EWord -> Expr EWord -> Expr EWord
 addmod = op3 AddMod (\x y z ->
   if z == 0 then 0
-  else fromIntegral $ (into @Word512 x + into y) `Prelude.mod` into z)
+  else fromIntegral $ (into @Integer x + into y) `Prelude.mod` into z)
 
 mulmod :: Expr EWord -> Expr EWord -> Expr EWord -> Expr EWord
 mulmod = op3 MulMod (\x y z ->
   if z == 0 then 0
-  else fromIntegral $ (into @Word512 x * into y) `Prelude.mod` into z)
+  else fromIntegral $ (into @Integer x * into y) `Prelude.mod` into z)
 
 exp :: Expr EWord -> Expr EWord -> Expr EWord
 exp = op2 Exp (^)

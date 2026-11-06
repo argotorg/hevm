@@ -128,6 +128,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes of zero.
 
 ## Changed
+- Concrete ADDMOD and MULMOD are computed with `Integer` instead of `Word512`,
+  which is several times faster in code that uses them heavily, such as `mulDiv`.
 - `EVM.SymExec` is split: concrete replay of counterexamples moves to
   `EVM.CexReplay`, and equivalence checking to `EVM.Equivalence`. Symbolic
   calldata (`EVM.SymExec.Calldata`) and counterexample models and printing
