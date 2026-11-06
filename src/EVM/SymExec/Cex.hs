@@ -16,7 +16,7 @@ import EVM.Effects
 import EVM.Expr qualified as Expr
 import EVM.Format (formatExpr, showVal, indent, formatBinary)
 import EVM.SMT qualified as SMT
-import EVM.Traversals (mapExpr, mapExprM, foldTerm)
+import EVM.Traversals (mapExpr, mapExprM, foldTermOnce)
 import EVM.Types
 
 -- | The concrete calldata of a counterexample, if it has one.
@@ -184,9 +184,9 @@ prettyCalldata cex buf sig types = headErr errSig (T.splitOn "(" sig) <> "(" <> 
 defaultSymbolicValues :: Err (Expr a) -> Err (Expr a)
 defaultSymbolicValues = \case
     -- addresses last, as balances are keyed by symbolic address
-    Right e -> fmap (subAddrs (foldTerm symaddrs mempty e))
-               . subBufs (foldTerm symbufs mempty e)
-               . subVars (foldTerm symwords mempty e) $ e
+    Right e -> fmap (subAddrs (foldTermOnce symaddrs mempty e))
+               . subBufs (foldTermOnce symbufs mempty e)
+               . subVars (foldTermOnce symwords mempty e) $ e
     Left err -> Left err
   where
     symaddrs :: Expr a -> Map (Expr EAddr) Addr

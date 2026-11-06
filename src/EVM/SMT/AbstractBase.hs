@@ -117,7 +117,7 @@ concFnName IsUMod = "bvurem"
 
 -- | Every occurrence of a term family in the props, de-duplicated.
 collectFrom :: Ord b => (forall a. Expr a -> [b]) -> [Prop] -> [b]
-collectFrom collect = nubOrd . concatMap (foldProp collect [])
+collectFrom collect = nubOrd . concatMap (foldPropOnce collect [])
 
 collectDivMods :: Expr a -> [DivModOp]
 collectDivMods = \case

@@ -170,11 +170,15 @@ mapCodeM f = mapCodeChildrenM (mapExprM f)
 class TraversableTerm a where
   mapTerm  :: (forall b. Expr b -> Expr b) -> a -> a
   foldTerm :: forall c. Monoid c => (forall b. Expr b -> c) -> c -> a -> c
+  -- | 'foldTerm' visiting each shared node once, for a monoid where repeats change nothing
+  foldTermOnce :: forall c. Monoid c => (forall b. Expr b -> c) -> c -> a -> c
 
 instance TraversableTerm (Expr a) where
   mapTerm = mapExpr
   foldTerm = foldExpr
+  foldTermOnce = foldExprOnce
 
 instance TraversableTerm Prop where
   mapTerm = mapProp
   foldTerm = foldProp
+  foldTermOnce = foldPropOnce

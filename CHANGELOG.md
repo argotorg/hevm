@@ -162,6 +162,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Changed
 - `mapExpr` visits each hash-consed node once per call, and the simplifier's
   searches for subterms fold over each node once, instead of over every path to it.
+  So do common subexpression elimination and the collection of variables, buffers,
+  storage reads and keccak values before a query is encoded.
 - Deciding a branch without the solver reuses the simplified path conditions
   of the earlier branches on the path, kept in the new `VM` field
   `simpConstraints`, and first tries the branch condition alone, which
