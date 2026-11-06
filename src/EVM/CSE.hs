@@ -9,7 +9,12 @@ import Control.Monad.State
 import Data.Map (Map)
 import Data.Map qualified as Map
 
-import EVM.Traversals
+import Data.IntMap.Strict (IntMap)
+import Data.IntMap.Strict qualified as IntMap
+import Unsafe.Coerce (unsafeCoerce)
+
+import EVM.HashCons (AnyExpr(..), nodeId)
+import EVM.Traversals.Children (mapChildrenM, mapPropChildrenM)
 import EVM.Types
 
 -- maps expressions to variable names
@@ -17,8 +22,9 @@ data BuilderState = BuilderState
   { bufs :: Map (Expr Buf) Int
   , stores :: Map (Expr Storage) Int
   , count :: Int
+  -- | the result of each canonical node already visited: a later visit finds the same names
+  , memo :: IntMap AnyExpr
   }
-  deriving (Show)
 
 type BufEnv = Map Int (Expr Buf)
 type StoreEnv = Map Int (Expr Storage)
@@ -28,6 +34,7 @@ initState = BuilderState
   { bufs = mempty
   , stores = mempty
   , count = 0
+  , memo = mempty
   }
 
 
@@ -82,7 +89,24 @@ invertKeyVal =  Map.fromList . map (\(x, y) -> (y, x)) . Map.toList
 
 -- | Common subexpression elimination pass for Expr
 eliminateExpr' :: Expr a -> State BuilderState (Expr a)
-eliminateExpr' e = mapExprM go e
+eliminateExpr' = cse
+
+-- | 'mapExprM' of 'go' visiting each shared node once, as walking a hash-consed DAG
+-- as a tree is exponential in the depth of its sharing
+cse :: Expr a -> State BuilderState (Expr a)
+cse e = case nodeId e of
+  Nothing -> step
+  Just i -> gets (IntMap.lookup i . (.memo)) >>= \case
+    -- equal ids are the same node, so of the same type
+    Just (AnyExpr r) -> pure (unsafeCoerce r)
+    Nothing -> do
+      r <- step
+      modify' (\s -> s { memo = IntMap.insert i (AnyExpr r) s.memo })
+      pure r
+  where
+    step = case e of
+      C {} -> mapChildrenM cse e
+      _ -> mapChildrenM cse e >>= go
 
 eliminateExpr :: Expr a -> (Expr a, BufEnv, StoreEnv)
 eliminateExpr e =
@@ -91,7 +115,7 @@ eliminateExpr e =
 
 -- | Common subexpression elimination pass for Prop
 eliminateProp' :: Prop -> State BuilderState Prop
-eliminateProp' prop = mapPropM go prop
+eliminateProp' = mapPropChildrenM cse
 
 -- | Common subexpression elimination pass for list of Prop
 eliminateProps' :: [Prop] -> State BuilderState [Prop]
