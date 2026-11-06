@@ -36,6 +36,7 @@ module EVM.Expr
   , upperWithBounds
   , wrapInterval
   , asWord
+  , substWord
   , sex
 
     -- * Comparisons / Booleans
@@ -3029,8 +3030,12 @@ directBounds = foldl go mempty
 
 -- | e with every occurrence of the word c replaced by 0
 zeroing :: Expr EWord -> Expr a -> Expr a
-zeroing c = mapExpr $ \e -> case asWordRefl e of
-  Just Refl | e == c -> Lit 0
+zeroing c = substWord c (Lit 0)
+
+-- | e with every occurrence of the word t replaced by r
+substWord :: Expr EWord -> Expr EWord -> Expr a -> Expr a
+substWord t r = mapExpr $ \e -> case asWordRefl e of
+  Just Refl | e == t -> r
   _ -> e
 
 asWordRefl :: Expr a -> Maybe (a :~: EWord)

@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- A memory offset or size that depends on a subterm with at most
+  `--max-mem-arg-split` values (default 8), such as the length of a short dynamic
+  argument, forks the path on those values, each substituted into the state, so
+  memory stays concrete.
 - Dynamic arrays of static types (e.g. `uint16[]`) can be symbolic arguments, with
   a symbolic length of at most `--max-dyn-size` elements, under the same caveat as
   `bytes` and `string`. They used to stop the run with an internal error.
