@@ -189,6 +189,16 @@ lockstepTests = testGroup "lockstep-fuzz"
         lockstepCase solvers mode c >>= \case
           Left err -> liftIO $ failWith c c.inputs (show mode <> ": " <> err)
           Right r -> liftIO $ unless (r.stopped == "halted") $ assertFailure ("stopped: " <> r.stopped)
+  , -- EXTCODEHASH of a precompile after a CALL that sends it x & 0: its balance is a
+    -- term equal to 0, so the account is empty and the hash is 0
+    test "lockstep-extcodehash-zero-transfer" $ do
+      let hex = fromJust . hexByteString . Char8.pack
+          c = TestCase (Prog [IRaw (hex "600a60247d00000000000000000000000000000000000000000000000000000000004060206024355f16600462fffffff15b5b5b5b5b6b0000000000000000000000043f5b610044575b5b")] [IRaw (hex "5b5b5b")])
+                (Inputs mempty mempty 0x227 0xb9bf20812) 348747 0x100
+      withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> forM_ [SolverBranches, ExplorerBranches, CheckedBranches] $ \mode ->
+        lockstepCase solvers mode c >>= \case
+          Left err -> liftIO $ failWith c c.inputs (show mode <> ": " <> err)
+          Right r -> liftIO $ unless (r.stopped == "halted") $ assertFailure ("stopped: " <> r.stopped)
   , -- the case from the HEVM_FUZZ_* variables that a failure prints, in every branch mode
     test "lockstep-from-env" $ liftIO caseFromEnv >>= mapM_ (\c ->
       withSolvers Z3 1 (Just 10) defMemLimit $ \solvers -> forM_ [SolverBranches, ExplorerBranches, CheckedBranches] $ \mode ->
