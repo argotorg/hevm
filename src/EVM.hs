@@ -46,7 +46,7 @@ import Data.DoubleWord (Int256, Word256)
 import Data.Either (partitionEithers)
 import Data.Either.Extra (maybeToEither)
 import Data.Foldable (Foldable(..))
-import Data.List (delete, find, isPrefixOf)
+import Data.List (delete, find, isPrefixOf, nub)
 import Data.List.Split (splitOn)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -355,24 +355,54 @@ getOpW8 state = case state.code of
 getOpName :: forall (t :: VMType) . FrameState t -> [Char]
 getOpName state = intToOpName $ fromEnum $ getOpW8 state
 
+-- | Replaces the word @atom@ by @val@ in the frames' stacks and memory, the buffers and
+-- the contracts' storage and balances. Only sound together with a path condition that
+-- @atom == val@: terms it does not reach keep @atom@, which that condition then pins.
+substVM :: Expr EWord -> Expr EWord -> VM Symbolic -> VM Symbolic
+substVM atom val =
+  over #state frameState . over #frames (map (over #state frameState)) . over (#env % #contracts) (fmap contract)
+  where
+    sub :: Expr a -> Expr a
+    sub e = let e' = Expr.substWord atom val e in if e' == e then e else Expr.simplify e'
+    frameState fs = fs
+      { stack = map sub fs.stack
+      , memory = case fs.memory of
+          SymbolicMemory b -> SymbolicMemory (sub b)
+          m -> m
+      , symMemorySize = fmap sub fs.symMemorySize
+      , calldata = sub fs.calldata
+      , returndata = sub fs.returndata
+      , callvalue = sub fs.callvalue
+      }
+    contract = over #storage sub . over #tStorage sub . over #balance sub
+
 -- | A merge can leave an ITE between literals where a memory offset or size is
 -- expected, e.g. a length picked by a ternary. Accessing memory there would make
 -- it symbolic for the rest of the path, so the path forks on the ITE instead,
 -- and the instruction runs again with each literal.
+--
+-- Otherwise, when the argument depends on a subterm with at most 'maxMemArgSplit' values,
+-- e.g. the length of a short dynamic argument, the path forks on its values, each
+-- substituted into the state, so memory stays concrete for the rest of the path.
 splitMergedMemArg :: forall (t :: VMType). Typeable t => Config -> VM t -> Maybe (EVM t ())
 splitMergedMemArg conf vm = case eqT @t @Symbolic of
-  -- with fewer items than the op takes, it underruns the stack: forking first would only
-  -- delay that, and a fork on an argument it never reads splits the path for nothing
-  Just Refl | not vm.mergeState.msActive, vm.state.pc < opslen vm.state.code
-            , let (arity, args) = memArgs (getOp (getOpW8 vm.state))
-            , length vm.state.stack >= arity -> listToMaybe
-    [ forkOnSubterm conf.maxDepth [atom] [(v, [[v]]) | (v, _) <- cases] $ \v ->
-        assign' (#state % #stack % ix i) (fromJust (lookup v cases))
-    | i <- args
-    , Just x <- [preview (ix i) vm.state.stack]
-    , isNothing (maybeLitWordSimp x)
-    , Just (atom, cases) <- [Expr.splitLitIte x]
-    ]
+  Just Refl | not vm.mergeState.msActive, vm.state.pc < opslen vm.state.code ->
+    -- with fewer items than the op takes, it underruns the stack: forking first would only
+    -- delay that, and a fork on an argument it never reads splits the path for nothing
+    let (arity, args) = memArgs (getOp (getOpW8 vm.state))
+        symArgs = [ (i, x) | length vm.state.stack >= arity, i <- args
+                  , Just x <- [preview (ix i) vm.state.stack]
+                  , isNothing (maybeLitWordSimp x) ]
+    in listToMaybe $
+      [ forkOnSubterm conf.maxDepth [atom] [(v, [[v]]) | (v, _) <- cases] $ \v ->
+          assign' (#state % #stack % ix i) (fromJust (lookup v cases))
+      | (i, x) <- symArgs, Just (atom, cases) <- [Expr.splitLitIte x] ]
+      <> [ forkOnSubterm conf.maxDepth [atom] [(v, [[v]]) | v <- vals] $ \v -> modify' (substVM atom (Lit v))
+         | conf.maxMemArgSplit > 0
+         , (_, x) <- symArgs
+         , Just ([atom], groups) <- [Expr.enumerateViaSmallSubterm conf.maxMemArgSplit vm.constraints x]
+         , let vals = nub [k | (_, kss) <- groups, [k] <- kss]
+         , not (null vals) ]
   _ -> Nothing
   where
     -- the items an op takes, and which of them are memory offsets or sizes
