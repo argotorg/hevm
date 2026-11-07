@@ -5,7 +5,7 @@ import Prelude hiding (Foldable(..))
 
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
-import Data.Foldable (length, foldl')
+import Data.Foldable (elem, foldl', length, null)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Vector qualified as V
@@ -107,7 +107,8 @@ symCalldataNamed prefix exact sig typesignature concreteArgs base = do
     -- (every path is still explored fully), so we record it as a program-wide
     -- 'Caveat' rather than a per-path 'Partial'. Derived from the fragments we
     -- actually built, so a concretely-supplied argument produces no caveat.
-    caveats = [DynArgBounded conf.maxDynSize | any isDy calldatas]
+    units = [unit | Dy _ _ unit <- calldatas]
+    caveats = [DynArgBounded conf.maxDynSize (1 `elem` units) (any (/= 1) units) | not (null units)]
   pure (withSelector, sizeConstraints : props, caveats)
 
 cdLen :: [CalldataFragment] -> Expr EWord
