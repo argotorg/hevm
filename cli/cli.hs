@@ -23,11 +23,9 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as T
 import Data.Version (showVersion)
 import Data.Word (Word64)
-import GHC.Conc (getNumProcessors)
 import GitHash
 import Numeric.Natural (Natural)
 import Optics.Core ((&), set)
-import Witch (unsafeInto)
 import Options.Generic as OptionsGeneric
 import Options.Applicative as Options
 import Paths_hevm qualified as Paths
@@ -104,6 +102,7 @@ data CommonOptions = CommonOptions
   , promiseNoReent::Bool
   , maxBufSize    ::Int
   , maxWidth      ::Int
+  , maxMemArgSplit ::Int
   , maxDepth      ::Maybe Int
   , noSimplify    ::Bool
   , onlyDeployed  ::Bool
@@ -143,12 +142,13 @@ commonOptions = CommonOptions
   <*> (option auto $ long "smt-memory"      <> value defMemLimit <> help "Maximum memory limit for SMT solver in MB. Only available on Linux")
   <*> (switch $ long "smt-debug"            <> help "Print smt queries sent to the solver")
   <*> (optional $ strOption $ long "dump-unsolved" <> help "Dump unsolved SMT queries to this (relative) path")
-  <*> (optional $ option auto $ long "num-solvers" <> help "Number of solver instances to use (default: number of cpu cores)")
+  <*> (optional $ option auto $ long "num-solvers" <> help "Number of solver instances to use (default: number of cpu cores, at most half the available memory divided by --smt-memory)")
   <*> (option auto $ long "max-iterations"  <> showDefault <> value 5 <> help "Number of times we may revisit a particular branching point. For no bound, set -1")
   <*> (option auto $ long "max-concrete-iterations" <> showDefault <> value 10000 <> help "Number of times we may revisit a branching point whose condition is concrete, e.g. in a loop over fetched state. Gas is not tracked, so this stops loops that never end. For no bound, set -1")
   <*> (switch $ long "promise-no-reent"     <> help "Promise no reentrancy is possible into the contract(s) being examined")
   <*> (option auto $ long "max-buf-size"    <> value 24 <> help "Maximum size of buffers such as calldata and returndata in exponents of 2 (default: 24, i.e. 16 MB, more than gas limits allow)")
   <*> (option auto $ long "max-width"      <> showDefault <> value 100 <> help "Max number of concrete values to explore when encountering a symbolic value. This is a form of branch width limitation per symbolic value")
+  <*> (option auto $ long "max-mem-arg-split" <> showDefault <> value 8 <> help "Max number of values of a subterm that a memory offset or size depends on, e.g. a short dynamic argument's length, to explore one path each with that value substituted, so memory stays concrete. 0 disables it")
   <*> (optional $ option auto $ long "max-depth" <> help "Limit maximum depth of branching during exploration (default: unlimited)")
   <*> (switch $ long "no-simplify" <> help "Don't perform simplification of expressions")
   <*> (switch $ long "only-deployed" <> help "When trying to resolve unknown addresses, only use addresses of deployed contracts")
@@ -156,7 +156,7 @@ commonOptions = CommonOptions
   <*> (switch $ long "no-rpc-cache" <> help "Don't save or load fetched state in the user's cache directory")
   <*> (switch $  long "no-early-abort" <> help "Keep exploring after the first counterexample, to find all of them. By default, exploration stops at the first one")
   <*> (option auto $ long "merge-max-budget" <> showDefault <> value 100 <> help "Max instructions for speculative merge exploration during path merging")
-  <*> (option auto $ long "max-dyn-size" <> showDefault <> value 64 <> help "Max byte length for concretized dynamic types (bytes, string) in symbolic arguments")
+  <*> (option auto $ long "max-dyn-size" <> showDefault <> value 64 <> help "Max length of dynamic symbolic arguments: bytes for bytes and string, elements for arrays")
   <*> (switch $  long "no-abstract-arith" <> help "Don't abstract symbolic multiplication and division as uninterpreted functions with sound lemmas; use native bitvector arithmetic instead")
   <*> (switch $ long "no-hash-cons" <> help "Don't hash-cons (share equal subterms of) the symbolic VM state during exploration")
   <*> (optional $ strOption $ long "progress-log" <> help "Write a JSONL log of interpreter and solver progress to this file (default with --verb 3: hevm-progress.jsonl)")
@@ -166,7 +166,7 @@ commonOptions = CommonOptions
   <*> (switch $ long "serve" <> help "Serve the progress of the run over HTTP on localhost, at /progress")
   <*> (option auto $ long "port" <> showDefault <> value defaultDebuggerPort <> help "Port for --interactive and --serve, 0 picks a free one")
   <*> (option auto $ long "interactive-snapshot-every" <> showDefault <> value snapshotInterval <> help "Steps between the debugger's snapshots: fewer make going back faster and use more memory")
-  <*> (switch $ long "check-static-branches" <> help "Internal check, slow: ask the solver to confirm every branch side that exploration drops by simplification alone")
+  <*> (switch $ long "check-static-branches" <> help "Slow: ask the solver about every branch that exploration decides by simplification alone. A dropped side that is reachable is an error; a side kept that the solver rules out is logged as a static-missed event in the progress log, and counted per location in its summary")
 
 data CommonExecOptions = CommonExecOptions
   { address       ::Maybe Addr
@@ -368,8 +368,7 @@ main = do
       env <- makeEnv cOpts
       root <- getRoot cOpts
       solver <- getSolver cOpts.solver
-      cores <- liftIO $ unsafeInto <$> getNumProcessors
-      let solverCount = fromMaybe cores cOpts.numSolvers
+      solverCount <- liftIO $ maybe (defaultSolverCount cOpts.smtMemory) pure cOpts.numSolvers
       runEnv env $ withProgress (progressOpts env cOpts) $ serving cOpts $ withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
         buildOut <- readBuildOutput root testOpts.projectType
         case buildOut of
@@ -420,6 +419,7 @@ main = do
         , promiseNoReent = cOpts.promiseNoReent
         , maxBufSize = cOpts.maxBufSize
         , maxWidth = cOpts.maxWidth
+        , maxMemArgSplit = cOpts.maxMemArgSplit
         , maxDepth = cOpts.maxDepth
         , verb = cOpts.verb
         , simp = Prelude.not cOpts.noSimplify
@@ -483,8 +483,7 @@ equivalence eqOpts cOpts = do
                           }
   (calldata, _caveats) <- buildCalldata cOpts eqOpts.sig eqOpts.arg
   solver <- liftIO $ getSolver cOpts.solver
-  cores <- liftIO $ unsafeInto <$> getNumProcessors
-  let solverCount = fromMaybe cores cOpts.numSolvers
+  solverCount <- liftIO $ maybe (defaultSolverCount cOpts.smtMemory) pure cOpts.numSolvers
   withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \s -> do
     sess <- Fetch.mkSession cOpts.cacheDir Nothing
     eq <- equivalenceCheck s (Just sess) (fromJust bytecodeA) (fromJust bytecodeB) veriOpts calldata eqOpts.create
@@ -603,8 +602,7 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = withRpcSession cOpts cExecOpts.rpc c
         exitFailure
       Just codes -> pure codes
   when (cOpts.verb > 0) $ liftIO $ putStrLn $ "Using assertion code(s): " <> intercalate "," (map show errCodes)
-  cores <- liftIO $ unsafeInto <$> getNumProcessors
-  let solverCount = fromMaybe cores cOpts.numSolvers
+  solverCount <- liftIO $ maybe (defaultSolverCount cOpts.smtMemory) pure cOpts.numSolvers
   solver <- liftIO $ getSolver cOpts.solver
   withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
     let veriOpts = VeriOpts { iterConf = IterConfig {

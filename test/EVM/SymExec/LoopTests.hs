@@ -12,7 +12,6 @@ import Data.Text qualified as T
 import Data.Vector qualified as V
 import Test.Tasty
 import Test.Tasty.HUnit
-import Test.Tasty.ExpectedFailure
 import Witch (into)
 
 import Optics.Core hiding (pre, re, elements)
@@ -97,6 +96,13 @@ tests =
         let veriOpts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 }}
         (e, []) <- withDefaultSolver $
           \s -> checkAssert s defaultPanicCodes c (Just (Sig "fun(uint256)" [AbiUIntType 256])) [] veriOpts
+        assertBoolM "The expression MUST be partial" $ any (Expr.containsNode isPartial) e
+    , test "merged-branch-in-loop-reaches-bound" $ do
+        -- the Yul `for {} and(y, 8) {} { if y { continue } }`: under its condition the loop's
+        -- condition is concrete, so only the merged `if` can count the iterations
+        let c = fromJust $ hexByteString "6104005f80376020515b60088116601257005b80601b575b6009565b601756"
+            opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 5 }}
+        (e, _) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c Nothing [] opts
         assertBoolM "The expression MUST be partial" $ any (Expr.containsNode isPartial) e
     , test "jumptable-without-solver" $ do
         -- jumps to table[selector mod 3], read with CODECOPY as Vyper's dispatcher does;
@@ -199,7 +205,7 @@ tests =
             step = error "concrete conditions must not trigger speculation"
         forM_ [Lit 0, Lit 1, h, Eq h (Lit (keccak' bytes)), Eq h (Lit (keccak' bytes + 1)), Lit maxBound, WAddr (LitAddr 0), WAddr (LitAddr 1)] $ \cond -> do
           (merged, result) <- stToIO $
-            runStateT (Merge.tryMergeForwardJump testEnv.config step 0 2 cond stack) initial
+            runStateT (Merge.tryMergeForwardJump testEnv.config step (const False) 0 2 cond stack) initial
           assertBool "leave concrete branches to the executor" (not merged)
           assertEqual "PC is unchanged" initial.state.pc result.state.pc
           assertEqual "stack is unchanged" stack result.state.stack
@@ -229,7 +235,7 @@ tests =
             step = do
               assign (#state % #pc) 2
               assign (#state % #stack) [Mul (Lit 0) (Var "value"), untouched]
-        (merged, result) <- stToIO $ runStateT (Merge.tryMergeForwardJump testEnv.config step 0 2 cond stack) vm
+        (merged, result) <- stToIO $ runStateT (Merge.tryMergeForwardJump testEnv.config step (const False) 0 2 cond stack) vm
         assertBool "symbolic branches still merge" merged
         assertEqual "only changed slots are simplified"
           [ITE cond (Var "value") (Lit 0), untouched] result.state.stack
@@ -256,9 +262,8 @@ tests =
           e <- withDefaultSolver $ \s -> getExpr s c sig [] defaultVeriOpts
           pure $ length e
         assertBoolM "Merging should reduce number of paths" (merge < noMerege)
-     -- Checked arithmetic reverts in one of the branches, which is not supported by
-     -- the current state merging implementation
-     , expectFail $ testCase "merge-simple-branches-revert" $ do
+     -- the overflow checks inside the branches are decided while speculating
+     , testCase "merge-simple-branches-revert" $ do
         Just c <- solcRuntime "C"
           [i|
           contract C {
@@ -319,6 +324,68 @@ tests =
         let numPaths = length paths
         -- Without merging: 16 paths. With unchecked + merging: should be <= 4
         liftIO $ assertBool ("Expected at most 4 paths with unchecked merging, got " ++ show numPaths) (numPaths <= 4)
+    , test "merge-diamonds" $ do
+        -- ternaries, with the underflow checks of each side decided by its condition
+        Just c <- solcRuntime "C"
+          [i|
+          contract C {
+            function f(uint256 a, uint256 b, uint256 c) public pure {
+              uint256 d = a > b ? a - b : b - a;
+              uint256 e = b > c ? b - c : c - b;
+              uint256 m = a > c ? a : c;
+              assert(d <= a || d <= b);
+              assert(e <= b || e <= c);
+              assert(m >= a);
+            }
+          }
+          |]
+        let sig = Just (Sig "f(uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256])
+        paths <- withDefaultSolver $ \s -> getExpr s c sig [] defaultVeriOpts
+        liftIO $ assertEqual "one path through all three ternaries" 1 (length (filter Expr.isSuccess paths))
+    , test "merge-diamond-finds-counterexample" $ do
+        Just c <- solcRuntime "C"
+          [i|
+          contract C {
+            function f(uint256 a, uint256 b) public pure {
+              uint256 d = a > b ? a - b : b - a;
+              assert(d != 5);
+            }
+          }
+          |]
+        let sig = Just (Sig "f(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])
+        (_, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        assertBoolM "the merged ternary keeps its counterexample" (exactlyCex 1 ret)
+    , test "merged-length-splits-at-memory-access" $ do
+        -- the merged ternary sizes an array: unless memory accesses fork on it, every
+        -- later allocation is at a symbolic offset and the loop never becomes concrete
+        Just c <- solcRuntime "C"
+          [i|
+          contract C {
+            function f(bool two, uint256 x) public pure {
+              uint256 n = two ? 2 : 1;
+              uint256[] memory a = new uint256[](n);
+              for (uint256 i = 0; i < a.length; i++) a[i] = x + i;
+              uint256[] memory b = new uint256[](3);
+              b[0] = x;
+              bytes memory e = abi.encode(a, b);
+              assert(e.length == 224 + 32 * n);
+              assert(b[0] == x);
+            }
+          }
+          |]
+        let sig = Just (Sig "f(bool,uint256)" [AbiBoolType, AbiUIntType 256])
+        (e, []) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        assertBoolM "The expression is partial" $ not $ any isPartial e
+    , testCase "merge-decides-nested-branches" $ do
+        let a = Var "a"
+            b = Var "b"
+            assumeGt = [Expr.simplifyProp (PNeg (PEq (Lit 0) (EVM.Types.GT a b)))]
+            assumeNotGt = [Expr.simplifyProp (PEq (Lit 0) (EVM.Types.GT a b))]
+        assertEqual "a literal" (Just True) (Merge.decide [] (Lit 3))
+        assertEqual "the condition itself" (Just True) (Merge.decide assumeGt (EVM.Types.GT a b))
+        assertEqual "its negation" (Just False) (Merge.decide assumeNotGt (EVM.Types.GT a b))
+        assertEqual "the reverse of a strict order" (Just False) (Merge.decide assumeGt (EVM.Types.GT b a))
+        assertEqual "anything else" Nothing (Merge.decide assumeGt (EVM.Types.GT a (Var "c")))
     , test "merge-with-unchecked-arithmetic" $ do
         Just c <- solcRuntime "C"
           [i|

@@ -92,7 +92,7 @@ contract OwnedTest is Test {
 contract Unsupported {
     uint256 public x;
 
-    function setX(uint256[] calldata xs) public {
+    function setX(bytes[] calldata xs) public {
         x = xs.length;
     }
 }
@@ -107,5 +107,30 @@ contract UnsupportedTest is Test {
 
     function invariant_zero() public view {
         assertEq(u.x(), 0);
+    }
+}
+
+contract Spread {
+    event Up();
+    event Down();
+    uint256 public last;
+
+    function put(uint256 x, uint256 y) public {
+        if (x > y) emit Up();
+        else emit Down();
+        last = x;
+    }
+}
+
+// the counterexample comes from a merged state
+contract SpreadTest is Test {
+    Spread s;
+
+    function setUp() public {
+        s = new Spread();
+    }
+
+    function invariant_last_small() public view {
+        assertLt(s.last(), 1000);
     }
 }

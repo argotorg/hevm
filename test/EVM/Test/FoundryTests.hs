@@ -11,7 +11,13 @@ import Control.Monad (forM_)
 import Control.Monad.Catch (MonadMask)
 import Control.Monad.IO.Class
 import Control.Monad.Reader (ReaderT)
+import Data.Foldable (toList)
+import Data.Map qualified as Map
 import Data.Text (Text, isPrefixOf, unpack)
+import System.Directory (createDirectory)
+import System.FilePath ((</>))
+import System.IO.Temp (withSystemTempDirectory)
+import System.Process (callProcess)
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -19,6 +25,7 @@ import EVM.ABI (Sig(..))
 import EVM.Dapp (TestMethodFilter, TestMethodInfo(..))
 import EVM.Effects
 import EVM.Fetch qualified as Fetch
+import EVM.Solidity (BuildOutput(..), Contracts(..), ProjectType(..), SolcContract(..), SourceCache(..), SrcMap(..), readBuildOutput)
 import EVM.Test.Utils (WithOutput, assertRun, runForgeTest, runForgeTestResults, runForgeTestResultsCustom)
 import EVM.Types (regexMatches)
 
@@ -35,7 +42,23 @@ testAbstractArith a b =
 
 tests :: TestTree
 tests = testGroup "Foundry tests"
-    [ test "Trivial-Pass" $ do
+    [ test "incremental-build-source-ids" $ withSystemTempDirectory "srcids" $ \root -> do
+        -- each build numbers its sources from 0, so A.sol and B.sol both get id 0
+        liftIO $ do
+          createDirectory (root </> "src")
+          writeFile (root </> "foundry.toml") "[profile.default]\nast = true\n"
+          writeFile (root </> "src" </> "A.sol") "contract A { function f(uint x) public pure returns (uint) { require(x > 1); return x - 1; } }\n"
+          callProcess "forge" ["build", "--root", root]
+          writeFile (root </> "src" </> "B.sol") "contract B { function g(uint x) public pure returns (uint) { require(x > 2); return x - 2; } }\n"
+          callProcess "forge" ["build", "--root", root]
+        Right out <- readBuildOutput root Foundry
+        let Contracts cs = out.contracts
+        forM_ [("src/A.sol:A", "src/A.sol"), ("src/B.sol:B", "src/B.sol")] $ \(name, file) -> liftIO $ do
+          c <- maybe (assertFailure $ "missing " <> unpack name) pure (Map.lookup name cs)
+          let resolved = [fp | sm <- toList c.runtimeSrcmap, Just (fp, _) <- [Map.lookup sm.file out.sources.files]]
+          assertBool "the source map resolves" (not (null resolved))
+          assertBool ("all of " <> unpack name <> " maps to " <> file) (all (== file) resolved)
+    , test "Trivial-Pass" $ do
         let testFile = "test/contracts/pass/trivial.sol"
         executeSingleMethod testFile "prove_true" >>= assertRun "test result" (True, True)
     , test "Foundry" $ do
