@@ -698,10 +698,18 @@ signature abi =
       fold [
         fromMaybe "<constructor>" (abi ^? key "name" % _String), "(",
         intercalate ","
-          (map (\x -> x ^?! key "type" % _String)
+          (map canonicalType
             (toList $ abi ^?! key "inputs" % _Array)),
         ")"
       ]
+  where
+    -- Expand tuples without changing array suffixes or library type names.
+    canonicalType :: Value -> Text
+    canonicalType x
+      | ("tuple", suffix) <- T.breakOn "[" typ =
+          "(" <> intercalate "," (map canonicalType (toList $ x ^?! key "components" % _Array)) <> ")" <> suffix
+      | otherwise = typ
+      where typ = x ^?! key "type" % _String
 
 -- Helper function to convert the fields to the desired type
 parseTypeName' :: AsValue s => s -> Maybe AbiType
