@@ -1664,6 +1664,24 @@ concretizationTests = testGroup "Concretization tests"
       -- sign-extend byte 0 of 0xff -> all 1s (since bit 7 is set)
       let simp = Expr.simplify $ SEx (Lit 0) (Lit 0xff)
       assertEqual "SEx should be concretized" (Lit Expr.maxLit) simp
+  , testCase "conc-modular-arithmetic-full-width" $ do
+      let top = Expr.maxLit
+      Expr.addmod (Lit top) (Lit top) (Lit top) @?= Lit 0
+      Expr.addmod (Lit top) (Lit top) (Lit (top - 1)) @?= Lit 2
+      Expr.mulmod (Lit top) (Lit top) (Lit top) @?= Lit 0
+      Expr.mulmod (Lit top) (Lit top) (Lit (top - 1)) @?= Lit 1
+      Expr.mulmod (Lit top) (Lit top) (Lit 0) @?= Lit 0
+  , testProperty "conc-modular-arithmetic-matches-wide-words" $
+      \(x :: W256) (y :: W256) (z :: W256) ->
+        let wideX = fromIntegral x :: Word512
+            wideY = fromIntegral y :: Word512
+            wideZ = fromIntegral z :: Word512
+            expected op = Lit $ if z == 0 then 0
+                          else fromIntegral (op wideX wideY `mod` wideZ)
+        in conjoin
+          [ Expr.addmod (Lit x) (Lit y) (Lit z) === expected (+)
+          , Expr.mulmod (Lit x) (Lit y) (Lit z) === expected (*)
+          ]
   , testCase "conc-sex-no-extend" $ do
       -- sign-extend byte 30 of 0xff -> 0xff (bit 247 is not set)
       let simp = Expr.simplify $ SEx (Lit 30) (Lit 0xff)
