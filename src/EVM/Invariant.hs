@@ -12,7 +12,7 @@ module EVM.Invariant
   , stateKey
   , startCall
   , nextStates
-  , disjoin
+  , simplifyDisjunction
   ) where
 
 import Control.Concurrent.STM.TVar (newTVarIO)
@@ -159,7 +159,7 @@ mergeStates vms = map (merge . snd) $ sortOn fst $ Map.elems $
     merge group@(vm:_) =
       let conds = map (Set.fromList . (.constraints)) group
           common = foldr1 Set.intersection conds
-          rest = disjoin $ map (`Set.difference` common) conds
+          rest = simplifyDisjunction $ map (`Set.difference` common) conds
           shared = filter (`Set.member` common) vm.constraints
       in vm & set #constraints (if any Set.null rest then shared else shared <> [por (map (pand . Set.toList) rest)])
             & set #keccakPreImgs (foldMap (.keccakPreImgs) group)
@@ -168,8 +168,8 @@ mergeStates vms = map (merge . snd) $ sortOn fst $ Map.elems $
 -- | Shortens a disjunction of conjunctions: two that differ only in one
 -- condition and its negation become one without it, and a conjunction that
 -- implies another is dropped
-disjoin :: [Set Prop] -> [Set Prop]
-disjoin = untilFixpoint (absorb . resolve) . mapMaybe simp
+simplifyDisjunction :: [Set Prop] -> [Set Prop]
+simplifyDisjunction = untilFixpoint (absorb . resolve) . mapMaybe simp
   where
     simp r = let ps = Set.delete (PBool True) (Set.map simplifyProp r)
              in if Set.member (PBool False) ps then Nothing else Just ps
