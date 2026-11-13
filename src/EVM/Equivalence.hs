@@ -256,22 +256,33 @@ equivalenceCheck' solvers sess branchesA branchesB create = do
     -- code is equivalent. The constraints from the undeployed code (aProps,bProps) influence this check.
     deployedCodeDiffer :: Expr Buf -> Expr Buf -> [Prop] -> [Prop] -> m EqIssues
     deployedCodeDiffer aOut bOut aProps bProps = do
-      let simpA = Expr.simplify aOut
-          simpB = Expr.simplify bOut
-      conf <- readConfig
-      case (simpA, simpB) of
-        (ConcreteBuf codeA, ConcreteBuf codeB) -> do
-          -- TODO: use aProps/bProps to constrain the deployed code
-          --       since symbolic code (with constructors taking arguments) is not supported,
-          --       this is currently not necessary
-          when conf.debug $ liftIO $ do
-            liftIO $ putStrLn $ "create deployed code A: " <> bsToHex codeA
-              <> " with constraints: " <> (T.unpack . T.unlines $ map formatProp aProps)
-            liftIO $ putStrLn $ "create deployed code B: " <> bsToHex codeB
-              <> " with constraints: " <> (T.unpack . T.unlines $ map formatProp bProps)
-          (calldata, _) <- mkCalldata Nothing []
-          equivalenceCheck solvers sess codeA codeB defaultVeriOpts calldata False
-        _ -> internalError $ "Symbolic code returned from constructor." <> " A: " <> show simpA <> " B: " <> show simpB
+      -- Compare deployed runtimes only when both constructor paths can occur for
+      -- the same input. Otherwise an impossible pair of paths can create a
+      -- spurious runtime difference (notably for --create).
+      pathOverlap <- checkSatWithProps solvers (aProps <> bProps)
+      case pathOverlap of
+        Qed -> pure mempty
+        Cex _ -> do
+          let simpA = Expr.simplify aOut
+              simpB = Expr.simplify bOut
+          conf <- readConfig
+          case (simpA, simpB) of
+            (ConcreteBuf codeA, ConcreteBuf codeB) -> do
+              when conf.debug $ liftIO $ do
+                liftIO $ putStrLn $ "create deployed code A: " <> bsToHex codeA
+                  <> " with constraints: " <> (T.unpack . T.unlines $ map formatProp aProps)
+                liftIO $ putStrLn $ "create deployed code B: " <> bsToHex codeB
+                  <> " with constraints: " <> (T.unpack . T.unlines $ map formatProp bProps)
+              (calldata, _) <- mkCalldata Nothing []
+              equivalenceCheck solvers sess codeA codeB defaultVeriOpts calldata False
+            _ -> internalError $ "Symbolic code returned from constructor." <> " A: " <> show simpA <> " B: " <> show simpB
+        Unknown reason -> pure $ EqIssues
+          [(Unknown ("Unable to establish constructor-path compatibility: " <> reason),
+            "Could not establish compatible constructor paths before comparing deployed code.")]
+          mempty
+        Error err -> pure $ EqIssues
+          [(Error err, "Failed to check constructor-path compatibility before comparing deployed code.")]
+          mempty
 
     statesDiffer :: Map (Expr EAddr) (Expr EContract) -> Map (Expr EAddr) (Expr EContract) -> Prop
     statesDiffer aState bState
