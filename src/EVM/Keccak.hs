@@ -8,7 +8,7 @@ import Control.Monad.State
 import Data.Map.Strict qualified as Map
 import Data.Set (Set)
 import Data.Set qualified as Set
-import Data.List (tails)
+import Data.List (partition, tails)
 import Witch (unsafeInto)
 
 import EVM.Traversals
@@ -84,11 +84,14 @@ congruenceProp _ _ = internalError "expected keccak expression"
 keccakAssumptions :: Map.Map Int (Expr Buf) -> [Expr EWord] -> [Prop]
 keccakAssumptions env keccaks = injectivity <> congruence <> minValue <> minDiffOfPairs
   where
-    ks = map concretizeKeccakParam keccaks
-    keccakPairs = uniquePairs ks
+    -- Concrete hash values are asserted separately by the SMT encoder.
+    (concrete, symbolic) = partition isConcrete (map concretizeKeccakParam keccaks)
+    isConcrete (Keccak (ConcreteBuf _)) = True
+    isConcrete _ = False
+    keccakPairs = uniquePairs symbolic <> [(s, c) | s <- symbolic, c <- concrete]
     injectivity = map (injProp env) keccakPairs
     congruence = map (congruenceProp env) keccakPairs
-    minValue = map minProp ks
+    minValue = map minProp symbolic
       where
         minProp :: Expr EWord -> Prop
         minProp k@(Keccak _) = PAnd (PGEq k (Lit keccakMin)) (PLEq k (Lit keccakMax))

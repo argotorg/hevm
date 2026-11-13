@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- Exponentiation over conditional constants folds to conditional powers, allowing
+  packed-array writes with a conditionally selected index to reach the SMT solver.
 - Invariant testing: `hevm test` checks `invariant_` functions after every
   sequence of at most `--invariant-depth` calls to the target contracts, with
   symbolic arguments, callers and timestamps. States reached before are not
@@ -128,6 +130,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes of zero.
 
 ## Changed
+- Concrete ADDMOD and MULMOD are computed with `Integer` instead of `Word512`,
+  which is several times faster in code that uses them heavily, such as `mulDiv`.
+- `EVM.SymExec` is split: concrete replay of counterexamples moves to
+  `EVM.CexReplay`, and equivalence checking to `EVM.Equivalence`. Symbolic
+  calldata (`EVM.SymExec.Calldata`) and counterexample models and printing
+  (`EVM.SymExec.Cex`) are re-exported by `EVM.SymExec`.
 - A storage read blocked by a write to a symbolic slot drops the writes below it that
   cannot alias the slot read, or are overwritten by a later write to the same slot.
 - `hevm test` and `hevm symbolic` stop at the first counterexample, cancelling the
@@ -191,6 +199,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Fixed
 - ABI signatures expand tuple components, fixing selectors and event topics for
   struct arguments and preventing struct overloads from being lost.
+- SMT queries skip assumptions between concrete keccak hashes, whose values
+  are already known, avoiding unnecessary quadratic growth.
 - Constant propagation checks disequalities and disjunctions against the
   constants of all path conditions, not only of those before them. The debugger
   no longer offers an infeasible branch side when the solver cannot encode the

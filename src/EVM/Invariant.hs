@@ -37,7 +37,8 @@ import EVM.Effects
 import EVM.Fetch qualified as Fetch
 import EVM.Keccak.Preimages qualified as Preimages
 import EVM.Solvers (SolverGroup, checkSatWithProps)
-import EVM.SymExec (IterConfig, Postcondition, interpretVMAbortable, runExpr, symCalldataNamed, freezeVM, extractProps, verifyResult)
+import EVM.SymExec (IterConfig, Postcondition, interpretVMAbortable, runExpr, freezeVM, extractProps, verifyResult)
+import EVM.SymExec.Calldata (symCalldataNamed)
 import EVM.Transaction (initTx)
 import EVM.Traversals (foldExpr, foldProp)
 import EVM.Types

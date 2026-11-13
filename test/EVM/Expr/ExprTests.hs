@@ -37,7 +37,7 @@ import EVM.Format (hexText)
 import EVM.SMT (AbstractQuery(..), SMT2(..), SMTScript(..), assertPropsAbstract, checkedMul)
 import EVM.Solvers hiding (checkSat)
 import EVM.Solvers qualified as Solvers (checkSat)
-import EVM.SymExec (subModel)
+import EVM.SymExec.Cex (subModel)
 import EVM.Traversals (foldExpr, foldProp, mapExpr, mapExprM, mapProp)
 import EVM.Types hiding (Env)
 
@@ -1117,6 +1117,19 @@ basicSimplificationTests = testGroup "Basic simplification tests"
         a = successPath [PEq (Add (Lit 1) (Lit 2)) (Sub (Lit 4) (Lit 1))]
         b = Expr.simplify a
       assertEqual "Must simplify down" (successPath []) b
+  , testCase "simp-exp-ite-lits" $ do
+      let c = Var "c"
+          choices = ITE c (Lit 3) (Lit 5)
+      assertEqual "packed-array byte offsets"
+        (ITE c (Lit (1 `shiftL` 224)) (Lit (1 `shiftL` 32)))
+        (Expr.simplify (Exp (Lit 256) (ITE c (Lit 28) (Lit 4))))
+      assertEqual "powers wrap at 256 bits"
+        (ITE c (Lit (1 `shiftL` 248)) (Lit 0))
+        (Expr.simplify (Exp (Lit 256) (ITE c (Lit 31) (Lit 32))))
+      assertEqual "conditional base" (ITE c (Lit 9) (Lit 25))
+        (Expr.simplify (Exp choices (Lit 2)))
+      assertEqual "shared condition" (ITE c (Lit 27) (Lit 3125))
+        (Expr.simplify (Exp choices choices))
   , testCase "simp-mul-neg1" $ do
       let simp = Expr.simplify $ Mul (Lit Expr.maxLit) (Var "x")
       assertEqual "mul by -1 is negation" (Sub (Lit 0) (Var "x")) simp
@@ -1651,6 +1664,24 @@ concretizationTests = testGroup "Concretization tests"
       -- sign-extend byte 0 of 0xff -> all 1s (since bit 7 is set)
       let simp = Expr.simplify $ SEx (Lit 0) (Lit 0xff)
       assertEqual "SEx should be concretized" (Lit Expr.maxLit) simp
+  , testCase "conc-modular-arithmetic-full-width" $ do
+      let top = Expr.maxLit
+      Expr.addmod (Lit top) (Lit top) (Lit top) @?= Lit 0
+      Expr.addmod (Lit top) (Lit top) (Lit (top - 1)) @?= Lit 2
+      Expr.mulmod (Lit top) (Lit top) (Lit top) @?= Lit 0
+      Expr.mulmod (Lit top) (Lit top) (Lit (top - 1)) @?= Lit 1
+      Expr.mulmod (Lit top) (Lit top) (Lit 0) @?= Lit 0
+  , testProperty "conc-modular-arithmetic-matches-wide-words" $
+      \(x :: W256) (y :: W256) (z :: W256) ->
+        let wideX = fromIntegral x :: Word512
+            wideY = fromIntegral y :: Word512
+            wideZ = fromIntegral z :: Word512
+            expected op = Lit $ if z == 0 then 0
+                          else fromIntegral (op wideX wideY `mod` wideZ)
+        in conjoin
+          [ Expr.addmod (Lit x) (Lit y) (Lit z) === expected (+)
+          , Expr.mulmod (Lit x) (Lit y) (Lit z) === expected (*)
+          ]
   , testCase "conc-sex-no-extend" $ do
       -- sign-extend byte 30 of 0xff -> 0xff (bit 247 is not set)
       let simp = Expr.simplify $ SEx (Lit 30) (Lit 0xff)
