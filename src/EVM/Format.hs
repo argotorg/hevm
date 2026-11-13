@@ -588,9 +588,10 @@ formatPartial = \case
 -- | Render a program-wide soundness caveat (see 'Caveat').
 formatCaveat :: Caveat -> Text
 formatCaveat = \case
-  DynArgBounded maxSz ->
-    "Dynamic (bytes/string) arguments were bounded to " <> pack (show maxSz) <>
-    " bytes; counterexamples requiring longer inputs may be missed."
+  DynArgBounded maxSz bytes arrays ->
+    "Dynamic arguments were bounded to " <> T.intercalate " and "
+      ([pack (show maxSz) <> " bytes (bytes, string)" | bytes] <> [pack (show maxSz) <> " elements (arrays)" | arrays])
+    <> "; counterexamples requiring longer inputs may be missed."
 
 formatPartialDetailed :: Maybe SrcLookup -> Map.Map (Expr EAddr) Contract -> PartialExec -> Text
 formatPartialDetailed srcLookupM contracts p =
