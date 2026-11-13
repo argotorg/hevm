@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- `test/scripts/fuzz-coverage.sh` reports which source lines a fuzz run never
+  reaches, using HPC.
+- `test` takes `--run-log FILE`, appending a line when each test starts and ends,
+  and `--yul-verbosity N`. Tests time out after 10 minutes by default.
 - The progress log gives the source location of forks and of the locations in
   its summaries, when there is debug info.
 - Exponentiation over conditional constants folds to conditional powers, allowing
@@ -132,6 +136,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes of zero.
 
 ## Changed
+- The default number of solvers is at most half of the available memory divided
+  by `--smt-memory`, so that the solvers running at once fit in memory.
 - Invariant tests print the paths they only partially explored grouped by
   source location, as `prove` tests do, instead of printing their expressions.
 - Concrete ADDMOD and MULMOD are computed with `Integer` instead of `Word512`,

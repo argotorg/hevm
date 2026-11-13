@@ -23,11 +23,9 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as T
 import Data.Version (showVersion)
 import Data.Word (Word64)
-import GHC.Conc (getNumProcessors)
 import GitHash
 import Numeric.Natural (Natural)
 import Optics.Core ((&), set)
-import Witch (unsafeInto)
 import Options.Generic as OptionsGeneric
 import Options.Applicative as Options
 import Paths_hevm qualified as Paths
@@ -143,7 +141,7 @@ commonOptions = CommonOptions
   <*> (option auto $ long "smt-memory"      <> value defMemLimit <> help "Maximum memory limit for SMT solver in MB. Only available on Linux")
   <*> (switch $ long "smt-debug"            <> help "Print smt queries sent to the solver")
   <*> (optional $ strOption $ long "dump-unsolved" <> help "Dump unsolved SMT queries to this (relative) path")
-  <*> (optional $ option auto $ long "num-solvers" <> help "Number of solver instances to use (default: number of cpu cores)")
+  <*> (optional $ option auto $ long "num-solvers" <> help "Number of solver instances to use (default: number of cpu cores, at most half the available memory divided by --smt-memory)")
   <*> (option auto $ long "max-iterations"  <> showDefault <> value 5 <> help "Number of times we may revisit a particular branching point. For no bound, set -1")
   <*> (option auto $ long "max-concrete-iterations" <> showDefault <> value 10000 <> help "Number of times we may revisit a branching point whose condition is concrete, e.g. in a loop over fetched state. Gas is not tracked, so this stops loops that never end. For no bound, set -1")
   <*> (switch $ long "promise-no-reent"     <> help "Promise no reentrancy is possible into the contract(s) being examined")
@@ -368,8 +366,7 @@ main = do
       env <- makeEnv cOpts
       root <- getRoot cOpts
       solver <- getSolver cOpts.solver
-      cores <- liftIO $ unsafeInto <$> getNumProcessors
-      let solverCount = fromMaybe cores cOpts.numSolvers
+      solverCount <- liftIO $ maybe (defaultSolverCount cOpts.smtMemory) pure cOpts.numSolvers
       runEnv env $ withProgress (progressOpts env cOpts) $ serving cOpts $ withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
         buildOut <- readBuildOutput root testOpts.projectType
         case buildOut of
@@ -483,8 +480,7 @@ equivalence eqOpts cOpts = do
                           }
   (calldata, _caveats) <- buildCalldata cOpts eqOpts.sig eqOpts.arg
   solver <- liftIO $ getSolver cOpts.solver
-  cores <- liftIO $ unsafeInto <$> getNumProcessors
-  let solverCount = fromMaybe cores cOpts.numSolvers
+  solverCount <- liftIO $ maybe (defaultSolverCount cOpts.smtMemory) pure cOpts.numSolvers
   withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \s -> do
     sess <- Fetch.mkSession cOpts.cacheDir Nothing
     eq <- equivalenceCheck s (Just sess) (fromJust bytecodeA) (fromJust bytecodeB) veriOpts calldata eqOpts.create
@@ -603,8 +599,7 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = withRpcSession cOpts cExecOpts.rpc c
         exitFailure
       Just codes -> pure codes
   when (cOpts.verb > 0) $ liftIO $ putStrLn $ "Using assertion code(s): " <> intercalate "," (map show errCodes)
-  cores <- liftIO $ unsafeInto <$> getNumProcessors
-  let solverCount = fromMaybe cores cOpts.numSolvers
+  solverCount <- liftIO $ maybe (defaultSolverCount cOpts.smtMemory) pure cOpts.numSolvers
   solver <- liftIO $ getSolver cOpts.solver
   withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
     let veriOpts = VeriOpts { iterConf = IterConfig {
