@@ -197,6 +197,7 @@ makeVm o = do
     , env = env
     , burned = initialGas
     , constraints = snd o.calldata
+    , simpConstraints = ([], [])
     , iterations = mempty
     , config = RuntimeConfig
       { allowFFI = o.allowFFI

@@ -794,6 +794,8 @@ data VM (t :: VMType) = VM
   , iterations     :: Map CodeLocation (Int, [Expr EWord])
   -- ^ how many times we've visited a loc, and what the contents of the stack were when we were there last
   , constraints    :: [Prop]
+  , simpConstraints :: ([Prop], [Prop])
+  -- ^ earlier constraints, and them simplified, so a branch only simplifies what was added since
   , config         :: RuntimeConfig
   , forks          :: Seq ForkState
   , currentFork    :: Int

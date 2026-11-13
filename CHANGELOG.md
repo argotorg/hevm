@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--max-mem-arg-split` values (default 8), such as the length of a short dynamic
   argument, forks the path on those values, each substituted into the state, so
   memory stays concrete.
+- With `--check-static-branches`, a branch that simplification keeps both ways but
+  the solver decides is logged as a `static-missed` event in the progress log, with
+  its condition and path conditions under `--progress-exprs`, and counted per
+  location in the summary.
 - Bounds from path conditions carry through `c + x`, `c - x` and `~x`, also when
   they wrap past 2^256 as signed range checks do, and through small signed values
   such as `-k + y % n`. The simplifier drops `m & x` to 0 when the bound of `x`
@@ -160,13 +164,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes of zero.
 
 ## Changed
+- A word subterm that a solver query uses more than once is defined once with
+  `define-fun` and referred to by name, instead of being written out at every use.
 - `mapExpr` visits each hash-consed node once per call, and the simplifier's
   searches for subterms fold over each node once, instead of over every path to it.
+  So do common subexpression elimination and the collection of variables, buffers,
+  storage reads and keccak values before a query is encoded.
+- Deciding a branch without the solver reuses the simplified path conditions
+  of the earlier branches on the path, kept in the new `VM` field
+  `simpConstraints`, and first tries the branch condition alone, which
+  simplification can decide where it cannot with the path conditions.
 - State merging also merges if/else branches and ternaries, where the two
   sides meet after the jump target, and follows the branches inside a merged
   side that its own condition decides, such as the overflow check of `a - b`
   under `a > b`. A branch reached again in a loop is not merged, so the loop
   bound applies. `MergeState` has `msAssume` instead of `msRemainingBudget`.
+- Symbolic execution explores the newest pending path first, depth-first,
+  which keeps fewer paths pending.
+- The Solidity ASTs are no longer kept after reading the build output:
+  `SourceCache` has no `asts`, `DappInfo` no `astIdMap` and `astSrcMap`.
 - The default number of solvers is at most half of the available memory divided
   by `--smt-memory`, so that the solvers running at once fit in memory.
 - Solidity's overflow check of a multiplication by a literal, `y == 0 || (y * c) / y == c`,

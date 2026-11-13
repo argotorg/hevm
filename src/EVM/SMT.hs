@@ -197,8 +197,11 @@ assertPropsAbstract conf ps = do
 -- passes through property-based testing.
 assertPropsHelperWith :: ArithEncoding -> Bool -> [SMTEntry] -> [Prop]  -> Err SMT2
 assertPropsHelperWith arithEnc simp extraDecls psPreConc = do
- encs <- mapM (propToSMTWith arithEnc) psElim
+ encs <- mapM (propToSMTWith arithEnc) psShared
  intermediates <- declareIntermediatesWith arithEnc bufs stores
+ sharedDefs <- mapM (\(name, body) -> do
+   encoded <- exprToSMTWith arithEnc body
+   pure $ SMTCommand $ "(define-fun " <> fromText name <> " () (_ BitVec 256) " <> encoded <> ")") wordDefs
  readAssumes' <- readAssumes
  keccakAssertions' <- keccakAssertions
  frameCtxs <- (declareFrameContext . nubOrd $ foldl' (<>) [] frameCtx)
@@ -212,6 +215,7 @@ assertPropsHelperWith arithEnc simp extraDecls psPreConc = do
   <> frameCtxs
   <> blockCtxs
   <> SMT2 (SMTScript intermediates) mempty mempty
+  <> SMT2 (SMTScript sharedDefs) mempty mempty
   <> SMT2 (SMTScript keccakAssertions') mempty mempty
   <> SMT2 (SMTScript readAssumes') mempty mempty
   <> SMT2 (SMTScript (fmap (\p -> SMTCommand("(assert " <> p <> ")")) encs)) (cexInfo storageReads) ps
@@ -219,6 +223,8 @@ assertPropsHelperWith arithEnc simp extraDecls psPreConc = do
   where
     ps = if simp then Expr.concKeccakSimpProps psPreConc else Expr.concKeccakProps psPreConc
     (psElim, bufs, stores) = eliminateProps ps
+    -- declarations come from psElim: the shared names are defined, not declared
+    (psShared, wordDefs) = shareWords psElim
 
     -- Props storing info that need declaration(s)
     toDeclarePs     = ps <> keccAssump <> keccComp
@@ -257,21 +263,21 @@ assertPropsHelperWith arithEnc simp extraDecls psPreConc = do
 
 
 referencedAbstractStores :: TraversableTerm a => a -> Set Builder
-referencedAbstractStores term = foldTerm go mempty term
+referencedAbstractStores term = foldTermOnce go mempty term
   where
     go = \case
       AbstractStore s idx -> Set.singleton (storeName s idx)
       _ -> mempty
 
 referencedAddrs :: TraversableTerm a => a -> Set Builder
-referencedAddrs term = foldTerm go mempty term
+referencedAddrs term = foldTermOnce go mempty term
   where
     go = \case
       SymAddr a -> Set.singleton (formatEAddr (SymAddr a))
       _ -> mempty
 
 referencedBufs :: TraversableTerm a => a -> [Builder]
-referencedBufs expr = nubOrd $ foldTerm go [] expr
+referencedBufs expr = nubOrd $ foldTermOnce go [] expr
   where
     go :: Expr a -> [Builder]
     go = \case
@@ -279,7 +285,7 @@ referencedBufs expr = nubOrd $ foldTerm go [] expr
       _ -> []
 
 referencedVars :: TraversableTerm a => a -> [Builder]
-referencedVars expr = nubOrd $ foldTerm go [] expr
+referencedVars expr = nubOrd $ foldTermOnce go [] expr
   where
     go :: Expr a -> [Builder]
     go = \case
@@ -287,7 +293,7 @@ referencedVars expr = nubOrd $ foldTerm go [] expr
       _ -> []
 
 referencedFrameContext :: TraversableTerm a => ArithEncoding -> a -> [(Builder, [Prop])]
-referencedFrameContext enc expr = nubOrd $ foldTerm go [] expr
+referencedFrameContext enc expr = nubOrd $ foldTermOnce go [] expr
   where
     go :: Expr a -> [(Builder, [Prop])]
     go = \case
@@ -300,7 +306,7 @@ referencedFrameContext enc expr = nubOrd $ foldTerm go [] expr
     exprToSMT = exprToSMTWith enc
 
 referencedBlockContext :: TraversableTerm a => a -> [(Builder, [Prop])]
-referencedBlockContext expr = nubOrd $ foldTerm go [] expr
+referencedBlockContext expr = nubOrd $ foldTermOnce go [] expr
   where
     go :: Expr a -> [(Builder, [Prop])]
     go = \case
@@ -321,7 +327,7 @@ referencedBlockContext expr = nubOrd $ foldTerm go [] expr
 -- However, we expect that most of such reads will have been
 -- simplified away.
 findStorageReads :: Prop -> StorageReads
-findStorageReads p = foldProp go mempty p
+findStorageReads p = foldPropOnce go mempty p
   where
     go :: Expr a -> StorageReads
     go = \case
@@ -342,7 +348,7 @@ findStorageReads p = foldProp go mempty p
     baseIsAbstractStore (GVar _) = internalError "Unexpected GVar"
 
 findBufferAccess :: TraversableTerm a => [a] -> [(Expr EWord, Expr EWord, Expr Buf)]
-findBufferAccess = foldl' (foldTerm go) mempty
+findBufferAccess = foldl' (foldTermOnce go) mempty
   where
     go :: Expr a -> [(Expr EWord, Expr EWord, Expr Buf)]
     go = \case
