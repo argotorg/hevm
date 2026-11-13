@@ -53,7 +53,7 @@ import EVM.Expr (maybeLitByteSimp)
 import Control.Applicative
 import Control.Monad
 import Control.Monad.IO.Unlift
-import Data.Aeson (encode)
+import Data.Aeson (encode, decodeStrict)
 import Data.Aeson.Types
 import Data.Aeson.Optics
 import Data.Aeson.Key qualified as Key
@@ -67,7 +67,7 @@ import Data.Char (isDigit)
 import Data.Foldable
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.List (isPrefixOf, isInfixOf, isSuffixOf, elemIndex, tails, findIndex)
+import Data.List (isPrefixOf, isInfixOf, isSuffixOf, elemIndex, tails, findIndex, sort)
 import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NonEmpty
 import Data.Maybe
@@ -86,6 +86,8 @@ import System.FilePath.Posix
 import System.Process
 import Text.Read (readMaybe)
 import Witch (unsafeInto)
+import Control.Exception (IOException, try)
+import System.Directory (doesFileExist)
 import Data.Either.Extra (maybeToEither, fromRight)
 import qualified Data.Bifunctor as Bifunctor (first)
 
@@ -313,8 +315,55 @@ readFilteredBuildOutput root jsonFilter _ = do
   case (filterMetadata jsons) of
     [] -> pure . Left $ "no json files found in: " <> outDir
     js -> do
-      outputs <- sequence <$> mapM (readSolc Foundry root) ((fmap ((</>) (outDir))) js)
-      pure . (fmap mconcat) $ outputs
+      (offsets, buildSrcs) <- liftIO $ srcIdOffsets root
+      outputs <- sequence <$> mapM (\j -> readSolcShifted (Map.findWithDefault 0 j offsets) Foundry root (outDir </> j)) js
+      extra <- liftIO $ makeSourceCache root buildSrcs mempty
+      pure $ (<> BuildOutput mempty extra) . mconcat <$> outputs
+
+-- | Source ids are only unique within one build of forge, and an incremental
+-- build adds a build-info of its own. Each artifact gets the offset that moves
+-- the ids of its build out of the way of the others, from forge's cache, and
+-- the sources of every build are added at their shifted ids, as an artifact
+-- may refer to a file whose own artifact is from another build.
+srcIdOffsets :: FilePath -> IO (Map FilePath Int, Sources)
+srcIdOffsets root = do
+  builds <- sort . fmap takeBaseName <$> getDirectoryFiles buildDir ["*.json"]
+  cache <- readJson (root </> "cache" </> "solidity-files-cache.json")
+  case (builds, cache) of
+    (_:_:_, Just v) -> do
+      srcs <- forM (zip [0..] builds) $ \(i, b) -> do
+        info <- readJson (buildDir </> b <.> "json")
+        filterM (doesFileExist . (root </>) . (.filepath) . fst)
+          [ (SrcFile (n + i * offset) (T.unpack path), Nothing)
+          | Just (Object m) <- [info >>= preview (key "source_id_to_path")]
+          , (k, String path) <- KeyMap.toList m
+          , Just n <- [readMaybe (Key.toString k)] ]
+      pure ( Map.fromList
+               [ (T.unpack path, i * offset)
+               | o <- universeObjects v
+               , Just (String path) <- [KeyMap.lookup "path" o]
+               , Just (String b) <- [KeyMap.lookup "build_id" o]
+               , Just i <- [elemIndex (T.unpack b) builds] ]
+           , Sources (Map.fromList (concat srcs)) )
+    _ -> pure mempty
+  where
+    offset = 1000000
+    buildDir = root </> "out" </> "build-info"
+    readJson :: FilePath -> IO (Maybe Value)
+    readJson f = (decodeStrict =<<) . either (const Nothing) Just <$> (try (BS.readFile f) :: IO (Either IOException ByteString))
+    universeObjects :: Value -> [Object]
+    universeObjects = \case
+      Object o -> o : concatMap universeObjects (KeyMap.elems o)
+      Array a -> concatMap universeObjects a
+      _ -> []
+
+shiftSrcIds :: Int -> BuildArtifacts -> BuildArtifacts
+shiftSrcIds 0 a = a
+shiftSrcIds off (Contracts cs, asts, Sources srcs) =
+  ( Contracts (fmap (\c -> c { runtimeSrcmap = fmap sm c.runtimeSrcmap, creationSrcmap = fmap sm c.creationSrcmap }) cs)
+  , asts
+  , Sources (Map.mapKeys (\f -> f { id = f.id + off }) srcs) )
+  where sm m = if m.file >= 0 then m { file = m.file + off } else m
 
 -- | Finds all json files under the provided filepath, searches recursively
 -- Filtering out:  * "kompiled" which gets added to `out` by `kontrol`
@@ -357,13 +406,16 @@ lineSubrange xs (s1, n1) i =
     else Just (s1 - s2, min (s2 + n2 - s1) n1)
 
 readSolc :: App m => ProjectType -> FilePath -> FilePath -> m (Err BuildOutput)
-readSolc pt root fp = do
+readSolc = readSolcShifted 0
+
+readSolcShifted :: App m => Int -> ProjectType -> FilePath -> FilePath -> m (Err BuildOutput)
+readSolcShifted off pt root fp = do
   -- NOTE: we cannot and must not use Data.Text.IO.readFile because that takes the locale
   --       and may fail with very strange errors when the JSON it's reading
   --       contains any UTF-8 character -- which it will with foundry
   fileContents <- liftIO $ fmap Data.Text.Encoding.decodeUtf8 $ Data.ByteString.readFile fp
   let contractName = T.pack $ takeBaseName fp
-  case readJSON pt contractName fileContents of
+  case shiftSrcIds off <$> readJSON pt contractName fileContents of
       -- forge links libraries at test time; we cannot, so only a test contract
       -- that needs one is fatal
       Left (UnlinkedLibrary _) | Foundry <- pt, not (isTestContractJson fileContents) -> do

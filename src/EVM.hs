@@ -1671,8 +1671,9 @@ accountEmpty :: Contract -> Bool
 accountEmpty c =
   codeEmpty c
   && c.nonce == (Just 0)
-  -- TODO: handle symbolic balance...
-  && c.balance == Lit 0
+  -- a symbolic balance that simplifies to 0, e.g. after transferring x & 0, is 0 too;
+  -- EXTCODEHASH handles one that stays symbolic
+  && maybeLitWordSimp c.balance == Just 0
 
 codeEmpty :: Contract -> Bool
 codeEmpty c = case c.code of
@@ -2005,6 +2006,13 @@ forceConcreteAddr n msg continue = case maybeLitAddrSimp n of
   Just c -> continue c
   where fallback = unexpectedSymArg msg [n]
 
+-- | A symbolic prank address (e.g. picked from an actor list by a symbolic index)
+-- is split into one branch per possible concrete value
+prankAddr :: (?conf :: Config, VMOps t) => Expr EWord -> String -> (Expr EAddr -> EVM t ()) -> EVM t ()
+prankAddr addr msg continue = case wordToAddr addr of
+  Just a -> continue a
+  Nothing -> forceConcreteLimitSz addr 20 msg (continue . LitAddr . truncateToAddr)
+
 forceConcreteAddr2 :: VMOps t => (Expr EAddr, Expr EAddr) -> String -> ((Addr, Addr) -> EVM t ()) -> EVM t ()
 forceConcreteAddr2 (n,m) msg continue = case (maybeLitAddrSimp n, maybeLitAddrSimp m) of
   (Just c, Just d) -> continue (c,d)
@@ -2212,22 +2220,18 @@ cheatActions = Map.fromList
 
   , action "prank(address)" $
       \sig input -> case decodeStaticArgs 0 1 input of
-        [addr]  -> case wordToAddr addr of
-          Just a -> do
-            doStop
-            assign (#state % #overrideCaller) (Just a)
-            assign (#state % #resetCaller) True
-          Nothing -> vmError (BadCheatCode "prank(address), could not decode address provided" sig)
+        [addr]  -> prankAddr addr "prank(address), could not decode address provided" $ \a -> do
+          doStop
+          assign (#state % #overrideCaller) (Just a)
+          assign (#state % #resetCaller) True
         _ -> vmError (BadCheatCode "prank(address) parameter decoding failed" sig)
 
   , action "startPrank(address)" $
       \sig input -> case decodeStaticArgs 0 1 input of
-        [addr]  -> case wordToAddr addr of
-          Just a -> do
-            doStop
-            assign (#state % #overrideCaller) (Just a)
-            assign (#state % #resetCaller) False
-          Nothing -> vmError (BadCheatCode "startPrank(address), could not decode address provided" sig)
+        [addr]  -> prankAddr addr "startPrank(address), could not decode address provided" $ \a -> do
+          doStop
+          assign (#state % #overrideCaller) (Just a)
+          assign (#state % #resetCaller) False
         _ -> vmError (BadCheatCode "startPrank(address) parameter decoding failed" sig)
 
   , action "stopPrank()" $
@@ -2932,8 +2936,13 @@ create' :: forall t. (?op :: Word8, ?conf::Config, VMOps t)
   -> Expr EWord -> Gas t -> Expr EWord -> [Expr EWord] -> Expr EAddr -> Expr Buf -> EVM t ()
 create' self this xSize xGas xValue xs newAddr initCode = do
   vm0 <- get
-  -- are we exceeding the max init code size
-  if xSize > Lit (vm0.block.maxCodeSize * 2)
+  -- are we exceeding the max init code size. Compared as a number: the derived Ord on
+  -- Expr is structural, and would take every symbolic size, e.g. end - start of a
+  -- buffer after a symbolic-length allocation, for an oversized one.
+  let litSize = Expr.maybeLitWordSimp xSize
+  if isNothing litSize
+  then unexpectedSymArg "init code size that does not simplify to a literal" [xSize]
+  else if litSize > Just (vm0.block.maxCodeSize * 2)
   then do
     assign' (#state % #stack) (Lit 0 : xs)
     assign (#state % #returndata) mempty

@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- The progress log gives the source location of forks and of the locations in
+  its summaries, when there is debug info.
 - Exponentiation over conditional constants folds to conditional powers, allowing
   packed-array writes with a conditionally selected index to reach the SMT solver.
 - Invariant testing: `hevm test` checks `invariant_` functions after every
@@ -130,6 +132,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes of zero.
 
 ## Changed
+- Invariant tests print the paths they only partially explored grouped by
+  source location, as `prove` tests do, instead of printing their expressions.
 - Concrete ADDMOD and MULMOD are computed with `Integer` instead of `Word512`,
   which is several times faster in code that uses them heavily, such as `mulDiv`.
 - `EVM.SymExec` is split: concrete replay of counterexamples moves to
@@ -197,6 +201,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of simplifying an ITE of them.
 
 ## Fixed
+- An account whose balance is a term equal to 0, e.g. after a transfer of `x & 0`,
+  counted as non-empty, so `EXTCODEHASH` gave the hash of the empty code instead
+  of 0, and the account was not cleared at the end of the transaction.
+- `CREATE` and `CREATE2` compared a symbolic init code size with the maximum
+  structurally, so every symbolic size failed as too large and the path was
+  dropped. The size is now simplified and compared as a number, and one that stays
+  symbolic ends the path as partial.
+- Source locations are right after an incremental `forge build`, whose
+  build-infos number the source files independently.
+- `prank` and `startPrank` with a symbolic address, e.g. one picked from a list
+  by a symbolic index, explore each possible address instead of failing.
 - ABI signatures expand tuple components, fixing selectors and event topics for
   struct arguments and preventing struct overloads from being lost.
 - SMT queries skip assumptions between concrete keccak hashes, whose values
