@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## Fixed
+- Equivalence checking no longer compares deployed runtime code for mutually
+  exclusive constructor paths.
+
 ## Added
 - Invariant testing: `hevm test` checks `invariant_` functions after every
   sequence of at most `--invariant-depth` calls to the target contracts, with

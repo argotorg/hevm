@@ -315,7 +315,14 @@ runtimeSolidityEquivalenceTests = testGroup "Solidity runtime equivalence"
 
 deploymentSolidityEquivalenceTests :: TestTree
 deploymentSolidityEquivalenceTests = testGroup "Solidity deployment equivalence"
-  [ testCase "constructor-same-deployed-diff" $ do
+  [ testCase "constructor-crossed-paths-do-not-compare-impossible-deployments" $ do
+      let a = "34600c5760fe5f5360015ff35b60005f5360015ff3"
+          b = "3415600d5760005f5360015ff35b60fe5f5360015ff3"
+      eq <- Effects.runApp $ withSolvers Bitwuzla 1 Nothing defMemLimit $ \s -> do
+        (calldata, _) <- mkCalldata Nothing []
+        equivalenceCheck s Nothing a b defaultVeriOpts calldata True
+      assertEqual "impossible constructor paths must not create a difference" [] (map fst eq.res)
+  , testCase "constructor-same-deployed-diff" $ do
       let a = [i|
                 contract C {
                   uint public immutable NUMBER;
