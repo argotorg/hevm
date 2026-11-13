@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- Exponentiation over conditional constants folds to conditional powers, allowing
+  packed-array writes with a conditionally selected index to reach the SMT solver.
 - Invariant testing: `hevm test` checks `invariant_` functions after every
   sequence of at most `--invariant-depth` calls to the target contracts, with
   symbolic arguments, callers and timestamps. States reached before are not
