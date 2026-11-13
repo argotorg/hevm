@@ -22,7 +22,7 @@ import EVM.ABI (Sig(..))
 import EVM.Dapp (TestMethodInfo(..))
 import EVM.Effects
 import EVM.Fetch qualified as Fetch
-import EVM.Invariant (disjoin)
+import EVM.Invariant (simplifyDisjunction)
 import EVM.Test.Utils (WithOutput, assertRun, runForgeTestResultsWith)
 import EVM.Expr (simplifyProp)
 import EVM.Traversals (mapProp)
@@ -66,13 +66,13 @@ tests = testGroup "invariant"
           q = PEq (Lit 1) (Var "c")
           r = PLT (Var "d") (Lit 5)
       assertEqual "branches on p and q cover everything" [Set.empty]
-        (disjoin [Set.fromList [p, q], Set.fromList [p, PNeg q], Set.fromList [PLEq (Var "b") (Var "a")]])
+        (simplifyDisjunction [Set.fromList [p, q], Set.fromList [p, PNeg q], Set.fromList [PLEq (Var "b") (Var "a")]])
       assertEqual "r is implied by r and q" [Set.fromList [r]]
-        (disjoin [Set.fromList [r, q], Set.fromList [r]])
-  , testProperty "disjoin-same-meaning" $ forAll genDisjunction $ \rs ->
-      let out = disjoin rs
+        (simplifyDisjunction [Set.fromList [r, q], Set.fromList [r]])
+  , testProperty "simplifyDisjunction-same-meaning" $ forAll genDisjunction $ \rs ->
+      let out = simplifyDisjunction rs
       in classify (length out < length rs) "shortened" $ classify (any Set.null out) "always true" $
-         counterexample ("disjoin: " <> show out) $
+         counterexample ("simplifyDisjunction: " <> show out) $
            length out <= length rs .&&. conjoin [holds env rs === holds env out | env <- envs]
   , test "fail" $ do
       runInvariant 1 "fail.sol" "invariant_below_two" >>= assertRun "one call is not enough" [(True, True)]
@@ -104,7 +104,7 @@ tests = testGroup "invariant"
 
 -- | halmos' invariant tests, with the results halmos expects (tests/expected/all.json)
 -- | Disjunctions of conjunctions over a few comparisons, often all sign
--- combinations of some of them, which 'disjoin' can shorten
+-- combinations of some of them, which 'simplifyDisjunction' can shorten
 genDisjunction :: Gen [Set.Set Prop]
 genDisjunction = oneof [random, split]
   where
