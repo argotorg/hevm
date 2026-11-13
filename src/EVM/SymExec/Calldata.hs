@@ -5,7 +5,7 @@ import Prelude hiding (Foldable(..))
 
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
-import Data.Foldable (length, foldl')
+import Data.Foldable (elem, foldl', length, null)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Vector qualified as V
@@ -39,26 +39,31 @@ symAbiArg maxDynSize name = \case
     Comp . V.toList . V.imap (\(T.pack . show -> i) tp -> symAbiArg maxDynSize (name <> "-t-" <> i) tp) $ tps
   -- Dynamic bytes/string: a symbolic length bounded by maxDynSize, the contents
   -- are the calldata bytes that follow the length word
+  -- an array of static elements: a symbolic count bounded by maxDynSize, the elements are
+  -- the calldata words that follow the length word
+  AbiArrayDynamicType t | abiKind t == Static ->
+    let len = Var (name <> "-array-length")
+    in Dy [PLEq len (Lit (fromIntegral maxDynSize))] len (32 * staticWords t)
   AbiBytesDynamicType -> dyn (name <> "-bytes-length")
   AbiStringType -> dyn (name <> "-string-length")
   t -> internalError $ "TODO: symbolic abi encoding for " <> show t
   where
     v = Var name
     dyn lenName = let len = Var lenName
-                  in Dy [PLEq len (Lit (fromIntegral maxDynSize))] len
+                  in Dy [PLEq len (Lit (fromIntegral maxDynSize))] len 1
 
 -- | Whether 'symAbiArg' can make an argument of this type symbolic
 symAbiArgSupported :: AbiType -> Bool
 symAbiArgSupported = \case
   AbiArrayType _ t -> symAbiArgSupported t
   AbiTupleType ts -> all symAbiArgSupported ts
-  AbiArrayDynamicType _ -> False
+  AbiArrayDynamicType t -> abiKind t == Static && symAbiArgSupported t
   AbiFunctionType -> False
   _ -> True
 
 data CalldataFragment
   = St [Prop] (Expr EWord)
-  | Dy [Prop] (Expr EWord) -- ^ props, symbolic length
+  | Dy [Prop] (Expr EWord) Int -- ^ props, symbolic length, and bytes per unit of it
   | DyConc ByteString -- ^ tail encoding of a concrete dynamic argument
   | Comp [CalldataFragment]
   deriving (Show, Eq)
@@ -102,21 +107,30 @@ symCalldataNamed prefix exact sig typesignature concreteArgs base = do
     -- (every path is still explored fully), so we record it as a program-wide
     -- 'Caveat' rather than a per-path 'Partial'. Derived from the fragments we
     -- actually built, so a concretely-supplied argument produces no caveat.
-    caveats = [DynArgBounded conf.maxDynSize | any isDy calldatas]
+    units = [unit | Dy _ _ unit <- calldatas]
+    caveats = [DynArgBounded conf.maxDynSize (1 `elem` units) (any (/= 1) units) | not (null units)]
   pure (withSelector, sizeConstraints : props, caveats)
 
 cdLen :: [CalldataFragment] -> Expr EWord
 cdLen frags = Expr.add (Expr.add (Lit 4) (countHeadBytes frags)) (tailLen frags)
   where
     tailLen = foldl' (\acc f -> case f of
-                         Dy _ len -> Expr.add acc (dynTailSize len)
+                         Dy _ len unit -> Expr.add acc (dynTailSize len unit)
                          DyConc bs -> Expr.add acc (Lit (unsafeInto (BS.length bs)))
                          _ -> acc) (Lit 0)
 
 -- | Bytes a dynamic argument takes in the tail: the length word and the
--- contents, padded to a multiple of 32
-dynTailSize :: Expr EWord -> Expr EWord
-dynTailSize len = Expr.add (Lit 32) (Expr.mul (Expr.div (Expr.add len (Lit 31)) (Lit 32)) (Lit 32))
+-- contents, @len@ units of @unit@ bytes, padded to a multiple of 32
+dynTailSize :: Expr EWord -> Int -> Expr EWord
+dynTailSize len 1 = Expr.add (Lit 32) (Expr.mul (Expr.div (Expr.add len (Lit 31)) (Lit 32)) (Lit 32))
+dynTailSize len unit = Expr.add (Lit 32) (Expr.mul len (Lit (fromIntegral unit)))
+
+-- | The words a static type takes in the ABI encoding
+staticWords :: AbiType -> Int
+staticWords = \case
+  AbiArrayType n t -> n * staticWords t
+  AbiTupleType ts -> V.sum (staticWords <$> ts)
+  _ -> 1
 
 -- | Each top-level fragment occupies 32 bytes in the head (value or offset pointer)
 countHeadBytes :: [CalldataFragment] -> Expr EWord
@@ -150,12 +164,12 @@ combineFragments fragments base =
         St p w -> go headSz (Expr.add idx (Lit 32)) tailAcc rest
                     (Expr.writeWord idx w buf, p <> ps)
         Comp xs | all isSt xs -> go headSz idx tailAcc (xs <> rest) (buf, ps)
-        Dy p len ->
+        Dy p len unit ->
           -- ABI offsets are relative to the start of the args (byte 4)
           let offset = Expr.add headSz tailAcc
               buf1 = Expr.writeWord idx offset buf
               buf2 = Expr.writeWord (Expr.add (Lit 4) offset) len buf1
-          in go headSz (Expr.add idx (Lit 32)) (Expr.add tailAcc (dynTailSize len)) rest
+          in go headSz (Expr.add idx (Lit 32)) (Expr.add tailAcc (dynTailSize len unit)) rest
                (buf2, p <> ps)
         DyConc bs ->
           let offset = Expr.add headSz tailAcc

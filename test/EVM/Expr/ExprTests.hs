@@ -11,6 +11,7 @@ import Test.Tasty.ExpectedFailure (ignoreTest)
 import Test.Tasty.HUnit
 import Test.Tasty.QuickCheck hiding (Failure, Success, (.&.))
 
+import Control.Monad (forM_)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ReaderT)
 import Data.Bits (complement, shiftL, shiftR, (.&.), (.|.))
@@ -143,6 +144,9 @@ rewriteRuleTests = testGroup "Rewrite rules"
       assertEqual "holds" (Expr.simplifyProps small) (Expr.simplifyProps (PNeg (PEq (Lit 0) guard) : small))
       assertEqual "cannot fail" [PBool False] (Expr.simplifyProps (PEq (Lit 0) guard : small))
       assertBool "may overflow" (Expr.simplifyProps (PEq (Lit 0) guard : big) /= [PBool False])
+      let y = Var "y"
+          chained = [PLEq x (Lit (2 ^ (128 :: Int) - 1)), PLEq d y, PLEq y (Lit (2 ^ (128 :: Int) - 1))]
+      assertEqual "bound through a chain" [PBool False] (Expr.simplifyProps (PEq (Lit 0) guard : chained))
       let a = Var "a"
           b = Var "b"
           scaled = Div (Mul a (Mod b (Lit (10 ^ (30 :: Int))))) (Lit (10 ^ (27 :: Int)))
@@ -152,6 +156,26 @@ rewriteRuleTests = testGroup "Rewrite rules"
       let ab = Mul a b
       assertBool "scale and back may overflow"
         (Expr.simplifyProps [PNeg (PEq (Div (Mul (Lit (10 ^ (18 :: Int))) ab) (Lit (10 ^ (18 :: Int)))) ab)] /= [PBool False])
+  , testCase "literal-mul-overflow-checks" $ do
+      let x = Var "x"
+          c = 10 ^ (18 :: Int)
+          b = 10 ^ (9 :: Int)
+          back = PEq (Div (Mul (Lit c) x) (Lit c)) x
+          -- y * c checked for y = b * x, after c * (b * x) is folded into (b * c) * x
+          folded = POr (PEq (Lit c) (Div (Mul (Lit (b * c)) x) (Mul (Lit b) x))) (PEq (Lit 0) (Mul (Lit b) x))
+          plain = POr (PEq (Lit c) (Div (Mul (Lit c) x) x)) (PEq (Lit 0) x)
+          at v = Expr.simplifyProp . mapProp (sub v)
+          sub :: W256 -> Expr a -> Expr a
+          sub v (Var "x") = Lit v
+          sub _ e = e
+          limit = Expr.maxLit `div` c
+      -- left alone: under abstract arithmetic, the solver relies on it relating c * x to x
+      assertBool "scale and back" (case Expr.simplifyProp back of PEq {} -> True; _ -> False)
+      assertEqual "folded" (PLEq (Mul (Lit b) x) (Lit limit)) (Expr.simplifyProp folded)
+      assertEqual "plain" (PLEq x (Lit limit)) (Expr.simplifyProp plain)
+      forM_ [back, folded, plain] $ \p ->
+        forM_ [0, 1, limit `div` b, limit `div` b + 1, limit, limit + 1, Expr.maxLit] $ \v ->
+          assertEqual ("same value at " <> show v) (at v p) (at v (Expr.simplifyProp p))
   , testCase "literal-scaling-cancels" $ do
       let m = Mod (Var "x") (Lit (10 ^ (18 :: Int)))
           e = 10 ^ (27 :: Int)
@@ -1117,6 +1141,9 @@ basicSimplificationTests = testGroup "Basic simplification tests"
         a = successPath [PEq (Add (Lit 1) (Lit 2)) (Sub (Lit 4) (Lit 1))]
         b = Expr.simplify a
       assertEqual "Must simplify down" (successPath []) b
+  , testCase "simp-exp-ite-lits" $ do
+      let e = Exp (Lit 0x100) (ITE (Var "c") (Lit 0x1c) (Lit 4))
+      assertEqual "split" (ITE (Var "c") (Lit (0x100 ^ (0x1c :: Int))) (Lit 0x100000000)) (Expr.simplify e)
   , testCase "simp-mul-neg1" $ do
       let simp = Expr.simplify $ Mul (Lit Expr.maxLit) (Var "x")
       assertEqual "mul by -1 is negation" (Sub (Lit 0) (Var "x")) simp
@@ -1129,6 +1156,30 @@ basicSimplificationTests = testGroup "Basic simplification tests"
   , testCase "simp-double-not" $ do
       let simp = Expr.simplify $ Not (Not (Var "a"))
       assertEqual "Not should be concretized" (Var "a") simp
+  , testCase "simp-round-down-not-above" $ do
+      -- Solidity's uint32 now < now - now % cycleSecs, from Drips' Streams: never true
+      let m32 = Lit 0xffffffff
+          t = Add (Lit 0x5ae26348) (And m32 (Var "arg1"))
+          now = And m32 t
+          cond start = LT now (And m32 (Sub start (Mod now (Lit 0x93a80))))
+      assertEqual "uint32" (Lit 0) (Expr.simplify (cond t))
+      assertEqual "uint32, masked start" (Lit 0) (Expr.simplify (cond now))
+      assertEqual "uint256" (Lit 0) (Expr.simplify (LT (Var "x") (Sub (Var "x") (Mod (Var "x") (Var "c")))))
+      -- the rule needs a 2^n - 1 mask
+      let m = Lit 0xf0
+          other = LT (And m (Var "t")) (And m (Sub (Var "t") (Mod (And m (Var "t")) (Var "c"))))
+      assertBool "other mask" (Expr.simplify other /= Lit 0)
+  , testProperty "simp-round-down-not-above-equivalence" $ withMaxSuccess 60 $
+      forAll (elements [8, 32, 64, 255, 256]) $ \n -> forAll (elements [0, 1, 7, 0x93a80]) $ \c -> ioProperty $ do
+        let mask = Lit ((1 `shiftL` n) - 1)
+            t = Add (Var "a") (Var "b")
+            now = And mask t
+            full = LT now (And mask (Sub t (Mod now (Lit c))))
+            simp = Expr.simplify full
+        res <- checkSatWith (equivConfig {abstractArith = False}) (full ./= simp)
+        pure $ counterexample ("simplified: " <> show simp <> "\nresult: " <> show res) $
+          -- c = 0, 1 make the modulo 0 first, so the rule has nothing to match
+          (c <= 1 || simp == Lit 0) .&&. isQed res
   , testCase "keccak-small-literal" $ do
       let k = Keccak (AbstractBuf "buf")
       assertEqual "keccak is nonzero" (Lit 0) (Expr.simplify (IsZero k))
@@ -1421,6 +1472,13 @@ constantPropagationTests = testGroup "isUnsat-concrete-tests"
       propagated = Expr.constPropagate t
     in
     mustContainFalse propagated
+  , testCase "pinned-term-substituted" $ do
+      let idx = Mod (Var "seed") (Lit 3)
+          slot = Add (Lit 7) idx
+          t = [PEq (Lit 1) idx, PEq (Lit 9) slot]
+      mustContainFalse (Expr.simplifyProps t)
+      assertEqual "the other uses become concrete" [PLT (Var "y") (Lit 8), PEq (Lit 1) idx]
+        (filter (/= PBool True) (Expr.simplifyProps [PEq (Lit 1) idx, PLT (Var "y") slot]))
   , testCase "disjunction-right-false" $
       let
         t = [PEq (Var "x") (Lit 1), POr (PEq (Var "y") (Lit 1)) (PEq (Var "x") (Lit 0)), PEq (Var "y") (Lit 2)]
@@ -1924,6 +1982,11 @@ concretizationTests = testGroup "Concretization tests"
   , testCase "conc-ite-same-branches" $ do
       let simp = Expr.simplify $ ITE (Var "c") (Lit 42) (Lit 42)
       assertEqual "ITE with same branches" (Lit 42) simp
+  , testCase "ite-else-is-then-at-zero" $ do
+      let xy = Mul (Var "x") (Var "y")
+      assertEqual "x * y is 0 where y is" xy (Expr.simplify $ ITE (Var "y") xy (Lit 0))
+      assertEqual "x + y is not 0 where y is" (ITE (Var "y") (Add (Var "x") (Var "y")) (Lit 0))
+        (Expr.simplify $ ITE (Var "y") (Add (Var "x") (Var "y")) (Lit 0))
 
     -- Eq in simplifier (structural equality)
   , testCase "conc-eq-self" $ do

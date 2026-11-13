@@ -403,6 +403,51 @@ tests =
         assertBoolM "bounded dyn arg must produce a caveat" $ not (null caveats)
         let numCexes = sum $ map (fromEnum . isCex) ret
         assertEqualM "should find counterexample" 1 numCexes
+    , test "dyn-array-arg-cex" $ do
+        Just c <- solcRuntime "C" [i|
+            contract C {
+              function fun(uint16[] calldata a) public pure {
+                if (a.length == 2 && a[1] == 7) {
+                  assert(false);
+                }
+              }
+            } |]
+        let sig = Just $ Sig "fun(uint16[])" [AbiArrayDynamicType (AbiUIntType 16)]
+        (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        (_, caveats) <- mkCalldata sig []
+        assertBoolM "bounded array arg must not produce a partial" $ not (any isPartial e)
+        assertBoolM "bounded array arg must produce a caveat" $ not (null caveats)
+        assertEqualM "should find counterexample" 1 (sum $ map (fromEnum . isCex) ret)
+    , test "dyn-array-arg-beyond-bound" $ do
+        Just c <- solcRuntime "C" [i|
+            contract C {
+              function fun(uint256[] calldata a) public pure {
+                if (a.length > 70) {
+                  assert(false);
+                }
+              }
+            } |]
+        let sig = Just $ Sig "fun(uint256[])" [AbiArrayDynamicType (AbiUIntType 256)]
+        (_, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        (_, caveats) <- mkCalldata sig []
+        assertBoolM "bounded array arg must produce a caveat" $ not (null caveats)
+        assertEqualM "should not find cex (bug is beyond bound)" 0 (sum $ map (fromEnum . isCex) ret)
+    -- a CREATE whose init code sits at a symbolic offset used to fail as oversized, dropping the path
+    , test "create-after-symbolic-alloc" $ do
+        Just c <- solcRuntime "C" [i|
+            contract D {}
+            contract C {
+              function fun(uint8 n) public {
+                uint256[] memory m = new uint256[](n);
+                m;
+                D d = new D();
+                d;
+                assert(false);
+              }
+            } |]
+        let sig = Just $ Sig "fun(uint8)" [AbiUIntType 8]
+        (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        assertBoolM "the CREATE path must be reported, not dropped" $ any isPartial e || any isCex ret
     -- Tests that bugs beyond maxDynSize are reported via a caveat, not as false passes
     , test "bytes-beyond-bound-length-check" $ do
         -- Bug only triggers when bytes.length > 100; with default maxDynSize=64, should NOT find cex

@@ -24,6 +24,12 @@ module EVM.HashCons
   , resetHashCons
   , setHashConsLimit
   , memoFixTraverse
+  , memoMapExpr
+  , AnyExpr(..)
+  , nodeId
+  , Seen
+  , newSeen
+  , firstVisit
   ) where
 
 import Prelude hiding (LT, GT)
@@ -31,6 +37,7 @@ import Data.IORef
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as M
 import Data.IntMap.Strict qualified as IM
+import Data.IntSet qualified as IS
 import Control.Concurrent (yield)
 import Control.Exception (evaluate, mask_)
 import Control.Monad (unless, when)
@@ -39,6 +46,7 @@ import Data.Text (Text)
 import Data.ByteString (ByteString)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Mem.StableName
+import Unsafe.Coerce (unsafeCoerce)
 import GHC.StaticPtr (StaticPtr, StaticKey, staticKey, deRefStaticPtr)
 
 import EVM.Traversals.Children (mapChildrenM)
@@ -337,3 +345,50 @@ memoFixTraverse pass root = unsafePerformIO (goM root)
         C {} -> pure $! e
         _ -> pure $! fi e
 {-# NOINLINE memoFixTraverse #-}
+
+data AnyExpr = forall x. AnyExpr (Expr x)
+
+-- | The id of a canonical node. Ids only grow, so a node keeps its id, or loses it when
+-- the tables are reset: a memo keyed by it misses then, but is never wrong.
+nodeId :: Expr a -> Maybe Int
+nodeId e = unsafePerformIO (lookupSN e)
+{-# NOINLINE nodeId #-}
+
+-- | 'mapExpr' of an arbitrary function, applying it once per canonical node in this call:
+-- walking a hash-consed DAG as a tree is exponential in the depth of its sharing,
+-- e.g. a merged @x' = ITE (c x) x (f x)@ chain holds three references to each @x@
+memoMapExpr :: (forall a . Expr a -> Expr a) -> Expr b -> Expr b
+memoMapExpr f root = unsafePerformIO $ do
+  memo <- newIORef IM.empty
+  let goM :: Expr x -> IO (Expr x)
+      goM n = lookupSN n >>= \case
+        Nothing -> rebuild n
+        Just i -> IM.lookup i <$> readIORef memo >>= \case
+          -- equal ids are the same node, so of the same type
+          Just (AnyExpr r) -> pure (unsafeCoerce r)
+          Nothing -> do
+            r <- rebuild n
+            modifyIORef' memo (IM.insert i (AnyExpr r))
+            pure r
+      rebuild :: Expr x -> IO (Expr x)
+      rebuild n = do
+        new <- mapChildrenM goM n
+        case n of
+          C {} -> pure $! new
+          _ -> evaluate (hashConsExpr (f new))
+  goM root
+{-# NOINLINE memoMapExpr #-}
+
+-- | The canonical nodes a traversal has visited
+newtype Seen = Seen (IORef IS.IntSet)
+
+newSeen :: IO Seen
+newSeen = Seen <$> newIORef IS.empty
+
+-- | Whether this is the first visit of the node; always for a node that is not canonical
+firstVisit :: Seen -> Expr a -> IO Bool
+firstVisit (Seen ref) e = lookupSN e >>= \case
+  Nothing -> pure True
+  Just i -> do
+    s <- readIORef ref
+    if IS.member i s then pure False else writeIORef ref (IS.insert i s) >> pure True

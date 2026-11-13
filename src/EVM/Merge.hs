@@ -7,79 +7,60 @@
 -- execution. Instead of forking on every JUMPI, we can speculatively execute
 -- both paths and merge them using ITE (If-Then-Else) expressions when:
 --
--- 1. Both paths converge to the same PC (forward jump pattern)
+-- 1. Both paths reach the same PC at the same stack depth: the jump target
+--    (skip block) or a later join point (if/else, ternary)
 -- 2. Neither path has side effects (storage, memory, logs unchanged)
--- 3. Both paths have the same stack depth
 --
 -- This reduces path explosion from 2^N to linear in many common patterns.
 
 module EVM.Merge
   ( tryMergeForwardJump
+  , decide
   ) where
 
 import Control.Monad (when)
 import Control.Monad.State.Strict (get, put)
+import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust)
 import Debug.Trace (traceM)
 import Optics.Core
 import Optics.State
+import Witch (tryInto)
 
 import EVM.Effects (Config(..))
 import EVM.Expr qualified as Expr
 import EVM.Types
 
--- | Execute instructions speculatively until target PC is reached or
--- we hit budget limit/SMT query/RPC call/revert/error.
-speculateLoopOuter
-  :: Config
-  -> EVM Symbolic ()  -- ^ Single-step executor
-  -> Int              -- ^ Target PC
-  -> EVM Symbolic (Maybe (VM Symbolic))
-speculateLoopOuter conf exec1Step targetPC = do
-    -- Initialize merge state for this speculation
-    let budget = conf.mergeMaxBudget
-    modifying #mergeState $ \ms -> ms { msActive = True , msRemainingBudget = budget }
-    res <- speculateLoop conf exec1Step targetPC
-    -- Reset merge state
-    assign #mergeState defaultMergeState
-    pure res
+-- | Executes instructions speculatively until @f@ is done, or until the budget
+-- runs out or execution stops (RPC call, revert, SMT query, nested branch)
+speculate :: Config -> EVM Symbolic () -> Prop -> s -> (s -> VM Symbolic -> Either a s) -> EVM Symbolic (Either a s)
+speculate conf exec1Step assume s0 f = do
+  assign #mergeState (MergeState True [Expr.simplifyProp assume])
+  res <- go conf.mergeMaxBudget s0
+  assign #mergeState defaultMergeState
+  pure res
+  where
+    go budget s = do
+      vm <- get
+      if isJust vm.result || budget <= 0 then pure (Right s)
+      else case f s vm of
+        Left a -> pure (Left a)
+        Right s' -> exec1Step >> go (budget - 1 :: Int) s'
 
--- | Inner loop for speculative execution with budget tracking
-speculateLoop
-  :: Config
-  -> EVM Symbolic ()  -- ^ Single-step executor
-  -> Int              -- ^ Target PC
-  -> EVM Symbolic (Maybe (VM Symbolic))
-speculateLoop conf exec1Step targetPC = do
-    ms <- use #mergeState
-    if ms.msRemainingBudget <= 0
-      then pure Nothing  -- Budget exhausted
-      else do
-        pc <- use (#state % #pc)
-        result <- use #result
-        case result of
-          Just _ -> pure Nothing  -- Hit RPC call/revert/SMT query/etc.
-          Nothing
-            | pc == targetPC -> Just <$> get  -- Reached target
-            | otherwise -> do
-                -- Decrement budget and execute one instruction
-                modifying #mergeState $ \s -> s { msRemainingBudget = subtract 1 s.msRemainingBudget }
-                exec1Step
-                speculateLoop conf exec1Step targetPC
-
--- | Try to merge a forward jump (skip block pattern) for Symbolic execution
+-- | Try to merge a forward jump for Symbolic execution
 -- Returns True if merge succeeded, False if we should fall back to forking
--- SOUNDNESS: Both paths (jump and fall-through) must converge to the same PC,
--- have the same stack depth, and have no side effects. Only then can we merge.
+-- SOUNDNESS: Both paths (jump and fall-through) must reach the same PC with
+-- the same stack depth and no side effects. Only then can we merge.
 tryMergeForwardJump
   :: Config
   -> EVM Symbolic ()  -- ^ Single-step executor
+  -> (Int -> Bool)    -- ^ Is this a valid jump destination
   -> Int              -- ^ Current PC
   -> Int              -- ^ Jump target PC
   -> Expr EWord       -- ^ Branch condition
   -> [Expr EWord]     -- ^ Stack after popping JUMPI args
   -> EVM Symbolic Bool
-tryMergeForwardJump conf exec1Step currentPC jumpTarget cond stackAfterPop = do
+tryMergeForwardJump conf exec1Step isJumpDest currentPC jumpTarget cond stackAfterPop = do
   -- Only merge forward jumps whose conditions remain symbolic.
   if jumpTarget <= currentPC || isJust (Expr.maybeLitWordSimp cond)
   then pure False
@@ -90,39 +71,61 @@ tryMergeForwardJump conf exec1Step currentPC jumpTarget cond stackAfterPop = do
     case vm0.state.memory of
       ConcreteMemory _ -> pure False
       SymbolicMemory _ -> do
-        -- True branch (jump taken): Just sets PC to target, no execution needed
-        let trueStack = stackAfterPop  -- Stack after popping JUMPI args
+        let place vm = (vm.state.pc, length vm.state.stack)
+            -- the fall-through may reach the join only after calling a helper
+            -- that the jump also calls: there the return addresses differ
+            mergeable vf vt = checkNoSideEffects vm0 vf && checkNoSideEffects vm0 vt
+              && not (or (zipWith returnsDiffer vt.state.stack vf.state.stack))
+            returnsDiffer (Lit a) (Lit b) = a /= b && jumpDest a && jumpDest b
+            returnsDiffer _ _ = False
+            jumpDest = either (const False) isJumpDest . tryInto
 
-        -- False branch (fall through): Execute until we reach jump target
+        -- False branch (fall through): every state it reaches
         assign' (#state % #stack) stackAfterPop
-        modifying' (#state % #pc) (+ 1)  -- Move past JUMPI
-        maybeVmFalse <- speculateLoopOuter conf exec1Step jumpTarget
+        modifying' (#state % #pc) (+ 1)
+        -- the jump target is the earliest point where the branches can meet
+        reached <- either id id <$> speculate conf exec1Step (PEq (Lit 0) cond) Map.empty (\seen vm ->
+          let seen' = Map.insertWith (\_ old -> old) (place vm) vm seen
+          in if vm.state.pc == jumpTarget then Left seen' else Right seen')
 
-        case maybeVmFalse of
-          Nothing -> put vm0 >> pure False -- can't merge: EVM error, SMT/RPC query, over-budget
-          Just vmFalse -> do
-            let falseStack = vmFalse.state.stack
-                soundnessOK = checkNoSideEffects vm0 vmFalse
+        -- True branch (jump taken): until it meets the false branch
+        put vm0
+        assign' (#state % #stack) stackAfterPop
+        assign' (#state % #pc) jumpTarget
+        met <- speculate conf exec1Step (PNeg (PEq (Lit 0) cond)) () $ \() vt -> case Map.lookup (place vt) reached of
+          Just vf | mergeable vf vt -> Left (vt, vf)
+          _ -> Right ()
 
-            -- Check merge conditions: same stack depth AND no side effects
-            if length trueStack == length falseStack && soundnessOK
-              then do
-                -- Merge stacks using ITE expressions, simplifying to prevent growth
-                let condSimp = Expr.simplify cond
-                    mergeExpr t f
-                      | t == f = t
-                      | otherwise = Expr.simplify $ ITE condSimp t f
-                    mergedStack = zipWith mergeExpr trueStack falseStack
-                -- Use vm0 as base and update only PC and stack
-                when conf.debug $ traceM $ "Merged forward jump"
-                  <> runSrcLookup vm0.srcLookup vm0.env.contracts vm0.state.contract jumpTarget
-                put vm0
-                assign (#state % #pc) jumpTarget
-                assign (#state % #stack) mergedStack
-                assign #result Nothing
-                assign (#mergeState % #msActive) False
-                pure True
-              else put vm0 >> pure False -- can't merge: stack depth or state differs
+        put vm0
+        case met of
+          Right () -> pure False -- can't merge: no common point, EVM error, SMT/RPC query, over-budget
+          Left (vmTrue, vmFalse) -> do
+            -- Merge stacks using ITE expressions, simplifying to prevent growth
+            let condSimp = Expr.simplify cond
+                mergeExpr t f
+                  | t == f = t
+                  | otherwise = Expr.simplify $ ITE condSimp t f
+                mergedStack = zipWith mergeExpr vmTrue.state.stack vmFalse.state.stack
+            when conf.debug $ traceM $ "Merged forward jump"
+              <> runSrcLookup vm0.srcLookup vm0.env.contracts vm0.state.contract jumpTarget
+            assign (#state % #pc) vmTrue.state.pc
+            assign (#state % #stack) mergedStack
+            assign #result Nothing
+            pure True
+
+-- | Whether a branch condition holds, if a literal or the assumptions of the
+-- speculated branch decide it
+decide :: [Prop] -> Expr EWord -> Maybe Bool
+decide assumed cond = case Expr.maybeLitWordSimp cond of
+  Just c -> Just (c /= 0)
+  Nothing
+    | implied (Expr.simplifyProp (PNeg (PEq (Lit 0) cond))) -> Just True
+    | implied (Expr.simplifyProp (PEq (Lit 0) cond)) -> Just False
+    | otherwise -> Nothing
+  where
+    implied p = p `elem` assumed || case p of
+      PLEq a b -> PLT a b `elem` assumed
+      _ -> False
 
 -- | Check that execution had no side effects (storage, memory, logs, etc.)
 checkNoSideEffects :: VM Symbolic -> VM Symbolic -> Bool
