@@ -46,11 +46,12 @@ import Data.DoubleWord (Int256, Word256)
 import Data.Either (partitionEithers)
 import Data.Either.Extra (maybeToEither)
 import Data.Foldable (Foldable(..))
+import Data.Containers.ListUtils (nubOrdOn)
 import Data.List (delete, find, isPrefixOf)
 import Data.List.Split (splitOn)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, fromJust, isJust, isNothing, mapMaybe)
+import Data.Maybe (fromMaybe, fromJust, isJust, isNothing, listToMaybe, mapMaybe)
 import Data.Set (insert, member, fromList)
 import Data.Sequence (Seq)
 import Data.Sequence qualified as Seq
@@ -355,6 +356,90 @@ getOpW8 state = case state.code of
 getOpName :: forall (t :: VMType) . FrameState t -> [Char]
 getOpName state = intToOpName $ fromEnum $ getOpW8 state
 
+-- | Replaces the word @atom@ by @val@ in the frames' stacks and memory, the buffers and
+-- the contracts' storage and balances. Only sound together with a path condition that
+-- @atom == val@: terms it does not reach keep @atom@, which that condition then pins.
+substVM :: Expr EWord -> Expr EWord -> VM Symbolic -> VM Symbolic
+substVM atom val =
+  over #state frameState . over #frames (map (over #state frameState)) . over (#env % #contracts) (fmap contract)
+  where
+    sub :: Expr a -> Expr a
+    sub e = let e' = Expr.substWord atom val e in if e' == e then e else Expr.simplify e'
+    frameState fs = fs
+      { stack = map sub fs.stack
+      , memory = case fs.memory of
+          SymbolicMemory b -> SymbolicMemory (sub b)
+          m -> m
+      , symMemorySize = fmap sub fs.symMemorySize
+      , calldata = sub fs.calldata
+      , returndata = sub fs.returndata
+      , callvalue = sub fs.callvalue
+      }
+    contract = over #storage sub . over #tStorage sub . over #balance sub
+
+-- | A merge can leave an ITE between literals where a memory offset or size is
+-- expected, e.g. a length picked by a ternary. Accessing memory there would make
+-- it symbolic for the rest of the path, so the path forks on the ITE instead,
+-- and the instruction runs again with each literal.
+--
+-- Otherwise, when the argument depends on a subterm with at most 'maxMemArgSplit' values,
+-- e.g. the length of a short dynamic argument, the path forks on its values, each
+-- substituted into the state, so memory stays concrete for the rest of the path.
+splitMergedMemArg :: forall (t :: VMType). Typeable t => Config -> VM t -> Maybe (EVM t ())
+splitMergedMemArg conf vm = case eqT @t @Symbolic of
+  Just Refl | not vm.mergeState.msActive, vm.state.pc < opslen vm.state.code ->
+    -- with fewer items than the op takes, it underruns the stack: forking first would only
+    -- delay that, and a fork on an argument it never reads splits the path for nothing
+    let (arity, args) = memArgs (getOp (getOpW8 vm.state))
+        symArgs = [ (i, x) | length vm.state.stack >= arity, i <- args
+                  , Just x <- [preview (ix i) vm.state.stack]
+                  , isNothing (maybeLitWordSimp x) ]
+    in listToMaybe $
+      [ forkOnSubterm conf.maxDepth [atom] [(v, [[v]]) | (v, _) <- cases] $ \v ->
+          assign' (#state % #stack % ix i) (fromJust (lookup v cases))
+      | (i, x) <- symArgs, Just (atom, cases) <- [Expr.splitLitIte x] ]
+      -- the argument is set to its value too: the atom is a subterm of the argument simplified,
+      -- which the stack may not hold as is, and then substituting it would change nothing
+      <> [ forkOnSubterm conf.maxDepth [atom] [(k, [[k]]) | (k, _) <- vals] $ \k -> do
+             modify' (substVM atom (Lit k))
+             assign' (#state % #stack % ix i) (Lit (fromJust (lookup k vals)))
+         | conf.maxMemArgSplit > 0
+         -- memory staying concrete is of no use to an op that ends the frame
+         , not (halts (getOp (getOpW8 vm.state)))
+         , (i, x) <- symArgs
+         , Just ([atom], groups) <- [Expr.enumerateViaSmallSubterm conf.maxMemArgSplit vm.constraints x]
+         , let vals = nubOrdOn fst [(k, ev) | (ev, kss) <- groups, [k] <- kss]
+         , not (null vals) ]
+  _ -> Nothing
+  where
+    halts :: GenericOp Word8 -> Bool
+    halts = \case
+      OpReturn -> True
+      OpRevert -> True
+      _ -> False
+    -- the items an op takes, and which of them are memory offsets or sizes
+    memArgs :: GenericOp Word8 -> (Int, [Int])
+    memArgs = \case
+      OpMload -> (1, [0])
+      OpMstore -> (2, [0])
+      OpMstore8 -> (2, [0])
+      OpSha3 -> (2, [0, 1])
+      OpCalldatacopy -> (3, [0, 2])
+      OpCodecopy -> (3, [0, 2])
+      OpReturndatacopy -> (3, [0, 2])
+      OpExtcodecopy -> (4, [1, 3])
+      OpMcopy -> (3, [0, 1, 2])
+      OpReturn -> (2, [0, 1])
+      OpRevert -> (2, [0, 1])
+      OpLog n -> (2 + fromIntegral n, [0, 1])
+      OpCall -> (7, [3, 4, 5, 6])
+      OpCallcode -> (7, [3, 4, 5, 6])
+      OpDelegatecall -> (6, [2, 3, 4, 5])
+      OpStaticcall -> (6, [2, 3, 4, 5])
+      OpCreate -> (3, [1, 2])
+      OpCreate2 -> (4, [1, 2])
+      _ -> (0, [])
+
 -- | Executes the EVM one step
 exec1 :: forall (t :: VMType). (VMOps t, Typeable t) => Config ->  EVM t ()
 exec1 conf = do
@@ -394,7 +479,9 @@ exec1 conf = do
   else if vm.state.pc >= opslen vm.state.code
     then doStop
 
-    else do
+    else case splitMergedMemArg conf vm of
+     Just split -> split
+     Nothing -> do
       let ?conf = conf
       let ?op = getOpW8 vm.state
       case getOp (?op) of
@@ -934,19 +1021,30 @@ exec1 conf = do
                           False -> assign' (#state % #stack) xs >> next
                           True -> vmError BadJumpDestination
                       Right jumpTarget -> do
+                        let jumpSym :: Bool -> EVM Symbolic ()
+                            jumpSym False = assign' (#state % #stack) xs >> next
+                            jumpSym _    = checkJump jumpTarget xs
                         -- Check if we're already in merge mode (speculative execution)
                         ms <- use #mergeState
                         if ms.msActive then
-                          -- Inside speculation: nested branch, bail out
-                          -- This will cause speculateLoop to return Nothing
-                          assign #result $ Just $ VMFailure BadJumpDestination
+                          -- Inside speculation: follow a nested branch the side's
+                          -- assumption decides, bail out on any other
+                          case Merge.decide ms.msAssume cond of
+                            Just c -> jumpSym c
+                            Nothing -> assign #result $ Just $ VMFailure BadJumpDestination
                         else do
-                          merged <- Merge.tryMergeForwardJump conf (exec1 conf) vm.state.pc jumpTarget cond xs
-                          unless merged $ do
-                            let jumpSym :: Bool -> EVM Symbolic ()
-                                jumpSym False = assign' (#state % #stack) xs >> next
-                                jumpSym _    = checkJump jumpTarget xs
-                            branchBounded conf cond jumpSym
+                          loc <- codeloc
+                          seen <- use (#iterations % at loc)
+                          let returnAddrs = filter $ \case
+                                Lit w -> w <= unsafeInto (maxBound :: Int) && isValidJumpDest vm (unsafeInto w)
+                                _ -> False
+                              -- reached again from the same call site: a loop, which must fork
+                              -- for the loop bound to apply, as its condition may be concrete
+                              inLoop = maybe False (\(_, old) -> returnAddrs old == returnAddrs vm.state.stack) seen
+                          merged <- if inLoop then pure False
+                            else Merge.tryMergeForwardJump conf (exec1 conf) (isValidJumpDest vm) vm.state.pc jumpTarget cond xs
+                          when merged $ assign (#iterations % at loc) (Just (maybe 1 ((+ 1) . fst) seen, vm.state.stack))
+                          unless merged $ branchBounded conf cond jumpSym
                 in case eqT @t @Symbolic of
                      Just Refl -> symbolicMerge
                      Nothing -> branch conf.maxDepth cond jump

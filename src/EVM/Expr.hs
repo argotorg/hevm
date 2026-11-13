@@ -36,6 +36,7 @@ module EVM.Expr
   , upperWithBounds
   , wrapInterval
   , asWord
+  , substWord
   , sex
 
     -- * Comparisons / Booleans
@@ -144,6 +145,7 @@ module EVM.Expr
   , maybeLitByteSimp
   , maybeLitWordSimp
   , enumerateViaSmallSubterm
+  , splitLitIte
   , maybeLitAddrSimp
   , maybeConcStoreSimp
   ) where
@@ -2793,6 +2795,29 @@ enumerateViaSmallSubterm limit props e0 = listToMaybe $ mapMaybe tryAtoms (map p
       Just Refl | x == atom -> k
       _ -> x
 
+-- | A subterm of @e@ with two possible values, an ITE between two literals or
+-- a comparison, and @e@ with each of them in its place
+splitLitIte :: Expr EWord -> Maybe (Expr EWord, [(W256, Expr EWord)])
+splitLitIte e0 = do
+  (atom, vs) <- listToMaybe $ foldExprOnce twoValued [] e
+  pure (atom, [(v, simplify $ mapExpr (subst atom (Lit v)) e) | v <- vs])
+  where
+    e = simplify e0
+    twoValued :: Expr a -> [(Expr EWord, [W256])]
+    twoValued = \case
+      x@(ITE _ (Lit a) (Lit b)) | a /= b -> [(x, [a, b])]
+      x@(LT _ _) -> [(x, [0, 1])]
+      x@(GT _ _) -> [(x, [0, 1])]
+      x@(SLT _ _) -> [(x, [0, 1])]
+      x@(SGT _ _) -> [(x, [0, 1])]
+      x@(Eq _ _) -> [(x, [0, 1])]
+      x@(IsZero _) -> [(x, [0, 1])]
+      _ -> []
+    subst :: Expr EWord -> Expr EWord -> Expr a -> Expr a
+    subst atom k x = case asWordRefl x of
+      Just Refl | x == atom -> k
+      _ -> x
+
 data Bounds = Bounds W256 W256 (Set.Set W256)
 
 -- | Decides @x == (x * d) / d@, as in Solidity's checked-multiplication guard
@@ -3004,8 +3029,12 @@ directBounds = foldl go mempty
 
 -- | e with every occurrence of the word c replaced by 0
 zeroing :: Expr EWord -> Expr a -> Expr a
-zeroing c = mapExpr $ \e -> case asWordRefl e of
-  Just Refl | e == c -> Lit 0
+zeroing c = substWord c (Lit 0)
+
+-- | e with every occurrence of the word t replaced by r
+substWord :: Expr EWord -> Expr EWord -> Expr a -> Expr a
+substWord t r = mapExpr $ \e -> case asWordRefl e of
+  Just Refl | e == t -> r
   _ -> e
 
 asWordRefl :: Expr a -> Maybe (a :~: EWord)

@@ -745,12 +745,12 @@ deriving instance Show (VMResult t)
 
 -- | State tracking for speculative merge execution
 data MergeState = MergeState
-  { msActive          :: Bool   -- ^ Inside speculative execution
-  , msRemainingBudget :: Int    -- ^ Instructions remaining in budget
-  } deriving (Show, Eq, Generic)
+  { msActive :: Bool   -- ^ Inside speculative execution
+  , msAssume :: [Prop] -- ^ What the branch being speculated assumes
+  } deriving (Show, Generic)
 
 defaultMergeState :: MergeState
-defaultMergeState = MergeState False 0
+defaultMergeState = MergeState False []
 
 -- | An active vm.expectRevert / vm.expectPartialRevert expectation set by a
 -- cheat call. Consumed when the matching frame returns/reverts.
