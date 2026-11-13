@@ -540,7 +540,11 @@ readFoundryJSON contractName json = do
         , creationSrcmap      = creationSrcMap
         , constructorInputs   = mkConstructor abi
         , storageLayout       = mkStorageLayout $ json ^? key "storageLayout"
-        , immutableReferences = mempty -- TODO: foundry doesn't expose this?
+        , immutableReferences = fromMaybe mempty $ do
+            x <- runtime ^? key "immutableReferences"
+            case fromJSON x of
+              Success a -> pure a
+              _ -> Nothing
         }
   Right ( Contracts $ Map.singleton (path <> ":" <> contractName) contract
         , Asts      $ Map.singleton path ast
