@@ -3859,8 +3859,8 @@ log2 x = finiteBitSize x - 1 - countLeadingZeros x
 writeMemory :: MutableMemory -> Int -> ByteString -> EVM t ()
 writeMemory memory offset buf = do
   memory' <- expandMemory (offset + BS.length buf)
-  VS.iforM_ (byteStringToVector buf) $ \i v -> do
-    VS.Mutable.unsafeWrite memory' (offset + i) v
+  -- Memory snapshots use 'freeze', so the immutable source cannot alias memory'.
+  VS.copy (VS.Mutable.slice offset (BS.length buf) memory') (byteStringToVector buf)
   where
   expandMemory requiredSize = do
     let currentSize = VS.Mutable.length memory
