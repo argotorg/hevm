@@ -54,9 +54,14 @@
           '';
         };
         solc = (solc-pkgs.mkDefault pkgs pkgs.solc_0_8_31);
+        foundry-bin = pkgs.foundry-bin.overrideAttrs (old: {
+          # Foundry's ARM64 Linux binaries depend on libudev.
+          buildInputs = (old.buildInputs or [])
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.udev ];
+        });
         testDeps = [
           solc
-          pkgs.foundry-bin
+          foundry-bin
           pkgs.go-ethereum
           pkgs.z3
           pkgs.cvc5
