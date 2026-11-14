@@ -269,7 +269,7 @@ common test-base
     hevm,
     mtl,
     process,
-    tasty,
+    tasty >= 1.5.4,
     tasty-hunit,
     text,
     tasty-expected-failure,

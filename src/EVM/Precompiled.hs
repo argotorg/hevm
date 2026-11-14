@@ -20,8 +20,8 @@ foreign import ccall unsafe "ethjet"
   ethjet
     :: Ptr EthjetContext     -- initialized context
     -> CInt                  -- operation
-    -> Ptr CChar -> CInt     -- input
-    -> Ptr CChar -> CInt     -- output
+    -> Ptr CChar -> CSize    -- input
+    -> Ptr CChar -> CSize    -- output
     -> IO CInt               -- 1 if good
 
 -- Lazy evaluation ensures this context is only initialized once,

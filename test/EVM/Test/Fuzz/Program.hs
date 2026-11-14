@@ -103,10 +103,11 @@ extraAccounts =
   , (0xe0a2, 0, 1, mempty)  -- EIP-161 nonempty by nonce only
   , (0xe0a3, 7, 0, mempty)  -- and by balance only
   , (0xe0a4, 0, 0, mempty)  -- EIP-161 empty
-  , (createdAt 0x48, 0, 0, Map.singleton 1 1) -- storage only: the first CREATE collides (EIP-7610)
+  -- Geth removed EIP-7610, so use nonzero nonces for creation collisions.
+  , (createdAt 0x48, 0, 1, Map.singleton 1 1) -- the first CREATE collides
   , (createdAt 0x49, 5, 0, mempty)            -- funded before the second CREATE
   , (create2At 0, 9, 0, mempty)
-  , (create2At 1, 0, 0, Map.singleton 2 3)
+  , (create2At 1, 0, 1, Map.singleton 2 3)
   ]
   where
     createdAt n = case Concrete.createAddress contractAddr n of

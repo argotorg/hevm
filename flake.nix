@@ -34,8 +34,10 @@
       let
         pkgs = (import nixpkgs {
           inherit system;
-          overlays = [solc-pkgs.overlay];
-          config = { allowBroken = true; };
+          overlays = [
+            foundry.overlay
+            solc-pkgs.overlay
+          ];
         });
         execution-spec-tests-fixtures = pkgs.stdenv.mkDerivation {
           name = "execution-spec-tests-fixtures";
@@ -52,9 +54,14 @@
           '';
         };
         solc = (solc-pkgs.mkDefault pkgs pkgs.solc_0_8_31);
+        foundry-bin = pkgs.foundry-bin.overrideAttrs (old: {
+          # Foundry's ARM64 Linux binaries depend on libudev.
+          buildInputs = (old.buildInputs or [])
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.udev ];
+        });
         testDeps = [
           solc
-          foundry.defaultPackage.${system}
+          foundry-bin
           pkgs.go-ethereum
           pkgs.z3
           pkgs.cvc5
@@ -66,17 +73,7 @@
           configureFlags = attrs.configureFlags ++ [ "--enable-static" ];
         }));
 
-        hspkgs = ps :
-          ps.haskellPackages.override {
-            overrides = hfinal: hprev: {
-              with-utf8 =
-                if (with ps.stdenv; hostPlatform.isDarwin && hostPlatform.isx86)
-                then ps.haskell.lib.compose.overrideCabal (_ : { extraLibraries = [ps.libiconv]; }) hprev.with-utf8
-                else hprev.with-utf8;
-              # TODO: temporary fix for static build which is still on 9.4
-              witch = ps.haskell.lib.doJailbreak hprev.witch;
-            };
-          };
+        hspkgs = ps: ps.haskell.packages.ghc912;
         hlib = pkgs.haskell.lib;
 
         # base hevm derivation.
@@ -110,7 +107,7 @@
           install_name_tool = "${pkgs.darwin.binutils.bintools}/bin/install_name_tool";
           codesign_allocate = "${pkgs.darwin.binutils.bintools}/bin/codesign_allocate";
           codesign = "${pkgs.darwin.sigtool}/bin/codesign";
-        in if pkgs.stdenv.isLinux
+        in if pkgs.stdenv.hostPlatform.isLinux
         then hlib.dontCheck (hevmBase pkgs.pkgsStatic)
         else pkgs.runCommand "stripNixRefs" {} ''
           mkdir -p $out/bin
@@ -229,7 +226,7 @@
 
           # point cabal repl to system deps
           LD_LIBRARY_PATH = libraryPath;
-          shellHook = pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
+          shellHook = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
             export DYLD_LIBRARY_PATH="${libraryPath}";
           '';
         };

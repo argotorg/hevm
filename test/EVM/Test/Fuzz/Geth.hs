@@ -7,7 +7,7 @@ tracing, and reads back the outcome, storage, logs and step trace.
 -}
 module EVM.Test.Fuzz.Geth
   ( EVMToolTrace(..), GethLog(..), GethRun(..), addrKey, blockHash, fromAddress
-  , headMay, mkTx, nonZero, originBalance, preState, prevRandaoVal, runGeth
+  , headMay, mkTx, nonZero, originBalance, preState, prevRandaoVal, requestQueues, runGeth
   ) where
 
 import Control.Monad (when)
@@ -134,6 +134,15 @@ blockHash n = keccak' (Char8.pack (show (into n :: Integer)))
 prevRandaoVal :: W256
 prevRandaoVal = 42
 
+-- The fuzz world has no beacon-chain requests. Geth requires code at the
+-- EIP-7002 and EIP-7251 queues for post-transaction calls, so model empty queues
+-- with STOP contracts in both engines. These calls return no request data.
+requestQueues :: [(Addr, ByteString)]
+requestQueues =
+  [ (0x00000961ef480eb55e80d19ad83579a64c007002, BS.singleton 0)
+  , (0x0000bbddc7ce488642fb579f8b00f3a590007251, BS.singleton 0)
+  ]
+
 -- | The state before the transaction, as geth gets it and as the mock node serves it
 preState :: TestCase -> Inputs -> World
 preState c i = Map.fromList $
@@ -141,6 +150,7 @@ preState c i = Map.fromList $
   , (contractAddr, Account (assembleItems c.prog.main) 0x48 contractBalance i.store)
   , (calleeAddr, Account (assembleItems c.prog.callee) 1 0 mempty) ]
   <> [(a, Account mempty (unsafeInto n) b st) | (a, b, n, st) <- extraAccounts]
+  <> [(a, Account code 1 0 mempty) | (a, code) <- requestQueues]
 
 runGeth :: FilePath -> TestCase -> Inputs -> IO GethRun
 runGeth dir c i = do
