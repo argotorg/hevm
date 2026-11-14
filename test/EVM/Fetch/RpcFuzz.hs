@@ -58,10 +58,10 @@ tests = testGroup "RPC fuzzing"
             [ OpPush (Lit (fromIntegral (addr :: Addr))), OpBalance
             , OpPush0, OpMstore, OpPush (Lit 0x20), OpPush0, OpReturn ]
       res <- withMockNode 16 (Map.singleton addr (eoa 1 0x1234)) $ \node ->
-        runEnv (Env {config = defaultConfig}) $ withSolvers Bitwuzla 1 Nothing defMemLimit $ \solvers -> do
+        runEnv (Env {config = defaultConfig}) $ do
           sess <- fastRetrying
           let rpcInfo = Fetch.RpcInfo (Just (Fetch.BlockNumber 16, node.url))
-          runConcrete (Fetch.oracle solvers (Just sess) rpcInfo) mempty (initialContract (RuntimeCode (ConcreteRuntimeCode code))) [] mempty
+          runConcrete (Fetch.concreteOracle (Just sess) rpcInfo) mempty (initialContract (RuntimeCode (ConcreteRuntimeCode code))) [] mempty
       fmap (\(o, _, _) -> o) res @?= Right (Right (word256Bytes 0x1234))
   , testCase "rpc-racing-fetches-share-one" $ withFaultyMockNode (slow 100_000) 16 slotWorld $ \node -> runEnv (Env {config = defaultConfig}) $ do
       sess <- fastRetrying
@@ -550,9 +550,9 @@ prop_rpc =
     runEnv (Env {config = defaultConfig}) $ Progress.withProgressLogFromEnv "rpc-fuzz" $
       withSolvers Bitwuzla 1 (Just 5) defMemLimit $ \solvers -> do
       truths <- Progress.withPhase "concrete" [] (const []) $ mapM
-        (runConcrete (Fetch.oracle solvers Nothing Fetch.noRpc) world (remoteContract code world False) known) cds
+        (runConcrete Fetch.noRpcConcreteFetcher world (remoteContract code world False) known) cds
       let mark = liftIO $ length <$> readIORef node.requests
-          runFetching sess = runConcrete (Fetch.oracle solvers (Just sess) rpcInfo) world (remoteContract code world True) []
+          runFetching sess = runConcrete (Fetch.concreteOracle (Just sess) rpcInfo) world (remoteContract code world True) []
       concSess <- fastRetrying
       fetched <- Progress.withPhase "concrete-rpc" [] (const []) $ mapM (runFetching concSess) cds
       afterConc <- mark

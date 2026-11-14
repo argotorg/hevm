@@ -63,7 +63,7 @@ import Data.Char (ord)
 data UnitTestOptions = UnitTestOptions
   { rpcInfo       :: Fetch.RpcInfo
   , solvers       :: SolverGroup
-  , sess          :: Fetch.Session
+  , sess          :: Maybe Fetch.Session
   , maxIter       :: Maybe Integer
   , maxConcreteIter :: Maybe Integer
   , askSmtIters   :: Integer
@@ -243,7 +243,7 @@ runUnitTestContract
   liftIO $ printOut $ "Checking " <> Text.pack (show (length testSigs)) <> " function(s) in contract " <> contract.contractName <> "\n"
   -- Construct the initial VM and begin the contract's constructor
   vm0 :: VM Concrete <- liftIO $ stToIO $ initialUnitTestVm opts contract
-  vm1 <- Stepper.interpret (Fetch.oracle solvers (Just sess) rpcInfo) vm0 $ do
+  vm1 <- Stepper.interpret (Fetch.concreteOracle sess rpcInfo) vm0 $ do
     Stepper.enter contract.contractName
     initializeUnitTest opts contract
     Stepper.evm get
@@ -270,14 +270,14 @@ debugTestVm opts buildOut@(BuildOutput (Contracts cs) _) =
   case [ (c, s) | c <- Map.elems cs, s <- findUnitTests opts.methodFilter c ] of
     [(contract, sig@(Sig testName types))] -> do
       vm0 :: VM Concrete <- liftIO $ stToIO $ initialUnitTestVm opts contract
-      vm1 <- Stepper.interpret (Fetch.oracle opts.solvers (Just opts.sess) opts.rpcInfo) vm0 $ do
+      vm1 <- Stepper.interpret (Fetch.concreteOracle opts.sess opts.rpcInfo) vm0 $ do
         Stepper.enter contract.contractName
         initializeUnitTest opts contract
         Stepper.evm get
       case vm1.result of
         Just (VMSuccess _) -> do
           (cdBuf, cdProps, _) <- symCalldata (callSig sig) types [] (AbstractBuf "txdata")
-          vm2 <- Stepper.interpret (Fetch.oracle opts.solvers (Just opts.sess) opts.rpcInfo) vm1 $
+          vm2 <- Stepper.interpret (Fetch.concreteOracle opts.sess opts.rpcInfo) vm1 $
             Stepper.evm $ do
               pushTrace (EntryTrace testName)
               makeTxCall opts.testParams (cdBuf, cdProps)
@@ -311,7 +311,7 @@ symRun opts@UnitTestOptions{..} vm (nth, numTests) sig@(Sig testName types) sour
     let shouldFail = "proveFail" `isPrefixOf` cs
         postcondition = testPostcondition opts.checkFailBit shouldFail
 
-    let fetcherConc = Fetch.oracle solvers (Just sess) rpcInfo
+    let fetcherConc = Fetch.concreteOracle sess rpcInfo
     vm' <- Stepper.interpret fetcherConc vm $
       Stepper.evm $ do
         pushTrace (EntryTrace testName)
@@ -320,7 +320,7 @@ symRun opts@UnitTestOptions{..} vm (nth, numTests) sig@(Sig testName types) sour
     writeTraceDapp dapp vm'
 
     -- check postconditions against vm
-    let fetcherSym = Fetch.oracle solvers (Just sess) rpcInfo
+    let fetcherSym = Fetch.oracle solvers sess rpcInfo
     let symVm = symbolify vm' & set #srcLookup (Just $ makeSrcLookup dapp sourceCache)
     let summary (ends, results) =
           ("paths" JSON..= length ends) : [k JSON..= n | (k, n) <-
@@ -661,8 +661,8 @@ makeSrcLookup dapp srcCache = SrcLookup $ \contracts addr pc ->
       True  -> let relevant = BS.take sMap.length $ BS.drop sMap.offset fcontent
         in pure $ str <> " : " <> show relevant
 
-paramsFromRpc :: forall m . App m => Fetch.RpcInfo -> Fetch.Session -> m TestVMParams
-paramsFromRpc rpcInfo sess = do
+paramsFromRpc :: forall m . App m => Fetch.RpcInfo -> Maybe Fetch.Session -> m TestVMParams
+paramsFromRpc rpcInfo preSess = do
   (miner,ts,blockNum,ran,limit,base) <- case rpcInfo.blockNumURL of
     Nothing -> pure (SymAddr "miner", Lit 0, Lit 0, Lit 0, 0, Lit 0)
     Just (Fetch.Latest, url) -> fetch Fetch.Latest url
@@ -690,6 +690,7 @@ paramsFromRpc rpcInfo sess = do
     }
   where
     fetch block url = do
+      let sess = fromMaybe (internalError "paramsFromRpc: RPC configured without a session") preSess
       conf <- readConfig
       liftIO $ Fetch.fetchBlockWithSession conf sess block url >>= \case
         Nothing -> internalError "Could not fetch block"
@@ -770,7 +771,7 @@ invariantContext opts vm testContract sourceCache = do
     getter sig ty
       | Map.notMember (abiKeccak (encodeUtf8 sig)) testContract.abiMap = pure Nothing
       | otherwise = do
-          res <- Stepper.interpret (Fetch.oracle opts.solvers (Just opts.sess) opts.rpcInfo) vm $ do
+          res <- Stepper.interpret (Fetch.concreteOracle opts.sess opts.rpcInfo) vm $ do
             Stepper.evm $ abiCall opts.testParams (Left (sig, emptyAbi))
             Stepper.execFully
           pure $ case res of
@@ -812,7 +813,7 @@ invariantLevel opts ctx targets d = do
     (states:_) -> pure states
     [] -> do
       prev <- invariantLevel opts ctx targets (d - 1)
-      let fetcher = Fetch.oracle opts.solvers (Just opts.sess) opts.rpcInfo
+      let fetcher = Fetch.oracle opts.solvers opts.sess opts.rpcInfo
       results <- mapM (nextStates opts.solvers (testPostcondition opts.checkFailBit False) fetcher
         (makeVeriOpts opts).iterConf opts.testParams.gasCall ctx.senders targets) prev
       let reached = concatMap (\(a, _, _) -> a) results
@@ -849,7 +850,7 @@ invariantRun opts ctx (nth, numTests) sig@(Sig testName types) = do
       let check :: InvState -> m ([Text], Maybe (InvState, Expr End, SMTCex))
           check st = do
             vm <- liftIO $ stToIO $ execStateT (startCall opts.testParams.address opts.testParams.caller opts.testParams.gasCall testName (cdBuf, cdProps)) st.vm
-            let fetcher = Fetch.oracle opts.solvers (Just opts.sess) opts.rpcInfo
+            let fetcher = Fetch.oracle opts.solvers opts.sess opts.rpcInfo
             (ends, results) <- verify opts.solvers fetcher (makeVeriOpts opts) vm (testPostcondition opts.checkFailBit False) Nothing
             let issues = [Text.pack str | (_, str) <- groupPartials vm.srcLookup vm.env.contracts ends]
                   <> [Text.pack (getUnknownStr u) | Unknown u <- results] <> [Text.pack e | Error e <- results]
@@ -911,7 +912,7 @@ replayCall :: App m => UnitTestOptions -> SMTCex -> VM Concrete -> Call -> m (Er
 replayCall opts cex vm call = calldataFromCex cex call.calldata call.target.sig >>= \case
   Left e -> pure $ Left e
   Right bs -> do
-    let fetcher = Fetch.oracle opts.solvers (Just opts.sess) opts.rpcInfo
+    let fetcher = Fetch.concreteOracle opts.sess opts.rpcInfo
         time = maybe vm.block.timestamp Lit $ case call.timestamp of
           v@(Var _) -> Map.lookup v cex.vars
           _ -> Nothing
@@ -945,7 +946,7 @@ validateInvariantCex :: App m
 validateInvariantCex opts ctx st cex sig cd = replayCalls opts ctx cex st.calls >>= \case
   Left e -> pure $ Left e
   Right vm -> do
-    let fetcher = Fetch.oracle opts.solvers (Just opts.sess) opts.rpcInfo
+    let fetcher = Fetch.concreteOracle opts.sess opts.rpcInfo
     repro <- getReproFailure sig cd cex
     traverse (validateCex opts fetcher vm cex.addrs) repro
 

@@ -754,7 +754,7 @@ runSimpleVM x ins = do
     Just vm -> do
      let calldata = (ConcreteBuf ins)
          vm' = set (#state % #calldata) calldata vm
-     res <- Stepper.interpret (Fetch.zero 0 Nothing 1024) vm' Stepper.execFully
+     res <- Stepper.interpret Fetch.noRpcConcreteFetcher vm' Stepper.execFully
      case res of
        Right (ConcreteBuf bs) -> pure $ Just bs
        s -> internalError $ show s
