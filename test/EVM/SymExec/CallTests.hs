@@ -380,7 +380,7 @@ tests =
     , test "address-sized-memory-access-charges-gas" $ do
         -- deploys ADDRESS PUSH0 RETURN: the return size is the address, as a WAddr
         Just vm <- loadVM (fromJust $ hexByteString "62305ff35f526003601df3")
-        res <- Stepper.interpret (Fetch.zero 0 Nothing 1024) vm Stepper.execFully
+        res <- Stepper.interpret Fetch.noRpcConcreteFetcher vm Stepper.execFully
         case res of
           Left _ -> pure ()
           r -> liftIO $ assertFailure $ "returning 2^160 bytes must fail, got " <> show r

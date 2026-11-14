@@ -26,7 +26,6 @@ import EVM.Expr (maybeLitByteSimp)
 import EVM.Fetch qualified as Fetch
 import EVM.Precompiled (execute)
 import EVM.Solidity (solcRuntime)
-import EVM.Solvers (defMemLimit)
 import EVM.Stepper qualified
 import EVM.SymExec
 import EVM.Transaction (initTx)
@@ -60,7 +59,7 @@ setupAndRunCall sourceCode contractName functionName abiArgs stepper = do
     , calldata = (ConcreteBuf callData, [])
     }
   let withInitializedTransactionVM = EVM.Transaction.initTx initialVM
-  let fetcher = Fetch.zero 0 Nothing defMemLimit
+  let fetcher = Fetch.noRpcConcreteFetcher
   Effects.runApp $ EVM.Stepper.interpret fetcher withInitializedTransactionVM stepper
 
 executeSingleCall :: SourceCode -> ContractName -> FunctionName -> Args -> IO ExecResult
@@ -203,7 +202,7 @@ tests = testGroup "Concrete execution tests"
                     , OpStop
                     ]
               vm <- liftIO $ stToIO $ vmForEthrunCreation code
-              vm' <- EVM.Stepper.interpret (Fetch.zero 0 Nothing 1024) vm EVM.Stepper.runFully
+              vm' <- EVM.Stepper.interpret Fetch.noRpcConcreteFetcher vm EVM.Stepper.runFully
               case vm'.result of
                 Just (VMFailure (NonexistentPrecompile a')) -> assertEqualM "wrong address" a a'
                 r -> liftIO $ assertFailure $ "unexpected result for " <> show a <> ": " <> show r

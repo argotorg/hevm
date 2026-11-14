@@ -73,6 +73,13 @@ main = do
         stdout `shouldContain` "exec"
         stdout `shouldContain` "version"
 
+      it "exec-without-rpc" $ do
+        let code = asmHex [OpPush (Lit 0x123456789), OpBalance, OpPush0, OpMstore, OpPush (Lit 32), OpPush0, OpReturn]
+        (exitCode, stdout, stderr) <- readProcessWithExitCode "cabal" ["run", "exe:hevm", "--", "exec", "--code", code] ""
+        exitCode `shouldBe` ExitSuccess
+        stdout `shouldContain` ("Return: 0x" <> replicate 64 '0')
+        stderr `shouldNotContain` "CallStack"
+
       it "hevm symbolic tutorial works -- FAIL" $ do
         Just symbBin <- runApp $ solcRuntime (T.pack "MyContract") (T.pack [i|
           contract MyContract {

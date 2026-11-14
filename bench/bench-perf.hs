@@ -81,7 +81,7 @@ vmOptsToTestVMParams v =
 callMainForBytecode :: App m => ByteString -> m (Either EvmError (Expr 'Buf))
 callMainForBytecode bs = do
   vm <- vmFromRawByteString bs
-  Stepper.interpret (Fetch.zero 0 Nothing 1024) vm (Stepper.evm (abiCall (vmOptsToTestVMParams (vm0Opts (initialContract (RuntimeCode (ConcreteRuntimeCode bs))))) (Left ("main()", emptyAbi))) >> Stepper.execFully)
+  Stepper.interpret Fetch.noRpcConcreteFetcher vm (Stepper.evm (abiCall (vmOptsToTestVMParams (vm0Opts (initialContract (RuntimeCode (ConcreteRuntimeCode bs))))) (Left ("main()", emptyAbi))) >> Stepper.execFully)
 
 benchMain :: (String, ByteString) -> Benchmark
 benchMain (name, bs) = bench name $ nfIO $ runApp $ (\x -> if isRight x then () else internalError "failed") <$> callMainForBytecode bs
