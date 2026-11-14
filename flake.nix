@@ -102,7 +102,7 @@
           install_name_tool = "${pkgs.darwin.binutils.bintools}/bin/install_name_tool";
           codesign_allocate = "${pkgs.darwin.binutils.bintools}/bin/codesign_allocate";
           codesign = "${pkgs.darwin.sigtool}/bin/codesign";
-        in if pkgs.stdenv.isLinux
+        in if pkgs.stdenv.hostPlatform.isLinux
         then hlib.dontCheck (hevmBase pkgs.pkgsStatic)
         else pkgs.runCommand "stripNixRefs" {} ''
           mkdir -p $out/bin
@@ -221,7 +221,7 @@
 
           # point cabal repl to system deps
           LD_LIBRARY_PATH = libraryPath;
-          shellHook = pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
+          shellHook = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
             export DYLD_LIBRARY_PATH="${libraryPath}";
           '';
         };
