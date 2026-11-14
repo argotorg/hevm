@@ -2,7 +2,7 @@ cabal-version: 3.0
 name:
   hevm
 version:
-  0.57.0
+  0.58.0
 synopsis:
   Symbolic EVM Evaluator
 description:
@@ -96,12 +96,16 @@ library
     EVM.Assembler,
     EVM.Concrete,
     EVM.Dapp,
+    EVM.Debugger,
+    EVM.Debugger.Server,
     EVM.Expr,
     EVM.SMT,
     EVM.Solvers,
     EVM.Exec,
     EVM.Format,
+    EVM.ConsoleLog,
     EVM.Fetch,
+    EVM.Invariant,
     EVM.FeeSchedule,
     EVM.Op,
     EVM.Precompiled,
@@ -110,15 +114,27 @@ library
     EVM.Stepper,
     EVM.Tracing,
     EVM.SymExec,
+    EVM.SymExec.Calldata,
+    EVM.SymExec.Cex,
+    EVM.CexReplay,
+    EVM.Equivalence,
     EVM.Traversals,
+    EVM.Traversals.Children,
+    EVM.Types.TH,
     EVM.CSE,
+    EVM.HashCons,
     EVM.Keccak,
+    EVM.Keccak.Preimages,
     EVM.Merge,
+    EVM.Progress,
     EVM.Transaction,
     EVM.Types,
     EVM.UnitTest,
     EVM.Sign,
     EVM.Effects,
+    EVM.SMT.AbstractBase,
+    EVM.SMT.AbstractLemmas,
+    EVM.SMT.ArithEncoding,
   other-modules:
     EVM.CheatsTH,
     EVM.SMT.Types,
@@ -174,10 +190,15 @@ library
     operational                       >= 0.2.3 && < 0.3,
     optparse-generic                  >= 1.3.1 && < 1.6,
     pretty-hex                        >= 1.1 && < 1.2,
+    prettyprinter                     >= 1.7 && < 1.8,
+    prettyprinter-ansi-terminal       >= 1.1 && < 1.2,
+    ansi-terminal                     >= 1.1 && < 1.2,
     rosezipper                        >= 0.2 && < 0.3,
     wreq                              >= 0.5.3 && < 0.6,
+    random                            >= 1.2 && < 1.3,
     regex-tdfa                        >= 1.2.3 && < 1.4,
     base                              >= 4.9 && < 5,
+    time                              >= 1.9 && < 1.15,
     smt2-parser                       >= 0.1.0 && < 0.2,
     spool                             >= 0.1 && < 0.2,
     stm                               >= 2.5.0 && < 2.6.0,
@@ -190,6 +211,7 @@ library
     extra                             >= 1.7.14 && < 2,
     aeson-pretty                      >= 0.8.8 && < 0.9.0,
     monad-loops                       >= 0.4.1 && < 0.5,
+    network                           >= 3.1 && < 3.3,
   hs-source-dirs:
     src
 
@@ -200,7 +222,9 @@ executable hevm
     cli
   main-is:
     cli.hs
-  ghc-options: -threaded -with-rtsopts=-N
+  ghc-options: -threaded "-with-rtsopts=-N -A32m"
+  if flag(devel)
+    ghc-options: -rtsopts
   other-modules:
     Paths_hevm
   autogen-modules:
@@ -247,13 +271,14 @@ common test-base
     process,
     tasty,
     tasty-hunit,
+    text,
     tasty-expected-failure,
     temporary,
-    text,
     witherable,
     optics-core,
     witch,
     unliftio-core,
+    async,
     exceptions
 
 library test-utils
@@ -267,7 +292,7 @@ common test-common
   import: test-base
   default-language: GHC2021
   if flag(devel)
-    ghc-options: -threaded -with-rtsopts=-N
+    ghc-options: -threaded -rtsopts "-with-rtsopts=-N -A32m"
   build-depends:
     test-utils,
     vector,
@@ -286,23 +311,59 @@ test-suite test
     test.hs
   other-modules:
     EVM.Equivalence.EquivalenceTests
+    EVM.Equivalence.EquivFuzz
+    EVM.Fetch.MockNode
+    EVM.Fetch.RpcFuzz
     EVM.Expr.ExprTests
+    EVM.Expr.RewriteFuzz
+    EVM.Expr.KeccakFuzz
     EVM.Expr.Generator
+    EVM.Expr.HashConsTests
+    EVM.Expr.Probe
     EVM.ConcreteExecution.ConcreteExecutionTests
     EVM.SymExec.SymExecTests
     EVM.Test.FuzzSymExec
+    EVM.Test.Fuzz.Program
+    EVM.Test.Fuzz.Gen
+    EVM.Test.Fuzz.Geth
+    EVM.Test.Fuzz.Hevm
+    EVM.Test.Fuzz.Case
+    EVM.Test.Fuzz.Check
+    EVM.Test.Fuzz.Lockstep
+    EVM.Test.FoundryTests
+    EVM.Invariant.InvariantTests
+    EVM.Test.Asm
+    EVM.Debugger.DebuggerTests
+    EVM.Debugger.DebuggerFuzz
+    EVM.Debugger.ProgressTests
+    EVM.Test.Helpers
+    EVM.Encoding.EncodingTests
+    EVM.Solidity.SolidityTests
+    EVM.SymExec.ArithTests
+    EVM.SymExec.LoopTests
+    EVM.SymExec.CallTests
+    EVM.SymExec.OpcodeTests
+    EVM.Solvers.SolverTests
+    EVM.Test.RunLog
   build-depends:
+    aeson-pretty,
     base16,
     binary,
     data-dword,
     extra,
     here,
+    network,
     time,
     optics-extra,
     QuickCheck,
     quickcheck-instances,
     regex,
+    stm,
     tasty-quickcheck,
+    template-haskell,
+    text,
+    transformers,
+    vector,
 
 -- these tests require network access so we split them into a separate test
 -- suite to make it easy to skip them when running nix-build
@@ -313,6 +374,8 @@ test-suite rpc-tests
     exitcode-stdio-1.0
   main-is:
     rpc.hs
+  build-depends:
+    text,
 
 test-suite ethereum-tests
   import: test-common
@@ -337,10 +400,29 @@ test-suite cli-test
     hevm,
     hspec,
     process,
-    text,
     bytestring,
     filepath,
     split,
+    text,
+
+test-suite forge-symbolic-tests
+  import: shared
+  type:
+    exitcode-stdio-1.0
+  default-language: GHC2021
+  hs-source-dirs:
+    test
+  main-is:
+    ForgeSymbolicTestSuite.hs
+  build-depends:
+    base,
+    hevm,
+    directory,
+    filepath,
+    process,
+    tasty,
+    tasty-hunit,
+    temporary,
 
 --- Benchmarks ---
 
@@ -380,7 +462,7 @@ benchmark bench-perf
   hs-source-dirs:
     bench
   ghc-options:
-    -O2 -threaded -with-rtsopts=-N -fproc-alignment=64
+    -O2 -threaded -rtsopts "-with-rtsopts=-N1 -A32m" -fproc-alignment=64
   other-modules:
     Paths_hevm
   autogen-modules:

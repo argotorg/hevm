@@ -84,7 +84,7 @@
               DAPP_SOLC = "${solc}/bin/solc";
             }))
             [
-              (hlib.compose.overrideCabal (old: { testTarget = "test"; }))
+              (hlib.compose.overrideCabal (old: { testTargets = ["test"]; }))
               (hlib.compose.addTestToolDepends testDeps)
               (hlib.compose.appendConfigureFlags [ "-fci" "-O2" ])
               hlib.compose.dontHaddock
@@ -200,6 +200,7 @@
           libraryPath = "${pkgs.lib.makeLibraryPath [ pkgs.libff pkgs.secp256k1 pkgs.gmp ]}";
         in (hspkgs pkgs).shellFor {
           packages = _: [ (hevmBase pkgs) ];
+          doBenchmark = true;
           buildInputs = [
             pkgs.curl
             pkgs.mdbook

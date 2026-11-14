@@ -4,16 +4,12 @@ module EVM.Op
   , opString
   , intToOpName
   , getOp
-  , readOp
   ) where
 
-import EVM.Expr qualified as Expr
 import EVM.Types
 
-import Data.Vector qualified as V
 import Data.Word (Word8)
 import Numeric (showHex)
-import Witch (into)
 
 intToOpName:: Int -> String
 intToOpName a =
@@ -267,14 +263,10 @@ opString (i, o) = let showPc x | x < 0x10 = '0' : showHex x ""
     Lit x' -> "PUSH 0x" ++ (showHex x' "")
     _ -> "PUSH " ++ show x
   OpRevert -> "REVERT"
-  OpUnknown x -> case x of
-    254 -> "INVALID"
-    _ -> "UNKNOWN " ++ (showHex x "")
+  OpInvalid -> "INVALID"
+  OpUnknown x -> "UNKNOWN " ++ (showHex x "")
 
-readOp :: Word8 -> [Expr Byte] -> Op
-readOp x xs =
-  (\n -> Expr.readBytes (into n) (Lit 0) (Expr.fromList $ V.fromList xs)) <$> getOp x
-
+{-# INLINE getOp #-}
 getOp :: Word8 -> GenericOp Word8
 getOp x | x >= 0x80 && x <= 0x8f = OpDup (x - 0x80 + 1)
 getOp x | x >= 0x90 && x <= 0x9f = OpSwap (x - 0x90 + 1)
@@ -359,6 +351,7 @@ getOp x = case x of
   0xf4 -> OpDelegatecall
   0xf5 -> OpCreate2
   0xfd -> OpRevert
+  0xfe -> OpInvalid
   0xfa -> OpStaticcall
   0xff -> OpSelfdestruct
   _    -> OpUnknown x

@@ -26,14 +26,14 @@ jobs:
       fail-fast: false
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - name: Install Nix
-        uses: nixbuild/nix-quick-install-action@v34
+        uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035 # v34
       - name: Nix cache
         id: cache
-        uses: nix-community/cache-nix-action@v6
+        uses: nix-community/cache-nix-action@135667ec418502fa5a3598af6fb9eb733888ce6a # v6.1.3
         with:
           primary-key: nix-build-${{ matrix.os }}-${{ hashFiles('**/*.nix', '**/flake.lock') }}
           purge: true
@@ -44,7 +44,7 @@ jobs:
       - name: build hevm
         run: nix build .#ci -L
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: hevm-${{ matrix.runtime }}
           path: result/bin/hevm
@@ -56,16 +56,17 @@ jobs:
       fail-fast: false
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+          submodules: recursive
       - uses: ./.github/actions/free-disk-space
 
       - name: Install Nix
-        uses: nixbuild/nix-quick-install-action@v34
+        uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035 # v34
       - name: Nix cache
         id: cache
-        uses: nix-community/cache-nix-action@v6
+        uses: nix-community/cache-nix-action@135667ec418502fa5a3598af6fb9eb733888ce6a # v6.1.3
         with:
           primary-key: nix-tests-${{ matrix.os }}-${{ hashFiles('**/*.nix', '**/flake.lock') }}
           purge: true
@@ -78,6 +79,8 @@ jobs:
         run: nix develop --command bash -c "cabal update"
       # can't be run in nix build due to network usage
       - name: run rpc tests
+        env:
+          RPC_MAINNET_KEY: ${{ secrets.RPC_MAINNET_KEY }}
         run: nix develop --command bash -c "cabal --active-repositories=:none run rpc-tests"
       # if we run this in nix build we often get killed due to oom in ci
       - name: run ethereum tests
@@ -85,6 +88,9 @@ jobs:
       # if we run this in nix build, it complains about running in a sandbox
       - name: run cli tests
         run: nix develop --command bash -c "cabal --active-repositories=:none run cli-test"
+      # runs hevm against the vendored forge-symbolic-tests bug suite (needs forge)
+      - name: run symbolic bug-suite tests
+        run: nix develop --command bash -c "cabal --active-repositories=:none run forge-symbolic-tests"
 
   build-windows:
     name: build (windows-latest)
@@ -93,16 +99,16 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: foundry-rs/foundry-toolchain@v1
+      - uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
         with:
           version: stable
       - run: |
           echo FOUNDRY_PATH="$(dirname "$(which forge)")" >> "$GITHUB_ENV"
         shell: bash
-      - uses: msys2/setup-msys2@v2
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         id: msys2
         with:
           msystem: CLANG64
@@ -123,9 +129,8 @@ jobs:
             autotools:p
             gmp:p
             openssl:p
-            z3:p
             go:p
-      - uses: haskell-actions/setup@v2.7.7
+      - uses: haskell-actions/setup@e447c4c045e7744463435b4b731e125861006ebb # v2.7.7
         id: setup
         with:
           ghc-version: '9.10.3'
@@ -181,7 +186,7 @@ jobs:
           # The last step generates dist-newstyle/cache/plan.json for the cache key.
 
       - name: Restore cached dependencies
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         id: cache
         env:
           key: ${{ runner.os }}-ghc-${{ steps.setup.outputs.ghc-version }}-cabal-${{ steps.setup.outputs.cabal-version }}
@@ -197,7 +202,7 @@ jobs:
 
       # Cache dependencies already, so that we do not have to rebuild them should the subsequent steps fail.
       - name: Save cached dependencies
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         # Caches are immutable, trying to save with the same key would error.
         if: ${{ steps.cache.outputs.cache-primary-key != steps.cache.outputs.cache-matched-key }}
         with:
@@ -212,12 +217,12 @@ jobs:
           strip result/hevm.exe
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: hevm-windows-x64
           path: result/hevm.exe
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: argotorg/solidity
           ref: fd3a22656ebe9c91a96ebd846ab7699b5f2e053c
@@ -229,7 +234,7 @@ jobs:
           ARTIFACT_URL="$(grep ethereum/execution-spec-tests flake.nix | cut -f2 -d'"')"
           curl --retry 5 -fsSL "$ARTIFACT_URL" | tar xz "fixtures/blockchain_tests"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: foundry-rs/forge-std
           path: forge-std
@@ -241,8 +246,13 @@ jobs:
           curl --retry 5 -fsSL https://github.com/bitwuzla/bitwuzla/releases/download/0.8.2/Bitwuzla-Win64-x86_64-static.zip -o bitwuzla.zip
           unzip bitwuzla.zip && rm bitwuzla.zip
           echo BITWUZLA_PATH="$PWD/Bitwuzla-Win64-x86_64-static/bin" >> "$GITHUB_ENV"
+          # z3, pinned: msys2's rolling z3 package broke 3 tests when it moved
+          # from 4.15.2 to 4.16.0 (upstream 4.16.0 is fine on other platforms)
+          curl --retry 5 -fsSL https://github.com/Z3Prover/z3/releases/download/z3-4.15.2/z3-4.15.2-x64-win.zip -o z3.zip
+          unzip z3.zip && rm z3.zip
+          echo Z3_PATH="$PWD/z3-4.15.2-x64-win/bin" >> "$GITHUB_ENV"
           # evm
-          go install github.com/ethereum/go-ethereum/cmd/evm@latest
+          go install github.com/ethereum/go-ethereum/cmd/evm@v1.16.1
           echo EVM_PATH="$(cygpath -u "$(go env GOPATH)/bin")" >> "$GITHUB_ENV"
           # cvc5
           curl --retry 5 -fsSL https://github.com/cvc5/cvc5/releases/download/cvc5-1.3.0/cvc5-Win64-x86_64-static.zip -o cvc5.zip
@@ -260,12 +270,14 @@ jobs:
 
       - name: run tests
         run: |
-          export PATH="$EVM_PATH:$CVC5_PATH:$BITWUZLA_PATH:$DAPP_SOLC_PATH:$FOUNDRY_PATH:$HASKELL_PATHS:$PATH"
+          export PATH="$EVM_PATH:$CVC5_PATH:$BITWUZLA_PATH:$Z3_PATH:$DAPP_SOLC_PATH:$FOUNDRY_PATH:$HASKELL_PATHS:$PATH"
           cabal run test
 
       - name: run rpc tests
+        env:
+          RPC_MAINNET_KEY: ${{ secrets.RPC_MAINNET_KEY }}
         run: |
-          export PATH="$BITWUZLA_PATH:$FOUNDRY_PATH:$HASKELL_PATHS:$PATH"
+          export PATH="$BITWUZLA_PATH:$Z3_PATH:$FOUNDRY_PATH:$HASKELL_PATHS:$PATH"
           cabal run rpc-tests
 
       - name: run ethereum tests
@@ -276,15 +288,15 @@ jobs:
   cabal-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - uses: ./.github/actions/free-disk-space
       - name: Install Nix
-        uses: nixbuild/nix-quick-install-action@v34
+        uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035 # v34
       - name: Nix cache
         id: cache
-        uses: nix-community/cache-nix-action@v6
+        uses: nix-community/cache-nix-action@135667ec418502fa5a3598af6fb9eb733888ce6a # v6.1.3
         with:
           primary-key: nix-cabal-check-${{ hashFiles('**/*.nix', '**/flake.lock') }}
           purge: true

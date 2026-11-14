@@ -1,19 +1,26 @@
 {-# LANGUAGE QuasiQuotes #-}
 {-# OPTIONS_GHC -Wno-x-partial #-}
 
-module EVM.Equivalence.EquivalenceTests (tests) where
+module EVM.Equivalence.EquivalenceTests (tests, YulVerbosity) where
 
 import Control.Monad (when, unless, forM_)
+import Control.Monad.ST (stToIO)
+import Control.Monad.State.Strict (evalStateT)
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
 import Data.Either.Extra (fromRight)
 import Data.Functor ((<&>))
 import Data.Maybe (fromMaybe, mapMaybe, fromJust)
-import Data.List qualified as List (isInfixOf)
+import Data.List qualified as List (isInfixOf, nub)
+import Data.Map.Strict qualified as Map
 import Data.String.Here
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (diffUTCTime, getCurrentTime)
+import Data.Vector qualified as V
 import System.Environment (lookupEnv)
+import Text.Read (readMaybe)
+import Test.Tasty.Options (IsOption(..))
 import System.FilePath (makeRelative, normalise)
 import System.FilePath.Find (find, always, filePath, fileType, (&&?), FileType(RegularFile))
 import Test.Tasty
@@ -23,7 +30,10 @@ import Text.RE.TDFA.String hiding (matches)
 import Text.RE.Replace (replaceAll, captureText, CaptureOrdinal(..), CaptureID(..))
 
 
+import EVM (makeVm, initialContract, defaultVMOpts)
+import EVM.Assembler (assemble, assembleBytes)
 import EVM.Effects qualified as Effects
+import EVM.Exec (exec)
 import EVM.Expr qualified as Expr
 import EVM.Format (hexByteString)
 import EVM.Types
@@ -31,6 +41,8 @@ import EVM.Solidity (solcRuntime, solidity, yul)
 import EVM.Solidity qualified as Solidity (CodeType(..))
 import EVM.Solvers (withSolvers, defMemLimit, Solver(..))
 import EVM.SymExec
+import EVM.CexReplay
+import EVM.Equivalence
 
 tests :: TestTree
 tests = testGroup "Bytecode equivalence tests"
@@ -71,7 +83,7 @@ run s s' codeType = do
   a <- compile s codeType
   b <- compile s' codeType
   Effects.runApp $ withSolvers Bitwuzla 3 Nothing defMemLimit $ \sg -> do
-    calldata <- mkCalldata Nothing []
+    (calldata, _) <- mkCalldata Nothing []
     equivalenceCheck sg Nothing a b defaultVeriOpts calldata (codeType == Solidity.Creation)
 
 runtimeSolidityEquivalenceTests :: TestTree
@@ -89,6 +101,26 @@ runtimeSolidityEquivalenceTests = testGroup "Solidity runtime equivalence"
       expectDifference 1 a b
   -- diverging gas overapproximations are caught
   -- previously, they had the same name (gas_...), so they compared equal
+  , testCase "eq-partials-not-duplicated" $ do
+    let a = [here|
+              contract C {
+                function stuff(uint n) public returns (uint256) {
+                  uint count = 0;
+                  for (uint i = 0; i < n; i++) count++;
+                  return count;
+                }
+              }
+           |]
+        b = replace $ "return count;" `with` "return count + 1;" `on` a
+    codeA <- compile a Solidity.Runtime
+    codeB <- compile b Solidity.Runtime
+    let opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf { maxIter = Just 3 } }
+    eq <- Effects.runApp $ withSolvers Bitwuzla 3 Nothing defMemLimit $ \sg -> do
+      (calldata, _) <- mkCalldata Nothing []
+      equivalenceCheck sg Nothing codeA codeB opts calldata False
+    assertBool "Must have partial end states" (not (null eq.partials))
+    -- each partial end state used to be reported once per end state of the other program
+    assertEqual "Partial end states must not be duplicated" (List.nub eq.partials) eq.partials
   , testCase "eq-divergent-overapprox-gas" $ do
     let a = [here|
               contract C {
@@ -377,6 +409,27 @@ deploymentSolidityEquivalenceTests = testGroup "Solidity deployment equivalence"
     let a = wrap aBody
     let b = wrap bBody
     expectDifferent a b
+  -- A writes 0 to slot 1, B leaves it unset; both read as 0
+  , testCase "storage-zero-same-as-unset" $ do
+    let a = [i|
+              contract C {
+                uint a = 1;
+                uint b = 0;
+                function get() public view returns (uint, uint) { return (a, b); }
+              }
+            |]
+    let b = replace $ "uint b = 0;" `with` "uint b;" `on` a
+    expectEquivalent a b
+  , testCase "storage-nonzero-differs-from-unset" $ do
+    let a = [i|
+              contract C {
+                uint a = 1;
+                uint b = 2;
+                function get() public view returns (uint) { return a; }
+              }
+            |]
+    let b = replace $ "uint b = 2;" `with` "uint b;" `on` a
+    expectDifferent a b
   ]
   where
     expectDifferent :: SourceCode -> SourceCode -> IO ()
@@ -397,7 +450,7 @@ bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
     let a = fromJust (hexByteString "5f610100526020610100f3")
         b = fromJust (hexByteString "5f356101f40115610100526020610100f3")
     eq <- Effects.runApp $ withSolvers Z3 1 Nothing defMemLimit $ \s -> do
-      calldata <- mkCalldata Nothing []
+      (calldata, _) <- mkCalldata Nothing []
       equivalenceCheck s Nothing a b defaultVeriOpts calldata False
     assertBool "Must have a difference" (any (isCex . fst) eq.res)
     let cexs :: [SMTCex] = mapMaybe (getCex . fst) eq.res
@@ -407,7 +460,201 @@ bytecodeEquivalenceTests = testGroup "Bytecode equivalence"
     let def = fromRight (internalError "cannot be") $ defaultSymbolicValues $ subModel cex (AbstractBuf "txdata")
     let buf = prettyBuf $ Expr.concKeccakSimpExpr def
     assertBool "Must start with specific string" (T.isPrefixOf "0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe0c" buf)
+  -- calls to unknown code with the same inputs must give the same results (#1116)
+  , testCase "eq-call-same-inputs-same-result" $ do
+    eq <- eqBytecode False (sCall "1234" "5f" <> pop <> revertRet) ("5b" <> sCall "1234" "5f" <> pop <> revertRet)
+    assertEqual "must be equivalent" [] (map fst eq.res)
+  , testCase "eq-call-different-calldata" $ do
+    eq <- eqBytecode False (sCall "1234" "5f" <> pop <> revertRet) (sCall "1234" "6001" <> pop <> revertRet)
+    assertBool "different calldata may give different results" (any (isCex . fst) eq.res)
+  , testCase "eq-call-after-extra-view-call" $ do
+    eq <- eqBytecode False (sCall "1234" "5f" <> pop <> revertRet)
+                           (sCall "5678" "5f" <> pop <> sCall "1234" "5f" <> pop <> revertRet)
+    assertEqual "a view call does not change later results" [] (map fst eq.res)
+  , testCase "eq-call-twice-in-one-program" $ do
+    -- returns whether two identical calls succeeded differently, vs making the call once and
+    -- returning 0 (so that both touch the same accounts)
+    eq <- eqBytecode False (sCall "1234" "5f" <> sCall "1234" "5f" <> "1415" <> "5f52" <> "60205ff3")
+                           (sCall "1234" "5f" <> pop <> "5f5f5260205ff3")
+    assertBool "the callee can read GAS, so identical calls may disagree (#1201)" (any (isCex . fst) eq.res)
+  , testCase "eq-call-twice-in-both-programs" $ do
+    let twice = sCall "1234" "5f" <> sCall "1234" "5f" <> "1415" <> "5f52" <> "60205ff3"
+    eq <- eqBytecode False twice ("5b" <> twice)
+    assertEqual "the n-th identical call of A and B must agree" [] (map fst eq.res)
+  , testCase "eq-staticcall-in-one-program" $ do
+    eq <- eqBytecode False (sCall "1234" "5f" <> pop) ""
+    assertBool "a view call whose result is unused changes nothing" (null eq.res)
+  , testCase "eq-transient-storage-starts-empty" $ do
+    -- tload(0) is zero, so this stops in both
+    eq <- eqBytecode False "5f5c15600757fe5b00" "00"
+    assertBool "transient storage must start empty" (null eq.res)
+  , testCase "eq-block-number-is-symbolic" $ do
+    -- sstore(1, 0) vs sstore(1, number())
+    eq <- eqBytecode False "5f600155" "43600155"
+    assertBool "the block number may be nonzero" (any (isCex . fst) eq.res)
+  , testCase "eq-timestamp-is-symbolic" $ do
+    -- sstore(1, 0) vs sstore(1, timestamp())
+    eq <- eqBytecode False "5f600155" "42600155"
+    assertBool "the timestamp may be nonzero" (any (isCex . fst) eq.res)
+  , testCase "eq-revert-data-length-differs" $ do
+    eq <- uncurry eqOps (zerosOfLen32vs31 OpRevert)
+    assertBool "32 vs 31 bytes of revert data" (any (isCex . fst) eq.res)
+  , testCase "eq-return-data-length-differs" $ do
+    eq <- uncurry eqOps (zerosOfLen32vs31 OpReturn)
+    assertBool "32 vs 31 bytes of return data" (any (isCex . fst) eq.res)
+  , testCase "eq-calldataload-near-max-offset-is-zero" $ do
+    -- sstore(0, calldataload(2^256-1)) vs sstore(0, 0)
+    eq <- eqBytecode False "7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff355f55" "5f5f55"
+    assertBool "reading past the end of calldata gives zero" (null eq.res)
+  , testCase "eq-calldataload-near-max-offset-does-not-wrap" $ do
+    -- sstore(0, calldataload(2^256-1)) vs sstore(0, shr(8, calldataload(0)))
+    eq <- eqBytecode False "7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff355f55" "5f3560081c5f55"
+    assertBool "the read must not wrap around to the start of calldata" (any (isCex . fst) eq.res)
+  , testCase "eq-call-moves-its-value" $ do
+    eq <- eqBytecode True (call "1234" <> pop) (callWithWei "1234" <> pop)
+    assertBool "the callee gets the value" (any (isCex . fst) eq.res)
+  , testCase "eq-replay-compares-balances" $ do
+    -- selfdestruct(0x1234) vs stop
+    replays <- replayAll "611234ff" "00"
+    assertBool "Must have a counterexample" (not (null replays))
+    forM_ replays $ \case
+      Validated {} -> pure ()
+      r -> assertFailure $ "Counterexample must replay as validated, got: " <> show r
+  , testCase "eq-call-may-send-ether-back" $ do
+    -- sstore(0, selfbalance()) after the call vs with the balance from before it
+    eq <- eqBytecode True (call "1234" <> pop <> "475f55") ("47" <> call "1234" <> pop <> "5f55")
+    assertBool "the callee may send the caller ether" (any (isCex . fst) eq.res)
+  , testCase "eq-call-after-same-state-changing-call" $ do
+    eq <- eqBytecode True (call "1234" <> pop <> sCall "5678" "5f" <> pop <> revertRet)
+                          ("5b" <> call "1234" <> pop <> sCall "5678" "5f" <> pop <> revertRet)
+    assertEqual "must be equivalent" [] (map fst eq.res)
+  , testCase "eq-call-after-state-changing-call-in-one-program" $ do
+    eq <- eqBytecode True (call "1234" <> pop <> sCall "5678" "5f" <> pop <> revertRet)
+                          (sCall "5678" "5f" <> pop <> revertRet)
+    assertBool "a state-changing call may change later results" (any (isCex . fst) eq.res)
+  , testCase "eq-replay-validates-storage-difference" $ do
+    -- sstore(0, 1) vs sstore(0, 2)
+    replays <- replayAll "6001600055" "6002600055"
+    assertBool "Must have a counterexample" (not (null replays))
+    forM_ replays $ \case
+      Validated ra rb -> assertBool "Replay must show the different stores" (ra /= rb)
+      r -> assertFailure $ "Counterexample must replay as validated, got: " <> show r
+  , testCase "eq-created-contracts-differ" $ forM_
+    -- the salt (#1193)
+    [ (returnTop (create2 1 []), returnTop (create2 2 []))
+    , (returnTop (create []), returnTop (create2 1 []))
+    -- the child's runtime code (#1192)
+    , (returnTop (create (deploy OpStop)), returnTop (create (deploy OpInvalid)))
+    -- what the child's constructor stores (#1178)
+    , (create (storeAt0 1) <> [OpPop], create (storeAt0 2) <> [OpPop])
+    -- a CREATE bumps the nonce even when it deploys nothing
+    , (create [] <> [OpPop], [OpStop])
+    ] $ \(a, b) -> do
+      replays <- replayCode (assembleBytes a) (assembleBytes b)
+      assertBool ("Must have a counterexample: " <> show (a, b)) (not (null replays))
+      forM_ replays $ \case
+        Validated {} -> pure ()
+        r -> assertFailure $ "Counterexample must replay as validated, got: " <> show r
+  , testCase "eq-same-create2-equivalent" $ do
+    -- the entrypoints differ, but the created contract and the returned address don't
+    let a = returnTop (create2 1 [])
+    eq <- eqCode False (assembleBytes a) (assembleBytes (a <> [OpStop]))
+    assertBool ("Must be equivalent, got: " <> show eq.res) (null eq.res)
+  , testCase "eq-replay-zero-write-over-nonzero-slot" $ do
+    -- stop vs sstore(1, 0): they differ only if slot 1 starts nonzero, so the model must give its value
+    replays <- replayAll "00" "5f600155"
+    assertBool "Must have a counterexample" (not (null replays))
+    forM_ replays $ \case
+      Validated {} -> pure ()
+      r -> assertFailure $ "Counterexample must replay as validated, got: " <> show r
+  , testCase "eq-replay-answers-calls-to-unknown-code" $ do
+    -- STATICCALL(gas, 0x1234, 0, 0, 0, 32), then sstore(0, mload(0) == 5) vs sstore(0, 0)
+    let callOut = "60205f5f5f6112345afa50"
+    replays <- replayAll (callOut <> "5f516005145f55") (callOut <> "5f5f55")
+    assertBool "Must have a counterexample" (not (null replays))
+    forM_ replays $ \case
+      Validated {} -> pure ()
+      r -> assertFailure $ "The callee must answer as in the counterexample, got: " <> show r
+  , testCase "eq-replay-keeps-long-returndata-compact" $ do
+    -- the model makes the return data 16 MB long, with one nonzero byte
+    let out = AbstractBuf "out"
+        inputs = CallInputs (Lit 0) (Lit 0xfa) (Lit 0x1234) (Lit 0) (ConcreteBuf "") (Lit 0) (LitAddr 0xacab)
+          (AbstractStore (LitAddr 0xacab) Nothing) (ConcreteStore mempty) (Lit 0) (Lit 0)
+        cex = (mempty :: SMTCex) { buffers = Map.singleton out (EVM.Types.Comp (Write 7 3 (Base 0 (2 ^ (24 :: Int))))) }
+    case modelUnknownCalls cex [PCall inputs (Lit 1) out Nothing] of
+      [Right m] -> do
+        assertEqual "only the bytes up to the last nonzero one are kept" (BS.pack [0, 0, 0, 7]) m.returndata
+        assertEqual "the length is kept" (2 ^ (24 :: Int)) m.returndataLength
+      r -> assertFailure $ "Must model the call, got: " <> show r
+  , testCase "eq-replay-stub-pads-returndata-with-zeros" $ do
+    -- the calldata is longer than the given part of the returndata
+    let input = BS.replicate 40 0xaa
+        code = stubCode [(input, (True, BS.pack [7], 64))]
+    res <- stToIO $ do
+      vm <- makeVm @Concrete $ (defaultVMOpts @Concrete)
+        { contract = initialContract (RuntimeCode (ConcreteRuntimeCode code))
+        , calldata = (ConcreteBuf input, [])
+        , gas = 0xffffffffffffffff
+        , gaslimit = 0xffffffffffffffff
+        }
+      evalStateT (exec Effects.defaultConfig) vm
+    case res of
+      VMSuccess (ConcreteBuf out) -> assertEqual "the rest of the returndata is zero" (BS.pack [7] <> BS.replicate 63 0) out
+      r -> assertFailure $ "The stub must return, got: " <> show r
+  , testCase "eq-replay-equal-programs-not-reproducible" $ do
+    -- sstore(0, 1), and the same after a JUMPDEST
+    let a = fromJust (hexByteString "6001600055")
+        b = fromJust (hexByteString "5b6001600055")
+    r <- Effects.runApp $ withSolvers Bitwuzla 1 Nothing defMemLimit $ \s ->
+      replayEqCex s False a b (AbstractBuf "txdata") mempty
+    case r of
+      NotReproducible {} -> pure ()
+      _ -> assertFailure $ "Replay of equal programs must not reproduce, got: " <> show r
   ]
+  where
+    -- STATICCALL(gas, addr, 0, size, 0, 0), size pushed by the given op
+    sCall addr size = "5f5f" <> size <> "5f61" <> addr <> "5afa"
+    -- CALL(gas, addr, 0, 0, 0, 0, 0)
+    call addr = "5f5f5f5f5f61" <> addr <> "5af1"
+    -- CALL(gas, addr, 1, 0, 0, 0, 0)
+    callWithWei addr = "5f5f5f5f600161" <> addr <> "5af1"
+    pop = "50"
+    -- revert with the last call's return data
+    revertRet = "3d5f5f3e3d5ffd"
+    -- both halt with all-zero data: the byte stored in B is byte(0, iszero(..)), i.e. always 0
+    zerosOfLen32vs31 :: Op -> ([Op], [Op])
+    zerosOfLen32vs31 halt =
+      ( [OpPush (Lit 32), OpPush (Lit 4), halt]
+      , [ OpPush0, OpCalldataload, OpIszero, OpPush0, OpByte, OpPush (Lit 31), OpMstore
+        , OpPush (Lit 31), OpPush (Lit 32), halt ] )
+    push = OpPush . Lit
+    -- the init code, at most 32 bytes, is a word in memory; they leave the new address
+    create code = storeCode code <> [push (codeSize code), push 0, push 0, OpCreate]
+    create2 salt code = storeCode code <> [push salt, push (codeSize code), push 0, push 0, OpCreate2]
+    storeCode code = let bs = assembleBytes code in [push (word (bs <> BS.replicate (32 - BS.length bs) 0)), push 0, OpMstore]
+    codeSize = fromIntegral . BS.length . assembleBytes
+    deploy o = [push (fromIntegral (BS.head (assembleBytes [o]))), push 0, OpMstore8, push 1, push 0, OpReturn]
+    storeAt0 v = [push v, push 0, OpSstore, push 0, push 0, OpReturn]
+    returnTop ops = ops <> [push 0, OpMstore, push 0x20, push 0, OpReturn]
+    eqOps :: [Op] -> [Op] -> IO EqIssues
+    eqOps a b = eqCode False (asm a) (asm b)
+      where asm = BS.pack . mapMaybe Expr.maybeLitByteSimp . V.toList . assemble
+    eqBytecode :: Bool -> ByteString -> ByteString -> IO EqIssues
+    eqBytecode noReent ha hb = eqCode noReent (fromJust (hexByteString ha)) (fromJust (hexByteString hb))
+    eqCode :: Bool -> ByteString -> ByteString -> IO EqIssues
+    eqCode noReent a b = do
+      let env = Effects.Env { config = Effects.defaultConfig { Effects.promiseNoReent = noReent } }
+      Effects.runEnv env $ withSolvers Bitwuzla 1 Nothing defMemLimit $ \s -> do
+        (calldata, _) <- mkCalldata Nothing []
+        equivalenceCheck s Nothing a b defaultVeriOpts calldata False
+    replayAll :: ByteString -> ByteString -> IO [CexReplay]
+    replayAll ha hb = replayCode (fromJust (hexByteString ha)) (fromJust (hexByteString hb))
+    replayCode :: ByteString -> ByteString -> IO [CexReplay]
+    replayCode a b =
+      Effects.runApp $ withSolvers Bitwuzla 1 Nothing defMemLimit $ \s -> do
+        (calldata, _) <- mkCalldata Nothing []
+        eq <- equivalenceCheck s Nothing a b defaultVeriOpts calldata False
+        mapM (replayEqCex s False a b (AbstractBuf "txdata")) (mapMaybe (getCex . fst) eq.res)
 
 yulEquivalenceTests :: TestTree
 yulEquivalenceTests = testGroup "Yul equivalence"
@@ -425,14 +672,22 @@ yulEquivalenceTests = testGroup "Yul equivalence"
     Right aPrgm <- yul "" a
     Right bPrgm <- yul "" b
     eq <- Effects.runApp $ withSolvers Bitwuzla 1 Nothing defMemLimit $ \s -> do
-      calldata <- mkCalldata Nothing []
+      (calldata, _) <- mkCalldata Nothing []
       equivalenceCheck s Nothing aPrgm bPrgm defaultVeriOpts calldata False
     assertBool "Must have a difference" (any (isCex . fst) eq.res)
   , yulOptimizationsSolcTests
   ]
 
+newtype YulVerbosity = YulVerbosity Int
+
+instance IsOption YulVerbosity where
+  defaultValue = YulVerbosity 0
+  parseValue = fmap YulVerbosity . readMaybe
+  optionName = pure "yul-verbosity"
+  optionHelp = pure "eq-all-yul-optimization-tests: 1 prints each file before checking it, 2 also its programs"
+
 yulOptimizationsSolcTests :: TestTree
-yulOptimizationsSolcTests = testCase "eq-all-yul-optimization-tests" $ do
+yulOptimizationsSolcTests = askOption $ \(YulVerbosity verbosity) -> testCase "eq-all-yul-optimization-tests" $ do
         let opts = (defaultVeriOpts :: VeriOpts) { iterConf = defaultIterConf {maxIter = Just 5, askSmtIters = 20, loopHeuristic = Naive }}
             ignoredTests = fmap normalise
                     -- unbounded loop --
@@ -535,7 +790,6 @@ yulOptimizationsSolcTests = testCase "eq-all-yul-optimization-tests" $ do
                   False -> ""
                   True-> success
           start <- getCurrentTime
-          let verbosity :: Int = 0
           when (verbosity > 0) $ putStrLn $ "Checking file: " <> f
           when (verbosity > 1) $ do
             putStrLn "-------------Original Below-----------------"
@@ -548,7 +802,7 @@ yulOptimizationsSolcTests = testCase "eq-all-yul-optimization-tests" $ do
           Right aPrgm <- yul contractName $ T.pack $ unlines filteredASym
           Right bPrgm <- yul contractName $ T.pack $ unlines filteredBSym
           eq <- Effects.runApp $ withSolvers Bitwuzla 1 (Just 100) defMemLimit $ \s -> do
-            calldata <- mkCalldata Nothing []
+            (calldata, _) <- mkCalldata Nothing []
             equivalenceCheck s Nothing aPrgm bPrgm opts calldata False
           let res = map fst eq.res
           end <- getCurrentTime

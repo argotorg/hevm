@@ -29,8 +29,8 @@ interface Hevm {
     function envBytes32(string calldata key, string calldata delimiter) external returns (bytes32[] memory values);
     function envString(string calldata key) external returns (string memory value);
     function envString(string calldata key, string calldata delimiter) external returns (string[] memory values);
-    function envBytes(bytes calldata key) external returns (bytes memory value);
-    function envBytes(bytes calldata key, bytes calldata delimiter) external returns (bytes[] memory values);
+    function envBytes(string calldata key) external returns (bytes memory value);
+    function envBytes(string calldata key, string calldata delimiter) external returns (bytes[] memory values);
     function toString(address value) external returns (string memory);
     function toString(bool value) external returns (string memory);
     function toString(uint256 value) external returns (string memory);
@@ -311,19 +311,30 @@ contract CheatCodes is Test {
         assertEq(result[3], "0xffff");
     }
 
-    function prove_envBytes() public {
-        bytes memory varname = "ENV_BYTES_TEST";
+    function prove_invalidUTF8() public {
+        // ABI strings are raw bytes and need not be valid UTF-8: byte 0xbf
+        // must not crash cheatcode string handling (issue #1076)
+        string memory invalid = string(abi.encodePacked(hex"bf"));
 
-        hevm.setEnv(string(varname), "0x7109709ECfa91a80626fF3989D68f67F5b1DD12D");
+        hevm.setEnv(invalid, "hello, world!");
+        assertEq(hevm.envString(invalid), "hello, world!");
+
+        hevm.label(address(this), invalid);
+    }
+
+    function prove_envBytes() public {
+        string memory varname = "ENV_BYTES_TEST";
+
+        hevm.setEnv(varname, "0x7109709ECfa91a80626fF3989D68f67F5b1DD12D");
         assert(keccak256(abi.encodePacked(hevm.envBytes(varname))) == keccak256(abi.encodePacked(hex"7109709ECfa91a80626fF3989D68f67F5b1DD12D")));
 
-        hevm.setEnv(string(varname), "0x7109709ECfa91a80626fF3989D68f67F5b1DD12D,0x00");
+        hevm.setEnv(varname, "0x7109709ECfa91a80626fF3989D68f67F5b1DD12D,0x00");
         bytes[] memory result = hevm.envBytes(varname, ",");
         assertEq(result.length, 2);
         assert(keccak256(abi.encodePacked(result[0])) == keccak256(abi.encodePacked(hex"7109709ECfa91a80626fF3989D68f67F5b1DD12D")));
         assert(keccak256(abi.encodePacked(result[1])) == keccak256(abi.encodePacked(hex"00")));
 
-        hevm.setEnv(string(varname), "invalid");
+        hevm.setEnv(varname, "invalid");
         try hevm.envBytes(varname) returns (bytes memory) {
             assert(false);
         } catch Error(string memory reason) {

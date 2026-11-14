@@ -9,6 +9,8 @@
 - [Forge std-test tutorial](./std-test-tutorial.md)
 - [Equivalence checking tutorial](./equivalence-checking-tutorial.md)
 - [Symbolic execution tutorial](./symbolic-execution-tutorial.md)
+- [Example: Truebit exploit](./exploit-tutorial.md)
+- [Example: Abracadabra exploit](./exploit-tutorial2.md)
 <!-- [Discovering reachable assertion violations]() -->
 
 # Reference
@@ -17,6 +19,7 @@
 - [Symbolic unit execution](./symbolic.md)
 - [Equivalence checking](./equivalence.md)
 - [Concrete execution](./exec.md)
+- [Interactive debugger](./debugger.md)
 - [Common options](./common-options.md)
 
 # Development

@@ -7,41 +7,41 @@
 
 module Main where
 
-import Control.Monad (when, forM_, unless)
+import Control.Monad (when, forM, forM_, unless)
 import Control.Monad.State.Strict (runStateT)
 import Control.Monad.ST (stToIO)
 import Control.Monad.IO.Unlift
 import Control.Exception (try, IOException)
 import Data.ByteString (ByteString)
-import Control.Concurrent.MVar (readMVar)
 import qualified Data.ByteString.Lazy as BS
 import Data.ByteString.Builder (toLazyByteString)
 import qualified Data.ByteString.Char8 as BC
 import Data.DoubleWord (Word256)
-import Data.List (intersperse, intercalate)
+import Data.List (intercalate)
 import Data.Maybe (fromMaybe, mapMaybe, fromJust, isNothing, isJust)
 import Data.Text qualified as T
 import Data.Text.IO qualified as T
 import Data.Version (showVersion)
 import Data.Word (Word64)
-import GHC.Conc (getNumProcessors)
 import GitHash
 import Numeric.Natural (Natural)
 import Optics.Core ((&), set)
-import Witch (unsafeInto)
 import Options.Generic as OptionsGeneric
 import Options.Applicative as Options
 import Paths_hevm qualified as Paths
-import System.Directory (withCurrentDirectory, getCurrentDirectory, doesDirectoryExist, makeAbsolute)
+import System.Directory (getXdgDirectory, XdgDirectory(..), withCurrentDirectory, getCurrentDirectory, doesDirectoryExist, makeAbsolute, findExecutable)
 import System.FilePath ((</>))
-import System.Exit (exitFailure, exitWith, ExitCode(..))
+import System.Exit (exitFailure, exitSuccess, exitWith, ExitCode(..))
+import System.IO (hFlush, stdout)
 import Data.List.Split (splitOn)
 import Text.Read (readMaybe)
 import JSONL (jsonlBuilder, jsonLine)
 
 import EVM (initialContract, abstractContract, makeVm, defaultVMOpts)
 import EVM.ABI (Sig(..))
-import EVM.Dapp (dappInfo, DappInfo, emptyDapp)
+import EVM.Debugger (newSession, setSnapshotInterval, snapshotInterval)
+import EVM.Debugger.Server (serveSession, withProgressServer, announce, defaultDebuggerPort)
+import EVM.Dapp (dappInfo, DappInfo, emptyDapp, TestMethodInfo(..))
 import EVM.Expr qualified as Expr
 import EVM.Concrete qualified as Concrete
 import EVM.Fetch qualified as Fetch
@@ -50,12 +50,16 @@ import EVM.Solidity
 import EVM.Solvers
 import EVM.Stepper qualified
 import EVM.SymExec
+import EVM.CexReplay
+import EVM.Equivalence
 import EVM.Transaction qualified
 import EVM.Types hiding (word, Env, Symbolic)
 import EVM.Types qualified
 import EVM.UnitTest
 import EVM.Effects
 import EVM.Expr (maybeLitWordSimp, maybeLitAddrSimp)
+import EVM.Progress (withProgress, ProgressOpts(..))
+import EVM.Progress qualified as Progress
 import EVM.Tracing (interpretWithTrace, VMTraceStepResult(..))
 
 data AssertionType = DSTest | Forge
@@ -88,11 +92,13 @@ data CommonOptions = CommonOptions
   , root          ::Maybe String
   , assertionType ::AssertionType
   , smtTimeout    ::Natural
+  , smtBranchTimeout ::Natural
   , smtMemory     ::Natural
   , smtDebug      ::Bool
   , dumpUnsolved  ::Maybe String
   , numSolvers    ::Maybe Natural
   , maxIterations ::Integer
+  , maxConcreteIterations ::Integer
   , promiseNoReent::Bool
   , maxBufSize    ::Int
   , maxWidth      ::Int
@@ -100,8 +106,20 @@ data CommonOptions = CommonOptions
   , noSimplify    ::Bool
   , onlyDeployed  ::Bool
   , cacheDir      ::Maybe String
-  , earlyAbort    ::Bool
+  , noRpcCache    ::Bool
+  , noEarlyAbort  ::Bool
   , mergeMaxBudget :: Int
+  , maxDynSize    ::Int
+  , noAbstractArith ::Bool
+  , noHashCons    ::Bool
+  , progressLog   ::Maybe FilePath
+  , progressExprs ::Bool
+  , noProgress    ::Bool
+  , interactive   ::Bool
+  , serve         ::Bool
+  , port          ::Int
+  , snapshotEvery ::Int
+  , checkStaticBranches ::Bool
   }
 
 commonOptions :: Parser CommonOptions
@@ -111,28 +129,42 @@ commonOptions = CommonOptions
   <*> option auto (long "loop-detection-heuristic" <> showDefault <> value StackBased <>
     help "Which heuristic should be used to determine if we are in a loop: StackBased or Naive")
   <*> (switch $ long "no-decompose"         <> help "Don't decompose storage slots into separate arrays")
-  <*> (strOption $ long "solver"            <> value "z3" <> help "Used SMT solver: z3, cvc5, or bitwuzla")
+  <*> (strOption $ long "solver"            <> value "bitwuzla" <> help "Used SMT solver: bitwuzla (default), z3, or cvc5")
   <*> (switch $ long "debug"                <> help "Debug printing of internal behaviour, and dump internal expressions")
   <*> (optional $ strOption $ long "calldata" <> help "Tx: calldata")
   <*> (switch $ long "trace"                <> help "Dump trace")
-  <*> (option auto $ long "verb"            <> showDefault <> value 1 <> help "Append call trace: {1} failures {2} all")
+  <*> (option auto $ long "verb"            <> showDefault <> value 1 <> help "Append call trace: {1} failures {2} all {3} also log progress to hevm-progress.jsonl {4} also log solver expressions there")
   <*> (optional $ strOption $ long "root"   <> help "Path to  project root directory")
-  <*> (option auto $ long "assertion-type"  <> showDefault <> value Forge <> help "Assertions as per Forge or DSTest")
+  <*> (option auto $ long "assertion-type"  <> showDefault <> value Forge <> help "Deprecated, has no effect: failing assertions are detected both by reverts and by the fail flag that forge-std's fail() and DSTest set")
   <*> (option auto $ long "smt-timeout"     <> value 300 <> help "Timeout given to SMT solver in seconds. Not available on Windows")
+  <*> (option auto $ long "smt-branch-timeout" <> showDefault <> value 20 <> help "Timeout in seconds for the SMT queries that decide which branches to explore, at most --smt-timeout. A branch the solver cannot decide is explored on both sides")
   <*> (option auto $ long "smt-memory"      <> value defMemLimit <> help "Maximum memory limit for SMT solver in MB. Only available on Linux")
   <*> (switch $ long "smt-debug"            <> help "Print smt queries sent to the solver")
   <*> (optional $ strOption $ long "dump-unsolved" <> help "Dump unsolved SMT queries to this (relative) path")
-  <*> (optional $ option auto $ long "num-solvers" <> help "Number of solver instances to use (default: number of cpu cores)")
+  <*> (optional $ option auto $ long "num-solvers" <> help "Number of solver instances to use (default: number of cpu cores, at most half the available memory divided by --smt-memory)")
   <*> (option auto $ long "max-iterations"  <> showDefault <> value 5 <> help "Number of times we may revisit a particular branching point. For no bound, set -1")
+  <*> (option auto $ long "max-concrete-iterations" <> showDefault <> value 10000 <> help "Number of times we may revisit a branching point whose condition is concrete, e.g. in a loop over fetched state. Gas is not tracked, so this stops loops that never end. For no bound, set -1")
   <*> (switch $ long "promise-no-reent"     <> help "Promise no reentrancy is possible into the contract(s) being examined")
-  <*> (option auto $ long "max-buf-size"    <> value 64 <> help "Maximum size of buffers such as calldata and returndata in exponents of 2 (default: 64, i.e. 2^64 bytes)")
+  <*> (option auto $ long "max-buf-size"    <> value 24 <> help "Maximum size of buffers such as calldata and returndata in exponents of 2 (default: 24, i.e. 16 MB, more than gas limits allow)")
   <*> (option auto $ long "max-width"      <> showDefault <> value 100 <> help "Max number of concrete values to explore when encountering a symbolic value. This is a form of branch width limitation per symbolic value")
   <*> (optional $ option auto $ long "max-depth" <> help "Limit maximum depth of branching during exploration (default: unlimited)")
   <*> (switch $ long "no-simplify" <> help "Don't perform simplification of expressions")
   <*> (switch $ long "only-deployed" <> help "When trying to resolve unknown addresses, only use addresses of deployed contracts")
-  <*> (optional $ strOption $ long "cache-dir" <> help "Directory to save and load RPC cache")
-  <*> (switch $  long "early-abort" <> help "Stop exploration immediately upon finding the first counterexample")
+  <*> (optional $ strOption $ long "cache-dir" <> help "Directory to save and load the RPC cache in (default: the user's cache directory, for runs at a fixed block)")
+  <*> (switch $ long "no-rpc-cache" <> help "Don't save or load fetched state in the user's cache directory")
+  <*> (switch $  long "no-early-abort" <> help "Keep exploring after the first counterexample, to find all of them. By default, exploration stops at the first one")
   <*> (option auto $ long "merge-max-budget" <> showDefault <> value 100 <> help "Max instructions for speculative merge exploration during path merging")
+  <*> (option auto $ long "max-dyn-size" <> showDefault <> value 64 <> help "Max byte length for concretized dynamic types (bytes, string) in symbolic arguments")
+  <*> (switch $  long "no-abstract-arith" <> help "Don't abstract symbolic multiplication and division as uninterpreted functions with sound lemmas; use native bitvector arithmetic instead")
+  <*> (switch $ long "no-hash-cons" <> help "Don't hash-cons (share equal subterms of) the symbolic VM state during exploration")
+  <*> (optional $ strOption $ long "progress-log" <> help "Write a JSONL log of interpreter and solver progress to this file (default with --verb 3: hevm-progress.jsonl)")
+  <*> (switch $ long "progress-exprs" <> help "Also log the expressions and path conditions sent to the solver in the progress log (implied by --verb 4)")
+  <*> (switch $ long "no-progress" <> help "Don't show the live status line on stderr")
+  <*> (switch $ long "interactive" <> help "Debug interactively: step through the run, forward and back, served over HTTP on localhost")
+  <*> (switch $ long "serve" <> help "Serve the progress of the run over HTTP on localhost, at /progress")
+  <*> (option auto $ long "port" <> showDefault <> value defaultDebuggerPort <> help "Port for --interactive and --serve, 0 picks a free one")
+  <*> (option auto $ long "interactive-snapshot-every" <> showDefault <> value snapshotInterval <> help "Steps between the debugger's snapshots: fewer make going back faster and use more memory")
+  <*> (switch $ long "check-static-branches" <> help "Internal check, slow: ask the solver to confirm every branch side that exploration drops by simplification alone")
 
 data CommonExecOptions = CommonExecOptions
   { address       ::Maybe Addr
@@ -190,10 +222,10 @@ data TestOptions = TestOptions
   { projectType   ::ProjectType
   , rpc           ::Maybe URL
   , number        ::Maybe W256
-  , coverage      ::Bool
-  , match         ::Maybe String
-  , prefix        ::String
+  , match         ::Maybe Text
+  , prefix        ::Text
   , ffi           ::Bool
+  , invariantDepth ::Int
   }
 
 testOptions :: Parser TestOptions
@@ -201,10 +233,10 @@ testOptions = TestOptions
   <$> projectTypeParser
   <*> rpcParser
   <*> (optional $ option auto $ long "number" <> help "Block: number")
-  <*> (switch $ long "coverage" <> help "Coverage analysis")
   <*> (optional $ strOption $ long "match" <> help "Test case filter - only run methods matching regex")
   <*> (strOption $ long "prefix"  <> showDefault <> value "prove" <> help "Prefix for test cases to prove")
   <*> (switch $ long "ffi" <> help "Allow the usage of the hevm.ffi() cheatcode (WARNING: this allows test authors to execute arbitrary code on your machine)")
+  <*> (option auto $ long "invariant-depth" <> showDefault <> value 2 <> help "Check invariant_ tests in every state reached by at most this many calls to the target contracts")
 
 data EqOptions = EqOptions
   { codeA         ::Maybe ByteString
@@ -323,35 +355,49 @@ main = do
     Symbolic cFileOpts symbOpts cExecOpts cOpts -> do
       env <- makeEnv cOpts
       root <- getRoot cOpts
-      withCurrentDirectory root $ runEnv env $ symbCheck cFileOpts symbOpts cExecOpts cOpts
+      withCurrentDirectory root $ runEnv env $ withProgress (progressOpts env cOpts) $ serving cOpts $ symbCheck cFileOpts symbOpts cExecOpts cOpts
     Equal eqOpts cOpts -> do
+      when cOpts.interactive $ do
+        putStrLn "Error: --interactive is not supported for equivalence checking"
+        exitFailure
       env <- makeEnv cOpts
-      runEnv env $ equivalence eqOpts cOpts
+      runEnv env $ withProgress (progressOpts env cOpts) $ serving cOpts $ equivalence eqOpts cOpts
     Test testOpts cOpts -> do
       env <- makeEnv cOpts
       root <- getRoot cOpts
       solver <- getSolver cOpts.solver
-      cores <- liftIO $ unsafeInto <$> getNumProcessors
-      let solverCount = fromMaybe cores cOpts.numSolvers
-      runEnv env $ withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
+      solverCount <- liftIO $ maybe (defaultSolverCount cOpts.smtMemory) pure cOpts.numSolvers
+      runEnv env $ withProgress (progressOpts env cOpts) $ serving cOpts $ withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
         buildOut <- readBuildOutput root testOpts.projectType
         case buildOut of
           Left e -> liftIO $ do
             putStrLn $ "Error: " <> e
             exitFailure
-          Right out -> do
+          Right out -> withRpcSession cOpts testOpts.rpc testOpts.number $ \fetchSess -> do
             -- TODO: which functions here actually require a BuildOutput, and which can take it as a Maybe?
-            unitTestOpts <- unitTestOptions testOpts cOpts solvers (Just out)
+            unitTestOpts <- unitTestOptions testOpts cOpts solvers fetchSess (Just out)
+            when cOpts.interactive $ do
+              debugTestVm unitTestOpts out >>= \case
+                Left err -> liftIO $ T.putStrLn err >> exitFailure
+                Right vm -> do
+                  sess <- liftIO $ setSnapshotInterval cOpts.snapshotEvery <$> newSession unitTestOpts.dapp vm
+                  serveSession (Fetch.oracle solvers (Just unitTestOpts.sess) unitTestOpts.rpcInfo) cOpts.port announce sess
+              liftIO exitSuccess
             res <- unitTest unitTestOpts out
-            liftIO $ forM_ ((,) <$> cOpts.cacheDir <*> testOpts.number) $ \(dir, fetchedBlock) -> do
-              cache <- readMVar (unitTestOpts.sess.sharedCache)
-              Fetch.saveCache dir fetchedBlock cache
+            Progress.stopStatus
             liftIO $ unless (uncurry (&&) res) exitFailure
     Exec cFileOpts execOpts cExecOpts cOpts-> do
       env <- makeEnv cOpts
-      runEnv env $ launchExec cFileOpts execOpts cExecOpts cOpts
+      runEnv env $ withProgress ((progressOpts env cOpts) { statusLine = False }) $ serving cOpts $ launchExec cFileOpts execOpts cExecOpts cOpts
     Version {} ->putStrLn getFullVersion
   where
+    progressOpts :: Env -> CommonOptions -> ProgressOpts
+    progressOpts env cOpts = ProgressOpts
+      { logFile = env.config.progressLog
+      , logExprs = env.config.progressExprs
+      , statusLine = Prelude.not cOpts.noProgress && Prelude.not cOpts.debug && Prelude.not cOpts.interactive
+      , track = cOpts.serve || cOpts.interactive
+      }
     makeEnv :: CommonOptions -> IO Env
     makeEnv cOpts = do
       when (cOpts.maxBufSize > 64) $ do
@@ -375,9 +421,24 @@ main = do
         , verb = cOpts.verb
         , simp = Prelude.not cOpts.noSimplify
         , onlyDeployed = cOpts.onlyDeployed
-        , earlyAbort = cOpts.earlyAbort
+        , earlyAbort = Prelude.not cOpts.noEarlyAbort
         , mergeMaxBudget = cOpts.mergeMaxBudget
+        , maxDynSize = cOpts.maxDynSize
+        , abstractArith = Prelude.not cOpts.noAbstractArith
+        , hashConsExplore = Prelude.not cOpts.noHashCons
+        , progressLog = progressFile cOpts
+        , progressExprs = cOpts.progressExprs || cOpts.verb >= 4
+        , checkStaticBranches = cOpts.checkStaticBranches
+        , smtBranchTimeout = Just cOpts.smtBranchTimeout
         } }
+    serving :: MonadUnliftIO m => CommonOptions -> m a -> m a
+    serving cOpts
+      | cOpts.serve && Prelude.not cOpts.interactive = withProgressServer cOpts.port $ \p ->
+          putStrLn ("hevm progress at http://127.0.0.1:" <> show p <> "/progress") >> hFlush stdout
+      | otherwise = id
+    progressFile cOpts = case cOpts.progressLog of
+      Nothing | cOpts.verb >= 3 -> Just "hevm-progress.jsonl"
+      f -> f
 
 
 getCode :: App m => Maybe String -> Maybe ByteString -> m (Maybe ByteString)
@@ -412,60 +473,83 @@ equivalence eqOpts cOpts = do
     exitFailure
   let veriOpts = (defaultVeriOpts :: VeriOpts) { iterConf = IterConfig {
                             maxIter = parseMaxIters cOpts.maxIterations
+                            , maxConcreteIter = parseMaxIters cOpts.maxConcreteIterations
                             , askSmtIters = cOpts.askSmtIterations
                             , loopHeuristic = cOpts.loopDetectionHeuristic
                             }
                           }
-  calldata <- buildCalldata cOpts eqOpts.sig eqOpts.arg
+  (calldata, _caveats) <- buildCalldata cOpts eqOpts.sig eqOpts.arg
   solver <- liftIO $ getSolver cOpts.solver
-  cores <- liftIO $ unsafeInto <$> getNumProcessors
-  let solverCount = fromMaybe cores cOpts.numSolvers
+  solverCount <- liftIO $ maybe (defaultSolverCount cOpts.smtMemory) pure cOpts.numSolvers
   withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \s -> do
     sess <- Fetch.mkSession cOpts.cacheDir Nothing
     eq <- equivalenceCheck s (Just sess) (fromJust bytecodeA) (fromJust bytecodeB) veriOpts calldata eqOpts.create
     let anyIssues =  not (null eq.partials) || any (isUnknown . fst) eq.res  || any (isError . fst) eq.res
-    liftIO $ case (any (isCex . fst) eq.res, anyIssues) of
-      (False, False) -> putStrLn "   \x1b[32m[PASS]\x1b[0m Contracts behave equivalently"
-      (True, _)      -> putStrLn "   \x1b[31m[FAIL]\x1b[0m Contracts do not behave equivalently"
-      (_, True)      -> putStrLn "   \x1b[31m[FAIL]\x1b[0m Contracts may not behave equivalently"
-    liftIO $ printWarnings Nothing mempty eq.partials (map fst eq.res) "the contracts under test"
-    case any (isCex . fst) eq.res of
-      False -> liftIO $ do
+        cd = fst calldata
+    cexes <- replayEqCexes s eqOpts.create (fromJust bytecodeA) (fromJust bytecodeB) cd (mapMaybe getCexP eq.res)
+    let nValidated = length [() | (_, _, Validated {}) <- cexes]
+    Progress.markPhase "report" [("cexes", length cexes), ("validated", nValidated), ("partials", length eq.partials)]
+    Progress.stopStatus
+    liftIO $ case (nValidated > 0, null cexes && Prelude.not anyIssues) of
+      (True, _) -> putStrLn "   \x1b[31m[FAIL]\x1b[0m Contracts do not behave equivalently"
+      (_, True) -> putStrLn "   \x1b[32m[PASS]\x1b[0m Contracts behave equivalently"
+      _         -> putStrLn "   \x1b[31m[FAIL]\x1b[0m Contracts may not behave equivalently"
+    liftIO $ printWarnings Progress.printOut Nothing mempty eq.partials (map fst eq.res) "the contracts under test"
+    case cexes of
+      [] -> liftIO $ do
         when anyIssues exitFailure
         putStrLn "No discrepancies found"
-      True -> liftIO $ do
-        let cexes = mapMaybe getCexP eq.res
-        T.putStrLn . T.unlines $
-          [ "Not equivalent. The following inputs result in differing behaviours:"
-          , "" , "-----", ""
-          ] <> (intersperse (T.unlines [ "", "-----" ]) $ fmap formatCexes cexes)
+      _ -> liftIO $ do
+        T.putStr . T.unlines $ cexHeader (length cexes) nValidated : concatMap (\c -> ["-----", formatCexes cd c]) cexes
         exitFailure
   where
     decipher = maybe Nothing (hexByteString . strip0x)
     getCexP :: (ProofResult a b, String) -> Maybe (a, String)
     getCexP (Cex c, reason) = Just (c, reason)
     getCexP _ = Nothing
-    formatCexes (cex, reason) = formatCex (AbstractBuf "txdata") Nothing cex <> "Difference: " <> T.pack reason
+    cexHeader :: Int -> Int -> Text
+    cexHeader 1 1 = "Not equivalent. This input results in differing behaviours:"
+    cexHeader _ v | v > 0 = "Not equivalent. These inputs result in differing behaviours:"
+    cexHeader 1 _ = "Possibly not equivalent: the input below could not be confirmed by running A and B concretely:"
+    cexHeader n _ = "Possibly not equivalent: none of these " <> T.pack (show n) <> " inputs could be confirmed by running A and B concretely:"
+    bold t = "\x1b[1m" <> t <> "\x1b[0m"
+    formatCexes cd (cex, reason, replay) = formatCex cd Nothing cex <> bold "Difference:" <> " " <> T.pack reason
+      <> "\n" <> bold "Concrete replay:" <> " " <> replayTagColoured replay <> case replay of
+        Validated a b -> "\n  A: " <> a <> "\n  B: " <> b
+        NotReproducible a b -> "\n  A: " <> a <> "\n  B: " <> b
+        CannotReplay _ -> ""
+    -- as `hevm test` shows its counterexamples
+    replayTagColoured r = case r of
+      Validated {} -> "\x1b[90m[" <> replayTag r <> "]\x1b[0m"
+      NotReproducible {} -> "\x1b[31m[" <> replayTag r <> "]\x1b[0m"
+      CannotReplay _ -> "\x1b[33m[" <> replayTag r <> "]\x1b[0m"
 
 getSolver :: Text -> IO Solver
 getSolver s = case T.unpack s of
-  "z3" -> pure Z3
-  "cvc5" -> pure CVC5
-  "bitwuzla" -> pure Bitwuzla
+  "z3" -> onPath "z3" Z3
+  "cvc5" -> onPath "cvc5" CVC5
+  "bitwuzla" -> onPath "bitwuzla" Bitwuzla
   "empty" -> pure EmptySolver
   input -> do
     putStrLn $ "unrecognised solver: " <> input
     exitFailure
+  where
+    onPath name solver = findExecutable name >>= \case
+      Just _ -> pure solver
+      Nothing -> do
+        putStrLn $ "Error: the SMT solver " <> name <> " is not installed (not found in PATH). "
+          <> "Install it, or pick another one with --solver (bitwuzla, z3, or cvc5)."
+        exitFailure
 
-getSrcInfo :: App m => ExecOptions -> CommonOptions -> m DappInfo
-getSrcInfo execOpts cOpts = do
+getSrcInfo :: App m => ProjectType -> CommonOptions -> m DappInfo
+getSrcInfo projectType cOpts = do
   root <- liftIO $ getRoot cOpts
   conf <- readConfig
   liftIO $ withCurrentDirectory root $ do
     outExists <- doesDirectoryExist (root System.FilePath.</> "out")
     if outExists
     then do
-      buildOutput <- runEnv Env {config = conf} $ readBuildOutput root execOpts.projectType
+      buildOutput <- runEnv Env {config = conf} $ readBuildOutput root projectType
       case buildOutput of
         Left _ -> pure emptyDapp
         Right o -> pure $ dappInfo root o
@@ -477,8 +561,9 @@ getRoot cmd = maybe getCurrentDirectory makeAbsolute cmd.root
 parseMaxIters :: Integer -> Maybe Integer
 parseMaxIters num = if num < 0 then Nothing else Just num
 
--- | Builds a buffer representing calldata based on the given cli arguments
-buildCalldata :: App m => CommonOptions -> Maybe Text -> [String] -> m (Expr Buf, [Prop])
+-- | Builds a buffer representing calldata based on the given cli arguments,
+-- together with any program-wide soundness caveats incurred (see 'Caveat').
+buildCalldata :: App m => CommonOptions -> Maybe Text -> [String] -> m ((Expr Buf, [Prop]), [Caveat])
 buildCalldata cOpts sig arg = case (cOpts.calldata, sig) of
   -- fully abstract calldata
   (Nothing, Nothing) -> mkCalldata Nothing []
@@ -488,7 +573,7 @@ buildCalldata cOpts sig arg = case (cOpts.calldata, sig) of
     if (isNothing val) then liftIO $ do
       putStrLn $ "Error, invalid calldata: " <>  show c
       exitFailure
-    else pure (ConcreteBuf (fromJust val), [])
+    else pure ((ConcreteBuf (fromJust val), []), [])
   -- calldata according to given abi with possible specializations from the `arg` list
   (Nothing, Just sig') -> do
     method' <- liftIO $ functionAbi sig'
@@ -501,11 +586,10 @@ buildCalldata cOpts sig arg = case (cOpts.calldata, sig) of
 
 -- If function signatures are known, they should always be given for best results.
 symbCheck :: App m => CommonFileOptions -> SymbolicOptions -> CommonExecOptions -> CommonOptions -> m ()
-symbCheck cFileOpts sOpts cExecOpts cOpts = do
+symbCheck cFileOpts sOpts cExecOpts cOpts = withRpcSession cOpts cExecOpts.rpc cExecOpts.block $ \sess -> do
   let block' = maybe Fetch.Latest Fetch.BlockNumber cExecOpts.block
       blockUrlInfo = (,) block' <$> cExecOpts.rpc
-  sess <- Fetch.mkSession cOpts.cacheDir cExecOpts.block
-  calldata <- buildCalldata cOpts sOpts.sig sOpts.arg
+  (calldata, caveats) <- buildCalldata cOpts sOpts.sig sOpts.arg
   preState <- symvmFromCommand cExecOpts sOpts cFileOpts sess calldata
   errCodes <- case sOpts.assertions of
     Nothing -> pure defaultPanicCodes
@@ -515,37 +599,55 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = do
         exitFailure
       Just codes -> pure codes
   when (cOpts.verb > 0) $ liftIO $ putStrLn $ "Using assertion code(s): " <> intercalate "," (map show errCodes)
-  cores <- liftIO $ unsafeInto <$> getNumProcessors
-  let solverCount = fromMaybe cores cOpts.numSolvers
+  solverCount <- liftIO $ maybe (defaultSolverCount cOpts.smtMemory) pure cOpts.numSolvers
   solver <- liftIO $ getSolver cOpts.solver
   withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
     let veriOpts = VeriOpts { iterConf = IterConfig {
                               maxIter = parseMaxIters cOpts.maxIterations
+                              , maxConcreteIter = parseMaxIters cOpts.maxConcreteIterations
                               , askSmtIters = cOpts.askSmtIterations
                               , loopHeuristic = cOpts.loopDetectionHeuristic
                               }
                             , rpcInfo = Fetch.RpcInfo blockUrlInfo
                             }
     let fetcher = Fetch.oracle solvers (Just sess) veriOpts.rpcInfo
+    when cOpts.interactive $ do
+      dapp <- getSrcInfo sOpts.projectType cOpts
+      dsess <- liftIO $ setSnapshotInterval cOpts.snapshotEvery <$> newSession dapp preState
+      serveSession fetcher cOpts.port announce dsess
+      liftIO exitSuccess
     (expr, res) <- verify solvers fetcher veriOpts preState (checkAssertions errCodes) Nothing
-    liftIO $ forM_ ((,) <$> cOpts.cacheDir <*> cExecOpts.block) $ \(dir, block) -> do
-      cache <- readMVar sess.sharedCache
-      Fetch.saveCache dir block cache
+    Progress.stopStatus
     case res of
+      [] | any Expr.isPartial expr -> do
+        liftIO $ putStrLn "\nNo reachable property violations discovered on the explored paths, but exploration was partial\n"
+        liftIO $ printWarnings Progress.printOut Nothing mempty expr res "symbolically"
+        liftIO $ printCaveats Progress.printOut caveats
+        showExtras solvers sOpts calldata expr
+        liftIO exitFailure
       [] -> do
         liftIO $ putStrLn "\nQED: No reachable property violations discovered\n"
+        liftIO $ printCaveats Progress.printOut caveats
         showExtras solvers sOpts calldata expr
       _ -> do
-        let cexs = snd <$> mapMaybe getCex res
-            counterexamples
+        let cexs = mapMaybe getCex res
+        replays <- forM cexs $ \(leaf, cex) ->
+          replaySymCex (Fetch.oracle solvers (Just sess) veriOpts.rpcInfo) (checkAssertions errCodes) preState leaf cex
+        let counterexamples
               | null cexs = []
               | otherwise =
                  [ ""
                  , ("Discovered the following " <> (T.pack $ show (length cexs)) <> " counterexample(s):")
                  , ""
-                 ] <> fmap (formatCex (fst calldata) Nothing) cexs
+                 ] <> zipWith (\(_, cex) r -> formatCex (fst calldata) Nothing cex <> "\x1b[1mConcrete replay:\x1b[0m " <> replayText r <> "\n") cexs replays
+            -- as `hevm test` shows its counterexamples
+            replayText = \case
+              Right True -> "\x1b[90m[validated]\x1b[0m"
+              Right False -> "\x1b[31m[not reproducible]\x1b[0m"
+              Left why -> "\x1b[33m[cannot replay: " <> why <> "]\x1b[0m"
         liftIO $ T.putStrLn $ T.unlines counterexamples
-        liftIO $ printWarnings Nothing mempty expr res "symbolically"
+        liftIO $ printWarnings Progress.printOut Nothing mempty expr res "symbolically"
+        liftIO $ printCaveats Progress.printOut caveats
         showExtras solvers sOpts calldata expr
         liftIO exitFailure
 
@@ -576,9 +678,8 @@ areAnyPrefixOf :: [Text] -> Text -> Bool
 areAnyPrefixOf prefixes t = any (flip T.isPrefixOf t) prefixes
 
 launchExec :: App m => CommonFileOptions -> ExecOptions -> CommonExecOptions -> CommonOptions -> m ()
-launchExec cFileOpts execOpts cExecOpts cOpts = do
-  dapp <- getSrcInfo execOpts cOpts
-  sess <- Fetch.mkSession cOpts.cacheDir cExecOpts.block
+launchExec cFileOpts execOpts cExecOpts cOpts = withRpcSession cOpts cExecOpts.rpc cExecOpts.block $ \sess -> do
+  dapp <- getSrcInfo execOpts.projectType cOpts
   vm <- vmFromCommand cOpts cExecOpts cFileOpts execOpts sess
   let
     block = maybe Fetch.Latest Fetch.BlockNumber cExecOpts.block
@@ -588,6 +689,10 @@ launchExec cFileOpts execOpts cExecOpts cOpts = do
   -- TODO: we shouldn't need solvers to execute this code
   withSolvers Z3 0 Nothing cOpts.smtMemory $ \solvers -> do
     let fetcher = Fetch.oracle solvers (Just sess) rpcDat
+    when cOpts.interactive $ do
+      dsess <- liftIO $ setSnapshotInterval cOpts.snapshotEvery <$> newSession dapp vm
+      serveSession fetcher cOpts.port announce dsess
+      liftIO exitSuccess
     vm' <- if execOpts.jsonTrace
            then do
              (vm', (_, traces)) <- runStateT (interpretWithTrace fetcher EVM.Stepper.runFully) (vm, [])
@@ -604,9 +709,6 @@ launchExec cFileOpts execOpts cExecOpts cOpts = do
              pure vm'
            else EVM.Stepper.interpret fetcher vm EVM.Stepper.runFully
     writeTraceDapp dapp vm'
-    liftIO $ forM_ ((,) <$> cOpts.cacheDir <*> cExecOpts.block) $ \(dir, fetchedBlock) -> do
-      cache <- readMVar sess.sharedCache
-      Fetch.saveCache dir fetchedBlock cache
     case vm'.result of
       Just (VMFailure (Revert msg)) -> liftIO $ do
         let res = case msg of
@@ -630,7 +732,7 @@ vmFromCommand :: App m => CommonOptions -> CommonExecOptions -> CommonFileOption
 vmFromCommand cOpts cExecOpts cFileOpts execOpts sess = do
   conf <- readConfig
   (miner,ts,baseFee,blockNum,prevRan) <- case cExecOpts.rpc of
-    Nothing -> pure (LitAddr 0,Lit 0,0,Lit 0,0)
+    Nothing -> pure (LitAddr 0,Lit 0,Lit 0,Lit 0,Lit 0)
     Just url -> liftIO $ Fetch.fetchBlockWithSession conf sess block url >>= \case
       Nothing -> do
         putStrLn $ "Error, Could not fetch block" <> show block <> " from URL: " <> show url
@@ -718,7 +820,7 @@ vmFromCommand cOpts cExecOpts cFileOpts execOpts sess = do
           , caller         = caller
           , origin         = origin
           , gas            = word64 (.gas) 0xffffffffffffffff
-          , baseFee        = baseFee
+          , baseFee        = maybe baseFee Lit cExecOpts.basefee
           , priorityFee    = word (.priorityFee) 0
           , gaslimit       = word64 (.gaslimit) 0xffffffffffffffff
           , coinbase       = addr (.coinbase) miner
@@ -727,7 +829,7 @@ vmFromCommand cOpts cExecOpts cFileOpts execOpts sess = do
           , blockGaslimit  = word64 (.gaslimit) 0xffffffffffffffff
           , gasprice       = word (.gasprice) 0
           , maxCodeSize    = word (.maxcodesize) 0xffffffff
-          , prevRandao     = word (.prevRandao) prevRan
+          , prevRandao     = maybe prevRan Lit cExecOpts.prevRandao
           , chainId        = word (.chainid) 1
           , create         = (.create) execOpts
           }
@@ -742,7 +844,7 @@ symvmFromCommand :: App m =>
 symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
   conf <- readConfig
   (miner,blockNum,baseFee,prevRan) <- case cExecOpts.rpc of
-    Nothing -> pure (SymAddr "miner",Lit 0,0,0)
+    Nothing -> pure (SymAddr "miner",BlockNumber,BaseFee,PrevRandao)
     Just url -> liftIO $ Fetch.fetchBlockWithSession conf sess block url >>= \case
       Nothing -> do
         putStrLn $ "Error, Could not fetch block" <> show block <> " from URL: " <> show url
@@ -818,7 +920,7 @@ symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
       , caller         = caller
       , origin         = origin
       , gaslimit       = word64 (.gaslimit) 0xffffffffffffffff
-      , baseFee        = baseFee
+      , baseFee        = maybe baseFee Lit cExecOpts.basefee
       , priorityFee    = word (.priorityFee) 0
       , coinbase       = eaddr (.coinbase) miner
       , number         = maybe blockNum Lit cExecOpts.number
@@ -826,7 +928,7 @@ symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
       , blockGaslimit  = word64 (.gaslimit) 0xffffffffffffffff
       , gasprice       = word (.gasprice) 0
       , maxCodeSize    = word (.maxcodesize) 0xffffffff
-      , prevRandao     = word (.prevRandao) prevRan
+      , prevRandao     = maybe prevRan Lit cExecOpts.prevRandao
       , chainId        = word (.chainid) 1
       , create         = (.create) sOpts
       , baseState      = baseState
@@ -835,8 +937,16 @@ symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
     word64 f def = fromMaybe def (f cExecOpts)
     eaddr f def = maybe def LitAddr (f cExecOpts)
 
-unitTestOptions :: App m => TestOptions -> CommonOptions -> SolverGroup -> Maybe BuildOutput -> m (UnitTestOptions)
-unitTestOptions testOpts cOpts solvers buildOutput = do
+withRpcSession :: App m => CommonOptions -> Maybe URL -> Maybe W256 -> (Fetch.Session -> m a) -> m a
+withRpcSession cOpts url block act = do
+  loc <- case cOpts.cacheDir of
+    Just d -> pure $ Just (Fetch.CacheDir d)
+    Nothing | cOpts.noRpcCache -> pure Nothing
+            | otherwise -> liftIO $ Just . Fetch.PerChainUnder <$> getXdgDirectory XdgCache ("hevm" </> "rpc")
+  Fetch.withCachedSession loc url block act
+
+unitTestOptions :: App m => TestOptions -> CommonOptions -> SolverGroup -> Fetch.Session -> Maybe BuildOutput -> m (UnitTestOptions)
+unitTestOptions testOpts cOpts solvers sess buildOutput = do
   root <- liftIO $ getRoot cOpts
 
   let srcInfo = maybe emptyDapp (dappInfo root) buildOutput
@@ -845,7 +955,6 @@ unitTestOptions testOpts cOpts solvers buildOutput = do
           (Nothing, Just url) -> Just (Fetch.Latest, url)
           _ -> Nothing
       rpcDat = Fetch.RpcInfo blockUrlInfo
-  sess <- Fetch.mkSession cOpts.cacheDir testOpts.number
   params <- paramsFromRpc rpcDat sess
   let testn = params.number
       block' = if 0 == testn
@@ -859,15 +968,18 @@ unitTestOptions testOpts cOpts solvers buildOutput = do
                      Nothing  -> Nothing
                 in rpcDat { Fetch.blockNumURL = i }
     , maxIter = parseMaxIters cOpts.maxIterations
+    , maxConcreteIter = parseMaxIters cOpts.maxConcreteIterations
     , askSmtIters = cOpts.askSmtIterations
     , smtTimeout = Just cOpts.smtTimeout
-    , match = T.pack $ fromMaybe ".*" testOpts.match
-    , prefix = T.pack testOpts.prefix
+    , methodFilter = \(TestMethodInfo _ (Sig name _)) -> (testOpts.prefix `T.isPrefixOf` name || "invariant_" `T.isPrefixOf` name)
+        && maybe True (\match -> regexMatches match name) testOpts.match
     , testParams = params
     , dapp = srcInfo
     , ffiAllowed = testOpts.ffi
-    , checkFailBit = cOpts.assertionType == DSTest
+    , checkFailBit = True
     , loopHeuristic = cOpts.loopDetectionHeuristic
+    , printOut = Progress.printOut
+    , invariantDepth = testOpts.invariantDepth
     }
 parseInitialStorage :: InitialStorage -> BaseState
 parseInitialStorage Empty = EmptyBase

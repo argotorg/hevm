@@ -1,0 +1,3 @@
+[submodule "forge-symbolic-tests/symbolic-bug-suite"]
+	path = forge-symbolic-tests/symbolic-bug-suite
+	url = https://github.com/grandizzy/symbolic-bug-suite

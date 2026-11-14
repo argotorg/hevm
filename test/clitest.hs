@@ -13,14 +13,19 @@ break the hevm CLI interface.
 import Test.Hspec
 import System.Process (readProcessWithExitCode)
 import System.Exit (ExitCode(..))
+import Control.Monad (forM_)
+import Data.List (isInfixOf, isPrefixOf, isSuffixOf)
 import Data.List.Split (splitOn)
 import Data.Text qualified as T
 import Data.String.Here
 import System.IO.Temp
-import System.Directory (doesFileExist, removeFile)
+import System.Directory (doesFileExist, listDirectory, removeFile)
 
 import EVM.Solidity
 import EVM.Types qualified as Types
+import EVM.Types (Op, GenericOp(..), Expr(Lit, LitByte))
+import EVM.Assembler (assemble)
+import Text.Printf (printf)
 import EVM.Effects
 import EVM.Test.Utils
 
@@ -49,6 +54,11 @@ runForge testFile extraOptions = do
         let options = ["run", "exe:hevm", "--", "test" , "--root", root] <> extraOptions
         (exitCode, stdout, stderr) <- readProcessWithExitCode "cabal" options ""
         pure (exitCode, stdout, stderr)
+
+-- the query-*.smt2 files --smt-debug writes into the cwd
+dumpedQueries :: IO [FilePath]
+dumpedQueries = filter isQuery <$> listDirectory "."
+  where isQuery f = "query-" `isPrefixOf` f && ".smt2" `isSuffixOf` f
 
 main :: IO ()
 main = do
@@ -87,6 +97,31 @@ main = do
         (exitCode, stdout, _) <- readProcessWithExitCode "cabal" (["run", "exe:hevm", "--" ] ++ torun) ""
         stdout `shouldContain` "Not equivalent"
         stdout `shouldContain` "FAIL"
+        exitCode `shouldBe` ExitFailure 1
+
+      it "equivalence-cex-with-balance" $ do
+        -- A returns SELFBALANCE, B returns 0
+        let torun = splitOn " " "equivalence --code-a 4760005260206000f3 --code-b 600060005260206000f3"
+        (exitCode, stdout, stderr) <- readProcessWithExitCode "cabal" (["run", "exe:hevm", "--" ] ++ torun) ""
+        stderr `shouldNotContain` "CallStack"
+        stdout `shouldContain` "Balance (SymAddr \"entrypoint\")"
+        stdout `shouldContain` "[validated]"
+        exitCode `shouldBe` ExitFailure 1
+
+      it "equivalence-cex-with-sig" $ do
+        let torun = splitOn " " "equivalence --code-a 6004355f5500 --code-b 600760043514600435015f5500 --sig f(uint256)"
+        (exitCode, stdout, _) <- readProcessWithExitCode "cabal" (["run", "exe:hevm", "--" ] ++ torun) ""
+        stdout `shouldContain` "Not equivalent"
+        stdout `shouldContain` "0xb3de648b0000000000000000000000000000000000000000000000000000000000000007"
+        stdout `shouldContain` "[validated]"
+        exitCode `shouldBe` ExitFailure 1
+
+      it "equivalence-cex-with-calldata" $ do
+        let torun = splitOn " " "equivalence --code-a 6004355f5500 --code-b 600760043514600435015f5500 --calldata b3de648b0000000000000000000000000000000000000000000000000000000000000007"
+        (exitCode, stdout, _) <- readProcessWithExitCode "cabal" (["run", "exe:hevm", "--" ] ++ torun) ""
+        stdout `shouldContain` "Not equivalent"
+        stdout `shouldNotContain` "Empty"
+        stdout `shouldContain` "[validated]"
         exitCode `shouldBe` ExitFailure 1
 
       it "hevm equivalence tutorial works -- PASS" $ do
@@ -163,7 +198,6 @@ main = do
         (T.count "Merged forward jump in file" (T.pack stderr)) `shouldBe` 4
         stdout `shouldContain` "Counterexample:"
         exitCode `shouldBe` (ExitFailure 1)
-
       it "crash-of-hevm" $ do
         let hexStrA = "608060405234801561001057600080fd5b506004361061002b5760003560e01c8063efa2978514610030575b600080fd5b61004361003e3660046102ad565b610045565b005b60006100508561007a565b9050600061005d866100a8565b905080821461006e5761006e61034c565b50505050505050505050565b600061008761032e6103aa565b8261009457610197610098565b61013e5b6100a291906103e2565b92915050565b60006100b561032e6103aa565b6100be906103aa565b6100c7906103aa565b82806100d1575060005b806100da575060005b61013157605a6100ea60006103aa565b6100f3906103aa565b6100ff6001605a610404565b61010b6001605a610404565b61011891166101976103e2565b6101229190610493565b61012c9190610493565b610149565b604061013f8161013e6103e2565b6101499190610493565b61015391906103e2565b61016061032e60006103e2565b83801561016b575060015b15801590610177575060015b80156101a05750831515801561018b575060015b15158015610197575060015b806101a0575060005b610251576101976101b3605a602d610493565b602d60006101c2600182610493565b6101cd906001610404565b6101d8906001610404565b6101e1906103aa565b6101ea906103aa565b6101f491906103e2565b6101ff90605a610404565b604e61020c8160016103e2565b6102169190610493565b61022490600116605a610404565b1661022e906103aa565b61023891906103e2565b6102429190610493565b61024c9190610493565b610283565b604561025f8161013e6103e2565b6102699190610493565b60456102778161013e6103e2565b6102819190610493565b165b61028d91906103e2565b1692915050565b80358015155b81146100a257600080fd5b80358061029a565b600080600080600080600080610100898b0312156102ca57600080fd5b6102d48a8a610294565b97506102e38a60208b01610294565b96506102f28a60408b016102a5565b95506103018a60608b016102a5565b94506103108a60808b01610294565b935061031f8a60a08b016102a5565b925061032e8a60c08b01610294565b915061033d8a60e08b016102a5565b90509295985092959890939650565b7f4e487b7100000000000000000000000000000000000000000000000000000000600052600160045260246000fd5b7f4e487b7100000000000000000000000000000000000000000000000000000000600052601160045260246000fd5b60007f800000000000000000000000000000000000000000000000000000000000000082036103db576103db61037b565b5060000390565b818103600083128015838313168383129190911617156100a2576100a261037b565b60008261043a577f4e487b7100000000000000000000000000000000000000000000000000000000600052601260045260246000fd5b7f800000000000000000000000000000000000000000000000000000000000000082147fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff8414161561048e5761048e61037b565b500590565b80820160008212801584831290811690159190911617156100a2576100a261037b56fea26469706673582212200a37769e5bf4b8b890caac8ab643126d55feb821a0201d2f674203f23fa666ad64736f6c634300081e0033"
 
@@ -204,7 +238,14 @@ main = do
         stderr `shouldNotContain` "CallStack"
         stdout `shouldContain` "[FAIL]"
         stdout `shouldContain` "[validated]"
+      -- the message of a symbolic assertion shows the replay's values, not expressions
+      it "symbolic-assert-message" $ do
+        (_, stdout, stderr) <- runForge "test/contracts/fail/symbolic-assert-message.sol" []
+        stderr `shouldNotContain` "CallStack"
+        stdout `shouldContain` "[validated]"
+        stdout `shouldContain` "assertion failed: 2994 > 2000"
       it "dump unsolved" $ do
+        -- z3, as bitwuzla solves this within the timeout
         -- >>> (139487132679483*2347234698674) % 982374892374389278894734
         -- 278198683154907855159120
         Just c <- runApp $ solcRuntime (T.pack "C") (T.pack [i|
@@ -220,19 +261,129 @@ main = do
            }
           |])
         let hexStr = Types.bsToHex c
-        _ <- readProcessWithExitCode "cabal" ["run", "exe:hevm", "--", "symbolic", "--code", hexStr, "--smt-timeout", "1", "--dump-unsolved", "."] ""
+        _ <- readProcessWithExitCode "cabal" ["run", "exe:hevm", "--", "symbolic", "--code", hexStr, "--solver", "z3", "--smt-timeout", "1", "--dump-unsolved", "."] ""
         let filename = "query-unsolved-0.smt2"
         fileExists <- doesFileExist filename
         shouldBe fileExists True
         removeFile filename
+      -- the empty solver answers without spawning a process, so queries can be
+      -- dumped on a machine with no solver installed
+      it "empty-solver-dumps-queries" $ do
+        Just c <- runApp $ solcRuntime (T.pack "C") (T.pack [i|
+           contract C {
+             function stuff(uint a, uint b) public {
+                 assert (a * b != 5);
+             }
+           }
+          |])
+        let hexStr = Types.bsToHex c
+        (_, _, stderr) <- readProcessWithExitCode "cabal"
+          ["run", "exe:hevm", "--", "symbolic", "--code", hexStr, "--solver", "empty", "--smt-debug"] ""
+        stderr `shouldNotContain` "CallStack"
+        dumped <- dumpedQueries
+        mapM_ removeFile dumped
+        dumped `shouldContain` ["query-0.smt2"]
+      -- with the default solver, which the library tests do not use
+      it "abstract-arith" $ do
+        Just c <- runApp $ solcRuntime (T.pack "C") (T.pack [i|
+           contract C {
+             function stuff(uint a, uint b, uint d) public {
+                 require(a <= b);
+                 uint p;
+                 uint q;
+                 assembly { p := div(a, d) q := div(b, d) }
+                 assert(p <= q);
+             }
+           }
+          |])
+        let hexStr = Types.bsToHex c
+        (_, stdout, stderr) <- readProcessWithExitCode "cabal"
+          ["run", "exe:hevm", "--", "symbolic", "--code", hexStr, "--smt-debug"] ""
+        stderr `shouldNotContain` "CallStack"
+        dumped <- dumpedQueries
+        mapM_ removeFile dumped
+        stdout `shouldContain` "QED"
+        filter ("-refined.smt2" `isSuffixOf`) dumped `shouldNotBe` []
+      -- a failing run leaves through an exit exception, which must not skip the summary
+      it "solver-summary" $ do
+        let summarised body = do
+              Just c <- runApp $ solcRuntime (T.pack "C") (T.pack ("contract C { function stuff(uint x, uint y) public { " <> body <> " } }"))
+              readProcessWithExitCode "cabal"
+                ["run", "exe:hevm", "--", "symbolic", "--code", Types.bsToHex c, "--verb", "2"] ""
+        (passCode, passOut, _) <- summarised "unchecked { require(x < 100 && y < 100); assert(x + y < 200); }"
+        passCode `shouldBe` ExitSuccess
+        passOut `shouldContain` "Queries answered:"
+        (failCode, failOut, _) <- summarised "unchecked { assert(x + y != 5); }"
+        failCode `shouldBe` ExitFailure 1
+        failOut `shouldContain` "Queries answered:"
+        (_, quietOut, _) <- do
+          Just c <- runApp $ solcRuntime (T.pack "C") (T.pack "contract C { function stuff(uint x, uint y) public { unchecked { assert(x + y != 5); } } }")
+          readProcessWithExitCode "cabal" ["run", "exe:hevm", "--", "symbolic", "--code", Types.bsToHex c] ""
+        quietOut `shouldNotContain` "Queries answered:"
+      it "symbolic-partial-is-not-qed" $ do
+        -- loops 10 times before INVALID, more than --max-concrete-iterations;
+        -- OpPush assembles to PUSH32, so the loop head is at 33 and the body at 104
+        let loop = asmHex
+              [ OpPush (Lit 0), OpJumpdest
+              , OpDup 1, OpPush (Lit 10), OpGt, OpPush (Lit 104), OpJumpi
+              , OpInvalid
+              , OpJumpdest, OpPush (Lit 1), OpAdd, OpPush (Lit 33), OpJump ]
+        (exitCode, stdout, _) <- readProcessWithExitCode "cabal"
+          ["run", "exe:hevm", "--", "symbolic", "--max-concrete-iterations", "5", "--code", loop] ""
+        exitCode `shouldBe` ExitFailure 1
+        stdout `shouldNotContain` "QED"
+        stdout `shouldContain` "[WARNING]"
+      it "symbolic-create-runs-initcode" $ do
+        (symCode, symOut, _) <- readProcessWithExitCode "cabal"
+          ["run", "exe:hevm", "--", "symbolic", "--create", "--code", asmHex [OpInvalid]] ""
+        symCode `shouldBe` ExitFailure 1
+        symOut `shouldNotContain` "QED"
+        (_, execOut, _) <- readProcessWithExitCode "cabal"
+          ["run", "exe:hevm", "--", "exec", "--create", "--code", asmHex [OpInvalid]] ""
+        execOut `shouldContain` "UnrecognizedOpcode"
+      it "symbolic-block-fields" $ do
+        -- INVALID iff the field is nonzero; OpPush assembles to PUSH32, so the JUMPDEST is at 36
+        let code op = asmHex [op, OpPush (Lit 36), OpJumpi, OpStop, OpJumpdest, OpInvalid]
+            run args = readProcessWithExitCode "cabal" (["run", "exe:hevm", "--", "symbolic"] <> args) ""
+        forM_ [OpNumber, OpBaseFee, OpPrevRandao] $ \op -> do
+          (exitCode, stdout, _) <- run ["--code", code op]
+          exitCode `shouldBe` ExitFailure 1
+          stdout `shouldContain` "Block Context"
+        (exitCode, _, _) <- run ["--code", code OpNumber, "--number", "0"]
+        exitCode `shouldBe` ExitSuccess
       it "early-abort" $ do
-        (exitcode, stdout, stderr) <- runForge "test/contracts/pass/early-abort.sol" ["--max-iterations", "1000"]
-        putStrLn $ "Exit code: " ++ show exitcode
-        putStrLn stderr
-        putStrLn stdout
+        (exitCode, stdout, stderr) <- runForge "test/contracts/pass/early-abort.sol" ["--max-iterations", "1000"]
+        stderr `shouldNotContain` "CallStack"
+        stderr `shouldNotContain` "blocked indefinitely"
+        stdout `shouldContain` "[FAIL]"
+        stdout `shouldNotContain` "all branches reverted"
+        stdout `shouldNotContain` "partially explore"
+        exitCode `shouldBe` (ExitFailure 1)
+      it "no-early-abort" $ do
+        (exitCode, stdout, stderr) <- runForge "test/contracts/pass/early-abort.sol" ["--max-iterations", "1000", "--no-early-abort"]
+        stderr `shouldNotContain` "CallStack"
+        length (filter (isInfixOf "Counterexample:") (lines stdout)) `shouldSatisfy` (> 1)
+        exitCode `shouldBe` (ExitFailure 1)
       it "rpc-cache" $ do
         (_, stdout, stderr) <- runForge "test/contracts/fail/rpc-test.sol"
           ["--rpc", "http://mock.mock", "--prefix", "test_attack_symbolic"
           , "--number", "10307563", "--cache-dir", "test/contracts/fail/"]
         stdout `shouldContain` "[FAIL]"
         stderr `shouldNotContain` "CallStack"
+      it "rpc-cache-fork-storage" $ do
+        (_, stdout, stderr) <- runForge "test/contracts/fail/rpc-fork-storage.sol"
+          ["--rpc", "http://mock.mock", "--number", "16198552", "--cache-dir", "test/contracts/fail/"]
+        let result status name = any (\l -> status `isInfixOf` l && name `isInfixOf` l) (lines stdout)
+        stderr `shouldNotContain` "CallStack"
+        stdout `shouldNotContain` "partially explore"
+        mapM_ (\name -> (name, result "[PASS]" name) `shouldBe` (name, True))
+          [ "prove_concrete_mapping_read", "prove_account_fields", "prove_transfer_over_fetched_storage"
+          , "prove_nested_mapping_allowance", "prove_multiple_contracts_and_packed_slot" ]
+        result "[FAIL]" "prove_fail_overdraft_reverts" `shouldBe` True
+        stdout `shouldContain` "[validated]"
+
+asmHex :: [Op] -> String
+asmHex = concatMap byte . assemble
+  where
+    byte (LitByte b) = printf "%02x" b
+    byte b = error $ "symbolic byte: " <> show b

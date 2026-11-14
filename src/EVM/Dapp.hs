@@ -13,9 +13,9 @@ import Data.ByteString qualified as BS
 import Data.List (find, sort)
 import Data.Map (Map)
 import Data.Map qualified as Map
-import Data.Maybe (mapMaybe)
+import Data.Maybe (mapMaybe, isJust)
 import Data.Sequence qualified as Seq
-import Data.Text (Text, isPrefixOf, pack)
+import Data.Text (Text, pack)
 import Data.Text.Encoding (encodeUtf8)
 import Data.Vector qualified as V
 import Optics.Core
@@ -46,6 +46,13 @@ data DappContext = DappContext
   , contracts :: Map (Expr EAddr) Contract
   , labels :: Map Addr Text
   }
+
+data TestMethodInfo = TestMethodInfo
+  { contract :: SolcContract
+  , methodSignature :: Sig
+  }
+
+type TestMethodFilter = TestMethodInfo -> Bool
 
 dappInfo :: FilePath -> BuildOutput -> DappInfo
 dappInfo root (BuildOutput (Contracts cs) sources) =
@@ -80,43 +87,30 @@ dappInfo root (BuildOutput (Contracts cs) sources) =
 emptyDapp :: DappInfo
 emptyDapp = dappInfo "" mempty
 
--- Dapp unit tests are detected by searching within abi methods
--- that begin with "check" or "prove", that are in a contract with
--- the "IS_TEST()" abi marker, for a given regular expression.
---
--- The regex is matched on the full test method name, including path
--- and contract, i.e. "path/to/file.sol:TestContract.test_name()".
+-- Unit tests are detected by searching within abi methods
+-- in a contract with the "IS_TEST()" abi marker.
 
 unitTestMarkerAbi :: FunctionSelector
 unitTestMarkerAbi = abiKeccak (encodeUtf8 "IS_TEST()")
 
-mkSig :: Text -> Method -> Maybe Sig
-mkSig prefix method
-  | prefix `isPrefixOf` testname = Just (Sig testname argtypes)
-  | otherwise = Nothing
+mkSig :: Method -> Sig
+mkSig method = Sig method.name argtypes
   where
-    testname = method.name
     argtypes = snd <$> method.inputs
 
-findUnitTests :: Text -> Text -> ([SolcContract] -> [(Text, [Sig])])
-findUnitTests prefix match =
-  concatMap $ \c ->
-    case Map.lookup unitTestMarkerAbi c.abiMap of
-      Nothing -> []
-      Just _  ->
-        let testNames = unitTestMethodsFiltered prefix (regexMatches match) c
-        in [(c.contractName, testNames) | not (BS.null c.runtimeCode) && not (null testNames)]
+findUnitTests :: TestMethodFilter -> SolcContract -> [Sig]
+findUnitTests methodFilter c = if isTestContract c then contractMethodsFiltered methodFilter c else []
+  where
+    isTestContract c' = not (BS.null c'.runtimeCode) && (isJust $ Map.lookup unitTestMarkerAbi c'.abiMap)
 
-unitTestMethodsFiltered :: Text -> (Text -> Bool) -> (SolcContract -> [Sig])
-unitTestMethodsFiltered prefix matcher c =
-  let testName (Sig n _) = c.contractName <> "." <> n
-  in filter (matcher . testName) (unitTestMethods prefix c)
+contractMethodsFiltered :: TestMethodFilter -> SolcContract -> [Sig]
+contractMethodsFiltered testMethodFilter c = filter (\sig -> testMethodFilter (TestMethodInfo c sig)) $ contractMethods c
 
-unitTestMethods :: Text -> SolcContract -> [Sig]
-unitTestMethods prefix =
+contractMethods :: SolcContract -> [Sig]
+contractMethods =
   (.abiMap)
   >>> Map.elems
-  >>> mapMaybe (mkSig prefix)
+  >>> map mkSig
 
 traceSrcMap :: DappInfo -> Trace -> Maybe SrcMap
 traceSrcMap dapp trace = srcMap dapp trace.contract trace.opIx
@@ -166,9 +160,35 @@ showTraceLocation dapp trace =
     Nothing -> Left "<no source map>"
     Just sm ->
       case srcMapCodePos dapp.sources sm of
-        Nothing -> Left "<source not found>"
         Just (fileName, lineIx) ->
           Right (pack fileName <> ":" <> pack (show lineIx))
+        -- srcmap points to a file not in the source cache (e.g. compiler-
+        -- generated panic handler).  Walk backwards through the contract's
+        -- srcmap to find the nearest entry with a valid source location —
+        -- this typically resolves to the assert/require that triggered the
+        -- error.
+        Nothing ->
+          case fallbackSrcPos dapp trace of
+            Just (fileName, lineIx) ->
+              Right (pack fileName <> ":" <> pack (show lineIx))
+            Nothing -> Left "<source not found>"
+
+-- | Walk backwards from the current opIx to find the nearest srcmap entry
+-- whose file index exists in the source cache.
+fallbackSrcPos :: DappInfo -> Trace -> Maybe (FilePath, Int)
+fallbackSrcPos dapp trace = do
+  sol <- findSrc trace.contract dapp
+  let srcmaps = case trace.contract.code of
+        InitCode _ _ -> sol.creationSrcmap
+        RuntimeCode _ -> sol.runtimeSrcmap
+        UnknownCode _ -> mempty
+  go (trace.opIx - 1) srcmaps
+  where
+    go i srcmaps
+      | i < 0     = Nothing
+      | otherwise = case Seq.lookup i srcmaps >>= srcMapCodePos dapp.sources of
+          Just pos -> Just pos
+          Nothing  -> go (i - 1) srcmaps
 
 srcMapCodePos :: SourceCache -> SrcMap -> Maybe (FilePath, Int)
 srcMapCodePos cache sm =

@@ -8,11 +8,14 @@ import Test.Tasty.ExpectedFailure
 
 import Control.Monad.IO.Unlift (MonadUnliftIO)
 import Control.Monad.Reader (ReaderT)
+import Control.Monad (filterM)
 import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
 import Data.List qualified as List (isInfixOf)
 import Data.Maybe (isJust, mapMaybe)
 import Data.Monoid (Any(..))
 import Data.String.Here
+import Data.Vector qualified as V
 
 import EVM.ABI
 import EVM.Effects qualified as Effects
@@ -20,9 +23,11 @@ import EVM.Expr qualified as Expr
 import EVM.Types
 import EVM.SMT qualified as SMT (getVar)
 import EVM.Solidity (solcRuntime)
-import EVM.Solvers (withSolvers, defMemLimit, Solver(..), SolverGroup)
+import EVM.Solvers (withSolvers, defMemLimit, Solver(..), SolverGroup, checkSatWithProps)
 import EVM.SymExec
 import EVM.Traversals
+import EVM.Test.Asm (AsmOp(..), asm)
+import EVM.SymExec.ArithTests (arithmeticTests)
 
 
 tests :: TestTree
@@ -32,6 +37,7 @@ tests = testGroup "Symbolic execution"
 solidityExplorationTests :: TestTree
 solidityExplorationTests = testGroup "Exploration of Solidity"
     [ basicTests
+    , keccakTests
     , maxDepthTests
     , copySliceTests
     , storageTests
@@ -42,7 +48,128 @@ solidityExplorationTests = testGroup "Exploration of Solidity"
 
 basicTests :: TestTree
 basicTests = testGroup "simple-checks"
-  [ testCase "simple-stores" $ do
+  [ testCase "packed-array-conditional-index" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          uint32[8] values;
+          function f(bool high) external {
+            uint256 index = 1;
+            if (high) index = 7;
+            values[0] = 42;
+            values[index] = 99;
+            assert(values[0] == 42);
+          }
+        }
+        |]
+      (paths, results) <- executeWithBitwuzla $ \s ->
+        checkAssert s defaultPanicCodes c (Just (Sig "f(bool)" [AbiBoolType])) [] defaultVeriOpts
+      assertEqual "the other packed element is unchanged" [] results
+      assertBool "no partial paths" (not (any isPartial paths))
+  , testCase "read-byte-from-word-mapping-key" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          mapping(address => uint256) balances;
+          function read(address dst, uint256 amount) external returns (uint256) {
+            balances[dst] = 7;
+            // The word includes dst's 20 bytes and 12 bytes of the symbolic amount.
+            bytes memory packed = abi.encodePacked(bytes12(0), bytes32(msg.data[16:48]));
+            return balances[address(uint160(uint256(bytes32(packed))))];
+          }
+        }
+      |]
+      let sig = Just (Sig "read(address,uint256)" [AbiAddressType, AbiUIntType 256])
+      paths <- executeWithBitwuzla $ \s ->
+        getExprEmptyStore s c sig ["0x1234567890123456789012345678901234567890"] defaultVeriOpts
+      assertBool "execution finishes" (not (any isPartial paths))
+      assertEqual "the copied address resolves the mapping read" [Lit 7]
+        [Expr.readWord (Lit 0) buf | Success _ _ buf _ <- paths]
+  , testCase "unknown-calls-with-different-gas-may-differ" $ do
+    -- INVALID if staticcall(1000, t) and staticcall(2000, t) to unknown t differ (#1201)
+    let call g = replicate 5 (I OpPush0) <> [I OpCalldataload, I (OpPush (Lit g)), I OpStaticcall]
+        c = asm $ call 1000 <> call 2000 <> [I OpEq, Target 0, I OpJumpi, I (OpInvalid), I OpJumpdest, I OpStop]
+    (_, res) <- executeWithBitwuzla $ \s -> verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
+    assertBool "the callee can read GAS, so the results may differ" (any isCex res)
+  , testCase "unknown-call-expands-memory" $ do
+    -- staticcall to unknown t with output at [100, 164), INVALID unless MSIZE is 0xc0
+    let c = asm $ map (I . OpPush . Lit) [64, 100, 32, 4, 0] <> [I OpCalldataload, I (OpPush (Lit 1000)), I OpStaticcall, I OpPop]
+          <> [I OpMsize, I (OpPush (Lit 0xc0)), I OpEq, Target 0, I OpJumpi, I (OpInvalid), I OpJumpdest, I OpStop]
+    (_, res) <- executeWithBitwuzla $ \s -> verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
+    assertBool "MSIZE covers the output" (all isQed res)
+  , testCase "mcopy-symbolic-size-expands-memory" $ do
+    -- MCOPY of calldata[0] & 0x3f bytes to 0; INVALID if 32 bytes were copied but MSIZE is not 32
+    let size = [I (OpPush (Lit 0)), I OpCalldataload, I (OpPush (Lit 0x3f)), I OpAnd]
+        c = asm $ size <> [I (OpPush (Lit 0)), I (OpPush (Lit 0)), I OpMcopy]
+          <> [I OpMsize, I (OpPush (Lit 0x20)), I OpEq, I OpIszero]
+          <> size <> [I (OpPush (Lit 0x20)), I OpEq, I OpAnd, Target 0, I OpJumpi, I OpStop, I OpJumpdest, I (OpInvalid)]
+    (_, res) <- executeWithBitwuzla $ \s -> verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
+    assertBool "MSIZE covers the copy" (all isQed res)
+  , testCase "merged-gas-reading-not-reused" $ do
+    -- the fall-through of a mergeable forward jump reads GAS, which is then
+    -- compared to a second reading; INVALID if they differ and x == 0 (#1191)
+    let x = [I (OpPush (Lit 0)), I OpCalldataload]
+        c = asm $ x <> [I (OpPush (Lit 0)), I OpMstore, I (OpPush (Lit 7))]
+          <> x <> [Target 0, I OpJumpi, I OpPop, I OpGas]
+          <> [I OpJumpdest, I OpGas, I OpEq, I OpIszero]
+          <> x <> [I OpIszero, I OpAnd, Target 1, I OpJumpi, I OpStop, I OpJumpdest, I (OpInvalid)]
+    (_, res) <- executeWithBitwuzla $ \s -> verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
+    assertBool "two GAS readings differ" (any isCex res)
+  , testCase "symbolic-address-high-bytes" $ do
+    -- if x has low 20 bytes 0xdead: BALANCE(x), then INVALID if x has higher bytes set (#1194)
+    let c = asm
+          [ I (OpPush (Lit 0)), I OpCalldataload, I (OpDup 1), I (OpPush (Lit (2 ^ (160 :: Int) - 1))), I OpAnd
+          , I (OpPush (Lit 0xdead)), I OpEq, Target 0, I OpJumpi, I OpStop
+          , I OpJumpdest, I (OpDup 1), I OpBalance, I OpPop
+          , I (OpPush (Lit 160)), I OpShr, Target 1, I OpJumpi, I OpStop
+          , I OpJumpdest, I (OpInvalid) ]
+    (_, res) <- executeWithBitwuzla $ \s -> verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
+    assertBool "x = 2^160 + 0xdead reaches INVALID" (any isCex res)
+  , testCase "blockhash-out-of-range-is-zero" $ do
+    -- block 0 is out of range at block 1000 (#1122)
+    (_, res) <- executeWithBitwuzla $ \s -> verifyContract s (blockhashIsZeroAt 0 1000) Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
+    assertBool "blockhash(0) is 0 at block 1000" (any isCex res)
+  , testCase "blockhash-in-range-is-nonzero" $ do
+    (_, res) <- executeWithBitwuzla $ \s -> verifyContract s (blockhashIsZeroAt 5 6) Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
+    assertBool "blockhash(5) is not 0 at block 6" (not (any isCex res))
+  , testCase "short-dynamic-calldata" $ do
+    -- the empty `bytes` is encoded in 68 bytes (#1200)
+    Just c <- solcRuntime "C" [i|
+      contract C {
+        function f(bytes calldata) external pure {
+          assert(msg.data.length >= 132);
+        }
+      }
+      |]
+    (_, res) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just (Sig "f(bytes)" [AbiBytesDynamicType])) [] defaultVeriOpts
+    assertBool "68-byte calldata violates the assert" (any isCex res)
+  , testCase "dynamic-calldata-offsets-follow-lengths" $ do
+    Just c <- solcRuntime "C" [i|
+      contract C {
+        function f(bytes calldata a, bytes calldata b) external pure {
+          assert(!(a.length == 1 && b.length == 2 && b[0] == 0x11 && b[1] == 0x22));
+        }
+      }
+      |]
+    let sig = Sig "f(bytes,bytes)" [AbiBytesDynamicType, AbiBytesDynamicType]
+    Right cd <- executeWithBitwuzla $ \s -> do
+      (_, [Cex (_, ctr)]) <- checkAssert s defaultPanicCodes c (Just sig) [] defaultVeriOpts
+      ((buf, _), _) <- mkCalldata (Just sig) []
+      calldataFromCex ctr buf sig
+    let args = BS.drop 4 cd
+        expected = encodeAbiValue (AbiTuple (V.fromList [AbiBytesDynamic "\x00", AbiBytesDynamic "\x11\x22"]))
+    -- the solver picks the contents of `a`, and the padding is unconstrained
+    assertEqual "offsets and length of a" (BS.take 96 expected) (BS.take 96 args)
+    assertEqual "b" (BS.take 34 (BS.drop 128 expected)) (BS.take 34 (BS.drop 128 args))
+  , testCase "symbolic-jump-high-bytes" $ do
+    -- jumps to calldata[0:32]: 0x10005 has the JUMPDEST at 5 in its low bytes, but is invalid
+    let c = BS.pack [0x60, 0x00, 0x35, 0x56, 0x00, 0x5b, 0x00]
+        hits l = PEq (ReadWord (Lit 0) (AbstractBuf "txdata")) (Lit 0x10005) : extractProps l
+    reached <- executeWithBitwuzla $ \s -> do
+      paths <- getExprEmptyStore s c Nothing [] defaultVeriOpts
+      filterM (fmap isCex . checkSatWithProps s . hits) paths
+    case reached of
+      [Failure _ _ BadJumpDestination] -> pure ()
+      _ -> assertFailure $ "the target must reach exactly one invalid jump leaf, got " <> show reached
+  , testCase "simple-stores" $ do
     Just c <- solcRuntime "MyContract"
       [i|
       contract MyContract {
@@ -150,6 +277,87 @@ basicTests = testGroup "simple-checks"
     (_, [Cex (_, ctr)]) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
     let b = SMT.getVar ctr "arg2"
     assertBool "b must be 0" (b == 0)
+  , testCase "implied-branch-not-forked" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function f(uint a, uint bound) public pure returns (uint) {
+            require(a >= 7, "first");
+            return g(a, bound);
+          }
+          function g(uint a, uint bound) internal pure returns (uint) {
+            require(a >= bound, "again");
+            return a;
+          }
+        }
+      |]
+      let sig = Just (Sig "f(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])
+          revertData msg = ConcreteBuf $ abiMethod "Error(string)" (AbiTuple (pure (AbiString msg)))
+      -- Bound 7 is implied; bound 8 still needs both sides explored.
+      mapM_ (\(bound, expectedReverts) -> do
+        paths <- executeWithBitwuzla $ \s -> getExpr s c sig ["<symbolic>", bound] defaultVeriOpts
+        let returns = [Expr.readWord (Lit 0) buf | Success _ _ buf _ <- paths]
+            reverts = [buf | Failure _ _ (Revert buf) <- paths]
+        assertEqual ("second require reverts for bound " <> bound) expectedReverts
+          (length $ filter (== revertData "again") reverts)
+        assertEqual "successful path returns the argument" [Var "arg1"] returns
+        assertEqual "all paths return or revert" (length paths) (length returns + length reverts)
+        assertBool "the first require can still fail" (revertData "first" `elem` reverts)
+        ) [("7", 0), ("8", 1)]
+  ]
+
+keccakTests :: TestTree
+keccakTests = testGroup "Keccak execution"
+  [ testCase "concrete-create2-preimage" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function pairFor(uint256 a, uint256 b) public pure returns (address) {
+            bytes32 salt = keccak256(abi.encode(a, b));
+            return address(uint160(uint256(keccak256(abi.encodePacked(
+              bytes1(0xff), address(1), salt, bytes32(uint256(3))
+            )))));
+          }
+        }
+      |]
+      let sig = Just (Sig "pairFor(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])
+          salt = keccak' (word256Bytes 1 <> word256Bytes 2)
+          preimage = BS.singleton 0xff <> BS.drop 12 (word256Bytes 1) <> word256Bytes salt <> word256Bytes 3
+          unresolved :: Expr a -> Any
+          unresolved (Keccak (ConcreteBuf _)) = mempty
+          unresolved (Keccak _) = Any True
+          unresolved _ = mempty
+      paths <- executeWithBitwuzla $ \s -> getExpr s c sig ["1", "2"] defaultVeriOpts
+      case [out | Success _ _ out _ <- paths] of
+        [out] -> do
+          assertEqual "CREATE2 address" (Lit (keccak' preimage `mod` 2 ^ (160 :: Int)))
+            (Expr.concKeccakSimpExpr (Expr.readWord (Lit 0) out))
+          assertBool "constant hashes have concrete inputs"
+            (not $ getAny $ foldExpr unresolved mempty out)
+        _ -> assertFailure $ "expected one successful path, got " <> show paths
+  , testCase "nested-concrete-keccak-keeps-assumptions" $ do
+      Just c <- solcRuntime "C" [i|
+        contract C {
+          function hash(uint256 x) internal pure returns (bytes32) {
+            return keccak256(abi.encode(keccak256(abi.encode(x))));
+          }
+          function different(uint256 fixedKey, uint256 key) public pure {
+            require(key != fixedKey);
+            assert(hash(fixedKey) != hash(key));
+          }
+          function same(uint256 fixedKey, uint256 key) public pure {
+            assert(hash(fixedKey) != hash(key));
+          }
+        }
+      |]
+      let sig name = Just (Sig name [AbiUIntType 256, AbiUIntType 256])
+          args = ["1592594996", "<symbolic>"]
+      (_, distinct) <- executeWithShortBitwuzla $ \s ->
+        checkAssert s defaultPanicCodes c (sig "different(uint256,uint256)") args defaultVeriOpts
+      assertEqual "distinct nested hashes must be proved" [] distinct
+      (_, same) <- executeWithShortBitwuzla $ \s ->
+        checkAssert s defaultPanicCodes c (sig "same(uint256,uint256)") args defaultVeriOpts
+      case same of
+        [Cex (_, cex)] -> assertEqual "equal inputs still alias" 1592594996 (SMT.getVar cex "arg2")
+        _ -> assertFailure $ "expected a counterexample, got " <> show same
   ]
 
 copySliceTests :: TestTree
@@ -275,7 +483,6 @@ storageDecompositionTests = testGroup "Storage decomposition"
         |]
       paths <- executeWithBitwuzla $ \s -> getExpr s c (Just (Sig "prove_array(uint256,uint256,uint256,uint256)" [AbiUIntType 256, AbiUIntType 256, AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
       let simpExpr = map (mapExprM Expr.decomposeStorage) paths
-      -- putStrLnM $ T.unpack $ formatExpr (fromJust simpExpr)
       assertBool "Decompose did not succeed." (all isJust simpExpr)
     , testCase "decompose-5-mixed" $ do
       Just c <- solcRuntime "MyContract"
@@ -559,7 +766,6 @@ storageSimplificationTests = testGroup "Storage simplification"
        --       is not stripped. This is due to us not doing all we can in this case, see
        --       note above readStorage. Decompose remedies this (when it can be decomposed)
        -- paths <- withDefaultSolver $ \s -> getExpr s c (Just (Sig "fun(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
-       -- putStrLnM $ T.unpack $ formatExpr paths
        (_, [Cex _]) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just (Sig "fun(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
        assertBool "" True
     ,
@@ -625,7 +831,6 @@ panicCodeTests = testGroup "Panic code tests via symbolic execution"
             |]
         (_, [Cex (_, ctr)]) <- executeWithBitwuzla $ \s -> checkAssert s [0x12] c (Just (Sig "fun(uint256,uint256)" [AbiUIntType 256, AbiUIntType 256])) [] defaultVeriOpts
         assertEqual "Division by 0 needs b=0" (SMT.getVar ctr "arg2") 0
-        -- putStrLnM "expected counterexample found"
   , testCase "unused-args-fail" $ do
          Just c <- solcRuntime "C"
              [i|
@@ -651,6 +856,42 @@ panicCodeTests = testGroup "Panic code tests via symbolic execution"
         let sig = (Just (Sig "fun(uint8)" [AbiUIntType 8]))
         (_, results) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
         expectNoCex results
+  , testCase "gas-decrease-monotone-across-call" $ do
+        Just c <- solcRuntime "MyContract"
+            [i|
+            contract Child {
+              function g() external view returns (uint) { return gasleft(); }
+            }
+            contract MyContract {
+              function fun() external {
+                Child child = new Child();
+                uint a = gasleft();
+                child.g{gas: 1000}();
+                uint b = gasleft();
+                assert(a > b);
+              }
+             }
+            |]
+        (_, results) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just (Sig "fun()" [])) [] defaultVeriOpts
+        expectNoCex results
+  -- #1123: gas readings in different call frames are not ordered
+  , testCase "gas-callee-below-caller" $ do
+        Just c <- solcRuntime "MyContract"
+            [i|
+            contract Child {
+              function g() external view returns (uint) { return gasleft(); }
+            }
+            contract MyContract {
+              function fun() external {
+                Child child = new Child();
+                uint childGas = child.g{gas: 1000}();
+                uint parentGas = gasleft();
+                assert(childGas >= parentGas);
+              }
+             }
+            |]
+        (_, results) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c (Just (Sig "fun()" [])) [] defaultVeriOpts
+        assertBool "The callee must be able to have less gas than the caller" (any isCex results)
   , testCase "enum-conversion-fail" $ do
         Just c <- solcRuntime "MyContract"
             [i|
@@ -761,6 +1002,40 @@ cheatCodeTests = testGroup "Cheatcode tests via symbolic execution"
           |]
       result <- verifyUserAsserts c (Just $ Sig "f()" [])
       expectNoCexNoPartial result
+  , testCase "vm.prank-create2" $ do
+      Just c <- solcRuntime "C"
+          [i|
+            interface Vm {
+              function prank(address) external;
+            }
+            contract Owned {
+              address public owner;
+              constructor() {
+                owner = msg.sender;
+              }
+            }
+            contract C {
+              function f() external {
+                Vm vm = Vm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
+
+                bytes32 salt = bytes32(uint256(1));
+                address usr = address(1312);
+                vm.prank(usr);
+                Owned target = new Owned{salt: salt}();
+                address expected = address(uint160(uint256(keccak256(abi.encodePacked(
+                  bytes1(0xff),
+                  usr,
+                  salt,
+                  keccak256(type(Owned).creationCode)
+                )))));
+
+                assert(target.owner() == usr);
+                assert(address(target) == expected);
+              }
+            }
+          |]
+      result <- verifyUserAsserts c (Just $ Sig "f()" [])
+      expectNoCexNoPartial result
   , testCase "vm.prank underflow" $ do
       Just c <- solcRuntime "C"
           [i|
@@ -837,7 +1112,11 @@ cheatCodeTests = testGroup "Cheatcode tests via symbolic execution"
               }
             }
           |]
-      expectAllBranchesFail c Nothing
+      (paths, _) <- executeWithBitwuzla $ \s -> verifyContract s c Nothing [] defaultVeriOpts Nothing (checkAssertions [0x1])
+      let cheatFailed = \case
+            Partial _ _ CheatCodeFailed {} -> True
+            _ -> False
+      assertBool "ffi must leave the path partial" (any cheatFailed paths)
   ]
 
 maxDepthTests :: TestTree
@@ -885,433 +1164,6 @@ maxDepthTests = testGroup "Tests for branching depth"
         assertBool "The expression MUST NOT be partial" $ Prelude.not (any isPartial paths)
   ]
 
-arithmeticTests :: TestTree
-arithmeticTests = testGroup "Arithmetic tests"
-  [ testCase "math-avg" $ do
-      Just c <- solcRuntime "C" [i|
-        contract C {
-          function prove_Avg(uint a, uint b) external pure {
-            require(a + b >= a);
-            unchecked {
-              uint r1 = (a & b) + (a ^ b) / 2;
-              uint r2 = (a + b) / 2;
-              assert(r1 == r2);
-            }
-          }
-        } |]
-      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-      expectProved res
-  , testCase "unsigned-div-by-zero" $ do
-      Just c <- solcRuntime "C" [i|
-        contract C {
-          function prove_unsigned_div_by_zero(uint256 a) external pure {
-            uint256 result;
-            assembly { result := div(a, 0) }
-            assert(result == 0);
-          }
-        } |]
-      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-      expectProved res
-  , testCase "arith-div-pass" $ do
-      Just c <- solcRuntime "C" [i|
-        contract C {
-          function prove_Div_pass(uint x, uint y) external pure {
-            require(x > y);
-            require(y > 0);
-            uint q;
-            assembly { q := div(x, y) }
-            assert(q != 0);
-          }
-        } |]
-      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-      expectProved res
-  , testCase "arith-div-fail" $ do
-      Just c <- solcRuntime "C" [i|
-        contract C {
-          function prove_Div_fail(uint x, uint y) external pure {
-            require(x > y);
-            uint q;
-            assembly { q := div(x, y) }
-            assert(q != 0);
-          }
-        } |]
-      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-      expectOneCex res
-  , testCase "arith-mod-fail" $ do
-        Just c <- solcRuntime "C" [i|
-          contract C {
-            function prove_Div_fail(uint x, uint y) external pure {
-              require(x > y);
-              uint q;
-              assembly { q := mod(x, y) }
-              assert(q != 0);
-            }
-          } |]
-        (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-        expectOneCex res
-  ,testCase "arith-mod" $ do
-      Just c <- solcRuntime "C" [i|
-        contract C {
-          function unchecked_smod(int x, int y) internal pure returns (int ret) {
-            assembly { ret := smod(x, y) }
-          }
-          function prove_Mod(int x, int y) external pure {
-            unchecked {
-              assert(unchecked_smod(x, 0) == 0);
-              assert(x % 1 == 0);
-              assert(x % 2 < 2 && x % 2 > -2);
-              assert(x % 4 < 4 && x % 4 > -4);
-              int x_smod_y = unchecked_smod(x, y);
-              assert(x_smod_y <= y || y < 0);}
-          }
-        } |]
-      (_, res) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-      expectProved res
-  , ignoreTestBecause "Currently takes too long" $ testCase "math-mint-fail" $ do
-        Just c <- solcRuntime "C" [i|
-          contract C {
-            function prove_mint(uint s, uint A1, uint S1) external pure {
-              uint a = (s * A1) / S1;
-              uint A2 = A1 + a;
-              uint S2 = S1 + s;
-              assert(A1 * S2 <= A2 * S1);
-            }
-          } |]
-        (_, res) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-        expectOneCex res
-  , signedDivModTests
-  , abdkMathTests
-  ]
-
-signedDivModTests :: TestTree
-signedDivModTests = testGroup "Tests for signed division and modulo"
-  [ testCase "sdiv-by-one" $ do
-      Just c <- solcRuntime "C" [i|
-        contract C {
-          function prove_sdiv_by_one(int256 a) external pure {
-            int256 result;
-            assembly { result := sdiv(a, 1) }
-            assert(result == a);
-          }
-        } |]
-      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-      expectProved res
-  , testCase "sdiv-by-neg-one" $ do
-      Just c <- solcRuntime "C" [i|
-        contract C {
-          function prove_sdiv_by_neg_one(int256 a) external pure {
-            int256 result;
-            assembly { result := sdiv(a, sub(0, 1)) }
-            if (a == -170141183460469231731687303715884105728 * 2**128) { // type(int256).min
-                assert(result == a);
-            } else {
-                assert(result == -a);
-            }
-          }
-        } |]
-      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-      expectProved res
-  , testCase "sdiv-intmin-by-two" $ do
-      Just c <- solcRuntime "C" [i|
-        contract C {
-          function prove_sdiv_intmin_by_two() external pure {
-            int256 result;
-            assembly {
-              let intmin := 0x8000000000000000000000000000000000000000000000000000000000000000
-              result := sdiv(intmin, 2)
-            }
-            // -2**254 is 0xc000...0000
-            assert(result == -0x4000000000000000000000000000000000000000000000000000000000000000);
-          }
-        } |]
-      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-      expectProved res
-  , testCase "smod-by-zero" $ do
-      Just c <- solcRuntime "C" [i|
-        contract C {
-          function prove_smod_by_zero(int256 a) external pure {
-            int256 result;
-            assembly { result := smod(a, 0) }
-            assert(result == 0);
-          }
-        } |]
-      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-      expectProved res
-  , testCase "smod-intmin-by-three" $ do
-      Just c <- solcRuntime "C" [i|
-        contract C {
-          function prove_smod_intmin_by_three() external pure {
-            int256 result;
-            assembly { result := smod(0x8000000000000000000000000000000000000000000000000000000000000000, 3) }
-            assert(result == -2);
-          }
-        } |]
-      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-      expectProved res
-  , testCase "sdiv-by-zero" $ do
-      Just c <- solcRuntime "C" [i|
-        contract C {
-          function prove_sdiv_by_zero(int256 a) external pure {
-            int256 result;
-            assembly { result := sdiv(a, 0) }
-            assert(result == 0);
-          }
-        } |]
-      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-      expectProved res
-  , testCase "sdiv-zero-dividend" $ do
-      Just c <- solcRuntime "C" [i|
-        contract C {
-          function prove_sdiv_zero_dividend(int256 b) external pure {
-            int256 result;
-            assembly { result := sdiv(0, b) }
-            assert(result == 0);
-          }
-        } |]
-      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-      expectProved res
-  , testCase "sdiv-truncation" $ do
-      Just c <- solcRuntime "C" [i|
-        contract C {
-          function prove_sdiv_truncation() external pure {
-            int256 result;
-            assembly { result := sdiv(sub(0, 7), 2) }
-            assert(result == -3);
-          }
-        } |]
-      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-      expectProved res
-  , ignoreTestBecause "Currently takes too long" $ testCase "sdiv-sign-symmetry" $ do
-      Just c <- solcRuntime "C" [i|
-        contract C {
-          function prove_sdiv_sign_symmetry(int256 a, int256 b) external pure {
-            if (a == -57896044618658097711785492504343953926634992332820282019728792003956564819968) return;
-            if (b == -57896044618658097711785492504343953926634992332820282019728792003956564819968) return;
-            if (b == 0) return;
-            int256 r1;
-            int256 r2;
-            assembly {
-              r1 := sdiv(a, b)
-              r2 := sdiv(sub(0, a), sub(0, b))
-            }
-            assert(r1 == r2);
-          }
-        } |]
-      (_, res) <- executeWithBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-      expectProved res
-  , ignoreTestBecause "Currently takes too long" $ testCase "sdiv-sign-antisymmetry" $ do
-      Just c <- solcRuntime "C" [i|
-        contract C {
-          function prove_sdiv_sign_antisymmetry(int256 a, int256 b) external pure {
-            if (a == -57896044618658097711785492504343953926634992332820282019728792003956564819968) return;
-            if (b == 0) return;
-            int256 r1;
-            int256 r2;
-            assembly {
-              r1 := sdiv(a, b)
-              r2 := sdiv(sub(0, a), b)
-            }
-            assert(r1 == -r2);
-          }
-        } |]
-      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-      expectProved res
-  , testCase "smod-by-one" $ do
-      Just c <- solcRuntime "C" [i|
-        contract C {
-          function prove_smod_by_one(int256 a) external pure {
-            int256 r1;
-            int256 r2;
-            assembly {
-              r1 := smod(a, 1)
-              r2 := smod(a, sub(0, 1))
-            }
-            assert(r1 == 0);
-            assert(r2 == 0);
-          }
-        } |]
-      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-      expectProved res
-  , testCase "smod-zero-dividend" $ do
-      Just c <- solcRuntime "C" [i|
-        contract C {
-          function prove_smod_zero_dividend(int256 b) external pure {
-            int256 result;
-            assembly { result := smod(0, b) }
-            assert(result == 0);
-          }
-        } |]
-      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-      expectProved res
-  , testCase "smod-sign-matches-dividend" $ do
-      Just c <- solcRuntime "C" [i|
-        contract C {
-          function prove_smod_sign_matches_dividend(int256 a, int256 b) external pure {
-            if (b == 0 || a == 0) return;
-            int256 result;
-            assembly { result := smod(a, b) }
-            if (result != 0) {
-              assert((a > 0 && result > 0) || (a < 0 && result < 0));
-            }
-          }
-        } |]
-      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-      expectProved res
-  , testCase "smod-intmin" $ do
-      Just c <- solcRuntime "C" [i|
-        contract C {
-          function prove_smod_intmin() external pure {
-            int256 result;
-            assembly { result := smod(0x8000000000000000000000000000000000000000000000000000000000000000, 2) }
-            assert(result == 0);
-          }
-        } |]
-      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-      expectProved res
-  , testCase "sdiv-intmin-by-neg-one" $ do
-      Just c <- solcRuntime "C" [i|
-        contract C {
-          function prove_sdiv_intmin_by_neg_one() external pure {
-            int256 result;
-            assembly {
-              let intmin := 0x8000000000000000000000000000000000000000000000000000000000000000
-              result := sdiv(intmin, sub(0, 1))
-            }
-            // EVM defines sdiv(MIN_INT, -1) = MIN_INT (overflow)
-            assert(result == -57896044618658097711785492504343953926634992332820282019728792003956564819968);
-          }
-        } |]
-      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-      expectProved res
-  , testCase "smod-intmin-by-neg-one" $ do
-      Just c <- solcRuntime "C" [i|
-        contract C {
-          function prove_smod_intmin_by_neg_one() external pure {
-            int256 result;
-            assembly {
-              let intmin := 0x8000000000000000000000000000000000000000000000000000000000000000
-              result := smod(intmin, sub(0, 1))
-            }
-            // smod(MIN_INT, -1) = 0 since MIN_INT is divisible by -1
-            assert(result == 0);
-          }
-        } |]
-      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-      expectProved res
-  , testCase "sdiv-intmin-by-intmin" $ do
-      Just c <- solcRuntime "C" [i|
-        contract C {
-          function prove_sdiv_intmin_by_intmin() external pure {
-            int256 result;
-            assembly {
-              let intmin := 0x8000000000000000000000000000000000000000000000000000000000000000
-              result := sdiv(intmin, intmin)
-            }
-            assert(result == 1);
-          }
-        } |]
-      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c Nothing [] defaultVeriOpts
-      expectProved res
-  ]
-
-abdkMathTests :: TestTree
-abdkMathTests = testGroup "ABDK math tests"
-  [ -- "make verify-hevm T=prove_div_negative_divisor" in https://github.com/gustavo-grieco/abdk-math-64.64-verification
-    ignoreTestBecause "Currently takes too long" $ testCase "prove_div_values-abdk" $ do
-      Just c <- solcRuntime "C" [i|
-        contract C {
-            bool public IS_TEST = true;
-
-            int128 private constant MIN_64x64 = -0x80000000000000000000000000000000;
-            int128 private constant MAX_64x64 = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF;
-
-            // ABDKMath64x64.fromInt(0) == 0
-            int128 private constant ZERO_FP = 0;
-            // ABDKMath64x64.fromInt(1) == 1 << 64
-            int128 private constant ONE_FP = 0x10000000000000000;
-
-            // ABDKMath64x64.div
-            function div(int128 x, int128 y) internal pure returns (int128) {
-                unchecked {
-                    require(y != 0);
-                    int256 result = (int256(x) << 64) / y;
-                    require(result >= MIN_64x64 && result <= MAX_64x64);
-                    return int128(result);
-                }
-            }
-
-            // ABDKMath64x64.abs
-            function abs(int128 x) internal pure returns (int128) {
-                unchecked {
-                    require(x != MIN_64x64);
-                    return x < 0 ? -x : x;
-                }
-            }
-
-            // Property: |x / y| <= |x| when |y| >= 1, and |x / y| >= |x| when |y| < 1
-            function prove_div_values(int128 x, int128 y) public pure {
-                require(y != ZERO_FP);
-
-                int128 x_y = abs(div(x, y));
-
-                if (abs(y) >= ONE_FP) {
-                    assert(x_y <= abs(x));
-                } else {
-                    assert(x_y >= abs(x));
-                }
-            }
-        } |]
-      let sig = (Just $ Sig "prove_div_values(int128,int128)" [AbiIntType 128, AbiIntType 128])
-      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-      expectProved res
-  -- "make verify-hevm T=prove_div_negative_divisor" in https://github.com/gustavo-grieco/abdk-math-64.64-verification
-  , ignoreTestBecause "Currently takes too long" $ testCase "prove_div_negative_divisor" $ do
-      Just c <- solcRuntime "C" [i|
-        contract C {
-            bool public IS_TEST = true;
-
-            int128 private constant MIN_64x64 = -0x80000000000000000000000000000000;
-            int128 private constant MAX_64x64 = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF;
-
-            // ABDKMath64x64.fromInt(0) == 0
-            int128 private constant ZERO_FP = 0;
-            
-            // ABDKMath64x64.div
-            function div(int128 x, int128 y) internal pure returns (int128) {
-                unchecked {
-                    require(y != 0);
-                    int256 result = (int256(x) << 64) / y;
-                    require(result >= MIN_64x64 && result <= MAX_64x64);
-                    return int128(result);
-                }
-            }
-            
-            // ABDKMath64x64.neg
-            function neg(int128 x) internal pure returns (int128) {
-                unchecked {
-                    require(x != MIN_64x64);
-                    return -x;
-                }
-            }
-
-            // Property: x / (-y) == -(x / y)
-            function prove_div_negative_divisor(int128 x, int128 y) public pure {
-                require(y < ZERO_FP);
-
-                int128 x_y = div(x, y);
-                int128 x_minus_y = div(x, neg(y));
-
-                assert(x_y == neg(x_minus_y));
-            }
-        } |]
-      let sig = (Just $ Sig "prove_div_negative_divisor(int128,int128)" [AbiIntType 128, AbiIntType 128])
-      (_, res) <- executeWithShortBitwuzla $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
-      expectProved res
-  ]
-
-expectProved :: [VerifyResult] -> Assertion
-expectProved results = assertBool "Must be proved" (null results)
-
 expectNoCex :: [VerifyResult] -> Assertion
 expectNoCex results = assertBool "There should be no cex" (not $ any isCex results)
 
@@ -1337,6 +1189,12 @@ badStoresInExpr exprs = any (getAny . foldExpr match mempty) exprs
   where
       match (SLoad _ (SStore _ _ _)) = Any True
       match _ = Any False
+
+-- | INVALID if blockhash(blk) == 0 and number == n
+blockhashIsZeroAt :: W256 -> W256 -> ByteString
+blockhashIsZeroAt blk n = asm
+  [ I (OpPush (Lit blk)), I OpBlockhash, I OpIszero, I OpNumber, I (OpPush (Lit n)), I OpEq, I OpAnd
+  , Target 0, I OpJumpi, I OpStop, I OpJumpdest, I (OpInvalid) ]
 
 symExecTestsConfig :: Effects.Config
 symExecTestsConfig = Effects.defaultConfig

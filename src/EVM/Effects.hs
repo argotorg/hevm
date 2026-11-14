@@ -20,6 +20,7 @@ import Control.Monad.Reader
 import Control.Monad.IO.Unlift
 import Data.Text (Text)
 import Data.Text.IO qualified as T
+import Numeric.Natural (Natural)
 import System.IO (stderr)
 
 
@@ -48,6 +49,17 @@ data Config = Config
   , onlyDeployed     :: Bool
   , earlyAbort       :: Bool
   , mergeMaxBudget   :: Int        -- ^ Max instructions for speculative merge exploration
+  , maxDynSize       :: Int        -- ^ Max byte length for concretized dynamic types (bytes, string)
+  , abstractArith    :: Bool
+  , hashConsExplore  :: Bool       -- ^ Share equal subterms (EVM.HashCons)
+  , progressLog      :: Maybe FilePath
+  , progressExprs    :: Bool
+  -- | Internal check: ask the solver to confirm every branch side that
+  -- exploration drops by simplification alone
+  , checkStaticBranches :: Bool
+  -- | Timeout in seconds for the queries that decide which branches to explore, capped by the
+  -- solver timeout. A branch the solver cannot decide is explored on both sides.
+  , smtBranchTimeout :: Maybe Natural
   }
   deriving (Show, Eq)
 
@@ -61,7 +73,7 @@ defaultConfig = Config
   , dumpTrace = False
   , decomposeStorage = True
   , promiseNoReent = False
-  , maxBufSize = 64
+  , maxBufSize = 24
   , maxWidth = 100
   , maxDepth = Nothing
   , verb = 0
@@ -69,6 +81,13 @@ defaultConfig = Config
   , onlyDeployed = False
   , earlyAbort = False
   , mergeMaxBudget = 100
+  , maxDynSize = 64
+  , abstractArith = True
+  , hashConsExplore = True
+  , progressLog = Nothing
+  , progressExprs = False
+  , checkStaticBranches = False
+  , smtBranchTimeout = Just 20
   }
 
 -- Write to the console

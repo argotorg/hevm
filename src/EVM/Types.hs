@@ -1,4 +1,5 @@
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE MagicHash #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilyDependencies #-}
 {-# LANGUAGE UndecidableInstances #-}
@@ -14,6 +15,7 @@ module EVM.Types where
 import Prelude hiding (Foldable(..))
 
 import GHC.Stack (HasCallStack, prettyCallStack, callStack)
+import GHC.Exts (reallyUnsafePtrEquality#, isTrue#, dataToTag#, Int(I#))
 import GHC.ByteOrder (targetByteOrder, ByteOrder(..))
 import Control.Arrow ((>>>))
 import Control.Monad (mzero)
@@ -33,6 +35,7 @@ import Data.ByteString.Base16 qualified as BS16
 import Data.ByteString.Builder (byteStringHex, toLazyByteString)
 import Data.ByteString.Char8 qualified as Char8
 import Data.ByteString.Internal (unsafeCreate)
+import Data.ByteString.Unsafe qualified as BSUnsafe
 import Data.ByteString.Lazy (toStrict)
 import Data.Data
 import Data.Int (Int64)
@@ -59,6 +62,7 @@ import Numeric (readHex, showHex)
 import Options.Generic
 import Optics.TH
 import EVM.FeeSchedule (FeeSchedule (..))
+import EVM.Types.TH (shortcutEq, shortcutCompare)
 import Data.Kind (Type)
 
 import Text.Regex.TDFA qualified as Regex
@@ -387,9 +391,98 @@ data Expr (a :: EType) where
   BufLength      :: Expr Buf -> Expr EWord
 
 deriving instance Show (Expr a)
-deriving instance Eq (Expr a)
-deriving instance Ord (Expr a)
 
+-- | Position of the constructor in the declaration, which is how the derived Ord orders
+-- different constructors
+exprRank :: Expr a -> Int
+exprRank !e = I# (dataToTag# e)
+
+-- | Which 'EType' an expression has, for traversals that visit nodes of every type
+data ETypeRep (a :: EType) where
+  BufRep      :: ETypeRep Buf
+  StorageRep  :: ETypeRep Storage
+  LogRep      :: ETypeRep Log
+  WordRep     :: ETypeRep EWord
+  AddrRep     :: ETypeRep EAddr
+  ContractRep :: ETypeRep EContract
+  ByteRep     :: ETypeRep Byte
+  EndRep      :: ETypeRep End
+
+exprType :: Expr a -> ETypeRep a
+exprType = \case
+  GVar (BufVar _) -> BufRep
+  GVar (StoreVar _) -> StorageRep
+  Lit {} -> WordRep
+  Var {} -> WordRep
+  LitByte {} -> ByteRep
+  IndexWord {} -> ByteRep
+  EqByte {} -> WordRep
+  JoinBytes {} -> WordRep
+  Partial {} -> EndRep
+  Failure {} -> EndRep
+  Success {} -> EndRep
+  Add {} -> WordRep
+  Sub {} -> WordRep
+  Mul {} -> WordRep
+  Div {} -> WordRep
+  SDiv {} -> WordRep
+  Mod {} -> WordRep
+  SMod {} -> WordRep
+  AddMod {} -> WordRep
+  MulMod {} -> WordRep
+  Exp {} -> WordRep
+  SEx {} -> WordRep
+  Min {} -> WordRep
+  Max {} -> WordRep
+  PrevRandao {} -> WordRep
+  EVM.Types.LT {} -> WordRep
+  EVM.Types.GT {} -> WordRep
+  LEq {} -> WordRep
+  GEq {} -> WordRep
+  SLT {} -> WordRep
+  SGT {} -> WordRep
+  Eq {} -> WordRep
+  IsZero {} -> WordRep
+  ITE {} -> WordRep
+  And {} -> WordRep
+  Or {} -> WordRep
+  Xor {} -> WordRep
+  Not {} -> WordRep
+  SHL {} -> WordRep
+  SHR {} -> WordRep
+  SAR {} -> WordRep
+  CLZ {} -> WordRep
+  Keccak {} -> WordRep
+  Origin {} -> WordRep
+  BlockHash {} -> WordRep
+  Coinbase {} -> WordRep
+  Timestamp {} -> WordRep
+  BlockNumber {} -> WordRep
+  GasLimit {} -> WordRep
+  ChainId {} -> WordRep
+  BaseFee {} -> WordRep
+  TxValue {} -> WordRep
+  Balance {} -> WordRep
+  Gas {} -> WordRep
+  CodeSize {} -> WordRep
+  CodeHash {} -> WordRep
+  LogEntry {} -> LogRep
+  C {} -> ContractRep
+  SymAddr {} -> AddrRep
+  LitAddr {} -> AddrRep
+  WAddr {} -> WordRep
+  ConcreteStore {} -> StorageRep
+  AbstractStore {} -> StorageRep
+  SLoad {} -> WordRep
+  SStore {} -> StorageRep
+  ConcreteBuf {} -> BufRep
+  AbstractBuf {} -> BufRep
+  ReadWord {} -> WordRep
+  ReadByte {} -> ByteRep
+  WriteWord {} -> BufRep
+  WriteByte {} -> BufRep
+  CopySlice {} -> BufRep
+  BufLength {} -> WordRep
 
 -- Existential Wrapper -----------------------------------------------------------------------------
 
@@ -398,17 +491,7 @@ data SomeExpr = forall a . Typeable a => SomeExpr (Expr a)
 
 deriving instance Show SomeExpr
 
-instance Eq SomeExpr where
-  SomeExpr (a :: Expr b) == SomeExpr (c :: Expr d) =
-    case eqT @b @d of
-      Just Refl -> a == c
-      Nothing -> False
 
-instance Ord SomeExpr where
-  compare (SomeExpr (a :: Expr b)) (SomeExpr (c :: Expr d)) =
-    case eqT @b @d of
-      Just Refl -> compare a c
-      Nothing -> compare (toNum a) (toNum c)
 
 toNum :: (Typeable a) => Expr a -> Int
 toNum (_ :: Expr a) =
@@ -444,7 +527,28 @@ data Prop where
   POr :: Prop -> Prop -> Prop
   PImpl :: Prop -> Prop -> Prop
   PBool :: Bool -> Prop
+  -- | The fresh success flag and return data of a call to unknown code, and if
+  -- it can change state, the world after it and the ether it sends the caller,
+  -- are what uninterpreted functions of the call's inputs give, so that calls
+  -- with equal inputs get equal results
+  PCall :: CallInputs -> Expr EWord -> Expr Buf -> Maybe (Expr EWord, Expr EWord) -> Prop
 deriving instance (Show Prop)
+
+-- | Everything the callee of a call to unknown code can observe
+data CallInputs = CallInputs
+  { world :: Expr EWord -- ^ the state of all other contracts, which only calls change
+  , callKind :: Expr EWord
+  , target :: Expr EWord
+  , callValue :: Expr EWord
+  , callData :: Expr Buf
+  , callDataLen :: Expr EWord
+  , caller :: Expr EAddr
+  , callerStorage :: Expr Storage
+  , callerTStorage :: Expr Storage
+  , callerBalance :: Expr EWord
+  , callGas :: Expr EWord -- ^ unknown, as hevm does not model gas
+  }
+deriving instance Show CallInputs
 
 infixr 3 .&&
 (.&&) :: Prop -> Prop -> Prop
@@ -476,50 +580,7 @@ pand = foldl' PAnd (PBool True)
 por :: [Prop] -> Prop
 por = foldl' POr (PBool False)
 
-instance Eq Prop where
-  PBool a == PBool b = a == b
-  PEq (a :: Expr x) (b :: Expr x) == PEq (c :: Expr y) (d :: Expr y)
-    = case eqT @x @y of
-       Just Refl -> a == c && b == d
-       Nothing -> False
-  PLT a b == PLT c d = a == c && b == d
-  PGT a b == PGT c d = a == c && b == d
-  PGEq a b == PGEq c d = a == c && b == d
-  PLEq a b == PLEq c d = a == c && b == d
-  PNeg a == PNeg b = a == b
-  PAnd a b == PAnd c d = a == c && b == d
-  POr a b == POr c d = a == c && b == d
-  PImpl a b == PImpl c d = a == c && b == d
-  _ == _ = False
 
-instance Ord Prop where
-  compare (PBool a) (PBool b) = compare a b
-  compare (PEq (a :: Expr x) (b :: Expr x)) (PEq (c :: Expr y) (d :: Expr y)) =
-    case eqT @x @y of
-      Just Refl -> compare (a, b) (c, d)
-      Nothing   -> compare (typeRep a) (typeRep c)
-  compare (PNeg a) (PNeg b) = compare a b
-  compare (PLT a1 b1) (PLT a2 b2) = compare (a1, b1) (a2, b2)
-  compare (PGT a1 b1) (PGT a2 b2) = compare (a1, b1) (a2, b2)
-  compare (PGEq a1 b1) (PGEq a2 b2) = compare (a1, b1) (a2, b2)
-  compare (PLEq a1 b1) (PLEq a2 b2) = compare (a1, b1) (a2, b2)
-  compare (PAnd a1 b1) (PAnd a2 b2) = compare (a1, b1) (a2, b2)
-  compare (POr a1 b1) (POr a2 b2) = compare (a1, b1) (a2, b2)
-  compare (PImpl a1 b1) (PImpl a2 b2) = compare (a1, b1) (a2, b2)
-  compare a b = compare (tag a) (tag b)
-
-    where
-      tag :: Prop -> Int
-      tag PBool{} = 0
-      tag PEq{}   = 1
-      tag PLT{}   = 2
-      tag PGT{}   = 3
-      tag PGEq{}  = 4
-      tag PLEq{}  = 5
-      tag PNeg{}  = 6
-      tag PAnd{}  = 7
-      tag POr{}   = 8
-      tag PImpl{} = 9
 
 
 isPBool :: Prop -> Bool
@@ -560,9 +621,9 @@ data EvmError
   | ReturnDataOutOfBounds
   | NonceOverflow
   | BadCheatCode String FunctionSelector
-  | NonexistentFork Int
+  | NonexistentFork Int -- ^ Retained for callers; selectFork now reverts.
   | AssumeCheatFailed
-  deriving (Show, Eq, Ord)
+  deriving (Show)
 
 evmErrToString :: EvmError -> String
 evmErrToString = \case
@@ -597,7 +658,19 @@ data PartialExec
   | JumpIntoSymbolicCode  { pc :: Int, addr :: Expr EAddr, jumpDst :: Int }
   | PrecompileMissing     { pc :: Int, addr :: Expr EAddr, preAddr :: Addr }
   | CheatCodeMissing      { pc :: Int, addr :: Expr EAddr, selector :: FunctionSelector }
+  | CheatCodeFailed       { pc :: Int, addr :: Expr EAddr, selector :: FunctionSelector, msg :: String }
   | BranchTooDeep         { pc :: Int, addr :: Expr EAddr}
+  -- | stopped because another path had a counterexample, see 'earlyAbort'
+  | Aborted               { pc :: Int, addr :: Expr EAddr }
+  deriving (Show)
+
+-- | A program-wide soundness caveat. Unlike a 'PartialExec', a caveat does not
+-- mark an execution path that we failed to explore: every reachable path was
+-- explored fully. It records that the *space of inputs* was restricted, so the
+-- result is only valid within that restriction. It is therefore attached to the
+-- verification result as a whole, not to an individual 'Expr End' leaf.
+data Caveat
+  = DynArgBounded { maxSize :: Int }  -- ^ dynamic (bytes/string) calldata args were bounded to this many bytes
   deriving (Show, Eq, Ord)
 
 -- | Effect types used by the vm implementation for side effects & control flow
@@ -614,13 +687,15 @@ data Query t where
   PleaseGetSols       :: Expr EWord -> Int -> [Prop] -> (Maybe [W256] -> EVM Symbolic ()) -> Query Symbolic
   PleaseDoFFI         :: [String] -> Map String String -> (ByteString -> EVM t ()) -> Query t
   PleaseReadEnv       :: String -> (String -> EVM t ()) -> Query t
+  -- | Just True: satisfiable, Just False: unsatisfiable, Nothing: unknown
+  PleaseCheckSat      :: [Prop] -> (Maybe Bool -> EVM Symbolic ()) -> Query Symbolic
 
 data BranchContext where
   PleaseRunBoth :: (Bool -> EVM Symbolic ()) -> BranchContext
   PleaseRunAll  :: [Expr EWord] -> (Expr EWord -> EVM Symbolic ()) -> BranchContext
 
--- | The possible return values of a SMT query
-data BranchCondition = Case Bool | UnknownBranch
+-- | The possible return values of a SMT query. Infeasible: neither direction can be taken
+data BranchCondition = Case Bool | UnknownBranch | Infeasible
   deriving Show
 
 instance Show (Query t) where
@@ -645,6 +720,8 @@ instance Show (Query t) where
       (("<EVM.Query: do ffi: " ++ (show cmd) ++ " env: " ++ (show env)) ++)
     PleaseReadEnv variable _ ->
       (("<EVM.Query: read env: " ++ variable) ++)
+    PleaseCheckSat props _ ->
+      (("<EVM.Query: check satisfiability of " ++ show props ++ ">") ++)
 
 instance Show (BranchContext) where
   showsPrec _ = \case
@@ -674,6 +751,27 @@ data MergeState = MergeState
 
 defaultMergeState :: MergeState
 defaultMergeState = MergeState False 0
+
+-- | An active vm.expectRevert / vm.expectPartialRevert expectation set by a
+-- cheat call. Consumed when the matching frame returns/reverts.
+data ExpectedRevert = ExpectedRevert
+  { reason         :: Maybe (Expr Buf)
+  -- ^ Nothing matches any revert data; Just expected matches concrete bytes.
+  , depth          :: Int
+  -- ^ length of vm.frames at the cheat call. The matching boundary is the
+  -- frame popping back down to this depth (i.e. the next outer subcall).
+  , partialMatch   :: Bool
+  -- ^ True for expectPartialRevert (compares only first 4 bytes of actual).
+  , reverter       :: Maybe (Expr EAddr)
+  -- ^ Nothing matches any reverter; Just want enforces actualReverter equals
+  -- this address.
+  , actualReverter :: Maybe (Expr EAddr)
+  -- ^ The first contract observed reverting in a non-CREATE frame after the
+  -- expectation was set. Captured on the first FrameReverted that arrives in a
+  -- CALL frame; subsequent reverts (bubble-ups) do not overwrite it. Used at
+  -- the matching boundary to compare against the expected reverter.
+  }
+  deriving (Show, Generic)
 
 data VMType = Symbolic | Concrete
 
@@ -708,6 +806,8 @@ data VM (t :: VMType) = VM
   , exploreDepth   :: Int
   , keccakPreImgs  :: Set (ByteString, W256)
   , mergeState     :: MergeState
+  , expectedRevert :: Maybe ExpectedRevert
+  -- ^ Active expectRevert/expectPartialRevert expectation, if any.
   }
   deriving (Generic)
 
@@ -748,6 +848,7 @@ runSrcLookup (Just (SrcLookup f)) contracts addr pc = f contracts addr pc
 data RuntimeConfig = RuntimeConfig
   { allowFFI :: Bool
   , baseState :: BaseState
+  , recordKeccakPreImgs :: Bool
   }
   deriving (Show)
 
@@ -755,6 +856,10 @@ data RuntimeConfig = RuntimeConfig
 data Frame (t :: VMType) = Frame
   { context :: FrameContext
   , state   :: FrameState t
+  , logs    :: [Expr Log] -- ^ the logs when the frame was entered, restored if it fails
+  , iterations :: Map CodeLocation (Int, [Expr EWord])
+    -- ^ the caller's loop counts, restored on return: each call counts its own, else
+    -- repeated calls into a contract look like iterations of a loop
   }
 
 deriving instance Show (Frame Symbolic)
@@ -779,7 +884,7 @@ data FrameContext
     , callreversion :: Map (Expr EAddr) Contract
     , subState      :: SubState
     }
-  deriving (Eq, Ord, Show, Generic)
+  deriving (Show, Generic)
 
 -- | The "accrued substate" across a transaction
 data SubState = SubState
@@ -791,7 +896,7 @@ data SubState = SubState
   , createdContracts    :: Set (Expr EAddr)
   -- in principle we should include logs here, but do not for now
   }
-  deriving (Eq, Ord, Show)
+  deriving (Show)
 
 -- | The "registers" of the VM along with memory and data stack
 data FrameState (t :: VMType) = FrameState
@@ -802,6 +907,7 @@ data FrameState (t :: VMType) = FrameState
   , stack        :: [Expr EWord]
   , memory       :: Memory
   , memorySize   :: Word64
+  , symMemorySize :: Maybe (Expr EWord) -- ^ the memory size, once an access had a symbolic offset or size
   , calldata     :: Expr Buf
   , callvalue    :: Expr EWord
   , caller       :: Expr EAddr
@@ -810,6 +916,7 @@ data FrameState (t :: VMType) = FrameState
   , static       :: Bool
   , overrideCaller :: Maybe (Expr EAddr)
   , resetCaller  :: Bool
+  , lastGasReading :: Maybe (Expr EWord) -- ^ previous symbolic GAS reading in this frame
   }
   deriving (Generic)
 
@@ -847,6 +954,8 @@ data Env = Env
   , chainId        :: W256
   , freshAddresses :: Int
   , freshGasVals :: Int
+  , callWorld :: Expr EWord -- ^ token for the state calls to unknown code have left behind, see 'PCall'
+  , callCounts :: Map W256 Int -- ^ how many calls to unknown code with the same inputs this path made, by their hash
   }
   deriving (Show, Generic)
 
@@ -855,12 +964,17 @@ data Block = Block
   { coinbase    :: Expr EAddr
   , timestamp   :: Expr EWord
   , number      :: Expr EWord
-  , prevRandao  :: W256
+  , prevRandao  :: Expr EWord
   , gaslimit    :: Word64
-  , baseFee     :: W256
+  , baseFee     :: Expr EWord
   , maxCodeSize :: W256
   , schedule    :: FeeSchedule Word64
   } deriving (Show, Generic)
+
+-- | The logical sub-store a storage slot belongs to under storage
+-- decomposition: the small slots, or the array or mapping at the given slot
+data LogicalStore = SmallSlots | ArrayStore W256 | MapStore W256
+  deriving (Show, Eq, Ord)
 
 -- | Full contract state
 data Contract = Contract
@@ -872,10 +986,11 @@ data Contract = Contract
   , nonce       :: Maybe W64
   , codehash    :: Expr EWord
   , opIxMap     :: VS.Vector Int -- ^ map from byte index to op index
-  , codeOps     :: V.Vector (Int, Op)
   , external    :: Bool
+  -- | Fetched via RPC with a non-empty storage root, whose slots may not be fetched yet
+  , chainStorage :: Bool
   }
-  deriving (Show, Eq, Ord)
+  deriving (Show)
 
 class VMOps (t :: VMType) where
   burn' :: Gas t -> EVM t () -> EVM t ()
@@ -906,12 +1021,14 @@ class VMOps (t :: VMType) where
   enoughGas :: Word64 -> Gas t -> Bool
   subGas :: Gas t -> Word64 -> Gas t
   toGas :: Word64 -> Gas t
+  -- | Nothing when gas is not tracked
+  gasWord :: Gas t -> Maybe Word64
 
   whenSymbolicElse :: EVM t a -> EVM t a -> EVM t a
 
   partial :: PartialExec -> EVM t ()
   branch :: Maybe Int -> Expr EWord -> (Bool -> EVM t ()) -> EVM t ()
-  manySolutions :: Maybe Int -> Expr EWord -> Int -> (Maybe W256 -> EVM t ()) -> EVM t ()
+  manySolutions :: Maybe Int -> Int -> Expr EWord -> Int -> (Maybe W256 -> EVM t ()) -> EVM t ()
 
 -- Bytecode Representations ------------------------------------------------------------------------
 
@@ -943,7 +1060,7 @@ data ContractCode
   = UnknownCode (Expr EAddr)       -- ^ Fully abstract code, keyed on an address to give consistent results for e.g. extcodehash
   | InitCode ByteString (Expr Buf) -- ^ "Constructor" code, during contract creation
   | RuntimeCode RuntimeCode        -- ^ "Instance" code, after contract creation
-  deriving (Show, Eq, Ord)
+  deriving (Show)
 
 -- | We have two variants here to optimize the fully concrete case.
 -- ConcreteRuntimeCode just wraps a ByteString
@@ -951,7 +1068,6 @@ data ContractCode
 data RuntimeCode
   = ConcreteRuntimeCode ByteString
   | SymbolicRuntimeCode (V.Vector (Expr Byte))
-  deriving (Eq, Ord)
 instance Show RuntimeCode
   where
     show = \case
@@ -966,7 +1082,7 @@ data Trace = Trace
   , contract  :: Contract
   , tracedata :: TraceData
   }
-  deriving (Eq, Ord, Show, Generic)
+  deriving (Show, Generic)
 
 data TraceData
   = EventTrace (Expr EWord) (Expr Buf) [Expr EWord]
@@ -974,7 +1090,8 @@ data TraceData
   | ErrorTrace EvmError
   | EntryTrace Text
   | ReturnTrace (Expr Buf) FrameContext
-  deriving (Eq, Ord, Show, Generic)
+  | ConsoleLog (Expr Buf)
+  deriving (Show, Generic)
 
 -- | Wrapper type containing vm traces and the context needed to pretty print them properly
 data TraceContext = TraceContext
@@ -982,12 +1099,8 @@ data TraceContext = TraceContext
   , contracts :: Map (Expr EAddr) Contract
   , labels :: Map Addr Text
   }
-  deriving (Eq, Ord, Show, Generic)
+  deriving (Show, Generic)
 
-instance Semigroup TraceContext where
-  (TraceContext a b c) <> (TraceContext d e f) = TraceContext (a <> d) (b <> e) (c <> f)
-instance Monoid TraceContext where
-  mempty = TraceContext mempty mempty mempty
 
 
 -- VM Initialization -------------------------------------------------------------------------------
@@ -1009,11 +1122,11 @@ data VMOpts (t :: VMType) = VMOpts
   , number :: Expr EWord
   , timestamp :: Expr EWord
   , coinbase :: Expr EAddr
-  , prevRandao :: W256
+  , prevRandao :: Expr EWord
   , maxCodeSize :: W256
   , blockGaslimit :: Word64
   , gasprice :: W256
-  , baseFee :: W256
+  , baseFee :: Expr EWord
   , schedule :: FeeSchedule Word64
   , chainId :: W256
   , create :: Bool
@@ -1119,6 +1232,7 @@ data GenericOp a
   | OpLog !Word8
   | OpPush0
   | OpPush a
+  | OpInvalid
   | OpUnknown Word8
   deriving (Show, Eq, Ord, Functor)
 
@@ -1149,28 +1263,21 @@ data SMTCex = SMTCex
   , store :: Map (Expr EAddr) (Map W256 W256)
   , blockContext :: Map (Expr EWord) W256
   , txContext :: Map (Expr EWord) W256
+  , unknownCalls :: [Either Text UnknownCall] -- ^ calls to unknown code, or why one has no concrete model
   }
-  deriving (Eq, Show)
+  deriving (Show)
 
-instance Semigroup SMTCex where
-  a <> b = SMTCex
-    { vars = a.vars <> b.vars
-    , addrs = a.addrs <> b.addrs
-    , buffers = a.buffers <> b.buffers
-    , store = a.store <> b.store
-    , blockContext = a.blockContext <> b.blockContext
-    , txContext = a.txContext <> b.txContext
-    }
+-- | A call to unknown code, with the values a model gives its calldata, success flag and returndata
+data UnknownCall = UnknownCall
+  { callee :: Addr
+  , calldata :: ByteString
+  , success :: Bool
+  , returndata :: ByteString -- ^ up to its last nonzero byte, the rest of 'returndataLength' is zero
+  , returndataLength :: Int
+  }
+  deriving (Show, Eq)
 
-instance Monoid SMTCex where
-  mempty = SMTCex
-    { vars = mempty
-    , addrs = mempty
-    , buffers = mempty
-    , store = mempty
-    , blockContext = mempty
-    , txContext = mempty
-    }
+
 
 data ReproducibleCex = ReproducibleCex
   { testName :: Text
@@ -1308,13 +1415,14 @@ instance JSON.FromJSON W256 where
   parseJSON v = do
     s <- T.unpack <$> JSON.parseJSON v
     case reads s of
-      [(x, "")]  -> pure x
+      -- forced, or the word holds on to its string, which can add up to GBs in a large trace
+      [(x, "")]  -> x `seq` pure x
       _          -> fail $ "invalid hex word (" ++ s ++ ")"
 
 instance JSON.FromJSONKey W256 where
   fromJSONKey = JSON.FromJSONKeyTextParser $ \s ->
     case reads (T.unpack s) of
-      [(x, "")]  -> pure x
+      [(x, "")]  -> x `seq` pure x
       _          -> fail $ "invalid word (" ++ T.unpack s ++ ")"
 
 wordField :: JSON.Object -> JSON.Key -> JSON.Parser W256
@@ -1350,7 +1458,7 @@ instance JSON.FromJSON W64 where
   parseJSON v = do
     s <- T.unpack <$> JSON.parseJSON v
     case reads s of
-      [(x, "")]  -> pure x
+      [(x, "")]  -> x `seq` pure x
       _          -> fail $ "invalid hex word (" ++ s ++ ")"
 
 
@@ -1374,9 +1482,9 @@ instance Read Addr where
 
 instance Show Addr where
   showsPrec _ addr next =
-    let hex = showHex addr next
+    let hex = showHex addr ""
         str = replicate (40 - length hex) '0' ++ hex
-    in "0x" ++ toChecksumAddress str ++ drop 40 str
+    in "0x" ++ toChecksumAddress str ++ next
 
 -- https://eips.ethereum.org/EIPS/eip-55
 toChecksumAddress :: String -> String
@@ -1437,9 +1545,26 @@ word256 :: ByteString -> Word256
 word256 xs | BS.length xs == 1 =
   -- optimize one byte pushes
   Word256 (Word128 0 0) (Word128 0 (into $ BS.head xs))
-word256 xs = case Cereal.runGet m (padLeft 32 xs) of
-               Left _ -> internalError "should not happen"
-               Right x -> x
+word256 xs = Word256 (Word128 (limb 0) (limb 1)) (Word128 (limb 2) (limb 3))
+  where
+    !pad = 32 - min 32 (BS.length xs)
+    byteAt :: Int -> Word64
+    byteAt i = let j = i - pad
+               in if j < 0 then 0 else fromIntegral (BSUnsafe.unsafeIndex xs j)
+    limb :: Int -> Word64
+    limb k =
+      let o = 8 * k in
+          byteAt o       `shiftL` 56 .|. byteAt (o + 1) `shiftL` 48
+      .|. byteAt (o + 2) `shiftL` 40 .|. byteAt (o + 3) `shiftL` 32
+      .|. byteAt (o + 4) `shiftL` 24 .|. byteAt (o + 5) `shiftL` 16
+      .|. byteAt (o + 6) `shiftL` 8  .|. byteAt (o + 7)
+
+-- old, slower word256 implementation, kept for differential fuzzing
+slow_word256 :: ByteString -> Word256
+slow_word256 xs =
+  case Cereal.runGet m (padLeft 32 xs) of
+    Left _ -> internalError "should not happen"
+    Right x -> x
   where
     m = do a <- Cereal.getWord64be
            b <- Cereal.getWord64be
@@ -1514,6 +1639,11 @@ packNibbles :: [Nibble] -> ByteString
 packNibbles [] = mempty
 packNibbles (n1:n2:ns) = BS.singleton (toByte n1 n2) <> packNibbles ns
 packNibbles _ = internalError "can't pack odd number of nibbles"
+
+-- | Memory offsets and sizes from here on fail: no transaction has the gas for them, and
+-- materializing them would exhaust hevm's own memory
+memoryAccessLimit :: Word64
+memoryAccessLimit = 0x0fffffff
 
 toWord64 :: W256 -> Maybe Word64
 toWord64 n =
@@ -1617,12 +1747,18 @@ paddedShowHex w n = pad ++ str
      str = showHex n ""
      pad = replicate (w - length str) '0'
 
+
+-- | True only if both are one heap object; False says nothing
+ptrEq :: a -> a -> Bool
+ptrEq x y = isTrue# (reallyUnsafePtrEquality# x y)
+
 untilFixpoint :: Eq a => (a -> a) -> a -> a
-untilFixpoint f a =
-  let a' = f a in
-    if a' == a
-    then a
-    else untilFixpoint f a'
+untilFixpoint f a0 = go a0
+  where
+    -- a' must be forced: a thunk is never ptrEq to the object it evaluates to
+    go a =
+      let !a' = f a
+      in if ptrEq a' a || a' == a then a else go a'
 
 bsToHex :: ByteString -> String
 bsToHex bs = concatMap (paddedShowHex 2) (BS.unpack bs)
@@ -1659,3 +1795,125 @@ makeFieldLabelsNoPrefix ''Contract
 makeFieldLabelsNoPrefix ''Env
 makeFieldLabelsNoPrefix ''Block
 makeFieldLabelsNoPrefix ''RuntimeConfig
+
+-- Eq and Ord as derived, plus a ptrEq check before every comparison. The splices can only see
+-- Expr once every type it mentions is declared, so they, and every instance that compares
+-- Exprs, sit down here.
+
+instance Eq (Expr a) where
+  (==) = $(shortcutEq ''Expr)
+
+instance Ord (Expr a) where
+  compare = $(shortcutCompare ''Expr)
+
+deriving instance Eq EvmError
+deriving instance Ord EvmError
+deriving instance Eq CallInputs
+deriving instance Ord CallInputs
+deriving instance Eq PartialExec
+deriving instance Ord PartialExec
+deriving instance Eq FrameContext
+deriving instance Ord FrameContext
+deriving instance Eq SubState
+deriving instance Ord SubState
+deriving instance Eq Contract
+deriving instance Ord Contract
+deriving instance Eq ContractCode
+deriving instance Ord ContractCode
+deriving instance Eq RuntimeCode
+deriving instance Ord RuntimeCode
+deriving instance Eq TraceData
+deriving instance Ord TraceData
+deriving instance Eq TraceContext
+deriving instance Ord TraceContext
+deriving instance Eq SMTCex
+deriving instance Eq Trace
+deriving instance Ord Trace
+
+instance Eq SomeExpr where
+  SomeExpr (a :: Expr b) == SomeExpr (c :: Expr d) =
+    case eqT @b @d of
+      Just Refl -> a == c
+      Nothing -> False
+
+instance Ord SomeExpr where
+  compare (SomeExpr (a :: Expr b)) (SomeExpr (c :: Expr d)) =
+    case eqT @b @d of
+      Just Refl -> compare a c
+      Nothing -> compare (toNum a) (toNum c)
+
+instance Eq Prop where
+  PBool a == PBool b = a == b
+  PEq (a :: Expr x) (b :: Expr x) == PEq (c :: Expr y) (d :: Expr y)
+    = case eqT @x @y of
+       Just Refl -> a == c && b == d
+       Nothing -> False
+  PLT a b == PLT c d = a == c && b == d
+  PGT a b == PGT c d = a == c && b == d
+  PGEq a b == PGEq c d = a == c && b == d
+  PLEq a b == PLEq c d = a == c && b == d
+  PNeg a == PNeg b = a == b
+  PAnd a b == PAnd c d = a == c && b == d
+  POr a b == POr c d = a == c && b == d
+  PImpl a b == PImpl c d = a == c && b == d
+  PCall a b c d == PCall e f g h = (a, b, c, d) == (e, f, g, h)
+  _ == _ = False
+
+instance Ord Prop where
+  compare (PBool a) (PBool b) = compare a b
+  compare (PEq (a :: Expr x) (b :: Expr x)) (PEq (c :: Expr y) (d :: Expr y)) =
+    case eqT @x @y of
+      Just Refl -> compare (a, b) (c, d)
+      Nothing   -> compare (typeRep a) (typeRep c)
+  compare (PNeg a) (PNeg b) = compare a b
+  compare (PLT a1 b1) (PLT a2 b2) = compare (a1, b1) (a2, b2)
+  compare (PGT a1 b1) (PGT a2 b2) = compare (a1, b1) (a2, b2)
+  compare (PGEq a1 b1) (PGEq a2 b2) = compare (a1, b1) (a2, b2)
+  compare (PLEq a1 b1) (PLEq a2 b2) = compare (a1, b1) (a2, b2)
+  compare (PAnd a1 b1) (PAnd a2 b2) = compare (a1, b1) (a2, b2)
+  compare (POr a1 b1) (POr a2 b2) = compare (a1, b1) (a2, b2)
+  compare (PImpl a1 b1) (PImpl a2 b2) = compare (a1, b1) (a2, b2)
+  compare (PCall a1 b1 c1 d1) (PCall a2 b2 c2 d2) = compare (a1, b1, c1, d1) (a2, b2, c2, d2)
+  compare a b = compare (tag a) (tag b)
+
+    where
+      tag :: Prop -> Int
+      tag PBool{} = 0
+      tag PEq{}   = 1
+      tag PLT{}   = 2
+      tag PGT{}   = 3
+      tag PGEq{}  = 4
+      tag PLEq{}  = 5
+      tag PNeg{}  = 6
+      tag PAnd{}  = 7
+      tag POr{}   = 8
+      tag PImpl{} = 9
+      tag PCall{} = 10
+
+instance Semigroup TraceContext where
+  (TraceContext a b c) <> (TraceContext d e f) = TraceContext (a <> d) (b <> e) (c <> f)
+
+instance Monoid TraceContext where
+  mempty = TraceContext mempty mempty mempty
+
+instance Semigroup SMTCex where
+  a <> b = SMTCex
+    { vars = a.vars <> b.vars
+    , addrs = a.addrs <> b.addrs
+    , buffers = a.buffers <> b.buffers
+    , store = a.store <> b.store
+    , blockContext = a.blockContext <> b.blockContext
+    , txContext = a.txContext <> b.txContext
+    , unknownCalls = a.unknownCalls <> b.unknownCalls
+    }
+
+instance Monoid SMTCex where
+  mempty = SMTCex
+    { vars = mempty
+    , addrs = mempty
+    , buffers = mempty
+    , store = mempty
+    , blockContext = mempty
+    , txContext = mempty
+    , unknownCalls = mempty
+    }

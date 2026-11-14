@@ -6,17 +6,16 @@ module EVM.SMT
 (
   module EVM.SMT.Types,
   module EVM.SMT.SMTLIB,
+  module EVM.SMT.ArithEncoding,
 
   collapse,
   getVar,
   formatSMT2,
   declareIntermediates,
   assertProps,
-  exprToSMT,
+  assertPropsAbstract,
+  AbstractQuery(..),
   encodeConcreteStore,
-  zero,
-  one,
-  propToSMT,
   parseVar,
   parseEAddr,
   parseBlockCtx,
@@ -25,21 +24,27 @@ module EVM.SMT
   getVars,
   queryMaxReads,
   getBufs,
-  getStore
+  getStore,
+  checkedMul
 ) where
 
 import Prelude hiding (LT, GT, Foldable(..))
 
 import Control.Monad
-import Control.Monad.Trans.Maybe (hoistMaybe)
-import Data.Containers.ListUtils (nubOrd, nubInt)
+import Control.Monad.Trans.Maybe (MaybeT(..))
+import Data.Bits (shiftR, testBit)
+import Data.Char (isDigit)
+import Data.Containers.ListUtils (nubOrd)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.Vector.Storable qualified as VS
+import Data.Vector.Storable.Mutable qualified as VSM
+import Data.Vector.Storable.ByteString (vectorToByteString)
 import Data.Foldable (Foldable(..))
 import Data.List qualified as List
 import Data.List.NonEmpty (NonEmpty((:|)))
 import Data.List.NonEmpty qualified as NonEmpty
-import Data.Maybe (fromJust, fromMaybe, isJust, listToMaybe)
+import Data.Maybe (fromJust, fromMaybe, listToMaybe)
 import Data.Either.Extra (fromRight')
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -50,15 +55,17 @@ import Data.Text.Lazy (Text)
 import Data.Text qualified as TS
 import Data.Text.Lazy qualified as T
 import Data.Text.Lazy.Builder
+import Data.Type.Equality ((:~:)(..))
+import Data.Typeable (eqT)
 import qualified Data.Text.Lazy.Builder.Int (decimal)
 import Language.SMT2.Parser (getValueRes, parseCommentFreeFileMsg, parseString, specConstant)
 import Language.SMT2.Syntax (Symbol, SpecConstant(..), GeneralRes(..), Term(..), QualIdentifier(..), Identifier(..), Sort(..), Index(..), VarBinding(..))
-import Numeric (readHex, readBin)
+import Numeric (readHex, readBin, showHex)
 import Witch (into, unsafeInto)
 import EVM.Format (formatProp)
 
 import EVM.CSE
-import EVM.Expr (writeByte, bufLengthEnv, bufLength, minLength, inRange)
+import EVM.Expr (bufLengthEnv, bufLength, minLength, inRange)
 import EVM.Expr qualified as Expr
 import EVM.Keccak (keccakAssumptions, concreteKeccaks, findKeccakPropsExprs)
 import EVM.Traversals
@@ -66,21 +73,34 @@ import EVM.Types
 import EVM.Effects
 import EVM.SMT.Types
 import EVM.SMT.SMTLIB
+import EVM.SMT.ArithEncoding
+import EVM.SMT.AbstractBase (DivModKind(..), abstFnName, concFnName, mulSMT, shareTerms)
 
 
 -- ** Encoding ** ----------------------------------------------------------------------------------
 
 
 -- | Attempts to collapse a compressed buffer representation down to a flattened one
+-- | Flattens a buffer model to its length, with the semantics of applying its
+-- writes with 'writeByte'. Builds the bytes in one pass: applying the writes
+-- one by one copies the whole buffer for every write.
 collapse :: BufModel -> Maybe BufModel
-collapse model = case toBuf model of
-  Just (ConcreteBuf b) -> Just $ Flat b
-  _ -> Nothing
+collapse (Flat b) = Just (Flat b)
+collapse (Comp c) = Flat <$> go c []
   where
-    toBuf (Comp (Base b sz)) | sz <= 120_000_000 = Just . ConcreteBuf $ BS.replicate (unsafeInto sz) b
-    toBuf (Comp (Write b idx next)) = fmap (writeByte (Lit idx) (LitByte b)) (toBuf $ Comp next)
-    toBuf (Flat b) = Just . ConcreteBuf $ b
-    toBuf _ = Nothing
+    -- collected innermost first, so the outermost write to an index wins in 'Map.fromList'
+    go (Write byte idx next) ws = go next ((idx, byte) : ws)
+    go (Base byte sz) ws
+      | sz <= 120_000_000 = Just $ vectorToByteString $ VS.create $ do
+          v <- VSM.replicate base byte
+          forM_ (Map.toList writes) $ \(i, b) -> VSM.write v (unsafeInto i) b
+          pure v
+      | otherwise = Nothing
+      where
+        base = unsafeInto sz
+        -- the length is the solver's, past it a buffer reads as zero; the solver
+        -- writes there e.g. to satisfy the assertion that such reads are zero
+        writes = Map.filterWithKey (\i _ -> i < sz) (Map.fromList ws)
 
 getVar :: SMTCex -> TS.Text -> W256
 getVar cex name = fromJust $ Map.lookup (Var name) cex.vars
@@ -93,7 +113,10 @@ formatSMT2 (SMT2 (SMTScript entries) _ ps) = expr <> smt2
 
 -- | Reads all intermediate variables from the builder state and produces SMT declaring them as constants
 declareIntermediates :: BufEnv -> StoreEnv -> Err [SMTEntry]
-declareIntermediates bufs stores = do
+declareIntermediates = declareIntermediatesWith ConcreteArith
+
+declareIntermediatesWith :: ArithEncoding -> BufEnv -> StoreEnv -> Err [SMTEntry]
+declareIntermediatesWith enc bufs stores = do
   let encSs = Map.mapWithKey encodeStore stores
       encBs = Map.mapWithKey encodeBuf bufs
   snippets <- sequence $ Map.elems $ encSs <> encBs
@@ -101,46 +124,87 @@ declareIntermediates bufs stores = do
   pure $ (SMTComment "intermediate buffers & stores") : decls
   where
     encodeBuf n expr = do
-      buf <- exprToSMT expr
+      buf <- exprToSMTWith enc expr
       bufLen <- encodeBufLen n expr
       pure [SMTCommand ("(define-fun buf" <> (Data.Text.Lazy.Builder.Int.decimal n) <> "() Buf " <> buf <> ")\n"), bufLen]
     encodeBufLen n expr = do
-      bufLen <- exprToSMT (bufLengthEnv bufs True expr)
+      bufLen <- exprToSMTWith enc (bufLengthEnv bufs True expr)
       pure $ SMTCommand ("(define-fun buf" <> (Data.Text.Lazy.Builder.Int.decimal n) <>"_length () (_ BitVec 256) " <> bufLen <> ")")
     encodeStore n expr = do
-      storage <- exprToSMT expr
+      storage <- exprToSMTWith enc expr
       pure [SMTCommand ("(define-fun store" <> (Data.Text.Lazy.Builder.Int.decimal n) <> " () Storage " <> storage <> ")")]
+
+decompose :: Config -> [Prop] -> ([Prop], CexVars)
+decompose conf props = case Expr.decomposeStorageProps props of
+  Just decomposed | conf.decomposeStorage ->
+    (decomposed, mempty { logicalStores = Map.fromList [(i, s) | s <- Expr.accessedLogicalStores props, i <- storeIdx s] })
+  _ -> (props, mempty)
+  where
+    storeIdx = \case
+      MapStore i -> [i]
+      ArrayStore i -> [i]
+      SmallSlots -> []
 
 -- simplify to rewrite sload/sstore combos
 -- notice: it is VERY important not to concretize early, because Keccak assumptions
 --         need unconcretized Props
 assertProps :: Config -> [Prop] -> Err SMT2
 assertProps conf ps =
-  if not conf.simp then assertPropsHelper False ps
-  else assertPropsHelper True (decompose ps)
-  where
-    decompose :: [Prop] -> [Prop]
-    decompose props = if conf.decomposeStorage && safeExprs && safeProps
-                      then fromMaybe props (mapM (mapPropM Expr.decomposeStorage) props)
-                      else props
-      where
-        -- All in these lists must be a `Just ()` or we cannot decompose
-        safeExprs = all (isJust . mapPropM_ Expr.safeToDecompose) props
-        safeProps = all Expr.safeToDecomposeProp props
+  if not conf.simp then assertPropsHelperWith ConcreteArith False [] ps
+  else let (decomposed, stores) = decompose conf ps
+       in (<> SMT2 mempty stores mempty) <$> assertPropsHelperWith ConcreteArith True [] decomposed
 
+data AbstractQuery = AbstractQuery
+  { query :: SMT2
+  , refinement :: [SMTEntry]
+    -- ^ equates the goal's abstract terms with the native ops, to re-check a
+    -- SAT result with; empty if nothing is abstract
+  , saturatedTruth :: [SMTEntry]
+    -- ^ the same for every term the lemmas mention, see 'saturatedGroundTruth'
+  , lemmaFamilies :: [String]
+    -- ^ the family of each lemma instance in the query
+  }
+
+-- | Assert props with abstract div/mod/mul (uninterpreted functions + lemmas).
+assertPropsAbstract :: Config -> [Prop] -> Err AbstractQuery
+assertPropsAbstract conf ps = do
+  base@(SMT2 _ _ goalPs) <- (<> SMT2 mempty decompStores mempty) <$> assertPropsHelperWith AbstractArith conf.simp divModAbstractDecls psDecomp
+  -- Lemmas and ground truth come from the helper's concretized props, the ones
+  -- the goal is encoded from: raw props can keep storage reads that simplify
+  -- away in the goal, so their terms would not match.
+  let (share, terms) = shareTerms goalPs
+      enc = exprToSMTWith AbstractArith . share
+  termDefs <- mapM defineTerm terms
+  shiftBounds <- divModEncoding enc goalPs
+  (families, mulLemmas) <- mulEncoding enc goalPs
+  divTruth <- divModGroundTruth enc goalPs
+  mulTruth <- mulGroundTruth enc goalPs
+  saturated <- saturatedGroundTruth enc goalPs
+  pure AbstractQuery
+    { query = base <> SMT2 (SMTScript (termDefs <> shiftBounds <> mulLemmas)) mempty mempty
+    , refinement = divTruth <> mulTruth
+    , saturatedTruth = saturated
+    , lemmaFamilies = families
+    }
+  where
+    (psDecomp, decompStores) = if conf.simp then decompose conf ps else (ps, mempty)
+    defineTerm (name, body) = do
+      encoded <- exprToSMTWith AbstractArith body
+      pure $ SMTCommand $ "(define-fun " <> fromText name <> " () (_ BitVec 256) " <> encoded <> ")"
 
 -- Note: we need a version that does NOT call simplify,
 -- because we make use of it to verify the correctness of our simplification
 -- passes through property-based testing.
-assertPropsHelper :: Bool -> [Prop]  -> Err SMT2
-assertPropsHelper simp psPreConc = do
- encs <- mapM propToSMT psElim
- intermediates <- declareIntermediates bufs stores
+assertPropsHelperWith :: ArithEncoding -> Bool -> [SMTEntry] -> [Prop]  -> Err SMT2
+assertPropsHelperWith arithEnc simp extraDecls psPreConc = do
+ encs <- mapM (propToSMTWith arithEnc) psElim
+ intermediates <- declareIntermediatesWith arithEnc bufs stores
  readAssumes' <- readAssumes
  keccakAssertions' <- keccakAssertions
  frameCtxs <- (declareFrameContext . nubOrd $ foldl' (<>) [] frameCtx)
  blockCtxs <- (declareBlockContext . nubOrd $ foldl' (<>) [] blockCtx)
  pure $ prelude
+  <> SMT2 (SMTScript extraDecls) mempty mempty
   <> SMT2 (SMTScript (declareAbstractStores abstractStores)) mempty mempty
   <> declareConstrainAddrs addresses
   <> (declareBufs toDeclarePsElim bufs stores)
@@ -150,7 +214,6 @@ assertPropsHelper simp psPreConc = do
   <> SMT2 (SMTScript intermediates) mempty mempty
   <> SMT2 (SMTScript keccakAssertions') mempty mempty
   <> SMT2 (SMTScript readAssumes') mempty mempty
-  <> SMT2 (SMTScript gasOrder) mempty mempty
   <> SMT2 (SMTScript (fmap (\p -> SMTCommand("(assert " <> p <> ")")) encs)) (cexInfo storageReads) ps
 
   where
@@ -163,9 +226,8 @@ assertPropsHelper simp psPreConc = do
 
     -- vars, frames, and block contexts in need of declaration
     allVars = fmap referencedVars toDeclarePsElim <> fmap referencedVars bufVals <> fmap referencedVars storeVals
-    frameCtx = fmap referencedFrameContext toDeclarePsElim <> fmap referencedFrameContext bufVals <> fmap referencedFrameContext storeVals
+    frameCtx = fmap (referencedFrameContext arithEnc) toDeclarePsElim <> fmap (referencedFrameContext arithEnc) bufVals <> fmap (referencedFrameContext arithEnc) storeVals
     blockCtx = fmap referencedBlockContext toDeclarePsElim <> fmap referencedBlockContext bufVals <> fmap referencedBlockContext storeVals
-    gasOrder = enforceGasOrder psPreConc
 
     -- Buf, Storage, etc. declarations needed
     bufVals = Map.elems bufs
@@ -178,16 +240,16 @@ assertPropsHelper simp psPreConc = do
     --      This will make sure concrete values of Keccak are asserted, if they can be computed (i.e. can be concretized)
     concreteKecc = concreteKeccaks psPreConc
     allKeccaks = (findKeccakPropsExprs psElim bufVals storeVals) <> Set.map (Keccak . fst) concreteKecc
-    keccAssump = keccakAssumptions $ Set.toList allKeccaks
+    keccAssump = keccakAssumptions bufs $ Set.toList allKeccaks
     keccComp = [(PEq (Lit l) (Keccak buf)) | (buf, l) <- Set.toList concreteKecc]
     keccakAssertions = do
-      assumps <- mapM assertSMT keccAssump
-      comps <- mapM assertSMT keccComp
+      assumps <- mapM (assertSMTWith arithEnc) keccAssump
+      comps <- mapM (assertSMTWith arithEnc) keccComp
       pure $ ((SMTComment "keccak assumptions") : assumps) <> ((SMTComment "keccak computations") : comps)
 
     -- assert that reads beyond size of buffer & storage is zero
     readAssumes = do
-      assumps <- mapM assertSMT $ assertReads psElim bufs stores
+      assumps <- mapM (assertSMTWith arithEnc) $ assertReads psElim bufs stores
       pure (SMTComment "read assumptions" : assumps)
 
     cexInfo :: StorageReads -> CexVars
@@ -224,8 +286,8 @@ referencedVars expr = nubOrd $ foldTerm go [] expr
       Var s -> [fromText s]
       _ -> []
 
-referencedFrameContext :: TraversableTerm a => a -> [(Builder, [Prop])]
-referencedFrameContext expr = nubOrd $ foldTerm go [] expr
+referencedFrameContext :: TraversableTerm a => ArithEncoding -> a -> [(Builder, [Prop])]
+referencedFrameContext enc expr = nubOrd $ foldTerm go [] expr
   where
     go :: Expr a -> [(Builder, [Prop])]
     go = \case
@@ -234,6 +296,8 @@ referencedFrameContext expr = nubOrd $ foldTerm go [] expr
       o@(Gas _ _) -> [(fromRight' $ exprToSMT o, [])]
       o@(CodeHash (LitAddr _)) -> [(fromRight' $ exprToSMT o, [])]
       _ -> []
+    exprToSMT :: Expr x -> Err Builder
+    exprToSMT = exprToSMTWith enc
 
 referencedBlockContext :: TraversableTerm a => a -> [(Builder, [Prop])]
 referencedBlockContext expr = nubOrd $ foldTerm go [] expr
@@ -262,6 +326,11 @@ findStorageReads p = foldProp go mempty p
     go :: Expr a -> StorageReads
     go = \case
       SLoad slot store | baseIsAbstractStore store -> case Expr.getAddr store of
+          Nothing -> internalError $ "could not extract address from: " <> show store
+          Just address -> StorageReads $ Map.singleton (address, Expr.getLogicalIdx store) (Set.singleton slot)
+      -- the prestate of a written slot matters when stores are compared,
+      -- e.g. writing 0 differs from not writing only if the slot was nonzero
+      SStore slot _ store | baseIsAbstractStore store -> case Expr.getAddr store of
           Nothing -> internalError $ "could not extract address from: " <> show store
           Just address -> StorageReads $ Map.singleton (address, Expr.getLogicalIdx store) (Set.singleton slot)
       _ -> mempty
@@ -351,30 +420,8 @@ declareConstrainAddrs names = SMT2 (SMTScript ([SMTComment "concrete and symboli
   where
     declare n = SMTCommand $ "(declare-fun " <> n <> " () Addr)"
     -- assume that symbolic addresses do not collide with the zero address or precompiles
-    assume n = SMTCommand $ "(assert (bvugt " <> n <> " (_ bv9 160)))"
+    assume n = SMTCommand $ "(assert (and (bvugt " <> n <> " (_ bv17 160)) (distinct " <> n <> " (_ bv256 160))))"
     cexvars = (mempty :: CexVars){ addrs = fmap toLazyText names }
-
--- The gas is a tuple of (prefix, index). Within each prefix, the gas is strictly decreasing as the
--- index increases. This function gets a map of Prefix -> [Int], and for each prefix,
--- enforces the order
-enforceGasOrder :: [Prop] -> [SMTEntry]
-enforceGasOrder ps = [SMTComment "gas ordering"] <> (concatMap (uncurry order) indices)
-  where
-    order :: TS.Text -> [Int] -> [SMTEntry]
-    order prefix n = consecutivePairs (nubInt n) >>= \(x, y)->
-      -- The GAS instruction itself costs gas, so it's strictly decreasing
-      [SMTCommand $ "(assert (bvugt " <> fromRight' (exprToSMT (Gas prefix x)) <> " " <>
-        fromRight' ((exprToSMT (Gas prefix y))) <> "))"]
-    consecutivePairs :: [Int] -> [(Int, Int)]
-    consecutivePairs [] = []
-    consecutivePairs l@(_:t) = zip l t
-    indices = Map.toList $ toMapOfLists $ concatMap (foldProp go mempty) ps
-    toMapOfLists :: [(TS.Text, Int)] -> Map.Map TS.Text [Int]
-    toMapOfLists = foldr (\(k, v) acc -> Map.insertWith (++) k [v] acc) Map.empty
-    go :: Expr a -> [(TS.Text, Int)]
-    go e = case e of
-      Gas prefix v -> [(prefix, v)]
-      _ -> []
 
 declareFrameContext :: [(Builder, [Prop])] -> Err SMT2
 declareFrameContext names = do
@@ -402,18 +449,18 @@ declareBlockContext names = do
     cexvars = (mempty :: CexVars){ blockContext = fmap (toLazyText . fst) names }
 
 assertSMT :: Prop -> Either String SMTEntry
-assertSMT p = do
-  p' <- propToSMT p
-  pure $ SMTCommand ("(assert " <> p' <> ")")
+assertSMT = assertSMTWith ConcreteArith
 
-wordAsBV :: forall a. Integral a => a -> Builder
-wordAsBV w = "(_ bv" <> Data.Text.Lazy.Builder.Int.decimal w <> " 256)"
+assertSMTWith :: ArithEncoding -> Prop -> Either String SMTEntry
+assertSMTWith enc p = do
+  p' <- propToSMTWith enc p
+  pure $ SMTCommand ("(assert " <> p' <> ")")
 
 byteAsBV :: Word8 -> Builder
 byteAsBV b = "(_ bv" <> Data.Text.Lazy.Builder.Int.decimal b <> " 8)"
 
-exprToSMT :: Expr a -> Err Builder
-exprToSMT = \case
+exprToSMTWith :: ArithEncoding -> Expr a -> Err Builder
+exprToSMTWith arithEnc = \case
   Lit w -> pure $ wordAsBV w
   Var s -> pure $ fromText s
   GVar (BufVar n) -> pure $ fromString $ "buf" <> (show n)
@@ -423,7 +470,7 @@ exprToSMT = \case
     eight nine ten eleven twelve thirteen fourteen fifteen
     sixteen seventeen eighteen nineteen twenty twentyone twentytwo twentythree
     twentyfour twentyfive twentysix twentyseven twentyeight twentynine thirty thirtyone
-    -> concatBytes [
+    -> concatBytesWith arithEnc [
         z, o, two, three, four, five, six, seven
         , eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen
         , sixteen, seventeen, eighteen, nineteen, twenty, twentyone, twentytwo, twentythree
@@ -431,7 +478,14 @@ exprToSMT = \case
 
   Add a b -> op2 "bvadd" a b
   Sub a b -> op2 "bvsub" a b
-  Mul a b -> op2 "bvmul" a b
+  Mul a b -> case arithEnc of
+    ConcreteArith -> op2 "bvmul" a b
+    -- 'mulSMT' is the one definition of which products are abstracted; the
+    -- lemmas build theirs with it too, so their terms match the goal's
+    AbstractArith -> do
+      aenc <- exprToSMT a
+      benc <- exprToSMT b
+      pure $ mulSMT (a, aenc) (b, benc)
   Exp a b -> case a of
     Lit 0 -> do
       benc <- exprToSMT b
@@ -441,8 +495,7 @@ exprToSMT = \case
         benc <- exprToSMT b
         pure $ "(bvshl " <> one `sp` benc <> ")"
     _ -> case b of
-      -- b is limited below, otherwise SMT query will be huge, and eventually Haskell stack overflows
-      Lit b' | b' < 1000 -> expandExp a b'
+      Lit b' -> expandExpWith arithEnc a b'
       _ -> Left $ "Cannot encode symbolic exponent into SMT. Offending symbolic value: " <> show b
   Min a b -> do
     aenc <- exprToSMT a
@@ -490,10 +543,10 @@ exprToSMT = \case
   SAR a b -> op2 "bvashr" b a
   CLZ a -> op1 "clz256" a
   SEx a b -> op2 "signext" a b
-  Div a b -> op2CheckZero "bvudiv" a b
-  SDiv a b -> op2CheckZero "bvsdiv" a b
-  Mod a b -> op2CheckZero "bvurem" a b
-  SMod a b -> op2CheckZero "bvsrem" a b
+  Div a b -> divModOp IsUDiv a b
+  SDiv a b -> divModOp IsSDiv a b
+  Mod a b -> divModOp IsUMod a b
+  SMod a b -> divModOp IsSMod a b
   -- NOTE: this needs to do the MUL at a higher precision, then MOD, then downcast
   MulMod a b c -> do
     aExp <- exprToSMT a
@@ -553,7 +606,7 @@ exprToSMT = \case
   ReadByte idx src -> op2 "select" src idx
 
   ConcreteBuf "" -> pure "((as const Buf) #b00000000)"
-  ConcreteBuf bs -> writeBytes bs mempty
+  ConcreteBuf bs -> writeBytesWith arithEnc bs mempty
   AbstractBuf s -> pure $ fromText s
   ReadWord idx prev -> op2 "readWord" idx prev
   BufLength (AbstractBuf b) -> pure $ fromText b <> "_length"
@@ -572,10 +625,10 @@ exprToSMT = \case
   CopySlice srcIdx dstIdx size src dst -> do
     srcSMT <- exprToSMT src
     dstSMT <- exprToSMT dst
-    copySlice srcIdx dstIdx size srcSMT dstSMT
+    copySliceWith arithEnc srcIdx dstIdx size srcSMT dstSMT
 
   -- we need to do a bit of processing here.
-  ConcreteStore s -> encodeConcreteStore s
+  ConcreteStore s -> encodeConcreteStore arithEnc s
   AbstractStore a idx -> pure $ storeName a idx
   SStore idx val prev -> do
     encIdx  <- exprToSMT idx
@@ -589,29 +642,66 @@ exprToSMT = \case
 
   a -> internalError $ "TODO: implement: " <> show a
   where
+    exprToSMT :: Expr x -> Err Builder
+    exprToSMT = exprToSMTWith arithEnc
+    op1 :: Builder -> Expr x -> Err Builder
     op1 op a = do
       enc <- exprToSMT a
       pure $ "(" <> op `sp` enc <> ")"
+    op2 :: Builder -> Expr x -> Expr y -> Err Builder
     op2 op a b = do
        aenc <- exprToSMT a
        benc <- exprToSMT b
        pure $ "(" <> op `sp` aenc `sp` benc <> ")"
+    op2CheckZero :: Builder -> Expr x -> Expr y -> Err Builder
     op2CheckZero op a b = do
       aenc <- exprToSMT a
       benc <- exprToSMT b
       pure $ "(ite (= " <> benc <> " (_ bv0 256)) (_ bv0 256) " <>  "(" <> op `sp` aenc `sp` benc <> "))"
+    -- the abstract function needs no zero guard: 'divModEncoding' asserts the
+    -- EVM x/0 = 0 convention on it, and so does the ground truth
+    divModOp :: DivModKind -> Expr x -> Expr y -> Err Builder
+    divModOp kind a b = case arithEnc of
+      ConcreteArith -> op2CheckZero (concFnName kind) a b
+      AbstractArith -> op2 (abstFnName kind) a b
 
-sp :: Builder -> Builder -> Builder
-a `sp` b = a <> (fromText " ") <> b
+-- | Matches @x == n / d@ where @n@ is @x * d@, as in checked multiplication, returning @x@ and @d@.
+-- @(x * d mod 2^256) / d == x@ iff @d /= 0@ and @x * d@ does not overflow, or @d == 0@ and @x == 0@.
+checkedMul :: Expr EWord -> Expr EWord -> Maybe (Expr EWord, Expr EWord)
+checkedMul a b = case (a, b) of
+  (x, Div n d) | isProduct x d n -> Just (x, d)
+  (Div n d, x) | isProduct x d n -> Just (x, d)
+  _ -> Nothing
+  where
+    -- matched locally, without simplifying: terms may hold placeholders of shared subterms
+    isProduct x d n =
+      let (cx, rx) = factor x
+          (cd, rd) = factor d
+          (cn, rn) = factor n
+      in cn == cx * cd && case (rx, rd) of
+           (Nothing, r) -> rn == r
+           (r, Nothing) -> rn == r
+           (Just p, Just q) -> rn `elem` [Just (Mul p q), Just (Mul q p)]
+    -- the literal coefficient of a term, and the rest of it if it is not 1
+    factor :: Expr EWord -> (W256, Maybe (Expr EWord))
+    factor = \case
+      Lit c -> (c, Nothing)
+      Mul (Lit c) r -> (c, Just r)
+      Mul r (Lit c) -> (c, Just r)
+      r -> (1, Just r)
 
-zero :: Builder
-zero = "(_ bv0 256)"
-
-one :: Builder
-one = "(_ bv1 256)"
-
-propToSMT :: Prop -> Err Builder
-propToSMT = \case
+propToSMTWith :: ArithEncoding -> Prop -> Err Builder
+propToSMTWith arithEnc = \case
+  -- array equality alone ignores length: all-zero buffers of different lengths would be equal
+  PEq (a :: Expr x) b | Just Refl <- eqT @x @Buf -> do
+    arrEq <- op2 "=" a b
+    lenEq <- op2 "=" (BufLength a) (BufLength b)
+    pure $ "(and " <> arrEq <> " " <> lenEq <> ")"
+  -- checked multiplication's x == (x * d) / d, without the costly division
+  PEq (a :: Expr x) b | Just Refl <- eqT @x @EWord, Just (x, d) <- checkedMul a b -> do
+    xe <- encE x
+    de <- encE d
+    pure $ "(and (or (not (= " <> de <> " (_ bv0 256))) (= " <> xe <> " (_ bv0 256))) (not (bvumulo " <> xe <> " " <> de <> ")))"
   PEq a b -> op2 "=" a b
   PLT a b -> op2 "bvult" a b
   PGT a b -> op2 "bvugt" a b
@@ -633,64 +723,99 @@ propToSMT = \case
     benc <- propToSMT b
     pure $ "(=> " <> aenc <> " " <> benc <> ")"
   PBool b -> pure $ if b then "true" else "false"
+  PCall i success retdata world -> do
+    args <- sequence
+      [ encE i.world, encE i.callKind, encE i.target, encE i.callValue, encE i.callData, encE i.callDataLen
+      , encE i.caller, encE i.callerStorage, encE i.callerTStorage, encE i.callerBalance, encE i.callGas ]
+    let app f = "(" <> f <> " " <> mconcat (List.intersperse " " args) <> ")"
+        def v f = "(= " <> v <> " " <> app f <> ")"
+    s <- encE success
+    r <- encE retdata
+    l <- encE (bufLength retdata)
+    w <- traverse (\(a, b) -> (,) <$> encE a <*> encE b) world
+    pure $ "(and " <> def s "call_success" <> " " <> def r "call_retdata" <> " " <> def l "call_retlen"
+      <> maybe "" (\(w', e) -> " " <> def w' "call_world" <> " " <> def e "call_ether") w <> ")"
   where
+    encE :: Expr x -> Err Builder
+    encE = exprToSMTWith arithEnc
+    propToSMT :: Prop -> Err Builder
+    propToSMT = propToSMTWith arithEnc
+    op2 :: Builder -> Expr x -> Expr y -> Err Builder
     op2 op a b = do
-      aenc <- exprToSMT a
-      benc <- exprToSMT b
+      aenc <- exprToSMTWith arithEnc a
+      benc <- exprToSMTWith arithEnc b
       pure $ "(" <> op <> " " <> aenc <> " " <> benc <> ")"
-
-
 
 -- ** Helpers ** ---------------------------------------------------------------------------------
 
+-- | Copies are encoded a byte at a time, so a larger one would take gigabytes
+maxEncodedCopy :: W256
+maxEncodedCopy = 0x100000
 
--- | Stores a region of src into dst
-copySlice :: Expr EWord -> Expr EWord -> Expr EWord -> Builder -> Builder -> Err Builder
-copySlice srcOffset dstOffset (Lit size) src dst = do
+copySliceWith :: ArithEncoding -> Expr EWord -> Expr EWord -> Expr EWord -> Builder -> Builder -> Err Builder
+copySliceWith arithEnc srcOffset dstOffset (Lit size) src dst = do
+  -- a symbolic size, e.g. a keccak, can become this large only once concretized for encoding
+  when (size > maxEncodedCopy) $
+    Left $ "CopySlice of 0x" <> showHex size "" <> " bytes not currently implemented, encoding it would take too much memory"
+  -- a symbolic offset is encoded once, not once per byte
+  srcBind <- binding "copy!srcoff" srcOffset
+  dstBind <- binding "copy!dstoff" dstOffset
   sz <- internal size
-  pure $ "(let ((src " <> src <> ")) " <> sz <> ")"
+  -- the binders must not be possible buffer names, or they capture that buffer in dst
+  pure $ "(let ((copy!src " <> src <> ")" <> srcBind <> dstBind <> ") " <> sz <> ")"
   where
+    binding :: Builder -> Expr EWord -> Err Builder
+    binding _ (Lit _) = pure ""
+    binding name e = do
+      enc <- exprToSMTWith arithEnc e
+      pure $ " (" <> name <> " " <> enc <> ")"
     internal 0 = pure dst
     internal idx = do
       let idx' = idx - 1
-      encDstOff <- offset idx' dstOffset
-      encSrcOff <- offset idx' srcOffset
+          encDstOff = offset "copy!dstoff" idx' dstOffset
+          encSrcOff = offset "copy!srcoff" idx' srcOffset
       child <- internal idx'
-      pure $ "(store " <> child `sp` encDstOff `sp` "(select src " <> encSrcOff <> "))"
-    offset :: W256 -> Expr EWord -> Err Builder
-    offset o (Lit b) = pure $ wordAsBV $ o + b
-    offset o e = exprToSMT $ Expr.add (Lit o) e
-copySlice _ _ _ _ _ = Left "CopySlice with a symbolically sized region not currently implemented, cannot execute SMT solver on this query"
+      pure $ "(store " <> child `sp` encDstOff `sp` "(select copy!src " <> encSrcOff <> "))"
+    offset :: Builder -> W256 -> Expr EWord -> Builder
+    offset _ o (Lit b) = wordAsBV $ o + b
+    offset name 0 _ = name
+    offset name o _ = "(bvadd " <> name <> " (_ bv" <> fromString (show (into o :: Integer)) <> " 256))"
+copySliceWith _ _ _ _ _ _ = Left "CopySlice with a symbolically sized region not currently implemented, cannot execute SMT solver on this query"
 
--- | Unrolls an exponentiation into a series of multiplications
-expandExp :: Expr EWord -> W256 -> Err Builder
-expandExp base expnt
+expandExpWith :: ArithEncoding -> Expr EWord -> W256 -> Err Builder
+expandExpWith arithEnc base expnt
   -- in EVM, anything (including 0) to the power of 0 is 1
   | expnt == 0 = pure one
-  | expnt == 1 = exprToSMT base
+  | expnt == 1 = exprToSMTWith arithEnc base
   | otherwise = do
-    b <- exprToSMT base
-    n <- expandExp base (expnt - 1)
-    pure $ "(bvmul " <> b `sp` n <> ")"
+    -- by squaring, binding the base and each square once: inlining them repeats the base
+    -- expnt times, and nested exponentiations multiply that
+    b <- exprToSMTWith arithEnc base
+    let bits = takeWhile (> 0) (iterate (`shiftR` 1) expnt)
+        sq :: Int -> Builder
+        sq i = "exp!sq" <> fromString (show i)
+        squares = [ "(let ((" <> sq i <> " " <> (if i == 0 then b else "(bvmul " <> sq (i - 1) `sp` sq (i - 1) <> ")") <> ")) "
+                  | i <- [0 .. length bits - 1] ]
+        used = [sq i | (i, k) <- zip [0 ..] bits, testBit k 0]
+        prod = foldr1 (\x acc -> "(bvmul " <> x `sp` acc <> ")") used
+    pure $ mconcat squares <> prod <> mconcat (replicate (length bits) ")")
 
--- | Concatenates a list of bytes into a larger bitvector
-concatBytes :: [Expr Byte] -> Err Builder
-concatBytes bytes = do
+concatBytesWith :: ArithEncoding -> [Expr Byte] -> Err Builder
+concatBytesWith arithEnc bytes = do
   case List.uncons $ reverse bytes of
     Nothing -> Left "unexpected empty bytes"
     Just (h, t) -> do
-      a2 <- exprToSMT h
+      a2 <- exprToSMTWith arithEnc h
       foldM wrap a2 t
   where
     wrap :: Builder -> Expr a -> Err Builder
     wrap inner byte = do
-      byteSMT <- exprToSMT byte
+      byteSMT <- exprToSMTWith arithEnc byte
       pure $ "(concat " <> byteSMT `sp` inner <> ")"
 
--- | Concatenates a list of bytes into a larger bitvector
-writeBytes :: ByteString -> Expr Buf -> Err Builder
-writeBytes bytes buf =  do
-  smtText <- exprToSMT buf
+writeBytesWith :: ArithEncoding -> ByteString -> Expr Buf -> Err Builder
+writeBytesWith arithEnc bytes buf =  do
+  smtText <- exprToSMTWith arithEnc buf
   let ret = BS.foldl wrap (0, smtText) bytes
   pure $ snd ret
   where
@@ -704,13 +829,13 @@ writeBytes bytes buf =  do
       where
         !idx' = idx + 1
 
-encodeConcreteStore :: Map W256 W256 -> Err Builder
-encodeConcreteStore s = foldM encodeWrite ("((as const Storage) #x0000000000000000000000000000000000000000000000000000000000000000)") (Map.toList s)
+encodeConcreteStore :: ArithEncoding -> Map W256 W256 -> Err Builder
+encodeConcreteStore enc s = foldM encodeWrite ("((as const Storage) #x0000000000000000000000000000000000000000000000000000000000000000)") (Map.toList s)
   where
     encodeWrite :: Builder -> (W256, W256) -> Err Builder
     encodeWrite prev (key, val) = do
-      encKey <- exprToSMT $ Lit key
-      encVal <- exprToSMT $ Lit val
+      encKey <- exprToSMTWith enc $ Lit key
+      encVal <- exprToSMTWith enc $ Lit val
       pure $ "(store " <> prev `sp` encKey `sp` encVal <> ")"
 
 storeName :: Expr EAddr -> Maybe W256 -> Builder
@@ -770,6 +895,9 @@ parseTxCtx name
   | name == "txvalue" = TxValue
   | Just a <- TS.stripPrefix "balance_" name = Balance (parseEAddr a)
   | Just a <- TS.stripPrefix "codehash_" name = CodeHash (parseEAddr a)
+  | Just a <- TS.stripPrefix "gas_" name
+  , n <- TS.takeWhileEnd isDigit a
+  , not (TS.null n) = Gas (TS.dropWhileEnd isDigit a) (read (TS.unpack n))
   | otherwise = internalError $ "cannot parse " <> (TS.unpack name) <> " into an Expr"
 
 type ValGetter = Text -> MaybeIO Text
@@ -845,7 +973,9 @@ getBufs getVal bufs = foldM getBuf mempty bufs
               pbase <- go env base
               let pidx = parseW256 idx
                   pval = parseW8 val
-              Just $ Write pval pidx pbase
+              -- bytes past the length read as zero, so the solver is free to
+              -- put anything at unread ones (even 2^256-1), which can't be flattened
+              Just $ if pidx >= len then pbase else Write pval pidx pbase
 
           -- binding a new name
           (TermLet ((VarBinding name' bound) :| []) term') -> do
@@ -863,9 +993,10 @@ getBufs getVal bufs = foldM getBuf mempty bufs
 -- concretized storage
 getStore
   :: ValGetter
+  -> Map W256 LogicalStore
   -> StorageReads
   -> MaybeIO (Map (Expr EAddr) (Map W256 W256))
-getStore getVal (StorageReads innerMap) = do
+getStore getVal stores (StorageReads innerMap) = do
   results <- forM (Map.toList innerMap) $ \((addr, idx), slots) -> do
     let name = toLazyText (storeName addr idx)
     raw <- getVal name
@@ -877,16 +1008,24 @@ getStore getVal (StorageReads innerMap) = do
     -- create a map by adding only the locations that are read by the program
     store <- foldM (\m slot -> do
       slot' <- queryValue getVal slot
-      pure $ Map.insert slot' (fun slot') m) Map.empty (Set.toList slots)
+      real <- hoistMaybe $ realSlot idx slot'
+      pure $ Map.insert real (fun slot') m) Map.empty (Set.toList slots)
     pure (addr, store)
-  pure $ Map.fromList results
+  pure $ Map.fromListWith Map.union results
+  where
+    -- a decomposed store is indexed by the key within its mapping or array
+    realSlot Nothing key = Just key
+    realSlot (Just idx) key = case Map.lookup idx stores of
+      Just (MapStore p) -> Just $ keccak' (word256Bytes key <> word256Bytes p)
+      Just (ArrayStore p) -> Just $ keccak' (word256Bytes p) + key
+      _ -> Nothing
 
 -- | Ask the solver to give us the concrete value of an arbitrary abstract word
 queryValue :: ValGetter -> Expr EWord -> MaybeIO W256
 queryValue _ (Lit w) = pure w
 queryValue getVal w = do
-  -- this exprToSMT should never fail, since we have already ran the solver
-  let expr = toLazyText $ fromRight' $ exprToSMT w
+  -- this exprToSMTWith should never fail, since we have already ran the solver, in refined mode
+  let expr = toLazyText $ fromRight' $ exprToSMTWith ConcreteArith w
   raw <- getVal expr
   hoistMaybe $ do
     valTxt <- extractValue raw
@@ -937,3 +1076,7 @@ interpret1DArray = interpretNDArray interpretW256
         Just t -> interpretW256 env t
         Nothing -> internalError "unknown identifier, cannot parse array"
     interpretW256 _ t = internalError $ "cannot parse array value. Unexpected term: " <> (show t)
+
+
+hoistMaybe :: Monad m => Maybe a -> MaybeT m a
+hoistMaybe = MaybeT . pure
