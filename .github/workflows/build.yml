@@ -104,7 +104,7 @@ jobs:
           persist-credentials: false
       - uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
         with:
-          version: stable
+          version: v1.9.0
       - run: |
           echo FOUNDRY_PATH="$(dirname "$(which forge)")" >> "$GITHUB_ENV"
         shell: bash
@@ -133,7 +133,9 @@ jobs:
       - uses: haskell-actions/setup@e447c4c045e7744463435b4b731e125861006ebb # v2.7.7
         id: setup
         with:
-          ghc-version: '9.10.3'
+          ghc-version: '9.12.3'
+          # GHCup's default catalog omits 9.12.3; vanilla supplies the official upstream binary.
+          ghcup-release-channel: https://raw.githubusercontent.com/haskell/ghcup-metadata/master/ghcup-vanilla-0.1.0.yaml
 
       - name: Extract GHC & Cabal paths
         run: |
@@ -176,7 +178,7 @@ jobs:
       - name: Configure the build
         run: |
           export PATH="$HASKELL_PATHS:$PATH"
-          cabal configure --disable-documentation --enable-executable-static --enable-executable-stripping \
+          cabal configure -fci -O2 --disable-documentation --enable-executable-static --enable-executable-stripping \
             --extra-lib-dirs="$(cygpath -m "$HASKELL_MINGW_PATH/x86_64-w64-mingw32/lib")" \
             --extra-lib-dirs="$(cygpath -m "$HASKELL_MINGW_PATH/lib")" \
             --extra-lib-dirs="$SYSTEM_MINGW_PATH/lib" \
@@ -237,25 +239,26 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: foundry-rs/forge-std
+          ref: 15b2df92a05d4d2f76a06653872fefb287e0e01c
           path: forge-std
           persist-credentials: false
 
       - name: prepare test dependencies
         run: |
           # bitwuzla
-          curl --retry 5 -fsSL https://github.com/bitwuzla/bitwuzla/releases/download/0.8.2/Bitwuzla-Win64-x86_64-static.zip -o bitwuzla.zip
+          curl --retry 5 -fsSL https://github.com/bitwuzla/bitwuzla/releases/download/0.9.1/Bitwuzla-Win64-x86_64-static.zip -o bitwuzla.zip
           unzip bitwuzla.zip && rm bitwuzla.zip
           echo BITWUZLA_PATH="$PWD/Bitwuzla-Win64-x86_64-static/bin" >> "$GITHUB_ENV"
-          # z3, pinned: msys2's rolling z3 package broke 3 tests when it moved
-          # from 4.15.2 to 4.16.0 (upstream 4.16.0 is fine on other platforms)
-          curl --retry 5 -fsSL https://github.com/Z3Prover/z3/releases/download/z3-4.15.2/z3-4.15.2-x64-win.zip -o z3.zip
+          # Use the official release binary; MSYS2's rolling package previously
+          # broke tests independently of the upstream release.
+          curl --retry 5 -fsSL https://github.com/Z3Prover/z3/releases/download/z3-5.3.3/z3-5.3.3-x64-win.zip -o z3.zip
           unzip z3.zip && rm z3.zip
-          echo Z3_PATH="$PWD/z3-4.15.2-x64-win/bin" >> "$GITHUB_ENV"
+          echo Z3_PATH="$PWD/z3-5.3.3-x64-win/bin" >> "$GITHUB_ENV"
           # evm
-          go install github.com/ethereum/go-ethereum/cmd/evm@v1.16.1
+          go install github.com/ethereum/go-ethereum/cmd/evm@v1.17.10
           echo EVM_PATH="$(cygpath -u "$(go env GOPATH)/bin")" >> "$GITHUB_ENV"
           # cvc5
-          curl --retry 5 -fsSL https://github.com/cvc5/cvc5/releases/download/cvc5-1.3.0/cvc5-Win64-x86_64-static.zip -o cvc5.zip
+          curl --retry 5 -fsSL https://github.com/cvc5/cvc5/releases/download/cvc5-1.4.2/cvc5-Win64-x86_64-static.zip -o cvc5.zip
           unzip cvc5.zip && rm cvc5.zip
           echo CVC5_PATH="$PWD/cvc5-Win64-x86_64-static/bin" >> "$GITHUB_ENV"
           # solc
