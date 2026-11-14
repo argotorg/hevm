@@ -381,7 +381,7 @@ main = do
                 Left err -> liftIO $ T.putStrLn err >> exitFailure
                 Right vm -> do
                   sess <- liftIO $ setSnapshotInterval cOpts.snapshotEvery <$> newSession unitTestOpts.dapp vm
-                  serveSession (Fetch.oracle solvers (Just unitTestOpts.sess) unitTestOpts.rpcInfo) cOpts.port announce sess
+                  serveSession (Fetch.oracle solvers unitTestOpts.sess unitTestOpts.rpcInfo) cOpts.port announce sess
               liftIO exitSuccess
             res <- unitTest unitTestOpts out
             Progress.stopStatus
@@ -482,8 +482,7 @@ equivalence eqOpts cOpts = do
   solver <- liftIO $ getSolver cOpts.solver
   solverCount <- liftIO $ maybe (defaultSolverCount cOpts.smtMemory) pure cOpts.numSolvers
   withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \s -> do
-    sess <- Fetch.mkSession cOpts.cacheDir Nothing
-    eq <- equivalenceCheck s (Just sess) (fromJust bytecodeA) (fromJust bytecodeB) veriOpts calldata eqOpts.create
+    eq <- equivalenceCheck s Nothing (fromJust bytecodeA) (fromJust bytecodeB) veriOpts calldata eqOpts.create
     let anyIssues =  not (null eq.partials) || any (isUnknown . fst) eq.res  || any (isError . fst) eq.res
         cd = fst calldata
     cexes <- replayEqCexes s eqOpts.create (fromJust bytecodeA) (fromJust bytecodeB) cd (mapMaybe getCexP eq.res)
@@ -610,7 +609,7 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = withRpcSession cOpts cExecOpts.rpc c
                               }
                             , rpcInfo = Fetch.RpcInfo blockUrlInfo
                             }
-    let fetcher = Fetch.oracle solvers (Just sess) veriOpts.rpcInfo
+    let fetcher = Fetch.oracle solvers sess veriOpts.rpcInfo
     when cOpts.interactive $ do
       dapp <- getSrcInfo sOpts.projectType cOpts
       dsess <- liftIO $ setSnapshotInterval cOpts.snapshotEvery <$> newSession dapp preState
@@ -632,7 +631,7 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = withRpcSession cOpts cExecOpts.rpc c
       _ -> do
         let cexs = mapMaybe getCex res
         replays <- forM cexs $ \(leaf, cex) ->
-          replaySymCex (Fetch.oracle solvers (Just sess) veriOpts.rpcInfo) (checkAssertions errCodes) preState leaf cex
+          replaySymCex (Fetch.concreteOracle sess veriOpts.rpcInfo) (checkAssertions errCodes) preState leaf cex
         let counterexamples
               | null cexs = []
               | otherwise =
@@ -686,50 +685,49 @@ launchExec cFileOpts execOpts cExecOpts cOpts = withRpcSession cOpts cExecOpts.r
     blockUrlInfo = (,) block <$> cExecOpts.rpc
     rpcDat :: Fetch.RpcInfo = Fetch.RpcInfo blockUrlInfo
 
-  -- TODO: we shouldn't need solvers to execute this code
-  withSolvers Z3 0 Nothing cOpts.smtMemory $ \solvers -> do
-    let fetcher = Fetch.oracle solvers (Just sess) rpcDat
-    when cOpts.interactive $ do
-      dsess <- liftIO $ setSnapshotInterval cOpts.snapshotEvery <$> newSession dapp vm
-      serveSession fetcher cOpts.port announce dsess
-      liftIO exitSuccess
-    vm' <- if execOpts.jsonTrace
-           then do
-             (vm', (_, traces)) <- runStateT (interpretWithTrace fetcher EVM.Stepper.runFully) (vm, [])
-             liftIO $ do
-               let ret = case vm'.result of
-                           Just (VMSuccess (ConcreteBuf r)) -> ByteStringS r
-                           Just (VMFailure (Revert (ConcreteBuf r))) -> ByteStringS r
-                           _ -> ByteStringS ""
-               let res = VMTraceStepResult ret (vm.state.gas - vm'.state.gas)
-               let jsonl = toLazyByteString $ jsonlBuilder traces <> jsonLine res
-               let file = "hevm-trace.jsonl"
-               BS.writeFile file jsonl
-               putStrLn $ "Wrote json trace to " <> show file
-             pure vm'
-           else EVM.Stepper.interpret fetcher vm EVM.Stepper.runFully
-    writeTraceDapp dapp vm'
-    case vm'.result of
-      Just (VMFailure (Revert msg)) -> liftIO $ do
-        let res = case msg of
-                    ConcreteBuf bs -> bs
-                    _ -> "<symbolic>"
-        putStrLn $ "Revert: " <> (show $ ByteStringS res)
-        exitWith (ExitFailure 2)
-      Just (VMFailure err) -> liftIO $ do
-        putStrLn $ "Error: " <> show err
-        exitWith (ExitFailure 2)
-      Just (VMSuccess buf) -> liftIO $ do
-        let msg = case buf of
-              ConcreteBuf msg' -> msg'
-              _ -> "<symbolic>"
-        print $ "Return: " <> (show $ ByteStringS msg)
-      _ ->
-        internalError "no EVM result"
+  let fetcher = Fetch.concreteOracle sess rpcDat
+  when cOpts.interactive $ do
+    dsess <- liftIO $ setSnapshotInterval cOpts.snapshotEvery <$> newSession dapp vm
+    serveSession fetcher cOpts.port announce dsess
+    liftIO exitSuccess
+  vm' <- if execOpts.jsonTrace
+         then do
+           (vm', (_, traces)) <- runStateT (interpretWithTrace fetcher EVM.Stepper.runFully) (vm, [])
+           liftIO $ do
+             let ret = case vm'.result of
+                         Just (VMSuccess (ConcreteBuf r)) -> ByteStringS r
+                         Just (VMFailure (Revert (ConcreteBuf r))) -> ByteStringS r
+                         _ -> ByteStringS ""
+             let res = VMTraceStepResult ret (vm.state.gas - vm'.state.gas)
+             let jsonl = toLazyByteString $ jsonlBuilder traces <> jsonLine res
+             let file = "hevm-trace.jsonl"
+             BS.writeFile file jsonl
+             putStrLn $ "Wrote json trace to " <> show file
+           pure vm'
+         else EVM.Stepper.interpret fetcher vm EVM.Stepper.runFully
+  writeTraceDapp dapp vm'
+  case vm'.result of
+    Just (VMFailure (Revert msg)) -> liftIO $ do
+      let res = case msg of
+                  ConcreteBuf bs -> bs
+                  _ -> "<symbolic>"
+      putStrLn $ "Revert: " <> (show $ ByteStringS res)
+      exitWith (ExitFailure 2)
+    Just (VMFailure err) -> liftIO $ do
+      putStrLn $ "Error: " <> show err
+      exitWith (ExitFailure 2)
+    Just (VMSuccess buf) -> liftIO $ do
+      let msg = case buf of
+            ConcreteBuf msg' -> msg'
+            _ -> "<symbolic>"
+      print $ "Return: " <> (show $ ByteStringS msg)
+    _ ->
+      internalError "no EVM result"
 
 -- | Creates a (concrete) VM from command line options
-vmFromCommand :: App m => CommonOptions -> CommonExecOptions -> CommonFileOptions -> ExecOptions -> Fetch.Session -> m (VM Concrete)
-vmFromCommand cOpts cExecOpts cFileOpts execOpts sess = do
+vmFromCommand :: App m => CommonOptions -> CommonExecOptions -> CommonFileOptions -> ExecOptions -> Maybe Fetch.Session -> m (VM Concrete)
+vmFromCommand cOpts cExecOpts cFileOpts execOpts preSess = do
+  let sess = fromMaybe (internalError "vmFromCommand: RPC configured without a session") preSess
   conf <- readConfig
   (miner,ts,baseFee,blockNum,prevRan) <- case cExecOpts.rpc of
     Nothing -> pure (LitAddr 0,Lit 0,Lit 0,Lit 0,Lit 0)
@@ -839,9 +837,10 @@ vmFromCommand cOpts cExecOpts cFileOpts execOpts sess = do
         bytes f def = maybe def decipher (f cOpts)
 
 symvmFromCommand :: App m =>
-  CommonExecOptions -> SymbolicOptions -> CommonFileOptions -> Fetch.Session ->
+  CommonExecOptions -> SymbolicOptions -> CommonFileOptions -> Maybe Fetch.Session ->
   (Expr Buf, [Prop]) -> m (VM EVM.Types.Symbolic)
-symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
+symvmFromCommand cExecOpts sOpts cFileOpts preSess calldata = do
+  let sess = fromMaybe (internalError "symvmFromCommand: RPC configured without a session") preSess
   conf <- readConfig
   (miner,blockNum,baseFee,prevRan) <- case cExecOpts.rpc of
     Nothing -> pure (SymAddr "miner",BlockNumber,BaseFee,PrevRandao)
@@ -937,15 +936,16 @@ symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
     word64 f def = fromMaybe def (f cExecOpts)
     eaddr f def = maybe def LitAddr (f cExecOpts)
 
-withRpcSession :: App m => CommonOptions -> Maybe URL -> Maybe W256 -> (Fetch.Session -> m a) -> m a
-withRpcSession cOpts url block act = do
+withRpcSession :: App m => CommonOptions -> Maybe URL -> Maybe W256 -> (Maybe Fetch.Session -> m a) -> m a
+withRpcSession _ Nothing _ act = act Nothing
+withRpcSession cOpts url@(Just _) block act = do
   loc <- case cOpts.cacheDir of
     Just d -> pure $ Just (Fetch.CacheDir d)
     Nothing | cOpts.noRpcCache -> pure Nothing
             | otherwise -> liftIO $ Just . Fetch.PerChainUnder <$> getXdgDirectory XdgCache ("hevm" </> "rpc")
-  Fetch.withCachedSession loc url block act
+  Fetch.withCachedSession loc url block (act . Just)
 
-unitTestOptions :: App m => TestOptions -> CommonOptions -> SolverGroup -> Fetch.Session -> Maybe BuildOutput -> m (UnitTestOptions)
+unitTestOptions :: App m => TestOptions -> CommonOptions -> SolverGroup -> Maybe Fetch.Session -> Maybe BuildOutput -> m (UnitTestOptions)
 unitTestOptions testOpts cOpts solvers sess buildOutput = do
   root <- liftIO $ getRoot cOpts
 

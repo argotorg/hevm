@@ -65,11 +65,11 @@ hex s =
 loadVM :: App m => ByteString -> m (Maybe (VM Concrete))
 loadVM x = do
   vm <- liftIO $ stToIO $ vmForEthrunCreation x
-  vm1 <- Stepper.interpret (Fetch.zero 0 Nothing 1024) vm Stepper.runFully
+  vm1 <- Stepper.interpret Fetch.noRpcConcreteFetcher vm Stepper.runFully
   case vm1.result of
     Just (VMSuccess (ConcreteBuf targetCode)) -> do
       let target = vm1.state.contract
-      vm2 <- Stepper.interpret (Fetch.zero 0 Nothing 1024) vm1 (prepVm target targetCode)
+      vm2 <- Stepper.interpret Fetch.noRpcConcreteFetcher vm1 (prepVm target targetCode)
       writeTrace vm2
       pure $ Just vm2
     _ -> pure Nothing
