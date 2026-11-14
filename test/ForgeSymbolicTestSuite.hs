@@ -60,7 +60,8 @@ setup = do
   void $ cp (suite </> "src") (root </> "src")
   void $ cp (suite </> "test") (root </> "test")
   writeFile (root </> "foundry.toml") $ unlines
-    [ "[profile.default]", "solc = \"" <> solc <> "\"", "evm_version = \"cancun\"", "ast = true" ]
+    [ "[profile.default]", "solc = \"" <> solc <> "\"", "evm_version = \"cancun\"", "ast = true"
+    , "dynamic_test_linking = false" ]
   createDirectoryIfMissing True (root </> "lib" </> "forge-std")
   -- nix-store sources are read-only; --no-preserve=mode keeps the copy removable
   void $ readProcess "cp" ["-r", "--no-preserve=mode", forgeStd </> "src", root </> "lib" </> "forge-std" </> "src"] ""
