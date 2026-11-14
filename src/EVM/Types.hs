@@ -75,7 +75,7 @@ import Witch
 
 -- We need a 512-bit word for doing ADDMOD and MULMOD with full precision.
 mkUnpackedDoubleWord "Word512" ''Word256 "Int512" ''Int256 ''Word256
-  [''Typeable, ''Data, ''Generic]
+  [''Data, ''Generic]
 
 
 
@@ -143,7 +143,6 @@ data EType
   | EContract
   | Byte
   | End
-  deriving (Typeable)
 
 -- Variables referring to a global environment
 data GVar (a :: EType) where
