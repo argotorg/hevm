@@ -433,7 +433,9 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props s
       case solver of
         -- answers without spawning a process, so queries can be dumped
         -- without a solver installed
-        EmptySolver -> pure (Unknown "Result unknown by SMT solver", phaseOf refinement)
+        EmptySolver -> do
+          dumpUnsolved smt2 fileCounter conf.dumpUnsolved
+          pure (Unknown "Result unknown by SMT solver", phaseOf refinement)
         _ -> bracket
           (spawnSolver solver timeout maxMemory)
           (stopSolver)
