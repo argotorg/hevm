@@ -107,7 +107,9 @@
           codesign_allocate = "${pkgs.darwin.binutils.bintools}/bin/codesign_allocate";
           codesign = "${pkgs.darwin.sigtool}/bin/codesign";
         in if pkgs.stdenv.hostPlatform.isLinux
-        then hlib.dontCheck (hevmBase pkgs.pkgsStatic)
+        # The release executable does not use profiling libraries. Building
+        # hevm's profiling library can crash the musl external interpreter.
+        then hlib.disableLibraryProfiling (hlib.dontCheck (hevmBase pkgs.pkgsStatic))
         else pkgs.runCommand "stripNixRefs" {} ''
           mkdir -p $out/bin
           cp ${hlib.dontCheck (forceStaticDepsMacos (hevmBase pkgs))}/bin/hevm $out/bin/
