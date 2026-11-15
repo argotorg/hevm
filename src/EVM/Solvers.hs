@@ -602,7 +602,12 @@ solverArgs solver timeout = case solver of
     ]
   Z3 ->
     [ "-st"
-    , "-in" ]
+    , "-in"
+#if defined(mingw32_HOST_OS)
+    -- Windows has no OS CPU limit, so Z3 must enforce the deadline.
+    , "-T:" <> T.pack (show (mkTimeout timeout))
+#endif
+    ]
   CVC5 ->
     [ "--lang=smt"
     , "--produce-models"

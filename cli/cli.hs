@@ -136,7 +136,7 @@ commonOptions = CommonOptions
   <*> (option auto $ long "verb"            <> showDefault <> value 1 <> help "Append call trace: {1} failures {2} all {3} also log progress to hevm-progress.jsonl {4} also log solver expressions there")
   <*> (optional $ strOption $ long "root"   <> help "Path to  project root directory")
   <*> (option auto $ long "assertion-type"  <> showDefault <> value Forge <> help "Deprecated, has no effect: failing assertions are detected both by reverts and by the fail flag that forge-std's fail() and DSTest set")
-  <*> (option auto $ long "smt-timeout"     <> value 300 <> help "Timeout given to SMT solver in seconds. Not available on Windows")
+  <*> (option auto $ long "smt-timeout"     <> value 300 <> help "Timeout given to SMT solver in seconds")
   <*> (option auto $ long "smt-branch-timeout" <> showDefault <> value 20 <> help "Timeout in seconds for the SMT queries that decide which branches to explore, at most --smt-timeout. A branch the solver cannot decide is explored on both sides")
   <*> (option auto $ long "smt-memory"      <> value defMemLimit <> help "Maximum memory limit for SMT solver in MB. Only available on Linux")
   <*> (switch $ long "smt-debug"            <> help "Print smt queries sent to the solver")
