@@ -98,9 +98,8 @@
 
         # "static" binary for distribution
         # on linux this is actually a real fully static binary
-        # on macos this has everything except libcxx, libsystem and libiconv
-        # statically linked. we can be confident that these three will always
-        # be provided in a well known location by macos itself.
+        # on macos only system libraries and frameworks remain dynamically
+        # linked, so the binary does not require a Nix installation.
         hevmRedistributable = let
           grep = "${pkgs.gnugrep}/bin/grep";
           otool = "${pkgs.darwin.binutils.bintools}/bin/otool";
@@ -116,16 +115,18 @@
           # get the list of dynamic libs from otool and tidy the output
           libs=$(${otool} -L $out/bin/hevm | tail -n +2 | sed 's/^[[:space:]]*//' | cut -d' ' -f1)
 
-          # get the paths for libcxx and libiconv
-          cxx=$(echo "$libs" | ${grep} '^/nix/store/.*/libc++\.')
-          cxxabi=$(echo "$libs" | ${grep} '^/nix/store/.*/libc++abi\.')
-          iconv=$(echo "$libs" | ${grep} '^/nix/store/.*/libiconv\.')
-
-          # rewrite /nix/... library paths to point to /usr/lib
+          # Some toolchains already link against the system C++ libraries.
+          # Rewrite only the libraries that still point into the Nix store.
           chmod 777 $out/bin/hevm
-          ${install_name_tool} -change "$cxx" /usr/lib/libc++.1.dylib $out/bin/hevm
-          ${install_name_tool} -change "$cxxabi" /usr/lib/libc++abi.dylib $out/bin/hevm
-          ${install_name_tool} -change "$iconv" /usr/lib/libiconv.dylib $out/bin/hevm
+          for lib in $libs; do
+            case "$lib" in
+              /nix/store/*/libc++.*) target=/usr/lib/libc++.1.dylib ;;
+              /nix/store/*/libc++abi.*) target=/usr/lib/libc++abi.dylib ;;
+              /nix/store/*/libiconv.*) target=/usr/lib/libiconv.dylib ;;
+              *) continue ;;
+            esac
+            ${install_name_tool} -change "$lib" "$target" $out/bin/hevm
+          done
           # check that no nix deps remain
           nixdeps=$(${otool} -L $out/bin/hevm | tail -n +2 | { ${grep} /nix/store -c || test $? = 1; })
           if [ ! "$nixdeps" = "0" ]; then
