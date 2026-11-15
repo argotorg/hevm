@@ -270,9 +270,21 @@ jobs:
           echo HEVM_FORGE_STD_REPO="$PWD/forge-std" >> "$GITHUB_ENV"
 
       - name: run tests
+        env:
+          HEVM_FUZZ_CASE_FILE: ${{ runner.temp }}/hevm-fuzz-case
         run: |
           export PATH="$EVM_PATH:$CVC5_PATH:$BITWUZLA_PATH:$Z3_PATH:$DAPP_SOLC_PATH:$FOUNDRY_PATH:$HASKELL_PATHS:$PATH"
-          cabal run test
+          cabal run test -- --run-log "$RUNNER_TEMP/hevm-tests.log"
+
+      - name: Upload test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-test-diagnostics
+          path: |
+            ${{ runner.temp }}/hevm-fuzz-case.*
+            ${{ runner.temp }}/hevm-tests.log
+          if-no-files-found: ignore
 
       - name: run rpc tests
         env:
