@@ -5,13 +5,14 @@ module EVM.Fetch
   , fetchBlockWithSession
   , fetchQuery
   , oracle
+  , concreteOracle
   , checkBranch
   , Fetcher
   , RpcInfo (..)
   , RpcQuery (..)
-  , EVM.Fetch.zero
   , noRpc
   , noRpcFetcher
+  , noRpcConcreteFetcher
   , BlockNumber (..)
   , mkSession
   , mkSessionWithoutCache
@@ -68,7 +69,6 @@ import Data.Set (Set)
 import Data.Vector qualified as RegularVector
 import Network.Wreq
 import Network.Wreq.Session qualified as NetSession
-import Numeric.Natural (Natural)
 import System.Environment (lookupEnv, getEnvironment)
 import System.Process
 import Control.Monad.IO.Class
@@ -678,19 +678,34 @@ withCachedSession loc url block act = do
   withRunInIO $ \run -> run (act sess) `finally` forM_ ((,) <$> dir <*> block) (\(d, b) ->
     readMVar sess.sharedCache >>= saveCache d b)
 
--- Only used for testing (test.hs, BlockchainTests.hs)
-zero :: Natural -> Maybe Natural -> Natural -> Fetcher t m
-zero smtjobs smttimeout maxMemoryMB q = do
-  sess <- mkSessionWithoutCache
-  withSolvers Z3 smtjobs smttimeout maxMemoryMB $ \s ->
-    oracle s (Just sess) noRpc q
-
+-- | Local execution with an existing solver group. No HTTP session is needed.
 noRpcFetcher :: forall t m . App m => SolverGroup -> Fetcher t m
 noRpcFetcher sg = oracle sg Nothing noRpc
 
--- SMT solving + RPC data fetching + reading from environment
+-- | Concrete local execution, with no HTTP or solver setup.
+noRpcConcreteFetcher :: App m => Fetcher Concrete m
+noRpcConcreteFetcher = concreteOracle Nothing noRpc
+
+-- | Concrete execution can fetch RPC state, read the environment and run FFI,
+-- but its query type excludes SMT requests.
+concreteOracle :: App m => Maybe Session -> RpcInfo -> Fetcher Concrete m
+concreteOracle = dispatch NoSMT
+
+-- | SMT solving, RPC state, environment reads and FFI. Resources belong to the
+-- caller and can be shared across queries.
 oracle :: forall t m . App m => SolverGroup -> Maybe Session -> RpcInfo -> Fetcher t m
-oracle solvers preSess rpcInfo q = do
+oracle solvers = dispatch (WithSMT solvers)
+
+-- A concrete fetcher cannot reach smtSolvers: those queries refine t to Symbolic.
+data SMTHandler t where
+  NoSMT :: SMTHandler Concrete
+  WithSMT :: SolverGroup -> SMTHandler t
+
+smtSolvers :: SMTHandler Symbolic -> SolverGroup
+smtSolvers (WithSMT solvers) = solvers
+
+dispatch :: forall t m . App m => SMTHandler t -> Maybe Session -> RpcInfo -> Fetcher t m
+dispatch smt preSess rpcInfo q = do
   case q of
     PleaseDoFFI vals envs continue -> case vals of
        cmd : args -> do
@@ -708,16 +723,16 @@ oracle solvers preSess rpcInfo q = do
          case branchcondition of
            Lit 0 -> pure $ continue (Case False)
            Lit _ -> pure $ continue (Case True)
-           _     -> continue <$> checkBranch solvers branchcondition pathconds
+           _     -> continue <$> checkBranch (smtSolvers smt) branchcondition pathconds
 
-    PleaseCheckSat props continue -> checkSatWithProps solvers props <&> \case
+    PleaseCheckSat props continue -> checkSatWithProps (smtSolvers smt) props <&> \case
       Cex _ -> continue (Just True)
       Qed -> continue (Just False)
       _ -> continue Nothing
 
     PleaseGetSols symExpr numBytes pathconditions continue -> do
          let pathconds = foldl' PAnd (PBool True) pathconditions
-         continue <$> getSolutions solvers symExpr numBytes pathconds
+         continue <$> getSolutions (smtSolvers smt) symExpr numBytes pathconds
 
     PleaseFetchContract addr base continue
       | isAddressSpecial addr -> pure $ continue nothingContract

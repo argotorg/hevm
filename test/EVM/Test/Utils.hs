@@ -96,7 +96,7 @@ runForgeTestResults testFile methodFilter = runForgeTestResultsCustom testFile m
 testOpts :: forall m . App m => SolverGroup -> FilePath -> Maybe BuildOutput -> TestMethodFilter -> Maybe Integer -> Bool -> RpcInfo -> (Text -> IO ()) -> m (UnitTestOptions)
 testOpts solvers root buildOutput methodFilter maxIter allowFFI rpcinfo printOut = do
   let srcInfo = maybe emptyDapp (dappInfo root) buildOutput
-  sess <- Fetch.mkSessionWithoutCache
+  sess <- traverse (const Fetch.mkSessionWithoutCache) rpcinfo.blockNumURL
   params <- paramsFromRpc rpcinfo sess
 
   pure UnitTestOptions
