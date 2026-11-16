@@ -56,7 +56,7 @@ runBCTest :: App m => BCTests.Case -> m Bool
 runBCTest x =
  do
   vm0 <- liftIO $ BCTests.vmForCase x
-  result <- Stepper.interpret (Fetch.zero 0 Nothing 1024) vm0 Stepper.runFully
+  result <- Stepper.interpret Fetch.noRpcConcreteFetcher vm0 Stepper.runFully
   writeTrace vm0
   pure $ isNothing $ BCTests.checkExpectation x result
 

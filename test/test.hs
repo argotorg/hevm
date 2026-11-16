@@ -20,6 +20,7 @@ import EVM.Equivalence.EquivalenceTests qualified as EquivalenceTests
 import EVM.Equivalence.EquivalenceTests (YulVerbosity)
 import EVM.Equivalence.EquivFuzz qualified as EquivFuzz
 import EVM.Fetch.RpcFuzz qualified as RpcFuzz
+import EVM.Fetch.FetchTests qualified as FetchTests
 import EVM.SymExec.SymExecTests qualified as SymExecTests
 import EVM.Debugger.DebuggerTests qualified as DebuggerTests
 import EVM.Debugger.DebuggerFuzz qualified as DebuggerFuzz
@@ -72,6 +73,7 @@ tests = testGroup "hevm" $
   , EquivalenceTests.tests
   , EquivFuzz.tests
   , RpcFuzz.tests
+  , FetchTests.tests
   , FoundryTests.tests
   , InvariantTests.tests
   ]

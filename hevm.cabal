@@ -314,6 +314,7 @@ test-suite test
     EVM.Equivalence.EquivFuzz
     EVM.Fetch.MockNode
     EVM.Fetch.RpcFuzz
+    EVM.Fetch.FetchTests
     EVM.Expr.ExprTests
     EVM.Expr.RewriteFuzz
     EVM.Expr.KeccakFuzz
