@@ -40,7 +40,7 @@ import EVM.SymExec (abstractVM)
 import EVM.Types (Expr(AbstractBuf))
 
 tests :: TestTree
-tests = after AllFinish "!/progress-global/" $ sequentialTestGroup "progress-global" AllFinish
+tests = after AllFinish "!/progress-global/" $ dependentTestGroup "progress-global" AllFinish
   [ testCase "not-running" $ do
       v <- currentProgress
       assertEqual "running" (Just (JSON.Bool False)) (at ["running"] v)

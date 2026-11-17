@@ -173,7 +173,7 @@ tests =
       ]
     ]
   -- the progress log is process-wide, so these must not run concurrently
-  , sequentialTestGroup "progress-log" AllFinish
+  , dependentTestGroup "progress-log" AllFinish
     [ test "progress-log-is-valid-jsonl" $ do
         Just c <- solcRuntime "C" [i|
           contract C {

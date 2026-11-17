@@ -44,7 +44,7 @@ module EVM.SMT.AbstractBase
   ) where
 
 import Data.Containers.ListUtils (nubOrd)
-import Data.List (foldl', sortOn)
+import Data.List qualified as List
 import Data.Map.Strict qualified as Map
 import Data.Monoid (Sum(..))
 import Data.Text qualified as TS
@@ -259,8 +259,8 @@ saturate props =
 shareTerms :: [Prop] -> (Expr EWord -> Expr EWord, [(TS.Text, Expr EWord)])
 shareTerms props = (mapExpr (named table), reverse defs)
   where
-    terms = sortOn termSize (collectFrom arithTerm props)
-    (table, defs) = foldl' define (mempty, []) (zip [0 :: Int ..] terms)
+    terms = List.sortOn termSize (collectFrom arithTerm props)
+    (table, defs) = List.foldl' define (mempty, []) (zip [0 :: Int ..] terms)
     define (tbl, ds) (i, term) =
       let name = "arith_term_" <> TS.pack (show i)
           -- the term is not in the table yet, so only what is inside it is named

@@ -433,7 +433,9 @@ getOneSol solver timeout maxMemory smt2@(SMT2 cmds cexvars _) refinement props s
       case solver of
         -- answers without spawning a process, so queries can be dumped
         -- without a solver installed
-        EmptySolver -> pure (Unknown "Result unknown by SMT solver", phaseOf refinement)
+        EmptySolver -> do
+          dumpUnsolved smt2 fileCounter conf.dumpUnsolved
+          pure (Unknown "Result unknown by SMT solver", phaseOf refinement)
         _ -> bracket
           (spawnSolver solver timeout maxMemory)
           (stopSolver)
@@ -600,7 +602,12 @@ solverArgs solver timeout = case solver of
     ]
   Z3 ->
     [ "-st"
-    , "-in" ]
+    , "-in"
+#if defined(mingw32_HOST_OS)
+    -- Windows has no OS CPU limit, so Z3 must enforce the deadline.
+    , "-T:" <> T.pack (show (mkTimeout timeout))
+#endif
+    ]
   CVC5 ->
     [ "--lang=smt"
     , "--produce-models"

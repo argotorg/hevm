@@ -334,12 +334,12 @@ srcIdOffsets root = do
       srcs <- forM (zip [0..] builds) $ \(i, b) -> do
         info <- readJson (buildDir </> b <.> "json")
         filterM (doesFileExist . (root </>) . (.filepath) . fst)
-          [ (SrcFile (n + i * offset) (T.unpack path), Nothing)
+          [ (SrcFile (n + i * offset) (forgePath path), Nothing)
           | Just (Object m) <- [info >>= preview (key "source_id_to_path")]
           , (k, String path) <- KeyMap.toList m
           , Just n <- [readMaybe (Key.toString k)] ]
       pure ( Map.fromList
-               [ (T.unpack path, i * offset)
+               [ (forgePath path, i * offset)
                | o <- universeObjects v
                , Just (String path) <- [KeyMap.lookup "path" o]
                , Just (String b) <- [KeyMap.lookup "build_id" o]
@@ -348,6 +348,8 @@ srcIdOffsets root = do
     _ -> pure mempty
   where
     offset = 1000000
+    -- Forge serializes native Windows paths; artifact discovery uses '/'.
+    forgePath = T.unpack . T.replace "\\" "/"
     buildDir = root </> "out" </> "build-info"
     readJson :: FilePath -> IO (Maybe Value)
     readJson f = (decodeStrict =<<) . either (const Nothing) Just <$> (try (BS.readFile f) :: IO (Either IOException ByteString))
