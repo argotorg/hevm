@@ -1,35 +1,16 @@
 (() => {
     const darkThemes = ['ayu', 'navy', 'coal'];
-    const lightThemes = ['light', 'rust'];
-
-    const classList = document.getElementsByTagName('html')[0].classList;
-
-    let lastThemeWasLight = true;
-    for (const cssClass of classList) {
-        if (darkThemes.includes(cssClass)) {
-            lastThemeWasLight = false;
-            break;
-        }
-    }
-
-    const theme = lastThemeWasLight ? 'default' : 'dark';
+    const html = document.documentElement;
+    const isDark = () => darkThemes.some(theme => html.classList.contains(theme));
+    const initiallyDark = isDark();
+    const theme = initiallyDark ? 'dark' : 'default';
     mermaid.initialize({ startOnLoad: true, theme });
 
-    // Simplest way to make mermaid re-render the diagrams in the new theme is via refreshing the page
-
-    for (const darkTheme of darkThemes) {
-        document.getElementById(darkTheme).addEventListener('click', () => {
-            if (lastThemeWasLight) {
-                window.location.reload();
-            }
-        });
-    }
-
-    for (const lightTheme of lightThemes) {
-        document.getElementById(lightTheme).addEventListener('click', () => {
-            if (!lastThemeWasLight) {
-                window.location.reload();
-            }
-        });
-    }
+    // Reload to redraw diagrams when the effective theme changes, including
+    // Auto mode and changes to the system's preferred color scheme.
+    new MutationObserver(() => {
+        if (isDark() !== initiallyDark) {
+            window.location.reload();
+        }
+    }).observe(html, { attributes: true, attributeFilter: ['class'] });
 })();
