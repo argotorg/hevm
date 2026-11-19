@@ -76,6 +76,12 @@
         hspkgs = ps: ps.haskell.packages.ghc912;
         hlib = pkgs.haskell.lib;
 
+        withStaticInterpreter = import ./nix/static-interpreter.nix {
+          inherit pkgs;
+          buildHaskellPackages = hspkgs pkgs;
+          hostHaskellPackages = hspkgs pkgs.pkgsStatic;
+        };
+
         # base hevm derivation.
         # parameterized on the pkgs definition to allow use of `pkgsStatic` or `pkgs` as needed.
         hevmBase = ps :
@@ -109,7 +115,11 @@
         in if pkgs.stdenv.hostPlatform.isLinux
         # The release executable does not use profiling libraries. Building
         # hevm's profiling library can crash the musl external interpreter.
-        then hlib.disableLibraryProfiling (hlib.dontCheck (hevmBase pkgs.pkgsStatic))
+        then pkgs.lib.pipe (hevmBase pkgs.pkgsStatic) [
+          hlib.dontCheck
+          hlib.disableLibraryProfiling
+          withStaticInterpreter
+        ]
         else pkgs.runCommand "stripNixRefs" {} ''
           mkdir -p $out/bin
           cp ${hlib.dontCheck (forceStaticDepsMacos (hevmBase pkgs))}/bin/hevm $out/bin/
