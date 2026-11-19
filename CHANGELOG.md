@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- A memory offset or size that depends on a subterm with at most
+  `--max-mem-arg-split` values (default 8), such as the length of a short dynamic
+  argument, forks the path on those values, each substituted into the state, so
+  memory stays concrete.
 - Bounds from path conditions carry through `c + x`, `c - x` and `~x`, also when
   they wrap past 2^256 as signed range checks do, and through small signed values
   such as `-k + y % n`. The simplifier drops `m & x` to 0 when the bound of `x`
@@ -27,6 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remainders: `a%b <= a` and `a%b < b`.
 - The simplifier drops an `ITE c t k` whose literal `k` is what `t` is when `c` is 0,
   such as the product a short-circuited overflow check leaves after a merge.
+- The simplifier folds `x < x - x % c`, also masked to `uintN`, to false.
+- A memory offset or size that depends on a merged condition, such as an array
+  length picked by a ternary, forks on that condition, so memory stays concrete.
 - `test` takes `--run-log FILE`, appending a line when each test starts and ends,
   and `--yul-verbosity N`. Tests time out after 10 minutes by default.
 - The progress log gives the source location of forks and of the locations in
@@ -155,6 +162,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Changed
 - `mapExpr` visits each hash-consed node once per call, and the simplifier's
   searches for subterms fold over each node once, instead of over every path to it.
+- State merging also merges if/else branches and ternaries, where the two
+  sides meet after the jump target, and follows the branches inside a merged
+  side that its own condition decides, such as the overflow check of `a - b`
+  under `a > b`. A branch reached again in a loop is not merged, so the loop
+  bound applies. `MergeState` has `msAssume` instead of `msRemainingBudget`.
 - The default number of solvers is at most half of the available memory divided
   by `--smt-memory`, so that the solvers running at once fit in memory.
 - Solidity's overflow check of a multiplication by a literal, `y == 0 || (y * c) / y == c`,
@@ -235,6 +247,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An account whose balance is a term equal to 0, e.g. after a transfer of `x & 0`,
   counted as non-empty, so `EXTCODEHASH` gave the hash of the empty code instead
   of 0, and the account was not cleared at the end of the transaction.
+- A memory instruction with fewer stack items than it takes could fork on a merged
+  memory offset before underrunning the stack, so the path went on where it should
+  have halted.
 - `CREATE` and `CREATE2` compared a symbolic init code size with the maximum
   structurally, so every symbolic size failed as too large and the path was
   dropped. The size is now simplified and compared as a number, and one that stays

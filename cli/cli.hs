@@ -102,6 +102,7 @@ data CommonOptions = CommonOptions
   , promiseNoReent::Bool
   , maxBufSize    ::Int
   , maxWidth      ::Int
+  , maxMemArgSplit ::Int
   , maxDepth      ::Maybe Int
   , noSimplify    ::Bool
   , onlyDeployed  ::Bool
@@ -147,6 +148,7 @@ commonOptions = CommonOptions
   <*> (switch $ long "promise-no-reent"     <> help "Promise no reentrancy is possible into the contract(s) being examined")
   <*> (option auto $ long "max-buf-size"    <> value 24 <> help "Maximum size of buffers such as calldata and returndata in exponents of 2 (default: 24, i.e. 16 MB, more than gas limits allow)")
   <*> (option auto $ long "max-width"      <> showDefault <> value 100 <> help "Max number of concrete values to explore when encountering a symbolic value. This is a form of branch width limitation per symbolic value")
+  <*> (option auto $ long "max-mem-arg-split" <> showDefault <> value 8 <> help "Max number of values of a subterm that a memory offset or size depends on, e.g. a short dynamic argument's length, to explore one path each with that value substituted, so memory stays concrete. 0 disables it")
   <*> (optional $ option auto $ long "max-depth" <> help "Limit maximum depth of branching during exploration (default: unlimited)")
   <*> (switch $ long "no-simplify" <> help "Don't perform simplification of expressions")
   <*> (switch $ long "only-deployed" <> help "When trying to resolve unknown addresses, only use addresses of deployed contracts")
@@ -417,6 +419,7 @@ main = do
         , promiseNoReent = cOpts.promiseNoReent
         , maxBufSize = cOpts.maxBufSize
         , maxWidth = cOpts.maxWidth
+        , maxMemArgSplit = cOpts.maxMemArgSplit
         , maxDepth = cOpts.maxDepth
         , verb = cOpts.verb
         , simp = Prelude.not cOpts.noSimplify
