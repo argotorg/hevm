@@ -8,8 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- Bounds from path conditions carry through `c + x`, `c - x` and `~x`, also when
+  they wrap past 2^256 as signed range checks do, and through small signed values
+  such as `-k + y % n`. The simplifier drops `m & x` to 0 when the bound of `x`
+  leaves it none of the bits of `m`, and to `x` when it leaves only bits of `m`, and
+  props whose bounds contradict, or exclude every value a term can have, such as a
+  sign-extended value, simplify to false.
+- The simplifier folds `c + ~x` to `(c - 1) - x` and `c - ~x` to `(c + 1) + x`.
+- The simplifier folds arithmetic, comparisons and bit operations through nested
+  ITEs whose leaves are literals, as merged branches build them, up to 128 leaves.
 - `test/scripts/fuzz-coverage.sh` reports which source lines a fuzz run never
   reaches, using HPC.
+- Abstract arithmetic lemmas for dividends a literal apart over one divisor,
+  `(x-k)/z <= x/z <= (x-k)/z + k`, as in a `ceilDiv` next to a round-down, and
+  for `(r + c*q)/c == q` when `r < c`.
+- Abstract arithmetic lemmas relating `a/c` to `x` when `a` is bounded by `c*x`,
+  bounding `ceilDiv(c1*x, c2)` by `x/(c2/c1)` when `c1` divides `c2`, and bounding
+  remainders: `a%b <= a` and `a%b < b`.
+- The simplifier drops an `ITE c t k` whose literal `k` is what `t` is when `c` is 0,
+  such as the product a short-circuited overflow check leaves after a merge.
 - `test` takes `--run-log FILE`, appending a line when each test starts and ends,
   and `--yul-verbosity N`. Tests time out after 10 minutes by default.
 - The progress log gives the source location of forks and of the locations in
@@ -136,8 +153,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes of zero.
 
 ## Changed
+- `mapExpr` visits each hash-consed node once per call, and the simplifier's
+  searches for subterms fold over each node once, instead of over every path to it.
 - The default number of solvers is at most half of the available memory divided
   by `--smt-memory`, so that the solvers running at once fit in memory.
+- Solidity's overflow check of a multiplication by a literal, `y == 0 || (y * c) / y == c`,
+  also once simplification has distributed `y * c` or dropped `y == 0`,
+  simplifies to a bound on `y`, and the overflow checks of multiplications use bounds that hold
+  through comparisons with other bounded values.
+- Constant propagation substitutes any term that the props fix to a constant,
+  not only variables.
 - Invariant tests print the paths they only partially explored grouped by
   source location, as `prove` tests do, instead of printing their expressions.
 - Concrete ADDMOD and MULMOD are computed with `Integer` instead of `Word512`,
@@ -214,6 +239,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   structurally, so every symbolic size failed as too large and the path was
   dropped. The size is now simplified and compared as a number, and one that stays
   symbolic ends the path as partial.
+- Source locations of contracts with immutables are found in Foundry projects.
 - Source locations are right after an incremental `forge build`, whose
   build-infos number the source files independently.
 - `prank` and `startPrank` with a symbolic address, e.g. one picked from a list

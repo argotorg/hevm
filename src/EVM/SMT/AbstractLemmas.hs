@@ -42,6 +42,11 @@ data LemmaInst
   | FracReduce    (Expr EWord) W256 W256 (Expr EWord)                  -- ^ (c1*x)/c2 == x/(c2/c1)
   | CeilDivCancel (Expr EWord) W256 W256 (Expr EWord)                  -- ^ ceilDiv(c1*x,c2) inner divide
   | Telescope     (Expr EWord) (Expr EWord) W256 W256                  -- ^ (a*b)/c - (a*(b-k))/c == a*(k/c)
+  | DivStep       (Expr EWord) W256 (Expr EWord)                       -- ^ (x-k)/z <= x/z <= (x-k)/z + k
+  | RemCancel     (Expr EWord) W256 W256 (Expr EWord)                  -- ^ (r + c*q)/c == q for r < c
+  | ConstDivBound (Expr EWord) W256 (Expr EWord)                       -- ^ a<=c*x => a/c<=x, c*x<=a => x<=a/c
+  | CeilFracReduce (Expr EWord) W256 W256 (Expr EWord)                 -- ^ (c1*x-1)/c2 <= x/(c2/c1) <= it + 1
+  | RemBound      (Expr EWord) (Expr EWord)                            -- ^ a%b <= a, a%b < b
   deriving (Eq, Ord)
 
 -- | The family an instance belongs to, for reporting which lemmas fired.
@@ -60,12 +65,18 @@ lemmaFamily = \case
   FracReduce{} -> "fraction reduction"
   CeilDivCancel{} -> "ceilDiv cancellation"
   Telescope{} -> "telescope"
+  DivStep{} -> "dividend step"
+  RemCancel{} -> "remainder cancellation"
+  ConstDivBound{} -> "const-div bound"
+  CeilFracReduce{} -> "ceilDiv fraction reduction"
+  RemBound{} -> "remainder bound"
 
 -- | Divisions an instance's assertion mentions that are neither in the goal
 -- nor in the saturated set.
 lemmaDivs :: LemmaInst -> [(Expr EWord, Expr EWord)]
 lemmaDivs = \case
   FracReduce _ c1 c2 x -> [(x, Lit (c2 `div` c1))]
+  CeilFracReduce _ c1 c2 x -> [(x, Lit (c2 `div` c1))]
   _ -> []
 
 -- | Every lemma instance triggered by the saturated term set, in emission
@@ -97,11 +108,24 @@ collectLemmas ctx =
      | (a, b) <- ctx.acUDivs, Just (c1, x) <- [asConstMul a]
      , Lit c2 <- [b], c2 /= 0, c1 /= 0, c2 `mod` c1 == 0, c2 /= c1 ]
   <> [ CeilDivCancel a c1 c2 x
-     | (a, b) <- ctx.acUDivs, T.Sub inner (Lit 1) <- [a]
+     | (a, b) <- ctx.acUDivs, Just inner <- [minusOne a]
      , Just (c1, x) <- [asConstMul inner]
      , Lit c2 <- [b], c2 /= 0, c1 `mod` c2 == 0 ]
+  <> [ CeilFracReduce a c1 c2 x
+     | (a, b) <- ctx.acUDivs, Just inner <- [minusOne a]
+     , Just (c1, x) <- [asConstMul inner]
+     , Lit c2 <- [b], c2 /= 0, c2 `mod` c1 == 0, c2 /= c1 ]
+     -- a division by c next to a product by the same c
+  <> [ RemBound a b | (a, b) <- ctx.acURems ]
+  <> nubOrd [ ConstDivBound a c x | (a, Lit c) <- ctx.acUDivs, (c', x) <- ctx.acConstMuls, c == c' ]
      -- scaled-product telescoping (the only cross-product lemma)
   <> [ Telescope a b k c | (a, b, k, c) <- telescopes ]
+     -- dividends a literal apart over one divisor, as ceilDiv's (a - 1)/b next to a/b
+  <> nubOrd [ DivStep x k z | (T.Sub x (Lit k), z) <- ctx.acUDivs, k /= 0, (x, z) `elem` ctx.acUDivs ]
+     -- a multiple of the divisor plus less than it, as a ceilDiv(c*q, c) after simplification
+  <> [ RemCancel a r c q
+     | (a@(T.Add (Lit r) m), Lit c) <- ctx.acUDivs, Just (c', q) <- [asConstMul m]
+     , c == c', r < c ]
   where
     telescopes = nubOrd
       [ (a, b, k, c)
@@ -262,6 +286,68 @@ emitLemma enc (Telescope a b k c) = do
       rhs     = "(bvadd" `sp` dStep `sp` coeff <> ")"
   pure [ SMTCommand $ "(assert (=> (and" `sp` mulNoOverflow ae be
          <> " (bvuge" `sp` be `sp` wordAsBV k <> ")) (=" `sp` dFull `sp` rhs <> ")))" ]
+
+-- dividend step (sound, guarded): dividends k apart give quotients at most
+-- ceil(k/z) <= k apart, so with k = 1 a ceilDiv (x - 1)/z + 1 is at least x/z.
+--   z != 0 && x >= k  =>  (x-k)/z <= x/z <= (x-k)/z + k
+-- The sum cannot wrap: (x-k)/z + k <= x.
+emitLemma enc (DivStep x k z) = do
+  xe <- enc x; ze <- enc z; se <- enc (T.Sub x (Lit k))
+  let kbv  = wordAsBV k
+      dx   = udivSMT xe ze
+      ds   = udivSMT se ze
+      grd  = "(and (distinct" `sp` ze `sp` zero <> ") (bvuge" `sp` xe `sp` kbv <> "))"
+  pure [ SMTCommand $ "(assert (=>" `sp` grd `sp` "(bvule" `sp` ds `sp` dx <> ")))"
+       , SMTCommand $ "(assert (=>" `sp` grd `sp` "(bvule" `sp` dx `sp` "(bvadd" `sp` ds `sp` kbv <> "))))" ]
+
+-- remainder cancellation (sound, no-overflow guarded): when c*q + r is exact
+-- and r < c, floor((c*q + r)/c) = q. `a` is the (r + c*q) dividend expr.
+emitLemma enc (RemCancel a r c q) = do
+  ae <- enc a; qe <- enc q
+  let dv  = udivSMT ae (wordAsBV c)
+      bnd = wordAsBV (((maxBound :: W256) - r) `div` c)  -- largest q with c*q + r < 2^256
+  pure [ SMTCommand $ "(assert (=> (bvule" `sp` qe `sp` bnd <> ") (=" `sp` dv `sp` qe <> ")))" ]
+
+-- const-div bound (sound, no-overflow guarded): dividing by c undoes
+-- multiplying by c, and division is monotone, so
+--   a <= c*x  =>  a/c <= x        c*x <= a  =>  x <= a/c
+-- e.g. a round trip x*1e27/r*r/1e27 against x, where r*(..) <= x*1e27.
+emitLemma enc (ConstDivBound a c x) = do
+  ae <- enc a; xe <- enc x
+  let cbv = wordAsBV c
+      cx  = "(bvmul" `sp` cbv `sp` xe <> ")"
+      dv  = udivSMT ae cbv
+      grd = "(bvule" `sp` xe `sp` wordAsBV ((maxBound :: W256) `div` c) <> ")"
+  pure [ SMTCommand $ "(assert (=> (and" `sp` grd `sp` "(bvule" `sp` ae `sp` cx <> ")) (bvule" `sp` dv `sp` xe <> ")))"
+       , SMTCommand $ "(assert (=> (and" `sp` grd `sp` "(bvule" `sp` cx `sp` ae <> ")) (bvule" `sp` xe `sp` dv <> ")))" ]
+
+-- ceilDiv fraction reduction (sound, guarded): the mirror of ceilDiv-cancel,
+-- for c1 | c2 with k = c2/c1, e.g. ceilDiv(x*1e27, 1e30) against x/1000.
+-- c1*x - 1 = c1*(x-1) + (c1-1) and c1*(x mod k) + c1 - 1 < c1*k, so
+-- floor((c1*x - 1)/c2) = floor((x-1)/k), which is x/k or one less.
+emitLemma enc (CeilFracReduce a c1 c2 x) = do
+  ae <- enc a; xe <- enc x
+  let dv  = udivSMT ae (wordAsBV c2)
+      xk  = udivSMT xe (wordAsBV (c2 `div` c1))
+      bnd = wordAsBV ((maxBound :: W256) `div` c1)
+  pure [ SMTCommand $ "(assert (=> (and (bvuge" `sp` xe `sp` one <> ") (bvule" `sp` xe `sp` bnd <> "))"
+         <> " (and (bvule" `sp` dv `sp` xk <> ") (bvule" `sp` xk `sp` "(bvadd" `sp` dv `sp` one <> ")))))" ]
+
+-- remainder bound (sound; a%0 = 0 in the EVM): a%b <= a, and a%b < b for
+-- b /= 0, e.g. what forge-std's bound() returns stays within its range.
+emitLemma enc (RemBound a b) = do
+  ae <- enc a; be <- enc b
+  let r = "(" <> abstFnName IsUMod `sp` ae `sp` be <> ")"
+  pure [ SMTCommand $ "(assert (bvule" `sp` r `sp` ae <> "))"
+       , SMTCommand $ "(assert (=> (distinct" `sp` be `sp` zero <> ") (bvult" `sp` r `sp` be <> ")))" ]
+
+-- | @x - 1@, also in the @x + (2^256-1)@ form the simplifier may leave.
+minusOne :: Expr EWord -> Maybe (Expr EWord)
+minusOne = \case
+  T.Sub x (Lit 1) -> Just x
+  T.Add (Lit c) x | c == maxBound -> Just x
+  T.Add x (Lit c) | c == maxBound -> Just x
+  _ -> Nothing
 
 -- | Both operand orders of each product, so monotonicity fires regardless of
 -- how the simplifier ordered the operands.
