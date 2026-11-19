@@ -11,7 +11,8 @@ break the hevm CLI interface.
 -}
 
 import Test.Hspec
-import System.Process (readProcessWithExitCode)
+import System.Process (readProcessWithExitCode, readCreateProcessWithExitCode, proc, CreateProcess(..))
+import System.Environment (getEnvironment)
 import System.Exit (ExitCode(..))
 import Control.Monad (forM_)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf)
@@ -41,7 +42,11 @@ testEnv = Env { config = defaultConfig {
   } }
 
 runForge :: FilePath -> [String] -> IO (ExitCode, String, String)
-runForge testFile extraOptions = do
+runForge = runForgeWithEnv []
+
+-- | @extraEnv@ overrides variables of the inherited environment.
+runForgeWithEnv :: [(String, String)] -> FilePath -> [String] -> IO (ExitCode, String, String)
+runForgeWithEnv extraEnv testFile extraOptions = do
   withSystemTempDirectory "dapp-test" $ \root -> do
     let projectType = Foundry
     ret <- runEnv testEnv $ compileWithForge root testFile
@@ -52,8 +57,9 @@ runForge testFile extraOptions = do
           <> show root <> " using project type " <> show projectType
       Right _ -> do
         let options = ["run", "exe:hevm", "--", "test" , "--root", root] <> extraOptions
-        (exitCode, stdout, stderr) <- readProcessWithExitCode "cabal" options ""
-        pure (exitCode, stdout, stderr)
+        env <- getEnvironment
+        let env' = extraEnv <> filter ((`notElem` map fst extraEnv) . fst) env
+        readCreateProcessWithExitCode (proc "cabal" options) { env = Just env' } ""
 
 -- the query-*.smt2 files --smt-debug writes into the cwd
 dumpedQueries :: IO [FilePath]
@@ -240,6 +246,20 @@ main = do
         stdout `shouldContain` "[FAIL]"
         stdout `shouldContain` "[validated]"
         stderr `shouldNotContain` "not reproducible"
+      it "non-utf8-locale" $ do
+        (exitCode, stdout, stderr) <- runForgeWithEnv [("LC_ALL", "C"), ("LANG", "C")] "test/contracts/pass/dsProvePass.sol" ["--match", "prove_trivial"]
+        stderr `shouldContain` "hevm: done test"
+        stderr `shouldNotContain` "cannot encode character"
+        stdout `shouldContain` "[PASS]"
+        exitCode `shouldBe` ExitSuccess
+      it "non-utf8-locale-cex" $ do
+        -- the counterexample is printed as «hi», which is not ASCII
+        (exitCode, stdout, stderr) <- runForgeWithEnv [("LC_ALL", "C"), ("LANG", "C")] "test/contracts/fail/non-utf8-cex.sol" []
+        stderr `shouldNotContain` "cannot encode character"
+        stdout `shouldContain` "[FAIL]"
+        stdout `shouldContain` "calldata: prove_bytes("
+        stdout `shouldContain` "hi"
+        exitCode `shouldBe` ExitFailure 1
       it "should-fail" $ do
         (_, stdout, stderr) <- runForge "test/contracts/fail/should-fail.sol" []
         stderr `shouldNotContain` "CallStack"

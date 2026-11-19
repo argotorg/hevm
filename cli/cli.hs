@@ -32,7 +32,7 @@ import Paths_hevm qualified as Paths
 import System.Directory (getXdgDirectory, XdgDirectory(..), withCurrentDirectory, getCurrentDirectory, doesDirectoryExist, makeAbsolute, findExecutable)
 import System.FilePath ((</>))
 import System.Exit (exitFailure, exitSuccess, exitWith, ExitCode(..))
-import System.IO (hFlush, stdout)
+import System.IO (hFlush, stdout, stderr, hGetEncoding, hSetEncoding, mkTextEncoding)
 import Data.List.Split (splitOn)
 import Text.Read (readMaybe)
 import JSONL (jsonlBuilder, jsonLine)
@@ -345,6 +345,10 @@ getFullVersion = showVersion Paths.version <> " [" <> gitVersion <> "]"
 
 main :: IO ()
 main = do
+  -- under a non-UTF-8 locale (e.g. LANG unset in Docker) printing a non-ASCII
+  -- character would otherwise throw and abort the run
+  forM_ [stdout, stderr] $ \h ->
+    hGetEncoding h >>= mapM_ (\e -> hSetEncoding h =<< mkTextEncoding (show e <> "//TRANSLIT"))
   cmd <- execParser $ info (commandParser <**> helper)
     ( Options.fullDesc
     <> progDesc "hevm, a symbolic and concrete EVM bytecode execution framework"

@@ -278,8 +278,9 @@ phaseDoneLine :: MonadIO m => Text -> Double -> [Pair] -> m ()
 phaseDoneLine name secs fs = liftIO $ readIORef global >>= mapM_ (\st -> withMVar st.lock $ \_ -> do
   on <- readIORef st.statusOn
   when on $ do
-    let fields = T.intercalate " │ " [Key.toText k <> " " <> val v | (k, v) <- fs]
-        txt = name <> T.pack (printf " %.1fs" secs) <> (if T.null fields then "" else " │ " <> fields)
+    let sep = if st.tty then " │ " else " | "
+        fields = T.intercalate sep [Key.toText k <> " " <> val v | (k, v) <- fs]
+        txt = name <> T.pack (printf " %.1fs" secs) <> (if T.null fields then "" else sep <> fields)
     if st.tty
       then hPutStrLn stderr $ "\r" <> clearLineCode
              <> setSGRCode [SetColor Foreground Vivid Green] <> "✓ " <> setSGRCode [Reset]
