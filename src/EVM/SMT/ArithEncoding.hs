@@ -9,6 +9,7 @@
 module EVM.SMT.ArithEncoding
   ( divModGroundTruth
   , mulGroundTruth
+  , mulModGroundTruth
   , saturatedGroundTruth
   , divModEncoding
   , divModAbstractDecls
@@ -25,6 +26,7 @@ import EVM.SMT.AbstractLemmas (collectLemmas, emitLemma, lemmaFamily, lemmaDivs)
 import EVM.SMT.SMTLIB (sp, zero, wordAsBV)
 import EVM.SMT.Types
 import EVM.Types (Prop, EType(EWord), Err, W256, Expr, Expr(Lit), Expr(SHL))
+import EVM.Types qualified as T
 
 -- | Lemmas for the initial abstract-multiplication phase. We add only the sound
 -- algebraic facts catalogued in
@@ -110,6 +112,15 @@ divModTruthFor enc allDivMods = do
 mulGroundTruth :: Enc -> [Prop] -> Err [SMTEntry]
 mulGroundTruth enc props = mulTruthFor enc (collectFrom collectMuls props)
 
+-- | Refine MULMOD with its full-precision EVM semantics.
+mulModGroundTruth :: Enc -> [Prop] -> Err [SMTEntry]
+mulModGroundTruth enc props = mapM truth (collectFrom collectMulMods props)
+  where
+    truth (a, b, c) = do
+      ae <- enc a; be <- enc b; ce <- enc c
+      pure $ SMTCommand $ "(assert (=" `sp` mulModSMT ae be ce
+        `sp` concreteMulModSMT ae be ce <> "))"
+
 -- | Ground truth for every abstract term the lemmas mention, not only the
 -- goal's. The refinement leaves the synthesized terms uninterpreted, which is
 -- enough to decide the goal but hides a false lemma about them; asserting this
@@ -119,10 +130,13 @@ saturatedGroundTruth enc props = do
   let ctx = saturate props
       extraDivs = concatMap lemmaDivs (collectLemmas ctx)
       udivs = [ (IsUDiv, a, b) | (a, b) <- ctx.acUDivs <> extraDivs ]
+      umods = [ (IsUMod, T.Mul a b, c) | (a, b, c) <- ctx.acMulMods ]
       muls = ctx.acMuls <> [ (b, a) | (a, b) <- ctx.acMuls ]
-  divTruth <- divModTruthFor enc (nubOrd (collectFrom collectDivMods props <> udivs))
+        <> [ (a, b) | (a, b, _) <- ctx.acMulMods, isAbstractMul a b ]
+  divTruth <- divModTruthFor enc (nubOrd (collectFrom collectDivMods props <> udivs <> umods))
   mulTruth <- mulTruthFor enc (nubOrd muls)
-  pure (divTruth <> mulTruth)
+  mulModTruth <- mulModGroundTruth enc props
+  pure (divTruth <> mulTruth <> mulModTruth)
 
 mulTruthFor :: Enc -> [(Expr EWord, Expr EWord)] -> Err [SMTEntry]
 mulTruthFor enc allMuls = do

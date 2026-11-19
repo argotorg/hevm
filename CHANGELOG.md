@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- Arithmetic abstraction now handles `MULMOD`, with exact 512-bit refinement,
+  and adds cancellation, div/mod identity and multiplication/division round-trip lemmas.
 - `test/scripts/fuzz-coverage.sh` reports which source lines a fuzz run never
   reaches, using HPC.
 - `test` takes `--run-log FILE`, appending a line when each test starts and ends,
