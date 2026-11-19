@@ -48,8 +48,7 @@ tests = testGroup "Debugger"
   , testCase "run-to-end-matches-exec" $ runEnv testEnv $ withConcrete loopCode $ \run s0 -> do
       sEnd <- run "continue" s0
       vm <- liftIO $ concreteVM loopCode
-      vm' <- withSolvers Bitwuzla 1 Nothing defMemLimit $ \solvers ->
-        Stepper.interpret (Fetch.oracle solvers Nothing Fetch.noRpc) vm Stepper.runFully
+      vm' <- Stepper.interpret Fetch.noRpcConcreteFetcher vm Stepper.runFully
       liftIO $ do
         assertBool "halted" (isHalted sEnd)
         assertEqual "result" (show vm'.result) (show (sessionVM sEnd).result)
@@ -254,10 +253,10 @@ concreteVM code = do
 type Run t m = Text -> Session t -> m (Session t)
 
 withConcrete :: (MonadUnliftIO m, ReadConfig m, TTY m) => ByteString -> (Run Concrete m -> Session Concrete -> m a) -> m a
-withConcrete code k = withSolvers Bitwuzla 1 Nothing defMemLimit $ \solvers -> do
+withConcrete code k = do
   vm <- liftIO $ concreteVM code
   s0 <- liftIO $ newSession emptyDapp vm
-  k (runCommandText (Fetch.oracle solvers Nothing Fetch.noRpc)) s0
+  k (runCommandText Fetch.noRpcConcreteFetcher) s0
 
 withSymbolic :: (MonadUnliftIO m, ReadConfig m, TTY m) => ByteString -> (Run Symbolic m -> Session Symbolic -> m a) -> m a
 withSymbolic code k = withSolvers Bitwuzla 1 Nothing defMemLimit $ \solvers -> do

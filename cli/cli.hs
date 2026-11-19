@@ -23,11 +23,9 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as T
 import Data.Version (showVersion)
 import Data.Word (Word64)
-import GHC.Conc (getNumProcessors)
 import GitHash
 import Numeric.Natural (Natural)
 import Optics.Core ((&), set)
-import Witch (unsafeInto)
 import Options.Generic as OptionsGeneric
 import Options.Applicative as Options
 import Paths_hevm qualified as Paths
@@ -52,6 +50,8 @@ import EVM.Solidity
 import EVM.Solvers
 import EVM.Stepper qualified
 import EVM.SymExec
+import EVM.CexReplay
+import EVM.Equivalence
 import EVM.Transaction qualified
 import EVM.Types hiding (word, Env, Symbolic)
 import EVM.Types qualified
@@ -136,12 +136,12 @@ commonOptions = CommonOptions
   <*> (option auto $ long "verb"            <> showDefault <> value 1 <> help "Append call trace: {1} failures {2} all {3} also log progress to hevm-progress.jsonl {4} also log solver expressions there")
   <*> (optional $ strOption $ long "root"   <> help "Path to  project root directory")
   <*> (option auto $ long "assertion-type"  <> showDefault <> value Forge <> help "Deprecated, has no effect: failing assertions are detected both by reverts and by the fail flag that forge-std's fail() and DSTest set")
-  <*> (option auto $ long "smt-timeout"     <> value 300 <> help "Timeout given to SMT solver in seconds. Not available on Windows")
+  <*> (option auto $ long "smt-timeout"     <> value 300 <> help "Timeout given to SMT solver in seconds")
   <*> (option auto $ long "smt-branch-timeout" <> showDefault <> value 20 <> help "Timeout in seconds for the SMT queries that decide which branches to explore, at most --smt-timeout. A branch the solver cannot decide is explored on both sides")
   <*> (option auto $ long "smt-memory"      <> value defMemLimit <> help "Maximum memory limit for SMT solver in MB. Only available on Linux")
   <*> (switch $ long "smt-debug"            <> help "Print smt queries sent to the solver")
   <*> (optional $ strOption $ long "dump-unsolved" <> help "Dump unsolved SMT queries to this (relative) path")
-  <*> (optional $ option auto $ long "num-solvers" <> help "Number of solver instances to use (default: number of cpu cores)")
+  <*> (optional $ option auto $ long "num-solvers" <> help "Number of solver instances to use (default: number of cpu cores, at most half the available memory divided by --smt-memory)")
   <*> (option auto $ long "max-iterations"  <> showDefault <> value 5 <> help "Number of times we may revisit a particular branching point. For no bound, set -1")
   <*> (option auto $ long "max-concrete-iterations" <> showDefault <> value 10000 <> help "Number of times we may revisit a branching point whose condition is concrete, e.g. in a loop over fetched state. Gas is not tracked, so this stops loops that never end. For no bound, set -1")
   <*> (switch $ long "promise-no-reent"     <> help "Promise no reentrancy is possible into the contract(s) being examined")
@@ -225,6 +225,7 @@ data TestOptions = TestOptions
   , match         ::Maybe Text
   , prefix        ::Text
   , ffi           ::Bool
+  , invariantDepth ::Int
   }
 
 testOptions :: Parser TestOptions
@@ -235,6 +236,7 @@ testOptions = TestOptions
   <*> (optional $ strOption $ long "match" <> help "Test case filter - only run methods matching regex")
   <*> (strOption $ long "prefix"  <> showDefault <> value "prove" <> help "Prefix for test cases to prove")
   <*> (switch $ long "ffi" <> help "Allow the usage of the hevm.ffi() cheatcode (WARNING: this allows test authors to execute arbitrary code on your machine)")
+  <*> (option auto $ long "invariant-depth" <> showDefault <> value 2 <> help "Check invariant_ tests in every state reached by at most this many calls to the target contracts")
 
 data EqOptions = EqOptions
   { codeA         ::Maybe ByteString
@@ -364,8 +366,7 @@ main = do
       env <- makeEnv cOpts
       root <- getRoot cOpts
       solver <- getSolver cOpts.solver
-      cores <- liftIO $ unsafeInto <$> getNumProcessors
-      let solverCount = fromMaybe cores cOpts.numSolvers
+      solverCount <- liftIO $ maybe (defaultSolverCount cOpts.smtMemory) pure cOpts.numSolvers
       runEnv env $ withProgress (progressOpts env cOpts) $ serving cOpts $ withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
         buildOut <- readBuildOutput root testOpts.projectType
         case buildOut of
@@ -380,7 +381,7 @@ main = do
                 Left err -> liftIO $ T.putStrLn err >> exitFailure
                 Right vm -> do
                   sess <- liftIO $ setSnapshotInterval cOpts.snapshotEvery <$> newSession unitTestOpts.dapp vm
-                  serveSession (Fetch.oracle solvers (Just unitTestOpts.sess) unitTestOpts.rpcInfo) cOpts.port announce sess
+                  serveSession (Fetch.oracle solvers unitTestOpts.sess unitTestOpts.rpcInfo) cOpts.port announce sess
               liftIO exitSuccess
             res <- unitTest unitTestOpts out
             Progress.stopStatus
@@ -479,11 +480,9 @@ equivalence eqOpts cOpts = do
                           }
   (calldata, _caveats) <- buildCalldata cOpts eqOpts.sig eqOpts.arg
   solver <- liftIO $ getSolver cOpts.solver
-  cores <- liftIO $ unsafeInto <$> getNumProcessors
-  let solverCount = fromMaybe cores cOpts.numSolvers
+  solverCount <- liftIO $ maybe (defaultSolverCount cOpts.smtMemory) pure cOpts.numSolvers
   withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \s -> do
-    sess <- Fetch.mkSession cOpts.cacheDir Nothing
-    eq <- equivalenceCheck s (Just sess) (fromJust bytecodeA) (fromJust bytecodeB) veriOpts calldata eqOpts.create
+    eq <- equivalenceCheck s Nothing (fromJust bytecodeA) (fromJust bytecodeB) veriOpts calldata eqOpts.create
     let anyIssues =  not (null eq.partials) || any (isUnknown . fst) eq.res  || any (isError . fst) eq.res
         cd = fst calldata
     cexes <- replayEqCexes s eqOpts.create (fromJust bytecodeA) (fromJust bytecodeB) cd (mapMaybe getCexP eq.res)
@@ -599,8 +598,7 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = withRpcSession cOpts cExecOpts.rpc c
         exitFailure
       Just codes -> pure codes
   when (cOpts.verb > 0) $ liftIO $ putStrLn $ "Using assertion code(s): " <> intercalate "," (map show errCodes)
-  cores <- liftIO $ unsafeInto <$> getNumProcessors
-  let solverCount = fromMaybe cores cOpts.numSolvers
+  solverCount <- liftIO $ maybe (defaultSolverCount cOpts.smtMemory) pure cOpts.numSolvers
   solver <- liftIO $ getSolver cOpts.solver
   withSolvers solver solverCount (Just cOpts.smtTimeout) cOpts.smtMemory $ \solvers -> do
     let veriOpts = VeriOpts { iterConf = IterConfig {
@@ -611,7 +609,7 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = withRpcSession cOpts cExecOpts.rpc c
                               }
                             , rpcInfo = Fetch.RpcInfo blockUrlInfo
                             }
-    let fetcher = Fetch.oracle solvers (Just sess) veriOpts.rpcInfo
+    let fetcher = Fetch.oracle solvers sess veriOpts.rpcInfo
     when cOpts.interactive $ do
       dapp <- getSrcInfo sOpts.projectType cOpts
       dsess <- liftIO $ setSnapshotInterval cOpts.snapshotEvery <$> newSession dapp preState
@@ -633,7 +631,7 @@ symbCheck cFileOpts sOpts cExecOpts cOpts = withRpcSession cOpts cExecOpts.rpc c
       _ -> do
         let cexs = mapMaybe getCex res
         replays <- forM cexs $ \(leaf, cex) ->
-          replaySymCex (Fetch.oracle solvers (Just sess) veriOpts.rpcInfo) (checkAssertions errCodes) preState leaf cex
+          replaySymCex (Fetch.concreteOracle sess veriOpts.rpcInfo) (checkAssertions errCodes) preState leaf cex
         let counterexamples
               | null cexs = []
               | otherwise =
@@ -687,50 +685,49 @@ launchExec cFileOpts execOpts cExecOpts cOpts = withRpcSession cOpts cExecOpts.r
     blockUrlInfo = (,) block <$> cExecOpts.rpc
     rpcDat :: Fetch.RpcInfo = Fetch.RpcInfo blockUrlInfo
 
-  -- TODO: we shouldn't need solvers to execute this code
-  withSolvers Z3 0 Nothing cOpts.smtMemory $ \solvers -> do
-    let fetcher = Fetch.oracle solvers (Just sess) rpcDat
-    when cOpts.interactive $ do
-      dsess <- liftIO $ setSnapshotInterval cOpts.snapshotEvery <$> newSession dapp vm
-      serveSession fetcher cOpts.port announce dsess
-      liftIO exitSuccess
-    vm' <- if execOpts.jsonTrace
-           then do
-             (vm', (_, traces)) <- runStateT (interpretWithTrace fetcher EVM.Stepper.runFully) (vm, [])
-             liftIO $ do
-               let ret = case vm'.result of
-                           Just (VMSuccess (ConcreteBuf r)) -> ByteStringS r
-                           Just (VMFailure (Revert (ConcreteBuf r))) -> ByteStringS r
-                           _ -> ByteStringS ""
-               let res = VMTraceStepResult ret (vm.state.gas - vm'.state.gas)
-               let jsonl = toLazyByteString $ jsonlBuilder traces <> jsonLine res
-               let file = "hevm-trace.jsonl"
-               BS.writeFile file jsonl
-               putStrLn $ "Wrote json trace to " <> show file
-             pure vm'
-           else EVM.Stepper.interpret fetcher vm EVM.Stepper.runFully
-    writeTraceDapp dapp vm'
-    case vm'.result of
-      Just (VMFailure (Revert msg)) -> liftIO $ do
-        let res = case msg of
-                    ConcreteBuf bs -> bs
-                    _ -> "<symbolic>"
-        putStrLn $ "Revert: " <> (show $ ByteStringS res)
-        exitWith (ExitFailure 2)
-      Just (VMFailure err) -> liftIO $ do
-        putStrLn $ "Error: " <> show err
-        exitWith (ExitFailure 2)
-      Just (VMSuccess buf) -> liftIO $ do
-        let msg = case buf of
-              ConcreteBuf msg' -> msg'
-              _ -> "<symbolic>"
-        print $ "Return: " <> (show $ ByteStringS msg)
-      _ ->
-        internalError "no EVM result"
+  let fetcher = Fetch.concreteOracle sess rpcDat
+  when cOpts.interactive $ do
+    dsess <- liftIO $ setSnapshotInterval cOpts.snapshotEvery <$> newSession dapp vm
+    serveSession fetcher cOpts.port announce dsess
+    liftIO exitSuccess
+  vm' <- if execOpts.jsonTrace
+         then do
+           (vm', (_, traces)) <- runStateT (interpretWithTrace fetcher EVM.Stepper.runFully) (vm, [])
+           liftIO $ do
+             let ret = case vm'.result of
+                         Just (VMSuccess (ConcreteBuf r)) -> ByteStringS r
+                         Just (VMFailure (Revert (ConcreteBuf r))) -> ByteStringS r
+                         _ -> ByteStringS ""
+             let res = VMTraceStepResult ret (vm.state.gas - vm'.state.gas)
+             let jsonl = toLazyByteString $ jsonlBuilder traces <> jsonLine res
+             let file = "hevm-trace.jsonl"
+             BS.writeFile file jsonl
+             putStrLn $ "Wrote json trace to " <> show file
+           pure vm'
+         else EVM.Stepper.interpret fetcher vm EVM.Stepper.runFully
+  writeTraceDapp dapp vm'
+  case vm'.result of
+    Just (VMFailure (Revert msg)) -> liftIO $ do
+      let res = case msg of
+                  ConcreteBuf bs -> bs
+                  _ -> "<symbolic>"
+      putStrLn $ "Revert: " <> (show $ ByteStringS res)
+      exitWith (ExitFailure 2)
+    Just (VMFailure err) -> liftIO $ do
+      putStrLn $ "Error: " <> show err
+      exitWith (ExitFailure 2)
+    Just (VMSuccess buf) -> liftIO $ do
+      let msg = case buf of
+            ConcreteBuf msg' -> msg'
+            _ -> "<symbolic>"
+      print $ "Return: " <> (show $ ByteStringS msg)
+    _ ->
+      internalError "no EVM result"
 
 -- | Creates a (concrete) VM from command line options
-vmFromCommand :: App m => CommonOptions -> CommonExecOptions -> CommonFileOptions -> ExecOptions -> Fetch.Session -> m (VM Concrete)
-vmFromCommand cOpts cExecOpts cFileOpts execOpts sess = do
+vmFromCommand :: App m => CommonOptions -> CommonExecOptions -> CommonFileOptions -> ExecOptions -> Maybe Fetch.Session -> m (VM Concrete)
+vmFromCommand cOpts cExecOpts cFileOpts execOpts preSess = do
+  let sess = fromMaybe (internalError "vmFromCommand: RPC configured without a session") preSess
   conf <- readConfig
   (miner,ts,baseFee,blockNum,prevRan) <- case cExecOpts.rpc of
     Nothing -> pure (LitAddr 0,Lit 0,Lit 0,Lit 0,Lit 0)
@@ -840,9 +837,10 @@ vmFromCommand cOpts cExecOpts cFileOpts execOpts sess = do
         bytes f def = maybe def decipher (f cOpts)
 
 symvmFromCommand :: App m =>
-  CommonExecOptions -> SymbolicOptions -> CommonFileOptions -> Fetch.Session ->
+  CommonExecOptions -> SymbolicOptions -> CommonFileOptions -> Maybe Fetch.Session ->
   (Expr Buf, [Prop]) -> m (VM EVM.Types.Symbolic)
-symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
+symvmFromCommand cExecOpts sOpts cFileOpts preSess calldata = do
+  let sess = fromMaybe (internalError "symvmFromCommand: RPC configured without a session") preSess
   conf <- readConfig
   (miner,blockNum,baseFee,prevRan) <- case cExecOpts.rpc of
     Nothing -> pure (SymAddr "miner",BlockNumber,BaseFee,PrevRandao)
@@ -938,15 +936,16 @@ symvmFromCommand cExecOpts sOpts cFileOpts sess calldata = do
     word64 f def = fromMaybe def (f cExecOpts)
     eaddr f def = maybe def LitAddr (f cExecOpts)
 
-withRpcSession :: App m => CommonOptions -> Maybe URL -> Maybe W256 -> (Fetch.Session -> m a) -> m a
-withRpcSession cOpts url block act = do
+withRpcSession :: App m => CommonOptions -> Maybe URL -> Maybe W256 -> (Maybe Fetch.Session -> m a) -> m a
+withRpcSession _ Nothing _ act = act Nothing
+withRpcSession cOpts url@(Just _) block act = do
   loc <- case cOpts.cacheDir of
     Just d -> pure $ Just (Fetch.CacheDir d)
     Nothing | cOpts.noRpcCache -> pure Nothing
             | otherwise -> liftIO $ Just . Fetch.PerChainUnder <$> getXdgDirectory XdgCache ("hevm" </> "rpc")
-  Fetch.withCachedSession loc url block act
+  Fetch.withCachedSession loc url block (act . Just)
 
-unitTestOptions :: App m => TestOptions -> CommonOptions -> SolverGroup -> Fetch.Session -> Maybe BuildOutput -> m (UnitTestOptions)
+unitTestOptions :: App m => TestOptions -> CommonOptions -> SolverGroup -> Maybe Fetch.Session -> Maybe BuildOutput -> m (UnitTestOptions)
 unitTestOptions testOpts cOpts solvers sess buildOutput = do
   root <- liftIO $ getRoot cOpts
 
@@ -972,13 +971,15 @@ unitTestOptions testOpts cOpts solvers sess buildOutput = do
     , maxConcreteIter = parseMaxIters cOpts.maxConcreteIterations
     , askSmtIters = cOpts.askSmtIterations
     , smtTimeout = Just cOpts.smtTimeout
-    , methodFilter = \(TestMethodInfo _ (Sig name _)) -> testOpts.prefix `T.isPrefixOf` name && maybe True (\match -> regexMatches match name) testOpts.match
+    , methodFilter = \(TestMethodInfo _ (Sig name _)) -> (testOpts.prefix `T.isPrefixOf` name || "invariant_" `T.isPrefixOf` name)
+        && maybe True (\match -> regexMatches match name) testOpts.match
     , testParams = params
     , dapp = srcInfo
     , ffiAllowed = testOpts.ffi
     , checkFailBit = True
     , loopHeuristic = cOpts.loopDetectionHeuristic
     , printOut = Progress.printOut
+    , invariantDepth = testOpts.invariantDepth
     }
 parseInitialStorage :: InitialStorage -> BaseState
 parseInitialStorage Empty = EmptyBase

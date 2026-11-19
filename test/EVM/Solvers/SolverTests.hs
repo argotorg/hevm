@@ -4,6 +4,7 @@ module EVM.Solvers.SolverTests (tests, hangingSolverFlag, hangingSolverMain, ran
 
 import GHC.TypeLits
 import Control.Concurrent (forkIO, threadDelay, ThreadId, myThreadId)
+import GHC.Conc (getNumProcessors)
 import Control.Concurrent.STM (atomically, newTVarIO, readTVarIO, writeTVar)
 import Control.Monad
 import System.Environment (getExecutablePath)
@@ -50,15 +51,22 @@ import EVM.SMT
 import EVM.Solidity
 import EVM.Solvers
 import EVM.SymExec
+import EVM.Equivalence
 import EVM.Types hiding (Env)
 import EVM.Effects
-import EVM.Keccak (concreteKeccaks)
+import EVM.Keccak (concreteKeccaks, keccakAssumptions)
 
 import EVM.Test.Helpers
 
 tests :: [TestTree]
 tests =
-  [ testGroup "SMT-encoding"
+  [ testCase "default-solver-count" $ do
+      cores <- fromIntegral <$> getNumProcessors
+      n <- defaultSolverCount defMemLimit
+      assertBool "at least one, at most one per core" (n >= 1 && n <= cores)
+      huge <- defaultSolverCount (10 ^ (9 :: Int))
+      assertEqual "a limit beyond the memory still leaves one" 1 huge
+  , testGroup "SMT-encoding"
   [ testProperty "collapse-matches-writeByte-within-length" $ \(baseByte, NonNegative sz, ws) ->
       let base = W256 (fromIntegral (sz `mod` 200 :: Int))
           writes = [(W256 (fromIntegral (pos `mod` 300 :: Int)), b) | (NonNegative pos, b) <- take 20 ws]
@@ -133,8 +141,39 @@ tests =
       assertBool ("lemma section missing:\n" <> someLemmas)
         (header `List.isInfixOf` someLemmas)
   ]
+  , testGroup "Keccak assumptions"
+    [ testCase "concrete-hashes-need-no-assumptions" $ do
+        let a = Keccak (ConcreteBuf "first")
+            b = Keccak (ConcreteBuf "second")
+            nested = Keccak (WriteWord (Lit 0) a (ConcreteBuf ""))
+        assertEqual "concrete hashes, including simplified inputs, need no assumptions"
+          [] (keccakAssumptions mempty [a, b, nested])
+    , testGroup "mixed-concrete-symbolic"
+      [ testCase (show solver) $ runEnv (testEnv {config = testEnv.config {simp = False}}) $
+          withSolvers solver 1 (Just 5) defMemLimit $ \s -> do
+            let key = Var "key"
+                symbolic = Keccak (WriteWord (Lit 0) key (ConcreteBuf ""))
+                concrete = Keccak (ConcreteBuf (word256Bytes 7))
+                h = Var "hash"
+                base = [PEq h concrete]
+            res <- checkSatWithProps s (PEq symbolic h : base)
+            case res of
+              Cex cex -> assertEqualM "the concrete preimage remains reachable"
+                (Just 7) (Map.lookup key cex.vars)
+              _ -> liftIO $ assertFailure $ "expected a model, got " <> show res
+            forM_
+              [ ("injectivity", [PEq key (Lit 8), PEq symbolic h])
+              , ("field separation", [PEq key (Lit 8), PEq symbolic (Add h (Lit 1))])
+              , ("congruence", [PEq key (Lit 7), PNeg (PEq symbolic h)])
+              , ("output range", [PEq symbolic (Lit 0)])
+              ] $ \(name, props) -> do
+                result <- checkSatWithProps s (props <> base)
+                assertBoolM (name <> ": expected unsat, got " <> show result) (isQed result)
+      | solver <- [Bitwuzla, Z3]
+      ]
+    ]
   -- the progress log is process-wide, so these must not run concurrently
-  , sequentialTestGroup "progress-log" AllFinish
+  , dependentTestGroup "progress-log" AllFinish
     [ test "progress-log-is-valid-jsonl" $ do
         Just c <- solcRuntime "C" [i|
           contract C {

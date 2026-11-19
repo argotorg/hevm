@@ -105,6 +105,7 @@ library
     EVM.Format,
     EVM.ConsoleLog,
     EVM.Fetch,
+    EVM.Invariant,
     EVM.FeeSchedule,
     EVM.Op,
     EVM.Precompiled,
@@ -113,6 +114,10 @@ library
     EVM.Stepper,
     EVM.Tracing,
     EVM.SymExec,
+    EVM.SymExec.Calldata,
+    EVM.SymExec.Cex,
+    EVM.CexReplay,
+    EVM.Equivalence,
     EVM.Traversals,
     EVM.Traversals.Children,
     EVM.Types.TH,
@@ -264,7 +269,7 @@ common test-base
     hevm,
     mtl,
     process,
-    tasty,
+    tasty >= 1.5.4,
     tasty-hunit,
     text,
     tasty-expected-failure,
@@ -309,6 +314,7 @@ test-suite test
     EVM.Equivalence.EquivFuzz
     EVM.Fetch.MockNode
     EVM.Fetch.RpcFuzz
+    EVM.Fetch.FetchTests
     EVM.Expr.ExprTests
     EVM.Expr.RewriteFuzz
     EVM.Expr.KeccakFuzz
@@ -326,6 +332,7 @@ test-suite test
     EVM.Test.Fuzz.Check
     EVM.Test.Fuzz.Lockstep
     EVM.Test.FoundryTests
+    EVM.Invariant.InvariantTests
     EVM.Test.Asm
     EVM.Debugger.DebuggerTests
     EVM.Debugger.DebuggerFuzz
@@ -338,6 +345,7 @@ test-suite test
     EVM.SymExec.CallTests
     EVM.SymExec.OpcodeTests
     EVM.Solvers.SolverTests
+    EVM.Test.RunLog
   build-depends:
     aeson-pretty,
     base16,

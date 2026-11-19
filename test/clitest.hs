@@ -73,6 +73,13 @@ main = do
         stdout `shouldContain` "exec"
         stdout `shouldContain` "version"
 
+      it "exec-without-rpc" $ do
+        let code = asmHex [OpPush (Lit 0x123456789), OpBalance, OpPush0, OpMstore, OpPush (Lit 32), OpPush0, OpReturn]
+        (exitCode, stdout, stderr) <- readProcessWithExitCode "cabal" ["run", "exe:hevm", "--", "exec", "--code", code] ""
+        exitCode `shouldBe` ExitSuccess
+        stdout `shouldContain` ("Return: 0x" <> replicate 64 '0')
+        stderr `shouldNotContain` "CallStack"
+
       it "hevm symbolic tutorial works -- FAIL" $ do
         Just symbBin <- runApp $ solcRuntime (T.pack "MyContract") (T.pack [i|
           contract MyContract {
@@ -245,9 +252,7 @@ main = do
         stdout `shouldContain` "[validated]"
         stdout `shouldContain` "assertion failed: 2994 > 2000"
       it "dump unsolved" $ do
-        -- z3, as bitwuzla solves this within the timeout
-        -- >>> (139487132679483*2347234698674) % 982374892374389278894734
-        -- 278198683154907855159120
+        -- Force an unknown result without depending on solver speed.
         Just c <- runApp $ solcRuntime (T.pack "C") (T.pack [i|
            contract C {
              function stuff(uint a, uint b) public returns (uint) {
@@ -261,7 +266,9 @@ main = do
            }
           |])
         let hexStr = Types.bsToHex c
-        _ <- readProcessWithExitCode "cabal" ["run", "exe:hevm", "--", "symbolic", "--code", hexStr, "--solver", "z3", "--smt-timeout", "1", "--dump-unsolved", "."] ""
+        (_, stdout, stderr) <- readProcessWithExitCode "cabal" ["run", "exe:hevm", "--", "symbolic", "--code", hexStr, "--solver", "empty", "--dump-unsolved", "."] ""
+        stderr `shouldNotContain` "CallStack"
+        stdout `shouldContain` "SMT solver says: Result unknown by SMT solver"
         let filename = "query-unsolved-0.smt2"
         fileExists <- doesFileExist filename
         shouldBe fileExists True

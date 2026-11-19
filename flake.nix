@@ -34,8 +34,10 @@
       let
         pkgs = (import nixpkgs {
           inherit system;
-          overlays = [solc-pkgs.overlay];
-          config = { allowBroken = true; };
+          overlays = [
+            foundry.overlay
+            solc-pkgs.overlay
+          ];
         });
         execution-spec-tests-fixtures = pkgs.stdenv.mkDerivation {
           name = "execution-spec-tests-fixtures";
@@ -52,9 +54,14 @@
           '';
         };
         solc = (solc-pkgs.mkDefault pkgs pkgs.solc_0_8_31);
+        foundry-bin = pkgs.foundry-bin.overrideAttrs (old: {
+          # Foundry's ARM64 Linux binaries depend on libudev.
+          buildInputs = (old.buildInputs or [])
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.udev ];
+        });
         testDeps = [
           solc
-          foundry.defaultPackage.${system}
+          foundry-bin
           pkgs.go-ethereum
           pkgs.z3
           pkgs.cvc5
@@ -66,17 +73,7 @@
           configureFlags = attrs.configureFlags ++ [ "--enable-static" ];
         }));
 
-        hspkgs = ps :
-          ps.haskellPackages.override {
-            overrides = hfinal: hprev: {
-              with-utf8 =
-                if (with ps.stdenv; hostPlatform.isDarwin && hostPlatform.isx86)
-                then ps.haskell.lib.compose.overrideCabal (_ : { extraLibraries = [ps.libiconv]; }) hprev.with-utf8
-                else hprev.with-utf8;
-              # TODO: temporary fix for static build which is still on 9.4
-              witch = ps.haskell.lib.doJailbreak hprev.witch;
-            };
-          };
+        hspkgs = ps: ps.haskell.packages.ghc912;
         hlib = pkgs.haskell.lib;
 
         # base hevm derivation.
@@ -101,17 +98,18 @@
 
         # "static" binary for distribution
         # on linux this is actually a real fully static binary
-        # on macos this has everything except libcxx, libsystem and libiconv
-        # statically linked. we can be confident that these three will always
-        # be provided in a well known location by macos itself.
+        # on macos only system libraries and frameworks remain dynamically
+        # linked, so the binary does not require a Nix installation.
         hevmRedistributable = let
           grep = "${pkgs.gnugrep}/bin/grep";
           otool = "${pkgs.darwin.binutils.bintools}/bin/otool";
           install_name_tool = "${pkgs.darwin.binutils.bintools}/bin/install_name_tool";
           codesign_allocate = "${pkgs.darwin.binutils.bintools}/bin/codesign_allocate";
           codesign = "${pkgs.darwin.sigtool}/bin/codesign";
-        in if pkgs.stdenv.isLinux
-        then hlib.dontCheck (hevmBase pkgs.pkgsStatic)
+        in if pkgs.stdenv.hostPlatform.isLinux
+        # The release executable does not use profiling libraries. Building
+        # hevm's profiling library can crash the musl external interpreter.
+        then hlib.disableLibraryProfiling (hlib.dontCheck (hevmBase pkgs.pkgsStatic))
         else pkgs.runCommand "stripNixRefs" {} ''
           mkdir -p $out/bin
           cp ${hlib.dontCheck (forceStaticDepsMacos (hevmBase pkgs))}/bin/hevm $out/bin/
@@ -119,16 +117,18 @@
           # get the list of dynamic libs from otool and tidy the output
           libs=$(${otool} -L $out/bin/hevm | tail -n +2 | sed 's/^[[:space:]]*//' | cut -d' ' -f1)
 
-          # get the paths for libcxx and libiconv
-          cxx=$(echo "$libs" | ${grep} '^/nix/store/.*/libc++\.')
-          cxxabi=$(echo "$libs" | ${grep} '^/nix/store/.*/libc++abi\.')
-          iconv=$(echo "$libs" | ${grep} '^/nix/store/.*/libiconv\.')
-
-          # rewrite /nix/... library paths to point to /usr/lib
+          # Some toolchains already link against the system C++ libraries.
+          # Rewrite only the libraries that still point into the Nix store.
           chmod 777 $out/bin/hevm
-          ${install_name_tool} -change "$cxx" /usr/lib/libc++.1.dylib $out/bin/hevm
-          ${install_name_tool} -change "$cxxabi" /usr/lib/libc++abi.dylib $out/bin/hevm
-          ${install_name_tool} -change "$iconv" /usr/lib/libiconv.dylib $out/bin/hevm
+          for lib in $libs; do
+            case "$lib" in
+              /nix/store/*/libc++.*) target=/usr/lib/libc++.1.dylib ;;
+              /nix/store/*/libc++abi.*) target=/usr/lib/libc++abi.dylib ;;
+              /nix/store/*/libiconv.*) target=/usr/lib/libiconv.dylib ;;
+              *) continue ;;
+            esac
+            ${install_name_tool} -change "$lib" "$target" $out/bin/hevm
+          done
           # check that no nix deps remain
           nixdeps=$(${otool} -L $out/bin/hevm | tail -n +2 | { ${grep} /nix/store -c || test $? = 1; })
           if [ ! "$nixdeps" = "0" ]; then
@@ -229,7 +229,7 @@
 
           # point cabal repl to system deps
           LD_LIBRARY_PATH = libraryPath;
-          shellHook = pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
+          shellHook = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
             export DYLD_LIBRARY_PATH="${libraryPath}";
           '';
         };

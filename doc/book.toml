@@ -4,7 +4,6 @@ command = "mdbook-mermaid"
 [book]
 authors = ["dxo", "msoos"]
 language = "en"
-multilingual = false
 src = "src"
 title = "hevm"
 
@@ -16,7 +15,7 @@ additional-css = ["book.css"]
 git-repository-url = "https://github.com/argotorg/hevm"
 edit-url-template = "hhttps://github.com/argotorg/hevm/edit/main/{path}"
 
-git-repository-icon = "fa-github"
+git-repository-icon = "fab-github"
 
 [output.html.fold]
 enable = true

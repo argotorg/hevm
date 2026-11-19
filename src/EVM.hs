@@ -37,6 +37,7 @@ import Data.Bits (FiniteBits, countLeadingZeros, finiteBitSize)
 import Data.ByteArray qualified as BA
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.ByteString.Unsafe qualified as BS.Unsafe
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Base16 qualified as BS16
 import Data.ByteString.Lazy (fromStrict)
@@ -1671,8 +1672,9 @@ accountEmpty :: Contract -> Bool
 accountEmpty c =
   codeEmpty c
   && c.nonce == (Just 0)
-  -- TODO: handle symbolic balance...
-  && c.balance == Lit 0
+  -- a symbolic balance that simplifies to 0, e.g. after transferring x & 0, is 0 too;
+  -- EXTCODEHASH handles one that stays symbolic
+  && maybeLitWordSimp c.balance == Just 0
 
 codeEmpty :: Contract -> Bool
 codeEmpty c = case c.code of
@@ -2005,6 +2007,13 @@ forceConcreteAddr n msg continue = case maybeLitAddrSimp n of
   Just c -> continue c
   where fallback = unexpectedSymArg msg [n]
 
+-- | A symbolic prank address (e.g. picked from an actor list by a symbolic index)
+-- is split into one branch per possible concrete value
+prankAddr :: (?conf :: Config, VMOps t) => Expr EWord -> String -> (Expr EAddr -> EVM t ()) -> EVM t ()
+prankAddr addr msg continue = case wordToAddr addr of
+  Just a -> continue a
+  Nothing -> forceConcreteLimitSz addr 20 msg (continue . LitAddr . truncateToAddr)
+
 forceConcreteAddr2 :: VMOps t => (Expr EAddr, Expr EAddr) -> String -> ((Addr, Addr) -> EVM t ()) -> EVM t ()
 forceConcreteAddr2 (n,m) msg continue = case (maybeLitAddrSimp n, maybeLitAddrSimp m) of
   (Just c, Just d) -> continue (c,d)
@@ -2212,22 +2221,18 @@ cheatActions = Map.fromList
 
   , action "prank(address)" $
       \sig input -> case decodeStaticArgs 0 1 input of
-        [addr]  -> case wordToAddr addr of
-          Just a -> do
-            doStop
-            assign (#state % #overrideCaller) (Just a)
-            assign (#state % #resetCaller) True
-          Nothing -> vmError (BadCheatCode "prank(address), could not decode address provided" sig)
+        [addr]  -> prankAddr addr "prank(address), could not decode address provided" $ \a -> do
+          doStop
+          assign (#state % #overrideCaller) (Just a)
+          assign (#state % #resetCaller) True
         _ -> vmError (BadCheatCode "prank(address) parameter decoding failed" sig)
 
   , action "startPrank(address)" $
       \sig input -> case decodeStaticArgs 0 1 input of
-        [addr]  -> case wordToAddr addr of
-          Just a -> do
-            doStop
-            assign (#state % #overrideCaller) (Just a)
-            assign (#state % #resetCaller) False
-          Nothing -> vmError (BadCheatCode "startPrank(address), could not decode address provided" sig)
+        [addr]  -> prankAddr addr "startPrank(address), could not decode address provided" $ \a -> do
+          doStop
+          assign (#state % #overrideCaller) (Just a)
+          assign (#state % #resetCaller) False
         _ -> vmError (BadCheatCode "startPrank(address) parameter decoding failed" sig)
 
   , action "stopPrank()" $
@@ -2932,8 +2937,13 @@ create' :: forall t. (?op :: Word8, ?conf::Config, VMOps t)
   -> Expr EWord -> Gas t -> Expr EWord -> [Expr EWord] -> Expr EAddr -> Expr Buf -> EVM t ()
 create' self this xSize xGas xValue xs newAddr initCode = do
   vm0 <- get
-  -- are we exceeding the max init code size
-  if xSize > Lit (vm0.block.maxCodeSize * 2)
+  -- are we exceeding the max init code size. Compared as a number: the derived Ord on
+  -- Expr is structural, and would take every symbolic size, e.g. end - start of a
+  -- buffer after a symbolic-length allocation, for an oversized one.
+  let litSize = Expr.maybeLitWordSimp xSize
+  if isNothing litSize
+  then unexpectedSymArg "init code size that does not simplify to a literal" [xSize]
+  else if litSize > Just (vm0.block.maxCodeSize * 2)
   then do
     assign' (#state % #stack) (Lit 0 : xs)
     assign (#state % #returndata) mempty
@@ -3637,26 +3647,8 @@ opSize _                          = 1
 -- entries are per operation, not per byte.
 mkOpIxMap :: ContractCode -> VS.Vector Int
 mkOpIxMap (UnknownCode _) = internalError "Cannot build opIxMap for unknown code"
-mkOpIxMap (InitCode conc _)
-  = VS.create $ VS.Mutable.new (BS.length conc) >>= \v ->
-      -- Loop over the byte string accumulating a vector-mutating action.
-      -- This is somewhat obfuscated, but should be fast.
-      let (_, _, _, m) = BS.foldl' (go v) (0 :: Word8, 0, 0, pure ()) conc
-      in m >> pure v
-      where
-        -- concrete case
-        go v (0, !i, !j, !m) x | x >= 0x60 && x <= 0x7f =
-          {- Start of PUSH op. -} (x - 0x60 + 1, i + 1, j,     m >> VS.Mutable.write v i j)
-        go v (1, !i, !j, !m) _ =
-          {- End of PUSH op. -}   (0,            i + 1, j + 1, m >> VS.Mutable.write v i j)
-        go v (0, !i, !j, !m) _ =
-          {- Other op. -}         (0,            i + 1, j + 1, m >> VS.Mutable.write v i j)
-        go v (n, !i, !j, !m) _ =
-          {- PUSH data. -}        (n - 1,        i + 1, j,     m >> VS.Mutable.write v i j)
-
-mkOpIxMap (RuntimeCode (ConcreteRuntimeCode ops)) =
-  mkOpIxMap (InitCode ops mempty) -- a bit hacky
-
+mkOpIxMap (InitCode conc _) = mkConcreteOpIxMap conc
+mkOpIxMap (RuntimeCode (ConcreteRuntimeCode ops)) = mkConcreteOpIxMap ops
 mkOpIxMap (RuntimeCode (SymbolicRuntimeCode ops))
   = VS.create $ VS.Mutable.new (length ops) >>= \v ->
       let (_, _, _, m) = foldl' (go v) (0, 0, 0, pure ()) (stripBytecodeMetadataSym $ V.toList ops)
@@ -3674,6 +3666,30 @@ mkOpIxMap (RuntimeCode (SymbolicRuntimeCode ops))
           {- End of PUSH op. -}   (0,            i + 1, j + 1, m >> VS.Mutable.write v i j)
         go v (n, !i, !j, !m) _ =
           {- PUSH data. -}        (n - 1,        i + 1, j,     m >> VS.Mutable.write v i j)
+
+mkConcreteOpIxMap :: ByteString -> VS.Vector Int
+mkConcreteOpIxMap bs = VS.create $ do
+  let !len = BS.length bs
+  v <- VS.Mutable.new len
+  let go !pushBytesLeft !i !j
+        | i >= len = pure ()
+        | otherwise = do
+            -- Both buffers have length len, and 0 <= i < len here.
+            let x = BS.Unsafe.unsafeIndex bs i
+            VS.Mutable.unsafeWrite v i j
+            case pushBytesLeft of
+              -- Start of PUSH: its payload shares the current operation index.
+              0 | x >= 0x60 && x <= 0x7f ->
+                    go (x - 0x60 + 1) (i + 1) j
+                -- Other opcode, including PUSH0: the next byte starts a new op.
+                | otherwise ->
+                    go 0 (i + 1) (j + 1)
+              -- Last PUSH payload byte: the next byte starts a new operation.
+              1 -> go 0 (i + 1) (j + 1)
+              -- More PUSH payload remains: keep the same operation index.
+              n -> go (n - 1 :: Word8) (i + 1) j
+  go 0 0 0
+  pure v
 
 
 vmOpIx :: VM t -> Maybe Int
@@ -3850,8 +3866,8 @@ log2 x = finiteBitSize x - 1 - countLeadingZeros x
 writeMemory :: MutableMemory -> Int -> ByteString -> EVM t ()
 writeMemory memory offset buf = do
   memory' <- expandMemory (offset + BS.length buf)
-  VS.iforM_ (byteStringToVector buf) $ \i v -> do
-    VS.Mutable.unsafeWrite memory' (offset + i) v
+  -- Memory snapshots use 'freeze', so the immutable source cannot alias memory'.
+  VS.copy (VS.Mutable.slice offset (BS.length buf) memory') (byteStringToVector buf)
   where
   expandMemory requiredSize = do
     let currentSize = VS.Mutable.length memory

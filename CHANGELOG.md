@@ -10,6 +10,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Added
 - Arithmetic abstraction now handles `MULMOD`, with exact 512-bit refinement,
   and adds cancellation, div/mod identity and multiplication/division round-trip lemmas.
+- `test/scripts/fuzz-coverage.sh` reports which source lines a fuzz run never
+  reaches, using HPC.
+- `test` takes `--run-log FILE`, appending a line when each test starts and ends,
+  and `--yul-verbosity N`. Tests time out after 10 minutes by default.
+- The progress log gives the source location of forks and of the locations in
+  its summaries, when there is debug info.
+- Exponentiation over conditional constants folds to conditional powers, allowing
+  packed-array writes with a conditionally selected index to reach the SMT solver.
+- Invariant testing: `hevm test` checks `invariant_` functions after every
+  sequence of at most `--invariant-depth` calls to the target contracts, with
+  symbolic arguments, callers and timestamps. States reached before are not
+  explored again. Assertion failures in the calls fail the test, and minimal
+  proxies (EIP-1167 clones) can be targets.
 - A worked example in the docs: finding the Abracadabra `cook()` exploit on a mainnet fork.
 - `--smt-branch-timeout`, 20 seconds by default, for the queries that decide which
   branches to explore.
@@ -125,6 +138,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes of zero.
 
 ## Changed
+- The default number of solvers is at most half of the available memory divided
+  by `--smt-memory`, so that the solvers running at once fit in memory.
+- Invariant tests print the paths they only partially explored grouped by
+  source location, as `prove` tests do, instead of printing their expressions.
+- Concrete ADDMOD and MULMOD are computed with `Integer` instead of `Word512`,
+  which is several times faster in code that uses them heavily, such as `mulDiv`.
+- `EVM.SymExec` is split: concrete replay of counterexamples moves to
+  `EVM.CexReplay`, and equivalence checking to `EVM.Equivalence`. Symbolic
+  calldata (`EVM.SymExec.Calldata`) and counterexample models and printing
+  (`EVM.SymExec.Cex`) are re-exported by `EVM.SymExec`.
 - A storage read blocked by a write to a symbolic slot drops the writes below it that
   cannot alias the slot read, or are overwritten by a later write to the same slot.
 - `hevm test` and `hevm symbolic` stop at the first counterexample, cancelling the
@@ -186,6 +209,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of simplifying an ITE of them.
 
 ## Fixed
+- An account whose balance is a term equal to 0, e.g. after a transfer of `x & 0`,
+  counted as non-empty, so `EXTCODEHASH` gave the hash of the empty code instead
+  of 0, and the account was not cleared at the end of the transaction.
+- `CREATE` and `CREATE2` compared a symbolic init code size with the maximum
+  structurally, so every symbolic size failed as too large and the path was
+  dropped. The size is now simplified and compared as a number, and one that stays
+  symbolic ends the path as partial.
+- Source locations are right after an incremental `forge build`, whose
+  build-infos number the source files independently.
+- `prank` and `startPrank` with a symbolic address, e.g. one picked from a list
+  by a symbolic index, explore each possible address instead of failing.
+- ABI signatures expand tuple components, fixing selectors and event topics for
+  struct arguments and preventing struct overloads from being lost.
+- SMT queries skip assumptions between concrete keccak hashes, whose values
+  are already known, avoiding unnecessary quadratic growth.
 - Constant propagation checks disequalities and disjunctions against the
   constants of all path conditions, not only of those before them. The debugger
   no longer offers an infeasible branch side when the solver cannot encode the

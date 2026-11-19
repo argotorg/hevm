@@ -38,6 +38,7 @@ import EVM.Op (intToOpName)
 import EVM.Solvers
 import EVM.Stepper qualified as Stepper
 import EVM.SymExec
+import EVM.CexReplay
 import EVM.Transaction qualified
 import EVM.Types hiding (Env)
 import EVM.Effects
@@ -91,6 +92,9 @@ mkVm fetching gas c i = do
                 & set #balance (Lit b) & set #nonce (Just (unsafeInto n))
                 & set #storage (ConcreteStore st) & set #origStorage (ConcreteStore st))
             | (a, b, n, st) <- extraAccounts ]
+          <> [ (LitAddr a, initialContract (RuntimeCode (ConcreteRuntimeCode code))
+                & set #nonce (Just 1))
+             | (a, code) <- requestQueues ]
     , calldata = (i.calldata, [])
     , value = i.callvalue
     , address = LitAddr contractAddr

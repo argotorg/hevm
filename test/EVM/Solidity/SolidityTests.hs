@@ -2,6 +2,7 @@
 
 module EVM.Solidity.SolidityTests (tests) where
 
+import Control.Monad (forM_)
 import Control.Monad.ST (stToIO)
 import Control.Monad.State.Strict
 import Control.Monad.Reader (ReaderT)
@@ -14,6 +15,7 @@ import Data.Maybe
 import Data.String.Here
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding (encodeUtf8)
 import Data.Tuple.Extra
 import Data.Vector qualified as V
 import Test.Tasty
@@ -403,6 +405,22 @@ tests =
         assertBoolM "bounded dyn arg must produce a caveat" $ not (null caveats)
         let numCexes = sum $ map (fromEnum . isCex) ret
         assertEqualM "should find counterexample" 1 numCexes
+    -- a CREATE whose init code sits at a symbolic offset used to fail as oversized, dropping the path
+    , test "create-after-symbolic-alloc" $ do
+        Just c <- solcRuntime "C" [i|
+            contract D {}
+            contract C {
+              function fun(uint8 n) public {
+                uint256[] memory m = new uint256[](n);
+                m;
+                D d = new D();
+                d;
+                assert(false);
+              }
+            } |]
+        let sig = Just $ Sig "fun(uint8)" [AbiUIntType 8]
+        (e, ret) <- withDefaultSolver $ \s -> checkAssert s defaultPanicCodes c sig [] defaultVeriOpts
+        assertBoolM "the CREATE path must be reported, not dropped" $ any isPartial e || any isCex ret
     -- Tests that bugs beyond maxDynSize are reported via a caveat, not as false passes
     , test "bytes-beyond-bound-length-check" $ do
         -- Bug only triggers when bytes.length > 100; with default maxDynSize=64, should NOT find cex
@@ -634,6 +652,59 @@ tests =
           let exprSimp = map Expr.simplify paths
           assertBoolM "expected partial execution" (any isPartial exprSimp)
     ]
+  , testGroup "ABI signatures"
+    [ test "struct-overloads" $ do
+        Right (Contracts contracts) <- readStdJSON <$> liftIO (solc Solidity [i|
+          contract C {
+            struct A { uint256 value; }
+            struct B { address owner; }
+            function f(A calldata a) external pure returns (uint256) { return a.value; }
+            function f(B calldata b) external pure returns (uint256) { return uint160(b.owner); }
+          }
+        |] False)
+        let c = contracts Map.! "hevm.sol:C"
+            sigs = ["f((uint256))", "f((address))"]
+        assertEqualM "both overloads retain their canonical selectors"
+          (Map.fromList [(abiKeccak (encodeUtf8 sig), sig) | sig <- sigs])
+          (Map.map (.methodSignature) c.abiMap)
+        forM_ (Map.elems c.abiMap) $ \method -> do
+          result <- runSimpleVM c.creationCode (abiMethod method.methodSignature (AbiUInt 256 42))
+          assertEqualM "the ABI selector calls the intended function"
+            (Just (encodeAbiValue (AbiUInt 256 42))) result
+    , test "nested-struct-arrays" $ do
+        Right (Contracts contracts) <- readStdJSON <$> liftIO (solc Solidity [i|
+          contract C {
+            struct Item { uint256 value; }
+            struct Nested { Item[][2] items; address owner; }
+            event Seen(Nested item);
+            error Bad(Nested item);
+            function f(Nested[2][] calldata) external pure {}
+          }
+        |] False)
+        let c = contracts Map.! "hevm.sol:C"
+            sig = "f(((uint256)[][2],address)[2][])"
+        assertEqualM "nested tuples preserve array dimensions"
+          (Map.singleton (abiKeccak (encodeUtf8 sig)) sig)
+          (Map.map (.methodSignature) c.abiMap)
+        assertEqualM "event topic uses tuple components"
+          [keccak' (encodeUtf8 "Seen(((uint256)[][2],address))")]
+          (Map.keys c.eventMap)
+        assertEqualM "error selector uses tuple components"
+          [fromIntegral (abiKeccak (encodeUtf8 "Bad(((uint256)[][2],address))")).unFunctionSelector]
+          (Map.keys c.errorMap)
+    , test "library-enum-name" $ do
+        Right (Contracts contracts) <- readStdJSON <$> liftIO (solc Solidity [i|
+          library L {
+            enum Choice { A, B }
+            function choose(Choice c) external pure returns (uint256) { return uint256(c); }
+          }
+        |] False)
+        let c = contracts Map.! "hevm.sol:L"
+            sig = "choose(L.Choice)"
+        assertEqualM "library enum names are preserved in selectors"
+          (Map.singleton (abiKeccak (encodeUtf8 sig)) sig)
+          (Map.map (.methodSignature) c.abiMap)
+    ]
   , testGroup "Unresolved link detection"
     [ testCase "holes-detected" $
         assertBool "linker hole not detected" (containsLinkerHole "608060405273__$f3cbc3eb14e5bd0705af404abcf6f741ec$__63ab5c1ffe")
@@ -683,7 +754,7 @@ runSimpleVM x ins = do
     Just vm -> do
      let calldata = (ConcreteBuf ins)
          vm' = set (#state % #calldata) calldata vm
-     res <- Stepper.interpret (Fetch.zero 0 Nothing 1024) vm' Stepper.execFully
+     res <- Stepper.interpret Fetch.noRpcConcreteFetcher vm' Stepper.execFully
      case res of
        Right (ConcreteBuf bs) -> pure $ Just bs
        s -> internalError $ show s

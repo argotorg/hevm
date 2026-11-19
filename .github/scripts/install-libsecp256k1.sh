@@ -3,7 +3,7 @@ set -eux -o pipefail
 
 ## The following script builds and installs libsecp256k1 to ~/.local/lib
 
-INSTALL_VERSION=0.6.0
+INSTALL_VERSION=0.8.0
 
 if [[ "$(uname -s)" =~ ^MSYS_NT.* ]]; then
     echo "This script is only meant to run on Windows under MSYS2"
