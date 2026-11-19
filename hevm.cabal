@@ -284,6 +284,8 @@ common test-base
 library test-utils
   import: test-base
   default-language: GHC2021
+  hs-source-dirs:
+    test/utils
   exposed-modules:
     EVM.Test.Utils
     EVM.Test.BlockchainTests
@@ -296,9 +298,6 @@ common test-common
   build-depends:
     test-utils,
     vector,
-  other-modules:
-    EVM.Test.Utils
-    EVM.Test.BlockchainTests
 
 --- Test Suites ---
 
