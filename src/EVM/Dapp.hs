@@ -7,7 +7,6 @@ import EVM.Types
 import EVM.Expr (maybeLitByteSimp, maybeLitWordSimp)
 
 import Control.Arrow ((>>>), second)
-import Data.Aeson (Value)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.List (find, sort)
@@ -30,8 +29,6 @@ data DappInfo = DappInfo
   , abiMap     :: Map FunctionSelector Method
   , eventMap   :: Map W256 Event
   , errorMap   :: Map W256 SolError
-  , astIdMap   :: Map Int Value
-  , astSrcMap  :: SrcMap -> Maybe Value
   }
 
 -- | bytecode modulo immutables, to identify contracts
@@ -58,7 +55,6 @@ dappInfo :: FilePath -> BuildOutput -> DappInfo
 dappInfo root (BuildOutput (Contracts cs) sources) =
   let
     solcs = Map.elems cs
-    astIds = astIdMap $ snd <$> Map.toList sources.asts
     immutables = filter ((/=) mempty . (.immutableReferences)) solcs
 
   in DappInfo
@@ -79,9 +75,6 @@ dappInfo root (BuildOutput (Contracts cs) sources) =
     , abiMap   = mconcat (map (.abiMap) solcs)
     , eventMap = mconcat (map (.eventMap) solcs)
     , errorMap = mconcat (map (.errorMap) solcs)
-
-    , astIdMap  = astIds
-    , astSrcMap = astSrcMap astIds
     }
 
 emptyDapp :: DappInfo

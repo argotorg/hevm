@@ -25,6 +25,8 @@ module EVM.HashCons
   , setHashConsLimit
   , memoFixTraverse
   , memoMapExpr
+  , AnyExpr(..)
+  , nodeId
   , Seen
   , newSeen
   , firstVisit
@@ -345,6 +347,12 @@ memoFixTraverse pass root = unsafePerformIO (goM root)
 {-# NOINLINE memoFixTraverse #-}
 
 data AnyExpr = forall x. AnyExpr (Expr x)
+
+-- | The id of a canonical node. Ids only grow, so a node keeps its id, or loses it when
+-- the tables are reset: a memo keyed by it misses then, but is never wrong.
+nodeId :: Expr a -> Maybe Int
+nodeId e = unsafePerformIO (lookupSN e)
+{-# NOINLINE nodeId #-}
 
 -- | 'mapExpr' of an arbitrary function, applying it once per canonical node in this call:
 -- walking a hash-consed DAG as a tree is exponential in the depth of its sharing,

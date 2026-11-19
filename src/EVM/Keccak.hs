@@ -117,7 +117,7 @@ concreteKeccaks ps = direct <> Set.map (\(pre, h) -> (ConcreteBuf (toBytes pre),
   direct = foldMap concreteKeccakValues ps
   known = Map.fromList [(h, fromBytes bs) | (ConcreteBuf bs, h) <- Set.toList direct]
   recovered = recoverSlots (Set.filter (>= 256) slots) bigKeys known
-  (slots, keys) = foldMap (foldProp literals mempty) ps
+  (slots, keys) = foldMap (foldPropOnce literals mempty) ps
   bigKeys = Set.toList $ Set.filter (> 255) keys
   literals :: forall a. Expr a -> (Set W256, Set W256)
   literals = \case
@@ -131,7 +131,7 @@ concreteKeccaks ps = direct <> Set.map (\(pre, h) -> (ConcreteBuf (toBytes pre),
 
 -- | Concrete hashes present in a term, without recovering preimages of literals.
 concreteKeccakValues :: TraversableTerm a => a -> Set KeccakValue
-concreteKeccakValues = foldTerm compute Set.empty
+concreteKeccakValues = foldTermOnce compute Set.empty
   where
   compute :: forall a. Expr a -> Set KeccakValue
   compute = \case
