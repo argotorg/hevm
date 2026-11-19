@@ -15,7 +15,12 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@f69a2d3e148e90223fe63ab6e3f6331f2e7e33dc # main
 
       - name: build docs
-        run: nix develop --ignore-environment --command sh -c "cd doc && mdbook build"
+        shell: nix develop --ignore-environment --command sh -e {0}
+        run: |
+          cd doc
+          yarn install --frozen-lockfile
+          yarn build
+          mdbook build
 
       - name: publish docs
         uses: JamesIves/github-pages-deploy-action@ec9c88baef04b842ca6f0a132fd61c762aa6c1b0 # v4.6.0
