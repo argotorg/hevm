@@ -113,6 +113,25 @@ describe.skipIf(!ready)("website in Chromium", () => {
       expect(bg).toBe(want);
     });
 
+    it("draws the cursor in the accent colour, visible in dark mode too", async () => {
+      await page.emulateMedia({ colorScheme: "dark" });
+      await page.click('.tabs [data-tab="sol"]');
+      await page.click("#source .cm-line >> nth=3");
+      const cursor = await page.waitForSelector("#source .cm-cursor-primary");
+      const [color, width] = await cursor.evaluate((e) => [getComputedStyle(e).borderLeftColor, getComputedStyle(e).borderLeftWidth]);
+      const want = await page.evaluate(() => {
+        const probe = document.createElement("div");
+        probe.style.color = "var(--accent)";
+        document.body.append(probe);
+        const c = getComputedStyle(probe).color;
+        probe.remove();
+        return c;
+      });
+      await page.emulateMedia({ colorScheme: null });
+      expect(color).toBe(want);
+      expect(width).toBe("2px");
+    });
+
     it("shows compile errors at their place", async () => {
       const cards = await prove("Find x, prove a bound", "pragma solidity ^0.8.0;\ncontract C { function f() public { x = 1; } }\n");
       expect(await cards.first().textContent()).toContain("Undeclared identifier");

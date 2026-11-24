@@ -8,10 +8,12 @@ import { EditorView, basicSetup } from "codemirror";
 
 const setFailing = StateEffect.define<number[]>();
 
-// CodeMirror's default selection is a fixed light purple, unreadable under light text
-const selection = EditorView.theme({
+// CodeMirror's defaults are for light pages: a fixed light purple selection, unreadable
+// under light text, and a thin black cursor, invisible on a dark background
+const colors = EditorView.theme({
   "&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection":
     { backgroundColor: "var(--selection)" },
+  ".cm-cursor, .cm-dropCursor": { borderLeft: "2px solid var(--accent)" },
 });
 
 // lines where a counterexample fails, until the source changes
@@ -36,7 +38,7 @@ export class SolidityEditor {
     this.view = new EditorView({
       parent,
       doc,
-      extensions: [basicSetup, keymap.of([indentWithTab]), solidity, syntaxHighlighting(classHighlighter), failing, selection],
+      extensions: [basicSetup, keymap.of([indentWithTab]), solidity, syntaxHighlighting(classHighlighter), failing, colors],
     });
   }
 
