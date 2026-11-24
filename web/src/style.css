@@ -155,8 +155,18 @@ body[data-tab="debug"] details {
 
 .actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 1rem;
+  gap: 0.6rem 1rem;
+}
+
+/* on a line of its own, below the buttons */
+.actions .status {
+  flex-basis: 100%;
+}
+
+.actions .status:empty {
+  display: none;
 }
 
 button {
@@ -399,6 +409,8 @@ code,
   font-size: 0.95rem;
   font-family: var(--mono);
   font-weight: 600;
+  /* a function's signature has no spaces to break at */
+  overflow-wrap: anywhere;
 }
 
 .badge {

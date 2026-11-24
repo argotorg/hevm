@@ -362,6 +362,22 @@ describe.skipIf(!ready)("website in Chromium", () => {
       await p.close();
     });
 
+    it("fits a phone, with what Prove found below its buttons", async () => {
+      const p = await offline();
+      await p.setViewportSize({ width: 390, height: 844 });
+      await p.goto(server.resolvedUrls!.local[0]!);
+      await p.click('.tabs [data-tab="sourcify"]');
+      await p.click("#sf-load");
+      await p.waitForSelector("#file-select:not([hidden])");
+      await proved(p);
+      const [scroll, width] = await p.evaluate(() => [document.documentElement.scrollWidth, window.innerWidth]);
+      expect(scroll).toBeLessThanOrEqual(width);
+      const prove = (await p.locator("#prove").boundingBox())!;
+      const status = (await p.locator("#sf-status").boundingBox())!;
+      expect(status.y).toBeGreaterThanOrEqual(prove.y + prove.height);
+      await p.close();
+    });
+
     it("gives any other contract a starter test", async () => {
       const p = await offline();
       await p.goto(server.resolvedUrls!.local[0]!);
