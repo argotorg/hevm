@@ -7,6 +7,7 @@ module EVM.Debugger.Server
   , withProgressServer
   , announce
   , defaultDebuggerPort
+  , webRequest
   ) where
 
 import Control.Concurrent (forkIO, killThread)
@@ -26,6 +27,8 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8With, encodeUtf8)
 import Data.Text.Encoding.Error (lenientDecode)
+import Data.IORef
+import System.IO.Unsafe (unsafePerformIO)
 #if !defined(wasm32_HOST_ARCH)
 import Network.Socket
 import Network.Socket.ByteString (recv, sendAll)
@@ -83,9 +86,27 @@ withProgressServer port onListen act = withRunInIO $ \runInIO -> do
   takeMVar ready >>= mapM_ throwIO
   runInIO act `finally` (tryPutMVar done () >> takeMVar stopped)
 
+-- | The routes being served to JavaScript, in the wasm build, which has no sockets
+webRoutes :: IORef [Route]
+webRoutes = unsafePerformIO (newIORef [])
+{-# NOINLINE webRoutes #-}
+
+-- | Answers a request as the server would over HTTP: with the status, content type
+-- and content. The wasm build serves its routes this way.
+webRequest :: ByteString -> ByteString -> ByteString -> IO (Int, ByteString, ByteString)
+webRequest method path body = do
+  routes <- readIORef webRoutes
+  r <- try (dispatch routes (Request method (BC.takeWhile (/= '?') path) body Nothing))
+  pure $ case r of
+    Left (e :: SomeException) -> (500, "text/plain", BC.pack ("internal error: " <> show e))
+    Right resp -> (resp.status, resp.contentType, resp.content)
+
 serveRoutes :: Int -> (Int -> IO ()) -> MVar () -> [Route] -> IO ()
 #if defined(wasm32_HOST_ARCH)
-serveRoutes _ _ _ _ = throwIO (userError "the debugger server needs sockets, which the wasm build lacks")
+serveRoutes _ onListen done routes = do
+  writeIORef webRoutes routes
+  onListen 0
+  takeMVar done `finally` writeIORef webRoutes []
 #else
 serveRoutes port onListen done routes = do
   addr : _ <- getAddrInfo (Just defaultHints { addrFlags = [AI_NUMERICHOST, AI_NUMERICSERV], addrSocketType = Stream })

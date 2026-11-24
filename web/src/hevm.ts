@@ -128,8 +128,8 @@ class LineSink extends File {
   }
 }
 
-/** Runs hevm.wasm, a WASI command, with the files in an in-memory filesystem at / */
-export async function runHevm(module: WebAssembly.Module, args: string[], opts: RunOptions = {}): Promise<RunResult> {
+/** The WASI environment hevm runs in: the files in memory at /, its output kept and passed on */
+export function hevmWasi(args: string[], opts: RunOptions = {}) {
   const stdout: string[] = [];
   const stderr: string[] = [];
   const root = inodes(treeOf(opts.files ?? {}));
@@ -157,6 +157,12 @@ export async function runHevm(module: WebAssembly.Module, args: string[], opts: 
     if (ret === 0) new DataView(wasi.inst.exports.memory.buffer).setUint32(nevents, 1, true);
     return ret;
   };
+  return { wasi, stdout, stderr };
+}
+
+/** Runs hevm.wasm, a WASI command, with the files in an in-memory filesystem at / */
+export async function runHevm(module: WebAssembly.Module, args: string[], opts: RunOptions = {}): Promise<RunResult> {
+  const { wasi, stdout, stderr } = hevmWasi(args, opts);
   const instance = await WebAssembly.instantiate(module, {
     wasi_snapshot_preview1: wasi.wasiImport,
   });

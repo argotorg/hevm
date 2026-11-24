@@ -249,6 +249,42 @@ executable hevm
     unliftio-core,
     split,
 
+-- the CLI as a wasm reactor with entry points for JavaScript: the website's debugger
+executable hevm-web
+  import: shared
+  default-language: GHC2021
+  if !arch(wasm32)
+    buildable: False
+  hs-source-dirs:
+    cli
+  main-is:
+    cli.hs
+  cpp-options: -DHEVM_WEB
+  ghc-options: -no-hs-main -optl-mexec-model=reactor "-optl-Wl,--export=hevm_main,--export=hevm_api"
+  other-modules:
+    Paths_hevm
+  autogen-modules:
+    Paths_hevm
+  build-depends:
+    aeson,
+    base,
+    bytestring,
+    data-dword,
+    directory,
+    filepath,
+    ghc-experimental,
+    githash,
+    hevm,
+    jsonl,
+    optparse-generic,
+    optparse-applicative,
+    text,
+    mtl,
+    optics-core,
+    witch,
+    unliftio-core,
+    split,
+
 --- Test Helpers ---
 
 common test-base

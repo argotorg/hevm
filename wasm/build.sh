@@ -28,9 +28,14 @@ done
 
 cabal=(wasm32-wasi-cabal --project-file=cabal.project.wasm --builddir=dist-wasm/build
        --extra-lib-dirs="$PWD/dist-wasm/solver/prefix/lib")
-bin=$("${cabal[@]}" list-bin exe:hevm)
-# cabal does not see changes to the solver libraries: rebuilding the exe component relinks it
-rm -rf "$(dirname "$(dirname "$(dirname "$bin")")")"
-"${cabal[@]}" build -j"${JOBS:-$(nproc)}" exe:hevm "$@"
-cp "$bin" dist-wasm/hevm.wasm
-echo "built dist-wasm/hevm.wasm"
+# hevm.wasm, a WASI command, and hevm-web.wasm, a reactor for the website's debugger
+for exe in hevm hevm-web; do
+  bin=$("${cabal[@]}" list-bin "exe:$exe")
+  # cabal does not see changes to the solver libraries: rebuilding the exe component relinks it
+  rm -rf "$(dirname "$(dirname "$(dirname "$bin")")")"
+  "${cabal[@]}" build -j"${JOBS:-$(nproc)}" "exe:$exe" "$@"
+  cp "$bin" "dist-wasm/$exe.wasm"
+done
+# the JavaScript side of the reactor's JSFFI exports
+node "$(wasm32-wasi-ghc --print-libdir)/post-link.mjs" -i dist-wasm/hevm-web.wasm -o dist-wasm/hevm-web.js
+echo "built dist-wasm/hevm.wasm, dist-wasm/hevm-web.wasm and dist-wasm/hevm-web.js"

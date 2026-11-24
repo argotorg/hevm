@@ -27,6 +27,14 @@ import Data.Word (Word64)
 #if !defined(wasm32_HOST_ARCH)
 import GitHash
 #endif
+#if defined(HEVM_WEB)
+import Data.Aeson qualified as JSON
+import Data.ByteString.Lazy qualified as BL
+import Data.Text.Encoding (decodeUtf8, encodeUtf8)
+import GHC.Wasm.Prim (JSString(..), fromJSString, toJSString)
+import System.Environment (withArgs)
+import EVM.Debugger.Server (webRequest)
+#endif
 import Numeric.Natural (Natural)
 import Optics.Core ((&), set)
 import Options.Generic as OptionsGeneric
@@ -391,7 +399,9 @@ main = do
             -- TODO: which functions here actually require a BuildOutput, and which can take it as a Maybe?
             unitTestOpts <- unitTestOptions testOpts cOpts solvers fetchSess (Just out)
             when cOpts.interactive $ do
-              debugTestVm unitTestOpts out >>= \case
+              cd <- forM cOpts.calldata $ \c -> maybe
+                (liftIO $ putStrLn ("Error, invalid calldata: " <> show c) >> exitFailure) pure (hexByteString (strip0x c))
+              debugTestVm unitTestOpts out cd >>= \case
                 Left err -> liftIO $ T.putStrLn err >> exitFailure
                 Right vm -> do
                   sess <- liftIO $ setSnapshotInterval cOpts.snapshotEvery <$> newSession unitTestOpts.dapp vm
@@ -1007,3 +1017,31 @@ unitTestOptions testOpts cOpts solvers sess buildOutput = do
 parseInitialStorage :: InitialStorage -> BaseState
 parseInitialStorage Empty = EmptyBase
 parseInitialStorage Abstract = AbstractBase
+
+#if defined(HEVM_WEB)
+-- | The entry points of the hevm-web reactor: main with the arguments given as a JSON
+-- array, which keeps running with --interactive, and the debugger API it then serves
+foreign export javascript "hevm_main" webMain :: JSString -> IO Int
+foreign export javascript "hevm_api" webApi :: JSString -> JSString -> JSString -> IO JSString
+
+webMain :: JSString -> IO Int
+webMain argsJson = do
+  let args = fromMaybe [] (JSON.decodeStrict (encodeUtf8 (T.pack (fromJSString argsJson))))
+  r <- try (withArgs args main)
+  hFlush stdout
+  pure $ case r of
+    Right () -> 0
+    Left ExitSuccess -> 0
+    Left (ExitFailure n) -> n
+
+-- | {"status": .., "contentType": .., "content": ..}
+webApi :: JSString -> JSString -> JSString -> IO JSString
+webApi method path body = do
+  let bytes = encodeUtf8 . T.pack . fromJSString
+  (status, contentType, content) <- webRequest (bytes method) (bytes path) (bytes body)
+  pure . toJSString . T.unpack . decodeUtf8 . BL.toStrict . JSON.encode $ JSON.object
+    [ "status" JSON..= status
+    , "contentType" JSON..= decodeUtf8 contentType
+    , "content" JSON..= decodeUtf8 content
+    ]
+#endif

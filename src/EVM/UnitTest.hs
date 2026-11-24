@@ -220,11 +220,20 @@ validateCex uTestOpts fetcher vm0 cexAddrs repCex = do
         r -> internalError $ "validateCex: the concrete run did not finish: " <> show r
   when (conf.debug && (conf.verb > 2)) $ liftIO $ putStrLn $ "vm res: " <> show vm3.result
   let shouldFail = "proveFail" `isPrefixOf` repCex.testName
-  pure ( assertionFailedConc utoConc.checkFailBit res vm3.env.contracts /= shouldFail, res
-       , failureLocation uTestOpts.dapp lastSteps )
+  pure Validation
+    { reproduced = assertionFailedConc utoConc.checkFailBit res vm3.env.contracts /= shouldFail
+    , result = res
+    , location = failureLocation uTestOpts.dapp lastSteps
+    , calldata = Just repCex.callData
+    }
 
 -- | Whether a replay reproduced the failure, its result, and where it failed
-type Validation = (Bool, Either EvmError (Expr Buf), Maybe Text)
+data Validation = Validation
+  { reproduced :: Bool
+  , result     :: Either EvmError (Expr Buf)
+  , location   :: Maybe Text -- ^ where in the source the replay failed
+  , calldata   :: Maybe ByteString
+  }
 
 -- | Where in the source a concrete run failed: the newest of its last steps that the
 -- source maps place in a source file, which skips compiler-generated code such as the
@@ -297,9 +306,9 @@ runUnitTestContract
     named name = (Text.takeWhileEnd (/= ':') contract.contractName, name)
 
 -- | The VM of the single test matching the filter, after setUp(), about to
--- call the test with symbolic arguments
-debugTestVm :: App m => UnitTestOptions -> BuildOutput -> m (Either Text (VM Symbolic))
-debugTestVm opts buildOut@(BuildOutput (Contracts cs) _) =
+-- call the test with the given calldata, or with symbolic arguments
+debugTestVm :: App m => UnitTestOptions -> BuildOutput -> Maybe ByteString -> m (Either Text (VM Symbolic))
+debugTestVm opts buildOut@(BuildOutput (Contracts cs) _) concreteCd =
   case [ (c, s) | c <- Map.elems cs, s <- findUnitTests opts.methodFilter c ] of
     [(contract, sig@(Sig testName types))] -> do
       vm0 :: VM Concrete <- liftIO $ stToIO $ initialUnitTestVm opts contract
@@ -309,7 +318,9 @@ debugTestVm opts buildOut@(BuildOutput (Contracts cs) _) =
         Stepper.evm get
       case vm1.result of
         Just (VMSuccess _) -> do
-          (cdBuf, cdProps, _) <- symCalldata (callSig sig) types [] (AbstractBuf "txdata")
+          (cdBuf, cdProps, _) <- case concreteCd of
+            Just bs -> pure (ConcreteBuf bs, [], [])
+            Nothing -> symCalldata (callSig sig) types [] (AbstractBuf "txdata")
           vm2 <- Stepper.interpret (Fetch.concreteOracle opts.sess opts.rpcInfo) vm1 $
             Stepper.evm $ do
               pushTrace (EntryTrace testName)
@@ -516,13 +527,14 @@ symFailure UnitTestOptions {..} testName calldata before failure = do
         ([maybe "Assertion failure in a call:   " (const "Counterexample:   ") calldata <> reproToText repro] <> before <>
         ["  calldata: " <> let ?context = dappContext (traceContext leaf)
                            in prettyCalldata cex cd testName types | Just (cd, types) <- [calldata]] <>
+        ["  raw:      0x" <> Text.pack (bsToHex cd) | Right v <- [repro], Just cd <- [v.calldata]] <>
         ["  result:   " <> showRes (replayed leaf repro)] <>
-        ["  at:       " <> loc | Right (True, _, Just loc) <- [repro]]
+        ["  at:       " <> loc | Right v <- [repro], v.reproduced, Just loc <- [v.location]]
         ) <> verbText conf leaf
       -- symbolic assertions render their operands as expressions, the replay has the values
       replayed leaf = \case
-        Right (True, Left e, _) -> Failure [] (traceContext leaf) e
-        Right (True, Right out, _) -> Success [] (traceContext leaf) out mempty
+        Right Validation { reproduced = True, result = Left e } -> Failure [] (traceContext leaf) e
+        Right Validation { reproduced = True, result = Right out } -> Success [] (traceContext leaf) out mempty
         _ -> leaf
       verbText conf leaf = if conf.verb <= 1 then mempty
                            else [Text.unlines [ indentLines 2 (showTraceTree' dapp leaf)]]
@@ -531,7 +543,7 @@ symFailure UnitTestOptions {..} testName calldata before failure = do
 
       reproToText :: Err Validation -> Text
       reproToText (Left err) = "\x1b[33m[error attempting to reproduce: " <> pack err <> "]\x1b[0m"
-      reproToText (Right (repro, _, _)) = if repro then "\x1b[90m[validated]\x1b[0m" else "\x1b[31m[not reproducible]\x1b[0m"
+      reproToText (Right v) = if v.reproduced then "\x1b[90m[validated]\x1b[0m" else "\x1b[31m[not reproducible]\x1b[0m"
 
 indentLines :: Int -> Text -> Text
 indentLines n s =
@@ -989,4 +1001,4 @@ validateProbe opts ctx p = case reverse p.state.calls of
   (lastCall:before) -> replayCalls opts ctx p.cex (reverse before) >>= \case
     Left e -> pure $ Left e
     Right vm -> replayCall opts p.cex vm lastCall <&> fmap (\(vm', res) ->
-      (assertionFailedConc opts.checkFailBit res vm'.env.contracts, res, Nothing))
+      Validation (assertionFailedConc opts.checkFailBit res vm'.env.contracts) res Nothing Nothing)
