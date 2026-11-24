@@ -10,6 +10,8 @@ export interface Location {
 
 export interface Counterexample {
   validated: boolean | null;
+  /** of an invariant: the calls that lead to the state it fails in */
+  calls?: string[];
   calldata: string;
   /** the calldata as hex */
   raw?: string;
@@ -23,6 +25,8 @@ export interface TestResult {
   status: "pass" | "fail" | "running";
   counterexamples: Counterexample[];
   notes: string[];
+  /** what a pass covered, e.g. "7 states, up to 2 calls deep" */
+  detail?: string;
 }
 
 export function parseTestOutput(stdout: string): TestResult[] {
@@ -30,9 +34,15 @@ export function parseTestOutput(stdout: string): TestResult[] {
   let contract = "";
   let current: TestResult | undefined;
   let cex: Counterexample | undefined;
+  let inCalls = false;
   for (const raw of stripAnsi(stdout).split("\n")) {
     const line = raw.trimEnd();
     let m: RegExpExecArray | null;
+    if (cex?.calls && inCalls && (m = /^ {10,}(\S.*)$/.exec(line))) {
+      cex.calls.push(m[1]!);
+      continue;
+    }
+    inCalls = false;
     if ((m = /^Checking \d+ function\(s\) in contract (.+)$/.exec(line))) {
       contract = m[1]!;
     } else if ((m = /^\[RUNNING\] (.+)$/.exec(line))) {
@@ -48,6 +58,9 @@ export function parseTestOutput(stdout: string): TestResult[] {
         result: "",
       };
       current.counterexamples.push(cex);
+    } else if (cex && (m = /^\s+calls:\s+(.*)$/.exec(line))) {
+      cex.calls = [m[1]!];
+      inCalls = true;
     } else if (cex && (m = /^\s+calldata: (.*)$/.exec(line))) {
       cex.calldata = m[1]!;
     } else if (cex && (m = /^\s+raw:\s+(0x[0-9a-f]*)$/.exec(line))) {
@@ -56,14 +69,20 @@ export function parseTestOutput(stdout: string): TestResult[] {
       cex.result = m[1]!;
     } else if (cex && (m = /^\s+at:\s+(.+?):(\d+):(\d+): (.*)$/.exec(line))) {
       cex.at = { file: m[1]!, line: Number(m[2]), column: Number(m[3]), code: m[4]! };
-    } else if ((m = /^\s+\[(PASS|FAIL)\] /.exec(line))) {
+    } else if ((m = /^\s+\[(PASS|FAIL)\] \S+(?: \((.*)\))?$/.exec(line))) {
       current.status = m[1] === "PASS" ? "pass" : "fail";
+      if (m[2]) current.detail = m[2];
       cex = undefined;
     } else if ((m = /^\s+\[(WARNING|CAVEAT)\] (.*)$/.exec(line))) {
       current.notes.push(m[2]!);
     }
   }
   return results;
+}
+
+/** Numbers of 2^64 and more in hex, where their bit patterns show */
+export function readableNumbers(text: string): string {
+  return text.replace(/\b\d{20,}\b/g, (n) => (BigInt(n) >= 1n << 64n ? "0x" + BigInt(n).toString(16) : n));
 }
 
 const panics: Record<number, string> = {

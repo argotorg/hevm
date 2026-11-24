@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 import { progressPath, runHevm } from "../src/hevm";
 import { newStats, onProgress as progressOnEvent, onStdout as progressOnStdout, testsDone } from "../src/progress";
-import { describeResult, parseTestOutput } from "../src/results";
+import { describeResult, parseTestOutput, readableNumbers } from "../src/results";
 import { compileProject, solcVersion, type Soljson } from "../src/solc";
 import { solExamples } from "../src/solExamples";
 
@@ -105,8 +105,35 @@ describe("progress of hevm test", () => {
   });
 });
 
+describe("test output", () => {
+  it("has the calls before a failing invariant, and what a pass covered", () => {
+    const out = [
+      "Checking 2 function(s) in contract src/Main.sol:T",
+      "[RUNNING] invariant_a()",
+      "   Counterexample:   [validated]",
+      "     calls:    Token.mint(18446744073709551616)",
+      "               Token.burn(1) from 0x0000000000000000000000000000000000000B0b",
+      "     calldata: invariant_a()",
+      "     raw:      0x12345678",
+      "     result:   Revert: 0x",
+      "   [FAIL] invariant_a",
+      "[RUNNING] invariant_b()",
+      "   [PASS] invariant_b (7 states, up to 2 calls deep)",
+    ].join("\n");
+    const [a, b] = parseTestOutput(out);
+    expect(a!.counterexamples[0]!.calls).toEqual([
+      "Token.mint(18446744073709551616)",
+      "Token.burn(1) from 0x0000000000000000000000000000000000000B0b",
+    ]);
+    expect(a!.counterexamples[0]!.calldata).toBe("invariant_a()");
+    expect(b).toMatchObject({ status: "pass", detail: "7 states, up to 2 calls deep" });
+    expect(readableNumbers("f(18446744073709551615, 18446744073709551616, 0x1)")).toBe("f(18446744073709551615, 0x10000000000000000, 0x1)");
+  });
+});
+
 // every example on the website, with what hevm must find
-const expectations: Record<string, Record<string, { status: "pass" | "fail"; calldata?: string; line?: number }>> = {
+type Expectation = { status: "pass" | "fail"; calldata?: string; line?: number; calls?: RegExp[] };
+const expectations: Record<string, Record<string, Expectation>> = {
   "Find x, prove a bound": {
     "prove_linear(uint256)": { status: "fail", calldata: "prove_linear(31)", line: 10 },
     "prove_fits(uint8,uint8)": { status: "pass" },
@@ -141,6 +168,19 @@ const expectations: Record<string, Record<string, { status: "pass" | "fail"; cal
     "prove_fee_capped(uint256)": { status: "pass" },
     "prove_only_owner_sets_fee()": { status: "fail", calldata: "prove_only_owner_sets_fee()", line: 44 },
   },
+  "Supply invariant": {
+    "invariant_supply()": { status: "fail", line: 37, calls: [/^Token\.mint\(\d+\)$/, /^Token\.burn\(\d+\)$/] },
+  },
+  "Ownership takeover": {
+    "invariant_owner()": { status: "fail", line: 31, calls: [/^Wallet\.init\(\) from 0x[0-9a-fA-F]{40}$/] },
+  },
+  "Escrow state machine": {
+    "invariant_one_outcome()": {
+      status: "fail",
+      line: 45,
+      calls: [/^Escrow\.release\(\) from 0x0+b0b$/i, /^Escrow\.refund\(\) from 0x0+5e11e7$/i],
+    },
+  },
 };
 
 describe("the website's examples", () => {
@@ -163,6 +203,12 @@ describe("the website's examples", () => {
         expect(cex.validated, fn).toBe(true);
         if (want.calldata) expect(cex.calldata, fn).toBe(want.calldata);
         expect(cex.at?.line, fn).toBe(want.line);
+        if (want.calls) {
+          expect(cex.calls?.length, fn).toBe(want.calls.length);
+          want.calls.forEach((re, i) => expect(cex.calls![i], fn).toMatch(re));
+        } else {
+          expect(cex.calls, fn).toBeUndefined();
+        }
       }
     });
   }

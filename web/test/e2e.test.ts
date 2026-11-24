@@ -136,6 +136,18 @@ describe.skipIf(!ready)("website in Chromium", () => {
       expect(width).toBe("2px");
     });
 
+    it("shows the calls that break an invariant", async () => {
+      const cards = await prove("Escrow state machine");
+      const card = cards.filter({ hasText: "invariant_one_outcome" });
+      expect(await card.locator("ol.calls li").allTextContents()).toEqual([
+        "Escrow.release() from 0x0000000000000000000000000000000000000B0b",
+        "Escrow.refund() from 0x00000000000000000000000000000000005E11e7",
+      ]);
+      expect(await card.getByRole("button").count()).toBe(0);
+      const row = page.locator("#sol-results .stats tr").filter({ hasText: "invariant_one_outcome" });
+      expect(await row.locator("td").last().textContent()).toBe("1");
+    });
+
     it("shows compile errors at their place", async () => {
       const cards = await prove("Find x, prove a bound", "pragma solidity ^0.8.0;\ncontract C { function f() public { x = 1; } }\n");
       expect(await cards.first().textContent()).toContain("Undeclared identifier");

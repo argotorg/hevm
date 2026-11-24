@@ -7,7 +7,7 @@ import { examples } from "./examples";
 import { SolidityEditor } from "./editor";
 import { segments, tokens } from "./highlight";
 import { newStats, onProgress, onStdout, testsDone, type Stats } from "./progress";
-import { describeResult, parseTestOutput, type TestResult } from "./results";
+import { describeResult, parseTestOutput, readableNumbers, type TestResult } from "./results";
 import { solExamples } from "./solExamples";
 import type { CompileError, Project } from "./solc";
 import type { DebugSession } from "./debugger-page";
@@ -129,13 +129,24 @@ function renderTest(t: TestResult) {
   head.append(el("span", `badge ${t.status}`, t.status.toUpperCase()), ` ${t.name}`);
   card.append(head);
   if (t.status === "running" && !t.counterexamples.length) card.append(el("p", "muted", "Checking…"));
+  const invariant = t.name.startsWith("invariant_");
   if (t.status === "pass" && !t.counterexamples.length) {
-    card.append(el("p", "muted", "No input breaks it."));
+    card.append(el("p", "muted", invariant
+      ? `No sequence of calls breaks it${t.detail ? `: ${t.detail}` : ""}.`
+      : "No input breaks it."));
   }
   const debugArgs = ["test", "--root", "/", "--match", `^${t.name.split("(")[0]}$`, "--interactive"];
   for (const c of t.counterexamples) {
     const dl = el("dl");
-    dl.append(el("dt", undefined, "Counterexample"), el("dd", "mono", c.calldata));
+    if (c.calls) {
+      const calls = el("ol", "calls");
+      for (const call of c.calls) calls.append(el("li", "mono", readableNumbers(call)));
+      const dd = el("dd");
+      dd.append(calls);
+      dl.append(el("dt", undefined, "Calls"), dd, el("dt", undefined, "Then"), el("dd", "mono", c.calldata));
+    } else {
+      dl.append(el("dt", undefined, "Counterexample"), el("dd", "mono", readableNumbers(c.calldata)));
+    }
     dl.append(el("dt", undefined, "Result"), el("dd", undefined, describeResult(c.result)));
     if (c.validated === false) dl.append(el("dt"), el("dd", "muted", "could not be reproduced concretely"));
     card.append(dl);
@@ -147,7 +158,8 @@ function renderTest(t: TestResult) {
       card.append(el("p", "where", `Fails at ${c.at.file}:${c.at.line}: ${c.at.code}`));
     }
     const raw = c.raw;
-    if (raw) {
+    // the debugger and the Bytecode tab run one call, not a sequence
+    if (raw && !invariant) {
       const actions = el("div", "card-actions");
       actions.append(
         button("Replay in debugger", () => openDebugger([...debugArgs, "--calldata", raw])),
@@ -157,7 +169,7 @@ function renderTest(t: TestResult) {
     }
   }
   for (const n of t.notes) card.append(el("p", "muted", n));
-  if (t.status !== "running") {
+  if (t.status !== "running" && !invariant) {
     const actions = el("div", "card-actions");
     actions.append(button("Debug symbolically", () => openDebugger(debugArgs)));
     if (!t.counterexamples.length) actions.append(button("Open in Bytecode tab", () => openInBytecode(t)));

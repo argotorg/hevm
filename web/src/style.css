@@ -739,3 +739,12 @@ button.secondary:hover {
   font-family: var(--mono);
   font-size: 0.8rem;
 }
+
+.card ol.calls {
+  margin: 0;
+  padding-left: 1.3rem;
+}
+
+.card ol.calls li {
+  overflow-wrap: anywhere;
+}

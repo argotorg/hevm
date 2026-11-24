@@ -25,9 +25,30 @@ export const testBase: Source = {
   content: `// SPDX-License-Identifier: MIT
 pragma solidity >=0.8.0;
 
-// Contracts inheriting this are tests: hevm proves their prove_ functions
+// Contracts inheriting this are tests: hevm proves their prove_ functions, and checks
+// their invariant_ functions after every sequence of calls to the contracts setUp() deploys
 abstract contract Test {
     bool public IS_TEST = true;
+
+    address[] private _targetContracts;
+    address[] private _targetSenders;
+
+    // as forge-std's StdInvariant: call only these contracts, only from these addresses
+    function targetContract(address target) internal {
+        _targetContracts.push(target);
+    }
+
+    function targetSender(address sender) internal {
+        _targetSenders.push(sender);
+    }
+
+    function targetContracts() public view returns (address[] memory) {
+        return _targetContracts;
+    }
+
+    function targetSenders() public view returns (address[] memory) {
+        return _targetSenders;
+    }
 }
 `,
 };

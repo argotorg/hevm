@@ -263,4 +263,135 @@ contract VaultTest is Test {
 }
 `,
   },
+  {
+    name: "Supply invariant",
+    source: `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import {Test} from "hevm/Test.sol";
+
+contract Token {
+    mapping(address => uint256) public balanceOf;
+    uint256 public totalSupply;
+
+    function mint(uint256 amount) external {
+        balanceOf[msg.sender] += amount;
+        totalSupply += amount;
+    }
+
+    function transfer(address to, uint256 amount) external {
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+    }
+
+    function burn(uint256 amount) external {
+        totalSupply -= amount;
+    }
+}
+
+// hevm calls the token's functions in every order, with any arguments, and checks
+// invariant_ functions after each sequence of calls: no fuzzing, no seeds
+contract TokenTest is Test {
+    Token token;
+    address constant alice = address(0xa11ce);
+
+    function setUp() public {
+        token = new Token();
+        targetSender(alice);
+    }
+
+    function invariant_supply() public view {
+        assert(token.balanceOf(alice) <= token.totalSupply());
+    }
+}
+`,
+  },
+  {
+    name: "Ownership takeover",
+    source: `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import {Test} from "hevm/Test.sol";
+
+contract Wallet {
+    address public owner;
+
+    function init() external {
+        owner = msg.sender;
+    }
+
+    uint256 public dailyLimit = 1 ether;
+
+    function setDailyLimit(uint256 limit) external {
+        require(msg.sender == owner, "not owner");
+        dailyLimit = limit;
+    }
+}
+
+contract WalletTest is Test {
+    Wallet wallet;
+
+    function setUp() public {
+        wallet = new Wallet();
+        wallet.init();
+    }
+
+    // whoever calls in, the test contract stays the owner
+    function invariant_owner() public view {
+        assert(wallet.owner() == address(this));
+    }
+}
+`,
+  },
+  {
+    name: "Escrow state machine",
+    source: `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import {Test} from "hevm/Test.sol";
+
+contract Escrow {
+    address public immutable buyer;
+    address public immutable seller;
+    bool public released;
+    bool public refunded;
+
+    constructor(address b, address s) {
+        buyer = b;
+        seller = s;
+    }
+
+    // the buyer confirms delivery: the seller gets paid
+    function release() external {
+        require(msg.sender == buyer, "only the buyer");
+        require(!refunded, "already refunded");
+        released = true;
+    }
+
+    // the seller cancels: the buyer gets the money back, but nothing checks that the
+    // seller was not paid already
+    function refund() external {
+        require(msg.sender == seller, "only the seller");
+        refunded = true;
+    }
+}
+
+contract EscrowTest is Test {
+    Escrow escrow;
+    address constant buyer = address(0xb0b);
+    address constant seller = address(0x5e11e7);
+
+    function setUp() public {
+        escrow = new Escrow(buyer, seller);
+        targetSender(buyer);
+        targetSender(seller);
+    }
+
+    // the money goes one way only
+    function invariant_one_outcome() public view {
+        assert(!(escrow.released() && escrow.refunded()));
+    }
+}
+`,
+  },
 ];
