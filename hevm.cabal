@@ -143,7 +143,14 @@ library
     ghc-options: -fcompact-unwind
   c-sources:
     ethjet/blake2.c, ethjet/ethjet.c
-  if !arch(wasm32)
+  if arch(wasm32)
+    -- built by wasm/build-solver.sh
+    other-modules:
+      EVM.Solvers.Bitwuzla
+    extra-libraries:
+      hevm_bitwuzla, bitwuzla, cadical, mpfr, gmpxx, gmp, c++, c++abi,
+      wasi-emulated-signal, wasi-emulated-process-clocks, wasi-emulated-getpid
+  else
     extra-libraries:
       ff, gmp
     cxx-sources:

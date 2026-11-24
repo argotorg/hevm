@@ -1,0 +1,92 @@
+diff --color -W 78 -ruN a/src/random.cpp b/src/random.cpp
+--- a/src/random.cpp
++++ b/src/random.cpp
+@@ -78,7 +78,7 @@
+ // work.  As an additional measure to increase the possibility to get
+ // different seeds we are now also using network addresses (explicitly).
+ 
+-#ifndef _WIN32
++#if !defined(_WIN32) && !defined(__wasi__)
+ 
+ extern "C" {
+ #include <ifaddrs.h>
+@@ -102,7 +102,7 @@
+   // you really need to run 'mobical' on a Windows cluster where each node
+   // has identical IP addresses.
+ 
+-#ifndef _WIN32
++#if !defined(_WIN32) && !defined(__wasi__)
+   struct ifaddrs *addrs;
+   if (!getifaddrs (&addrs)) {
+     for (struct ifaddrs *addr = addrs; addr; addr = addr->ifa_next) {
+diff --color -W 78 -ruN a/src/resources.cpp b/src/resources.cpp
+--- a/src/resources.cpp
++++ b/src/resources.cpp
+@@ -130,7 +130,9 @@
+   struct rusage u;
+   if (getrusage (RUSAGE_SELF, &u))
+     return 0;
+-#ifndef __APPLE__
++#if defined(__wasi__)
++  return 0;
++#elif !defined(__APPLE__)
+   return ((uint64_t) u.ru_maxrss) << 10;
+ #else
+   return ((uint64_t) u.ru_maxrss);
+diff --color -W 78 -ruN a/src/signal.cpp b/src/signal.cpp
+--- a/src/signal.cpp
++++ b/src/signal.cpp
+@@ -23,7 +23,7 @@
+ static volatile bool caught_signal = false;
+ static Handler *signal_handler;
+ 
+-#ifndef _WIN32
++#if !defined(_WIN32) && !defined(__wasi__)
+ 
+ static volatile bool caught_alarm = false;
+ static volatile bool alarm_set = false;
+@@ -43,7 +43,7 @@
+ SIGNALS
+ #undef SIGNAL
+ 
+-#ifndef _WIN32
++#if !defined(_WIN32) && !defined(__wasi__)
+ 
+ static void (*SIGALRM_handler) (int);
+ 
+@@ -66,7 +66,7 @@
+   SIG##_handler = 0;
+   SIGNALS
+ #undef SIGNAL
+-#ifndef _WIN32
++#if !defined(_WIN32) && !defined(__wasi__)
+   reset_alarm ();
+ #endif
+   caught_signal = false;
+@@ -79,7 +79,7 @@
+     return #SIG;
+   SIGNALS
+ #undef SIGNAL
+-#ifndef _WIN32
++#if !defined(_WIN32) && !defined(__wasi__)
+   if (sig == SIGALRM)
+     return "SIGALRM";
+ #endif
+@@ -87,7 +87,7 @@
+ }
+ 
+ static void catch_signal (int sig) {
+-#ifndef _WIN32
++#if !defined(_WIN32) && !defined(__wasi__)
+   if (sig == SIGALRM && absolute_real_time () >= alarm_time) {
+     if (!caught_alarm) {
+       caught_alarm = true;
+@@ -123,7 +123,7 @@
+ #undef SIGNAL
+ }
+ 
+-#ifndef _WIN32
++#if !defined(_WIN32) && !defined(__wasi__)
+ 
+ void Signal::alarm (int seconds) {
+   assert (seconds >= 0);

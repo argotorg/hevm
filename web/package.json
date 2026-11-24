@@ -1,0 +1,22 @@
+{
+  "name": "hevm-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "wasm": "mkdir -p public && cp ../dist-wasm/hevm.wasm public/hevm.wasm",
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "playwright-core": "^1.65.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.1"
+  },
+  "dependencies": {
+    "@bjorn3/browser_wasi_shim": "^0.4.2"
+  }
+}

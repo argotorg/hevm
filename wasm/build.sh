@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds hevm.wasm with ghc-wasm-meta's GHC 9.12 toolchain. Usage: wasm/build.sh [cabal build args]
+# Builds hevm.wasm with ghc-wasm-meta's GHC 9.12 toolchain. Usage: [JOBS=n] wasm/build.sh [cabal build args]
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -18,6 +18,13 @@ for p in wasm/patches/*.patch; do
   fi
 done
 
-wasm32-wasi-cabal --project-file=cabal.project.wasm --builddir=dist-wasm/build build -j"$(nproc)" exe:hevm "$@"
-cp "$(wasm32-wasi-cabal --project-file=cabal.project.wasm --builddir=dist-wasm/build list-bin exe:hevm)" dist-wasm/hevm.wasm
+[ -f dist-wasm/solver/prefix/lib/libhevm_bitwuzla.a ] || wasm/build-solver.sh
+
+cabal=(wasm32-wasi-cabal --project-file=cabal.project.wasm --builddir=dist-wasm/build
+       --extra-lib-dirs="$PWD/dist-wasm/solver/prefix/lib")
+bin=$("${cabal[@]}" list-bin exe:hevm)
+# cabal does not see changes to the solver libraries: rebuilding the exe component relinks it
+rm -rf "$(dirname "$(dirname "$(dirname "$bin")")")"
+"${cabal[@]}" build -j"${JOBS:-$(nproc)}" exe:hevm "$@"
+cp "$bin" dist-wasm/hevm.wasm
 echo "built dist-wasm/hevm.wasm"

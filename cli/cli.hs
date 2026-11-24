@@ -24,7 +24,9 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as T
 import Data.Version (showVersion)
 import Data.Word (Word64)
+#if !defined(wasm32_HOST_ARCH)
 import GitHash
+#endif
 import Numeric.Natural (Natural)
 import Optics.Core ((&), set)
 import Options.Generic as OptionsGeneric
@@ -341,10 +343,15 @@ data InitialStorage
 getFullVersion :: [Char]
 getFullVersion = showVersion Paths.version <> " [" <> gitVersion <> "]"
   where
+#if defined(wasm32_HOST_ARCH)
+    -- the splice would make the wasm TH interpreter load bitwuzla's static libraries, which it cannot
+    gitVersion = "no git revision present"
+#else
     gitInfo = $$tGitInfoCwdTry
     gitVersion = case gitInfo of
       Right val -> "git rev " <> giBranch val <>  "@" <> giHash val
       Left _ -> "no git revision present"
+#endif
 
 main :: IO ()
 main = do
@@ -533,9 +540,10 @@ equivalence eqOpts cOpts = do
 
 getSolver :: Text -> IO Solver
 #if defined(wasm32_HOST_ARCH)
+getSolver "bitwuzla" = pure Bitwuzla
 getSolver "empty" = pure EmptySolver
-getSolver _ = do
-  putStrLn "Error: the wasm build cannot start SMT solvers, so it can only run concrete execution (hevm exec)."
+getSolver s = do
+  putStrLn $ "Error: the wasm build has bitwuzla built in, and cannot start " <> T.unpack s <> "."
   exitFailure
 #else
 getSolver s = case T.unpack s of

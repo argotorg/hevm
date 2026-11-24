@@ -26,7 +26,11 @@ module EVM.Solvers
 import Prelude hiding (LT, GT)
 
 import GHC.Natural
-import GHC.IO.Handle (Handle, hFlush, hSetBuffering, BufferMode(..))
+#if defined(wasm32_HOST_ARCH)
+import EVM.Solvers.Bitwuzla qualified as Bitwuzla
+#else
+import GHC.IO.Handle (hFlush, hSetBuffering, BufferMode(..))
+#endif
 import Control.Concurrent.Chan (Chan, newChan, writeChan, readChan)
 import Control.Concurrent (forkIO, killThread)
 import GHC.Conc (getNumProcessors)
@@ -52,7 +56,9 @@ import Data.Text.Lazy qualified as T
 import Data.Text.Lazy.IO qualified as T
 import Data.Text.Lazy.Builder
 import qualified Data.Text.Lazy.Builder.Int (decimal)
-import System.Process (createProcess, cleanupProcess, proc, ProcessHandle, std_in, std_out, std_err, StdStream(..), createPipe)
+#if !defined(wasm32_HOST_ARCH)
+import System.Process (createProcess, cleanupProcess, proc, std_in, std_out, std_err, StdStream(..), createPipe)
+#endif
 import System.FilePath ((</>))
 import EVM.Effects
 import EVM.Progress qualified as Progress
@@ -103,12 +109,13 @@ instance Show Solver where
   show (Custom s _) = T.unpack s
 
 
--- | A running solver instance
+-- | A running solver, as an SMT-LIB line protocol
 data SolverInstance = SolverInstance
-  Solver -- solver type
-  Handle -- stdin
-  Handle -- stdout
-  ProcessHandle
+  { solver   :: Solver
+  , send     :: Text -> IO ()
+  , recvLine :: IO Text
+  , stop     :: IO ()
+  }
 
 -- | A channel representing a group of solvers
 -- | The last field is the abort flag of the current run, see 'withRunAbort'
@@ -623,6 +630,17 @@ solverArgs solver timeout = case solver of
 
 -- | Spawns a solver instance, and sets the various global config options that we use for our queries
 spawnSolver :: Solver -> Maybe (Natural) -> Natural -> IO SolverInstance
+#if defined(wasm32_HOST_ARCH)
+-- wasm cannot start processes, so it runs bitwuzla linked into hevm
+spawnSolver solver timeout _ = case solver of
+  Bitwuzla -> do
+    (send, recvLine, stop) <- Bitwuzla.new
+      [T.toStrict a | a <- solverArgs solver timeout, not ("--lang" `T.isPrefixOf` a)]
+    let solverInstance = SolverInstance { solver, send, recvLine, stop }
+    _ <- sendCommand solverInstance $ SMTCommand "(set-option :print-success true)"
+    pure solverInstance
+  _ -> ioError (userError "the wasm build only has bitwuzla")
+#else
 #if defined(mingw32_HOST_OS)
 spawnSolver solver timeout _ = do
   (readout, writeout) <- createPipe
@@ -668,7 +686,12 @@ spawnSolver solver timeout maxMemoryMB = do
 #endif
   (Just stdin, Nothing, Nothing, process) <- createProcess cmd
   hSetBuffering stdin (BlockBuffering (Just 1000000))
-  let solverInstance = SolverInstance solver stdin readout process
+  let solverInstance = SolverInstance
+        { solver
+        , send = \line -> T.hPutStrLn stdin line >> hFlush stdin
+        , recvLine = T.hGetLine readout
+        , stop = cleanupProcess (Just stdin, Just readout, Nothing, process)
+        }
 
   case solver of
     CVC5 -> pure solverInstance
@@ -680,10 +703,11 @@ spawnSolver solver timeout maxMemoryMB = do
       _ <- sendCommand solverInstance $ SMTCommand "(set-option :print-success true)"
       pure solverInstance
     Custom _ _ -> pure solverInstance
+#endif
 
 -- | Cleanly shutdown a running solver instance
 stopSolver :: SolverInstance -> IO ()
-stopSolver (SolverInstance _ stdin stdout process) = cleanupProcess (Just stdin, Just stdout, Nothing, process)
+stopSolver inst = inst.stop
 
 -- | Sends a list of commands to the solver. Returns the first error, if there was one.
 sendScript :: SolverInstance -> SMTScript -> IO (Either Text ())
@@ -717,29 +741,27 @@ tryIO action = MaybeT $ either (const Nothing) Just <$> (try action :: IO (Eithe
 -- Returns "unknown" if the solver process has died (timeout, crash, etc.)
 sendCommand :: SolverInstance -> SMTEntry -> IO Text
 sendCommand _ (SMTComment _) = internalError "Attempting to send a comment as a command to SMT solver"
-sendCommand (SolverInstance _ stdin stdout _) (SMTCommand cmd) = do
+sendCommand inst (SMTCommand cmd) = do
   result <- runMaybeT $ do
-    tryIO $ T.hPutStrLn stdin $ toLazyText cmd
-    tryIO $ hFlush stdin
-    tryIO $ stripCarriageReturn <$> T.hGetLine stdout
+    tryIO $ inst.send $ toLazyText cmd
+    tryIO $ stripCarriageReturn <$> inst.recvLine
   pure $ fromMaybe "unknown" result
 
 -- | Returns a string representation of the model for the requested variable
 -- Returns Nothing if the solver process has died (timeout, crash, etc.)
 getValue :: SolverInstance -> Text -> MaybeIO Text
-getValue (SolverInstance _ stdin stdout _) var = do
-  tryIO $ T.hPutStrLn stdin (T.append (T.append "(get-value (" var) "))")
-  tryIO $ hFlush stdin
-  val <- readSExpr stdout
+getValue inst var = do
+  tryIO $ inst.send (T.append (T.append "(get-value (" var) "))")
+  val <- readSExpr inst.recvLine
   pure $ (T.unlines . reverse) val
 
 -- | Reads lines from h until we have a balanced sexpr
 -- Returns Nothing if the solver process has died or parsing fails
-readSExpr :: Handle -> MaybeIO [Text]
-readSExpr h = go 0 0 []
+readSExpr :: IO Text -> MaybeIO [Text]
+readSExpr recv = go 0 0 []
   where
     go 0 0 _ = do
-      line <- tryIO $ T.hGetLine h
+      line <- tryIO recv
       let cleanLine = stripCarriageReturn line
           ls = T.length $ T.filter (== '(') cleanLine
           rs = T.length $ T.filter (== ')') cleanLine
@@ -747,7 +769,7 @@ readSExpr h = go 0 0 []
          then pure [cleanLine]
          else go ls rs [cleanLine]
     go ls rs prev = do
-      line <- tryIO $ T.hGetLine h
+      line <- tryIO recv
       let cleanLine = stripCarriageReturn line
           ls' = T.length $ T.filter (== '(') cleanLine
           rs' = T.length $ T.filter (== ')') cleanLine
