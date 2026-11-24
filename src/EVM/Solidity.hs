@@ -23,6 +23,8 @@ module EVM.Solidity
   , readBuildOutput
   , readFilteredBuildOutput
   , functionAbi
+  , functionAbiSolc
+  , parseFunctionSig
   , makeSrcMaps
   , readSolc
   , readJSON
@@ -61,7 +63,7 @@ import Data.ByteString (ByteString, readFile)
 import Data.ByteString qualified as BS
 import Data.ByteString.Base16 qualified as BS16
 import Data.ByteString.Lazy (toStrict)
-import Data.Char (isDigit)
+import Data.Char (isAlphaNum, isDigit)
 import Data.Foldable
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -460,8 +462,45 @@ solcCode contract src codeType viaIR = liftIO $ do
             Runtime -> (.runtimeCode)
     Left e -> internalError $ "unable to parse solidity output:\n" <> (T.unpack json) <> "\n" <> show e
 
+-- | The ABI of a function signature, e.g. @f(uint x, bytes[] memory y)@. Signatures of
+-- ABI types are parsed directly, so that no solc is needed, as in the wasm build; others,
+-- e.g. naming a struct, by solc.
 functionAbi :: Text -> IO Method
-functionAbi f = do
+functionAbi f = maybe (functionAbiSolc f) pure (parseFunctionSig f)
+
+parseFunctionSig :: Text -> Maybe Method
+parseFunctionSig sig = do
+  let (name, rest) = T.break (== '(') (T.strip sig)
+  guard (identifier name)
+  body <- T.stripSuffix ")" =<< T.stripPrefix "(" (T.strip rest)
+  inputs <- if T.null (T.strip body) then Just [] else mapM param (T.splitOn "," body)
+  pure Method
+    { output = []
+    , inputs
+    , name
+    , methodSignature = name <> "(" <> T.intercalate "," (abiTypeSolidity . snd <$> inputs) <> ")"
+    , mutability = NonPayable
+    }
+  where
+    identifier t = case T.uncons t of
+      Just (c, cs) -> identChar c && not (isDigit c) && T.all identChar cs
+      Nothing -> False
+    identChar c = isAlphaNum c || c == '_' || c == '$'
+    param p = case filter (`notElem` ["memory", "calldata", "payable"]) (T.words p) of
+      [t] -> (,) "" <$> abiType t
+      [t, n] | identifier n -> (,) n <$> abiType t
+      _ -> Nothing
+    abiType t = do
+      let (base, suffix) = T.break (== '[') t
+          base' = fromMaybe base (lookup base [("uint", "uint256"), ("int", "int256")])
+      guard (elementary base')
+      parseTypeName mempty (base' <> suffix)
+    elementary b = b `elem` ["address", "bool", "string", "bytes"]
+      || sized "uint" [8, 16 .. 256] || sized "int" [8, 16 .. 256] || sized "bytes" [1 .. 32]
+      where sized prefix ns = maybe False (`elem` map (T.pack . show) (ns :: [Int])) (T.stripPrefix prefix b)
+
+functionAbiSolc :: Text -> IO Method
+functionAbiSolc f = do
   json <- solc Solidity ("contract ABI { function " <> f <> " public {}}") False
   let Contracts sol = fromRight
         (internalError . T.unpack $ "while trying to parse function signature `"

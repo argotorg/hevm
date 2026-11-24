@@ -682,7 +682,17 @@ tests =
           assertBoolM "expected partial execution" (any isPartial exprSimp)
     ]
   , testGroup "ABI signatures"
-    [ test "struct-overloads" $ do
+    [ test "parsed-like-solc" $ do
+        forM_
+          [ "f()", "f(uint)", "f(int, uint8[] memory, bytes calldata)", "transfer(address to, uint256 amount)"
+          , "g(bytes memory b, string calldata s, int8[3][] memory x)", "h(address payable a, bytes32 d, bool)"
+          ] $ \sig -> do
+            viaSolc <- liftIO $ functionAbiSolc sig
+            assertEqualM (T.unpack sig) (Just viaSolc) (parseFunctionSig sig)
+        assertEqualM "data locations are optional" (Just "f(int256,uint8[],bytes)")
+          ((.methodSignature) <$> parseFunctionSig "f(int, uint8[], bytes)")
+        assertEqualM "a struct is left to solc" Nothing (parseFunctionSig "f(S memory s)")
+    , test "struct-overloads" $ do
         Right (Contracts contracts) <- readStdJSON <$> liftIO (solc Solidity [i|
           contract C {
             struct A { uint256 value; }

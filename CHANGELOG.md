@@ -177,6 +177,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes of zero.
 
 ## Changed
+- `--sig` parses signatures of ABI types itself, without solc, and data
+  locations in them are optional (e.g. `f(uint8[])`); solc still parses those
+  naming other types, such as structs.
 - `ECRECOVER` is implemented in Haskell, so hevm no longer depends on libsecp256k1.
 - A word subterm that a solver query uses more than once is defined once with
   `define-fun` and referred to by name, instead of being written out at every use.
