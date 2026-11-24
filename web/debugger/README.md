@@ -1,32 +1,24 @@
-# hevm-web-ui
+# hevm's debugger page
 
-A web page for [hevm](https://github.com/argotorg/hevm)'s interactive debugger.
+The page of hevm's interactive debugger, formerly hevm-web-ui. The website shows it in its
+Debugger tab, where it debugs on `hevm-web.wasm`: replaying a counterexample, or a test
+function symbolically.
 
-hevm serves the debugger as a JSON API on localhost (`hevm test --interactive`, see
-hevm's docs). This page is one client of it; `hevm-debug` is another.
-
-## Running it
+It speaks hevm's JSON API (see `hevm test --interactive` in hevm's docs), so it can also
+debug a native hevm:
 
 ```shell
-nix develop -c ./build.sh
-hevm test --root <project> --match <test> --interactive    # in another terminal
-nix develop -c node serve.mjs                           # then open http://127.0.0.1:7318
+hevm test --root <project> --match <test> --interactive    # serves on 127.0.0.1:7317
+cd web && HEVM_DEBUGGER=http://127.0.0.1:7317 npm run dev  # then open /debugger/
 ```
 
-`serve.mjs` serves the page and passes its API calls on to hevm, so that the
-browser sees one origin. `node serve.mjs <hevm port> <page port>` sets the ports
-(7317 and 7318 by default).
+`npm test` in `web/` runs its tests, which parse sample answers of the API in
+`test/fixtures/`. After the API changes, `node fixtures.mjs [hevm]` rewrites them from a
+running hevm debugger; it needs hevm and an SMT solver on PATH, e.g. in hevm's nix shell.
 
-## Developing
-
-`nix develop -c ./build.sh test` type-checks and runs the tests. They parse
-sample answers of the API in `test/fixtures/`. After hevm's API changes,
-`node fixtures.mjs [hevm]` rewrites them from a running hevm debugger; it needs
-hevm and an SMT solver on PATH, e.g. in hevm's nix shell.
-
-The code: `api.ts` (the API's schemas), `model.ts` (state, pure), `view.ts` and
-`highlight.ts` (what the panes show, pure), `vdom.ts`, `keys.ts`, and `app.ts`,
-the only module with side effects. Colours are all in `index.html`'s CSS.
+The code: `api.ts` (the API's schemas, and how requests reach hevm), `model.ts` (state,
+pure), `view.ts` and `highlight.ts` (what the panes show, pure), `vdom.ts`, `keys.ts`,
+and `app.ts`, the only module with side effects. Colours are all in `index.html`'s CSS.
 `src/vendor/prism.js` is Prism, for highlighting Solidity (MIT, see
 `src/vendor/LICENSE.prism`).
 

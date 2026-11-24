@@ -1,5 +1,5 @@
 // Prism 1.29.0, https://prismjs.com: its core, clike and solidity files, unchanged but for these
-// first lines and the export at the end. MIT licensed, see LICENSE.prism next to this file.
+// first lines, its CommonJS export taken out, and the ES export at the end. MIT licensed, see LICENSE.prism next to this file.
 // Prism.manual stops it from highlighting the page by itself.
 (typeof window !== 'undefined' ? window : globalThis).Prism = { manual: true };
 
@@ -1208,10 +1208,6 @@ var Prism = (function (_self) {
 	return _;
 
 }(_self));
-
-if (typeof module !== 'undefined' && module.exports) {
-	module.exports = Prism;
-}
 
 // hack for components to work correctly in node.js
 if (typeof global !== 'undefined') {

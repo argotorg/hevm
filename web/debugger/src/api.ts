@@ -88,16 +88,30 @@ export class ApiError extends Error {
   override name = "ApiError";
 }
 
+/** How a request reaches hevm: over HTTP to its server, or to hevm running in the page */
+export type Transport = (method: "GET" | "POST", path: string, body?: string) => Promise<{ status: number; text: string }>;
+
+const overHttp: Transport = async (method, path, body) => {
+  const response = await fetch(path, body === undefined ? { method } : { method, body });
+  return { status: response.status, text: await response.text() };
+};
+
+let transport = overHttp;
+
+export function setTransport(t: Transport): void {
+  transport = t;
+}
+
 async function request<T>(schema: Schema<T>, method: "GET" | "POST", path: string, body?: string): Promise<T> {
-  let response: Response;
+  let response: { status: number; text: string };
   try {
-    response = await fetch(path, body === undefined ? { method } : { method, body });
+    response = await transport(method, path, body);
   } catch (e) {
     throw new ApiError(`cannot reach hevm: ${String(e)}`);
   }
-  if (!response.ok) throw new ApiError(`${method} ${path}: ${response.status} ${await response.text()}`);
+  if (response.status < 200 || response.status >= 300) throw new ApiError(`${method} ${path}: ${response.status} ${response.text}`);
   try {
-    return schema.parse(await response.json());
+    return schema.parse(JSON.parse(response.text));
   } catch (e) {
     throw new ApiError(`${method} ${path} answered unexpectedly, is this the hevm the page came with? ${String(e)}`);
   }

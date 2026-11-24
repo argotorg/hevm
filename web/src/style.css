@@ -142,8 +142,10 @@ input:not([type="radio"]) {
 
 body[data-mode="symbolic"] .exec-only,
 body[data-mode="exec"] .symbolic-only,
-body[data-tab="sol"] .bytecode-only,
-body[data-tab="bytecode"] .sol-only {
+body:not([data-tab="sol"]) .sol-only,
+body:not([data-tab="bytecode"]) .bytecode-only,
+body:not([data-tab="debug"]) .debug-only,
+body[data-tab="debug"] details {
   display: none;
 }
 
@@ -240,6 +242,7 @@ details pre {
 }
 
 body[data-tab="sol"] .tabs [data-tab="sol"],
+body[data-tab="debug"] .tabs [data-tab="debug"],
 body[data-tab="bytecode"] .tabs [data-tab="bytecode"] {
   color: var(--fg);
   background: var(--panel);
@@ -624,4 +627,47 @@ code,
   .outcome:empty {
     border-left-style: dashed;
   }
+}
+
+.card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.8rem;
+}
+
+button.secondary {
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+  padding: 0.3rem 0.8rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+button.secondary:hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.debug-only {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 0 10px 10px 10px;
+  padding: 0.5rem;
+}
+
+#debug-hint {
+  margin: 0.75rem;
+}
+
+#debugger {
+  display: block;
+  width: 100%;
+  height: max(40rem, calc(100vh - 12rem));
+  border: 0;
+  border-radius: 6px;
+}
+
+#debugger[hidden] {
+  display: none;
 }

@@ -17,6 +17,7 @@
     </header>
     <nav class="tabs" role="tablist">
       <button type="button" role="tab" data-tab="sol">Solidity</button>
+      <button type="button" role="tab" data-tab="debug">Debugger</button>
       <button type="button" role="tab" data-tab="bytecode">Bytecode</button>
     </nav>
     <main>
@@ -71,6 +72,14 @@
           </div>
         </form>
         <section id="outcome" class="outcome"></section>
+      </section>
+
+      <section class="debug-only">
+        <p id="debug-hint" class="muted">
+          Prove a contract on the Solidity tab, then pick <b>Replay in debugger</b> on a counterexample,
+          or <b>Debug symbolically</b> on any function.
+        </p>
+        <iframe id="debugger" title="hevm debugger" hidden></iframe>
       </section>
 
       <details>

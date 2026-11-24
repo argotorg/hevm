@@ -3,13 +3,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "assets": "mkdir -p public && cp ../dist-wasm/hevm.wasm node_modules/solc/soljson.js public/",
+    "assets": "mkdir -p public && cp ../dist-wasm/hevm.wasm ../dist-wasm/hevm-web.wasm ../dist-wasm/hevm-web.js node_modules/solc/soljson.js public/",
     "predev": "npm run assets",
     "dev": "vite",
     "prebuild": "npm run assets",
-    "build": "tsc --noEmit && vite build",
+    "build": "npm run typecheck && vite build",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc -p debugger --noEmit"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",

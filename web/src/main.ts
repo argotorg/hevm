@@ -7,6 +7,7 @@ import { newStats, onProgress, onStdout, testsDone, type Stats } from "./progres
 import { describeResult, parseTestOutput, type TestResult } from "./results";
 import { solExamples } from "./solExamples";
 import type { CompileError, Project, Source } from "./solc";
+import type { DebugSession } from "./debugger-page";
 import type { WorkerRequest, WorkerResponse, WorkerStream } from "./worker";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -61,10 +62,56 @@ async function compile(sources: Source[]): Promise<Project> {
 
 // --- tabs ---
 
+function showTab(name: string) {
+  document.body.dataset.tab = name;
+}
+
 for (const tab of document.querySelectorAll<HTMLButtonElement>(".tabs button")) {
-  tab.addEventListener("click", () => {
-    document.body.dataset.tab = tab.dataset.tab;
-  });
+  tab.addEventListener("click", () => showTab(tab.dataset.tab!));
+}
+
+// --- the debugger tab, a page of its own in an iframe ---
+
+const debugFrame = $<HTMLIFrameElement>("debugger");
+const debugHint = $<HTMLElement>("debug-hint");
+let debugSession: DebugSession | undefined;
+
+window.addEventListener("message", (e) => {
+  if (e.source === debugFrame.contentWindow && e.data?.kind === "hevm-debugger-ready" && debugSession) {
+    debugFrame.contentWindow!.postMessage(debugSession, "*");
+  }
+});
+
+function openDebugger(args: string[]) {
+  if (!lastProject) return;
+  debugSession = { kind: "hevm-debug", files: lastProject.files, args };
+  debugHint.hidden = true;
+  debugFrame.hidden = false;
+  // a fresh page for each session
+  debugFrame.src = `debugger/index.html?session=${Date.now()}`;
+  showTab("debug");
+}
+
+/** The runtime code of a compiled contract, e.g. "src/Main.sol:Example" */
+function runtimeCode(contract: string): string | undefined {
+  const [path, name] = contract.split(":");
+  const artifact = lastProject?.files[`out/${path!.split("/").pop()}/${name}.json`];
+  return artifact ? (JSON.parse(artifact) as { deployedBytecode: { object: string } }).deployedBytecode.object : undefined;
+}
+
+function openInBytecode(t: TestResult, calldata?: string) {
+  const code = runtimeCode(t.contract);
+  if (!code) return;
+  load(calldata ? { mode: "exec", code, calldata } : { mode: "symbolic", code, sig: t.name });
+  outcome.replaceChildren();
+  showTab("bytecode");
+}
+
+function button(label: string, onClick: () => void) {
+  const b = el("button", "secondary", label);
+  b.type = "button";
+  b.addEventListener("click", onClick);
+  return b;
 }
 
 // --- Solidity ---
@@ -142,6 +189,7 @@ function renderTest(t: TestResult) {
   if (t.status === "pass" && !t.counterexamples.length) {
     card.append(el("p", "muted", "No input breaks it."));
   }
+  const debugArgs = ["test", "--root", "/", "--match", `^${t.name.split("(")[0]}$`, "--interactive"];
   for (const c of t.counterexamples) {
     const dl = el("dl");
     dl.append(el("dt", undefined, "Counterexample"), el("dd", "mono", c.calldata));
@@ -155,8 +203,23 @@ function renderTest(t: TestResult) {
     } else if (c.at) {
       card.append(el("p", "where", `Fails at ${c.at.file}:${c.at.line}: ${c.at.code}`));
     }
+    const raw = c.raw;
+    if (raw) {
+      const actions = el("div", "card-actions");
+      actions.append(
+        button("Replay in debugger", () => openDebugger([...debugArgs, "--calldata", raw])),
+        button("Open in Bytecode tab", () => openInBytecode(t, raw)),
+      );
+      card.append(actions);
+    }
   }
   for (const n of t.notes) card.append(el("p", "muted", n));
+  if (t.status !== "running") {
+    const actions = el("div", "card-actions");
+    actions.append(button("Debug symbolically", () => openDebugger(debugArgs)));
+    if (!t.counterexamples.length) actions.append(button("Open in Bytecode tab", () => openInBytecode(t)));
+    card.append(actions);
+  }
   solResults.append(card);
 }
 
@@ -257,6 +320,7 @@ solForm.addEventListener("submit", async (e) => {
   try {
     solStatus.textContent = "Compiling…";
     const project = await compile([{ path: sourcePath, content: editor.value }]);
+    lastProject = project;
     const errors = project.errors.filter((x) => x.severity === "error");
     if (errors.length) {
       solStatus.textContent = `Compilation failed — ${secs()}s`;
@@ -296,6 +360,7 @@ solForm.addEventListener("submit", async (e) => {
 solExamples.forEach((ex, i) => solExample.add(new Option(ex.name, String(i))));
 const editor = new SolidityEditor($("source"), solExamples[0]!.source);
 let failingLines: number[] = [];
+let lastProject: Project | undefined;
 
 // --- bytecode ---
 

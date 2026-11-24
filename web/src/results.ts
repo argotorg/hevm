@@ -11,6 +11,8 @@ export interface Location {
 export interface Counterexample {
   validated: boolean | null;
   calldata: string;
+  /** the calldata as hex */
+  raw?: string;
   result: string;
   at?: Location;
 }
@@ -48,6 +50,8 @@ export function parseTestOutput(stdout: string): TestResult[] {
       current.counterexamples.push(cex);
     } else if (cex && (m = /^\s+calldata: (.*)$/.exec(line))) {
       cex.calldata = m[1]!;
+    } else if (cex && (m = /^\s+raw:\s+(0x[0-9a-f]*)$/.exec(line))) {
+      cex.raw = m[1]!;
     } else if (cex && (m = /^\s+result:\s+(.*)$/.exec(line))) {
       cex.result = m[1]!;
     } else if (cex && (m = /^\s+at:\s+(.+?):(\d+):(\d+): (.*)$/.exec(line))) {

@@ -52,6 +52,7 @@ describe("hevm test on soljson output", () => {
       {
         validated: true,
         calldata: "prove_linear(31)",
+        raw: "0x82d4ea10" + "1f".padStart(64, "0"),
         result: "Revert: 0x4e487b71" + "0".repeat(63) + "1",
         at: { file: "src/Main.sol", line: 10, column: 13, code: "assert(x * 3 + 7 != 100)" },
       },

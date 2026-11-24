@@ -9,7 +9,7 @@ import { solExamples } from "../src/solExamples";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const chrome = process.env.CHROME ?? "/usr/bin/chromium";
-const ready = existsSync(`${root}/dist/hevm.wasm`) && existsSync(`${root}/dist/soljson.js`) && existsSync(chrome);
+const ready = ["hevm.wasm", "hevm-web.wasm", "hevm-web.js", "soljson.js"].every((f) => existsSync(`${root}/dist/${f}`)) && existsSync(chrome);
 
 describe.skipIf(!ready)("website in Chromium", () => {
   let server: PreviewServer;
@@ -119,6 +119,49 @@ describe.skipIf(!ready)("website in Chromium", () => {
       expect(await cards.first().locator(".excerpt mark").textContent()).toBe("x");
       expect(await page.textContent("#sol-status")).toMatch(/^Compilation failed/);
       expect(await page.locator("#sol-progress").isHidden()).toBe(true);
+    });
+  });
+
+  describe("Debugger", () => {
+    const debuggerFrame = () => page.frameLocator("#debugger");
+
+    async function proveFirstExample() {
+      await page.click('.tabs [data-tab="sol"]');
+      await page.selectOption("#sol-example", String(solExamples.findIndex((e) => e.name === "Find x, prove a bound")));
+      await page.click("#prove");
+      await idle("prove");
+      return page.locator("#sol-results .card:not(.stats)").filter({ hasText: "prove_linear" });
+    }
+
+    it("replays a counterexample to its failure", async () => {
+      const card = await proveFirstExample();
+      await card.getByRole("button", { name: "Replay in debugger" }).click();
+      expect(await page.locator("#debugger").isVisible()).toBe(true);
+      const frame = debuggerFrame();
+      await frame.locator("#status .step").waitFor();
+      await frame.getByRole("button", { name: /^Continue/ }).click();
+      // Panic(0x01): the assertion
+      await expect.poll(() => frame.locator("#result").textContent(), { timeout: 60_000 }).toMatch(/^revert, returned 0x4e487b7100*1$/);
+      expect(await frame.locator("#status").textContent()).toContain("halted");
+    });
+
+    it("debugs a function symbolically", async () => {
+      const card = await proveFirstExample();
+      await card.getByRole("button", { name: "Debug symbolically" }).click();
+      const frame = debuggerFrame();
+      await frame.locator("#status .step").waitFor();
+      expect(await frame.locator("#status").textContent()).toContain("symbolic");
+    });
+
+    it("sends a counterexample to the Bytecode tab", async () => {
+      const card = await proveFirstExample();
+      await card.getByRole("button", { name: "Open in Bytecode tab" }).click();
+      expect(await page.inputValue("#calldata")).toBe("0x82d4ea10" + "1f".padStart(64, "0"));
+      expect((await page.inputValue("#code")).length).toBeGreaterThan(100);
+      await page.click("#run");
+      await idle("run");
+      expect(await page.getAttribute("#outcome", "class")).toBe("outcome revert");
+      expect(await page.textContent("#outcome")).toContain("4e487b71");
     });
   });
 
