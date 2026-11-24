@@ -99,7 +99,9 @@ describe.skipIf(!ready)("website in Chromium", () => {
       await page.click('.tabs [data-tab="sol"]');
       await page.click("#source .cm-line >> nth=7");
       await page.keyboard.press("Shift+ArrowDown");
-      const bg = await page.$eval("#source .cm-selectionBackground", (e) => getComputedStyle(e).backgroundColor);
+      // drawn on the next frame
+      const sel = await page.waitForSelector("#source .cm-selectionBackground");
+      const bg = await sel.evaluate((e) => getComputedStyle(e).backgroundColor);
       const want = await page.evaluate(() => {
         const probe = document.createElement("div");
         probe.style.backgroundColor = "var(--selection)";
