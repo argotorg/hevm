@@ -818,6 +818,10 @@ body[data-tab="sourcify"] .sol-pick {
   display: none;
 }
 
+#sol-origin {
+  margin: 0;
+}
+
 #sol-origin p {
   margin: 0.5rem 0 0;
 }
@@ -951,4 +955,16 @@ button.link {
 #sf-examples {
   margin: 0.5rem 0 0;
   font-size: 0.85rem;
+}
+
+#sol-origin p.deployed {
+  font-weight: 600;
+}
+
+#sol-origin p.deployed.same {
+  color: var(--ok);
+}
+
+#sol-origin p.deployed.differs {
+  color: var(--t-number);
 }

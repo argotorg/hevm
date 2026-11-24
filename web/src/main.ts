@@ -9,9 +9,9 @@ import { segments, tokens } from "./highlight";
 import { newStats, onProgress, onStdout, testsDone, type Stats } from "./progress";
 import { describeResult, parseTestOutput, readableNumbers, type TestResult } from "./results";
 import { solExamples } from "./solExamples";
-import { artifactPath, type CompileError, type Project } from "./solc";
-import { fetchVerified } from "./sourcify";
-import { Workspace, setupSourcify } from "./workspace";
+import { artifactPath, bundledSolc, type CompileError, type Project } from "./solc";
+import { fetchVerified, sameAsDeployed } from "./sourcify";
+import { Workspace, setupSourcify, type SolProject } from "./workspace";
 import type { DebugSession } from "./debugger-page";
 import type { WorkerStream } from "./worker";
 
@@ -99,6 +99,33 @@ function switchSol(to: SolTab) {
   else workspace.clear();
   solTab = to;
   editor.markFailing(outputs[to].failing);
+}
+
+/** Says on a verified contract's banner whether the code compiled is the code on chain, and if not, why */
+function checkDeployed(sol: SolProject, project: Project, edited: string[]) {
+  const v = sol.verified;
+  if (!v?.deployed) return;
+  const artifact = project.files[artifactPath(v.path, v.name)];
+  if (!artifact) return;
+  const a = JSON.parse(artifact) as { bytecode: { object: string }; deployedBytecode: { object: string } };
+  const code = { runtime: a.deployedBytecode.object, creation: a.bytecode.object };
+  const files = (paths: string[]) => paths.join(", ");
+  const otherSolc = sol.version !== v.version ? `you picked solc ${(sol.version ?? `${bundledSolc} (built in)`).split("+")[0]}` : "";
+  if (sameAsDeployed(code, v.deployed)) {
+    sol.deployedCheck = {
+      same: true,
+      text: edited.length
+        ? `The code tested is still the code deployed: your edits to ${files(edited)} do not change it.`
+        : "The code tested is the code deployed.",
+    };
+  } else {
+    const why = [edited.length ? `you edited ${files(edited)}` : "", otherSolc].filter(Boolean);
+    sol.deployedCheck = {
+      same: false,
+      text: `The code tested differs from the code deployed${why.length ? `: ${why.join(", and ")}` : ""}.`,
+    };
+  }
+  if (workspace.project === sol) workspace.showOrigin();
 }
 
 function fail(o: SolOutput, file: string, line: number) {
@@ -296,6 +323,9 @@ solForm.addEventListener("submit", async (e) => {
   o.progress.hidden = true;
   o.failing = new Map();
   let project: Project | undefined;
+  // what was compiled, should one switch tabs meanwhile
+  const sol = workspace.project;
+  const edited = workspace.editedSources();
   const started = performance.now();
   const secs = () => ((performance.now() - started) / 1000).toFixed(2);
   const stats = newStats();
@@ -339,6 +369,7 @@ solForm.addEventListener("submit", async (e) => {
       renderErrors(o, errors);
       return;
     }
+    checkDeployed(sol, project, edited);
     o.status.textContent = "Proving…";
     phase = "Starting hevm…";
     renderProgress(o, stats, true, elapsed(), phase);

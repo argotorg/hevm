@@ -18,6 +18,8 @@ export interface SolProject {
   version?: string;
   settings?: Record<string, unknown>;
   verified?: VerifiedContract;
+  /** whether the last compile of the verified contract gave the code deployed */
+  deployedCheck?: { same: boolean; text: string };
 }
 
 export const examplePath = "src/Main.sol";
@@ -146,6 +148,12 @@ export class Workspace {
     return this.project.settings ? { solc: this.project.settings } : undefined;
   }
 
+  /** The verified contract's own files that were edited, among those compiled */
+  editedSources(): string[] {
+    const v = this.project.verified;
+    return v ? this.visible().filter((p) => p in v.sources && this.editor.text(p) !== v.sources[p]) : [];
+  }
+
   /** Files added or changed, compared with the project as it came */
   changes(): Record<string, string> {
     return Object.fromEntries(Object.entries(this.current()).filter(([p, text]) => this.project.files[p] !== text));
@@ -188,7 +196,7 @@ contract ${/^\d/.test(contract) ? `T${contract}` : contract} is Test {
     this.render();
   }
 
-  private showOrigin() {
+  showOrigin() {
     const c = this.project.verified;
     this.origin.hidden = !c;
     if (!c) return this.origin.replaceChildren();
@@ -208,6 +216,8 @@ contract ${/^\d/.test(contract) ? `T${contract}` : contract} is Test {
       parts.push(" It links libraries deployed at fixed addresses, which are empty here: calls to them fail.");
     }
     this.origin.replaceChildren(...parts);
+    const check = this.project.deployedCheck;
+    if (check) this.origin.append(el("p", `deployed ${check.same ? "same" : "differs"}`, check.text));
     if (c.implementations.length) {
       const impl = c.implementations[0]!;
       const load = el("button", "secondary", `Load ${impl.name ?? "the implementation"} instead`);

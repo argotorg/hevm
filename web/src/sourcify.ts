@@ -22,6 +22,29 @@ export interface VerifiedContract {
   match: string;
   /** the contracts behind it, if it is a proxy */
   implementations: { address: string; name?: string }[];
+  /** the code it was deployed with: its runtime code on chain, and its creation code, the
+   * constructor's, as Sourcify compiled it */
+  deployed?: { runtime: Code; creation?: Code };
+}
+
+/** Code as hex, and the bytes that differ from a compilation of the same sources: the
+ * immutables, set at deployment, and solc's metadata, which covers all files compiled */
+export interface Code {
+  code: string;
+  ignore: { start: number; length: number }[];
+}
+
+function sameCode(compiled: string, expected: Code): boolean {
+  const ours = compiled.replace(/^0x/, "").toLowerCase();
+  if (ours.length !== expected.code.length) return false;
+  const blank = (code: string) =>
+    expected.ignore.reduce((c, r) => c.slice(0, 2 * r.start) + "00".repeat(r.length) + c.slice(2 * (r.start + r.length)), code);
+  return blank(ours) === blank(expected.code);
+}
+
+/** Whether compiled code is what the contract was deployed with, but for the bytes that may differ */
+export function sameAsDeployed(compiled: { runtime: string; creation: string }, deployed: NonNullable<VerifiedContract["deployed"]>): boolean {
+  return sameCode(compiled.runtime, deployed.runtime) && (!deployed.creation || sameCode(compiled.creation, deployed.creation));
 }
 
 export const chains: { id: string; name: string }[] = [
@@ -59,7 +82,18 @@ interface Response {
   sources?: Record<string, { content: string }>;
   abi?: { type: string; inputs?: AbiParam[] }[];
   proxyResolution?: { isProxy?: boolean; implementations?: { address: string; name?: string }[] } | null;
+  runtimeBytecode?: {
+    onchainBytecode?: string;
+    immutableReferences?: Record<string, { start: number; length: number }[]> | null;
+    cborAuxdata?: Auxdata;
+  };
+  creationBytecode?: { recompiledBytecode?: string; cborAuxdata?: Auxdata };
 }
+
+type Auxdata = Record<string, { offset: number; value: string }> | null;
+
+const auxdata = (a: Auxdata | undefined) => Object.values(a ?? {}).map((x) => ({ start: x.offset, length: (x.value.length - 2) / 2 }));
+const hex = (code: string) => code.replace(/^0x/, "").toLowerCase();
 
 /** How a Sourcify answer becomes a contract to test */
 export function readVerified(chainId: string, address: string, r: Response): VerifiedContract {
@@ -80,6 +114,17 @@ export function readVerified(chainId: string, address: string, r: Response): Ver
     constructorInputs: r.abi?.find((x) => x.type === "constructor")?.inputs ?? [],
     match: r.match ?? "match",
     implementations: r.proxyResolution?.isProxy ? (r.proxyResolution.implementations ?? []) : [],
+    ...(r.runtimeBytecode?.onchainBytecode && {
+      deployed: {
+        runtime: {
+          code: hex(r.runtimeBytecode.onchainBytecode),
+          ignore: [...Object.values(r.runtimeBytecode.immutableReferences ?? {}).flat(), ...auxdata(r.runtimeBytecode.cborAuxdata)],
+        },
+        ...(r.creationBytecode?.recompiledBytecode && {
+          creation: { code: hex(r.creationBytecode.recompiledBytecode), ignore: auxdata(r.creationBytecode.cborAuxdata) },
+        }),
+      },
+    }),
   };
 }
 
@@ -90,7 +135,10 @@ export function fetchVerified(chainId: string, address: string, get: typeof fetc
   let found = looked.get(key);
   if (!found) {
     found = (async () => {
-      const url = `https://sourcify.dev/server/v2/contract/${chainId}/${address}?fields=sources,compilation,abi,proxyResolution`;
+      const fields = "sources,compilation,abi,proxyResolution,"
+        + "runtimeBytecode.onchainBytecode,runtimeBytecode.immutableReferences,runtimeBytecode.cborAuxdata,"
+        + "creationBytecode.recompiledBytecode,creationBytecode.cborAuxdata";
+      const url = `https://sourcify.dev/server/v2/contract/${chainId}/${address}?fields=${fields}`;
       const res = await get(url);
       if (res.status === 404) throw new Error(`${address} is not verified on Sourcify for chain ${chainId}`);
       if (res.status === 429) throw new Error("Sourcify asks to slow down: try again in a minute");

@@ -6,7 +6,8 @@ import { runHevm } from "../src/hevm";
 import { importClosure } from "../src/imports";
 import { describeResult, parseTestOutput } from "../src/results";
 import { compileProject, evalSoljson, solcVersion } from "../src/solc";
-import { fetchVerified, parseTarget, readVerified, type VerifiedContract } from "../src/sourcify";
+import { artifactPath } from "../src/solc";
+import { fetchVerified, parseTarget, readVerified, sameAsDeployed, type VerifiedContract } from "../src/sourcify";
 import { sourcifyExamples } from "../src/sourcifyExamples";
 import { starterPath, starterTest } from "../src/starter";
 import { hasSoljson, soljsonText } from "./soljsonCache";
@@ -33,6 +34,11 @@ describe("Sourcify", () => {
     });
     expect(factory.settings).toMatchObject({ optimizer: { enabled: true, runs: 800 }, evmVersion: "istanbul" });
     expect(weth).toMatchObject({ name: "WETH9", path: "WETH9.sol", version: "0.4.19+commit.c4cbbb05" });
+    // the factory's immutable is its own address, and WETH9's metadata a swarm hash
+    expect(factory.deployed!.runtime.ignore).toEqual([{ start: 1361, length: 32 }]);
+    expect(weth.deployed!.runtime.ignore).toEqual([{ start: 3081, length: 43 }]);
+    expect(weth.deployed!.creation!.ignore).toEqual([{ start: 3461, length: 43 }]);
+    expect(factory.deployed!.runtime.code.length).toBe(2 * 24535);
   });
 
   it("takes an address, or a link with the chain", () => {
@@ -53,7 +59,9 @@ describe("Sourcify", () => {
     const a = await fetchVerified("1", "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", get);
     const b = await fetchVerified("1", "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", get);
     expect(b).toBe(a);
-    expect(urls).toEqual(["https://sourcify.dev/server/v2/contract/1/0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2?fields=sources,compilation,abi,proxyResolution"]);
+    expect(urls).toEqual(["https://sourcify.dev/server/v2/contract/1/0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2?fields=sources,compilation,abi,proxyResolution,"
+      + "runtimeBytecode.onchainBytecode,runtimeBytecode.immutableReferences,runtimeBytecode.cborAuxdata,"
+      + "creationBytecode.recompiledBytecode,creationBytecode.cborAuxdata"]);
     await expect(fetchVerified("1", "0x00000000000000000000000000000000000000aa", get)).rejects.toThrow(/not verified on Sourcify for chain 1/);
     expect(() => readVerified("1", "0x00", { compilation: { language: "Vyper", compilerVersion: "0.3.10", compilerSettings: {}, fullyQualifiedName: "a.vy:A" }, sources: {} }))
       .toThrow(/Vyper contracts are not supported yet/);
@@ -87,6 +95,32 @@ describe.skipIf(!hasSoljson(factory.version))("a verified contract with many fil
     expect(fail.status).toBe("fail");
     const line = test.split("\n").findIndex((l) => l.includes("assert(target.owner()")) + 1;
     expect(fail.counterexamples[0]!.at).toMatchObject({ file: "test/UniswapV3Factory.t.sol", line });
+  });
+});
+
+// the contract's code, compiled from its files as they are, or with one edited
+function compiledCode(c: VerifiedContract, edit?: (source: string) => string): { runtime: string; creation: string } {
+  const files = { ...c.sources, ...(edit && { [c.path]: edit(c.sources[c.path]!) }) };
+  const closure = importClosure(files, [c.path], (c.settings.remappings as string[] | undefined) ?? []);
+  const project = compileProject(evalSoljson(soljsonText(c.version)), closure.map((path) => ({ path, content: files[path]! })), { solc: c.settings });
+  const a = JSON.parse(project.files[artifactPath(c.path, c.name)]!);
+  return { runtime: a.deployedBytecode.object, creation: a.bytecode.object };
+}
+
+describe("the code compiled, and the code deployed", () => {
+  it.skipIf(!hasSoljson(factory.version))("are the same for Uniswap V3's factory, unless its code is edited", () => {
+    expect(sameAsDeployed(compiledCode(factory), factory.deployed!)).toBe(true);
+    expect(sameAsDeployed(compiledCode(factory, (s) => `// a comment\n${s}`), factory.deployed!)).toBe(true);
+    expect(sameAsDeployed(compiledCode(factory, (s) => s.replace("require(fee < 1000000);", "require(fee < 2000000);")), factory.deployed!)).toBe(false);
+  });
+
+  it.skipIf(!hasSoljson(weth.version))("are the same for WETH9, but for its metadata", () => {
+    expect(sameAsDeployed(compiledCode(weth), weth.deployed!)).toBe(true);
+    // an initial value is the constructor's: the runtime code stays, the creation code changes
+    const decimals = compiledCode(weth, (s) => s.replace("uint8  public decimals = 18;", "uint8  public decimals = 17;"));
+    expect(sameAsDeployed({ runtime: decimals.runtime, creation: compiledCode(weth).creation }, weth.deployed!)).toBe(true);
+    expect(sameAsDeployed(decimals, weth.deployed!)).toBe(false);
+    expect(sameAsDeployed(compiledCode(weth, (s) => s.replace("require(balanceOf[msg.sender] >= wad);", "require(balanceOf[msg.sender] > wad);")), weth.deployed!)).toBe(false);
   });
 });
 

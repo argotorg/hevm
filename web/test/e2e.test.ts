@@ -337,6 +337,31 @@ describe.skipIf(!ready)("website in Chromium", () => {
       await p.close();
     });
 
+    it("says whether the code tested is the code deployed, and if not, why", async () => {
+      const p = await offline();
+      await loadFactory(p);
+      expect(await p.locator("#sol-origin .deployed").count()).toBe(0);
+      expect(await proved(p)).toMatch(/^5 passed/);
+      expect(await p.textContent("#sol-origin .deployed.same")).toBe("The code tested is the code deployed.");
+      const original = JSON.parse(readFileSync(`${root}/test/fixtures/sourcify/univ3factory.json`, "utf8"))
+        .sources["contracts/UniswapV3Factory.sol"].content as string;
+      const replace = async (text: string) => {
+        await p.click("#files li.file >> text=/^UniswapV3Factory\\.sol$/");
+        await p.click("#source .cm-content");
+        await p.keyboard.press("ControlOrMeta+A");
+        await p.keyboard.insertText(text);
+      };
+      await replace(`// a comment\n${original}`);
+      await proved(p);
+      expect(await p.textContent("#sol-origin .deployed.same"))
+        .toBe("The code tested is still the code deployed: your edits to contracts/UniswapV3Factory.sol do not change it.");
+      await replace(original.replace("require(fee < 1000000);", "require(fee < 2000000);"));
+      await proved(p);
+      expect(await p.textContent("#sol-origin .deployed.differs"))
+        .toBe("The code tested differs from the code deployed: you edited contracts/UniswapV3Factory.sol.");
+      await p.close();
+    });
+
     it("gives any other contract a starter test", async () => {
       const p = await offline();
       await p.goto(server.resolvedUrls!.local[0]!);
