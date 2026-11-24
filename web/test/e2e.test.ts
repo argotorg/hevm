@@ -95,6 +95,22 @@ describe.skipIf(!ready)("website in Chromium", () => {
       expect(await page.locator("#sol-progress .counters").textContent()).toContain("Functions6 / 6");
     });
 
+    it("selects text in the page's colour, not CodeMirror's fixed purple", async () => {
+      await page.click('.tabs [data-tab="sol"]');
+      await page.click("#source .cm-line >> nth=7");
+      await page.keyboard.press("Shift+ArrowDown");
+      const bg = await page.$eval("#source .cm-selectionBackground", (e) => getComputedStyle(e).backgroundColor);
+      const want = await page.evaluate(() => {
+        const probe = document.createElement("div");
+        probe.style.backgroundColor = "var(--selection)";
+        document.body.append(probe);
+        const c = getComputedStyle(probe).backgroundColor;
+        probe.remove();
+        return c;
+      });
+      expect(bg).toBe(want);
+    });
+
     it("shows compile errors at their place", async () => {
       const cards = await prove("Assertions", "pragma solidity ^0.8.0;\ncontract C { function f() public { x = 1; } }\n");
       expect(await cards.first().textContent()).toContain("Undeclared identifier");

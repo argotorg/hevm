@@ -15,6 +15,7 @@
   --t-comment: #8c8a85;
   --t-operator: #4c4f69;
   --t-name: #1d1c1a;
+  --selection: color-mix(in srgb, var(--accent) 22%, transparent);
   color-scheme: light dark;
   font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
   background: var(--bg);
@@ -38,6 +39,7 @@
     --t-comment: #7f7d77;
     --t-operator: #bac2de;
     --t-name: #ecebe8;
+    --selection: color-mix(in srgb, var(--accent) 32%, transparent);
   }
 }
 
@@ -546,4 +548,8 @@ code,
 .stats .num {
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+::selection {
+  background: var(--selection);
 }

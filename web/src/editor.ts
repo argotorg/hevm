@@ -8,6 +8,12 @@ import { EditorView, basicSetup } from "codemirror";
 
 const setFailing = StateEffect.define<number[]>();
 
+// CodeMirror's default selection is a fixed light purple, unreadable under light text
+const selection = EditorView.theme({
+  "&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection":
+    { backgroundColor: "var(--selection)" },
+});
+
 // lines where a counterexample fails, until the source changes
 const failing = StateField.define<DecorationSet>({
   create: () => Decoration.none,
@@ -30,7 +36,7 @@ export class SolidityEditor {
     this.view = new EditorView({
       parent,
       doc,
-      extensions: [basicSetup, keymap.of([indentWithTab]), solidity, syntaxHighlighting(classHighlighter), failing],
+      extensions: [basicSetup, keymap.of([indentWithTab]), solidity, syntaxHighlighting(classHighlighter), failing, selection],
     });
   }
 
