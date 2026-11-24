@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds bitwuzla, with GMP and MPFR, for wasm32-wasi into dist-wasm/solver/prefix. Usage: [JOBS=n] wasm/build-solver.sh
+# Builds bitwuzla, with GMP and MPFR, and libff's BN254 for wasm32-wasi into dist-wasm/solver/prefix. Usage: [JOBS=n] wasm/build-solver.sh
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -15,6 +15,8 @@ gmp_sha256=a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898
 mpfr_version=4.2.1
 mpfr_sha256=277807353a6726978996945af13e52829e3abd7a9a5b7fb2793894e18f1fcbb2
 bitwuzla_version=0.11.0
+libff_version=0.2.1
+libff_sha256=630010841f6992ad6e4758bb079d248eab46cfe66a4c0391c11075f3e5387b60
 
 export CC=$sdk/bin/wasm32-wasi-clang CXX=$sdk/bin/wasm32-wasi-clang++
 export AR=$sdk/bin/llvm-ar RANLIB=$sdk/bin/llvm-ranlib CC_FOR_BUILD=cc
@@ -49,6 +51,23 @@ if [ ! -f "$prefix/lib/libmpfr.a" ]; then
       --with-gmp="$prefix" --disable-shared --enable-static --disable-thread-safe \
       --prefix="$prefix" &&
     make -j"$jobs" && make install)
+fi
+
+# only its BN254 curve, which hevm's precompiles use: libff's CMake would want OpenSSL.
+# The CPU clock is only read for profiling, which ethjet turns off.
+if [ ! -f "$prefix/lib/libff.a" ]; then
+  fetch $libff_sha256 "https://github.com/scipr-lab/libff/archive/refs/tags/v$libff_version.tar.gz"
+  ff=$work/src/libff-$libff_version
+  mkdir -p "$work/libff-build" "$prefix/include"
+  objs=()
+  for src in algebra/curves/alt_bn128/alt_bn128_{g1,g2,init,pairing,pp}.cpp common/{double,profiling,utils}.cpp; do
+    obj=$work/libff-build/$(basename "$src" .cpp).o
+    "$CXX" -std=c++11 -O2 -fPIC -fignore-exceptions -DCURVE_ALT_BN128 -DNO_PROCPS \
+      -DCLOCK_PROCESS_CPUTIME_ID=CLOCK_MONOTONIC -I"$ff" -I"$prefix/include" -c "$ff/libff/$src" -o "$obj"
+    objs+=("$obj")
+  done
+  "$AR" rcs "$prefix/lib/libff.a" "${objs[@]}"
+  (cd "$ff" && find libff \( -name '*.hpp' -o -name '*.tcc' \) -exec cp --parents {} "$prefix/include" \;)
 fi
 
 bzla=$work/src/bitwuzla

@@ -14,6 +14,8 @@
 
 using namespace libff;
 
+// Invalid input is reported by returning false, not by an exception: the wasm build has
+// no C++ exceptions.
 namespace ethjet_ff {
   // libff's parameters are globals, meant to be set up once: setting them up again on
   // every call, as this did, corrupted the heap now and then
@@ -28,30 +30,31 @@ namespace ethjet_ff {
 
   // for loading an element of F_q (a coordinate of G_1)
   // consumes 32 bytes
-  alt_bn128_Fq read_Fq_element (uint8_t *in) {
-    mpz_t x_data;
+  bool read_Fq_element (uint8_t *in, alt_bn128_Fq &out) {
+    mpz_t x_data, q;
     mpz_init(x_data);
-    mpz_import(x_data, 32, 1, sizeof(in[0]), 1, 0, in);
-
-    mpz_t q;
     mpz_init(q);
+    mpz_import(x_data, 32, 1, sizeof(in[0]), 1, 0, in);
     alt_bn128_modulus_q.to_mpz(q);
     const mp_size_t limbs = alt_bn128_q_limbs;
 
-    if (mpz_cmp(x_data, q) >= 0)
-      throw 0;
-
-    return Fp_model<limbs, alt_bn128_modulus_q>(bigint<limbs>(x_data));
+    bool ok = mpz_cmp(x_data, q) < 0;
+    if (ok)
+      out = Fp_model<limbs, alt_bn128_modulus_q>(bigint<limbs>(x_data));
+    mpz_clear(x_data);
+    mpz_clear(q);
+    return ok;
   }
 
   // for loading an element of F_{q^2} (a coordinate of G_2)
   // consumes 64 bytes
-  alt_bn128_Fq2 read_Fq2_element (uint8_t *in) {
+  bool read_Fq2_element (uint8_t *in, alt_bn128_Fq2 &out) {
     // suprising "big-endian" encoding
-    alt_bn128_Fq x0 = read_Fq_element(in+32);
-    alt_bn128_Fq x1 = read_Fq_element(in);
-
-    return Fp2_model<alt_bn128_q_limbs, alt_bn128_modulus_q>(x0, x1);
+    alt_bn128_Fq x0, x1;
+    if (!read_Fq_element(in+32, x0) || !read_Fq_element(in, x1))
+      return false;
+    out = Fp2_model<alt_bn128_q_limbs, alt_bn128_modulus_q>(x0, x1);
+    return true;
   }
 
   // for loading an element of F_r (a scalar for G_1)
@@ -63,64 +66,58 @@ namespace ethjet_ff {
 
     const mp_size_t limbs = alt_bn128_r_limbs;
 
-    return Fp_model<limbs, alt_bn128_modulus_r>(bigint<limbs>(x_data));
+    alt_bn128_Fr r = Fp_model<limbs, alt_bn128_modulus_r>(bigint<limbs>(x_data));
+    mpz_clear(x_data);
+    return r;
   }
 
   // for loading a point in G_1
   // consumes 64 bytes
-  alt_bn128_G1 read_G1_point (uint8_t *in) {
-    alt_bn128_Fq ax = read_Fq_element(in);
-    alt_bn128_Fq ay = read_Fq_element(in+32);
-    alt_bn128_G1 a;
+  bool read_G1_point (uint8_t *in, alt_bn128_G1 &out) {
+    alt_bn128_Fq ax, ay;
+    if (!read_Fq_element(in, ax) || !read_Fq_element(in+32, ay))
+      return false;
     // create curve point from affine coordinates
     // the point at infinity (0,0) is a special case
     if (ax.is_zero() && ay.is_zero()) {
-      a = alt_bn128_G1::G1_zero;
+      out = alt_bn128_G1::G1_zero;
     }
     else {
-      a = alt_bn128_G1(ax, ay, alt_bn128_Fq::one());
+      out = alt_bn128_G1(ax, ay, alt_bn128_Fq::one());
     }
-    if (! a.is_well_formed()) {
-      throw 0;
-    }
-    return a;
+    return out.is_well_formed();
   }
 
   // for loading a point in G_2
   // consumes 128 bytes
-  alt_bn128_G2 read_G2_point (uint8_t *in) {
-    alt_bn128_Fq2 ax = read_Fq2_element(in);
-    alt_bn128_Fq2 ay = read_Fq2_element(in+64);
-    alt_bn128_G2  a;
+  bool read_G2_point (uint8_t *in, alt_bn128_G2 &out) {
+    alt_bn128_Fq2 ax, ay;
+    if (!read_Fq2_element(in, ax) || !read_Fq2_element(in+64, ay))
+      return false;
     // create curve point from affine coordinates
     // the point at infinity (0,0) is a special case
     if (ax.is_zero() && ay.is_zero()) {
-      a = alt_bn128_G2::G2_zero;
-      return a;
+      out = alt_bn128_G2::G2_zero;
+      return true;
     }
-    a = alt_bn128_G2(ax, ay, alt_bn128_Fq2::one());
-    if (! a.is_well_formed()) {
-      throw 0;
-    }
+    out = alt_bn128_G2(ax, ay, alt_bn128_Fq2::one());
+    if (! out.is_well_formed())
+      return false;
     // additionally check that the element has the right order
-    if (-alt_bn128_Fr::one() * a + a != alt_bn128_G2::G2_zero) {
-      throw 0;
-    }
-    return a;
+    return -alt_bn128_Fr::one() * out + out == alt_bn128_G2::G2_zero;
   }
 
-  // writes an element of Fq
+  // writes an element of Fq, which is less than q and so fits
   // produces 32 bytes
   void write_Fq_element(uint8_t *out, alt_bn128_Fq x) {
     mpz_t x_data;
-    size_t x_size;
     mpz_init(x_data);
-
     x.as_bigint().to_mpz(x_data);
-    uint8_t *x_arr = (uint8_t *)mpz_export(NULL, &x_size, 1, 1, 1, 0, x_data);
-    if (x_size > 32) {
-      throw 0;
-    }
+
+    uint8_t x_arr[32];
+    size_t x_size = 0;
+    mpz_export(x_arr, &x_size, 1, 1, 1, 0, x_data);
+    mpz_clear(x_data);
     // copy the result to the output buffer
     // with padding
     for (size_t i = 1; i <= 32; i++) {
@@ -129,16 +126,6 @@ namespace ethjet_ff {
       else
         out[32-i] = 0;
     }
-    return;
-  }
-
-  // writes an element of F_{q^2}
-  // produces 64 bytes
-  void write_Fq2_element(uint8_t *out, alt_bn128_Fq2 x) {
-    // surprising "big-endian" encoding
-    write_Fq_element(out+32, x.c0);
-    write_Fq_element(out,    x.c1);
-    return;
   }
 
   // writes a point of G1
@@ -154,23 +141,6 @@ namespace ethjet_ff {
     a.to_affine_coordinates();
     write_Fq_element(out,    a.X);
     write_Fq_element(out+32, a.Y);
-    return;
-  }
-
-  // writes a point of G2
-  // produces 128 bytes
-  void write_G2_point(uint8_t *out, alt_bn128_G2 a) {
-    // point at infinity is represented as (0,0)
-    // so treat it as a special case
-    if (a.is_zero()) {
-      write_Fq2_element(out,    alt_bn128_Fq2::zero());
-      write_Fq2_element(out+64, alt_bn128_Fq2::zero());
-      return;
-    }
-    a.to_affine_coordinates();
-    write_Fq2_element(out,    a.X);
-    write_Fq2_element(out+64, a.Y);
-    return;
   }
 
   // writes a bool
@@ -199,17 +169,10 @@ extern "C" {
 
     init();
 
-    try {
-      alt_bn128_G1 a = read_G1_point(in);
-      alt_bn128_G1 b = read_G1_point(in+64);
-      alt_bn128_G1 sum = (a + b);
-
-      write_G1_point(out, sum);
-    }
-    catch (int e) {
+    alt_bn128_G1 a, b;
+    if (!read_G1_point(in, a) || !read_G1_point(in+64, b))
       return 0;
-    }
-
+    write_G1_point(out, a + b);
     return 1;
   }
 
@@ -226,17 +189,11 @@ extern "C" {
 
     init();
 
-    try {
-      alt_bn128_G1 a = read_G1_point(in);
-      alt_bn128_Fr n = read_Fr_element(in+64);
-      alt_bn128_G1 na = n * a;
-
-      write_G1_point(out, na);
-    }
-    catch (int e) {
+    alt_bn128_G1 a;
+    if (!read_G1_point(in, a))
       return 0;
-    }
-
+    alt_bn128_Fr n = read_Fr_element(in+64);
+    write_G1_point(out, n * a);
     return 1;
   }
 
@@ -253,26 +210,22 @@ extern "C" {
     init();
     int pairs = in_size / 192;
 
-    try {
-      alt_bn128_Fq12 x = libff::alt_bn128_Fq12::one();
-      for (int i = 0; i < pairs; i++) {
-        alt_bn128_G1 a = read_G1_point(in + i*192);
-        alt_bn128_G2 b = read_G2_point(in + i*192 + 64);
-        if (a.is_zero() || b.is_zero())
-          continue;
-        x = x * alt_bn128_miller_loop(alt_bn128_precompute_G1(a), alt_bn128_precompute_G2(b));
-      }
-      bool result;
-      if (pairs == 0)
-        result = true;
-      else
-        result = (alt_bn128_final_exponentiation(x) == alt_bn128_GT::one());
-      write_bool(out, result);
+    alt_bn128_Fq12 x = libff::alt_bn128_Fq12::one();
+    for (int i = 0; i < pairs; i++) {
+      alt_bn128_G1 a;
+      alt_bn128_G2 b;
+      if (!read_G1_point(in + i*192, a) || !read_G2_point(in + i*192 + 64, b))
+        return 0;
+      if (a.is_zero() || b.is_zero())
+        continue;
+      x = x * alt_bn128_miller_loop(alt_bn128_precompute_G1(a), alt_bn128_precompute_G2(b));
     }
-    catch (int e) {
-      return 0;
-    }
-
+    bool result;
+    if (pairs == 0)
+      result = true;
+    else
+      result = (alt_bn128_final_exponentiation(x) == alt_bn128_GT::one());
+    write_bool(out, result);
     return 1;
   }
 }

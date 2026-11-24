@@ -61,13 +61,12 @@ $ wasm/build.sh
 $ dist-wasm/toolchain/wasmtime/bin/wasmtime run --dir . dist-wasm/hevm.wasm symbolic --code 0x600035602a14600a57005bfe
 ```
 
-`wasm/build-solver.sh`, which `wasm/build.sh` runs first, builds GMP, MPFR and
-bitwuzla with the toolchain's wasi-sdk. The build applies the patches in
-`wasm/patches` to Haskell dependencies that do not yet build for 32-bit wasm. It
-has no solver other than bitwuzla, cannot run `solc` or `forge`, has no RPC and no
-debugger server, and does not support the BN254 precompiles (`ECADD`, `ECMUL`,
-`ECPAIRING`). An error inside bitwuzla aborts hevm, as wasi-sdk has no C++
-exceptions.
+`wasm/build-solver.sh`, which `wasm/build.sh` runs first, builds GMP, MPFR,
+bitwuzla and libff's BN254 curve with the toolchain's wasi-sdk. The build applies
+the patches in `wasm/patches` to Haskell dependencies that do not yet build for
+32-bit wasm. It has no solver other than bitwuzla, cannot run `solc` or `forge`, and
+has no RPC and no debugger server. An error inside bitwuzla aborts hevm, as wasi-sdk
+has no C++ exceptions.
 
 `wasm/fuzz.sh` runs hevm's fuzzers that need nothing outside hevm (`eq-fuzz`, the
 rewrite and keccak fuzzers) on the wasm build, and `wasm/ethereum-tests.sh` compares

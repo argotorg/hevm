@@ -143,23 +143,27 @@ library
     ghc-options: -fcompact-unwind
   c-sources:
     ethjet/blake2.c, ethjet/ethjet.c
+  cxx-sources:
+    ethjet/ethjet-ff.cc
   if arch(wasm32)
     -- built by wasm/build-solver.sh
+    include-dirs: dist-wasm/solver/prefix/include
     other-modules:
       EVM.Solvers.Bitwuzla
     extra-libraries:
-      hevm_bitwuzla, bitwuzla, cadical, mpfr, gmpxx, gmp, c++, c++abi,
+      hevm_bitwuzla, bitwuzla, cadical, ff, mpfr, gmpxx, gmp, c++, c++abi,
       wasi-emulated-signal, wasi-emulated-process-clocks, wasi-emulated-getpid
   else
     extra-libraries:
       ff, gmp
-    cxx-sources:
-      ethjet/ethjet-ff.cc
     build-depends:
       wreq                              >= 0.5.3 && < 0.6,
       network                           >= 3.1 && < 3.3,
   cxx-options:
     -std=c++0x
+  if arch(wasm32)
+    -- libff's headers throw, and wasi-sdk has no C++ exceptions
+    cxx-options: -fignore-exceptions
   install-includes:
     ethjet/ethjet.h, ethjet/ethjet-ff.h, ethjet/blake2.h
   build-depends:

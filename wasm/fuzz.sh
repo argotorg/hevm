@@ -5,7 +5,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 wasm_dir=${GHC_WASM:-$PWD/dist-wasm/toolchain}
 . "$wasm_dir/env"
-[ -f dist-wasm/solver/prefix/lib/libhevm_bitwuzla.a ] || wasm/build-solver.sh
+[ -f dist-wasm/solver/prefix/lib/libhevm_bitwuzla.a ] && [ -f dist-wasm/solver/prefix/lib/libff.a ] ||
+  wasm/build-solver.sh
 
 cabal=(wasm32-wasi-cabal --project-file=cabal.project.wasm --builddir=dist-wasm/build
        --extra-lib-dirs="$PWD/dist-wasm/solver/prefix/lib" --enable-tests)

@@ -1,10 +1,7 @@
 #include "ethjet.h"
 #include "blake2.h"
 
-/* the wasm build has no libff */
-#ifndef __wasm__
 #include "ethjet-ff.h"
-#endif
 
 #include <stdlib.h>
 #include <stdint.h>
@@ -50,7 +47,6 @@ ethjet (enum ethjet_operation op,
   case ETHJET_EXAMPLE:
     return ethjet_example (in, in_size, out, out_size);
 
-#ifndef __wasm__
   case ETHJET_ECADD:
     return ethjet_ecadd (in, in_size, out, out_size);
 
@@ -59,7 +55,6 @@ ethjet (enum ethjet_operation op,
 
   case ETHJET_ECPAIRING:
     return ethjet_ecpairing (in, in_size, out, out_size);
-#endif
 
   case ETHJET_BLAKE2:
     return ethjet_blake2 (in, in_size, out, out_size);

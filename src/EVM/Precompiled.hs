@@ -1,5 +1,4 @@
-{-# LANGUAGE CPP #-}
-module EVM.Precompiled (execute, supported) where
+module EVM.Precompiled (execute) where
 
 import Control.Monad (guard)
 import Crypto.Hash (Digest, Keccak_256, hash)
@@ -25,15 +24,6 @@ foreign import ccall unsafe "ethjet"
     -> Ptr CChar -> CSize    -- input
     -> Ptr CChar -> CSize    -- output
     -> IO CInt               -- 1 if good
-
--- | Whether this build can run the given precompiled contract. The wasm build has no
--- libff, so it cannot run the BN254 precompiles.
-supported :: Int -> Bool
-#if defined(wasm32_HOST_ARCH)
-supported n = n `notElem` [0x6, 0x7, 0x8]
-#else
-supported _ = True
-#endif
 
 -- | Run a given precompiled contract: ECRECOVER in Haskell, the others with the C library.
 execute
