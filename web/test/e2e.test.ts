@@ -354,6 +354,10 @@ describe.skipIf(!ready)("website in Chromium", () => {
       expect(scroll).toBeLessThanOrEqual(width);
     });
 
+    it("has the tabs in order, the Debugger last", async () => {
+      expect(await page.locator(".tabs button").allTextContents()).toEqual(["Solidity", "Equivalence", "Bytecode", "Debugger"]);
+    });
+
     it("fits all the tabs on a phone", async () => {
       const p = await browser.newPage({ viewport: { width: 360, height: 700 } });
       await p.goto(server.resolvedUrls!.local[0]!);
