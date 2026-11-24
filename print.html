@@ -37,10 +37,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-427761b4.js";
+            window.path_to_searchindex_js = "searchindex-9946d329.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-afb2082f.js"></script>
+        <script src="toc-db290892.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -918,6 +918,182 @@ implementing the following methods:</p>
 </table>
 </div>
 <div style="break-before: page; page-break-before: always;"></div>
+<h1 id="invariant-testing-tutorial"><a class="header" href="#invariant-testing-tutorial">Invariant Testing Tutorial</a></h1>
+<p>An invariant is a property that must hold no matter which functions of a
+contract are called, in which order, with which arguments, and by whom. hevm
+checks <code>invariant_</code> functions of a Forge test contract symbolically: it
+explores every sequence of calls up to a given length, with symbolic arguments
+and callers, and checks the invariant in every state reached. Unlike fuzzing,
+a <code>[PASS]</code> means no sequence of calls up to that length breaks the invariant.</p>
+<h2 id="a-simple-example"><a class="header" href="#a-simple-example">A simple example</a></h2>
+<p>The following token has a bug: <code>burn</code> lowers the total supply but not the
+caller’s balance. Save it as <code>src/Token.sol</code>:</p>
+<pre><code class="language-solidity">pragma solidity ^0.8.19;
+
+contract Token {
+    mapping(address =&gt; uint256) public balanceOf;
+    uint256 public totalSupply;
+
+    function mint(uint256 amount) public {
+        require(amount &lt;= 10);
+        balanceOf[msg.sender] += amount;
+        totalSupply += amount;
+    }
+
+    function burn(uint256 amount) public {
+        require(balanceOf[msg.sender] &gt;= amount);
+        totalSupply -= amount;
+    }
+}
+</code></pre>
+<p>The test, in <code>test/Token.t.sol</code>, lets one user call the token, and checks that
+they never hold more than the total supply:</p>
+<pre><code class="language-solidity">pragma solidity ^0.8.19;
+
+import {Test} from "forge-std/Test.sol";
+import {Token} from "../src/Token.sol";
+
+contract TokenTest is Test {
+    Token token;
+    address constant alice = address(0x1000);
+
+    function setUp() public {
+        token = new Token();
+        targetSender(alice);
+    }
+
+    function invariant_supply() public view {
+        assertLe(token.balanceOf(alice), token.totalSupply());
+    }
+}
+</code></pre>
+<p><code>setUp()</code> deploys the token, so its non-view functions, <code>mint</code> and <code>burn</code>, are
+the ones hevm calls. Build with <code>forge build --ast</code> and run:</p>
+<pre><code class="language-shell">$ hevm test
+Checking 1 function(s) in contract test/Token.t.sol:TokenTest
+[RUNNING] invariant_supply()
+   Counterexample:   [validated]
+     calls:    Token.mint(10)
+               Token.burn(10)
+     calldata: invariant_supply()
+     result:   Revert: Error("assertion failed: 10 &gt; 0")
+   [FAIL] invariant_supply
+</code></pre>
+<p>The counterexample lists the calls that lead to the bad state, then the call
+of the invariant that fails in it: after minting and burning 10 tokens, Alice
+still holds 10 of a total supply of 0. <code>[validated]</code> means hevm replayed the
+calls concretely and the invariant indeed failed.</p>
+<p>The bug needs two calls. With <code>--invariant-depth 1</code> the invariant passes:</p>
+<pre><code class="language-shell">$ hevm test --invariant-depth 1
+...
+   [PASS] invariant_supply (3 states, up to 1 calls deep)
+</code></pre>
+<p>After adding <code>balanceOf[msg.sender] -= amount;</code> to <code>burn</code>, it passes at the
+default depth of 2, too:</p>
+<pre><code class="language-shell">$ hevm test
+...
+   [PASS] invariant_supply (7 states, up to 2 calls deep)
+</code></pre>
+<p>The number of states is how many distinct states hevm reached and checked the
+invariant in, including the one after <code>setUp()</code>.</p>
+<h2 id="how-it-works"><a class="header" href="#how-it-works">How it works</a></h2>
+<p>After <code>setUp()</code>, hevm repeatedly calls every target function with symbolic
+arguments and caller, up to <code>--invariant-depth</code> calls, and checks the invariant
+in every state reached. The timestamp may advance between calls. Reverting
+calls and already-seen states are not explored further. A failing assertion
+inside a call also fails the test. Cost grows quickly with depth.</p>
+<h2 id="choosing-what-to-call"><a class="header" href="#choosing-what-to-call">Choosing what to call</a></h2>
+<p>By default, the target functions are all non-view, non-pure functions of the
+contracts deployed in <code>setUp()</code>, other than the test contract itself, and they
+may be called by any address. The same <code>forge-std</code> functions that Foundry uses
+change this; call them in <code>setUp()</code>:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Function</th><th>Effect</th></tr>
+</thead>
+<tbody>
+<tr><td><code>targetContract(addr)</code></td><td>Call only these contracts</td></tr>
+<tr><td><code>excludeContract(addr)</code></td><td>Never call these contracts</td></tr>
+<tr><td><code>targetSelector(FuzzSelector)</code></td><td>Call only these functions of a contract</td></tr>
+<tr><td><code>excludeSelector(FuzzSelector)</code></td><td>Never call these functions of a contract</td></tr>
+<tr><td><code>targetSender(addr)</code></td><td>Only these addresses send calls</td></tr>
+<tr><td><code>excludeSender(addr)</code></td><td>These addresses never send calls</td></tr>
+</tbody>
+</table>
+</div>
+<p>The test contract itself can be targeted too; its <code>test</code>, <code>prove</code>, <code>check</code>,
+<code>invariant_</code> and <code>setUp</code> functions are then not called. <code>targetSelector</code> can
+select view functions, and overrides <code>excludeSelector</code> for that contract.</p>
+<p>For example, to call only <code>mint</code> and <code>transfer</code> of a token, and never from the
+zero address:</p>
+<pre><code class="language-solidity">function setUp() public {
+    token = new Token();
+    bytes4[] memory selectors = new bytes4[](2);
+    selectors[0] = Token.mint.selector;
+    selectors[1] = Token.transfer.selector;
+    targetSelector(FuzzSelector({addr: address(token), selectors: selectors}));
+    excludeSender(address(0));
+}
+</code></pre>
+<p>Note that without <code>targetSender</code>, a caller can be any address, including the
+test contract and the contracts deployed in <code>setUp()</code>. If a contract trusts
+its deployer, exclude it, or list the senders that matter.</p>
+<p>A common pattern is a handler contract that wraps the contract under test,
+and is the only target. Its functions can bound the arguments, pick actors, or
+set up the right preconditions, for example:</p>
+<pre><code class="language-solidity">contract Handler is Test {
+    Token token;
+    address[] actors;
+
+    constructor(Token t) {
+        token = t;
+        actors.push(address(0x1000));
+        actors.push(address(0x2000));
+    }
+
+    function transfer(uint256 from, uint256 to, uint256 amount) public {
+        vm.prank(actors[from % actors.length]);
+        token.transfer(actors[to % actors.length], amount);
+    }
+}
+</code></pre>
+<p>with <code>targetContract(address(new Handler(token)))</code> in <code>setUp()</code>.</p>
+<p>A minimal proxy (<a href="https://eips.ethereum.org/EIPS/eip-1167">EIP-1167</a> clone)
+deployed in <code>setUp()</code> is called with the functions of the contract it
+delegates to.</p>
+<h2 id="options"><a class="header" href="#options">Options</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Option</th><th>Effect</th></tr>
+</thead>
+<tbody>
+<tr><td><code>--invariant-depth N</code></td><td>Check the invariants in every state reached by at most <code>N</code> calls. Default: 2.</td></tr>
+<tr><td><code>--match REGEX</code></td><td>Only check the invariants (and other tests) whose names match. <code>invariant_</code> functions are checked regardless of <code>--prefix</code>.</td></tr>
+<tr><td><code>--debug</code></td><td>Also print the target functions, and the number of new states after each number of calls.</td></tr>
+</tbody>
+</table>
+</div>
+<p>The <a href="#common-options">common options</a> apply to each call. For example,
+<code>--max-iterations</code> bounds the iterations of each loop in each call separately,
+and <code>--solver-timeout</code> applies to every query.</p>
+<h2 id="warnings"><a class="header" href="#warnings">Warnings</a></h2>
+<p>When hevm could not explore everything, it prints a warning, and the test
+fails instead of passing:</p>
+<ul>
+<li><em>some checks of the invariant were inconclusive</em>: the solver could not decide
+whether the invariant holds in some state, for example because it timed out.</li>
+<li><em>the calls before the invariant were only partially explored</em>: some paths of
+the target functions were cut short, for example by a loop bound or an
+unsupported operation, so some states may have been missed.</li>
+<li><em>these functions were not called, their arguments cannot be symbolic</em>:
+functions with arguments such as dynamic arrays are not called. Wrap them in
+a handler function with arguments hevm supports.</li>
+</ul>
+<p>See <a href="#limitations-and-workarounds">Limitations and Workarounds</a> for ways
+around these.</p>
+<div style="break-before: page; page-break-before: always;"></div>
 <h1 id="equivalence-checking-tutorial"><a class="header" href="#equivalence-checking-tutorial">Equivalence Checking Tutorial</a></h1>
 <p>Equivalence checking allows to check whether two bytecodes do the same thing under all input
 circumstances. This allows to e.g. create two functions, one that is known to be good, and
@@ -1706,7 +1882,9 @@ Checking 1 function(s) in contract test/Counter.t.sol:CounterTest
    [FAIL] invariant_below_two
 </code></pre>
 <p>Functions with arguments that cannot be symbolic, such as dynamic arrays, are
-not called, and hevm warns about them.</p>
+not called, and hevm warns about them. See the <a href="#invariant-testing-tutorial">invariant testing
+tutorial</a> for a longer example and all the
+options.</p>
 <h2 id="further-reading"><a class="header" href="#further-reading">Further reading</a></h2>
 <p>See our
 <a href="#forge-std-test-usage-tutorial">tutorial here</a> for more details. An overview of using
