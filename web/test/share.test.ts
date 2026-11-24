@@ -29,10 +29,12 @@ describe("links", () => {
   it("carry a project's files and solc version, or a verified contract and the files changed", async () => {
     const files = { "src/A.sol": "contract A {}", "test/A.t.sol": "contract T {}" };
     expect(await round({ tab: "sol", files, version: "0.7.6+commit.7338295f" })).toEqual({ tab: "sol", files, version: "0.7.6+commit.7338295f" });
-    const verified: Shared = { tab: "sol", sourcify: { chainId: "1", address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" }, files: { "test/W.t.sol": "x" } };
+    const verified: Shared = { tab: "sourcify", sourcify: { chainId: "1", address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" }, files: { "test/W.t.sol": "x" } };
     const hash = await encodeShare(verified);
-    expect(hash).toMatch(/^tab=sol&sourcify=1%3A0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2&s=/);
+    expect(hash).toMatch(/^tab=sourcify&sourcify=1%3A0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2&s=/);
     expect(await decodeShare("#" + hash)).toEqual(verified);
+    // as such links were at first
+    expect(await decodeShare("#" + hash.replace("tab=sourcify", "tab=sol"))).toEqual(verified);
   });
 
   it("ignore what is not theirs", async () => {

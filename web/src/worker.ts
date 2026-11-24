@@ -1,5 +1,5 @@
 import { runHevm, type Files, type ProgressEvent, type RunResult } from "./hevm";
-import { compileProject, evalSoljson, solcUrl, type CompileSettings, type Project, type Soljson, type Source } from "./solc";
+import { compileProject, evalSoljson, fetchSoljson, solcUrl, type CompileSettings, type Project, type Soljson, type Source } from "./solc";
 
 export type WorkerRequest = { id: number; wasmUrl: string; solcUrl: string } & (
   | { kind: "hevm"; args: string[]; files?: Files; stream?: boolean }
@@ -19,17 +19,6 @@ let hevm: Promise<WebAssembly.Module> | undefined;
 // the built-in one, and the last other version used: each takes some 100 MB once running
 let bundled: Promise<Soljson> | undefined;
 let other: { version: string; solc: Promise<Soljson> } | undefined;
-
-// 25 MB each: kept in the browser's cache, which pages served over http:// do not have
-async function fetchSoljson(url: string): Promise<string> {
-  const cache = typeof caches === "undefined" ? undefined : await caches.open("soljson").catch(() => undefined);
-  const hit = await cache?.match(url);
-  if (hit) return hit.text();
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`could not download ${url}: ${res.status}`);
-  await cache?.put(url, res.clone()).catch(() => {});
-  return res.text();
-}
 
 // soljson is a classic script that defines Module, and a module worker cannot importScripts it
 async function loadSolc(url: string): Promise<Soljson> {

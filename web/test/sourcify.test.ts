@@ -7,6 +7,7 @@ import { importClosure } from "../src/imports";
 import { parseTestOutput } from "../src/results";
 import { compileProject, evalSoljson, solcVersion } from "../src/solc";
 import { fetchVerified, parseTarget, readVerified, type VerifiedContract } from "../src/sourcify";
+import { sourcifyExamples } from "../src/sourcifyExamples";
 import { starterPath, starterTest } from "../src/starter";
 import { hasSoljson, soljsonText } from "./soljsonCache";
 
@@ -86,6 +87,23 @@ describe.skipIf(!hasSoljson(factory.version))("a verified contract with many fil
     expect(fail.status).toBe("fail");
     const line = test.split("\n").findIndex((l) => l.includes("assert(target.owner()")) + 1;
     expect(fail.counterexamples[0]!.at).toMatchObject({ file: "test/UniswapV3Factory.t.sol", line });
+  });
+});
+
+describe.skipIf(!hasSoljson(factory.version))("the Sourcify tab's example, Uniswap V3's factory", () => {
+  it("has properties hevm proves, and one it finds a counterexample to", async () => {
+    const res = await testVerified(factory, sourcifyExamples[0]!.test);
+    const status = Object.fromEntries(Object.entries(res).map(([name, r]) => [name, r.status]));
+    expect(status).toEqual({
+      "prove_initial_fee_tiers(uint24)": "pass",
+      "prove_enable_fee(uint24,int24)": "pass",
+      "prove_enable_fee_never_reverts(uint24,int24)": "fail",
+      "prove_create_pool()": "pass",
+      "prove_one_pool_per_pair()": "pass",
+    });
+    const [fee, spacing] = /^prove_enable_fee_never_reverts\((\d+),(-?\d+)\)$/.exec(res["prove_enable_fee_never_reverts(uint24,int24)"]!.counterexamples[0]!.calldata)!.slice(1).map(Number);
+    // what enableFeeAmount turns down: a fee of 100% or more, a spacing out of range, or a fee tier there is
+    expect(fee! >= 1_000_000 || spacing! <= 0 || spacing! >= 16384 || [500, 3000, 10000].includes(fee!)).toBe(true);
   });
 });
 

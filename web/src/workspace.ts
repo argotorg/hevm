@@ -6,6 +6,7 @@ import { importClosure } from "./imports";
 import { bundledSolc, type CompileSettings, type Source } from "./solc";
 import { solcReleases } from "./solcReleases";
 import { chains, fetchVerified, parseTarget, repoUrl, type VerifiedContract } from "./sourcify";
+import { sourcifyExample, sourcifyExamples } from "./sourcifyExamples";
 import { starterPath, starterTest } from "./starter";
 
 export interface SolProject {
@@ -61,6 +62,27 @@ export class Workspace {
     this.render();
   }
 
+  /** No files: nothing loaded yet */
+  clear() {
+    this.show({ files: {}, roots: [] }, "");
+  }
+
+  empty(): boolean {
+    return this.editor.paths().length === 0;
+  }
+
+  snapshot() {
+    return { project: this.project, editor: this.editor.snapshot() };
+  }
+
+  restore(s: ReturnType<Workspace["snapshot"]>) {
+    this.project = s.project;
+    this.editor.restore(s.editor);
+    this.setVersion(s.project.version);
+    this.showOrigin();
+    this.render();
+  }
+
   loadExample(source: string) {
     this.show({ files: { [examplePath]: source }, roots: [examplePath] }, examplePath);
   }
@@ -83,9 +105,12 @@ export class Workspace {
   private verifiedProject(c: VerifiedContract, withStarter: boolean): SolProject {
     const files = { ...c.sources };
     const roots = [c.path];
-    if (withStarter && !(starterPath(c) in files)) {
-      files[starterPath(c)] = starterTest(c);
-      roots.push(starterPath(c));
+    // an example's own tests, or a starter test
+    const example = sourcifyExample(c.chainId, c.address);
+    const path = example?.testPath ?? starterPath(c);
+    if (withStarter && !(path in files)) {
+      files[path] = example?.test ?? starterTest(c);
+      roots.push(path);
     }
     return { files, roots, version: c.version, settings: c.settings, verified: c };
   }
@@ -201,6 +226,7 @@ contract ${/^\d/.test(contract) ? `T${contract}` : contract} is Test {
     const visible = this.visible();
     const current = this.editor.current;
     const many = visible.length > 1 || !!this.project.verified;
+    $<HTMLFormElement>("sol-form").dataset.empty = String(this.empty());
     this.panel.hidden = !many;
     this.fileSelect.hidden = !many;
     const user = (p: string) => !(p in this.project.files) || (this.project.verified ? !(p in this.project.verified.sources) : false);
@@ -251,6 +277,22 @@ export function setupSourcify(workspace: Workspace, onLoaded: () => void) {
   for (const c of chains) chain.add(new Option(`${c.name} (${c.id})`, c.id));
   chain.add(new Option("Other chain…", "other"));
   chain.addEventListener("change", () => (otherField.hidden = chain.value !== "other"));
+  // an example is filled in, for one click to load it with its tests
+  const examples = $<HTMLElement>("sf-examples");
+  const fill = (ex: (typeof sourcifyExamples)[number]) => {
+    chain.value = ex.chainId;
+    otherField.hidden = true;
+    address.value = ex.address;
+  };
+  fill(sourcifyExamples[0]!);
+  examples.append("Filled in: ");
+  sourcifyExamples.forEach((ex, i) => {
+    const b = el("button", "link", ex.name);
+    b.type = "button";
+    b.addEventListener("click", () => fill(ex));
+    examples.append(...(i ? [", ", b] : [b]));
+  });
+  examples.append(", on Ethereum, with tests of it to prove. Or put in any verified contract.");
 
   const load = async (chainId: string, addr: string) => {
     loadButton.disabled = true;

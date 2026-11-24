@@ -87,7 +87,23 @@ export class ProjectEditor {
     this.failingLines.clear();
     for (const [path, text] of Object.entries(files)) this.states.set(path, EditorState.create({ doc: text, extensions: this.extensions }));
     this.current = "";
-    this.open(open);
+    if (this.states.has(open)) this.open(open);
+    else this.view.setState(EditorState.create({ extensions: this.extensions }));
+  }
+
+  /** The files as they are, with their undo histories, to come back to */
+  snapshot(): { states: Map<string, EditorState>; current: string; failing: Map<string, number[]> } {
+    if (this.current) this.states.set(this.current, this.view.state);
+    return { states: new Map(this.states), current: this.current, failing: this.failingLines };
+  }
+
+  restore(s: ReturnType<ProjectEditor["snapshot"]>) {
+    this.states.clear();
+    for (const [path, state] of s.states) this.states.set(path, state);
+    this.failingLines = s.failing;
+    this.current = "";
+    if (this.states.has(s.current)) this.open(s.current);
+    else this.view.setState(EditorState.create({ extensions: this.extensions }));
   }
 
   paths(): string[] {

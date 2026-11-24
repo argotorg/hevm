@@ -21,6 +21,7 @@ onHevmOutput((text) => (log.textContent = text));
 // --- tabs ---
 
 function showTab(name: string) {
+  if (name === "sol" || name === "sourcify") switchSol(name);
   document.body.dataset.tab = name;
 }
 
@@ -42,9 +43,8 @@ window.addEventListener("message", (e) => {
 });
 
 // the tab shows once there is something to debug
-function openDebugger(args: string[], caption: string) {
-  if (!lastProject) return;
-  debugSession = { kind: "hevm-debug", files: lastProject.files, args };
+function openDebugger(project: Project, args: string[], caption: string) {
+  debugSession = { kind: "hevm-debug", files: project.files, args };
   debugCaption.textContent = caption;
   debugTab.hidden = false;
   // a fresh page for each session
@@ -53,14 +53,14 @@ function openDebugger(args: string[], caption: string) {
 }
 
 /** The runtime code of a compiled contract, e.g. "src/Main.sol:Example" */
-function runtimeCode(contract: string): string | undefined {
+function runtimeCode(project: Project, contract: string): string | undefined {
   const [path, name] = contract.split(":");
-  const artifact = lastProject?.files[artifactPath(path!, name!)];
+  const artifact = project.files[artifactPath(path!, name!)];
   return artifact ? (JSON.parse(artifact) as { deployedBytecode: { object: string } }).deployedBytecode.object : undefined;
 }
 
-function openInBytecode(t: TestResult, calldata?: string) {
-  const code = runtimeCode(t.contract);
+function openInBytecode(project: Project, t: TestResult, calldata?: string) {
+  const code = runtimeCode(project, t.contract);
   if (!code) return;
   load(calldata ? { mode: "exec", code, calldata } : { mode: "symbolic", code, sig: t.name });
   outcome.replaceChildren();
@@ -72,9 +72,38 @@ function openInBytecode(t: TestResult, calldata?: string) {
 const solForm = $<HTMLFormElement>("sol-form");
 const solExample = $<HTMLSelectElement>("sol-example");
 const prove = $<HTMLButtonElement>("prove");
-const solStatus = $<HTMLElement>("sol-status");
-const solResults = $<HTMLElement>("sol-results");
-const solProgress = $<HTMLElement>("sol-progress");
+// the Solidity and Sourcify tabs share the form, each with its project and what hevm found
+type SolTab = "sol" | "sourcify";
+interface SolOutput {
+  status: HTMLElement;
+  results: HTMLElement;
+  progress: HTMLElement;
+  /** lines where a counterexample or an error is, per file */
+  failing: Map<string, number[]>;
+}
+const outputs: Record<SolTab, SolOutput> = {
+  sol: { status: $("sol-status"), results: $("sol-results"), progress: $("sol-progress"), failing: new Map() },
+  sourcify: { status: $("sf-status"), results: $("sf-results"), progress: $("sf-progress"), failing: new Map() },
+};
+let solTab: SolTab = "sol";
+const solStatus = outputs.sol.status;
+const solResults = outputs.sol.results;
+const solProgress = outputs.sol.progress;
+const saved: Partial<Record<SolTab, ReturnType<Workspace["snapshot"]>>> = {};
+
+function switchSol(to: SolTab) {
+  if (to === solTab) return;
+  saved[solTab] = workspace.snapshot();
+  const back = saved[to];
+  if (back) workspace.restore(back);
+  else workspace.clear();
+  solTab = to;
+  editor.markFailing(outputs[to].failing);
+}
+
+function fail(o: SolOutput, file: string, line: number) {
+  o.failing.set(file, [...(o.failing.get(file) ?? []), line]);
+}
 
 /** A few highlighted lines of a file around a line, marked from the column on */
 function excerpt(file: string, line: number, column: number, length: number) {
@@ -114,21 +143,21 @@ function lineCol(text: string, offset: number) {
   return { line, column: offset - before.lastIndexOf("\n") };
 }
 
-function renderErrors(errors: CompileError[]) {
+function renderErrors(o: SolOutput, errors: CompileError[]) {
   for (const e of errors) {
     const card = el("article", `card ${e.severity === "error" ? "fail" : "note"}`);
     card.append(el("h3", undefined, `${e.severity === "error" ? "Error" : "Warning"}: ${e.message}`));
     if (e.file && editor.has(e.file) && e.start !== undefined && e.end !== undefined) {
       const { line, column } = lineCol(editor.text(e.file)!, e.start);
-      fail(e.file, line);
+      fail(o, e.file, line);
       if (workspace.visible().length > 1) card.append(el("p", "where", e.file));
       card.append(excerpt(e.file, line, column, Math.max(1, e.end - e.start)));
     }
-    solResults.append(card);
+    o.results.append(card);
   }
 }
 
-function renderTest(t: TestResult) {
+function renderTest(o: SolOutput, project: Project, t: TestResult) {
   const card = el("article", `card ${t.status}`);
   const head = el("h3");
   head.append(el("span", `badge ${t.status}`, t.status.toUpperCase()), ` ${t.name}`);
@@ -156,7 +185,7 @@ function renderTest(t: TestResult) {
     if (c.validated === false) dl.append(el("dt"), el("dd", "muted", "could not be reproduced concretely"));
     card.append(dl);
     if (c.at && editor.has(c.at.file)) {
-      fail(c.at.file, c.at.line);
+      fail(o, c.at.file, c.at.line);
       card.append(el("p", "where", workspace.visible().length > 1 ? `Fails at ${c.at.file}, line ${c.at.line}:` : `Fails at line ${c.at.line}:`));
       card.append(excerpt(c.at.file, c.at.line, c.at.column, c.at.code.length));
     } else if (c.at) {
@@ -167,9 +196,9 @@ function renderTest(t: TestResult) {
     if (raw && !invariant) {
       const actions = el("div", "card-actions");
       actions.append(
-        button("Replay in debugger", () => openDebugger([...debugArgs, "--calldata", raw],
+        button("Replay in debugger", () => openDebugger(project, [...debugArgs, "--calldata", raw],
           `Replaying ${readableNumbers(c.calldata)}: step through it, or press Continue to run to where it fails.`)),
-        button("Open in Bytecode tab", () => openInBytecode(t, raw)),
+        button("Open in Bytecode tab", () => openInBytecode(project, t, raw)),
       );
       card.append(actions);
     }
@@ -177,12 +206,12 @@ function renderTest(t: TestResult) {
   for (const n of t.notes) card.append(el("p", "muted", n));
   if (t.status !== "running" && !invariant) {
     const actions = el("div", "card-actions");
-    actions.append(button("Debug symbolically", () => openDebugger(debugArgs,
+    actions.append(button("Debug symbolically", () => openDebugger(project, debugArgs,
       `Debugging ${t.name.split("(")[0]} for all inputs at once: at each branch that depends on them, you pick the side to follow.`)));
-    if (!t.counterexamples.length) actions.append(button("Open in Bytecode tab", () => openInBytecode(t)));
+    if (!t.counterexamples.length) actions.append(button("Open in Bytecode tab", () => openInBytecode(project, t)));
     card.append(actions);
   }
-  solResults.append(card);
+  o.results.append(card);
 }
 
 const solStory = $<HTMLElement>("sol-story");
@@ -201,7 +230,7 @@ solExample.addEventListener("change", () => {
 
 const fmt = (secs: number) => (secs < 10 ? secs.toFixed(2) : secs.toFixed(1)) + "s";
 
-function renderProgress(stats: Stats, running: boolean, elapsed: number, phase = "Starting…") {
+function renderProgress(o: SolOutput, stats: Stats, running: boolean, elapsed: number, phase = "Starting…") {
   const done = testsDone(stats);
   const current = stats.tests.at(-1);
   const checking = running && current && current.secs === undefined ? current : undefined;
@@ -227,11 +256,11 @@ function renderProgress(stats: Stats, running: boolean, elapsed: number, phase =
   add("SMT queries", stats.queriesDone + (stats.queriesInFlight ? ` (+${stats.queriesInFlight} running)` : ""));
   add("Solver time", fmt(stats.solveSecs));
   add("Elapsed", fmt(elapsed));
-  solProgress.replaceChildren(bar, counters);
-  solProgress.hidden = false;
+  o.progress.replaceChildren(bar, counters);
+  o.progress.hidden = false;
 }
 
-function renderStats(stats: Stats) {
+function renderStats(o: SolOutput, stats: Stats) {
   if (!stats.tests.length) return;
   const card = el("article", "card stats");
   card.append(el("h3", undefined, "Statistics"));
@@ -253,32 +282,37 @@ function renderStats(stats: Stats) {
   card.append(wrap);
   const results = Object.entries(stats.results).map(([r, n]) => `${n} ${r}`).join(", ");
   card.append(el("p", "muted", `${stats.queriesDone} SMT queries${results ? `: ${results}` : ""}, ${fmt(stats.solveSecs)} in the solver, ${fmt(stats.elapsed)} in all.`));
-  solResults.append(card);
+  o.results.append(card);
 }
 
 solForm.addEventListener("submit", async (e) => {
   e.preventDefault();
+  if (workspace.empty()) return;
   prove.disabled = true;
-  solResults.replaceChildren();
-  solProgress.hidden = true;
-  failing.clear();
+  // the output of the tab the run started in, wherever one goes meanwhile
+  const runTab = solTab;
+  const o = outputs[runTab];
+  o.results.replaceChildren();
+  o.progress.hidden = true;
+  o.failing = new Map();
+  let project: Project | undefined;
   const started = performance.now();
   const secs = () => ((performance.now() - started) / 1000).toFixed(2);
   const stats = newStats();
   const stdout: string[] = [];
   const showTests = () => {
-    solResults.replaceChildren();
-    failing.clear();
+    o.results.replaceChildren();
+    o.failing = new Map();
     const tests = parseTestOutput(stdout.join("\n"));
-    tests.forEach(renderTest);
+    for (const t of tests) renderTest(o, project!, t);
     return tests;
   };
   let frame = 0;
   const elapsed = () => (performance.now() - started) / 1000;
   let phase = "Compiling…";
   // hevm reports nothing while the solver works, the clock keeps going
-  const clock = setInterval(() => renderProgress(stats, true, elapsed(), phase), 250);
-  renderProgress(stats, true, 0, phase);
+  const clock = setInterval(() => renderProgress(o, stats, true, elapsed(), phase), 250);
+  renderProgress(o, stats, true, 0, phase);
   const onStream = (m: WorkerStream) => {
     if ("stdout" in m) {
       stdout.push(m.stdout);
@@ -289,48 +323,48 @@ solForm.addEventListener("submit", async (e) => {
     // at most once a frame, however fast hevm reports
     frame ||= requestAnimationFrame(() => {
       frame = 0;
-      renderProgress(stats, true, elapsed(), phase);
+      renderProgress(o, stats, true, elapsed(), phase);
       showTests();
     });
   };
   try {
     const version = workspace.project.version;
-    solStatus.textContent = version ? `Compiling with solc ${version.split("+")[0]}…` : "Compiling…";
-    const project = await compile(workspace.sources(), workspace.settings(), version);
-    lastProject = project;
+    o.status.textContent = version ? `Compiling with solc ${version.split("+")[0]}…` : "Compiling…";
+    project = await compile(workspace.sources(), workspace.settings(), version);
     const errors = project.errors.filter((x) => x.severity === "error");
     if (errors.length) {
-      solStatus.textContent = `Compilation failed — ${secs()}s`;
+      o.status.textContent = `Compilation failed — ${secs()}s`;
       clearInterval(clock);
-      solProgress.hidden = true;
-      renderErrors(errors);
+      o.progress.hidden = true;
+      renderErrors(o, errors);
       return;
     }
-    solStatus.textContent = "Proving…";
+    o.status.textContent = "Proving…";
     phase = "Starting hevm…";
-    renderProgress(stats, true, elapsed(), phase);
+    renderProgress(o, stats, true, elapsed(), phase);
     const run = await runHevm(["test", "--root", "/", "--progress-log", progressPath], project.files, onStream);
     cancelAnimationFrame(frame);
     clearInterval(clock);
     stdout.splice(0, stdout.length, ...run.stdout.split("\n"));
-    renderProgress(stats, false, elapsed());
+    renderProgress(o, stats, false, elapsed());
     const tests = showTests();
     const failed = tests.filter((t) => t.status === "fail").length;
-    solStatus.textContent = tests.length
+    o.status.textContent = tests.length
       ? `${tests.length - failed} passed, ${failed} failed — ${secs()}s`
       : `No prove_ functions found — ${secs()}s`;
-    renderStats(stats);
+    renderStats(o, stats);
     if (!tests.length && run.exitCode !== 0) {
-      solResults.append(el("pre", "card fail", stripAnsi(run.stderr || run.stdout)));
+      o.results.append(el("pre", "card fail", stripAnsi(run.stderr || run.stdout)));
     }
   } catch (err) {
     clearInterval(clock);
-    solProgress.hidden = true;
-    solStatus.textContent = "";
-    solResults.append(el("pre", "card fail", String(err)));
+    o.progress.hidden = true;
+    o.status.textContent = "";
+    o.results.append(el("pre", "card fail", String(err)));
   } finally {
     clearInterval(clock);
-    editor.markFailing(failing);
+    if (solTab === runTab) editor.markFailing(o.failing);
+    else if (saved[runTab]) saved[runTab]!.editor.failing = o.failing;
     prove.disabled = false;
   }
 });
@@ -354,18 +388,13 @@ const workspace = new Workspace(() => {});
 const editor = workspace.editor;
 workspace.loadExample(solExamples[defaultExample]!.source);
 showStory();
-// lines where a counterexample or an error is, per file
-const failing = new Map<string, number[]>();
-function fail(file: string, line: number) {
-  failing.set(file, [...(failing.get(file) ?? []), line]);
-}
 setupSourcify(workspace, () => {
-  solExample.selectedIndex = -1;
-  showStory();
-  solResults.replaceChildren();
-  solProgress.hidden = true;
+  const o = outputs.sourcify;
+  o.results.replaceChildren();
+  o.progress.hidden = true;
+  o.status.textContent = "";
+  o.failing = new Map();
 });
-let lastProject: Project | undefined;
 
 // --- bytecode ---
 
@@ -475,10 +504,11 @@ async function share(s: Shared, where: HTMLElement) {
 
 $("sol-share").addEventListener("click", () => {
   const { verified, version } = workspace.project;
-  if (verified) {
+  if (solTab === "sourcify") {
+    if (!verified) return;
     const changed = version !== verified.version ? version : undefined;
-    void share({ tab: "sol", sourcify: { chainId: verified.chainId, address: verified.address }, files: workspace.changes(),
-                 ...(changed && { version: changed }) }, solStatus);
+    void share({ tab: "sourcify", sourcify: { chainId: verified.chainId, address: verified.address }, files: workspace.changes(),
+                 ...(changed && { version: changed }) }, outputs.sourcify.status);
   } else if (workspace.single() && !version) {
     const ex = solExamples.find((e) => e.source === editor.value);
     void share(ex ? { tab: "sol", example: ex.name } : { tab: "sol", source: editor.value }, solStatus);
@@ -494,7 +524,19 @@ $("share").addEventListener("click", () => {
 async function openShared() {
   const s = await decodeShare(location.hash);
   if (!s) return;
-  if (s.tab === "sol") {
+  if (s.tab === "sourcify") {
+    showTab("sourcify");
+    outputs.sourcify.status.textContent = "Looking up the contract on Sourcify…";
+    try {
+      workspace.loadFiles(s.files, s.version, await fetchVerified(s.sourcify.chainId, s.sourcify.address));
+    } catch (err) {
+      outputs.sourcify.status.textContent = (err as Error).message;
+      return;
+    }
+    outputs.sourcify.results.replaceChildren();
+    solForm.requestSubmit();
+  } else if (s.tab === "sol") {
+    showTab("sol");
     if ("example" in s) {
       const i = solExamples.findIndex((e) => e.name === s.example);
       if (i < 0) return;
@@ -504,21 +546,12 @@ async function openShared() {
       solExample.selectedIndex = -1;
       if ("source" in s) {
         workspace.loadExample(s.source);
-      } else if ("sourcify" in s) {
-        solStatus.textContent = "Looking up the contract on Sourcify…";
-        try {
-          workspace.loadFiles(s.files, s.version, await fetchVerified(s.sourcify.chainId, s.sourcify.address));
-        } catch (err) {
-          solStatus.textContent = (err as Error).message;
-          return;
-        }
       } else {
         workspace.loadFiles(s.files, s.version);
       }
     }
     showStory();
     solResults.replaceChildren();
-    showTab("sol");
     solForm.requestSubmit();
   } else if (s.tab === "eq") {
     if (!eqTab.open(s)) return;

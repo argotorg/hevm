@@ -142,7 +142,10 @@ input:not([type="radio"]) {
 
 body[data-mode="symbolic"] .exec-only,
 body[data-mode="exec"] .symbolic-only,
-body:not([data-tab="sol"]) .sol-only,
+body:not([data-tab="sol"]):not([data-tab="sourcify"]) .sol-only,
+body:not([data-tab="sol"]) .example-only,
+body:not([data-tab="sourcify"]) .sourcify-only,
+#sol-form[data-empty="true"] > :not(.sourcify-only),
 body:not([data-tab="eq"]) .eq-only,
 body:not([data-tab="bytecode"]) .bytecode-only,
 body:not([data-tab="debug"]) .debug-only,
@@ -258,6 +261,7 @@ details pre {
 }
 
 body[data-tab="sol"] .tabs [data-tab="sol"],
+body[data-tab="sourcify"] .tabs [data-tab="sourcify"],
 body[data-tab="debug"] .tabs [data-tab="debug"],
 body[data-tab="eq"] .tabs [data-tab="eq"],
 body[data-tab="bytecode"] .tabs [data-tab="bytecode"] {
@@ -657,6 +661,15 @@ code,
     border-radius: 8px;
   }
 
+  #sf-results:empty::before {
+    content: "Load a verified contract, then prove its tests to see what hevm finds here.";
+    display: block;
+    padding: 1rem;
+    color: var(--muted);
+    border: 1px dashed var(--line);
+    border-radius: 8px;
+  }
+
   #sol-results:empty::before {
     content: "Prove the contract to see what hevm finds here.";
     display: block;
@@ -764,13 +777,16 @@ button.secondary:hover {
   gap: 1rem;
 }
 
+body[data-tab="sourcify"] .sol-pick {
+  grid-template-columns: minmax(8rem, 14rem);
+}
+
 .sourcify {
   font-size: 0.9rem;
 }
 
-.sourcify summary {
-  cursor: pointer;
-  color: var(--accent);
+.sourcify > p:first-child {
+  margin: 0;
 }
 
 .sourcify-form {
@@ -919,4 +935,20 @@ button.secondary:hover {
   .sol-pick {
     grid-template-columns: 1fr;
   }
+}
+
+button.link {
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+#sf-examples {
+  margin: 0.5rem 0 0;
+  font-size: 0.85rem;
 }

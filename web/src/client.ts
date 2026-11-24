@@ -1,6 +1,6 @@
 // The page's side of the worker, which compiles and runs hevm
 import { stripAnsi, type Files, type RunResult } from "./hevm";
-import type { CompileSettings, Project, Source } from "./solc";
+import { compileProject, evalSoljson, fetchSoljson, solcUrl, type CompileSettings, type Project, type Soljson, type Source } from "./solc";
 import type { WorkerRequest, WorkerResponse, WorkerStream } from "./worker";
 
 const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
@@ -48,9 +48,29 @@ export async function runHevm(args: string[], files?: Files, onStream?: OnStream
   return res.result;
 }
 
+// Releases from before about 0.5 are asm.js, too deeply nested for a worker's stack to parse: those
+// compile here, on the page's thread, which has a bigger one
+const tooDeepForWorker = new Set<string>();
+let here: { version: string; solc: Promise<Soljson> } | undefined;
+
+async function compileHere(sources: Source[], settings: CompileSettings | undefined, version: string): Promise<Project> {
+  if (here?.version !== version) here = { version, solc: fetchSoljson(solcUrl(version)).then(evalSoljson) };
+  try {
+    return compileProject(await here.solc, sources, settings);
+  } catch (err) {
+    here = undefined;
+    throw err;
+  }
+}
+
 /** Compiles with the given solc version, e.g. "0.7.6+commit.7338295f", or the built-in one */
 export async function compile(sources: Source[], settings?: CompileSettings, version?: string): Promise<Project> {
+  if (version && tooDeepForWorker.has(version)) return compileHere(sources, settings, version);
   const res = await call({ kind: "compile", sources, ...(settings && { settings }), ...(version && { version }) });
+  if (!res.ok && version && /Maximum call stack size exceeded/.test(res.error)) {
+    tooDeepForWorker.add(version);
+    return compileHere(sources, settings, version);
+  }
   if (!res.ok) throw new Error(res.error);
   if (!("project" in res)) throw new Error("unexpected worker reply");
   return res.project;

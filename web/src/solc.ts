@@ -88,6 +88,17 @@ export function evalSoljson(text: string): Soljson {
   return run(undefined, undefined, undefined, undefined, undefined, undefined, quiet, quiet, Object.create(console)) as Soljson;
 }
 
+// 25 MB each: kept in the browser's cache, which pages served over http:// do not have
+export async function fetchSoljson(url: string): Promise<string> {
+  const cache = typeof caches === "undefined" ? undefined : await caches.open("soljson").catch(() => undefined);
+  const hit = await cache?.match(url);
+  if (hit) return hit.text();
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`could not download ${url}: ${res.status}`);
+  await cache?.put(url, res.clone()).catch(() => {});
+  return res.text();
+}
+
 /** The version of the soljson the site comes with */
 export const bundledSolc = "0.8.39";
 

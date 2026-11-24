@@ -281,7 +281,7 @@ describe.skipIf(!ready)("website in Chromium", () => {
     });
   });
 
-  describe.skipIf(!hasSoljson("0.7.6+commit.7338295f"))("Sourcify", () => {
+  describe.skipIf(!hasSoljson("0.7.6+commit.7338295f") || !hasSoljson("0.4.19+commit.c4cbbb05"))("Sourcify", () => {
     const fixtures: Record<string, string> = {
       "0x1f98431c8ad98523631ae4a59f267346ea31f984": "univ3factory",
       "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": "weth9",
@@ -306,29 +306,52 @@ describe.skipIf(!ready)("website in Chromium", () => {
       return p;
     }
 
-    async function loadFactory(p: Page) {
-      await p.goto(server.resolvedUrls!.local[0]!);
-      await p.click("#sourcify summary");
+    async function loadFactory(p: Page, navigate = true) {
+      if (navigate) await p.goto(server.resolvedUrls!.local[0]!);
+      await p.click('.tabs [data-tab="sourcify"]');
       await p.fill("#sf-address", "https://repo.sourcify.dev/1/0x1F98431c8aD98523631AE4a59f267346ea31F984");
       await p.click("#sf-load");
       await p.waitForSelector("#files:not([hidden])");
     }
 
-    const proved = async (p: Page) => {
+    const proved = async (p: Page, status = "#sf-status") => {
       await p.click("#prove");
       await p.waitForFunction(() => !(document.getElementById("prove") as HTMLButtonElement).disabled, null, { timeout: 120_000 });
-      return p.textContent("#sol-status");
+      return p.textContent(status);
     };
 
-    it("loads a verified contract, its compiler and a starter test, and proves it", async () => {
+    it("has an example filled in, which loads with its tests, and proves them", async () => {
       const p = await offline();
-      await loadFactory(p);
+      await p.goto(server.resolvedUrls!.local[0]!);
+      await p.click('.tabs [data-tab="sourcify"]');
+      expect(await p.inputValue("#sf-address")).toBe("0x1F98431c8aD98523631AE4a59f267346ea31F984");
+      expect(await p.inputValue("#sf-chain")).toBe("1");
+      await p.click("#sf-load");
+      await p.waitForSelector("#files:not([hidden])");
       expect(await p.textContent("#files .files-head")).toBe("34 files");
       expect(await p.inputValue("#sol-version")).toBe("0.7.6+commit.7338295f");
       expect(await p.textContent("#files li.current")).toContain("UniswapV3Factory.t.sol");
       expect(await p.textContent("#sol-origin")).toMatch(/^UniswapV3Factory at 0x1F9843…31F984 on Ethereum/);
-      expect(await p.textContent("#source .cm-content")).toContain("target = new UniswapV3Factory();");
+      expect(await p.textContent("#source .cm-content")).toContain("function prove_initial_fee_tiers(uint24 fee)");
+      expect(await proved(p)).toMatch(/^4 passed, 1 failed/);
+      const fail = p.locator("#sf-results .card.fail");
+      expect(await fail.locator("h3").textContent()).toContain("prove_enable_fee_never_reverts");
+      expect(await fail.textContent()).toContain("INVALID opcode: a failed assert, before Solidity 0.8");
+      await p.close();
+    });
+
+    it("gives any other contract a starter test", async () => {
+      const p = await offline();
+      await p.goto(server.resolvedUrls!.local[0]!);
+      await p.click('.tabs [data-tab="sourcify"]');
+      await p.fill("#sf-address", "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
+      await p.click("#sf-load");
+      await p.waitForSelector("#files:not([hidden])");
+      expect(await p.inputValue("#sol-version")).toBe("0.4.19+commit.c4cbbb05");
+      expect(await p.textContent("#source .cm-content")).toContain("target = new WETH9();");
       expect(await proved(p)).toMatch(/^1 passed, 0 failed/);
+      await p.click('#sf-examples button');
+      expect(await p.inputValue("#sf-address")).toBe("0x1F98431c8aD98523631AE4a59f267346ea31F984");
       await p.close();
     });
 
@@ -352,8 +375,8 @@ contract OwnerTest is Test {
 `);
       // the other file, to see the failure take us back
       await p.click("#files li.file >> text=UniswapV3Factory.t.sol");
-      expect(await proved(p)).toMatch(/^1 passed, 1 failed/);
-      const card = p.locator("#sol-results .card.fail");
+      expect(await proved(p)).toMatch(/^4 passed, 2 failed/);
+      const card = p.locator("#sf-results .card.fail").filter({ hasText: "prove_owner" });
       expect(await card.locator(".where").textContent()).toBe("Fails at test/Owner.t.sol, line 7:");
       await card.locator(".excerpt").click();
       await expect.poll(() => p.textContent("#files li.current")).toContain("Owner.t.sol");
@@ -366,7 +389,7 @@ contract OwnerTest is Test {
     it("says when a contract is not verified", async () => {
       const p = await offline();
       await p.goto(server.resolvedUrls!.local[0]!);
-      await p.click("#sourcify summary");
+      await p.click('.tabs [data-tab="sourcify"]');
       await p.selectOption("#sf-chain", "8453");
       await p.fill("#sf-address", "0x00000000000000000000000000000000000000aa");
       await p.press("#sf-address", "Enter");
@@ -381,13 +404,17 @@ contract OwnerTest is Test {
       await p.keyboard.press("ControlOrMeta+End");
       await p.keyboard.insertText("\ncontract Extra {}\n");
       await p.click("#sol-share");
-      await expect.poll(() => new URL(p.url()).hash).toMatch(/^#tab=sol&sourcify=1%3A0x1F98431c8aD98523631AE4a59f267346ea31F984&s=/);
+      await expect.poll(() => new URL(p.url()).hash).toMatch(/^#tab=sourcify&sourcify=1%3A0x1F98431c8aD98523631AE4a59f267346ea31F984&s=/);
       const hash = new URL(p.url()).hash;
       await p.close();
       const q = await offline();
       await q.goto(server.resolvedUrls!.local[0]! + hash);
-      await q.waitForFunction(() => /passed/.test(document.getElementById("sol-status")!.textContent ?? ""), null, { timeout: 120_000 });
-      expect(await q.textContent("#source .cm-content")).toContain("contract Extra {}");
+      await q.waitForFunction(() => /passed/.test(document.getElementById("sf-status")!.textContent ?? ""), null, { timeout: 120_000 });
+      expect(await q.getAttribute("body", "data-tab")).toBe("sourcify");
+      // the editor draws only the lines in view
+      await q.click("#source .cm-content");
+      await q.keyboard.press("ControlOrMeta+End");
+      await expect.poll(() => q.textContent("#source .cm-content")).toContain("contract Extra {}");
       expect(await q.inputValue("#sol-version")).toBe("0.7.6+commit.7338295f");
       await q.close();
     });
@@ -396,8 +423,38 @@ contract OwnerTest is Test {
       const p = await offline();
       await p.goto(server.resolvedUrls!.local[0]!);
       await p.selectOption("#sol-version", "0.7.6+commit.7338295f");
-      await proved(p);
+      await proved(p, "#sol-status");
       expect(await p.textContent("#sol-results .card.fail")).toContain("requires different compiler version");
+      await p.close();
+    });
+
+    it("has no editor on the Sourcify tab until a contract is loaded", async () => {
+      const p = await offline();
+      await p.goto(server.resolvedUrls!.local[0]!);
+      await p.click('.tabs [data-tab="sourcify"]');
+      expect(await p.locator("#source").isHidden()).toBe(true);
+      expect(await p.locator("#prove").isHidden()).toBe(true);
+      expect(await p.locator("#sf-address").isVisible()).toBe(true);
+      expect(await p.locator("#sol-example").isHidden()).toBe(true);
+      await p.close();
+    });
+
+    it("keeps each tab's project and results", async () => {
+      const p = await offline();
+      await p.goto(server.resolvedUrls!.local[0]!);
+      await proved(p, "#sol-status");
+      const solFirstLine = await p.locator("#source .cm-line").nth(5).textContent();
+      await loadFactory(p, false);
+      expect(await proved(p)).toMatch(/^4 passed, 1 failed/);
+      await p.click('.tabs [data-tab="sol"]');
+      expect(await p.locator("#source .cm-line").nth(5).textContent()).toBe(solFirstLine);
+      expect(await p.locator("#files").isHidden()).toBe(true);
+      expect(await p.textContent("#sol-results .card")).toContain("invariant_owner");
+      expect(await p.textContent("#sol-status")).toMatch(/^0 passed, 1 failed/);
+      await p.click('.tabs [data-tab="sourcify"]');
+      expect(await p.textContent("#files li.current")).toContain("UniswapV3Factory.t.sol");
+      expect(await p.inputValue("#sol-version")).toBe("0.7.6+commit.7338295f");
+      expect(await p.locator("#sf-results .card").allTextContents()).toContainEqual(expect.stringContaining("prove_initial_fee_tiers"));
       await p.close();
     });
   });
@@ -488,7 +545,7 @@ contract OwnerTest is Test {
     });
 
     it("has the tabs in order, the Debugger last", async () => {
-      expect(await page.locator(".tabs button").allTextContents()).toEqual(["Solidity", "Equivalence", "Bytecode", "Debugger"]);
+      expect(await page.locator(".tabs button").allTextContents()).toEqual(["Solidity", "Sourcify", "Equivalence", "Bytecode", "Debugger"]);
     });
 
     it("fits all the tabs on a phone", async () => {
