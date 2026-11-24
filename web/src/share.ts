@@ -5,6 +5,9 @@ import type { Request } from "./hevm";
 export type Shared =
   | { tab: "sol"; example: string }
   | { tab: "sol"; source: string }
+  | { tab: "sol"; files: Record<string, string>; version?: string }
+  /** a verified contract, and the files added or changed */
+  | { tab: "sol"; sourcify: { chainId: string; address: string }; files: Record<string, string>; version?: string }
   | { tab: "eq"; example: string }
   | { tab: "eq"; source: string; mode: EqMode; a: string; b: string }
   | { tab: "bytecode"; request: Request };
@@ -38,7 +41,12 @@ export async function encodeShare(s: Shared): Promise<string> {
   const params = new URLSearchParams({ tab: s.tab });
   if ("example" in s) params.set("example", s.example);
   else if (s.tab === "bytecode") params.set("s", await pack(s.request));
-  else params.set("s", await pack(s.tab === "sol" ? { source: s.source } : { source: s.source, mode: s.mode, a: s.a, b: s.b }));
+  else if (s.tab === "eq") params.set("s", await pack({ source: s.source, mode: s.mode, a: s.a, b: s.b }));
+  else if ("source" in s) params.set("s", await pack({ source: s.source }));
+  else {
+    if ("sourcify" in s) params.set("sourcify", `${s.sourcify.chainId}:${s.sourcify.address}`);
+    params.set("s", await pack({ files: s.files, ...(s.version && { version: s.version }) }));
+  }
   return params.toString();
 }
 
@@ -54,6 +62,12 @@ export async function decodeShare(hash: string): Promise<Shared | undefined> {
     if (!packed) return undefined;
     const v = (await unpack(packed)) as Record<string, string>;
     if (tab === "sol" && typeof v.source === "string") return { tab, source: v.source };
+    if (tab === "sol" && v.files && typeof v.files === "object") {
+      const files = Object.fromEntries(Object.entries(v.files as unknown as Record<string, unknown>).map(([p, t]) => [p, String(t)]));
+      const version = typeof v.version === "string" ? { version: v.version } : {};
+      const target = /^(\d+):(0x[0-9a-fA-F]{40})$/.exec(params.get("sourcify") ?? "");
+      return target ? { tab, sourcify: { chainId: target[1]!, address: target[2]! }, files, ...version } : { tab, files, ...version };
+    }
     if (tab === "eq" && typeof v.source === "string" && ["contracts", "optimizer", "via-ir"].includes(v.mode!)) {
       return { tab, source: v.source, mode: v.mode as EqMode, a: String(v.a ?? ""), b: String(v.b ?? "") };
     }

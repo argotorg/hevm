@@ -24,7 +24,7 @@ worker.onmessage = (e: MessageEvent<WorkerResponse | WorkerStream>) => {
 
 type Body =
   | { kind: "hevm"; args: string[]; files?: Files; stream?: boolean }
-  | { kind: "compile"; sources: Source[]; settings?: CompileSettings };
+  | { kind: "compile"; sources: Source[]; settings?: CompileSettings; version?: string };
 
 function call(body: Body, onStream?: OnStream): Promise<WorkerResponse> {
   const id = nextId++;
@@ -48,8 +48,9 @@ export async function runHevm(args: string[], files?: Files, onStream?: OnStream
   return res.result;
 }
 
-export async function compile(sources: Source[], settings?: CompileSettings): Promise<Project> {
-  const res = await call({ kind: "compile", sources, ...(settings && { settings }) });
+/** Compiles with the given solc version, e.g. "0.7.6+commit.7338295f", or the built-in one */
+export async function compile(sources: Source[], settings?: CompileSettings, version?: string): Promise<Project> {
+  const res = await call({ kind: "compile", sources, ...(settings && { settings }), ...(version && { version }) });
   if (!res.ok) throw new Error(res.error);
   if (!("project" in res)) throw new Error("unexpected worker reply");
   return res.project;

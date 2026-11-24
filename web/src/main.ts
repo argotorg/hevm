@@ -5,18 +5,18 @@ import { $, button, el } from "./dom";
 import { setupEquivalence } from "./eqTab";
 import { decodeShare, encodeShare, type Shared } from "./share";
 import { examples } from "./examples";
-import { SolidityEditor } from "./editor";
 import { segments, tokens } from "./highlight";
 import { newStats, onProgress, onStdout, testsDone, type Stats } from "./progress";
 import { describeResult, parseTestOutput, readableNumbers, type TestResult } from "./results";
 import { solExamples } from "./solExamples";
-import type { CompileError, Project } from "./solc";
+import { artifactPath, type CompileError, type Project } from "./solc";
+import { fetchVerified } from "./sourcify";
+import { Workspace, setupSourcify } from "./workspace";
 import type { DebugSession } from "./debugger-page";
 import type { WorkerStream } from "./worker";
 
 const log = $<HTMLElement>("log");
 onHevmOutput((text) => (log.textContent = text));
-const sourcePath = "src/Main.sol";
 
 // --- tabs ---
 
@@ -55,7 +55,7 @@ function openDebugger(args: string[], caption: string) {
 /** The runtime code of a compiled contract, e.g. "src/Main.sol:Example" */
 function runtimeCode(contract: string): string | undefined {
   const [path, name] = contract.split(":");
-  const artifact = lastProject?.files[`out/${path!.split("/").pop()}/${name}.json`];
+  const artifact = lastProject?.files[artifactPath(path!, name!)];
   return artifact ? (JSON.parse(artifact) as { deployedBytecode: { object: string } }).deployedBytecode.object : undefined;
 }
 
@@ -76,8 +76,9 @@ const solStatus = $<HTMLElement>("sol-status");
 const solResults = $<HTMLElement>("sol-results");
 const solProgress = $<HTMLElement>("sol-progress");
 
-/** A few highlighted lines of the source around a line, marked from the column on */
-function excerpt(text: string, line: number, column: number, length: number) {
+/** A few highlighted lines of a file around a line, marked from the column on */
+function excerpt(file: string, line: number, column: number, length: number) {
+  const text = editor.text(file) ?? "";
   const lines = text.split("\n");
   const starts: number[] = [];
   lines.reduce((off, l) => (starts.push(off), off + l.length + 1), 0);
@@ -102,7 +103,7 @@ function excerpt(text: string, line: number, column: number, length: number) {
     }
     pre.append(row);
   }
-  pre.addEventListener("click", () => editor.selectLine(line));
+  pre.addEventListener("click", () => editor.selectLine(file, line));
   pre.title = "Show in the editor";
   return pre;
 }
@@ -117,10 +118,11 @@ function renderErrors(errors: CompileError[]) {
   for (const e of errors) {
     const card = el("article", `card ${e.severity === "error" ? "fail" : "note"}`);
     card.append(el("h3", undefined, `${e.severity === "error" ? "Error" : "Warning"}: ${e.message}`));
-    if (e.file === sourcePath && e.start !== undefined && e.end !== undefined) {
-      const { line, column } = lineCol(editor.value, e.start);
-      failingLines.push(line);
-      card.append(excerpt(editor.value, line, column, Math.max(1, e.end - e.start)));
+    if (e.file && editor.has(e.file) && e.start !== undefined && e.end !== undefined) {
+      const { line, column } = lineCol(editor.text(e.file)!, e.start);
+      fail(e.file, line);
+      if (workspace.visible().length > 1) card.append(el("p", "where", e.file));
+      card.append(excerpt(e.file, line, column, Math.max(1, e.end - e.start)));
     }
     solResults.append(card);
   }
@@ -153,10 +155,10 @@ function renderTest(t: TestResult) {
     dl.append(el("dt", undefined, "Result"), el("dd", undefined, describeResult(c.result)));
     if (c.validated === false) dl.append(el("dt"), el("dd", "muted", "could not be reproduced concretely"));
     card.append(dl);
-    if (c.at && c.at.file === sourcePath) {
-      failingLines.push(c.at.line);
-      card.append(el("p", "where", `Fails at line ${c.at.line}:`));
-      card.append(excerpt(editor.value, c.at.line, c.at.column, c.at.code.length));
+    if (c.at && editor.has(c.at.file)) {
+      fail(c.at.file, c.at.line);
+      card.append(el("p", "where", workspace.visible().length > 1 ? `Fails at ${c.at.file}, line ${c.at.line}:` : `Fails at line ${c.at.line}:`));
+      card.append(excerpt(c.at.file, c.at.line, c.at.column, c.at.code.length));
     } else if (c.at) {
       card.append(el("p", "where", `Fails at ${c.at.file}:${c.at.line}: ${c.at.code}`));
     }
@@ -192,7 +194,7 @@ function showStory() {
 }
 
 solExample.addEventListener("change", () => {
-  editor.value = solExamples[Number(solExample.value)]?.source ?? "";
+  workspace.loadExample(solExamples[Number(solExample.value)]?.source ?? "");
   showStory();
   solResults.replaceChildren();
 });
@@ -259,14 +261,14 @@ solForm.addEventListener("submit", async (e) => {
   prove.disabled = true;
   solResults.replaceChildren();
   solProgress.hidden = true;
-  failingLines = [];
+  failing.clear();
   const started = performance.now();
   const secs = () => ((performance.now() - started) / 1000).toFixed(2);
   const stats = newStats();
   const stdout: string[] = [];
   const showTests = () => {
     solResults.replaceChildren();
-    failingLines = [];
+    failing.clear();
     const tests = parseTestOutput(stdout.join("\n"));
     tests.forEach(renderTest);
     return tests;
@@ -292,8 +294,9 @@ solForm.addEventListener("submit", async (e) => {
     });
   };
   try {
-    solStatus.textContent = "Compiling…";
-    const project = await compile([{ path: sourcePath, content: editor.value }]);
+    const version = workspace.project.version;
+    solStatus.textContent = version ? `Compiling with solc ${version.split("+")[0]}…` : "Compiling…";
+    const project = await compile(workspace.sources(), workspace.settings(), version);
     lastProject = project;
     const errors = project.errors.filter((x) => x.severity === "error");
     if (errors.length) {
@@ -327,7 +330,7 @@ solForm.addEventListener("submit", async (e) => {
     solResults.append(el("pre", "card fail", String(err)));
   } finally {
     clearInterval(clock);
-    editor.markFailing(failingLines);
+    editor.markFailing(failing);
     prove.disabled = false;
   }
 });
@@ -347,9 +350,21 @@ solExamples.forEach((ex, i) => {
 });
 const defaultExample = solExamples.findIndex((e) => e.name === "Re-initializable wallet (Parity, 2017)");
 solExample.value = String(defaultExample);
-const editor = new SolidityEditor($("source"), solExamples[defaultExample]!.source);
+const workspace = new Workspace(() => {});
+const editor = workspace.editor;
+workspace.loadExample(solExamples[defaultExample]!.source);
 showStory();
-let failingLines: number[] = [];
+// lines where a counterexample or an error is, per file
+const failing = new Map<string, number[]>();
+function fail(file: string, line: number) {
+  failing.set(file, [...(failing.get(file) ?? []), line]);
+}
+setupSourcify(workspace, () => {
+  solExample.selectedIndex = -1;
+  showStory();
+  solResults.replaceChildren();
+  solProgress.hidden = true;
+});
 let lastProject: Project | undefined;
 
 // --- bytecode ---
@@ -459,8 +474,17 @@ async function share(s: Shared, where: HTMLElement) {
 }
 
 $("sol-share").addEventListener("click", () => {
-  const ex = solExamples.find((e) => e.source === editor.value);
-  void share(ex ? { tab: "sol", example: ex.name } : { tab: "sol", source: editor.value }, solStatus);
+  const { verified, version } = workspace.project;
+  if (verified) {
+    const changed = version !== verified.version ? version : undefined;
+    void share({ tab: "sol", sourcify: { chainId: verified.chainId, address: verified.address }, files: workspace.changes(),
+                 ...(changed && { version: changed }) }, solStatus);
+  } else if (workspace.single() && !version) {
+    const ex = solExamples.find((e) => e.source === editor.value);
+    void share(ex ? { tab: "sol", example: ex.name } : { tab: "sol", source: editor.value }, solStatus);
+  } else {
+    void share({ tab: "sol", files: workspace.current(), ...(version && { version }) }, solStatus);
+  }
 });
 $("eq-share").addEventListener("click", () => void share(eqTab.shared(), $("eq-status")));
 $("share").addEventListener("click", () => {
@@ -475,10 +499,22 @@ async function openShared() {
       const i = solExamples.findIndex((e) => e.name === s.example);
       if (i < 0) return;
       solExample.value = String(i);
-      editor.value = solExamples[i]!.source;
+      workspace.loadExample(solExamples[i]!.source);
     } else {
       solExample.selectedIndex = -1;
-      editor.value = s.source;
+      if ("source" in s) {
+        workspace.loadExample(s.source);
+      } else if ("sourcify" in s) {
+        solStatus.textContent = "Looking up the contract on Sourcify…";
+        try {
+          workspace.loadFiles(s.files, s.version, await fetchVerified(s.sourcify.chainId, s.sourcify.address));
+        } catch (err) {
+          solStatus.textContent = (err as Error).message;
+          return;
+        }
+      } else {
+        workspace.loadFiles(s.files, s.version);
+      }
     }
     showStory();
     solResults.replaceChildren();

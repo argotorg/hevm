@@ -73,7 +73,9 @@ rewrite and keccak fuzzers) on the wasm build, and `wasm/ethereum-tests.sh` comp
 it with a native build on the Ethereum blockchain tests.
 
 `web/` is a website that compiles Solidity with soljson and runs `hevm.wasm` on it in
-the browser, showing counterexamples at their place in the source. Its Debugger tab is
+the browser, showing counterexamples at their place in the source. It can load a
+contract verified on [Sourcify](https://sourcify.dev), with all its files and its solc
+version, for tests of it to prove. Its Debugger tab is
 hevm's interactive debugger on `hevm-web.wasm`, a build of hevm as a wasm reactor, for
 replaying a counterexample or stepping through a test symbolically. Its Equivalence tab
 checks that two contracts, or one compiled with different solc settings, behave the

@@ -4,3 +4,4 @@ public/hevm.wasm
 public/soljson.js
 public/hevm-web.wasm
 public/hevm-web.js
+.cache/

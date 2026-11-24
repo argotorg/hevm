@@ -26,6 +26,15 @@ describe("links", () => {
     expect(await round(bytecode)).toEqual(bytecode);
   });
 
+  it("carry a project's files and solc version, or a verified contract and the files changed", async () => {
+    const files = { "src/A.sol": "contract A {}", "test/A.t.sol": "contract T {}" };
+    expect(await round({ tab: "sol", files, version: "0.7.6+commit.7338295f" })).toEqual({ tab: "sol", files, version: "0.7.6+commit.7338295f" });
+    const verified: Shared = { tab: "sol", sourcify: { chainId: "1", address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" }, files: { "test/W.t.sol": "x" } };
+    const hash = await encodeShare(verified);
+    expect(hash).toMatch(/^tab=sol&sourcify=1%3A0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2&s=/);
+    expect(await decodeShare("#" + hash)).toEqual(verified);
+  });
+
   it("ignore what is not theirs", async () => {
     for (const hash of ["", "#", "#intro", "#tab=sol", "#tab=sol&s=not-deflate", "#tab=eq&s=" + (await encodeShare({ tab: "sol", source: "x" })).slice(10), "#tab=nope&example=x"]) {
       expect(await decodeShare(hash), hash).toBeUndefined();

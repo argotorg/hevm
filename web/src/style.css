@@ -757,3 +757,166 @@ button.secondary:hover {
   border-left: 3px solid var(--accent);
   border-radius: 4px;
 }
+
+.sol-pick {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(8rem, 12rem);
+  gap: 1rem;
+}
+
+.sourcify {
+  font-size: 0.9rem;
+}
+
+.sourcify summary {
+  cursor: pointer;
+  color: var(--accent);
+}
+
+.sourcify-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.75rem;
+  margin-top: 0.6rem;
+}
+
+.sourcify-form label {
+  min-width: 9rem;
+}
+
+.sourcify-form label[hidden] {
+  display: none;
+}
+
+.sourcify-form .grow {
+  flex: 1 1 18rem;
+}
+
+.sourcify-form input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+#sf-message:empty {
+  display: none;
+}
+
+#sol-origin p {
+  margin: 0.5rem 0 0;
+}
+
+.workspace {
+  display: flex;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.workspace .editor {
+  flex: 1;
+  min-width: 0;
+}
+
+.files {
+  flex: none;
+  width: 13rem;
+  height: 28rem;
+  overflow: auto;
+  font-size: 0.8rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.3rem 0;
+}
+
+.files[hidden],
+.file-select[hidden] {
+  display: none;
+}
+
+.files .files-head {
+  margin: 0 0.6rem 0.3rem;
+  color: var(--muted);
+}
+
+.files ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.files li.dir {
+  margin-top: 0.35rem;
+  padding: 0 0.6rem;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+
+.files li.file {
+  display: flex;
+  align-items: center;
+}
+
+.files li.file button {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-family: var(--mono);
+  text-align: left;
+  padding: 0.15rem 0.6rem 0.15rem 1.1rem;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.files li.file.current button:first-child {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  font-weight: 600;
+}
+
+.files li.file.user button:first-child {
+  color: var(--accent);
+}
+
+.files li.file.modified button:first-child::after {
+  content: " •";
+  color: var(--t-number);
+}
+
+.files li.file button.delete {
+  flex: none;
+  padding: 0.15rem 0.5rem;
+  color: var(--muted);
+}
+
+.files li.file button.delete:hover {
+  color: var(--bad);
+}
+
+.file-select {
+  display: none;
+  margin-bottom: 0.5rem;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+}
+
+/* a phone has no room for the panel: a dropdown picks the file */
+@media (max-width: 700px) {
+  .files {
+    display: none;
+  }
+
+  .file-select:not([hidden]) {
+    display: block;
+  }
+
+  .sol-pick {
+    grid-template-columns: 1fr;
+  }
+}

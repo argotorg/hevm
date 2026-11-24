@@ -1,5 +1,5 @@
 // Loads the built site (npm run build) in headless Chromium and runs examples through the UI.
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { chromium, type Browser, type Page } from "playwright-core";
 import { preview, type PreviewServer } from "vite";
@@ -8,6 +8,7 @@ import { examples } from "../src/examples";
 import { solExamples } from "../src/solExamples";
 import { eqExamples } from "../src/eqExamples";
 import { encodeShare } from "../src/share";
+import { hasSoljson, soljsonText } from "./soljsonCache";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const chrome = process.env.CHROME ?? "/usr/bin/chromium";
@@ -277,6 +278,127 @@ describe.skipIf(!ready)("website in Chromium", () => {
       await page.keyboard.type("\ncontract Other {}\n");
       expect(await page.locator("#eq-b option").allTextContents()).toEqual(["Packing", "Other"]);
       expect(await page.inputValue("#eq-b")).toBe("Other");
+    });
+  });
+
+  describe.skipIf(!hasSoljson("0.7.6+commit.7338295f"))("Sourcify", () => {
+    const fixtures: Record<string, string> = {
+      "0x1f98431c8ad98523631ae4a59f267346ea31f984": "univ3factory",
+      "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": "weth9",
+    };
+
+    // Sourcify and solc's binaries, from saved answers: no test goes to the network
+    async function offline() {
+      const p = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
+      await p.route("https://sourcify.dev/**", (r) => {
+        const address = /\/(0x[0-9a-fA-F]{40})\?/.exec(r.request().url())![1]!.toLowerCase();
+        const name = fixtures[address];
+        return r.fulfill(name
+          ? { status: 200, contentType: "application/json", headers: { "access-control-allow-origin": "*" },
+              body: readFileSync(`${root}/test/fixtures/sourcify/${name}.json`) }
+          : { status: 404, headers: { "access-control-allow-origin": "*" }, body: "{}" });
+      });
+      await p.route("https://binaries.soliditylang.org/**", (r) => {
+        const version = /soljson-v(.+)\.js$/.exec(r.request().url())![1]!;
+        return r.fulfill({ status: 200, contentType: "text/javascript", headers: { "access-control-allow-origin": "*" },
+                           body: soljsonText(version) });
+      });
+      return p;
+    }
+
+    async function loadFactory(p: Page) {
+      await p.goto(server.resolvedUrls!.local[0]!);
+      await p.click("#sourcify summary");
+      await p.fill("#sf-address", "https://repo.sourcify.dev/1/0x1F98431c8aD98523631AE4a59f267346ea31F984");
+      await p.click("#sf-load");
+      await p.waitForSelector("#files:not([hidden])");
+    }
+
+    const proved = async (p: Page) => {
+      await p.click("#prove");
+      await p.waitForFunction(() => !(document.getElementById("prove") as HTMLButtonElement).disabled, null, { timeout: 120_000 });
+      return p.textContent("#sol-status");
+    };
+
+    it("loads a verified contract, its compiler and a starter test, and proves it", async () => {
+      const p = await offline();
+      await loadFactory(p);
+      expect(await p.textContent("#files .files-head")).toBe("34 files");
+      expect(await p.inputValue("#sol-version")).toBe("0.7.6+commit.7338295f");
+      expect(await p.textContent("#files li.current")).toContain("UniswapV3Factory.t.sol");
+      expect(await p.textContent("#sol-origin")).toMatch(/^UniswapV3Factory at 0x1F9843…31F984 on Ethereum/);
+      expect(await p.textContent("#source .cm-content")).toContain("target = new UniswapV3Factory();");
+      expect(await proved(p)).toMatch(/^1 passed, 0 failed/);
+      await p.close();
+    });
+
+    it("adds a test file, shows where it fails, and deletes it", async () => {
+      const p = await offline();
+      await loadFactory(p);
+      p.on("dialog", (d) => void d.accept(d.type() === "prompt" ? "test/Owner.t.sol" : undefined));
+      await p.click("#new-file");
+      expect(await p.textContent("#files li.current")).toContain("Owner.t.sol");
+      await p.click("#source .cm-content");
+      await p.keyboard.press("ControlOrMeta+A");
+      await p.keyboard.insertText(`pragma solidity >=0.7.0;
+import {Test} from "hevm/Test.sol";
+import {UniswapV3Factory} from "contracts/UniswapV3Factory.sol";
+contract OwnerTest is Test {
+    function prove_owner() public {
+        UniswapV3Factory f = new UniswapV3Factory();
+        assert(f.owner() == address(0));
+    }
+}
+`);
+      // the other file, to see the failure take us back
+      await p.click("#files li.file >> text=UniswapV3Factory.t.sol");
+      expect(await proved(p)).toMatch(/^1 passed, 1 failed/);
+      const card = p.locator("#sol-results .card.fail");
+      expect(await card.locator(".where").textContent()).toBe("Fails at test/Owner.t.sol, line 7:");
+      await card.locator(".excerpt").click();
+      await expect.poll(() => p.textContent("#files li.current")).toContain("Owner.t.sol");
+      await p.click("#files li.current button.delete");
+      expect(await p.locator("#files li.file >> text=Owner.t.sol").count()).toBe(0);
+      expect(await p.textContent("#files .files-head")).toBe("34 files");
+      await p.close();
+    });
+
+    it("says when a contract is not verified", async () => {
+      const p = await offline();
+      await p.goto(server.resolvedUrls!.local[0]!);
+      await p.click("#sourcify summary");
+      await p.selectOption("#sf-chain", "8453");
+      await p.fill("#sf-address", "0x00000000000000000000000000000000000000aa");
+      await p.press("#sf-address", "Enter");
+      await expect.poll(() => p.textContent("#sf-message")).toBe("0x00000000000000000000000000000000000000aa is not verified on Sourcify for chain 8453");
+      await p.close();
+    });
+
+    it("shares a verified contract with its test changed, and the link proves it", async () => {
+      const p = await offline();
+      await loadFactory(p);
+      await p.click("#source .cm-content");
+      await p.keyboard.press("ControlOrMeta+End");
+      await p.keyboard.insertText("\ncontract Extra {}\n");
+      await p.click("#sol-share");
+      await expect.poll(() => new URL(p.url()).hash).toMatch(/^#tab=sol&sourcify=1%3A0x1F98431c8aD98523631AE4a59f267346ea31F984&s=/);
+      const hash = new URL(p.url()).hash;
+      await p.close();
+      const q = await offline();
+      await q.goto(server.resolvedUrls!.local[0]! + hash);
+      await q.waitForFunction(() => /passed/.test(document.getElementById("sol-status")!.textContent ?? ""), null, { timeout: 120_000 });
+      expect(await q.textContent("#source .cm-content")).toContain("contract Extra {}");
+      expect(await q.inputValue("#sol-version")).toBe("0.7.6+commit.7338295f");
+      await q.close();
+    });
+
+    it("compiles with the version picked", async () => {
+      const p = await offline();
+      await p.goto(server.resolvedUrls!.local[0]!);
+      await p.selectOption("#sol-version", "0.7.6+commit.7338295f");
+      await proved(p);
+      expect(await p.textContent("#sol-results .card.fail")).toContain("requires different compiler version");
+      await p.close();
     });
   });
 

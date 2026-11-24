@@ -12,7 +12,8 @@
         The <a href="https://github.com/argotorg/hevm">hevm</a> symbolic EVM, the
         <a href="https://bitwuzla.github.io/">bitwuzla</a> SMT solver and the
         <a href="https://soliditylang.org/">Solidity</a> compiler, all compiled to WebAssembly.
-        Nothing leaves your machine.
+        Your code stays on your machine: only a contract you look up on
+        <a href="https://sourcify.dev/">Sourcify</a>, and a solc version you pick, are downloaded.
       </p>
     </header>
     <nav class="tabs" role="tablist">
@@ -24,11 +25,37 @@
     <main>
       <section class="sol-only">
         <form id="sol-form">
-          <label class="row">
-            <span>Example</span>
-            <select id="sol-example"></select>
-          </label>
+          <div class="sol-pick">
+            <label>
+              <span>Example</span>
+              <select id="sol-example"></select>
+            </label>
+            <label>
+              <span>Compiler</span>
+              <select id="sol-version" title="solc's version: other than the built-in one, it is downloaded once"></select>
+            </label>
+          </div>
           <p id="sol-story" class="story" hidden></p>
+          <details id="sourcify" class="sourcify">
+            <summary>Or test a verified contract from Sourcify</summary>
+            <div class="sourcify-form">
+              <label>
+                <span>Chain</span>
+                <select id="sf-chain"></select>
+              </label>
+              <label id="sf-chain-other" hidden>
+                <span>Chain ID</span>
+                <input id="sf-chain-id" inputmode="numeric" spellcheck="false" />
+              </label>
+              <label class="grow">
+                <span>Address, or a link to it on Sourcify</span>
+                <input id="sf-address" spellcheck="false" placeholder="0x…" />
+              </label>
+              <button id="sf-load" type="button">Load</button>
+            </div>
+            <p id="sf-message" class="muted"></p>
+          </details>
+          <div id="sol-origin" class="story" hidden></div>
           <div class="field">
             <span>
               Source
@@ -36,11 +63,16 @@
                 hevm checks their <code>prove_</code> functions for all inputs, and their
                 <code>invariant_</code> functions after every sequence of calls</small>
             </span>
-            <div id="source" class="editor"></div>
+            <select id="file-select" class="file-select" hidden></select>
+            <div class="workspace">
+              <nav id="files" class="files" aria-label="Files" hidden></nav>
+              <div id="source" class="editor"></div>
+            </div>
           </div>
           <div class="actions">
             <button id="prove" type="submit">Prove</button>
             <button id="sol-share" type="button" class="secondary">Share</button>
+            <button id="new-file" type="button" class="secondary">New file</button>
             <span id="sol-status" class="status"></span>
           </div>
         </form>
