@@ -52,10 +52,28 @@ describe("hevm exec", () => {
     expect(await hevm(example("Revert"))).toEqual({ kind: "revert", data: "0x" });
   });
 
-  it("reports BN254 precompiles as unsupported", async () => {
-    const res = await hevm({ mode: "exec", code: "0x604060006080600060065afa5060206000f3" });
-    expect(res).toMatchObject({ kind: "error" });
-    expect(res.kind === "error" && res.message).toMatch(/NonexistentPrecompile/);
+  it("runs the BN254 precompiles", async () => {
+    const word = (n: number) => n.toString(16).padStart(64, "0");
+    const g = word(1) + word(2);
+    // ECADD of the calldata: returns the sum, or the call's success flag
+    const sum = "0x3660006000376040608036600060065afa5060406080f3";
+    const succeeded = "0x3660006000376040608036600060065afa60005260206000f3";
+    expect(await hevm({ mode: "exec", code: sum, calldata: "0x" + g + g })).toEqual({
+      kind: "return",
+      data:
+        "0x030644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd3" +
+        "15ed738c0e0a7c92e7845f96b2ae9c0a68a6a449e3538fc7ff3ebf7a5a18a2c4",
+    });
+    // (1, 3) is not on the curve
+    expect(await hevm({ mode: "exec", code: succeeded, calldata: "0x" + g + word(1) + word(3) })).toEqual({
+      kind: "return",
+      data: "0x" + word(0),
+    });
+    // the pairing check of no pairs holds
+    expect(await hevm({ mode: "exec", code: "0x602060006000600060085afa5060206000f3" })).toEqual({
+      kind: "return",
+      data: "0x" + word(1),
+    });
   });
 });
 
