@@ -69,6 +69,21 @@ a {
   color: var(--accent);
 }
 
+/* grid items size to their content unless told otherwise: long code lines and options would widen the form */
+form > *,
+#source,
+label,
+.field,
+.results > * {
+  min-width: 0;
+}
+
+select,
+#source .cm-editor {
+  width: 100%;
+  max-width: 100%;
+}
+
 form {
   display: grid;
   gap: 1rem;
@@ -523,6 +538,10 @@ code,
   background: var(--accent);
 }
 
+.table-wrap {
+  overflow-x: auto;
+}
+
 .stats table {
   width: 100%;
   border-collapse: collapse;
@@ -552,4 +571,57 @@ code,
 
 ::selection {
   background: var(--selection);
+}
+
+/* side by side when there is room: the code on the left, what hevm finds on the right */
+@media (min-width: 1100px) {
+  body {
+    max-width: 96rem;
+  }
+
+  .sol-only,
+  .bytecode-only {
+    display: grid;
+    grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+    gap: 1rem 1.5rem;
+    align-items: start;
+  }
+
+  .sol-only > form,
+  .bytecode-only > form {
+    grid-column: 1;
+    grid-row: 1 / span 3;
+    position: sticky;
+    top: 1rem;
+  }
+
+  .sol-only > :not(form),
+  .bytecode-only > :not(form) {
+    grid-column: 2;
+    margin-top: 0;
+  }
+
+  #sol-results:empty::before {
+    content: "Prove the contract to see what hevm finds here.";
+    display: block;
+    padding: 1rem;
+    color: var(--muted);
+    border: 1px dashed var(--line);
+    border-radius: 8px;
+  }
+
+  .outcome:empty {
+    display: block;
+  }
+
+  .outcome:empty::before {
+    content: "Run the bytecode to see the outcome here.";
+    display: block;
+    padding: 0.75rem 0;
+    color: var(--muted);
+  }
+
+  .outcome:empty {
+    border-left-style: dashed;
+  }
 }

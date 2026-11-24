@@ -44,7 +44,7 @@ describe("soljson", () => {
 
 describe("hevm test on soljson output", () => {
   it("finds counterexamples and where they fail", async () => {
-    const res = await prove(example("Assertions"));
+    const res = await prove(example("Find x, prove a bound"));
     expect(res["prove_fits(uint8,uint8)"]).toMatchObject({ status: "pass", counterexamples: [] });
     const linear = res["prove_linear(uint256)"]!;
     expect(linear.status).toBe("fail");
@@ -106,7 +106,7 @@ describe("progress of hevm test", () => {
 
 // every example on the website, with what hevm must find
 const expectations: Record<string, Record<string, { status: "pass" | "fail"; calldata?: string; line?: number }>> = {
-  "Assertions": {
+  "Find x, prove a bound": {
     "prove_linear(uint256)": { status: "fail", calldata: "prove_linear(31)", line: 10 },
     "prove_fits(uint8,uint8)": { status: "pass" },
   },

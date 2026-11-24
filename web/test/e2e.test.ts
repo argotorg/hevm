@@ -46,7 +46,7 @@ describe.skipIf(!ready)("website in Chromium", () => {
     }
 
     it("shows a counterexample at its line in the source", async () => {
-      const cards = await prove("Assertions");
+      const cards = await prove("Find x, prove a bound");
       await expect.poll(() => cards.count()).toBe(2);
       const failing = cards.filter({ hasText: "prove_linear" });
       expect(await failing.getAttribute("class")).toBe("card fail");
@@ -114,11 +114,51 @@ describe.skipIf(!ready)("website in Chromium", () => {
     });
 
     it("shows compile errors at their place", async () => {
-      const cards = await prove("Assertions", "pragma solidity ^0.8.0;\ncontract C { function f() public { x = 1; } }\n");
+      const cards = await prove("Find x, prove a bound", "pragma solidity ^0.8.0;\ncontract C { function f() public { x = 1; } }\n");
       expect(await cards.first().textContent()).toContain("Undeclared identifier");
       expect(await cards.first().locator(".excerpt mark").textContent()).toBe("x");
       expect(await page.textContent("#sol-status")).toMatch(/^Compilation failed/);
       expect(await page.locator("#sol-progress").isHidden()).toBe(true);
+    });
+  });
+
+  describe("Layout", () => {
+    async function boxes(width: number) {
+      const p = await browser.newPage({ viewport: { width, height: 900 } });
+      await p.goto(server.resolvedUrls!.local[0]!);
+      const form = (await p.locator("#sol-form").boundingBox())!;
+      const results = (await p.locator("#sol-results").boundingBox())!;
+      const inside = await Promise.all(["#sol-example", "#source .cm-editor"].map(async (sel) => {
+        const b = (await p.locator(sel).boundingBox())!;
+        return b.x >= form.x && b.x + b.width <= form.x + form.width + 0.5;
+      }));
+      await p.close();
+      return { form, results, inside };
+    }
+
+    it("puts the results beside the code when there is room", async () => {
+      const { form, results, inside } = await boxes(1400);
+      expect(inside).toEqual([true, true]);
+      expect(results.x).toBeGreaterThanOrEqual(form.x + form.width);
+      expect(results.y).toBeLessThan(form.y + form.height);
+    });
+
+    it("never scrolls sideways on a phone, however long the code lines", async () => {
+      const p = await browser.newPage({ viewport: { width: 420, height: 900 } });
+      await p.goto(server.resolvedUrls!.local[0]!);
+      await p.click("#prove");
+      await p.waitForFunction(() => !(document.getElementById("prove") as HTMLButtonElement).disabled);
+      expect(await p.locator("#sol-results .excerpt").count()).toBeGreaterThan(0);
+      const [scroll, width] = await p.evaluate(() => [document.documentElement.scrollWidth, window.innerWidth]);
+      await p.close();
+      expect(scroll).toBeLessThanOrEqual(width);
+    });
+
+    it("stacks them on a narrow screen", async () => {
+      const { form, results, inside } = await boxes(600);
+      expect(inside).toEqual([true, true]);
+      expect(results.y).toBeGreaterThanOrEqual(form.y + form.height);
+      expect(results.x).toBeLessThan(form.x + 1);
     });
   });
 

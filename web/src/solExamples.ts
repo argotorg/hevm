@@ -5,7 +5,7 @@ export interface SolExample {
 
 export const solExamples: SolExample[] = [
   {
-    name: "Assertions",
+    name: "Find x, prove a bound",
     source: `// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 

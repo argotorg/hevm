@@ -210,7 +210,10 @@ function renderStats(stats: Stats) {
     tr.firstElementChild!.setAttribute("title", t.name);
     table.append(tr);
   }
-  card.append(table);
+  // scrolls by itself on a narrow screen rather than widening the page
+  const wrap = el("div", "table-wrap");
+  wrap.append(table);
+  card.append(wrap);
   const results = Object.entries(stats.results).map(([r, n]) => `${n} ${r}`).join(", ");
   card.append(el("p", "muted", `${stats.queriesDone} SMT queries${results ? `: ${results}` : ""}, ${fmt(stats.solveSecs)} in the solver, ${fmt(stats.elapsed)} in all.`));
   solResults.append(card);
