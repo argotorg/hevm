@@ -4,7 +4,9 @@
   "type": "module",
   "scripts": {
     "assets": "mkdir -p public && cp ../dist-wasm/hevm.wasm node_modules/solc/soljson.js public/",
+    "predev": "npm run assets",
     "dev": "vite",
+    "prebuild": "npm run assets",
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
@@ -26,5 +28,8 @@
     "@lezer/highlight": "^1.2.5",
     "@replit/codemirror-lang-solidity": "^6.0.2",
     "codemirror": "^6.0.2"
+  },
+  "overrides": {
+    "tmp": "0.2.7"
   }
 }

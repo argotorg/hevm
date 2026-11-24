@@ -72,7 +72,7 @@ exceptions.
 `web/` is a website that compiles Solidity with soljson and runs `hevm.wasm` on it in
 the browser, showing counterexamples at their place in the source:
 ```
-$ cd web && npm install && npm run assets && npm run dev
+$ cd web && npm install && npm run dev
 ```
 
 `npm test` there runs the TypeScript tests: unit tests, `hevm.wasm` under Node, and,
