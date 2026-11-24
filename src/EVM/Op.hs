@@ -4,6 +4,7 @@ module EVM.Op
   , opString
   , intToOpName
   , getOp
+  , opOffset
   ) where
 
 import EVM.Types
@@ -266,12 +267,19 @@ opString (i, o) = let showPc x | x < 0x10 = '0' : showHex x ""
   OpInvalid -> "INVALID"
   OpUnknown x -> "UNKNOWN " ++ (showHex x "")
 
+-- | @x - base@ for an opcode in a range from @base@. It is computed as an Int: the wasm
+-- GHC (9.12.4) reuses the Word8 subtraction of the range check without narrowing it,
+-- turning e.g. SWAP1's 0x90 - 0x90 + 1 into 257.
+{-# INLINE opOffset #-}
+opOffset :: Word8 -> Int -> Int
+opOffset x base = fromIntegral x - base
+
 {-# INLINE getOp #-}
 getOp :: Word8 -> GenericOp Word8
-getOp x | x >= 0x80 && x <= 0x8f = OpDup (x - 0x80 + 1)
-getOp x | x >= 0x90 && x <= 0x9f = OpSwap (x - 0x90 + 1)
-getOp x | x >= 0xa0 && x <= 0xa4 = OpLog (x - 0xa0)
-getOp x | x >= 0x60 && x <= 0x7f = OpPush (x - 0x60 + 1)
+getOp x | x >= 0x80 && x <= 0x8f = OpDup (fromIntegral (opOffset x 0x80 + 1))
+getOp x | x >= 0x90 && x <= 0x9f = OpSwap (fromIntegral (opOffset x 0x90 + 1))
+getOp x | x >= 0xa0 && x <= 0xa4 = OpLog (fromIntegral (opOffset x 0xa0))
+getOp x | x >= 0x60 && x <= 0x7f = OpPush (fromIntegral (opOffset x 0x60 + 1))
 getOp x = case x of
   0x00 -> OpStop
   0x01 -> OpAdd

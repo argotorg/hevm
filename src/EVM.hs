@@ -3759,7 +3759,7 @@ mkOpIxMap (RuntimeCode (SymbolicRuntimeCode ops))
         go v (0, !i, !j, !m) x = case maybeLitByteSimp x of
           Just x' -> if x' >= 0x60 && x' <= 0x7f
             -- start of PUSH op --
-                     then (x' - 0x60 + 1, i + 1, j,     m >> VS.Mutable.write v i j)
+                     then (opOffset x' 0x60 + 1, i + 1, j, m >> VS.Mutable.write v i j)
             -- other data --
                      else (0,             i + 1, j + 1, m >> VS.Mutable.write v i j)
           _ -> internalError $ "cannot analyze symbolic code:\nx: " <> show x <> " i: " <> show i <> " j: " <> show j
@@ -3782,14 +3782,14 @@ mkConcreteOpIxMap bs = VS.create $ do
             case pushBytesLeft of
               -- Start of PUSH: its payload shares the current operation index.
               0 | x >= 0x60 && x <= 0x7f ->
-                    go (x - 0x60 + 1) (i + 1) j
+                    go (opOffset x 0x60 + 1) (i + 1) j
                 -- Other opcode, including PUSH0: the next byte starts a new op.
                 | otherwise ->
                     go 0 (i + 1) (j + 1)
               -- Last PUSH payload byte: the next byte starts a new operation.
               1 -> go 0 (i + 1) (j + 1)
               -- More PUSH payload remains: keep the same operation index.
-              n -> go (n - 1 :: Word8) (i + 1) j
+              n -> go (n - 1 :: Int) (i + 1) j
   go 0 0 0
   pure v
 
