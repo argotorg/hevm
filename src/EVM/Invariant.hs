@@ -8,17 +8,21 @@ module EVM.Invariant
   , InvState(..)
   , Senders(..)
   , Probe(..)
+  , CallConfig(..)
+  , defaultCallConfig
+  , Transition(..)
   , StateKey
   , stateKey
   , startCall
   , nextStates
+  , nextStatesWith
   , simplifyDisjunction
   ) where
 
 import Control.Concurrent.STM.TVar (newTVarIO)
-import Control.Monad (forM)
+import Control.Monad (forM, forM_)
 import Control.Monad.ST (stToIO)
-import Data.IORef (IORef, readIORef, atomicModifyIORef')
+import Data.IORef (IORef, newIORef, readIORef, atomicModifyIORef')
 import Control.Monad.State.Strict (execStateT, execState, get, put, liftIO, modify)
 import Data.Either (partitionEithers)
 import Data.List (partition, sortOn)
@@ -34,7 +38,7 @@ import Optics.Core
 import Optics.State
 import Optics.State.Operators
 
-import EVM (loadContract, resetState, pushTrace)
+import EVM (clearTStorages, loadContract, resetState, pushTrace)
 import EVM.ABI (Sig(..), callSig)
 import EVM.Effects
 import EVM.Expr (simplifyProp)
@@ -59,7 +63,39 @@ data Call = Call
   , caller :: Expr EAddr
   , calldata :: Expr Buf
   , timestamp :: Expr EWord
+  , blockNumber :: Expr EWord
+  , origin :: Expr EAddr
   }
+
+-- | Context for generated transactions. Bounds are per transaction. With no
+-- number bound the block number stays fixed; time is always monotone and below
+-- 2^64. Value is currently zero. Caller-as-origin requires a finite sender list
+-- so account lookup during transaction initialization stays concrete.
+data CallConfig = CallConfig
+  { gas :: Word64
+  , maxTimeDelay :: Maybe W256
+  , maxBlockDelay :: Maybe W256
+  , callerIsOrigin :: Bool
+  }
+
+defaultCallConfig :: Word64 -> CallConfig
+defaultCallConfig gas = CallConfig gas Nothing Nothing False
+
+-- | Outcomes of expanding a frontier. Inconclusive solver results must not
+-- be mistaken for successfully checked paths.
+data Transition = Transition
+  { states :: [InvState]
+  , partials :: [Expr End]
+  , probes :: [Probe]
+  , issues :: [Text]
+  }
+
+instance Semigroup Transition where
+  a <> b = Transition (a.states <> b.states) (a.partials <> b.partials)
+    (a.probes <> b.probes) (a.issues <> b.issues)
+
+instance Monoid Transition where
+  mempty = Transition [] [] [] []
 
 -- | A call that can fail an assertion: the calls up to and including it, from the state before it
 data Probe = Probe
@@ -121,9 +157,11 @@ stateKey vm = StateKey accounts (Set.fromList (connected (foldMap accountAtoms a
 startCall :: VMOps t => Expr EAddr -> Expr EAddr -> Word64 -> Text -> (Expr Buf, [Prop]) -> EVM t ()
 startCall target caller gas entry (cd, props) = do
   resetState
+  clearTStorages
   -- loop bounds count visits within one transaction
   assign #iterations mempty
   assign #pathsVisited mempty
+  assign #exploreDepth 0
   assign (#tx % #subState) (SubState mempty mempty mempty mempty mempty mempty)
   assign (#tx % #isCreate) False
   execState (loadContract target) <$> get >>= put
@@ -190,32 +228,59 @@ nextStates :: App m
   -> IORef (Set StateKey) -> InvState
   -> m ([InvState], [Expr End], [Probe])
 nextStates solvers post fetcher iterConf gas senders targets visited st = do
-  results <- forM targets $ \target -> do
+  result <- nextStatesWith solvers post fetcher iterConf (defaultCallConfig gas)
+    senders targets (Just visited) st
+  pure (result.states, result.partials, result.probes)
+
+-- | Configurable transition execution. Passing 'Nothing' for the visited set
+-- disables state pruning, which is needed when checks observe transaction or
+-- block context not captured by 'stateKey'. The legacy 'nextStates' wrapper
+-- retains its original pruning policy and result type.
+nextStatesWith :: App m
+  => SolverGroup -> Postcondition -> Fetch.Fetcher Symbolic m -> IterConfig -> CallConfig -> Senders -> [Target]
+  -> Maybe (IORef (Set StateKey)) -> InvState -> m Transition
+nextStatesWith solvers post fetcher iterConf conf senders targets visited st
+  | conf.callerIsOrigin = case senders of
+      OneOf as -> mconcat <$> mapM (expand . OneOf . pure) as
+      _ -> pure $ mempty { issues = ["caller-as-origin requires OneOf senders"] }
+  | otherwise = expand senders
+  where
+  expand (OneOf []) = pure mempty
+  expand allowed = fmap mconcat $ forM targets $ \target -> do
     let Sig _ types = target.sig
         -- each call of a sequence needs its own variables, and they are on one path
         n = T.pack (show (length st.calls + 1))
         anyCaller = SymAddr ("caller" <> n)
-        (caller, callerProps) = case senders of
+        (caller, callerProps) = case allowed of
           OneOf [a] -> (LitAddr a, [])
-          OneOf as -> (anyCaller, [foldr1 POr [PEq anyCaller (LitAddr a) | a <- as]])
+          OneOf as -> (anyCaller, [por [PEq anyCaller (LitAddr a) | a <- as]])
           NoneOf as -> (anyCaller, [PNeg (PEq anyCaller (LitAddr a)) | a <- as])
           AnySender -> (anyCaller, [])
         -- time may pass between calls, as in halmos up to 2^64
         timestamp = Var ("timestamp" <> n)
         timeProps = [PLEq st.vm.block.timestamp timestamp, PLT timestamp (Lit (2 ^ (64 :: Int)))]
+          <> maybe [] (\limit -> [PLEq (Sub timestamp st.vm.block.timestamp) (Lit limit)]) conf.maxTimeDelay
+        blockNumber = maybe st.vm.block.number (const $ Var ("blockNumber" <> n)) conf.maxBlockDelay
+        numberProps = maybe [] (\limit -> [PLEq st.vm.block.number blockNumber,
+          PLEq (Sub blockNumber st.vm.block.number) (Lit limit)]) conf.maxBlockDelay
+        origin = if conf.callerIsOrigin then caller else st.vm.tx.origin
     (cd, props, _) <- symCalldataNamed ("call" <> n <> "-") True (callSig target.sig) types [] (AbstractBuf ("txdata" <> n))
-    let call = Call { target, caller, calldata = cd, timestamp }
+    let call = Call { target, caller, calldata = cd, timestamp, blockNumber, origin }
         entry = target.contractName <> "." <> callSig target.sig
     vm <- liftIO $ stToIO $ flip execStateT st.vm $ do
       assign (#block % #timestamp) timestamp
-      startCall target.addr caller gas entry (cd, props <> callerProps <> timeProps)
+      assign (#block % #number) blockNumber
+      assign (#tx % #origin) origin
+      startCall target.addr caller conf.gas entry (cd, props <> callerProps <> timeProps <> numberProps)
     abort <- liftIO $ newTVarIO False
+    issues <- liftIO $ newIORef []
     leaves <- interpretVMAbortable abort fetcher iterConf vm runExpr $ \leaf endVm _ -> case leaf of
       Success {} -> do
-        known <- liftIO $ Set.member (stateKey endVm) <$> readIORef visited
+        known <- maybe (pure False) (liftIO . fmap (Set.member (stateKey endVm)) . readIORef) visited
         if known then pure Nothing else do
           -- branches were only decided by the simplifier
           res <- checkBranchSat solvers (extractProps leaf <> Preimages.recordedProps endVm.keccakPreImgs)
+          recordIssue issues res
           pure $ case res of
             Qed -> Nothing
             _ -> Just $ Left (endState endVm)
@@ -224,6 +289,7 @@ nextStates solvers post fetcher iterConf gas senders targets visited st = do
         PBool True -> pure Nothing
         p -> do
           res <- checkSatWithProps solvers (PNeg p : extractProps leaf <> Preimages.recordedProps vm.keccakPreImgs)
+          recordIssue issues res
           pure $ case snd (verifyResult vm (res, leaf)) of
             Cex (l, cex) -> Just $ Right $ Right Probe { state = st { calls = st.calls <> [call] }, leaf = l, cex }
             _ -> Nothing
@@ -232,9 +298,16 @@ nextStates solvers post fetcher iterConf gas senders targets visited st = do
         (partials, probes) = partitionEithers others
     states <- liftIO $ fmap catMaybes $ forM (mergeStates ends) $ \end -> do
       let k = stateKey end
-      atomicModifyIORef' visited $ \seen ->
-        (Set.insert k seen, if Set.member k seen then Nothing else Just InvState { vm = end, calls = st.calls <> [call] })
+          reached = InvState { vm = end, calls = st.calls <> [call] }
+      maybe (pure $ Just reached) (\ref -> atomicModifyIORef' ref $ \seen ->
+        (Set.insert k seen, if Set.member k seen then Nothing else Just reached)) visited
     -- a merged state covers each of its paths
-    liftIO $ atomicModifyIORef' visited $ \seen -> (seen <> Set.fromList (map stateKey ends), ())
-    pure (states, partials, probes)
-  pure (concatMap (\(a, _, _) -> a) results, concatMap (\(_, b, _) -> b) results, concatMap (\(_, _, c) -> c) results)
+    liftIO $ forM_ visited $ \ref -> atomicModifyIORef' ref $ \seen -> (seen <> Set.fromList (map stateKey ends), ())
+    Transition states partials probes <$> liftIO (readIORef issues)
+
+  recordIssue :: App m => IORef [Text] -> SMTResult -> m ()
+  recordIssue ref result = case result of
+    Unknown reason -> add (getUnknownStr reason)
+    Error err -> add err
+    _ -> pure ()
+    where add message = liftIO $ atomicModifyIORef' ref $ \found -> (found <> [T.pack message], ())

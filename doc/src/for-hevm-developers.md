@@ -5,6 +5,34 @@ You can also check out a few [presentations](https://github.com/msooseth/hevm-pr
 
 # Debugging
 
+## Embedding the invariant driver
+
+`EVM.Invariant.Driver` provides bounded exploration without Foundry naming or
+assertion conventions. Create an `Exploration` with explicit `Target`s, allowed
+senders, a `CallConfig` and a transition postcondition. Supply each property as a
+`Check`, including its calldata, caller, optional origin override and postcondition.
+`searchInvariant` searches an inclusive depth range and stops at the first
+counterexample for that check. Multiple checks share the same cached frontiers;
+property calls execute on copies and do not change those frontiers. The cache is
+single-threaded and must use the same solver settings and fetcher throughout.
+
+`CallConfig` can bound timestamp and block-number increments per transaction.
+`callerIsOrigin` requires `OneOf` senders and enumerates them concretely so that
+transaction initialization looks up the correct origin account. Disable
+`pruneStates` for properties that observe context not represented by `stateKey`,
+such as time or block number. Foundry keeps its existing pruning policy.
+
+Read both `CheckResult` and `explorationStatus`: partial paths and solver issues
+are inconclusive, and transition probes report assertion failures before the
+property call. Reaching the depth limit is not an unbounded proof. Counterexamples
+include the symbolic sequence and the property call separately. `concretizeCalls`
+materializes a sequence using one model, including ABI arguments, callers, origins
+and per-call delays. Clients may replay it with their own executor, or use
+`replayCalls` and classify the final check themselves.
+
+Calls currently send zero ETH. Configurable or symbolic call value is a follow-up
+for hevm; clients should not duplicate the symbolic transition executor for it.
+
 ## Printf-style debugging
 
 Haskell offers a way to print messages anywhere in the code with [Debug.Trace](https://hackage.haskell.org/package/base-4.20.0.1/docs/Debug-Trace.html).

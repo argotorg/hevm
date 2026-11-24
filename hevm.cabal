@@ -106,6 +106,7 @@ library
     EVM.ConsoleLog,
     EVM.Fetch,
     EVM.Invariant,
+    EVM.Invariant.Driver,
     EVM.FeeSchedule,
     EVM.Op,
     EVM.Precompiled,
@@ -332,6 +333,7 @@ test-suite test
     EVM.Test.Fuzz.Lockstep
     EVM.Test.FoundryTests
     EVM.Invariant.InvariantTests
+    EVM.Invariant.DriverTests
     EVM.Test.Asm
     EVM.Debugger.DebuggerTests
     EVM.Debugger.DebuggerFuzz

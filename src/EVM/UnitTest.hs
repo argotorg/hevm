@@ -25,8 +25,10 @@ import EVM.Tracing qualified as Tracing
 import EVM.Expr (maybeLitWordSimp)
 import EVM.Progress qualified as Progress
 import EVM.Invariant
+import EVM.Invariant.Driver (concreteAddr)
+import EVM.Invariant.Driver qualified as Invariant
 
-import Control.Monad (void, when, unless, forM, forM_, foldM, mfilter)
+import Control.Monad (void, when, unless, forM, forM_, mfilter)
 import Control.Monad.ST (RealWorld, ST, stToIO)
 import Control.Monad.State.Strict (execState, execStateT, get, put, liftIO, runStateT)
 import Optics.Core
@@ -39,13 +41,11 @@ import Data.ByteString.Char8 qualified as BS
 import Data.ByteString.Internal (c2w)
 import Data.ByteString.Lazy qualified as BSLazy
 import Data.Decimal (DecimalRaw(..))
+import Data.Either (fromRight)
 import Data.Foldable (Foldable(..), toList)
-import Data.IORef (IORef, newIORef, readIORef, modifyIORef)
 import Data.List qualified as List
 import Data.Map (Map)
 import Data.Map qualified as Map
-import Data.Set (Set)
-import Data.Set qualified as Set
 import Data.Maybe
 import Data.Text (isPrefixOf, stripSuffix, intercalate, Text, pack, unpack)
 import Data.Text qualified as Text
@@ -716,13 +716,7 @@ data InvariantContext = InvariantContext
   , targets :: Either Text [Target]
   -- | target functions whose arguments cannot be symbolic
   , skipped :: [Text]
-  , senders :: Senders
-  , levels :: IORef [[InvState]]
-  -- | the states reached so far, a state reached again is not explored again
-  , visited :: IORef (Set StateKey)
-  , partials :: IORef [Expr End]
-  -- | the first call found to fail an assertion, of each target function
-  , probes :: IORef [Probe]
+  , exploration :: Invariant.Exploration
   }
 
 invariantContext :: App m => UnitTestOptions -> VM Concrete -> SolcContract -> SourceCache -> m InvariantContext
@@ -761,12 +755,11 @@ invariantContext opts vm testContract sourceCache = do
   conf <- readConfig
   when conf.debug $ liftIO $ putStrLn $ "Invariant targets: " <> either Text.unpack
     (unwords . map (\t -> show t.addr <> ":" <> Text.unpack (t.contractName <> "." <> callSig t.sig))) targets
-  let start = InvState { vm = symbolify vm & set #srcLookup (Just $ makeSrcLookup opts.dapp sourceCache), calls = [] }
-  levels <- liftIO $ newIORef [[start]]
-  visited <- liftIO $ newIORef (Set.singleton (stateKey start.vm))
-  partials <- liftIO $ newIORef []
-  probes <- liftIO $ newIORef []
-  pure InvariantContext { setupVm = vm, targets, skipped, senders, levels, visited, partials, probes }
+  exploration <- Invariant.newExploration
+    (Invariant.ExplorationConfig (fromRight [] targets) senders
+      (defaultCallConfig opts.testParams.gasCall) (testPostcondition opts.checkFailBit False) True)
+    (symbolify vm & set #srcLookup (Just $ makeSrcLookup opts.dapp sourceCache))
+  pure InvariantContext { setupVm = vm, targets, skipped, exploration }
   where
     getter sig ty
       | Map.notMember (abiKeccak (encodeUtf8 sig)) testContract.abiMap = pure Nothing
@@ -805,34 +798,6 @@ invariantContext opts vm testContract sourceCache = do
       _ -> Nothing
     reserved name = any (`isPrefixOf` name) ["test", "prove", "check", "invariant_", "setUp", "afterInvariant"]
 
--- | The states reached by exactly @d@ calls, computed once per test contract
-invariantLevel :: App m => UnitTestOptions -> InvariantContext -> [Target] -> Int -> m [InvState]
-invariantLevel opts ctx targets d = do
-  known <- liftIO $ readIORef ctx.levels
-  case drop d known of
-    (states:_) -> pure states
-    [] -> do
-      prev <- invariantLevel opts ctx targets (d - 1)
-      let fetcher = Fetch.oracle opts.solvers opts.sess opts.rpcInfo
-      results <- mapM (nextStates opts.solvers (testPostcondition opts.checkFailBit False) fetcher
-        (makeVeriOpts opts).iterConf opts.testParams.gasCall ctx.senders targets ctx.visited) prev
-      let states = concatMap (\(a, _, _) -> a) results
-      conf <- readConfig
-      when conf.debug $ liftIO $ putStrLn $ "Invariant states after " <> show d <> " calls: "
-        <> show (length states) <> " new"
-      liftIO $ do
-        modifyIORef ctx.levels (<> [states])
-        modifyIORef ctx.partials (<> concatMap (\(_, b, _) -> b) results)
-        modifyIORef ctx.probes $ \found -> foldl' (\ps p -> if any (sameFunction p) ps then ps else ps <> [p]) found
-          (concatMap (\(_, _, c) -> c) results)
-      pure states
-
-sameFunction :: Probe -> Probe -> Bool
-sameFunction a b = case (lastCall a, lastCall b) of
-  (Just x, Just y) -> x.target.addr == y.target.addr && callSig x.target.sig == callSig y.target.sig
-  _ -> False
-  where lastCall p = listToMaybe (reverse p.state.calls)
-
 -- | Checks an invariant in every state reached by at most 'invariantDepth' calls
 -- Returns tuple of (No Cex, No warnings)
 invariantRun :: forall m . App m => UnitTestOptions -> InvariantContext -> (Int, Int) -> Sig -> m (Bool, Bool)
@@ -843,42 +808,33 @@ invariantRun opts ctx (nth, numTests) sig@(Sig testName types) = do
     Left err -> do
       liftIO $ opts.printOut $ "   \x1b[31m[FAIL]\x1b[0m " <> testName <> ": " <> err <> "\n"
       pure (True, False)
-    Right targets -> do
+    Right _ -> do
       (cdBuf, cdProps, caveats) <- symCalldata cs types [] (AbstractBuf "txdata")
-      let check :: InvState -> m ([Text], Maybe (InvState, Expr End, SMTCex))
-          check st = do
-            vm <- liftIO $ stToIO $ execStateT (startCall opts.testParams.address opts.testParams.caller opts.testParams.gasCall testName (cdBuf, cdProps)) st.vm
-            let fetcher = Fetch.oracle opts.solvers opts.sess opts.rpcInfo
-            (ends, results) <- verify opts.solvers fetcher (makeVeriOpts opts) vm (testPostcondition opts.checkFailBit False) Nothing
-            let issues = [Text.pack str | (_, str) <- groupPartials vm.srcLookup vm.env.contracts ends]
-                  <> [Text.pack (getUnknownStr u) | Unknown u <- results] <> [Text.pack e | Error e <- results]
-            pure (issues, (\(leaf, cex) -> (st, leaf, cex)) <$> listToMaybe (mapMaybe extractCex results))
-          go d issues
-            | d > opts.invariantDepth = pure (Nothing, issues)
-            | otherwise = do
-                states <- invariantLevel opts ctx targets d
-                let firstCex is [] = go (d + 1) is
-                    firstCex is (st:rest) = check st >>= \case
-                      (is', Just c) -> pure (Just c, is <> is')
-                      (is', Nothing) -> firstCex (is <> is') rest
-                firstCex issues states
-      (found, issues) <- Progress.withPhase "test" ["test" JSON..= cs] (const []) $ do
+      let check = Invariant.Check (Target opts.testParams.address "" sig) opts.testParams.caller
+            Nothing opts.testParams.gasCall (cdBuf, cdProps) (testPostcondition opts.checkFailBit False)
+          fetcher = Fetch.oracle opts.solvers opts.sess opts.rpcInfo
+      result <- Progress.withPhase "test" ["test" JSON..= cs] (const []) $ do
         Progress.phaseTotal numTests
         Progress.phaseAt nth
-        go 0 []
-      framePartials <- liftIO $ readIORef ctx.partials
-      probes <- filter (\p -> length p.state.calls <= opts.invariantDepth) <$> liftIO (readIORef ctx.probes)
+        Invariant.searchInvariant opts.solvers fetcher (makeVeriOpts opts) ctx.exploration
+          (0, opts.invariantDepth) check
+      (sizes, transitions) <- Invariant.explorationStatus ctx.exploration
+      let found = result.counterexample
+          issues = result.issues <> transitions.issues
+            <> [Text.pack str | (_, str) <- groupPartials ctx.setupVm.srcLookup ctx.setupVm.env.contracts result.partials]
+          framePartials = transitions.partials
+          probes = filter (\p -> length p.state.calls <= opts.invariantDepth) transitions.probes
+          numStates = sum (take (opts.invariantDepth + 1) sizes)
       forM_ probes $ \p -> do
         validation <- validateProbe opts ctx p
         txt <- symFailure opts testName Nothing (callLines p.cex p.state.calls) (p.leaf, p.cex, validation)
         liftIO $ opts.printOut txt
-      numStates <- liftIO $ sum . map length . take (opts.invariantDepth + 1) <$> readIORef ctx.levels
       let incomplete = not (null issues) || not (null framePartials) || not (null ctx.skipped)
       case found of
         Nothing | not (null probes) -> liftIO $ opts.printOut $ "   \x1b[31m[FAIL]\x1b[0m " <> testName <> "\n"
-        Just (st, leaf, cex) -> do
-          validation <- validateInvariantCex opts ctx st cex sig cdBuf
-          txt <- symFailure opts testName (Just (cdBuf, types)) (callLines cex st.calls) (leaf, cex, validation)
+        Just c -> do
+          validation <- validateInvariantCex opts ctx c.state c.model sig cdBuf
+          txt <- symFailure opts testName (Just (cdBuf, types)) (callLines c.model c.state.calls) (c.leaf, c.model, validation)
           liftIO $ opts.printOut $ txt <> "   \x1b[31m[FAIL]\x1b[0m " <> testName <> "\n"
         Nothing -> liftIO $ opts.printOut $
           (if incomplete then "   \x1b[31m[FAIL]\x1b[0m " else "   \x1b[32m[PASS]\x1b[0m ")
@@ -907,35 +863,17 @@ callLines cex calls = zipWith (<>) ("  calls:    " : repeat "            ") $ fl
 
 -- | Runs one call of a counterexample concretely
 replayCall :: App m => UnitTestOptions -> SMTCex -> VM Concrete -> Call -> m (Err (VM Concrete, Either EvmError (Expr Buf)))
-replayCall opts cex vm call = calldataFromCex cex call.calldata call.target.sig >>= \case
+replayCall opts cex vm call = Invariant.concretizeCalls vm.block cex [call] >>= \case
   Left e -> pure $ Left e
-  Right bs -> do
-    let fetcher = Fetch.concreteOracle opts.sess opts.rpcInfo
-        time = maybe vm.block.timestamp Lit $ case call.timestamp of
-          v@(Var _) -> Map.lookup v cex.vars
-          _ -> Nothing
-    (res, vm') <- Stepper.interpret fetcher (vm & set (#block % #timestamp) time) $ do
-      Stepper.evm $ startCall call.target.addr (concreteAddr cex call.caller) opts.testParams.gasCall
-        (callSig call.target.sig) (ConcreteBuf bs, [])
-      res <- Stepper.execFully
-      (res,) <$> Stepper.evm get
-    pure $ Right (vm', res)
-
-concreteAddr :: SMTCex -> Expr EAddr -> Expr EAddr
-concreteAddr cex = \case
-  a@(SymAddr _) -> LitAddr $ Map.findWithDefault 0xdeadbeef a cex.addrs
-  a -> a
+  Right [concrete] -> Right <$> Invariant.replayCall
+    (Fetch.concreteOracle opts.sess opts.rpcInfo) opts.testParams.gasCall vm concrete
+  Right _ -> pure $ Left "expected one invariant call"
 
 -- | The state after the given calls of a counterexample, run concretely after setUp()
 replayCalls :: App m => UnitTestOptions -> InvariantContext -> SMTCex -> [Call] -> m (Err (VM Concrete))
-replayCalls opts ctx cex calls = foldM replay (Right vm0) (zip [1 :: Int ..] calls)
-  where
-    vm0 = ctx.setupVm & set (#tx % #origin) (concreteAddr cex opts.testParams.origin)
-    replay (Left e) _ = pure (Left e)
-    replay (Right vm) (i, call) = replayCall opts cex vm call <&> \case
-      Right (vm', Right _) -> Right vm'
-      Right _ -> Left $ "call " <> show i <> " failed in the concrete replay"
-      Left e -> Left e
+replayCalls opts ctx cex calls = Invariant.replayCalls
+  (Fetch.concreteOracle opts.sess opts.rpcInfo) opts.testParams.gasCall
+  (ctx.setupVm & set (#tx % #origin) (concreteAddr cex opts.testParams.origin)) cex calls
 
 -- | Replays the calls of a counterexample concretely, then checks the invariant
 validateInvariantCex :: App m

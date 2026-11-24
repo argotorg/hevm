@@ -23,6 +23,7 @@ import EVM.Dapp (TestMethodInfo(..))
 import EVM.Effects
 import EVM.Fetch qualified as Fetch
 import EVM.Invariant (simplifyDisjunction)
+import EVM.Invariant.DriverTests qualified as Driver
 import EVM.Test.Utils (WithOutput, assertRun, runForgeTestResultsWith)
 import EVM.Expr (simplifyProp)
 import EVM.Traversals (mapProp)
@@ -44,7 +45,8 @@ runInvariant depth file name = first (map snd) <$> runInvariants depth file (== 
 
 tests :: TestTree
 tests = testGroup "invariant"
-  [ test "pass" $ do
+  [ Driver.tests
+  , test "pass" $ do
       (results, out) <- runInvariants 2 "pass.sol" (const True)
       liftIO $ assertBool "some invariants ran" (not (null results))
       assertRun "all pass" (map (const (True, True)) results) (map snd results, out)
