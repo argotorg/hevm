@@ -3,6 +3,7 @@ import { buildArgs, parseOutcome, progressPath, stripAnsi, type Mode, type Outco
 import { compile, onHevmOutput, runHevm } from "./client";
 import { $, button, el } from "./dom";
 import { setupEquivalence } from "./eqTab";
+import { decodeShare, encodeShare, type Shared } from "./share";
 import { examples } from "./examples";
 import { SolidityEditor } from "./editor";
 import { segments, tokens } from "./highlight";
@@ -181,7 +182,7 @@ function renderTest(t: TestResult) {
 const solStory = $<HTMLElement>("sol-story");
 
 function showStory() {
-  const story = solExamples[Number(solExample.value)]?.story;
+  const story = solExample.value === "" ? undefined : solExamples[Number(solExample.value)]?.story;
   solStory.textContent = story ?? "";
   solStory.hidden = !story;
 }
@@ -430,10 +431,63 @@ form.addEventListener("submit", async (e) => {
 examples.forEach((ex, i) => example.add(new Option(ex.name, String(i))));
 load(examples[0]!.request);
 
-setupEquivalence({
+const eqTab = setupEquivalence({
   openInBytecode(code, calldata) {
     load({ mode: "exec", code, calldata });
     outcome.replaceChildren();
     showTab("bytecode");
   },
 });
+
+// --- links to what a tab holds ---
+
+async function share(s: Shared, where: HTMLElement) {
+  history.replaceState(null, "", `#${await encodeShare(s)}`);
+  try {
+    await navigator.clipboard.writeText(location.href);
+    where.textContent = "Link copied";
+  } catch {
+    where.textContent = "The link is in the address bar";
+  }
+}
+
+$("sol-share").addEventListener("click", () => {
+  const ex = solExamples.find((e) => e.source === editor.value);
+  void share(ex ? { tab: "sol", example: ex.name } : { tab: "sol", source: editor.value }, solStatus);
+});
+$("eq-share").addEventListener("click", () => void share(eqTab.shared(), $("eq-status")));
+$("share").addEventListener("click", () => {
+  void share({ tab: "bytecode", request: { mode: mode(), code: code.value, calldata: calldata.value, sig: sig.value } }, status);
+});
+
+async function openShared() {
+  const s = await decodeShare(location.hash);
+  if (!s) return;
+  if (s.tab === "sol") {
+    if ("example" in s) {
+      const i = solExamples.findIndex((e) => e.name === s.example);
+      if (i < 0) return;
+      solExample.value = String(i);
+      editor.value = solExamples[i]!.source;
+    } else {
+      solExample.selectedIndex = -1;
+      editor.value = s.source;
+    }
+    showStory();
+    solResults.replaceChildren();
+    showTab("sol");
+    solForm.requestSubmit();
+  } else if (s.tab === "eq") {
+    if (!eqTab.open(s)) return;
+    showTab("eq");
+    eqTab.check();
+  } else {
+    load(s.request);
+    outcome.replaceChildren();
+    showTab("bytecode");
+    form.requestSubmit();
+  }
+}
+
+window.addEventListener("hashchange", () => void openShared());
+void openShared();

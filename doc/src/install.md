@@ -77,7 +77,8 @@ the browser, showing counterexamples at their place in the source. Its Debugger 
 hevm's interactive debugger on `hevm-web.wasm`, a build of hevm as a wasm reactor, for
 replaying a counterexample or stepping through a test symbolically. Its Equivalence tab
 checks that two contracts, or one compiled with different solc settings, behave the
-same on every call:
+same on every call. Each tab's Share button copies a link that opens the tab with its
+code and runs it; the code travels in the link itself:
 ```
 $ cd web && npm install && npm run dev
 ```

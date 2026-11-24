@@ -8,6 +8,9 @@ import { parseEquivalence, type EqCounterexample } from "./eqOutput";
 import { contractNames, eqArgs, eqPrograms, type EqMode, type EqProgram } from "./equivalence";
 import { stripAnsi } from "./hevm";
 import { newStats, onProgress, type Stats } from "./progress";
+import type { Shared } from "./share";
+
+type EqShared = Extract<Shared, { tab: "eq" }>;
 
 export interface EqTabOptions {
   /** opens a program in the Bytecode tab, to run it on the calldata */
@@ -16,7 +19,15 @@ export interface EqTabOptions {
 
 const fmt = (secs: number) => (secs < 10 ? secs.toFixed(2) : secs.toFixed(1)) + "s";
 
-export function setupEquivalence(opts: EqTabOptions) {
+export interface EqTab {
+  /** what a link to the tab holds */
+  shared(): EqShared;
+  /** shows what a link holds, unless it names no example there is */
+  open(s: EqShared): boolean;
+  check(): void;
+}
+
+export function setupEquivalence(opts: EqTabOptions): EqTab {
   const form = $<HTMLFormElement>("eq-form");
   const example = $<HTMLSelectElement>("eq-example");
   const mode = $<HTMLSelectElement>("eq-mode");
@@ -179,4 +190,32 @@ export function setupEquivalence(opts: EqTabOptions) {
       check.disabled = false;
     }
   });
+
+  return {
+    shared() {
+      const ex = eqExamples.find((e) =>
+        e.source === editor.value && e.mode === mode.value && e.a === pickA.value && (e.mode !== "contracts" || e.b === pickB.value));
+      return ex
+        ? { tab: "eq", example: ex.name }
+        : { tab: "eq", source: editor.value, mode: mode.value as EqMode, a: pickA.value, b: pickB.value };
+    },
+    open(s) {
+      if ("example" in s) {
+        const i = eqExamples.findIndex((e) => e.name === s.example);
+        if (i < 0) return false;
+        example.value = String(i);
+        load(i);
+        return true;
+      }
+      example.selectedIndex = -1;
+      mode.value = s.mode;
+      editor.value = s.source;
+      refreshContracts(s.source, s.a, s.b);
+      showMode();
+      results.replaceChildren();
+      progress.hidden = true;
+      return true;
+    },
+    check: () => form.requestSubmit(),
+  };
 }

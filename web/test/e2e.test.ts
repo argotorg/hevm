@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { examples } from "../src/examples";
 import { solExamples } from "../src/solExamples";
 import { eqExamples } from "../src/eqExamples";
+import { encodeShare } from "../src/share";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const chrome = process.env.CHROME ?? "/usr/bin/chromium";
@@ -256,6 +257,59 @@ describe.skipIf(!ready)("website in Chromium", () => {
       await page.keyboard.type("\ncontract Other {}\n");
       expect(await page.locator("#eq-b option").allTextContents()).toEqual(["Packing", "Other"]);
       expect(await page.inputValue("#eq-b")).toBe("Other");
+    });
+  });
+
+  describe("Links", () => {
+    async function open(hash: string) {
+      const p = await browser.newPage();
+      await p.goto(`${server.resolvedUrls!.local[0]!}#${hash}`);
+      return p;
+    }
+
+    it("open an example and prove it", async () => {
+      const p = await open("tab=sol&example=Unsafe+downcast");
+      await p.waitForSelector("#sol-results .card.fail");
+      expect(await p.inputValue("#sol-example")).toBe(String(solExamples.findIndex((e) => e.name === "Unsafe downcast")));
+      expect(await p.textContent("#sol-story")).toContain("SafeCast");
+      await p.close();
+    });
+
+    it("carry edited code to another page, which proves it", async () => {
+      await page.click('.tabs [data-tab="sol"]');
+      await page.selectOption("#sol-example", "0");
+      await page.click("#source .cm-content");
+      await page.keyboard.press("ControlOrMeta+A");
+      const source = "pragma solidity ^0.8.0;\nimport {Test} from \"hevm/Test.sol\";\ncontract T is Test {\n  function prove_small(uint8 x) public pure { assert(x != 7); }\n}\n";
+      await page.keyboard.insertText(source);
+      await page.click("#sol-share");
+      await expect.poll(() => page.textContent("#sol-status")).toMatch(/^(Link copied|The link is in the address bar)$/);
+      const hash = new URL(page.url()).hash.slice(1);
+      expect(hash).toMatch(/^tab=sol&s=/);
+      const p = await open(hash);
+      await p.waitForSelector("#sol-results .card.fail");
+      expect(await p.locator("#sol-results .card.fail dd").first().textContent()).toBe("prove_small(7)");
+      expect(await p.inputValue("#sol-example")).toBe("");
+      await p.close();
+    });
+
+    it("open the Equivalence tab with its settings, and check", async () => {
+      await page.click('.tabs [data-tab="eq"]');
+      await page.selectOption("#eq-example", String(eqExamples.findIndex((e) => e.name === "Forgot the zero case")));
+      await page.click("#eq-share");
+      await expect.poll(() => new URL(page.url()).hash).toMatch(/^#tab=eq&example=/);
+      const p = await open(new URL(page.url()).hash.slice(1));
+      await p.waitForSelector("#eq-results .card.fail");
+      expect(await p.getAttribute("body", "data-tab")).toBe("eq");
+      expect(await p.locator("#eq-results dd").first().textContent()).toBe("isPowerOfTwo(0)");
+      await p.close();
+    });
+
+    it("open the Bytecode tab, and run it", async () => {
+      const p = await open(`tab=bytecode&s=${(await encodeShare({ tab: "bytecode", request: { mode: "exec", code: "0x602a60005260206000f3", calldata: "", sig: "" } })).split("&s=")[1]}`);
+      await p.waitForSelector("#outcome.return");
+      expect(await p.textContent("#outcome code")).toBe("0x" + "2a".padStart(64, "0"));
+      await p.close();
     });
   });
 
