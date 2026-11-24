@@ -14,6 +14,7 @@ import Control.Monad.Reader (ReaderT)
 import Data.Foldable (toList)
 import Data.Map qualified as Map
 import Data.Text (Text, isPrefixOf, unpack)
+import Data.Text qualified as T
 import System.Directory (createDirectory)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
@@ -261,6 +262,12 @@ tests = testGroup "Foundry tests"
         -- Regression test for #895: panic in a called contract should not show "<source not found>"
         let testFile = "test/contracts/fail/assertPanic.sol"
         executeSingleMethod testFile "prove_panic" >>= assertRun "prove_panic" (False, False)
+    , test "Failure-Location" $ do
+        -- a revert the test only passes on is located where it started, in the callee
+        (res, out) <- executeSingleMethod "test/contracts/fail/assertPanic.sol" "prove_panic"
+        assertRun "prove_panic" (False, False) (res, out)
+        liftIO $ assertBool ("not located at the callee's assert:\n" <> unpack out) $
+          any (\l -> "at:" `T.isInfixOf` l && "assert(false)" `T.isInfixOf` l) (T.lines out)
     ]
 
 executeSingleMethod :: (App m, MonadMask m) => FilePath -> Text -> m (WithOutput (Bool, Bool))

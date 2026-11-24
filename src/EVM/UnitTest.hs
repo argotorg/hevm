@@ -21,14 +21,14 @@ import EVM.Types
 import EVM.Transaction (initTx)
 import EVM.Stepper (Stepper)
 import EVM.Stepper qualified as Stepper
-import EVM.Tracing qualified as Tracing
+import EVM.CexReplay (runTraced, Step(..))
 import EVM.Expr (maybeLitWordSimp)
 import EVM.Progress qualified as Progress
 import EVM.Invariant
 
 import Control.Monad (void, when, unless, forM, forM_, foldM, mfilter)
 import Control.Monad.ST (RealWorld, ST, stToIO)
-import Control.Monad.State.Strict (execState, execStateT, get, put, liftIO, runStateT)
+import Control.Monad.State.Strict (execState, execStateT, get, put, liftIO)
 import Optics.Core
 import Optics.State
 import Optics.State.Operators
@@ -49,7 +49,8 @@ import Data.Set qualified as Set
 import Data.Maybe
 import Data.Text (isPrefixOf, stripSuffix, intercalate, Text, pack, unpack)
 import Data.Text qualified as Text
-import Data.Text.Encoding (encodeUtf8)
+import Data.Text.Encoding (encodeUtf8, decodeUtf8With)
+import Data.Text.Encoding.Error (lenientDecode)
 import Data.Text.IO qualified as Text
 import Data.Word (Word64)
 import GHC.Natural
@@ -57,6 +58,7 @@ import System.IO (hFlush, stdout)
 import Witch (unsafeInto, into)
 import Data.Vector qualified as V
 import Data.Vector.Storable qualified as VS
+import Data.Sequence (Seq)
 import Data.Sequence qualified as Seq
 import Data.Char (ord)
 
@@ -189,7 +191,7 @@ validateCex :: forall m . App m
   -> VM Concrete
   -> Map (Expr EAddr) Addr
   -> ReproducibleCex
-  -> m (Bool, Either EvmError (Expr Buf))
+  -> m Validation
 validateCex uTestOpts fetcher vm0 cexAddrs repCex = do
   let concAddr dflt a = case a of
         SymAddr _ -> LitAddr $ Map.findWithDefault dflt a cexAddrs
@@ -211,13 +213,44 @@ validateCex uTestOpts fetcher vm0 cexAddrs repCex = do
       makeTxCall utoConc.testParams (ConcreteBuf repCex.callData, [])
     Stepper.evm get
 
-  (res, (vm3, vmtrace)) <- runStateT (Tracing.interpretWithTrace fetcher Stepper.execFully) (vm2, [])
-  when (conf.debug && (conf.verb > 2)) $ liftIO $ do
-    putStrLn $ "vm step trace: " <> unlines (map show vmtrace)
-    putStrLn $ "vm res: " <> show res
-    putStrLn $ "vm res: " <> show vm3.result
+  (_, lastSteps, vm3) <- Stepper.interpret fetcher vm2 (runTraced conf 256)
+  let res = case vm3.result of
+        Just (VMSuccess out) -> Right out
+        Just (VMFailure e) -> Left e
+        r -> internalError $ "validateCex: the concrete run did not finish: " <> show r
+  when (conf.debug && (conf.verb > 2)) $ liftIO $ putStrLn $ "vm res: " <> show vm3.result
   let shouldFail = "proveFail" `isPrefixOf` repCex.testName
-  pure (assertionFailedConc utoConc.checkFailBit res vm3.env.contracts /= shouldFail, res)
+  pure ( assertionFailedConc utoConc.checkFailBit res vm3.env.contracts /= shouldFail, res
+       , failureLocation uTestOpts.dapp lastSteps )
+
+-- | Whether a replay reproduced the failure, its result, and where it failed
+type Validation = (Bool, Either EvmError (Expr Buf), Maybe Text)
+
+-- | Where in the source a concrete run failed: the newest of its last steps that the
+-- source maps place in a source file, which skips compiler-generated code such as the
+-- panic helper that a failing assert jumps to. A revert that a caller only passes on,
+-- all its steps since the call mapping to the call itself, is located in the callee.
+failureLocation :: DappInfo -> Seq Step -> Maybe Text
+failureLocation dapp steps = go (reverse (toList steps))
+  where
+    go [] = Nothing
+    go newest@(s : _) =
+      let (own, rest) = span (\x -> x.depth == s.depth) newest
+          ranges = List.nub [(sm.file, sm.offset, sm.length) | (sm, _) <- mapMaybe located own]
+      in case rest of
+           inner : _ | inner.depth > s.depth, length ranges <= 1 -> go rest
+           _ -> listToMaybe (mapMaybe (fmap snd . located) newest)
+    located st = do
+      c <- st.account
+      opIx <- c.opIxMap VS.!? st.pc
+      sm <- srcMap dapp c opIx
+      (file, src) <- Map.lookup sm.file dapp.sources.files
+      let before = BS.take sm.offset src
+          line = BS.count '\n' before + 1
+          col = BS.length before - maybe 0 (+ 1) (BS.elemIndexEnd '\n' before) + 1
+          code = BS.takeWhile (/= '\n') (BS.take sm.length (BS.drop sm.offset src))
+      pure (sm, Text.pack file <> ":" <> Text.pack (show line) <> ":" <> Text.pack (show col)
+        <> ": " <> decodeUtf8With lenientDecode code)
 
 -- | Whether a concrete run failed an assertion
 assertionFailedConc :: Bool -> Either EvmError (Expr Buf) -> Map (Expr EAddr) Contract -> Bool
@@ -466,7 +499,7 @@ getReproFailure sig@(Sig testName _) cd cex = do
 -- | Without calldata, the failure is in the last of the calls shown before
 symFailure :: App m =>
   UnitTestOptions -> Text -> Maybe (Expr Buf, [AbiType]) -> [Text] ->
-  (Expr End, SMTCex, Err (Bool, Either EvmError (Expr Buf))) ->
+  (Expr End, SMTCex, Err Validation) ->
   m Text
 symFailure UnitTestOptions {..} testName calldata before failure = do
   conf <- readConfig
@@ -483,21 +516,22 @@ symFailure UnitTestOptions {..} testName calldata before failure = do
         ([maybe "Assertion failure in a call:   " (const "Counterexample:   ") calldata <> reproToText repro] <> before <>
         ["  calldata: " <> let ?context = dappContext (traceContext leaf)
                            in prettyCalldata cex cd testName types | Just (cd, types) <- [calldata]] <>
-        ["  result:   " <> showRes (replayed leaf repro)
-        ]) <> verbText conf leaf
+        ["  result:   " <> showRes (replayed leaf repro)] <>
+        ["  at:       " <> loc | Right (True, _, Just loc) <- [repro]]
+        ) <> verbText conf leaf
       -- symbolic assertions render their operands as expressions, the replay has the values
       replayed leaf = \case
-        Right (True, Left e) -> Failure [] (traceContext leaf) e
-        Right (True, Right out) -> Success [] (traceContext leaf) out mempty
+        Right (True, Left e, _) -> Failure [] (traceContext leaf) e
+        Right (True, Right out, _) -> Success [] (traceContext leaf) out mempty
         _ -> leaf
       verbText conf leaf = if conf.verb <= 1 then mempty
                            else [Text.unlines [ indentLines 2 (showTraceTree' dapp leaf)]]
       dappContext TraceContext { contracts, labels } =
         DappContext { info = dapp, contracts, labels }
 
-      reproToText :: Err (Bool, a) -> Text
+      reproToText :: Err Validation -> Text
       reproToText (Left err) = "\x1b[33m[error attempting to reproduce: " <> pack err <> "]\x1b[0m"
-      reproToText (Right (repro, _)) = if repro then "\x1b[90m[validated]\x1b[0m" else "\x1b[31m[not reproducible]\x1b[0m"
+      reproToText (Right (repro, _, _)) = if repro then "\x1b[90m[validated]\x1b[0m" else "\x1b[31m[not reproducible]\x1b[0m"
 
 indentLines :: Int -> Text -> Text
 indentLines n s =
@@ -940,7 +974,7 @@ replayCalls opts ctx cex calls = foldM replay (Right vm0) (zip [1 :: Int ..] cal
 -- | Replays the calls of a counterexample concretely, then checks the invariant
 validateInvariantCex :: App m
   => UnitTestOptions -> InvariantContext -> InvState -> SMTCex -> Sig -> Expr Buf
-  -> m (Err (Bool, Either EvmError (Expr Buf)))
+  -> m (Err Validation)
 validateInvariantCex opts ctx st cex sig cd = replayCalls opts ctx cex st.calls >>= \case
   Left e -> pure $ Left e
   Right vm -> do
@@ -949,10 +983,10 @@ validateInvariantCex opts ctx st cex sig cd = replayCalls opts ctx cex st.calls 
     traverse (validateCex opts fetcher vm cex.addrs) repro
 
 -- | Replays the calls of a probe concretely, the last one must fail an assertion
-validateProbe :: App m => UnitTestOptions -> InvariantContext -> Probe -> m (Err (Bool, Either EvmError (Expr Buf)))
+validateProbe :: App m => UnitTestOptions -> InvariantContext -> Probe -> m (Err Validation)
 validateProbe opts ctx p = case reverse p.state.calls of
   [] -> pure $ Left "no calls"
   (lastCall:before) -> replayCalls opts ctx p.cex (reverse before) >>= \case
     Left e -> pure $ Left e
     Right vm -> replayCall opts p.cex vm lastCall <&> fmap (\(vm', res) ->
-      (assertionFailedConc opts.checkFailBit res vm'.env.contracts, res))
+      (assertionFailedConc opts.checkFailBit res vm'.env.contracts, res, Nothing))

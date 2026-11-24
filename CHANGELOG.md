@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- `hevm test` shows where in the source a counterexample fails (`at:`), in the
+  contract where a revert started when callers only pass it on.
 - Experimental WebAssembly (WASI) build via `wasm/build.sh`, with bitwuzla compiled
   to wasm and linked in, and a website in `web/` that runs it in the browser.
 - Arithmetic abstraction now handles `MULMOD`, with exact 512-bit refinement,

@@ -81,7 +81,7 @@ replayEqCex solvers create codeA codeB cd cex
       (steps, lastSteps, end) <- Stepper.interpret (Fetch.oracle solvers Nothing Fetch.noRpc) vm (runTraced conf 32)
       Progress.emit "replay-run"
         [ "program" .= label, "result" .= T.pack (show end.result), "steps" .= steps
-        , "trail" .= [(showAddr a, pc) | (a, pc) <- toList lastSteps] ]
+        , "trail" .= [(showAddr st.contract, st.pc) | st <- toList lastSteps] ]
       let finalStore = case (.storage) <$> Map.lookup entry end.env.contracts of
             Just (ConcreteStore m) -> Right (Map.filter (/= 0) m)
             s -> Left (T.pack (show s))
@@ -248,9 +248,12 @@ replaySymCex fetcher post vm0 leaf cex' = case setup of
         , baseFee = Lit baseFee
         }
 
--- | 'Stepper.runFully' that also counts the steps and keeps the code address and
--- pc of the last @n@ of them
-runTraced :: Config -> Int -> Stepper Concrete (Int, Seq (Expr EAddr, Int), VM Concrete)
+-- | An executed instruction: the address of its code, the account then, its pc, and
+-- the call depth. The account is kept since a revert may undo its creation.
+data Step = Step { contract :: Expr EAddr, account :: !(Maybe Contract), pc :: Int, depth :: Int }
+
+-- | 'Stepper.runFully' that also counts the steps and keeps the last @n@ of them
+runTraced :: Config -> Int -> Stepper Concrete (Int, Seq Step, VM Concrete)
 runTraced conf n = go 0 mempty
   where
     go steps lastSteps = do
@@ -263,7 +266,9 @@ runTraced conf n = go 0 mempty
       case vm.result of
         Nothing -> do
           exec1 conf
-          stepAll (steps + 1) (Seq.drop (Seq.length lastSteps + 1 - n) (lastSteps Seq.|> (vm.state.codeContract, vm.state.pc)))
+          let step = Step vm.state.codeContract (Map.lookup vm.state.codeContract vm.env.contracts)
+                          vm.state.pc (length vm.frames)
+          stepAll (steps + 1) (Seq.drop (Seq.length lastSteps + 1 - n) (lastSteps Seq.|> step))
         Just _ -> pure (steps, lastSteps, vm)
 
 -- | The calls to unknown code in @props@, with the values the model gives them
