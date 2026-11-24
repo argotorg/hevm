@@ -30,7 +30,7 @@ import EVM.Invariant.Driver qualified as Invariant
 
 import Control.Monad (void, when, unless, forM, forM_, mfilter)
 import Control.Monad.ST (RealWorld, ST, stToIO)
-import Control.Monad.State.Strict (execState, execStateT, get, put, liftIO, runStateT)
+import Control.Monad.State.Strict (execState, get, put, liftIO, runStateT)
 import Optics.Core
 import Optics.State
 import Optics.State.Operators
