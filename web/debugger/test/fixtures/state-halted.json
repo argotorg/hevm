@@ -1,0 +1,103 @@
+{
+    "branch": null,
+    "branchMode": "solver",
+    "breakpoints": [],
+    "choices": [
+        "step 6: true"
+    ],
+    "code": [
+        {
+            "arg": "0x00",
+            "current": false,
+            "op": "PUSH1",
+            "pc": 0
+        },
+        {
+            "arg": null,
+            "current": false,
+            "op": "CALLDATALOAD",
+            "pc": 2
+        },
+        {
+            "arg": "0x05",
+            "current": false,
+            "op": "PUSH1",
+            "pc": 3
+        },
+        {
+            "arg": null,
+            "current": false,
+            "op": "EQ",
+            "pc": 5
+        },
+        {
+            "arg": "0x0a",
+            "current": false,
+            "op": "PUSH1",
+            "pc": 6
+        },
+        {
+            "arg": null,
+            "current": false,
+            "op": "JUMPI",
+            "pc": 8
+        },
+        {
+            "arg": null,
+            "current": false,
+            "op": "STOP",
+            "pc": 9
+        },
+        {
+            "arg": null,
+            "current": false,
+            "op": "JUMPDEST",
+            "pc": 10
+        },
+        {
+            "arg": null,
+            "current": true,
+            "op": "STOP",
+            "pc": 11
+        }
+    ],
+    "codeContract": "(SymAddr \"entrypoint\")",
+    "codeName": null,
+    "contract": "(SymAddr \"entrypoint\")",
+    "depth": 0,
+    "gas": null,
+    "generatedCode": false,
+    "memory": {
+        "hex": "0x"
+    },
+    "memorySize": 0,
+    "message": "Execution finished: success, returned nothing",
+    "mode": "symbolic",
+    "op": "STOP",
+    "output": null,
+    "pathConditions": 5,
+    "pc": 11,
+    "result": {
+        "outcome": "success",
+        "output": {
+            "hex": "0x"
+        },
+        "problem": null
+    },
+    "simplified": true,
+    "source": null,
+    "stack": [],
+    "status": "halted",
+    "step": 8,
+    "storage": [
+        {
+            "address": {
+                "expr": "(SymAddr \"entrypoint\")"
+            },
+            "current": true,
+            "initial": "unknown",
+            "slots": []
+        }
+    ],
+    "warnings": []
+}

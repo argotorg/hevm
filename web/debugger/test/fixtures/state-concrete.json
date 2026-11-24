@@ -1,0 +1,123 @@
+{
+    "branch": null,
+    "branchMode": "solver",
+    "breakpoints": [],
+    "choices": [],
+    "code": [
+        {
+            "arg": "0x00",
+            "current": false,
+            "op": "PUSH1",
+            "pc": 0
+        },
+        {
+            "arg": null,
+            "current": false,
+            "op": "JUMPDEST",
+            "pc": 2
+        },
+        {
+            "arg": null,
+            "current": false,
+            "op": "DUP1",
+            "pc": 3
+        },
+        {
+            "arg": null,
+            "current": false,
+            "op": "DUP1",
+            "pc": 4
+        },
+        {
+            "arg": null,
+            "current": false,
+            "op": "MSTORE",
+            "pc": 5
+        },
+        {
+            "arg": "0x01",
+            "current": true,
+            "op": "PUSH1",
+            "pc": 6
+        },
+        {
+            "arg": null,
+            "current": false,
+            "op": "ADD",
+            "pc": 8
+        },
+        {
+            "arg": null,
+            "current": false,
+            "op": "DUP1",
+            "pc": 9
+        },
+        {
+            "arg": "0x20",
+            "current": false,
+            "op": "PUSH1",
+            "pc": 10
+        },
+        {
+            "arg": null,
+            "current": false,
+            "op": "GT",
+            "pc": 12
+        },
+        {
+            "arg": "0x02",
+            "current": false,
+            "op": "PUSH1",
+            "pc": 13
+        },
+        {
+            "arg": null,
+            "current": false,
+            "op": "JUMPI",
+            "pc": 15
+        },
+        {
+            "arg": null,
+            "current": false,
+            "op": "STOP",
+            "pc": 16
+        }
+    ],
+    "codeContract": "0x000000000000000000000000000000000000ACAb",
+    "codeName": null,
+    "contract": "0x000000000000000000000000000000000000ACAb",
+    "depth": 0,
+    "gas": 18446744073709552000,
+    "generatedCode": false,
+    "memory": {
+        "hex": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "memorySize": 32,
+    "message": "",
+    "mode": "concrete",
+    "op": "PUSH1",
+    "output": null,
+    "pathConditions": 0,
+    "pc": 6,
+    "result": null,
+    "simplified": true,
+    "source": null,
+    "stack": [
+        {
+            "hex": "0x0"
+        }
+    ],
+    "status": "running",
+    "step": 5,
+    "storage": [
+        {
+            "address": {
+                "hex": "0xacab"
+            },
+            "current": true,
+            "initial": "known",
+            "slots": []
+        }
+    ],
+    "warnings": []
+}

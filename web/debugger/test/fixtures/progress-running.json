@@ -1,0 +1,46 @@
+{
+    "elapsedSecs": 0,
+    "hottest": [
+        {
+            "addr": "SymAddr \"entrypoint\"",
+            "forks": 0,
+            "pc": 102,
+            "queries": 2,
+            "solveSecs": 0
+        }
+    ],
+    "paths": {
+        "done": 0,
+        "partial": 0
+    },
+    "phase": {
+        "done": 0,
+        "name": "starting",
+        "total": 0
+    },
+    "phases": [],
+    "queries": {
+        "byResult": [
+            {
+                "count": 2,
+                "kind": "sat",
+                "result": "sat (PhasePlain)",
+                "solveSecs": 0,
+                "waitSecs": 0
+            }
+        ],
+        "done": 2,
+        "inFlight": []
+    },
+    "running": true,
+    "tasks": 0,
+    "workers": [
+        {
+            "addr": "SymAddr \"entrypoint\"",
+            "pc": 102,
+            "secs": 0,
+            "step": 7,
+            "thread": "ThreadId 0"
+        }
+    ]
+}
