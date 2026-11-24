@@ -367,6 +367,26 @@ test-suite test
     transformers,
     vector,
 
+-- the fuzzers that need nothing outside hevm: the wasm build runs these too
+test-suite wasm-fuzz
+  import: test-common
+  default-language: GHC2021
+  type:
+    exitcode-stdio-1.0
+  main-is:
+    wasm-fuzz.hs
+  other-modules:
+    EVM.Equivalence.EquivFuzz
+    EVM.Expr.Generator
+    EVM.Expr.KeccakFuzz
+    EVM.Expr.RewriteFuzz
+  build-depends:
+    data-dword,
+    QuickCheck,
+    quickcheck-instances,
+    tasty-quickcheck,
+    text,
+
 -- these tests require network access so we split them into a separate test
 -- suite to make it easy to skip them when running nix-build
 test-suite rpc-tests

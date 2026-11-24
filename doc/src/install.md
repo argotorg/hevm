@@ -69,6 +69,10 @@ debugger server, and does not support the BN254 precompiles (`ECADD`, `ECMUL`,
 `ECPAIRING`). An error inside bitwuzla aborts hevm, as wasi-sdk has no C++
 exceptions.
 
+`wasm/fuzz.sh` runs hevm's fuzzers that need nothing outside hevm (`eq-fuzz`, the
+rewrite and keccak fuzzers) on the wasm build, and `wasm/ethereum-tests.sh` compares
+it with a native build on the Ethereum blockchain tests.
+
 `web/` is a website that compiles Solidity with soljson and runs `hevm.wasm` on it in
 the browser, showing counterexamples at their place in the source:
 ```
