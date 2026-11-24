@@ -26,14 +26,14 @@
             <span>Example</span>
             <select id="sol-example"></select>
           </label>
-          <label>
+          <div class="field">
             <span>
               Source
               <small>contracts inheriting <code>Test</code> from <code>hevm/Test.sol</code> are tests;
                 hevm checks their <code>prove_</code> functions for all inputs</small>
             </span>
-            <textarea id="source" rows="22" spellcheck="false"></textarea>
-          </label>
+            <div id="source"></div>
+          </div>
           <div class="actions">
             <button id="prove" type="submit">Prove</button>
             <span id="sol-status" class="status"></span>

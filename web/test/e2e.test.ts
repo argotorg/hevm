@@ -35,7 +35,11 @@ describe.skipIf(!ready)("website in Chromium", () => {
     async function prove(name: string, source?: string) {
       await page.click('.tabs [data-tab="sol"]');
       await page.selectOption("#sol-example", String(solExamples.findIndex((e) => e.name === name)));
-      if (source !== undefined) await page.fill("#source", source);
+      if (source !== undefined) {
+        await page.click("#source .cm-content");
+        await page.keyboard.press("ControlOrMeta+A");
+        await page.keyboard.insertText(source);
+      }
       await page.click("#prove");
       await idle("prove");
       return page.locator("#sol-results .card");
@@ -50,6 +54,12 @@ describe.skipIf(!ready)("website in Chromium", () => {
       expect(await failing.textContent()).toContain("Panic(0x01): assertion failed");
       expect(await failing.locator(".excerpt .hit").textContent()).toBe("10            assert(x * 3 + 7 != 100);");
       expect(await failing.locator(".excerpt mark").textContent()).toBe("assert(x * 3 + 7 != 100)");
+      // highlighted like the editor, the mark spanning the tokens
+      expect(await failing.locator(".excerpt .tok-number").first().textContent()).toBe("3");
+      expect(await failing.locator(".excerpt mark .tok-operator").count()).toBeGreaterThan(0);
+      expect(await page.locator("#source .tok-keyword").first().textContent()).toBe("pragma");
+      // and the editor shows the failing line
+      expect(await page.locator("#source .cm-failing").textContent()).toBe("            assert(x * 3 + 7 != 100);");
       expect(await cards.filter({ hasText: "prove_fits" }).getAttribute("class")).toBe("card pass");
       expect(await page.textContent("#sol-status")).toMatch(/^1 passed, 1 failed/);
     });

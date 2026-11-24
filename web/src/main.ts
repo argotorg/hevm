@@ -1,6 +1,8 @@
 import "./style.css";
 import { buildArgs, parseOutcome, stripAnsi, type Files, type Mode, type Outcome, type Request, type RunResult } from "./hevm";
 import { examples } from "./examples";
+import { SolidityEditor } from "./editor";
+import { segments, tokens } from "./highlight";
 import { describeResult, parseTestOutput, type TestResult } from "./results";
 import { solExamples } from "./solExamples";
 import type { CompileError, Project, Source } from "./solc";
@@ -62,7 +64,6 @@ for (const tab of document.querySelectorAll<HTMLButtonElement>(".tabs button")) 
 
 const solForm = $<HTMLFormElement>("sol-form");
 const solExample = $<HTMLSelectElement>("sol-example");
-const source = $<HTMLTextAreaElement>("source");
 const prove = $<HTMLButtonElement>("prove");
 const solStatus = $<HTMLElement>("sol-status");
 const solResults = $<HTMLElement>("sol-results");
@@ -74,37 +75,35 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: 
   return e;
 }
 
-/** A few lines of the source around a line, which is highlighted from the column on */
+/** A few highlighted lines of the source around a line, marked from the column on */
 function excerpt(text: string, line: number, column: number, length: number) {
   const lines = text.split("\n");
+  const starts: number[] = [];
+  lines.reduce((off, l) => (starts.push(off), off + l.length + 1), 0);
+  const toks = tokens(text);
+  const markFrom = (starts[line - 1] ?? 0) + column - 1;
   const pre = el("pre", "excerpt");
   for (let n = Math.max(1, line - 2); n <= Math.min(lines.length, line + 2); n++) {
     const row = el("div", n === line ? "hit" : undefined);
     row.append(el("span", "ln", String(n)));
-    const content = lines[n - 1] ?? "";
-    if (n === line) {
-      row.append(
-        content.slice(0, column - 1),
-        el("mark", undefined, content.slice(column - 1, column - 1 + length)),
-        content.slice(column - 1 + length),
-      );
-    } else {
-      row.append(content);
+    const from = starts[n - 1]!;
+    let mark: HTMLElement | undefined;
+    for (const seg of segments(text, toks, from, from + lines[n - 1]!.length,
+                               n === line ? [markFrom, markFrom + length] : undefined)) {
+      const piece = seg.cls ? el("span", seg.cls, seg.text) : document.createTextNode(seg.text);
+      if (!seg.marked) {
+        mark = undefined;
+        row.append(piece);
+      } else {
+        if (!mark) row.append((mark = el("mark")));
+        mark.append(piece);
+      }
     }
     pre.append(row);
   }
-  pre.addEventListener("click", () => selectLine(line));
+  pre.addEventListener("click", () => editor.selectLine(line));
   pre.title = "Show in the editor";
   return pre;
-}
-
-function selectLine(line: number) {
-  const lines = source.value.split("\n");
-  const start = lines.slice(0, line - 1).reduce((n, l) => n + l.length + 1, 0);
-  source.focus();
-  source.setSelectionRange(start, start + (lines[line - 1]?.length ?? 0));
-  const lineHeight = parseFloat(getComputedStyle(source).lineHeight) || 20;
-  source.scrollTop = Math.max(0, (line - 4) * lineHeight);
 }
 
 function lineCol(text: string, offset: number) {
@@ -118,8 +117,9 @@ function renderErrors(errors: CompileError[]) {
     const card = el("article", `card ${e.severity === "error" ? "fail" : "note"}`);
     card.append(el("h3", undefined, `${e.severity === "error" ? "Error" : "Warning"}: ${e.message}`));
     if (e.file === sourcePath && e.start !== undefined && e.end !== undefined) {
-      const { line, column } = lineCol(source.value, e.start);
-      card.append(excerpt(source.value, line, column, Math.max(1, e.end - e.start)));
+      const { line, column } = lineCol(editor.value, e.start);
+      failingLines.push(line);
+      card.append(excerpt(editor.value, line, column, Math.max(1, e.end - e.start)));
     }
     solResults.append(card);
   }
@@ -140,8 +140,9 @@ function renderTest(t: TestResult) {
     if (c.validated === false) dl.append(el("dt"), el("dd", "muted", "could not be reproduced concretely"));
     card.append(dl);
     if (c.at && c.at.file === sourcePath) {
+      failingLines.push(c.at.line);
       card.append(el("p", "where", `Fails at line ${c.at.line}:`));
-      card.append(excerpt(source.value, c.at.line, c.at.column, c.at.code.length));
+      card.append(excerpt(editor.value, c.at.line, c.at.column, c.at.code.length));
     } else if (c.at) {
       card.append(el("p", "where", `Fails at ${c.at.file}:${c.at.line}: ${c.at.code}`));
     }
@@ -151,26 +152,20 @@ function renderTest(t: TestResult) {
 }
 
 solExample.addEventListener("change", () => {
-  source.value = solExamples[Number(solExample.value)]?.source ?? "";
+  editor.value = solExamples[Number(solExample.value)]?.source ?? "";
   solResults.replaceChildren();
-});
-
-source.addEventListener("keydown", (e) => {
-  if (e.key === "Tab") {
-    e.preventDefault();
-    source.setRangeText("    ", source.selectionStart, source.selectionEnd, "end");
-  }
 });
 
 solForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   prove.disabled = true;
   solResults.replaceChildren();
+  failingLines = [];
   const started = performance.now();
   const secs = () => ((performance.now() - started) / 1000).toFixed(2);
   try {
     solStatus.textContent = "Compiling…";
-    const project = await compile([{ path: sourcePath, content: source.value }]);
+    const project = await compile([{ path: sourcePath, content: editor.value }]);
     const errors = project.errors.filter((x) => x.severity === "error");
     if (errors.length) {
       solStatus.textContent = `Compilation failed — ${secs()}s`;
@@ -192,12 +187,14 @@ solForm.addEventListener("submit", async (e) => {
     solStatus.textContent = "";
     solResults.append(el("pre", "card fail", String(err)));
   } finally {
+    editor.markFailing(failingLines);
     prove.disabled = false;
   }
 });
 
 solExamples.forEach((ex, i) => solExample.add(new Option(ex.name, String(i))));
-source.value = solExamples[0]!.source;
+const editor = new SolidityEditor($("source"), solExamples[0]!.source);
+let failingLines: number[] = [];
 
 // --- bytecode ---
 

@@ -8,6 +8,13 @@
   --ok: #2b8a3e;
   --bad: #c92a2a;
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+  --t-keyword: #8839ef;
+  --t-type: #1e66f5;
+  --t-string: #40a02b;
+  --t-number: #d9480f;
+  --t-comment: #8c8a85;
+  --t-operator: #4c4f69;
+  --t-name: #1d1c1a;
   color-scheme: light dark;
   font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
   background: var(--bg);
@@ -24,6 +31,13 @@
     --accent: #7d95ff;
     --ok: #69db7c;
     --bad: #ff8787;
+    --t-keyword: #cba6f7;
+    --t-type: #89b4fa;
+    --t-string: #a6e3a1;
+    --t-number: #fab387;
+    --t-comment: #7f7d77;
+    --t-operator: #bac2de;
+    --t-name: #ecebe8;
   }
 }
 
@@ -219,10 +233,97 @@ main > section > form {
   border-top-left-radius: 0;
 }
 
-#source {
-  line-height: 1.45;
-  tab-size: 4;
+.field {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.field > span {
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+#source .cm-editor {
+  height: 28rem;
   resize: vertical;
+  overflow: hidden;
+  font-size: 0.85rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+#source .cm-editor.cm-focused {
+  outline: 2px solid color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+#source .cm-scroller {
+  font-family: var(--mono);
+  line-height: 1.45;
+}
+
+#source .cm-scroller,
+pre,
+code,
+.mono {
+  font-variant-ligatures: none;
+}
+
+#source .cm-gutters {
+  background: var(--bg);
+  color: var(--muted);
+  border-right: 1px solid var(--line);
+}
+
+#source .cm-activeLine,
+#source .cm-activeLineGutter {
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+#source .cm-content {
+  caret-color: var(--fg);
+}
+
+#source .cm-failing {
+  background: color-mix(in srgb, var(--bad) 14%, transparent);
+}
+
+.tok-keyword {
+  color: var(--t-keyword);
+}
+
+.tok-typeName,
+.tok-atom {
+  color: var(--t-type);
+}
+
+.tok-string,
+.tok-string2 {
+  color: var(--t-string);
+}
+
+.tok-number {
+  color: var(--t-number);
+}
+
+.tok-comment {
+  color: var(--t-comment);
+  font-style: italic;
+}
+
+.tok-operator,
+.tok-punctuation {
+  color: var(--t-operator);
+}
+
+.tok-variableName,
+.tok-propertyName {
+  color: var(--t-name);
+}
+
+.tok-definition,
+.tok-variableName2 {
+  color: var(--t-type);
 }
 
 .results {

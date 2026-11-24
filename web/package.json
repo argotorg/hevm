@@ -18,6 +18,13 @@
     "vitest": "^5.1.1"
   },
   "dependencies": {
-    "@bjorn3/browser_wasi_shim": "^0.4.2"
+    "@bjorn3/browser_wasi_shim": "^0.4.2",
+    "@codemirror/commands": "^6.11.1",
+    "@codemirror/language": "^6.13.1",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.15",
+    "@lezer/highlight": "^1.2.5",
+    "@replit/codemirror-lang-solidity": "^6.0.2",
+    "codemirror": "^6.0.2"
   }
 }
