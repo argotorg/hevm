@@ -1,6 +1,10 @@
 export interface SolExample {
   name: string;
   source: string;
+  /** where the dropdown lists it, if not with the plain examples */
+  group?: "Invariants" | "Real bug patterns";
+  /** the story behind it, shown above the source */
+  story?: string;
 }
 
 export const solExamples: SolExample[] = [
@@ -265,6 +269,7 @@ contract VaultTest is Test {
   },
   {
     name: "Supply invariant",
+    group: "Invariants",
     source: `// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
@@ -307,7 +312,12 @@ contract TokenTest is Test {
 `,
   },
   {
-    name: "Ownership takeover",
+    name: "Re-initializable wallet (Parity, 2017)",
+    group: "Real bug patterns",
+    story:
+      "In July 2017 an attacker called the Parity multisig wallet's initWallet a second time, " +
+      "became the owner of three wallets, and took about 150,000 ETH, then some $30 million. " +
+      "Nothing stopped initialization from running again.",
     source: `// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
@@ -316,7 +326,8 @@ import {Test} from "hevm/Test.sol";
 contract Wallet {
     address public owner;
 
-    function init() external {
+    // meant to run once, but nothing checks that it already ran
+    function initWallet() external {
         owner = msg.sender;
     }
 
@@ -333,7 +344,7 @@ contract WalletTest is Test {
 
     function setUp() public {
         wallet = new Wallet();
-        wallet.init();
+        wallet.initWallet();
     }
 
     // whoever calls in, the test contract stays the owner
@@ -345,6 +356,7 @@ contract WalletTest is Test {
   },
   {
     name: "Escrow state machine",
+    group: "Invariants",
     source: `// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
@@ -390,6 +402,127 @@ contract EscrowTest is Test {
     // the money goes one way only
     function invariant_one_outcome() public view {
         assert(!(escrow.released() && escrow.refunded()));
+    }
+}
+`,
+  },
+  {
+    name: "Batch transfer overflow (BeautyChain, 2018)",
+    group: "Real bug patterns",
+    story:
+      "In April 2018 someone called BeautyChain's batchTransfer with two receivers and a value of 2^255: " +
+      "the total, receivers times value, wrapped around to 0 and passed the balance check, and each " +
+      "receiver got 2^255 tokens out of nothing (CVE-2018-10299). Exchanges suspended the token.",
+    source: `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import {Test} from "hevm/Test.sol";
+
+// the core of BeautyChain's batchTransfer, written for Solidity 0.4, whose arithmetic
+// wrapped around as unchecked arithmetic does now
+contract Token {
+    mapping(address => uint256) public balanceOf;
+
+    constructor() {
+        balanceOf[msg.sender] = 1_000 ether;
+    }
+
+    function batchTransfer(address[2] calldata receivers, uint256 value) external {
+        unchecked {
+            uint256 amount = receivers.length * value;
+            require(value > 0 && balanceOf[msg.sender] >= amount);
+            balanceOf[msg.sender] -= amount;
+            for (uint256 i = 0; i < receivers.length; i++) {
+                balanceOf[receivers[i]] += value;
+            }
+        }
+    }
+}
+
+contract TokenTest is Test {
+    // all 1,000 tokens are the test contract's: nobody can end up with more
+    function prove_no_tokens_from_nothing(address a, address b, uint256 value) public {
+        require(a != b && a != address(this) && b != address(this));
+        Token token = new Token();
+        token.batchTransfer([a, b], value);
+        assert(token.balanceOf(a) <= 1_000 ether);
+    }
+}
+`,
+  },
+  {
+    name: "Unsafe downcast",
+    group: "Real bug patterns",
+    story:
+      "A cast to a smaller integer type silently drops the high bits: uint128(2^128) is 0. Packing " +
+      "balances into small types to save storage made this a recurring bug, and OpenZeppelin's " +
+      "SafeCast library exists to catch it.",
+    source: `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import {Test} from "hevm/Test.sol";
+
+contract Staking {
+    // two stakes fit in one storage slot
+    mapping(address => uint128) public stakeOf;
+    uint256 public totalStaked;
+
+    function stake(uint256 amount) external {
+        stakeOf[msg.sender] += uint128(amount);
+        totalStaked += amount;
+    }
+}
+
+contract StakingTest is Test {
+    function prove_stake_recorded(uint256 amount) public {
+        Staking staking = new Staking();
+        staking.stake(amount);
+        assert(staking.stakeOf(address(this)) == staking.totalStaked());
+    }
+}
+`,
+  },
+  {
+    name: "Share inflation (ERC-4626)",
+    group: "Real bug patterns",
+    story:
+      "A vault's first depositor can mint a single share, then send tokens straight to the vault: " +
+      "the next deposit's shares round down to zero, and the attacker's one share owns it all. This " +
+      "inflation attack on ERC-4626 vaults is why OpenZeppelin's implementation adds virtual shares.",
+    source: `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import {Test} from "hevm/Test.sol";
+
+contract Vault {
+    mapping(address => uint256) public sharesOf;
+    uint256 public totalShares;
+    // what the vault holds: deposits, and anything sent to it directly
+    uint256 public totalAssets;
+
+    function deposit(uint256 assets) external returns (uint256 shares) {
+        shares = totalShares == 0 ? assets : assets * totalShares / totalAssets;
+        sharesOf[msg.sender] += shares;
+        totalShares += shares;
+        totalAssets += assets;
+    }
+
+    // a plain transfer of tokens to the vault, which makes every share worth more
+    function donate(uint256 assets) external {
+        totalAssets += assets;
+    }
+}
+
+contract VaultTest is Test {
+    function prove_deposit_gets_shares(uint256 donation, uint256 assets) public {
+        require(assets > 0 && assets < 1e30 && donation < 1e30);
+        Vault vault = new Vault();
+        // the attacker gets in first, with 1 wei, and sends tokens directly
+        vault.deposit(1);
+        vault.donate(donation);
+        // then someone deposits
+        uint256 shares = vault.deposit(assets);
+        assert(shares > 0);
     }
 }
 `,

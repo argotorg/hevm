@@ -136,6 +136,19 @@ describe.skipIf(!ready)("website in Chromium", () => {
       expect(width).toBe("2px");
     });
 
+    it("groups the examples, and tells the story of a real bug", async () => {
+      await page.click('.tabs [data-tab="sol"]');
+      expect(await page.locator("#sol-example optgroup").evaluateAll((gs) => gs.map((g) => (g as HTMLOptGroupElement).label)))
+        .toEqual(["Invariants", "Real bug patterns"]);
+      await page.selectOption("#sol-example", "0");
+      expect(await page.locator("#sol-story").isHidden()).toBe(true);
+      await page.selectOption("#sol-example", String(solExamples.findIndex((e) => e.name.startsWith("Batch transfer overflow"))));
+      expect(await page.textContent("#sol-story")).toContain("CVE-2018-10299");
+      const cards = await prove("Batch transfer overflow (BeautyChain, 2018)");
+      // the value of the real attack: 2^255
+      expect(await cards.first().locator("dd").first().textContent()).toMatch(new RegExp(`,0x8${"0".repeat(63)}\\)$`));
+    });
+
     it("shows the calls that break an invariant", async () => {
       const cards = await prove("Escrow state machine");
       const card = cards.filter({ hasText: "invariant_one_outcome" });

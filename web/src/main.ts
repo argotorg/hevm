@@ -178,8 +178,17 @@ function renderTest(t: TestResult) {
   solResults.append(card);
 }
 
+const solStory = $<HTMLElement>("sol-story");
+
+function showStory() {
+  const story = solExamples[Number(solExample.value)]?.story;
+  solStory.textContent = story ?? "";
+  solStory.hidden = !story;
+}
+
 solExample.addEventListener("change", () => {
   editor.value = solExamples[Number(solExample.value)]?.source ?? "";
+  showStory();
   solResults.replaceChildren();
 });
 
@@ -318,7 +327,19 @@ solForm.addEventListener("submit", async (e) => {
   }
 });
 
-solExamples.forEach((ex, i) => solExample.add(new Option(ex.name, String(i))));
+const groups = new Map<string, HTMLOptGroupElement>();
+solExamples.forEach((ex, i) => {
+  const option = new Option(ex.name, String(i));
+  if (!ex.group) return solExample.add(option);
+  let group = groups.get(ex.group);
+  if (!group) {
+    group = document.createElement("optgroup");
+    group.label = ex.group;
+    groups.set(ex.group, group);
+    solExample.append(group);
+  }
+  group.append(option);
+});
 const editor = new SolidityEditor($("source"), solExamples[0]!.source);
 let failingLines: number[] = [];
 let lastProject: Project | undefined;

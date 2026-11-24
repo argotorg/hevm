@@ -748,3 +748,13 @@ button.secondary:hover {
 .card ol.calls li {
   overflow-wrap: anywhere;
 }
+
+.story {
+  margin: -0.4rem 0 0;
+  padding: 0.6rem 0.8rem;
+  font-size: 0.85rem;
+  line-height: 1.45;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+}

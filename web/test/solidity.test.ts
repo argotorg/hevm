@@ -168,11 +168,20 @@ const expectations: Record<string, Record<string, Expectation>> = {
     "prove_fee_capped(uint256)": { status: "pass" },
     "prove_only_owner_sets_fee()": { status: "fail", calldata: "prove_only_owner_sets_fee()", line: 44 },
   },
+  "Batch transfer overflow (BeautyChain, 2018)": {
+    "prove_no_tokens_from_nothing(address,address,uint256)": { status: "fail", line: 33 },
+  },
+  "Unsafe downcast": {
+    "prove_stake_recorded(uint256)": { status: "fail", calldata: "prove_stake_recorded(340282366920938463463374607431768211456)", line: 21 },
+  },
+  "Share inflation (ERC-4626)": {
+    "prove_deposit_gets_shares(uint256,uint256)": { status: "fail", line: 34 },
+  },
   "Supply invariant": {
     "invariant_supply()": { status: "fail", line: 37, calls: [/^Token\.mint\(\d+\)$/, /^Token\.burn\(\d+\)$/] },
   },
-  "Ownership takeover": {
-    "invariant_owner()": { status: "fail", line: 31, calls: [/^Wallet\.init\(\) from 0x[0-9a-fA-F]{40}$/] },
+  "Re-initializable wallet (Parity, 2017)": {
+    "invariant_owner()": { status: "fail", line: 32, calls: [/^Wallet\.initWallet\(\) from 0x[0-9a-fA-F]{40}$/] },
   },
   "Escrow state machine": {
     "invariant_one_outcome()": {
