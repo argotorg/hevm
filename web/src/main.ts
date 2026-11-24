@@ -341,7 +341,10 @@ solExamples.forEach((ex, i) => {
   }
   group.append(option);
 });
-const editor = new SolidityEditor($("source"), solExamples[0]!.source);
+const defaultExample = solExamples.findIndex((e) => e.name === "Re-initializable wallet (Parity, 2017)");
+solExample.value = String(defaultExample);
+const editor = new SolidityEditor($("source"), solExamples[defaultExample]!.source);
+showStory();
 let failingLines: number[] = [];
 let lastProject: Project | undefined;
 

@@ -137,6 +137,15 @@ describe.skipIf(!ready)("website in Chromium", () => {
       expect(width).toBe("2px");
     });
 
+    it("opens on the Parity wallet, with its story", async () => {
+      const p = await browser.newPage();
+      await p.goto(server.resolvedUrls!.local[0]!);
+      expect(await p.locator("#sol-example option:checked").textContent()).toBe("Re-initializable wallet (Parity, 2017)");
+      expect(await p.textContent("#sol-story")).toContain("initWallet");
+      expect(await p.textContent("#source .cm-content")).toContain("function initWallet()");
+      await p.close();
+    });
+
     it("groups the examples, and tells the story of a real bug", async () => {
       await page.click('.tabs [data-tab="sol"]');
       expect(await page.locator("#sol-example optgroup").evaluateAll((gs) => gs.map((g) => (g as HTMLOptGroupElement).label)))
