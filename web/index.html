@@ -19,7 +19,7 @@
       <button type="button" role="tab" data-tab="sol">Solidity</button>
       <button type="button" role="tab" data-tab="eq">Equivalence</button>
       <button type="button" role="tab" data-tab="bytecode">Bytecode</button>
-      <button type="button" role="tab" data-tab="debug">Debugger</button>
+      <button type="button" role="tab" data-tab="debug" hidden>Debugger</button>
     </nav>
     <main>
       <section class="sol-only">
@@ -122,11 +122,8 @@
       </section>
 
       <section class="debug-only">
-        <p id="debug-hint" class="muted">
-          Prove a contract on the Solidity tab, then pick <b>Replay in debugger</b> on a counterexample,
-          or <b>Debug symbolically</b> on any function.
-        </p>
-        <iframe id="debugger" title="hevm debugger" hidden></iframe>
+        <p id="debug-caption" class="story"></p>
+        <iframe id="debugger" title="hevm debugger"></iframe>
       </section>
 
       <details>

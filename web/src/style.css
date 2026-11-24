@@ -707,8 +707,8 @@ button.secondary:hover {
   padding: 0.5rem;
 }
 
-#debug-hint {
-  margin: 0.75rem;
+#debug-caption {
+  margin: 0.25rem 0.25rem 0.6rem;
 }
 
 #debugger {
@@ -719,9 +719,6 @@ button.secondary:hover {
   border-radius: 6px;
 }
 
-#debugger[hidden] {
-  display: none;
-}
 
 .eq-pick {
   display: grid;

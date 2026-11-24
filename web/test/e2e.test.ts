@@ -191,10 +191,20 @@ describe.skipIf(!ready)("website in Chromium", () => {
       return page.locator("#sol-results .card:not(.stats)").filter({ hasText: "prove_linear" });
     }
 
+    it("has no tab until there is something to debug", async () => {
+      const p = await browser.newPage();
+      await p.goto(server.resolvedUrls!.local[0]!);
+      expect(await p.locator('.tabs [data-tab="debug"]').isHidden()).toBe(true);
+      await p.close();
+    });
+
     it("replays a counterexample to its failure", async () => {
       const card = await proveFirstExample();
       await card.getByRole("button", { name: "Replay in debugger" }).click();
+      expect(await page.locator('.tabs [data-tab="debug"]').isVisible()).toBe(true);
       expect(await page.locator("#debugger").isVisible()).toBe(true);
+      expect(await page.textContent("#debug-caption")).toBe(
+        "Replaying prove_linear(31): step through it, or press Continue to run to where it fails.");
       const frame = debuggerFrame();
       await frame.locator("#status .step").waitFor();
       await frame.getByRole("button", { name: /^Continue/ }).click();
@@ -206,6 +216,7 @@ describe.skipIf(!ready)("website in Chromium", () => {
     it("debugs a function symbolically", async () => {
       const card = await proveFirstExample();
       await card.getByRole("button", { name: "Debug symbolically" }).click();
+      expect(await page.textContent("#debug-caption")).toMatch(/^Debugging prove_linear for all inputs at once/);
       const frame = debuggerFrame();
       await frame.locator("#status .step").waitFor();
       expect(await frame.locator("#status").textContent()).toContain("symbolic");

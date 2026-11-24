@@ -31,7 +31,8 @@ for (const tab of document.querySelectorAll<HTMLButtonElement>(".tabs button")) 
 // --- the debugger tab, a page of its own in an iframe ---
 
 const debugFrame = $<HTMLIFrameElement>("debugger");
-const debugHint = $<HTMLElement>("debug-hint");
+const debugCaption = $<HTMLElement>("debug-caption");
+const debugTab = document.querySelector<HTMLButtonElement>('.tabs [data-tab="debug"]')!;
 let debugSession: DebugSession | undefined;
 
 window.addEventListener("message", (e) => {
@@ -40,11 +41,12 @@ window.addEventListener("message", (e) => {
   }
 });
 
-function openDebugger(args: string[]) {
+// the tab shows once there is something to debug
+function openDebugger(args: string[], caption: string) {
   if (!lastProject) return;
   debugSession = { kind: "hevm-debug", files: lastProject.files, args };
-  debugHint.hidden = true;
-  debugFrame.hidden = false;
+  debugCaption.textContent = caption;
+  debugTab.hidden = false;
   // a fresh page for each session
   debugFrame.src = `debugger/index.html?session=${Date.now()}`;
   showTab("debug");
@@ -163,7 +165,8 @@ function renderTest(t: TestResult) {
     if (raw && !invariant) {
       const actions = el("div", "card-actions");
       actions.append(
-        button("Replay in debugger", () => openDebugger([...debugArgs, "--calldata", raw])),
+        button("Replay in debugger", () => openDebugger([...debugArgs, "--calldata", raw],
+          `Replaying ${readableNumbers(c.calldata)}: step through it, or press Continue to run to where it fails.`)),
         button("Open in Bytecode tab", () => openInBytecode(t, raw)),
       );
       card.append(actions);
@@ -172,7 +175,8 @@ function renderTest(t: TestResult) {
   for (const n of t.notes) card.append(el("p", "muted", n));
   if (t.status !== "running" && !invariant) {
     const actions = el("div", "card-actions");
-    actions.append(button("Debug symbolically", () => openDebugger(debugArgs)));
+    actions.append(button("Debug symbolically", () => openDebugger(debugArgs,
+      `Debugging ${t.name.split("(")[0]} for all inputs at once: at each branch that depends on them, you pick the side to follow.`)));
     if (!t.counterexamples.length) actions.append(button("Open in Bytecode tab", () => openInBytecode(t)));
     card.append(actions);
   }
