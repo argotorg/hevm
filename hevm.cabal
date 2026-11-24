@@ -25,11 +25,6 @@ extra-source-files:
 extra-doc-files:
   CHANGELOG.md
 
-flag static-secp256k1
-  description: Sets flags for compilation with static secp256k1
-  default:     False
-  manual:      True
-
 flag ci
   description: Sets flags for compilation in CI
   default:     False
@@ -142,21 +137,15 @@ library
     Paths_hevm
   autogen-modules:
     Paths_hevm
-  if os(windows) && flag(static-secp256k1)
-    cc-options: -DSECP256K1_STATIC
-    cxx-options: -DSECP256K1_STATIC
   if os(darwin)
     -- https://gitlab.haskell.org/ghc/ghc/-/issues/11829
     ld-options: -Wl,-keep_dwarf_unwind
     ghc-options: -fcompact-unwind
-  if arch(wasm32)
-    c-sources:
-      ethjet/tinykeccak.c, ethjet/blake2.c, ethjet/ethjet-wasm.c
-  else
+  c-sources:
+    ethjet/blake2.c, ethjet/ethjet.c
+  if !arch(wasm32)
     extra-libraries:
-      secp256k1, ff, gmp
-    c-sources:
-      ethjet/tinykeccak.c, ethjet/blake2.c, ethjet/ethjet.c
+      ff, gmp
     cxx-sources:
       ethjet/ethjet-ff.cc
     build-depends:
@@ -165,7 +154,7 @@ library
   cxx-options:
     -std=c++0x
   install-includes:
-    ethjet/tinykeccak.h, ethjet/ethjet.h, ethjet/ethjet-ff.h, ethjet/blake2.h
+    ethjet/ethjet.h, ethjet/ethjet-ff.h, ethjet/blake2.h
   build-depends:
     directory                         >= 1.3.6 && < 1.4,
     system-cxx-std-lib                >= 1.0 && < 2.0,

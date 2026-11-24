@@ -1,5 +1,5 @@
 {-# LANGUAGE CPP #-}
-module EVM.Precompiled (execute, supported, ecrecover) where
+module EVM.Precompiled (execute, supported) where
 
 import Control.Monad (guard)
 import Crypto.Hash (Digest, Keccak_256, hash)
@@ -19,30 +19,12 @@ import System.IO.Unsafe
 
 import EVM.Types (internalError)
 
--- | Opaque representation of the C library's context struct.
-data EthjetContext
-
-foreign import ccall unsafe "ethjet_init"
-  ethjet_init :: IO (Ptr EthjetContext)
-foreign import ccall unsafe "&ethjet_free"
-  ethjet_free :: FunPtr (Ptr EthjetContext -> IO ())
 foreign import ccall unsafe "ethjet"
   ethjet
-    :: Ptr EthjetContext     -- initialized context
-    -> CInt                  -- operation
+    :: CInt                  -- operation
     -> Ptr CChar -> CSize    -- input
     -> Ptr CChar -> CSize    -- output
     -> IO CInt               -- 1 if good
-
--- Lazy evaluation ensures this context is only initialized once,
--- and `unsafePerformIO` in such situations is a common pattern.
---
--- We use a "foreign pointer" annotated with a finalizer.
-globalContext :: ForeignPtr EthjetContext
-{-# NOINLINE globalContext #-}
-globalContext =
-  unsafePerformIO $
-    ethjet_init >>= newForeignPtr ethjet_free
 
 -- | Whether this build can run the given precompiled contract. The wasm build has no
 -- libff, so it cannot run the BN254 precompiles.
@@ -53,15 +35,14 @@ supported n = n `notElem` [0x6, 0x7, 0x8]
 supported _ = True
 #endif
 
--- | Run a given precompiled contract using the C library.
+-- | Run a given precompiled contract: ECRECOVER in Haskell, the others with the C library.
 execute
   :: Int                -- ^ The number of the precompiled contract
   -> ByteString         -- ^ The input buffer
   -> Int                -- ^ The desired output size
   -> Maybe ByteString   -- ^ Hopefully, the output buffer
-#if defined(wasm32_HOST_ARCH)
 execute 0x1 input 32 = ecrecover input
-#endif
+execute 0x1 _ _ = Nothing
 execute contract input outputSize =
 
   -- This code looks messy because of the pointer handling,
@@ -73,19 +54,16 @@ execute contract input outputSize =
     \(inputPtr, inputSize) -> do
        outputForeignPtr <- mallocForeignPtrBytes outputSize
        withForeignPtr outputForeignPtr $ \outputPtr -> do
-         status <-
-           withForeignPtr globalContext $ \contextPtr ->
-             -- Finally, we can invoke the C library.
-             ethjet contextPtr (fromIntegral contract)
-               inputPtr (fromIntegral inputSize)
-               outputPtr (fromIntegral outputSize)
+         status <- ethjet (fromIntegral contract)
+           inputPtr (fromIntegral inputSize)
+           outputPtr (fromIntegral outputSize)
 
          case status of
            1 -> Just <$> BS.packCStringLen (outputPtr, outputSize)
            _ -> pure Nothing
 
--- | The ECRECOVER precompile without libsecp256k1, accepting exactly what the C version
--- accepts: 128 bytes of hash, v, r and s, with v 27 or 28 and r and s in [1, n).
+-- | The ECRECOVER precompile, accepting what libsecp256k1 accepts: 128 bytes of hash, v,
+-- r and s, with v 27 or 28 and r and s in [1, n).
 ecrecover :: ByteString -> Maybe ByteString
 ecrecover input = do
   guard (BS.length input == 128)

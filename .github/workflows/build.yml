@@ -167,9 +167,6 @@ jobs:
       - name: build and install c dependencies
         run: |
           export PATH="$HASKELL_MINGW_PATH/bin:$PATH"
-          echo "::group::Installing libsecp256k1"
-          ./.github/scripts/install-libsecp256k1.sh
-          echo "::endgroup::"
           echo "::group::Installing libff"
           ./.github/scripts/install-libff.sh
           echo "::endgroup::"
@@ -181,7 +178,7 @@ jobs:
             --extra-lib-dirs="$(cygpath -m "$HASKELL_MINGW_PATH/lib")" \
             --extra-lib-dirs="$SYSTEM_MINGW_PATH/lib" \
             --extra-include-dirs="$HOME/.local/include" --extra-lib-dirs="$HOME/.local/lib" \
-            --ghc-options=-pgml="$(cygpath -m "$HASKELL_MINGW_PATH/bin/clang.exe") -optc-idirafter -optc$SYSTEM_MINGW_PATH/include -optcxx-idirafter -optcxx$SYSTEM_MINGW_PATH/include" -fstatic-secp256k1 --constraint="zlib +bundled-c-zlib"
+            --ghc-options=-pgml="$(cygpath -m "$HASKELL_MINGW_PATH/bin/clang.exe") -optc-idirafter -optc$SYSTEM_MINGW_PATH/include -optcxx-idirafter -optcxx$SYSTEM_MINGW_PATH/include" --constraint="zlib +bundled-c-zlib"
           cabal build --dry-run
           # The last step generates dist-newstyle/cache/plan.json for the cache key.
 

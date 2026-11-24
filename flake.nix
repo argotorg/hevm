@@ -69,10 +69,6 @@
           pkgs.bitwuzla
         ];
 
-        secp256k1-static = stripDylib (pkgs.secp256k1.overrideAttrs (attrs: {
-          configureFlags = attrs.configureFlags ++ [ "--enable-static" ];
-        }));
-
         hspkgs = ps: ps.haskell.packages.ghc912;
         hlib = pkgs.haskell.lib;
 
@@ -80,9 +76,7 @@
         # parameterized on the pkgs definition to allow use of `pkgsStatic` or `pkgs` as needed.
         hevmBase = ps :
           ps.lib.pipe
-            (((hspkgs ps).callCabal2nix "hevm" ./. {
-              secp256k1 = ps.secp256k1;
-            }).overrideAttrs(final: prev: {
+            (((hspkgs ps).callCabal2nix "hevm" ./. {}).overrideAttrs(final: prev: {
               HEVM_SOLIDITY_REPO = solidity;
               HEVM_ETHEREUM_TESTS_REPO = "${execution-spec-tests-fixtures}/blockchain_tests";
               HEVM_FORGE_STD_REPO = forge-std;
@@ -179,7 +173,6 @@
           hlib.appendConfigureFlags p
             [
               "--extra-lib-dirs=${stripDylib (pkgs.gmp.override { withStatic = true; })}/lib"
-              "--extra-lib-dirs=${stripDylib secp256k1-static}/lib"
               "--extra-lib-dirs=${stripDylib (pkgs.libff.override { enableStatic = true; })}/lib"
               "--extra-lib-dirs=${pkgs.zlib.static}/lib"
               "--extra-lib-dirs=${stripDylib (pkgs.libffi.overrideAttrs (_: { dontDisableStatic = true; }))}/lib"
@@ -205,7 +198,7 @@
         # --- shell ---
 
         devShells.default = let
-          libraryPath = "${pkgs.lib.makeLibraryPath [ pkgs.libff pkgs.secp256k1 pkgs.gmp ]}";
+          libraryPath = "${pkgs.lib.makeLibraryPath [ pkgs.libff pkgs.gmp ]}";
         in (hspkgs pkgs).shellFor {
           packages = _: [ (hevmBase pkgs) ];
           doBenchmark = true;

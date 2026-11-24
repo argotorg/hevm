@@ -24,8 +24,8 @@ import EVM.Effects qualified as Effects
 import EVM.Exec (vmForEthrunCreation)
 import EVM.Expr (maybeLitByteSimp)
 import EVM.Fetch qualified as Fetch
-import EVM.Precompiled (execute, ecrecover)
-import EVM.Sign (sign)
+import EVM.Precompiled (execute)
+import EVM.Sign (sign, ecrec, deriveAddr)
 import EVM.Solidity (solcRuntime)
 import EVM.Stepper qualified
 import EVM.SymExec
@@ -36,7 +36,7 @@ import EVM (initialContract, makeVm, defaultVMOpts, traceForest)
 import EVM.Test.Helpers
 import Test.Tasty
 import Test.Tasty.HUnit
-import Test.Tasty.QuickCheck (Gen, testProperty, forAll, (===), choose, elements, oneof, vectorOf, arbitrary)
+import Test.Tasty.QuickCheck (testProperty, forAll, (===), choose, vectorOf, arbitrary)
 
 type SourceCode = Text
 type ContractName = Text
@@ -190,8 +190,20 @@ tests = testGroup "Concrete execution tests"
               assertEqualM "fail because bit flip"
                 Nothing
                 (execute 1 (h <> v <> r <> s) 32)
-          , testProperty "haskell-matches-libsecp256k1" $ forAll ecrecoverInput $ \input ->
-              ecrecover input === execute 1 input 32
+          , test "rejects-r-and-s-out-of-range" $ do
+              let
+                r = hex "c84e55cee2032ea541a32bf6749e10c8b9344c92061724c4e751600f886f4732"
+                s = hex "1542b6457e91098682138856165381453b3d0acae2470286fd8c8a09914b1b5d"
+                v = hex "000000000000000000000000000000000000000000000000000000000000001c"
+                h = hex "513954cf30af6638cb8f626bd3f8c39183c26784ce826084d9d267868a18fb31"
+                bad = map word256Bytes [0, fromInteger secp256k1N, maxBound]
+              forM_ bad $ \x -> do
+                assertEqualM "r out of range" Nothing (execute 1 (h <> v <> x <> s) 32)
+                assertEqualM "s out of range" Nothing (execute 1 (h <> v <> r <> x) 32)
+          , testProperty "recovers-signer-of-random-keys" $
+              forAll ((,) <$> choose (1, secp256k1N - 1) <*> (BS.pack <$> vectorOf 32 arbitrary)) $ \(sk, h) ->
+                let (v, r, s) = sign (word h) sk
+                in ecrec (fromIntegral v) r s (word h) === deriveAddr sk
           ]
       , testGroup "Unimplemented"
           [ test "concrete-call-gives-nonexistent-precompile" $ forM_ [0x0a, 0x10, 0x11, 0x100 :: Addr] $ \a -> do
@@ -331,25 +343,6 @@ consoleLogExample = [here|
   }
 |]
 
--- | Signatures, corruptions of them, and values at the bounds ecrecover checks
-ecrecoverInput :: Gen ByteString
-ecrecoverInput = do
-  sk <- choose (1, secp256k1N - 1)
-  h <- BS.pack <$> vectorOf 32 arbitrary
-  let (v, r, s) = sign (word h) sk
-      signed = h <> word256Bytes (fromIntegral v) <> word256Bytes r <> word256Bytes s
-      setWord k w = BS.take (32 * k) signed <> word256Bytes w <> BS.drop (32 * (k + 1)) signed
-  oneof
-    [ pure signed
-    , do
-        k <- choose (0, 127)
-        b <- arbitrary
-        pure (BS.take k signed <> BS.singleton b <> BS.drop (k + 1) signed)
-    , setWord 1 <$> elements [0, 1, 26, 27, 28, 29, 0x100 + 27]
-    , do
-        k <- elements [2, 3]
-        setWord k <$> elements [0, 1, fromInteger secp256k1N - 1, fromInteger secp256k1N, fromInteger secp256k1N + 1, maxBound]
-    , BS.pack <$> vectorOf 128 arbitrary
-    ]
-  where
-    secp256k1N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141 :: Integer
+
+secp256k1N :: Integer
+secp256k1N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141

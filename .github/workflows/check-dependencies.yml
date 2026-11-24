@@ -32,7 +32,6 @@ jobs:
             in {
               ghc = (builtins.getAttr system flake.packages).ci.compiler.version;
               libff = pkgs.libff.version;
-              libsecp256k1 = pkgs.secp256k1.version;
               geth = pkgs.go-ethereum.version;
               z3 = pkgs.z3.version;
               cvc5 = pkgs.cvc5.version;
@@ -66,7 +65,6 @@ jobs:
           local = {
               "ghc": extract(r"ghc-version:\s*'([^']+)'", windows, "GHC"),
               "libff": extract(r"^INSTALL_VERSION=(\S+)$", Path(".github/scripts/install-libff.sh").read_text(), "libff"),
-              "libsecp256k1": extract(r"^INSTALL_VERSION=(\S+)$", Path(".github/scripts/install-libsecp256k1.sh").read_text(), "libsecp256k1"),
               "geth": extract(r"go-ethereum/cmd/evm@v([0-9.]+)", windows, "Geth"),
               "z3": extract(r"z3/releases/download/z3-([0-9.]+)/", windows, "Z3"),
               "cvc5": extract(r"cvc5/releases/download/cvc5-([0-9.]+)/", windows, "cvc5"),
