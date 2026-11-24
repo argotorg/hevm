@@ -8,7 +8,9 @@ wasm_dir=${GHC_WASM:-$HOME/.ghc-wasm}
 
 deps=dist-wasm/deps
 mkdir -p "$deps"
-wasm32-wasi-cabal update
+# a flaky Hackage mirror should not stop a build that already has an index new enough for
+# the index-state pinned in cabal.project.wasm
+wasm32-wasi-cabal update || echo "warning: cabal update failed, using the existing package index" >&2
 for p in wasm/patches/*.patch; do
   pkg=$(basename "$p" .patch)
   if [ ! -d "$deps/$pkg" ]; then

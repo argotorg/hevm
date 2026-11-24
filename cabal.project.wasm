@@ -2,5 +2,6 @@
 packages: . dist-wasm/deps/*/*.cabal
 tests: False
 benchmarks: False
+index-state: hackage.haskell.org 2026-11-24T12:24:40Z
 
 allow-newer: aeson-optics:base
