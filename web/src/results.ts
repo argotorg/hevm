@@ -18,7 +18,7 @@ export interface Counterexample {
 export interface TestResult {
   contract: string;
   name: string;
-  status: "pass" | "fail";
+  status: "pass" | "fail" | "running";
   counterexamples: Counterexample[];
   notes: string[];
 }
@@ -34,7 +34,7 @@ export function parseTestOutput(stdout: string): TestResult[] {
     if ((m = /^Checking \d+ function\(s\) in contract (.+)$/.exec(line))) {
       contract = m[1]!;
     } else if ((m = /^\[RUNNING\] (.+)$/.exec(line))) {
-      current = { contract, name: m[1]!, status: "pass", counterexamples: [], notes: [] };
+      current = { contract, name: m[1]!, status: "running", counterexamples: [], notes: [] };
       results.push(current);
       cex = undefined;
     } else if (!current) {

@@ -42,7 +42,7 @@ describe.skipIf(!ready)("website in Chromium", () => {
       }
       await page.click("#prove");
       await idle("prove");
-      return page.locator("#sol-results .card");
+      return page.locator("#sol-results .card:not(.stats)");
     }
 
     it("shows a counterexample at its line in the source", async () => {
@@ -60,7 +60,7 @@ describe.skipIf(!ready)("website in Chromium", () => {
       expect(await page.locator("#source .tok-keyword").first().textContent()).toBe("pragma");
       // and the editor shows the failing line
       expect(await page.locator("#source .cm-failing").textContent()).toBe("            assert(x * 3 + 7 != 100);");
-      expect(await cards.filter({ hasText: "prove_fits" }).getAttribute("class")).toBe("card pass");
+      expect(await cards.filter({ hasText: "PASS" }).getAttribute("class")).toBe("card pass");
       expect(await page.textContent("#sol-status")).toMatch(/^1 passed, 1 failed/);
     });
 
@@ -69,11 +69,38 @@ describe.skipIf(!ready)("website in Chromium", () => {
       expect(await cards.first().locator(".excerpt mark").textContent()).toBe("assert(total < 1000)");
     });
 
+    it("shows progress while it runs, and statistics at the end", async () => {
+      await page.click('.tabs [data-tab="sol"]');
+      await page.selectOption("#sol-example", String(solExamples.findIndex((e) => e.name === "Sorting network")));
+      await page.click("#prove");
+      // a live update: the run takes seconds, the counters move before it ends
+      await page.waitForFunction(() => {
+        const bar = document.querySelector("#sol-progress .bar.busy");
+        const dd = [...document.querySelectorAll("#sol-progress .counters dt")].find((d) => d.textContent === "Paths");
+        return bar && Number(dd?.nextElementSibling?.textContent) > 0;
+      });
+      expect(await page.locator("#prove").isDisabled()).toBe(true);
+      await idle("prove");
+      expect(await page.textContent("#sol-progress .what")).toBe("Done");
+      expect(await page.locator("#sol-progress .bar.busy").count()).toBe(0);
+      expect(await page.locator("#sol-progress .counters").textContent()).toContain("Functions2 / 2");
+    });
+
+    it("has a row of statistics per function", async () => {
+      const cards = await prove("Math library");
+      expect(await cards.filter({ hasText: "FAIL" }).count()).toBe(2);
+      const rows = page.locator("#sol-results .stats tr");
+      expect(await rows.count()).toBe(7);
+      expect(await page.locator("#sol-results .stats").textContent()).toMatch(/\d+ SMT queries: /);
+      expect(await page.locator("#sol-progress .counters").textContent()).toContain("Functions6 / 6");
+    });
+
     it("shows compile errors at their place", async () => {
       const cards = await prove("Assertions", "pragma solidity ^0.8.0;\ncontract C { function f() public { x = 1; } }\n");
       expect(await cards.first().textContent()).toContain("Undeclared identifier");
       expect(await cards.first().locator(".excerpt mark").textContent()).toBe("x");
       expect(await page.textContent("#sol-status")).toMatch(/^Compilation failed/);
+      expect(await page.locator("#sol-progress").isHidden()).toBe(true);
     });
   });
 

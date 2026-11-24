@@ -1,12 +1,13 @@
 import "./style.css";
-import { buildArgs, parseOutcome, stripAnsi, type Files, type Mode, type Outcome, type Request, type RunResult } from "./hevm";
+import { buildArgs, parseOutcome, progressPath, stripAnsi, type Files, type Mode, type Outcome, type Request, type RunResult } from "./hevm";
 import { examples } from "./examples";
 import { SolidityEditor } from "./editor";
 import { segments, tokens } from "./highlight";
+import { newStats, onProgress, onStdout, testsDone, type Stats } from "./progress";
 import { describeResult, parseTestOutput, type TestResult } from "./results";
 import { solExamples } from "./solExamples";
 import type { CompileError, Project, Source } from "./solc";
-import type { WorkerRequest, WorkerResponse } from "./worker";
+import type { WorkerRequest, WorkerResponse, WorkerStream } from "./worker";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const log = $<HTMLElement>("log");
@@ -21,24 +22,30 @@ const urls = {
   solcUrl: new URL("soljson.js", document.baseURI).href,
 };
 let nextId = 0;
-const pending = new Map<number, (r: WorkerResponse) => void>();
-worker.onmessage = (e: MessageEvent<WorkerResponse>) => {
-  pending.get(e.data.id)?.(e.data);
-  pending.delete(e.data.id);
+type OnStream = (m: WorkerStream) => void;
+const pending = new Map<number, { resolve: (r: WorkerResponse) => void; onStream?: OnStream }>();
+worker.onmessage = (e: MessageEvent<WorkerResponse | WorkerStream>) => {
+  const p = pending.get(e.data.id);
+  if ("stream" in e.data) {
+    p?.onStream?.(e.data);
+  } else {
+    p?.resolve(e.data);
+    pending.delete(e.data.id);
+  }
 };
 
-type Body = { kind: "hevm"; args: string[]; files?: Files } | { kind: "compile"; sources: Source[] };
+type Body = { kind: "hevm"; args: string[]; files?: Files; stream?: boolean } | { kind: "compile"; sources: Source[] };
 
-function call(body: Body): Promise<WorkerResponse> {
+function call(body: Body, onStream?: OnStream): Promise<WorkerResponse> {
   const id = nextId++;
   return new Promise((resolve) => {
-    pending.set(id, resolve);
+    pending.set(id, { resolve, onStream });
     worker.postMessage({ id, ...urls, ...body } as WorkerRequest);
   });
 }
 
-async function runHevm(args: string[], files?: Files): Promise<RunResult> {
-  const res = await call({ kind: "hevm", args, files });
+async function runHevm(args: string[], files?: Files, onStream?: OnStream): Promise<RunResult> {
+  const res = await call({ kind: "hevm", args, files, stream: onStream !== undefined }, onStream);
   if (!res.ok) throw new Error(res.error);
   if (!("result" in res)) throw new Error("unexpected worker reply");
   log.textContent = stripAnsi([res.result.stdout, res.result.stderr].filter(Boolean).join("\n"));
@@ -67,6 +74,7 @@ const solExample = $<HTMLSelectElement>("sol-example");
 const prove = $<HTMLButtonElement>("prove");
 const solStatus = $<HTMLElement>("sol-status");
 const solResults = $<HTMLElement>("sol-results");
+const solProgress = $<HTMLElement>("sol-progress");
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string) {
   const e = document.createElement(tag);
@@ -128,8 +136,9 @@ function renderErrors(errors: CompileError[]) {
 function renderTest(t: TestResult) {
   const card = el("article", `card ${t.status}`);
   const head = el("h3");
-  head.append(el("span", `badge ${t.status}`, t.status === "pass" ? "PASS" : "FAIL"), ` ${t.name}`);
+  head.append(el("span", `badge ${t.status}`, t.status.toUpperCase()), ` ${t.name}`);
   card.append(head);
+  if (t.status === "running" && !t.counterexamples.length) card.append(el("p", "muted", "Checking…"));
   if (t.status === "pass" && !t.counterexamples.length) {
     card.append(el("p", "muted", "No input breaks it."));
   }
@@ -156,37 +165,126 @@ solExample.addEventListener("change", () => {
   solResults.replaceChildren();
 });
 
+const fmt = (secs: number) => (secs < 10 ? secs.toFixed(2) : secs.toFixed(1)) + "s";
+
+function renderProgress(stats: Stats, running: boolean, elapsed: number) {
+  const done = testsDone(stats);
+  const current = stats.tests.at(-1);
+  const bar = el("div", "bar");
+  const fill = el("div", "fill");
+  fill.style.width = stats.total ? `${(100 * done) / stats.total}%` : "0";
+  bar.append(fill);
+  bar.classList.toggle("busy", running);
+  const what = running && current && current.secs === undefined
+    ? `Checking ${current.name}`
+    : running ? "Starting…" : "Done";
+  const counters = el("dl", "counters");
+  const add = (k: string, v: string) => {
+    const item = el("div");
+    item.append(el("dt", undefined, k), el("dd", undefined, v));
+    counters.append(item);
+  };
+  add("Functions", `${done} / ${stats.total || "?"}`);
+  add("Paths", String(stats.paths));
+  add("Branches", String(stats.forks));
+  add("SMT queries", stats.queriesDone + (stats.queriesInFlight ? ` (+${stats.queriesInFlight} running)` : ""));
+  add("Solver time", fmt(stats.solveSecs));
+  add("Elapsed", fmt(elapsed));
+  solProgress.replaceChildren(el("p", "what", what), bar, counters);
+  solProgress.hidden = false;
+}
+
+function renderStats(stats: Stats) {
+  if (!stats.tests.length) return;
+  const card = el("article", "card stats");
+  card.append(el("h3", undefined, "Statistics"));
+  const table = el("table");
+  const row = (cells: string[], tag: "th" | "td" = "td") => {
+    const tr = el("tr");
+    cells.forEach((c, i) => tr.append(el(tag, i ? "num" : undefined, c)));
+    return tr;
+  };
+  table.append(row(["Function", "Paths", "Branches", "SMT queries", "Solver time", "Time", "Counterexamples"], "th"));
+  for (const t of stats.tests) {
+    const tr = row([t.name.split("(")[0]!, String(t.paths), String(t.forks), String(t.queries), fmt(t.solveSecs), fmt(t.secs ?? 0), String(t.cex)]);
+    tr.firstElementChild!.setAttribute("title", t.name);
+    table.append(tr);
+  }
+  card.append(table);
+  const results = Object.entries(stats.results).map(([r, n]) => `${n} ${r}`).join(", ");
+  card.append(el("p", "muted", `${stats.queriesDone} SMT queries${results ? `: ${results}` : ""}, ${fmt(stats.solveSecs)} in the solver, ${fmt(stats.elapsed)} in all.`));
+  solResults.append(card);
+}
+
 solForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   prove.disabled = true;
   solResults.replaceChildren();
+  solProgress.hidden = true;
   failingLines = [];
   const started = performance.now();
   const secs = () => ((performance.now() - started) / 1000).toFixed(2);
+  const stats = newStats();
+  const stdout: string[] = [];
+  const showTests = () => {
+    solResults.replaceChildren();
+    failingLines = [];
+    const tests = parseTestOutput(stdout.join("\n"));
+    tests.forEach(renderTest);
+    return tests;
+  };
+  let frame = 0;
+  const elapsed = () => (performance.now() - started) / 1000;
+  // hevm reports nothing while the solver works, the clock keeps going
+  const clock = setInterval(() => renderProgress(stats, true, elapsed()), 250);
+  const onStream = (m: WorkerStream) => {
+    if ("stdout" in m) {
+      stdout.push(m.stdout);
+      onStdout(stats, m.stdout);
+    } else {
+      onProgress(stats, m.progress);
+    }
+    // at most once a frame, however fast hevm reports
+    frame ||= requestAnimationFrame(() => {
+      frame = 0;
+      renderProgress(stats, true, elapsed());
+      showTests();
+    });
+  };
   try {
     solStatus.textContent = "Compiling…";
     const project = await compile([{ path: sourcePath, content: editor.value }]);
     const errors = project.errors.filter((x) => x.severity === "error");
     if (errors.length) {
       solStatus.textContent = `Compilation failed — ${secs()}s`;
+      clearInterval(clock);
+      solProgress.hidden = true;
       renderErrors(errors);
       return;
     }
     solStatus.textContent = "Proving…";
-    const run = await runHevm(["test", "--root", "/"], project.files);
-    const tests = parseTestOutput(run.stdout);
+    renderProgress(stats, true, elapsed());
+    const run = await runHevm(["test", "--root", "/", "--progress-log", progressPath], project.files, onStream);
+    cancelAnimationFrame(frame);
+    clearInterval(clock);
+    stdout.splice(0, stdout.length, ...run.stdout.split("\n"));
+    renderProgress(stats, false, elapsed());
+    const tests = showTests();
     const failed = tests.filter((t) => t.status === "fail").length;
     solStatus.textContent = tests.length
       ? `${tests.length - failed} passed, ${failed} failed — ${secs()}s`
       : `No prove_ functions found — ${secs()}s`;
-    tests.forEach(renderTest);
+    renderStats(stats);
     if (!tests.length && run.exitCode !== 0) {
       solResults.append(el("pre", "card fail", stripAnsi(run.stderr || run.stdout)));
     }
   } catch (err) {
+    clearInterval(clock);
+    solProgress.hidden = true;
     solStatus.textContent = "";
     solResults.append(el("pre", "card fail", String(err)));
   } finally {
+    clearInterval(clock);
     editor.markFailing(failingLines);
     prove.disabled = false;
   }

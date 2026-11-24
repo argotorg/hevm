@@ -3,7 +3,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
-import { runHevm } from "../src/hevm";
+import { progressPath, runHevm } from "../src/hevm";
+import { newStats, onProgress as progressOnEvent, onStdout as progressOnStdout, testsDone } from "../src/progress";
 import { describeResult, parseTestOutput } from "../src/results";
 import { compileProject, solcVersion, type Soljson } from "../src/solc";
 import { solExamples } from "../src/solExamples";
@@ -22,7 +23,7 @@ const example = (name: string) => solExamples.find((e) => e.name === name)!.sour
 async function prove(source: string) {
   const project = compileProject(solc, [{ path: "src/Main.sol", content: source }]);
   expect(project.errors.filter((e) => e.severity === "error")).toEqual([]);
-  const run = await runHevm(module, ["test", "--root", "/"], project.files);
+  const run = await runHevm(module, ["test", "--root", "/"], { files: project.files });
   return Object.fromEntries(parseTestOutput(run.stdout).map((r) => [r.name, r]));
 }
 
@@ -71,4 +72,97 @@ describe("hevm test on soljson output", () => {
     const t = (await prove(example("Failure in a called contract")))["prove_deposit(uint256)"]!;
     expect(t.counterexamples[0]!.at).toMatchObject({ line: 11, code: "assert(total < 1000)" });
   });
+});
+
+describe("progress of hevm test", () => {
+  it("streams events and stdout while it runs", async () => {
+    const project = compileProject(solc, [{ path: "src/Main.sol", content: example("Token with a bug") }]);
+    const stats = newStats();
+    const order: string[] = [];
+    await runHevm(module, ["test", "--root", "/", "--progress-log", progressPath], {
+      files: project.files,
+      onStdout: (l) => {
+        order.push("stdout");
+        progressOnStdout(stats, l);
+      },
+      onProgress: (e) => {
+        order.push(e.ev);
+        progressOnEvent(stats, e);
+      },
+    });
+    expect(stats.total).toBe(1);
+    expect(stats.finished).toBe(true);
+    expect(testsDone(stats)).toBe(1);
+    expect(stats.tests[0]).toMatchObject({ name: "prove_transfer(address,uint256)", cex: 1 });
+    expect(stats.paths).toBeGreaterThan(0);
+    expect(stats.forks).toBeGreaterThan(0);
+    expect(stats.queriesDone).toBeGreaterThan(0);
+    expect(stats.queriesInFlight).toBe(0);
+    expect(Object.values(stats.results).reduce((a, b) => a + b, 0)).toBe(stats.queriesDone);
+    // the events come during the run, between lines of stdout
+    expect(order.indexOf("query-end")).toBeLessThan(order.lastIndexOf("stdout"));
+  });
+});
+
+// every example on the website, with what hevm must find
+const expectations: Record<string, Record<string, { status: "pass" | "fail"; calldata?: string; line?: number }>> = {
+  "Assertions": {
+    "prove_linear(uint256)": { status: "fail", calldata: "prove_linear(31)", line: 10 },
+    "prove_fits(uint8,uint8)": { status: "pass" },
+  },
+  "Token with a bug": {
+    "prove_transfer(address,uint256)": { status: "fail", line: 29 },
+  },
+  "Failure in a called contract": {
+    "prove_deposit(uint256)": { status: "fail", line: 11 },
+  },
+  "Math library": {
+    "prove_min_max(uint256,uint256)": { status: "pass" },
+    "prove_ceilDiv(uint256,uint256)": { status: "fail", line: 42 },
+    "prove_abs(int256)": {
+      status: "fail",
+      calldata: "prove_abs(-57896044618658097711785492504343953926634992332820282019728792003956564819968)",
+      line: 46,
+    },
+    "prove_clamp(uint256,uint256,uint256)": { status: "pass" },
+    "prove_clamp_keeps(uint256,uint256,uint256)": { status: "pass" },
+    "prove_min_commutes(uint256,uint256)": { status: "pass" },
+  },
+  "Sorting network": {
+    "prove_sorted(uint256,uint256,uint256)": { status: "pass" },
+    "prove_permutation(uint256,uint256,uint256)": { status: "pass" },
+  },
+  "Bit tricks": {
+    "prove_average(uint128,uint128)": { status: "pass" },
+    "prove_powerOfTwo(uint256)": { status: "fail", calldata: "prove_powerOfTwo(0)", line: 24 },
+  },
+  "Access control": {
+    "prove_fee_capped(uint256)": { status: "pass" },
+    "prove_only_owner_sets_fee()": { status: "fail", calldata: "prove_only_owner_sets_fee()", line: 44 },
+  },
+};
+
+describe("the website's examples", () => {
+  it("covers every example", () => {
+    expect(Object.keys(expectations).sort()).toEqual(solExamples.map((e) => e.name).sort());
+  });
+
+  for (const [name, tests] of Object.entries(expectations)) {
+    it(name, async () => {
+      const res = await prove(example(name));
+      expect(Object.keys(res).sort()).toEqual(Object.keys(tests).sort());
+      for (const [fn, want] of Object.entries(tests)) {
+        const got = res[fn]!;
+        expect(got.status, fn).toBe(want.status);
+        if (want.status === "pass") {
+          expect(got.counterexamples, fn).toEqual([]);
+          continue;
+        }
+        const cex = got.counterexamples[0]!;
+        expect(cex.validated, fn).toBe(true);
+        if (want.calldata) expect(cex.calldata, fn).toBe(want.calldata);
+        expect(cex.at?.line, fn).toBe(want.line);
+      }
+    });
+  }
 });

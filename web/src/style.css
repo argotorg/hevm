@@ -442,3 +442,108 @@ code,
   background: color-mix(in srgb, var(--bad) 25%, transparent);
   border-bottom: 2px solid var(--bad);
 }
+
+.progress {
+  margin-top: 1.5rem;
+  padding: 0.9rem 1rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.progress .what {
+  margin: 0 0 0.6rem;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.progress .bar {
+  position: relative;
+  height: 0.5rem;
+  overflow: hidden;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+
+.progress .fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+
+.progress .bar.busy::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 35%, transparent), transparent);
+  animation: sweep 1.2s linear infinite;
+}
+
+@keyframes sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+.counters {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+  gap: 0.6rem 1rem;
+  margin: 0.8rem 0 0;
+}
+
+.counters div {
+  display: grid;
+  gap: 0.1rem;
+}
+
+.counters dt {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.counters dd {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 0.95rem;
+}
+
+.card.running {
+  border-left-color: var(--accent);
+}
+
+.badge.running {
+  background: var(--accent);
+}
+
+.stats table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.stats th,
+.stats td {
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+}
+
+.stats th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.stats td:first-child {
+  font-family: var(--mono);
+}
+
+.stats .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}

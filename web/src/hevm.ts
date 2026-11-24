@@ -1,5 +1,17 @@
 import { ConsoleStdout, Directory, File, OpenFile, PreopenDirectory, WASI, type Inode } from "@bjorn3/browser_wasi_shim";
 
+export interface RunOptions {
+  files?: Files;
+  /** each line hevm prints, as it prints it */
+  onStdout?: (line: string) => void;
+  /** the events of `--progress-log /progress.jsonl`, as hevm writes them */
+  onProgress?: (event: ProgressEvent) => void;
+}
+
+export type ProgressEvent = { ev: string; t: number } & Record<string, unknown>;
+
+export const progressPath = "/progress.jsonl";
+
 export interface RunResult {
   exitCode: number;
   stdout: string;
@@ -93,21 +105,58 @@ function treeOf(files: Files): Tree {
   return root;
 }
 
+/** A file that passes each line written to it on instead of keeping it */
+class LineSink extends File {
+  constructor(private readonly onLine: (line: string) => void) {
+    super(new Uint8Array());
+  }
+
+  override path_open(oflags: number, fs_rights_base: bigint, fd_flags: number) {
+    const opened = super.path_open(oflags, fs_rights_base, fd_flags);
+    const decoder = new TextDecoder();
+    let pending = "";
+    opened.fd_obj.fd_write = (data: Uint8Array) => {
+      pending += decoder.decode(data, { stream: true });
+      let nl: number;
+      while ((nl = pending.indexOf("\n")) >= 0) {
+        this.onLine(pending.slice(0, nl));
+        pending = pending.slice(nl + 1);
+      }
+      return { ret: 0, nwritten: data.byteLength };
+    };
+    return opened;
+  }
+}
+
 /** Runs hevm.wasm, a WASI command, with the files in an in-memory filesystem at / */
-export async function runHevm(module: WebAssembly.Module, args: string[], files: Files = {}): Promise<RunResult> {
+export async function runHevm(module: WebAssembly.Module, args: string[], opts: RunOptions = {}): Promise<RunResult> {
   const stdout: string[] = [];
   const stderr: string[] = [];
+  const root = inodes(treeOf(opts.files ?? {}));
+  const onProgress = opts.onProgress;
+  if (onProgress) root.set(progressPath.slice(1), new LineSink((l) => l && onProgress(JSON.parse(l) as ProgressEvent)));
   const wasi = new WASI(
     ["hevm", ...args],
     ["HOME=/", "PATH=/"],
     [
       new OpenFile(new File([])),
-      ConsoleStdout.lineBuffered((l) => stdout.push(l)),
+      ConsoleStdout.lineBuffered((l) => {
+        stdout.push(l);
+        opts.onStdout?.(l);
+      }),
       ConsoleStdout.lineBuffered((l) => stderr.push(l)),
-      new PreopenDirectory("/", inodes(treeOf(files))),
+      new PreopenDirectory("/", root),
     ],
     { debug: false },
   );
+  // browser_wasi_shim 0.4.2's poll_oneoff never writes the number of events, which
+  // wasi-libc then reads from whatever is there, and walks off the end of memory
+  const poll = wasi.wasiImport.poll_oneoff!;
+  wasi.wasiImport.poll_oneoff = (inPtr: number, outPtr: number, n: number, nevents: number) => {
+    const ret = poll(inPtr, outPtr, n);
+    if (ret === 0) new DataView(wasi.inst.exports.memory.buffer).setUint32(nevents, 1, true);
+    return ret;
+  };
   const instance = await WebAssembly.instantiate(module, {
     wasi_snapshot_preview1: wasi.wasiImport,
   });
