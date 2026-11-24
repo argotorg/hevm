@@ -37,7 +37,7 @@
 html, body { height: 100%; }
 body {
   margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 var(--sans);
-  display: grid; grid-template-rows: auto auto minmax(0, 1fr) 13rem;
+  display: grid; grid-template-rows: auto auto minmax(0, 1fr) 10rem;
 }
 body.busy { cursor: progress; }
 ::selection { background: rgba(122, 162, 247, 0.3); }
@@ -83,7 +83,7 @@ kbd { font: 11px var(--mono); color: var(--muted); margin-left: .35rem; padding:
       border: 1px solid var(--line-strong); border-bottom-width: 2px; border-radius: 4px; }
 
 /* panes */
-main { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) minmax(0, 1fr);
+main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) minmax(0, .75fr);
        gap: .7rem; padding: .7rem; min-height: 0; }
 .column { display: flex; flex-direction: column; gap: .7rem; min-height: 0; }
 /* the side column scrolls as a whole, so its panes keep their full height */
@@ -93,6 +93,9 @@ section { background: var(--panel); border: 1px solid var(--line); border-radius
           padding: .55rem .75rem .65rem; overflow: auto; min-height: 0;
           box-shadow: 0 1px 0 rgba(255, 255, 255, .02) inset, 0 6px 18px rgba(0, 0, 0, .25); }
 section.grow { flex: 1; }
+/* the machine state shares its column: the stack gets the most, the rest scroll in theirs */
+.column.state section { flex: 1 1 0; min-height: 5rem; }
+.column.state section.stack { flex: 2.2 1 0; min-height: 12rem; }
 h2 { font: 600 11px var(--sans); text-transform: uppercase; letter-spacing: .12em; color: var(--muted);
      margin: 0 0 .45rem; }
 pre { font: 13px/1.5 var(--mono); margin: 0; white-space: pre-wrap; word-break: break-all; }
@@ -191,6 +194,7 @@ dialog::backdrop { background: rgba(5, 7, 10, .7); backdrop-filter: blur(2px); }
 @media (max-width: 1000px) {
   body { height: auto; grid-template-rows: auto auto auto 16rem; }
   main { grid-template-columns: 1fr; }
+  .column.state section, .column.state section.stack { flex: none; min-height: 0; }
 }
 </style>
 </head>
@@ -213,8 +217,8 @@ dialog::backdrop { background: rgba(5, 7, 10, .7); backdrop-filter: blur(2px); }
     <section class="grow"><h2>Source</h2><div id="source"></div></section>
     <section class="grow"><h2>Code</h2><div id="code"></div></section>
   </div>
-  <div class="column">
-    <section class="grow"><h2>Stack · top first</h2><div id="stack"></div></section>
+  <div class="column state">
+    <section class="stack"><h2>Stack · top first</h2><div id="stack"></div></section>
     <section><h2>Memory</h2><div id="memory"></div></section>
     <section><h2>Storage · newest write first</h2><div id="storage"></div></section>
     <section><h2>Trace</h2><div id="trace"></div></section>

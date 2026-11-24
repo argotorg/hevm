@@ -618,7 +618,9 @@ code,
 /* side by side when there is room: the code on the left, what hevm finds on the right */
 @media (min-width: 1100px) {
   body {
-    max-width: 96rem;
+    max-width: none;
+    padding-left: 2rem;
+    padding-right: 2rem;
   }
 
   .sol-only,
@@ -714,7 +716,7 @@ button.secondary:hover {
 #debugger {
   display: block;
   width: 100%;
-  height: max(40rem, calc(100vh - 12rem));
+  height: max(46rem, calc(100vh - 3rem));
   border: 0;
   border-radius: 6px;
 }
