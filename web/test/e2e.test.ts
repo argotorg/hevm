@@ -333,10 +333,7 @@ describe.skipIf(!ready)("website in Chromium", () => {
       expect(await p.textContent("#files li.current")).toContain("UniswapV3Factory.t.sol");
       expect(await p.textContent("#sol-origin")).toMatch(/^UniswapV3Factory at 0x1F9843…31F984 on Ethereum/);
       expect(await p.textContent("#source .cm-content")).toContain("function prove_initial_fee_tiers(uint24 fee)");
-      expect(await proved(p)).toMatch(/^4 passed, 1 failed/);
-      const fail = p.locator("#sf-results .card.fail");
-      expect(await fail.locator("h3").textContent()).toContain("prove_enable_fee_never_reverts");
-      expect(await fail.textContent()).toContain("INVALID opcode: a failed assert, before Solidity 0.8");
+      expect(await proved(p)).toMatch(/^5 passed, 0 failed/);
       await p.close();
     });
 
@@ -375,7 +372,7 @@ contract OwnerTest is Test {
 `);
       // the other file, to see the failure take us back
       await p.click("#files li.file >> text=UniswapV3Factory.t.sol");
-      expect(await proved(p)).toMatch(/^4 passed, 2 failed/);
+      expect(await proved(p)).toMatch(/^5 passed, 1 failed/);
       const card = p.locator("#sf-results .card.fail").filter({ hasText: "prove_owner" });
       expect(await card.locator(".where").textContent()).toBe("Fails at test/Owner.t.sol, line 7:");
       await card.locator(".excerpt").click();
@@ -445,7 +442,7 @@ contract OwnerTest is Test {
       await proved(p, "#sol-status");
       const solFirstLine = await p.locator("#source .cm-line").nth(5).textContent();
       await loadFactory(p, false);
-      expect(await proved(p)).toMatch(/^4 passed, 1 failed/);
+      expect(await proved(p)).toMatch(/^5 passed, 0 failed/);
       await p.click('.tabs [data-tab="sol"]');
       expect(await p.locator("#source .cm-line").nth(5).textContent()).toBe(solFirstLine);
       expect(await p.locator("#files").isHidden()).toBe(true);

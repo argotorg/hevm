@@ -47,11 +47,15 @@ contract UniswapV3FactoryTest is Test {
         assert(factory.feeAmountTickSpacing(fee) == spacing);
     }
 
-    // this one fails: hevm finds a fee tier that enableFeeAmount turns down
-    function prove_enable_fee_never_reverts(uint24 fee, int24 spacing) public {
-        try factory.enableFeeAmount(fee, spacing) {} catch {
-            assert(false);
-        }
+    // the owner can add a fee tier exactly when its fee is under 100%, its tick
+    // spacing is from 1 to 16383, and there is no tier with that fee yet
+    function prove_enable_fee_exactly_when_valid(uint24 fee, int24 spacing) public {
+        bool valid = fee < 1000000 && spacing > 0 && spacing < 16384 && factory.feeAmountTickSpacing(fee) == 0;
+        bool enabled;
+        try factory.enableFeeAmount(fee, spacing) {
+            enabled = true;
+        } catch {}
+        assert(enabled == valid);
     }
 
     // a pool is found whichever order its tokens are given in, and keeps them sorted

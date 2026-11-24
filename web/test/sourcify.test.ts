@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 import { runHevm } from "../src/hevm";
 import { importClosure } from "../src/imports";
-import { parseTestOutput } from "../src/results";
+import { describeResult, parseTestOutput } from "../src/results";
 import { compileProject, evalSoljson, solcVersion } from "../src/solc";
 import { fetchVerified, parseTarget, readVerified, type VerifiedContract } from "../src/sourcify";
 import { sourcifyExamples } from "../src/sourcifyExamples";
@@ -91,19 +91,16 @@ describe.skipIf(!hasSoljson(factory.version))("a verified contract with many fil
 });
 
 describe.skipIf(!hasSoljson(factory.version))("the Sourcify tab's example, Uniswap V3's factory", () => {
-  it("has properties hevm proves, and one it finds a counterexample to", async () => {
+  it("has properties hevm proves", async () => {
     const res = await testVerified(factory, sourcifyExamples[0]!.test);
     const status = Object.fromEntries(Object.entries(res).map(([name, r]) => [name, r.status]));
     expect(status).toEqual({
       "prove_initial_fee_tiers(uint24)": "pass",
       "prove_enable_fee(uint24,int24)": "pass",
-      "prove_enable_fee_never_reverts(uint24,int24)": "fail",
+      "prove_enable_fee_exactly_when_valid(uint24,int24)": "pass",
       "prove_create_pool()": "pass",
       "prove_one_pool_per_pair()": "pass",
     });
-    const [fee, spacing] = /^prove_enable_fee_never_reverts\((\d+),(-?\d+)\)$/.exec(res["prove_enable_fee_never_reverts(uint24,int24)"]!.counterexamples[0]!.calldata)!.slice(1).map(Number);
-    // what enableFeeAmount turns down: a fee of 100% or more, a spacing out of range, or a fee tier there is
-    expect(fee! >= 1_000_000 || spacing! <= 0 || spacing! >= 16384 || [500, 3000, 10000].includes(fee!)).toBe(true);
   });
 });
 
@@ -114,5 +111,6 @@ describe.skipIf(!hasSoljson(weth.version))("a verified contract from 2017, compi
     const t = res["prove_example(uint256)"]!;
     expect(t.status).toBe("fail");
     expect(t.counterexamples[0]).toMatchObject({ calldata: "prove_example(7)", result: "Unrecognized opcode: 254" });
+    expect(describeResult(t.counterexamples[0]!.result)).toBe("INVALID opcode: a failed assert, before Solidity 0.8");
   });
 });
