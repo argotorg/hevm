@@ -165,7 +165,7 @@ searchInvariant solvers fetcher opts exploration (first, lastDepth) check = go (
       let ps = partials <> result.partials
           es = issues <> result.issues
       case result.counterexample of
-        Just _ -> pure result { partials = ps, issues = es }
+        Just cex -> pure $ CheckResult (Just cex) ps es
         Nothing -> visit depth ps es rest
 
 -- | A replayable zero-value transaction, including decoded ABI arguments and
