@@ -1,4 +1,4 @@
-import { ConsoleStdout, File, OpenFile, PreopenDirectory, WASI } from "@bjorn3/browser_wasi_shim";
+import { ConsoleStdout, Directory, File, OpenFile, PreopenDirectory, WASI, type Inode } from "@bjorn3/browser_wasi_shim";
 
 export interface RunResult {
   exitCode: number;
@@ -63,8 +63,38 @@ export function parseOutcome(mode: Mode, result: RunResult): Outcome {
   return { kind: "error", message: message || `hevm exited with code ${result.exitCode}` };
 }
 
-/** Runs hevm.wasm, a WASI command, with an empty in-memory filesystem */
-export async function runHevm(module: WebAssembly.Module, args: string[]): Promise<RunResult> {
+/** Paths and their contents, or null for an empty directory */
+export type Files = Record<string, string | null>;
+
+type Tree = Map<string, Tree | string>;
+
+function inodes(tree: Tree): Map<string, Inode> {
+  const enc = new TextEncoder();
+  return new Map(
+    [...tree].map(([name, t]) => [name, typeof t === "string" ? new File(enc.encode(t)) : new Directory(inodes(t))]),
+  );
+}
+
+function treeOf(files: Files): Tree {
+  const root: Tree = new Map();
+  for (const [path, content] of Object.entries(files)) {
+    const parts = path.split("/").filter(Boolean);
+    let dir = root;
+    parts.forEach((part, i) => {
+      if (i === parts.length - 1 && content !== null) {
+        dir.set(part, content);
+      } else {
+        let sub = dir.get(part);
+        if (!(sub instanceof Map)) dir.set(part, (sub = new Map()));
+        dir = sub;
+      }
+    });
+  }
+  return root;
+}
+
+/** Runs hevm.wasm, a WASI command, with the files in an in-memory filesystem at / */
+export async function runHevm(module: WebAssembly.Module, args: string[], files: Files = {}): Promise<RunResult> {
   const stdout: string[] = [];
   const stderr: string[] = [];
   const wasi = new WASI(
@@ -74,7 +104,7 @@ export async function runHevm(module: WebAssembly.Module, args: string[]): Promi
       new OpenFile(new File([])),
       ConsoleStdout.lineBuffered((l) => stdout.push(l)),
       ConsoleStdout.lineBuffered((l) => stderr.push(l)),
-      new PreopenDirectory("/", new Map()),
+      new PreopenDirectory("/", inodes(treeOf(files))),
     ],
     { debug: false },
   );

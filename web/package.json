@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "wasm": "mkdir -p public && cp ../dist-wasm/hevm.wasm public/hevm.wasm",
+    "assets": "mkdir -p public && cp ../dist-wasm/hevm.wasm node_modules/solc/soljson.js public/",
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "test": "vitest run",
@@ -12,6 +12,7 @@
   "devDependencies": {
     "@types/node": "^26.6.6",
     "playwright-core": "^1.65.1",
+    "solc": "0.8.39",
     "typescript": "^7.0.2",
     "vite": "^8.3.8",
     "vitest": "^5.1.1"

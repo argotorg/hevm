@@ -110,7 +110,9 @@ input:not([type="radio"]) {
 }
 
 body[data-mode="symbolic"] .exec-only,
-body[data-mode="exec"] .symbolic-only {
+body[data-mode="exec"] .symbolic-only,
+body[data-tab="sol"] .bytecode-only,
+body[data-tab="bytecode"] .sol-only {
   display: none;
 }
 
@@ -136,7 +138,7 @@ button:disabled {
   cursor: progress;
 }
 
-#status {
+.status {
   color: var(--muted);
   font-size: 0.8rem;
   font-family: var(--mono);
@@ -189,4 +191,153 @@ details pre {
   border-radius: 6px;
   padding: 0.75rem;
   color: var(--fg);
+}
+
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: -1px;
+}
+
+.tabs button {
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 8px 8px 0 0;
+  padding: 0.45rem 1.1rem;
+}
+
+body[data-tab="sol"] .tabs [data-tab="sol"],
+body[data-tab="bytecode"] .tabs [data-tab="bytecode"] {
+  color: var(--fg);
+  background: var(--panel);
+  border-color: var(--line);
+}
+
+main > section > form {
+  border-top-left-radius: 0;
+}
+
+#source {
+  line-height: 1.45;
+  tab-size: 4;
+  resize: vertical;
+}
+
+.results {
+  display: grid;
+  gap: 0.9rem;
+  margin-top: 1.5rem;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--line);
+  border-radius: 8px;
+  padding: 0.8rem 1rem;
+  margin: 0;
+}
+
+.card.pass {
+  border-left-color: var(--ok);
+}
+
+.card.fail {
+  border-left-color: var(--bad);
+}
+
+.card h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+  font-family: var(--mono);
+  font-weight: 600;
+}
+
+.badge {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-family: system-ui, sans-serif;
+  letter-spacing: 0.04em;
+  color: white;
+  border-radius: 4px;
+  padding: 0.1rem 0.4rem;
+  vertical-align: 0.1em;
+}
+
+.badge.pass {
+  background: var(--ok);
+}
+
+.badge.fail {
+  background: var(--bad);
+}
+
+.card dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.2rem 1rem;
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.card dt {
+  color: var(--muted);
+}
+
+.card dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.mono {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 0.3rem 0 0;
+}
+
+.where {
+  margin: 0.7rem 0 0.3rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.excerpt {
+  margin: 0;
+  padding: 0.5rem 0;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  white-space: pre;
+  overflow-x: auto;
+  cursor: pointer;
+}
+
+.excerpt div {
+  padding: 0 0.75rem 0 0;
+}
+
+.excerpt .hit {
+  background: color-mix(in srgb, var(--bad) 10%, transparent);
+}
+
+.excerpt .ln {
+  display: inline-block;
+  width: 2.5rem;
+  margin-right: 0.75rem;
+  text-align: right;
+  color: var(--muted);
+  user-select: none;
+}
+
+.excerpt mark {
+  color: inherit;
+  background: color-mix(in srgb, var(--bad) 25%, transparent);
+  border-bottom: 2px solid var(--bad);
 }

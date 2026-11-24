@@ -4,7 +4,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 root=$PWD
-sdk=${GHC_WASM:-$HOME/.ghc-wasm}/wasi-sdk
+sdk=${GHC_WASM:-$root/dist-wasm/toolchain}/wasi-sdk
 work=$root/dist-wasm/solver
 prefix=$work/prefix
 jobs=${JOBS:-$(nproc)}
@@ -21,15 +21,20 @@ export AR=$sdk/bin/llvm-ar RANLIB=$sdk/bin/llvm-ranlib CC_FOR_BUILD=cc
 # PIC since GHC also links hevm as a shared library; GMP raises SIGFPE on division by zero
 export CFLAGS="-O2 -fPIC -D_WASI_EMULATED_SIGNAL" LIBS="-lwasi-emulated-signal"
 
+# fetch SHA256 URL...: the first URL that works, as mirrors fail at times
 fetch() {
-  local url=$1 sha=$2 file=$work/src/$(basename "$1")
-  [ -f "$file" ] || curl -fsSL -o "$file" "$url"
+  local sha=$1 file=$work/src/$(basename "$2")
+  shift
+  for url in "$@"; do
+    [ -f "$file" ] || curl -fsSL --retry 3 -o "$file" "$url" || rm -f "$file"
+  done
   echo "$sha  $file" | sha256sum -c --quiet
   tar -xf "$file" -C "$work/src"
 }
 
 if [ ! -f "$prefix/lib/libgmpxx.a" ]; then
-  fetch "https://ftp.gnu.org/gnu/gmp/gmp-$gmp_version.tar.xz" $gmp_sha256
+  fetch $gmp_sha256 "https://ftp.gnu.org/gnu/gmp/gmp-$gmp_version.tar.xz" \
+    "https://gmplib.org/download/gmp/gmp-$gmp_version.tar.xz"
   (cd "$work/src/gmp-$gmp_version" &&
     CXXFLAGS="$CFLAGS -fignore-exceptions" ./configure --host=none --build="$(./config.guess)" \
       --disable-assembly --enable-cxx --disable-shared --enable-static --prefix="$prefix" &&
@@ -37,7 +42,8 @@ if [ ! -f "$prefix/lib/libgmpxx.a" ]; then
 fi
 
 if [ ! -f "$prefix/lib/libmpfr.a" ]; then
-  fetch "https://ftp.gnu.org/gnu/mpfr/mpfr-$mpfr_version.tar.xz" $mpfr_sha256
+  fetch $mpfr_sha256 "https://ftp.gnu.org/gnu/mpfr/mpfr-$mpfr_version.tar.xz" \
+    "https://www.mpfr.org/mpfr-$mpfr_version/mpfr-$mpfr_version.tar.xz"
   (cd "$work/src/mpfr-$mpfr_version" &&
     ./configure --host=wasm32-unknown-wasi --build="$(./config.guess)" \
       --with-gmp="$prefix" --disable-shared --enable-static --disable-thread-safe \

@@ -53,11 +53,12 @@ install solidity separately.
 
 hevm builds to WebAssembly (WASI) with the
 [ghc-wasm-meta](https://gitlab.haskell.org/haskell-wasm/ghc-wasm-meta) GHC 9.12
-toolchain, installed under `~/.ghc-wasm` (or `$GHC_WASM`). Since wasm cannot start
+toolchain, which `wasm/setup-toolchain.sh` installs at a pinned version into
+`dist-wasm/toolchain` (or set `$GHC_WASM` to use another). Since wasm cannot start
 processes, bitwuzla is compiled to wasm too and linked into hevm:
 ```
 $ wasm/build.sh
-$ wasmtime run --dir . dist-wasm/hevm.wasm symbolic --code 0x600035602a14600a57005bfe
+$ dist-wasm/toolchain/wasmtime/bin/wasmtime run --dir . dist-wasm/hevm.wasm symbolic --code 0x600035602a14600a57005bfe
 ```
 
 `wasm/build-solver.sh`, which `wasm/build.sh` runs first, builds GMP, MPFR and
@@ -68,9 +69,10 @@ debugger server, and does not support the BN254 precompiles (`ECADD`, `ECMUL`,
 `ECPAIRING`). An error inside bitwuzla aborts hevm, as wasi-sdk has no C++
 exceptions.
 
-`web/` is a website that runs `hevm.wasm` in the browser:
+`web/` is a website that compiles Solidity with soljson and runs `hevm.wasm` on it in
+the browser, showing counterexamples at their place in the source:
 ```
-$ cd web && npm install && npm run wasm && npm run dev
+$ cd web && npm install && npm run assets && npm run dev
 ```
 
 `npm test` there runs the TypeScript tests: unit tests, `hevm.wasm` under Node, and,

@@ -5,43 +5,73 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>hevm in the browser</title>
   </head>
-  <body data-mode="symbolic">
+  <body data-tab="sol" data-mode="symbolic">
     <header>
       <h1>hevm <span>in the browser</span></h1>
       <p>
-        The <a href="https://github.com/argotorg/hevm">hevm</a> symbolic EVM and the
-        <a href="https://bitwuzla.github.io/">bitwuzla</a> SMT solver, compiled to WebAssembly.
+        The <a href="https://github.com/argotorg/hevm">hevm</a> symbolic EVM, the
+        <a href="https://bitwuzla.github.io/">bitwuzla</a> SMT solver and the
+        <a href="https://soliditylang.org/">Solidity</a> compiler, all compiled to WebAssembly.
         Nothing leaves your machine.
       </p>
     </header>
+    <nav class="tabs" role="tablist">
+      <button type="button" role="tab" data-tab="sol">Solidity</button>
+      <button type="button" role="tab" data-tab="bytecode">Bytecode</button>
+    </nav>
     <main>
-      <form id="form">
-        <label class="row">
-          <span>Example</span>
-          <select id="example"></select>
-        </label>
-        <fieldset class="modes">
-          <label><input type="radio" name="mode" value="symbolic" checked /> Symbolic</label>
-          <label><input type="radio" name="mode" value="exec" /> Concrete</label>
-        </fieldset>
-        <label>
-          <span>Runtime bytecode</span>
-          <textarea id="code" rows="4" spellcheck="false"></textarea>
-        </label>
-        <label class="exec-only">
-          <span>Calldata</span>
-          <input id="calldata" spellcheck="false" placeholder="0x" />
-        </label>
-        <label class="symbolic-only">
-          <span>Function signature <small>(optional, e.g. <code>f(uint256)</code>)</small></span>
-          <input id="sig" spellcheck="false" />
-        </label>
-        <div class="actions">
-          <button id="run" type="submit">Run</button>
-          <span id="status"></span>
-        </div>
-      </form>
-      <section id="outcome" class="outcome"></section>
+      <section class="sol-only">
+        <form id="sol-form">
+          <label class="row">
+            <span>Example</span>
+            <select id="sol-example"></select>
+          </label>
+          <label>
+            <span>
+              Source
+              <small>contracts inheriting <code>Test</code> from <code>hevm/Test.sol</code> are tests;
+                hevm checks their <code>prove_</code> functions for all inputs</small>
+            </span>
+            <textarea id="source" rows="22" spellcheck="false"></textarea>
+          </label>
+          <div class="actions">
+            <button id="prove" type="submit">Prove</button>
+            <span id="sol-status" class="status"></span>
+          </div>
+        </form>
+        <section id="sol-results" class="results"></section>
+      </section>
+
+      <section class="bytecode-only">
+        <form id="form">
+          <label class="row">
+            <span>Example</span>
+            <select id="example"></select>
+          </label>
+          <fieldset class="modes">
+            <label><input type="radio" name="mode" value="symbolic" checked /> Symbolic</label>
+            <label><input type="radio" name="mode" value="exec" /> Concrete</label>
+          </fieldset>
+          <label>
+            <span>Runtime bytecode</span>
+            <textarea id="code" rows="4" spellcheck="false"></textarea>
+          </label>
+          <label class="exec-only">
+            <span>Calldata</span>
+            <input id="calldata" spellcheck="false" placeholder="0x" />
+          </label>
+          <label class="symbolic-only">
+            <span>Function signature <small>(optional, e.g. <code>f(uint256)</code>)</small></span>
+            <input id="sig" spellcheck="false" />
+          </label>
+          <div class="actions">
+            <button id="run" type="submit">Run</button>
+            <span id="status" class="status"></span>
+          </div>
+        </form>
+        <section id="outcome" class="outcome"></section>
+      </section>
+
       <details>
         <summary>hevm output</summary>
         <pre id="log"></pre>

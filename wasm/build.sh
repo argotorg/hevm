@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# Builds hevm.wasm with ghc-wasm-meta's GHC 9.12 toolchain. Usage: [JOBS=n] wasm/build.sh [cabal build args]
+# Builds hevm.wasm with the toolchain of wasm/setup-toolchain.sh, or the one in $GHC_WASM. Usage: [JOBS=n] wasm/build.sh [cabal build args]
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-wasm_dir=${GHC_WASM:-$HOME/.ghc-wasm}
+if [ -z "${GHC_WASM:-}" ]; then
+  wasm/setup-toolchain.sh
+fi
+wasm_dir=${GHC_WASM:-$PWD/dist-wasm/toolchain}
+export GHC_WASM=$wasm_dir
 . "$wasm_dir/env"
 
 deps=dist-wasm/deps
