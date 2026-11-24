@@ -41,6 +41,7 @@ jobs:
           # requires-python = ">=3.12"
           # dependencies = ["pyyaml"]
           # ///
+          import re
           import yaml
 
           with open('stack.yaml', 'r') as f:
@@ -48,8 +49,11 @@ jobs:
 
           deps = data.get('extra-deps', [])
           deps = [d for d in deps if not (isinstance(d, str) and 'hevm' in d)
-                                  and not (isinstance(d, dict) and 'git' in d and 'hevm' in d['git'])]
+                                  and not (isinstance(d, dict) and 'git' in d and 'hevm' in d['git'])
+                                  and not (isinstance(d, str) and re.match(r'^tasty-[0-9]', d))]
           deps.insert(0, './hevm')
+          # hevm's test-utils library requires a newer tasty than Echidna's snapshot.
+          deps.append('tasty-1.5.4')
           data['extra-deps'] = deps
 
           with open('stack.yaml', 'w') as f:

@@ -65,6 +65,9 @@ data Call = Call
   , timestamp :: Expr EWord
   , blockNumber :: Expr EWord
   , origin :: Expr EAddr
+  -- | Relative to the state before this call, which may have been changed by
+  -- warp/roll cheatcodes in the preceding call.
+  , delay :: (Expr EWord, Expr EWord)
   }
 
 -- | Context for generated transactions. Bounds are per transaction. With no
@@ -265,7 +268,8 @@ nextStatesWith solvers post fetcher iterConf conf senders targets visited st
           PLEq (Sub blockNumber st.vm.block.number) (Lit limit)]) conf.maxBlockDelay
         origin = if conf.callerIsOrigin then caller else st.vm.tx.origin
     (cd, props, _) <- symCalldataNamed ("call" <> n <> "-") True (callSig target.sig) types [] (AbstractBuf ("txdata" <> n))
-    let call = Call { target, caller, calldata = cd, timestamp, blockNumber, origin }
+    let call = Call { target, caller, calldata = cd, timestamp, blockNumber, origin,
+          delay = (Sub timestamp st.vm.block.timestamp, Sub blockNumber st.vm.block.number) }
         entry = target.contractName <> "." <> callSig target.sig
     vm <- liftIO $ stToIO $ flip execStateT st.vm $ do
       assign (#block % #timestamp) timestamp

@@ -70,6 +70,19 @@ tests = testGroup "framework-independent driver"
       result <- searchInvariant solvers (Fetch.oracle solvers Nothing Fetch.noRpc) defaultVeriOpts
         cache (1, 1) (property initial "clock")
       assertBoolM "time or number can falsify the property without a storage write" (not $ isNothing result.counterexample)
+  , test "delays account for preceding warp and roll cheatcodes" $ withDefaultSolver $ \solvers -> do
+      initial <- fixture
+      let target = Target initial.state.contract "Native" (Sig "jump" [])
+          options = ExplorationConfig [target] (OneOf [0x10000])
+            (CallConfig maxBound (Just 0) (Just 0) True) (\_ _ -> PBool True) False
+          fetcher = Fetch.oracle solvers Nothing Fetch.noRpc
+      cache <- newExploration options (symbolify initial)
+      result <- searchInvariant solvers fetcher defaultVeriOpts cache (0, 2) (property initial "valid")
+      cex <- maybe (internalError "expected a two-call counterexample") pure result.counterexample
+      calls <- concretizeCalls initial.block cex.model (cex.state.calls <> [cex.call]) >>= either internalError pure
+      assertEqualM "cheatcode changes do not become additional delays" [(0, 0), (0, 0), (0, 0)] (map (.delay) calls)
+      assertEqualM "timestamps include preceding warp calls" [0, 7, 14] (map (.timestamp) calls)
+      assertEqualM "block numbers include preceding roll calls" [0, 3, 6] (map (.blockNumber) calls)
   ]
 
 property :: VM Concrete -> T.Text -> Check
@@ -85,7 +98,8 @@ returnsTrue _ = \case
 fixture :: App m => m (VM Concrete)
 fixture = do
   Just code <- solidity "Native" $ T.unlines
-    [ "contract Native {"
+    [ "interface Vm { function warp(uint256) external; function roll(uint256) external; }"
+    , "contract Native {"
     , "  uint256 count;"
     , "  function advance(uint256 n) public {"
     , "    require(n == count + 1); require(tx.origin == msg.sender); count = n;"
@@ -93,6 +107,10 @@ fixture = do
     , "  function valid() public view returns (bool) { return count < 2; }"
     , "  function context() public view returns (bool) { return msg.sender == address(0xcafe) && tx.origin == msg.sender; }"
     , "  function noop() public {}"
+    , "  function jump() public {"
+    , "    Vm vm = Vm(address(uint160(uint256(keccak256('hevm cheat code')))));"
+    , "    vm.warp(block.timestamp + 7); vm.roll(block.number + 3); count++;"
+    , "  }"
     , "  function clock() public view returns (bool) { return block.number == 0 && block.timestamp == 0; }"
     , "}"
     ]

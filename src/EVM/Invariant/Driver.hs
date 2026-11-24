@@ -135,7 +135,7 @@ checkInvariant :: App m => SolverGroup -> Fetcher Symbolic m -> VeriOpts -> Chec
 checkInvariant solvers fetcher opts check st = do
   let initial = maybe st.vm (\a -> st.vm & set (#tx % #origin) a) check.origin
       call = Call check.target check.caller (fst check.calldata) initial.block.timestamp
-        initial.block.number initial.tx.origin
+        initial.block.number initial.tx.origin (Lit 0, Lit 0)
   vm <- liftIO $ stToIO $ execStateT
     (startCall check.target.addr check.caller check.gas (callSig check.target.sig) check.calldata) initial
   (ends, results) <- verify solvers fetcher opts vm check.postcondition Nothing
@@ -167,7 +167,7 @@ searchInvariant solvers fetcher opts exploration (first, lastDepth) check = go (
         Nothing -> visit depth ps es rest
 
 -- | A replayable zero-value transaction, including decoded ABI arguments and
--- delays relative to the preceding call (or the supplied initial block).
+-- delays relative to the state before each call, including prior cheatcodes.
 data ConcreteCall = ConcreteCall
   { target :: Addr
   , caller :: Addr
@@ -207,10 +207,8 @@ concretizeCalls block model = go (forceLit block.timestamp) (forceLit block.numb
             target <- address call.target.addr
             caller <- address call.caller
             origin <- address call.origin
-            if timestamp < time || blockNumber < number
-              then Left "invariant counterexample has decreasing block context"
-              else Right ConcreteCall { target, caller, origin, sig = call.target.sig, arguments, calldata,
-                timestamp, blockNumber, delay = (timestamp - time, blockNumber - number) }
+            Right ConcreteCall { target, caller, origin, sig = call.target.sig, arguments, calldata,
+              timestamp, blockNumber, delay = (wordValue 0 $ fst call.delay, wordValue 0 $ snd call.delay) }
       case materialized of
         Left err -> pure $ Left err
         Right concrete -> fmap (concrete :) <$> go timestamp blockNumber rest
