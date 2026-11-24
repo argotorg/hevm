@@ -166,7 +166,7 @@ commonOptions = CommonOptions
   <*> (switch $ long "serve" <> help "Serve the progress of the run over HTTP on localhost, at /progress")
   <*> (option auto $ long "port" <> showDefault <> value defaultDebuggerPort <> help "Port for --interactive and --serve, 0 picks a free one")
   <*> (option auto $ long "interactive-snapshot-every" <> showDefault <> value snapshotInterval <> help "Steps between the debugger's snapshots: fewer make going back faster and use more memory")
-  <*> (switch $ long "check-static-branches" <> help "Internal check, slow: ask the solver to confirm every branch side that exploration drops by simplification alone")
+  <*> (switch $ long "check-static-branches" <> help "Slow: ask the solver about every branch that exploration decides by simplification alone. A dropped side that is reachable is an error; a side kept that the solver rules out is logged as a static-missed event in the progress log, and counted per location in its summary")
 
 data CommonExecOptions = CommonExecOptions
   { address       ::Maybe Addr
