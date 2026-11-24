@@ -19,6 +19,7 @@ module EVM.Expr.RewriteFuzz
 
 import Prelude hiding (LT, GT)
 
+import Control.Monad (foldM)
 import Data.Bits (shiftL, shiftR, testBit, (.&.), (.|.), xor, complement, countLeadingZeros)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -78,12 +79,12 @@ prop_folding = forAll (sized $ \n -> genShapedWord (min n 40)) $ \e -> forAll (g
 -- | The bounds that the simplifier derives are sound: under bound props that
 -- hold in the environment, every subterm's value is within them
 prop_bounds :: Property
-prop_bounds = forAllShrink (sized $ \n -> genShapedWord (min n 40)) shrinkWord $ \e ->
+prop_bounds = forAllShrink (sized $ \n -> oneof [genShapedWord (min n 40), genSignedWord]) shrinkWord $ \e ->
   forAll (genEnv e) $ \env ->
     let vals = [(t, v) | t <- take 30 (nub (foldExpr (maybe [] pure . Expr.asWord) [] e)), Just v <- [evalWord env t]]
     in forAll (genFacts vals) $ \facts ->
-      let bs = Expr.propBounds facts
-          inBounds = [ counterexample ("propBounds: " <> show t <> " = " <> show v <> " outside " <> show (lb, ub, ex)) $
+      let bs = Expr.shiftedBounds facts
+          inBounds = [ counterexample ("shiftedBounds: " <> show t <> " = " <> show v <> " outside " <> show (lb, ub, ex)) $
                          lb <= v && v <= ub && Prelude.not (v `elem` ex)
                      | (t, v) <- vals, Just (Expr.Bounds lb ub ex) <- [Map.lookup t bs] ]
           uppers = [ counterexample ("upperWithBounds: " <> show t <> " = " <> show v <> " > " <> show u) $ v <= u
@@ -411,6 +412,23 @@ shrinkProp = \case
 varNames :: [Text]
 varNames = ["a", "b", "c", "d"]
 
+-- | Words as Solidity's signed range checks build them: sign-extended values, offset
+-- by literals, and small signed values reduced mod a small number
+genSignedWord :: Gen (Expr EWord)
+genSignedWord = do
+  v <- Var <$> elements varNames
+  k <- Lit <$> elements [0, 1, 2, 3]
+  small <- Lit . fromIntegral <$> choose (-300, 300 :: Int)
+  small' <- Lit . fromIntegral <$> choose (-300, 300 :: Int)
+  n <- Lit . fromIntegral <$> choose (1, 300 :: Int)
+  big <- Lit <$> elements [2 ^ (255 :: Int), 2 ^ (23 :: Int), 2 ^ (255 :: Int) - 1, 0]
+  let s = SEx k v
+  elements
+    [ s, Add big s, Sub big s, Not s, Sub big (Not s)
+    , SEx k (Add small (Mod (Add small' s) n))
+    , Sub (Lit 0) (SEx k (Add small (Mod v n)))
+    ]
+
 genSpecialLit :: Gen W256
 genSpecialLit = frequency
   [ (3, fromIntegral <$> choose (0 :: Int, 40))
@@ -476,6 +494,11 @@ genTemplate s shiftAmt = oneof
   , LT <$> lit <*> (And <$> lit <*> s)
   , litOp' <*> lit <*> ite, litOp' <*> ite <*> lit, litOp' <*> ite <*> ite
   , IsZero <$> ite, Not <$> ite
+  , litOp' <*> lit <*> iteTree, litOp' <*> iteTree <*> lit, litOp' <*> iteTree <*> iteTree
+  -- past the leaf limit of folding into ITEs, alone and as a product
+  , litOp' <*> fullTree 4 <*> fullTree 4, IsZero <$> fullTree 8
+  , IsZero <$> iteTree, Not <$> iteTree
+  , litOp' <*> mergedChain <*> elements [Lit 0, Lit 1, Lit 128]
   , ITE <$> (IsZero <$> s) <*> s <*> s
   , ITE <$> s <*> elements [Lit 0, Lit 1] <*> elements [Lit 0, Lit 1]
   , shared
@@ -520,8 +543,26 @@ genTemplate s shiftAmt = oneof
       ys' <- shuffle ys
       pure $ Sub (foldr1 Add (take 6 xs')) (foldr1 Add (take 6 ys'))
     -- literal branches, sharing a condition from a small set so that ITEs pair up
-    ite = ITE <$> elements [Var "a", LT (Var "a") (Var "b"), IsZero (Var "c")] <*> lit <*> lit
-    litOp' = elements [Add, Sub, Mul, Exp, Div, Mod, And, Or, Xor, Eq, LT, SLT, SHL, SHR, SAR]
+    ite = ITE <$> iteCond <*> lit <*> lit
+    iteCond = elements [Var "a", LT (Var "a") (Var "b"), IsZero (Var "c")]
+    iteTree = choose (1, 4 :: Int) >>= tree
+      where tree 0 = lit
+            tree d = oneof [lit, ITE <$> iteCond <*> tree (d - 1) <*> tree (d - 1)]
+    -- distinct conditions per level, so no branches merge
+    fullTree :: Int -> Gen (Expr EWord)
+    fullTree 0 = lit
+    fullTree d = ITE (Var (varNames !! (d `mod` 4)) `Eq` Lit (fromIntegral d)) <$> fullTree (d - 1) <*> fullTree (d - 1)
+    -- a value updated under a condition per step, as merging the branches of
+    -- `if (x & bit != 0) r = r * c >> 128` makes it
+    mergedChain = do
+      n <- choose (1, 5 :: Int)
+      start <- lit
+      foldM (\r c -> do
+                op <- litOp'
+                k <- lit
+                pure (ITE c (SHR (Lit 128) (op r k)) r))
+            start =<< vectorOf n iteCond
+    litOp' =elements [Add, Sub, Mul, Exp, Div, Mod, And, Or, Xor, Eq, LT, SLT, SHL, SHR, SAR]
     lit = Lit <$> genSpecialLit
     pow2 = Lit . (2 ^) <$> choose (0 :: Int, 255)
     litOp = elements [Add, Sub, Xor, Mul]
@@ -608,7 +649,10 @@ genShapedProp n = frequency
   , (2, PNeg <$> p), (2, PAnd <$> p <*> p), (2, POr <$> p <*> p), (1, PImpl <$> p <*> p)
   , (2, overflowCheck)
   , (2, mulOverflowCheck)
+  , (2, literalMulCheck)
+  , (2, pinnedTerm)
   , (2, scalingUnderBounds)
+  , (2, maskUnderBounds)
   , (2, complementary)
   , (2, PEq <$> lit <*> ite), (1, PLT <$> lit <*> ite), (1, PLT <$> ite <*> lit)
   , (1, PLEq <$> lit <*> ite), (1, PLEq <$> ite <*> lit)
@@ -649,6 +693,10 @@ genShapedProp n = frequency
       bd <- case bx of
         Lit c | c > 0 -> frequency [(3, (\o -> Lit (Expr.maxLit `div` c + o)) <$> elements [-1, 0, 1]), (1, lit)]
         _ -> lit
+      -- d bounded directly or through another variable
+      dBound <- do
+        y <- var
+        elements [PLEq d bd, PAnd (PLEq d y) (PLEq y bd)]
       -- bounds on the variables, which bound compound x and d through their structure
       va <- var
       ba <- frequency [(3, Lit . (\k -> 2 ^ k - 1) <$> choose (0 :: Int, 256)), (1, lit)]
@@ -657,7 +705,38 @@ genShapedProp n = frequency
       let z = PEq (Lit 0) d
           guardW = Or (Eq x (Div prod d)) (IsZero d)
       g <- elements [POr eq z, POr z eq, eq, PNeg eq, PEq (Lit 0) guardW, PNeg (PEq (Lit 0) guardW)]
-      pure $ PAnd (PLEq va ba) (PAnd (PLEq x bx) (PAnd (PLEq d bd) g))
+      pure $ PAnd (PLEq va ba) (PAnd (PLEq x bx) (PAnd dBound g))
+    -- a compound term fixed by one prop and used in another, as an index a path picked
+    pinnedTerm = do
+      t <- frequency [(2, Mod <$> w <*> lit), (1, w)]
+      c <- frequency [(2, Lit <$> elements [0, 1, 2]), (1, lit)]
+      v <- w
+      q <- elements [PLT t v, PLEq v t, PEq v (Add t v), PEq (Lit 0) (Sub t v), PLT (Add (Lit 7) t) v]
+      elements [PAnd (PEq c t) q, PAnd q (PEq t c), PAnd (PNeg (PEq c t)) q, POr (PEq c t) q]
+    -- Solidity's checked multiplication by a literal, also with c * (b * x) folded into
+    -- (b * c) * x, next to a bound around where it overflows so values there are tried
+    literalMulCheck = do
+      let power = (10 ^) <$> choose (0 :: Int, 40)
+          k = frequency [(3, power), (2, genSpecialLit), (1, fromIntegral <$> choose (1 :: Int, 300))]
+      x <- frequency [(3, Var <$> elements varNames), (1, w)]
+      c <- k
+      b <- k
+      let y = Mul (Lit b) x
+          backEq = elements [PEq (Div (Mul (Lit c) x) (Lit c)) x, PEq x (Div (Mul (Lit c) x) (Lit c))]
+          guardOn v num = do
+            let eq = PEq (Lit c) (Div num v)
+                z = PEq (Lit 0) v
+            elements [POr eq z, POr z eq]
+      -- y = d + x, where simplification distributes c * y, and the check without its y == 0 half
+      d <- k
+      let shifted = Add (Lit d) x
+          lone v = pure (PEq (Lit c) (Div (Expr.simplify (Mul (Lit c) v)) v))
+      g <- oneof [ backEq, guardOn x (Mul (Lit c) x), guardOn y (Mul (Lit (b * c)) x), guardOn y (Mul (Lit c) y)
+                 , guardOn shifted (Expr.simplify (Mul (Lit c) shifted)), lone x, lone y, lone shifted ]
+      o <- elements [-1, 0, 1]
+      bv <- elements [x, y]
+      let near = if c == 0 then Lit 0 else Lit (Expr.maxLit `div` c + o)
+      elements [g, PNeg g, PAnd (PLEq bv near) g, PAnd (PLEq bv near) (PNeg g)]
     -- literal scaling of a variable bounded directly or through another one, around where it overflows
     scalingUnderBounds = do
       let var = Var <$> elements varNames
@@ -672,6 +751,23 @@ genShapedProp n = frequency
       side <- elements [op (Div (Mul (Lit a) x) (Lit b)) other, op other (Div (Mul (Lit a) x) (Lit b))]
       bound <- elements [PLEq x (Lit bx), PAnd (PLEq y (Lit bx)) (PLEq x y), PAnd (PLT y (Lit bx)) (PLT x y)]
       pure $ PAnd bound side
+    -- a bit test of a signed word under a range check, as a bounded tick's bits are tested
+    maskUnderBounds = do
+      x <- genSignedWord
+      l <- choose (-300, 300 :: Int)
+      h <- choose (l, 300)
+      off <- elements [2 ^ (255 :: Int), 2 ^ (23 :: Int), 0]
+      let at i = Lit (off + fromIntegral i)
+          shifted = Add (Lit off) x
+      range <- elements
+        [ PAnd (PLEq (at l) shifted) (PLEq shifted (at h))
+        , PAnd (PLT (at l) shifted) (PLT shifted (at h))
+        , PAnd (PLEq x (Lit Expr.maxLitSigned)) (PLEq (at l) shifted) ]
+      bit <- (2 ^) <$> choose (0 :: Int, 24)
+      test <- elements
+        [ PEq (Lit 0) (And (Lit bit) x), PNeg (PEq (Lit 0) (And (Lit bit) x))
+        , PEq (Lit 0) (And (Lit (bit - 1)) x), PLT (And (Lit (2 * bit - 1)) x) (Lit bit) ]
+      pure (PAnd range test)
     w = genShapedWord (n `div` 2)
     p = genShapedProp (n `div` 2)
 
