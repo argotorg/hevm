@@ -97,7 +97,7 @@ returnsTrue _ = \case
 
 fixture :: App m => m (VM Concrete)
 fixture = do
-  Just code <- solidity "Native" $ T.unlines
+  compiled <- solidity "Native" $ T.unlines
     [ "interface Vm { function warp(uint256) external; function roll(uint256) external; }"
     , "contract Native {"
     , "  uint256 count;"
@@ -114,5 +114,5 @@ fixture = do
     , "  function clock() public view returns (bool) { return block.number == 0 && block.timestamp == 0; }"
     , "}"
     ]
-  Just vm <- loadVM code
-  pure vm
+  code <- maybe (internalError "could not compile native invariant fixture") pure compiled
+  loadVM code >>= maybe (internalError "could not deploy native invariant fixture") pure

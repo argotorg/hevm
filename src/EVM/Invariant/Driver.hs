@@ -101,7 +101,9 @@ exploreLevel solvers fetcher iterConf exploration depth
               { states = [], probes = foldl' addProbe old.probes result.probes }
           pure result.states
   where
+    addProbe :: [Probe] -> Probe -> [Probe]
     addProbe found p = if any (sameFunction p) found then found else found <> [p]
+    sameFunction :: Probe -> Probe -> Bool
     sameFunction a b = case (reverse a.state.calls, reverse b.state.calls) of
       (x:_, y:_) -> x.target.addr == y.target.addr && callSig x.target.sig == callSig y.target.sig
       _ -> False
@@ -212,6 +214,7 @@ concretizeCalls block model = go (forceLit block.timestamp) (forceLit block.numb
       case materialized of
         Left err -> pure $ Left err
         Right concrete -> fmap (concrete :) <$> go timestamp blockNumber rest
+    wordValue :: W256 -> Expr EWord -> W256
     wordValue fallback expression = case Expr.simplify <$> subModel model expression of
       Right (Lit value) -> value
       _ -> fallback
