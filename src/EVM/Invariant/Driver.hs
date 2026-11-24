@@ -26,7 +26,7 @@ import Control.Monad.State.Strict (execStateT, get)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.IORef (IORef, newIORef, readIORef, modifyIORef')
-import Data.List (foldl')
+import Data.List qualified as List
 import Data.Map qualified as Map
 import Data.Maybe (listToMaybe)
 import Data.Set (Set)
@@ -98,7 +98,7 @@ exploreLevel solvers fetcher iterConf exploration depth
           liftIO $ do
             modifyIORef' exploration.levels (<> [result.states])
             modifyIORef' exploration.outcomes $ \old -> (old <> result)
-              { states = [], probes = foldl' addProbe old.probes result.probes }
+              { states = [], probes = List.foldl' addProbe old.probes result.probes }
           pure result.states
   where
     addProbe :: [Probe] -> Probe -> [Probe]
