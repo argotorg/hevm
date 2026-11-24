@@ -6,6 +6,7 @@ import { preview, type PreviewServer } from "vite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { examples } from "../src/examples";
 import { solExamples } from "../src/solExamples";
+import { eqExamples } from "../src/eqExamples";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const chrome = process.env.CHROME ?? "/usr/bin/chromium";
@@ -73,15 +74,18 @@ describe.skipIf(!ready)("website in Chromium", () => {
       await page.click('.tabs [data-tab="sol"]');
       await page.selectOption("#sol-example", String(solExamples.findIndex((e) => e.name === "Sorting network")));
       await page.click("#prove");
-      // a live update: the run takes seconds, the counters move before it ends
-      await page.waitForFunction(() => {
+      // a live update: the run takes seconds, the counters move before it ends, and the bar
+      // names the function being checked
+      const label = await page.waitForFunction(() => {
         const bar = document.querySelector("#sol-progress .bar.busy");
         const dd = [...document.querySelectorAll("#sol-progress .counters dt")].find((d) => d.textContent === "Paths");
-        return bar && Number(dd?.nextElementSibling?.textContent) > 0;
+        const label = bar?.querySelector(".label")?.textContent ?? "";
+        return Number(dd?.nextElementSibling?.textContent) > 0 && /^prove_\w+ · [12] of 2$/.test(label) && label;
       });
+      expect(await label.jsonValue()).toMatch(/^prove_(sorted|permutation) /);
       expect(await page.locator("#prove").isDisabled()).toBe(true);
       await idle("prove");
-      expect(await page.textContent("#sol-progress .what")).toBe("Done");
+      expect(await page.textContent("#sol-progress .label")).toBe("Done: 2 of 2 functions");
       expect(await page.locator("#sol-progress .bar.busy").count()).toBe(0);
       expect(await page.locator("#sol-progress .counters").textContent()).toContain("Functions2 / 2");
     });
@@ -184,6 +188,52 @@ describe.skipIf(!ready)("website in Chromium", () => {
     });
   });
 
+  describe("Equivalence", () => {
+    async function check(name: string) {
+      await page.click('.tabs [data-tab="eq"]');
+      await page.selectOption("#eq-example", String(eqExamples.findIndex((e) => e.name === name)));
+      await page.click("#eq-check");
+      await idle("eq-check");
+      return page.locator("#eq-results .card");
+    }
+
+    it("proves two contracts equivalent", async () => {
+      const card = await check("Branch-free min and max");
+      expect(await card.locator(".badge").textContent()).toBe("EQUIVALENT");
+      expect(await page.textContent("#eq-status")).toMatch(/^Equivalent — /);
+    });
+
+    it("shows an input where they differ, and what each does", async () => {
+      const card = await check("Forgot the zero case");
+      expect(await card.locator(".badge").textContent()).toBe("DIFFERENT");
+      expect(await card.locator("dd").first().textContent()).toBe("isPowerOfTwo(0)");
+      expect(await card.textContent()).toContain("Carefulreturns false");
+      expect(await card.textContent()).toContain("Forgetfulreturns true");
+    });
+
+    it("runs a program on the input in the Bytecode tab", async () => {
+      const card = await check("Forgot the zero case");
+      await card.getByRole("button", { name: "Run Forgetful in Bytecode tab" }).click();
+      expect(await page.getAttribute("body", "data-tab")).toBe("bytecode");
+      await page.click("#run");
+      await idle("run");
+      expect(await page.textContent("#outcome code")).toBe("0x" + "1".padStart(64, "0"));
+    });
+
+    it("offers the contracts of the source, and one for the compiler comparisons", async () => {
+      await page.click('.tabs [data-tab="eq"]');
+      await page.selectOption("#eq-example", String(eqExamples.findIndex((e) => e.name === "Legacy codegen vs via-IR")));
+      expect(await page.locator("#eq-b-field").isHidden()).toBe(true);
+      await page.selectOption("#eq-mode", "contracts");
+      expect(await page.locator("#eq-b-field").isVisible()).toBe(true);
+      await page.click("#eq-source .cm-content");
+      await page.keyboard.press("Control+End");
+      await page.keyboard.type("\ncontract Other {}\n");
+      expect(await page.locator("#eq-b option").allTextContents()).toEqual(["Packing", "Other"]);
+      expect(await page.inputValue("#eq-b")).toBe("Other");
+    });
+  });
+
   describe("Layout", () => {
     async function boxes(width: number) {
       const p = await browser.newPage({ viewport: { width, height: 900 } });
@@ -212,6 +262,17 @@ describe.skipIf(!ready)("website in Chromium", () => {
       await p.waitForFunction(() => !(document.getElementById("prove") as HTMLButtonElement).disabled);
       expect(await p.locator("#sol-results .excerpt").count()).toBeGreaterThan(0);
       const [scroll, width] = await p.evaluate(() => [document.documentElement.scrollWidth, window.innerWidth]);
+      await p.close();
+      expect(scroll).toBeLessThanOrEqual(width);
+    });
+
+    it("fits all the tabs on a phone", async () => {
+      const p = await browser.newPage({ viewport: { width: 360, height: 700 } });
+      await p.goto(server.resolvedUrls!.local[0]!);
+      const [scroll, width] = await p.evaluate(() => {
+        const tabs = document.querySelector(".tabs")!;
+        return [tabs.scrollWidth, tabs.clientWidth];
+      });
       await p.close();
       expect(scroll).toBeLessThanOrEqual(width);
     });

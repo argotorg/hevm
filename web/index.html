@@ -18,6 +18,7 @@
     <nav class="tabs" role="tablist">
       <button type="button" role="tab" data-tab="sol">Solidity</button>
       <button type="button" role="tab" data-tab="debug">Debugger</button>
+      <button type="button" role="tab" data-tab="eq">Equivalence</button>
       <button type="button" role="tab" data-tab="bytecode">Bytecode</button>
     </nav>
     <main>
@@ -33,7 +34,7 @@
               <small>contracts inheriting <code>Test</code> from <code>hevm/Test.sol</code> are tests;
                 hevm checks their <code>prove_</code> functions for all inputs</small>
             </span>
-            <div id="source"></div>
+            <div id="source" class="editor"></div>
           </div>
           <div class="actions">
             <button id="prove" type="submit">Prove</button>
@@ -42,6 +43,47 @@
         </form>
         <section id="sol-progress" class="progress" hidden></section>
         <section id="sol-results" class="results"></section>
+      </section>
+
+      <section class="eq-only">
+        <form id="eq-form">
+          <label class="row">
+            <span>Example</span>
+            <select id="eq-example"></select>
+          </label>
+          <div class="eq-pick">
+            <label>
+              <span>Compare</span>
+              <select id="eq-mode">
+                <option value="contracts">Two contracts</option>
+                <option value="optimizer">One contract, optimizer off and on</option>
+                <option value="via-ir">One contract, legacy codegen and via-IR</option>
+              </select>
+            </label>
+            <label>
+              <span id="eq-a-label">Contract A</span>
+              <select id="eq-a"></select>
+            </label>
+            <label id="eq-b-field">
+              <span>Contract B</span>
+              <select id="eq-b"></select>
+            </label>
+          </div>
+          <div class="field">
+            <span>
+              Source
+              <small>hevm checks that A and B behave the same on every call, for all arguments:
+                the same return data or revert, and the same storage writes</small>
+            </span>
+            <div id="eq-source" class="editor"></div>
+          </div>
+          <div class="actions">
+            <button id="eq-check" type="submit">Check equivalence</button>
+            <span id="eq-status" class="status"></span>
+          </div>
+        </form>
+        <section id="eq-progress" class="progress" hidden></section>
+        <section id="eq-results" class="results"></section>
       </section>
 
       <section class="bytecode-only">

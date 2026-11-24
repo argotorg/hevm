@@ -34,11 +34,14 @@ const failing = StateField.define<DecorationSet>({
 export class SolidityEditor {
   readonly view: EditorView;
 
-  constructor(parent: HTMLElement, doc: string) {
+  constructor(parent: HTMLElement, doc: string, onChange?: (text: string) => void) {
+    const changes = EditorView.updateListener.of((u) => {
+      if (u.docChanged) onChange?.(u.state.doc.toString());
+    });
     this.view = new EditorView({
       parent,
       doc,
-      extensions: [basicSetup, keymap.of([indentWithTab]), solidity, syntaxHighlighting(classHighlighter), failing, colors],
+      extensions: [basicSetup, keymap.of([indentWithTab]), solidity, syntaxHighlighting(classHighlighter), failing, colors, changes],
     });
   }
 

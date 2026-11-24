@@ -52,18 +52,25 @@ interface Bytecode {
 interface ContractOutput {
   abi: unknown[];
   storageLayout?: unknown;
-  evm: { bytecode: Bytecode; deployedBytecode: Bytecode };
+  evm: { bytecode: Bytecode; deployedBytecode: Bytecode; methodIdentifiers?: Record<string, string> };
 }
 
 export function solcVersion(solc: Soljson): string {
   return solc.cwrap("solidity_version", "string", [])() as string;
 }
 
-export function compileStandard(solc: Soljson, sources: Source[]): StandardOutput {
+export interface CompileSettings {
+  optimize?: boolean;
+  viaIR?: boolean;
+}
+
+export function compileStandard(solc: Soljson, sources: Source[], settings: CompileSettings = {}): StandardOutput {
   const input = {
     language: "Solidity",
     sources: Object.fromEntries(sources.map((s) => [s.path, { content: s.content }])),
     settings: {
+      optimizer: { enabled: settings.optimize ?? false, runs: 200 },
+      viaIR: settings.viaIR ?? false,
       outputSelection: {
         "*": {
           "*": [
@@ -74,6 +81,7 @@ export function compileStandard(solc: Soljson, sources: Source[]): StandardOutpu
             "evm.deployedBytecode.object",
             "evm.deployedBytecode.sourceMap",
             "evm.deployedBytecode.immutableReferences",
+            "evm.methodIdentifiers",
           ],
           "": ["ast"],
         },
@@ -93,9 +101,9 @@ export interface Project {
 }
 
 /** Compiles the sources, with the Test base, into a project for `hevm test --root` */
-export function compileProject(solc: Soljson, sources: Source[]): Project {
+export function compileProject(solc: Soljson, sources: Source[], settings?: CompileSettings): Project {
   const all = [...sources, testBase];
-  const out = compileStandard(solc, all);
+  const out = compileStandard(solc, all, settings);
   const errors: CompileError[] = (out.errors ?? []).map((e) => ({
     severity: e.severity,
     message: e.message,
@@ -119,6 +127,7 @@ export function compileProject(solc: Soljson, sources: Source[]): Project {
           sourceMap: c.evm.deployedBytecode.sourceMap,
           immutableReferences: c.evm.deployedBytecode.immutableReferences ?? {},
         },
+        methodIdentifiers: c.evm.methodIdentifiers ?? {},
         ast: src.ast,
         id: src.id,
       });

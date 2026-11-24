@@ -1,9 +1,9 @@
 import { runHevm, type Files, type ProgressEvent, type RunResult } from "./hevm";
-import { compileProject, type Project, type Soljson, type Source } from "./solc";
+import { compileProject, type CompileSettings, type Project, type Soljson, type Source } from "./solc";
 
 export type WorkerRequest = { id: number; wasmUrl: string; solcUrl: string } & (
   | { kind: "hevm"; args: string[]; files?: Files; stream?: boolean }
-  | { kind: "compile"; sources: Source[] }
+  | { kind: "compile"; sources: Source[]; settings?: CompileSettings }
 );
 
 /** Sent while hevm runs, before its WorkerResponse */
@@ -29,7 +29,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
   try {
     if (req.kind === "compile") {
       solc ??= loadSolc(req.solcUrl);
-      const project = compileProject(await solc, req.sources);
+      const project = compileProject(await solc, req.sources, req.settings);
       self.postMessage({ id: req.id, ok: true, project } satisfies WorkerResponse);
     } else {
       hevm ??= WebAssembly.compileStreaming(fetch(req.wasmUrl));

@@ -24,6 +24,8 @@ export interface Stats {
   results: Record<string, number>;
   elapsed: number;
   finished: boolean;
+  /** the phase hevm is in, e.g. "explore A" */
+  phase?: string;
 }
 
 export function newStats(): Stats {
@@ -52,6 +54,7 @@ export function onProgress(s: Stats, e: ProgressEvent) {
   const num = (k: string) => (typeof e[k] === "number" ? (e[k] as number) : 0);
   switch (e.ev) {
     case "phase-start":
+      s.phase = String(e.phase);
       if (e.phase === "test") {
         s.tests.push({ name: String(e.test ?? ""), paths: 0, forks: 0, queries: 0, solveSecs: 0, cex: 0 });
       }

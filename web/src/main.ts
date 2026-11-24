@@ -1,64 +1,21 @@
 import "./style.css";
-import { buildArgs, parseOutcome, progressPath, stripAnsi, type Files, type Mode, type Outcome, type Request, type RunResult } from "./hevm";
+import { buildArgs, parseOutcome, progressPath, stripAnsi, type Mode, type Outcome, type Request } from "./hevm";
+import { compile, onHevmOutput, runHevm } from "./client";
+import { $, button, el } from "./dom";
+import { setupEquivalence } from "./eqTab";
 import { examples } from "./examples";
 import { SolidityEditor } from "./editor";
 import { segments, tokens } from "./highlight";
 import { newStats, onProgress, onStdout, testsDone, type Stats } from "./progress";
 import { describeResult, parseTestOutput, type TestResult } from "./results";
 import { solExamples } from "./solExamples";
-import type { CompileError, Project, Source } from "./solc";
+import type { CompileError, Project } from "./solc";
 import type { DebugSession } from "./debugger-page";
-import type { WorkerRequest, WorkerResponse, WorkerStream } from "./worker";
+import type { WorkerStream } from "./worker";
 
-const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const log = $<HTMLElement>("log");
+onHevmOutput((text) => (log.textContent = text));
 const sourcePath = "src/Main.sol";
-
-// --- the worker, which compiles and runs hevm ---
-
-const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
-// relative to the page: the worker's own URL is under assets/
-const urls = {
-  wasmUrl: new URL("hevm.wasm", document.baseURI).href,
-  solcUrl: new URL("soljson.js", document.baseURI).href,
-};
-let nextId = 0;
-type OnStream = (m: WorkerStream) => void;
-const pending = new Map<number, { resolve: (r: WorkerResponse) => void; onStream?: OnStream }>();
-worker.onmessage = (e: MessageEvent<WorkerResponse | WorkerStream>) => {
-  const p = pending.get(e.data.id);
-  if ("stream" in e.data) {
-    p?.onStream?.(e.data);
-  } else {
-    p?.resolve(e.data);
-    pending.delete(e.data.id);
-  }
-};
-
-type Body = { kind: "hevm"; args: string[]; files?: Files; stream?: boolean } | { kind: "compile"; sources: Source[] };
-
-function call(body: Body, onStream?: OnStream): Promise<WorkerResponse> {
-  const id = nextId++;
-  return new Promise((resolve) => {
-    pending.set(id, { resolve, onStream });
-    worker.postMessage({ id, ...urls, ...body } as WorkerRequest);
-  });
-}
-
-async function runHevm(args: string[], files?: Files, onStream?: OnStream): Promise<RunResult> {
-  const res = await call({ kind: "hevm", args, files, stream: onStream !== undefined }, onStream);
-  if (!res.ok) throw new Error(res.error);
-  if (!("result" in res)) throw new Error("unexpected worker reply");
-  log.textContent = stripAnsi([res.result.stdout, res.result.stderr].filter(Boolean).join("\n"));
-  return res.result;
-}
-
-async function compile(sources: Source[]): Promise<Project> {
-  const res = await call({ kind: "compile", sources });
-  if (!res.ok) throw new Error(res.error);
-  if (!("project" in res)) throw new Error("unexpected worker reply");
-  return res.project;
-}
 
 // --- tabs ---
 
@@ -107,13 +64,6 @@ function openInBytecode(t: TestResult, calldata?: string) {
   showTab("bytecode");
 }
 
-function button(label: string, onClick: () => void) {
-  const b = el("button", "secondary", label);
-  b.type = "button";
-  b.addEventListener("click", onClick);
-  return b;
-}
-
 // --- Solidity ---
 
 const solForm = $<HTMLFormElement>("sol-form");
@@ -122,13 +72,6 @@ const prove = $<HTMLButtonElement>("prove");
 const solStatus = $<HTMLElement>("sol-status");
 const solResults = $<HTMLElement>("sol-results");
 const solProgress = $<HTMLElement>("sol-progress");
-
-function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string) {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text !== undefined) e.textContent = text;
-  return e;
-}
 
 /** A few highlighted lines of the source around a line, marked from the column on */
 function excerpt(text: string, line: number, column: number, length: number) {
@@ -230,17 +173,20 @@ solExample.addEventListener("change", () => {
 
 const fmt = (secs: number) => (secs < 10 ? secs.toFixed(2) : secs.toFixed(1)) + "s";
 
-function renderProgress(stats: Stats, running: boolean, elapsed: number) {
+function renderProgress(stats: Stats, running: boolean, elapsed: number, phase = "Starting…") {
   const done = testsDone(stats);
   const current = stats.tests.at(-1);
+  const checking = running && current && current.secs === undefined ? current : undefined;
   const bar = el("div", "bar");
   const fill = el("div", "fill");
   fill.style.width = stats.total ? `${(100 * done) / stats.total}%` : "0";
-  bar.append(fill);
+  const label = checking
+    ? `${checking.name.split("(")[0]} · ${done + 1} of ${stats.total || "?"}`
+    : running ? phase : `Done: ${done} of ${stats.total} functions`;
+  const name = el("span", "label", label);
+  if (checking) name.title = checking.name;
+  bar.append(fill, name);
   bar.classList.toggle("busy", running);
-  const what = running && current && current.secs === undefined
-    ? `Checking ${current.name}`
-    : running ? "Starting…" : "Done";
   const counters = el("dl", "counters");
   const add = (k: string, v: string) => {
     const item = el("div");
@@ -253,7 +199,7 @@ function renderProgress(stats: Stats, running: boolean, elapsed: number) {
   add("SMT queries", stats.queriesDone + (stats.queriesInFlight ? ` (+${stats.queriesInFlight} running)` : ""));
   add("Solver time", fmt(stats.solveSecs));
   add("Elapsed", fmt(elapsed));
-  solProgress.replaceChildren(el("p", "what", what), bar, counters);
+  solProgress.replaceChildren(bar, counters);
   solProgress.hidden = false;
 }
 
@@ -301,8 +247,10 @@ solForm.addEventListener("submit", async (e) => {
   };
   let frame = 0;
   const elapsed = () => (performance.now() - started) / 1000;
+  let phase = "Compiling…";
   // hevm reports nothing while the solver works, the clock keeps going
-  const clock = setInterval(() => renderProgress(stats, true, elapsed()), 250);
+  const clock = setInterval(() => renderProgress(stats, true, elapsed(), phase), 250);
+  renderProgress(stats, true, 0, phase);
   const onStream = (m: WorkerStream) => {
     if ("stdout" in m) {
       stdout.push(m.stdout);
@@ -313,7 +261,7 @@ solForm.addEventListener("submit", async (e) => {
     // at most once a frame, however fast hevm reports
     frame ||= requestAnimationFrame(() => {
       frame = 0;
-      renderProgress(stats, true, elapsed());
+      renderProgress(stats, true, elapsed(), phase);
       showTests();
     });
   };
@@ -330,7 +278,8 @@ solForm.addEventListener("submit", async (e) => {
       return;
     }
     solStatus.textContent = "Proving…";
-    renderProgress(stats, true, elapsed());
+    phase = "Starting hevm…";
+    renderProgress(stats, true, elapsed(), phase);
     const run = await runHevm(["test", "--root", "/", "--progress-log", progressPath], project.files, onStream);
     cancelAnimationFrame(frame);
     clearInterval(clock);
@@ -447,3 +396,11 @@ form.addEventListener("submit", async (e) => {
 
 examples.forEach((ex, i) => example.add(new Option(ex.name, String(i))));
 load(examples[0]!.request);
+
+setupEquivalence({
+  openInBytecode(code, calldata) {
+    load({ mode: "exec", code, calldata });
+    outcome.replaceChildren();
+    showTab("bytecode");
+  },
+});
