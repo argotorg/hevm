@@ -284,6 +284,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of simplifying an ITE of them.
 
 ## Fixed
+- In the progress log, an invariant test's `phase-end` event counts its
+  counterexample and inconclusive checks, as other tests' do.
 - `ECADD`, `ECMUL` and `ECPAIRING` set up libff on every call, which now and then
   corrupted the heap and crashed hevm; it is set up once.
 - Under a non-UTF-8 locale, e.g. `LANG` unset in Docker, printing a non-ASCII

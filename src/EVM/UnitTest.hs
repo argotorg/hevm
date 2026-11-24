@@ -908,7 +908,8 @@ invariantRun opts ctx (nth, numTests) sig@(Sig testName types) = do
                       (is', Just c) -> pure (Just c, is <> is')
                       (is', Nothing) -> firstCex (is <> is') rest
                 firstCex issues states
-      (found, issues) <- Progress.withPhase "test" ["test" JSON..= cs] (const []) $ do
+      let summary (found', issues') = [k JSON..= n | (k, n) <- [("cex", length (maybeToList found')), ("unknown", length issues')], n > 0]
+      (found, issues) <- Progress.withPhase "test" ["test" JSON..= cs] summary $ do
         Progress.phaseTotal numTests
         Progress.phaseAt nth
         go 0 []
