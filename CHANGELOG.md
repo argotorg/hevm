@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- Experimental WebAssembly (WASI) build via `wasm/build.sh`, for concrete
+  execution only.
 - Arithmetic abstraction now handles `MULMOD`, with exact 512-bit refinement,
   and adds cancellation, div/mod identity and multiplication/division round-trip lemmas.
 - A memory offset or size that depends on a subterm with at most

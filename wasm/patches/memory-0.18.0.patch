@@ -1,0 +1,53 @@
+diff --color -W 78 -ruN wasm-pristine/memory-0.18.0/Data/Memory/Internal/CompatPrim64.hs wasm-src/memory-0.18.0/Data/Memory/Internal/CompatPrim64.hs
+--- a/Data/Memory/Internal/CompatPrim64.hs
++++ b/Data/Memory/Internal/CompatPrim64.hs
+@@ -150,6 +150,9 @@
+ w64# w _ _ = w
+ 
+ #elif WORD_SIZE_IN_BITS == 32
++#if __GLASGOW_HASKELL__ >= 904
++import GHC.Prim
++#else
+ import GHC.IntWord64
+ import GHC.Prim (Word#)
+ 
+@@ -158,6 +161,7 @@
+     let !ai = word64ToInt64# a
+         !bi = word64ToInt64# b
+      in int64ToWord64# (timesInt64# ai bi)
++#endif
+ 
+ w64# :: Word# -> Word# -> Word# -> Word64#
+ w64# _ hw lw =
+diff --color -W 78 -ruN wasm-pristine/memory-0.18.0/Data/Memory/PtrMethods.hs wasm-src/memory-0.18.0/Data/Memory/PtrMethods.hs
+--- a/Data/Memory/PtrMethods.hs
++++ b/Data/Memory/PtrMethods.hs
+@@ -114,7 +114,13 @@
+             loop (i+1) (acc .|. e)
+ 
+ foreign import ccall unsafe "memset"
+-    c_memset :: Ptr Word8 -> Word8 -> CSize -> IO ()
++    raw_memset :: Ptr Word8 -> Word8 -> CSize -> IO (Ptr Word8)
++
++c_memset :: Ptr Word8 -> Word8 -> CSize -> IO ()
++c_memset p w n = raw_memset p w n >> return ()
+ 
+ foreign import ccall unsafe "memcpy"
+-    c_memcpy :: Ptr Word8 -> Ptr Word8 -> CSize -> IO ()
++    raw_memcpy :: Ptr Word8 -> Ptr Word8 -> CSize -> IO (Ptr Word8)
++
++c_memcpy :: Ptr Word8 -> Ptr Word8 -> CSize -> IO ()
++c_memcpy d s' n = raw_memcpy d s' n >> return ()
+diff --color -W 78 -ruN wasm-pristine/memory-0.18.0/memory.cabal wasm-src/memory-0.18.0/memory.cabal
+--- a/memory.cabal
++++ b/memory.cabal
+@@ -79,6 +79,9 @@
+   -- ARCH_ENDIAN_UNKNOWN
+   if (arch(i386) || arch(x86_64))
+     CPP-options:     -DARCH_IS_LITTLE_ENDIAN
++  if arch(wasm32)
++    cc-options:      -D_WASI_EMULATED_MMAN
++    extra-libraries: wasi-emulated-mman
+   if os(windows)
+     Other-modules:   Data.Memory.MemMap.Windows
+   else

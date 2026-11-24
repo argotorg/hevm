@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 -- | Minimal HTTP+JSON API for debugging sessions and run progress, bound to
 -- localhost. Clients, such as hevm-web-ui, format what it sends.
 -- Hand-rolled on top of 'network' to avoid pulling a web framework into hevm.
@@ -25,10 +26,14 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8With, encodeUtf8)
 import Data.Text.Encoding.Error (lenientDecode)
+#if !defined(wasm32_HOST_ARCH)
 import Network.Socket
 import Network.Socket.ByteString (recv, sendAll)
+#endif
 import System.IO (hFlush, stdout)
+#if !defined(wasm32_HOST_ARCH)
 import System.Timeout (timeout)
+#endif
 
 import EVM.Debugger
 import EVM.Effects (App)
@@ -79,6 +84,9 @@ withProgressServer port onListen act = withRunInIO $ \runInIO -> do
   runInIO act `finally` (tryPutMVar done () >> takeMVar stopped)
 
 serveRoutes :: Int -> (Int -> IO ()) -> MVar () -> [Route] -> IO ()
+#if defined(wasm32_HOST_ARCH)
+serveRoutes _ _ _ _ = throwIO (userError "the debugger server needs sockets, which the wasm build lacks")
+#else
 serveRoutes port onListen done routes = do
   addr : _ <- getAddrInfo (Just defaultHints { addrFlags = [AI_NUMERICHOST, AI_NUMERICSERV], addrSocketType = Stream })
                           (Just "127.0.0.1") (Just (show port))
@@ -95,6 +103,7 @@ serveRoutes port onListen done routes = do
       (conn, _) <- accept sock
       void $ forkIO $ handleConn hosts (dispatch routes) conn `finally` close conn
     takeMVar done `finally` killThread acceptor
+#endif
 
 dispatch :: [Route] -> Request -> IO Response
 dispatch routes req = case (req.method, req.path) of
@@ -109,6 +118,7 @@ announce port = do
   putStrLn $ "hevm debugger at http://127.0.0.1:" <> show port
   hFlush stdout
 
+#if !defined(wasm32_HOST_ARCH)
 handleConn :: [ByteString] -> (Request -> IO Response) -> Socket -> IO ()
 handleConn hosts handler conn = do
   r <- try (timeout 30000000 (readRequest conn))
@@ -151,6 +161,7 @@ readRequest conn = go BS.empty
       (x : _) -> x
       [] -> ""
     maxSize = 1024 * 1024
+#endif
 
 renderResponse :: Response -> ByteString
 renderResponse r = BS.concat

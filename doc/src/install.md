@@ -48,3 +48,18 @@ See [Forge std-test tutorial](./std-test-tutorial.md) for details.
 
 Note that Foundry provides the solidity compiler, hence there is no need to
 install solidity separately.
+
+# WebAssembly Build (Experimental)
+
+hevm builds to WebAssembly (WASI) with the
+[ghc-wasm-meta](https://gitlab.haskell.org/haskell-wasm/ghc-wasm-meta) GHC 9.12
+toolchain, installed under `~/.ghc-wasm` (or `$GHC_WASM`):
+```
+$ wasm/build.sh
+$ wasmtime run --dir . dist-wasm/hevm.wasm exec --code 0x602060002060005260206000f3
+```
+
+The build applies the patches in `wasm/patches` to dependencies that do not yet
+build for 32-bit wasm. It only does concrete execution: it cannot start SMT
+solvers, `solc` or `forge`, has no RPC and no debugger server, and does not
+support the BN254 precompiles (`ECADD`, `ECMUL`, `ECPAIRING`).

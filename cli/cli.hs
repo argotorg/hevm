@@ -1,5 +1,6 @@
 -- Main file of the hevm CLI program
 
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE TemplateHaskell #-}
@@ -531,6 +532,12 @@ equivalence eqOpts cOpts = do
       CannotReplay _ -> "\x1b[33m[" <> replayTag r <> "]\x1b[0m"
 
 getSolver :: Text -> IO Solver
+#if defined(wasm32_HOST_ARCH)
+getSolver "empty" = pure EmptySolver
+getSolver _ = do
+  putStrLn "Error: the wasm build cannot start SMT solvers, so it can only run concrete execution (hevm exec)."
+  exitFailure
+#else
 getSolver s = case T.unpack s of
   "z3" -> onPath "z3" Z3
   "cvc5" -> onPath "cvc5" CVC5
@@ -546,6 +553,7 @@ getSolver s = case T.unpack s of
         putStrLn $ "Error: the SMT solver " <> name <> " is not installed (not found in PATH). "
           <> "Install it, or pick another one with --solver (bitwuzla, z3, or cvc5)."
         exitFailure
+#endif
 
 getSrcInfo :: App m => ProjectType -> CommonOptions -> m DappInfo
 getSrcInfo projectType cOpts = do

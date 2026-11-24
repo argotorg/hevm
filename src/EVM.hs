@@ -1462,7 +1462,7 @@ executePrecompile preCompileAddr gasCap inOffset inSize outOffset outSize xs  = 
                          assign (#state % #returndata) mempty
                          pushTrace $ ErrorTrace PrecompileFailure
                          next
-  if preCompileAddr > 0x9 then notImplemented
+  if preCompileAddr > 0x9 || not (EVM.Precompiled.supported (fromIntegral preCompileAddr)) then notImplemented
   else if not (enoughGas cost gasCap) then
     burn' gasCap $ do
       assign' (#state % #stack) (Lit 0 : xs)

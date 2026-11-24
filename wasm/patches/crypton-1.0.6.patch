@@ -1,0 +1,13 @@
+diff --color -W 78 -ruN wasm-pristine/crypton-1.0.6/crypton.cabal wasm-src/crypton-1.0.6/crypton.cabal
+--- a/crypton.cabal
++++ b/crypton.cabal
+@@ -407,6 +407,9 @@
+         if arch(i386)
+             cc-options: -msse2
+ 
++    if arch(wasm32)
++        cc-options: -DARGON2_NO_THREADS
++
+     if os(windows)
+         cpp-options:     -DWINDOWS
+         other-modules:   Crypto.Random.Entropy.Windows

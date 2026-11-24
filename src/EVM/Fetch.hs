@@ -1,4 +1,5 @@
 
+{-# LANGUAGE CPP #-}
 module EVM.Fetch
   ( fetchContractWithSession
   , fetchAccountWithSession
@@ -67,8 +68,10 @@ import Data.Maybe (fromMaybe, fromJust, isNothing)
 import Data.Set qualified as Set
 import Data.Set (Set)
 import Data.Vector qualified as RegularVector
+#if !defined(wasm32_HOST_ARCH)
 import Network.Wreq
 import Network.Wreq.Session qualified as NetSession
+#endif
 import System.Environment (lookupEnv, getEnvironment)
 import System.Process
 import Control.Monad.IO.Class
@@ -93,8 +96,15 @@ data FetchResult a
   | FetchError Text
   deriving (Show, Eq)
 
+#if defined(wasm32_HOST_ARCH)
+-- wasm has no sockets, so the wasm build has no RPC
+newtype NetSession = NetSession ()
+#else
+type NetSession = NetSession.Session
+#endif
+
 data Session = Session
-  { sess            :: NetSession.Session
+  { sess            :: NetSession
   , latestBlockNum  :: MVar (Maybe W256)
   , sharedCache     :: MVar FetchCache
   , cacheDir        :: Maybe FilePath
@@ -365,17 +375,21 @@ fetchWithRetry debug url session x = withRetry debug session.retryDelay session.
     Left (Just err) | rateLimited err -> throwIO (RateLimited (pack (show err)))
     r -> pure (first rpcError r)
 
-fetchWithSession :: Text -> NetSession.Session -> Value -> IO (Either Text Value)
+fetchWithSession :: Text -> NetSession -> Value -> IO (Either Text Value)
 fetchWithSession url sess x = first rpcError <$> postRpc url sess x
 
 -- | The result of a JSON-RPC request, or its error, if any
-postRpc :: Text -> NetSession.Session -> Value -> IO (Either (Maybe Value) Value)
+postRpc :: Text -> NetSession -> Value -> IO (Either (Maybe Value) Value)
+#if defined(wasm32_HOST_ARCH)
+postRpc _ _ _ = pure $ Left (Just (String "RPC is not supported in the wasm build"))
+#else
 postRpc url sess x = do
   r <- asValue =<< NetSession.post sess (unpack url) x
   let body = r ^. (lensVL responseBody)
   pure $ case body ^? key "result" of
     Just val -> Right val
     Nothing -> Left (body ^? key "error")
+#endif
 
 rpcError :: Maybe Value -> Text
 rpcError = maybe "Unknown RPC error" (pack . show)
@@ -559,7 +573,7 @@ getCacheState sess = do
 
   pure (allContracts, allSlots)
 
-fetchSlotWithSession :: NetSession.Session -> BlockNumber -> Text -> Addr -> W256 -> IO (Either Text W256)
+fetchSlotWithSession :: NetSession -> BlockNumber -> Text -> Addr -> W256 -> IO (Either Text W256)
 fetchSlotWithSession sess n url addr slot =
   fetchQuery n (fetchWithSession url sess) (QuerySlot addr slot)
 
@@ -637,7 +651,11 @@ fetchChainId conf sess url = fetchQuery Latest (fetchWithRetry conf.debug url se
 
 mkSession :: App m => Maybe FilePath -> Maybe W256 -> m Session
 mkSession cacheDir mblock = do
+#if defined(wasm32_HOST_ARCH)
+  let sess = NetSession ()
+#else
   sess <- liftIO NetSession.newAPISession
+#endif
   initialCache <- case (cacheDir, mblock) of
       (Just dir, Just block) -> liftIO $ loadCache dir block
       _ -> pure emptyCache

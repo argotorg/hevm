@@ -8,6 +8,7 @@ result-*
 # cabal
 dist/
 dist-newstyle/
+dist-wasm/
 .configured
 cabal.project.local*
 

@@ -1,0 +1,162 @@
+diff --color -W 78 -ruN wasm-pristine/basement-0.0.16/Basement/Bits.hs wasm-src/basement-0.0.16/Basement/Bits.hs
+--- a/Basement/Bits.hs
++++ b/Basement/Bits.hs
+@@ -53,8 +53,10 @@
+ import GHC.Int
+ import Basement.Compat.Primitive
+ 
+-#if WORD_SIZE_IN_BITS < 64
++#if WORD_SIZE_IN_BITS < 64 && __GLASGOW_HASKELL__ < 904
+ import GHC.IntWord64
++#elif WORD_SIZE_IN_BITS < 64
++import GHC.Prim hiding (word64ToWord#)
+ #endif
+ 
+ -- | operation over finite bits
+diff --color -W 78 -ruN wasm-pristine/basement-0.0.16/Basement/Numerical/Additive.hs wasm-src/basement-0.0.16/Basement/Numerical/Additive.hs
+--- a/Basement/Numerical/Additive.hs
++++ b/Basement/Numerical/Additive.hs
+@@ -29,8 +29,10 @@
+ import qualified Basement.Types.Word128 as Word128
+ import qualified Basement.Types.Word256 as Word256
+ 
+-#if WORD_SIZE_IN_BITS < 64
++#if WORD_SIZE_IN_BITS < 64 && __GLASGOW_HASKELL__ < 904
+ import           GHC.IntWord64
++#elif WORD_SIZE_IN_BITS < 64
++import GHC.Prim hiding (word64ToWord#)
+ #endif
+ 
+ -- | Represent class of things that can be added together,
+diff --color -W 78 -ruN wasm-pristine/basement-0.0.16/Basement/Numerical/Conversion.hs wasm-src/basement-0.0.16/Basement/Numerical/Conversion.hs
+--- a/Basement/Numerical/Conversion.hs
++++ b/Basement/Numerical/Conversion.hs
+@@ -25,7 +25,7 @@
+ import GHC.Word
+ import Basement.Compat.Primitive
+ 
+-#if WORD_SIZE_IN_BITS < 64
++#if WORD_SIZE_IN_BITS < 64 && __GLASGOW_HASKELL__ < 904
+ import GHC.IntWord64
+ #endif
+ 
+@@ -70,7 +70,7 @@
+ word64ToWord (W64# i) = W# i
+ #endif
+ #else
+-word64ToWord (W64# i) = W# (word64ToWord# i)
++word64ToWord (W64# i) = W# (GHC.Prim.word64ToWord# i)
+ #endif
+ 
+ word64ToInt64 :: Word64 -> Int64
+@@ -99,6 +99,10 @@
+ word64ToWord# :: Word# -> Word#
+ word64ToWord# i = i
+ {-# INLINE word64ToWord# #-}
++#else
++word64ToWord# :: Word# -> Word#
++word64ToWord# i = i
++{-# INLINE word64ToWord# #-}
+ #endif
+ 
+ -- | 2 Word32s
+@@ -114,7 +118,7 @@
+ #endif
+ #else
+ word64ToWord32s :: Word64 -> Word32x2
+-word64ToWord32s (W64# w64) = Word32x2 (W32# (word64ToWord# (uncheckedShiftRL64# w64 32#))) (W32# (word64ToWord# w64))
++word64ToWord32s (W64# w64) = Word32x2 (W32# (wordToWord32# (GHC.Prim.word64ToWord# (uncheckedShiftRL64# w64 32#)))) (W32# (wordToWord32# (GHC.Prim.word64ToWord# w64)))
+ #endif
+ 
+ wordToChar :: Word -> Char
+diff --color -W 78 -ruN wasm-pristine/basement-0.0.16/Basement/PrimType.hs wasm-src/basement-0.0.16/Basement/PrimType.hs
+--- a/Basement/PrimType.hs
++++ b/Basement/PrimType.hs
+@@ -53,8 +53,10 @@
+ import           Basement.Nat
+ import qualified Prelude (quot)
+ 
+-#if WORD_SIZE_IN_BITS < 64
++#if WORD_SIZE_IN_BITS < 64 && __GLASGOW_HASKELL__ < 904
+ import           GHC.IntWord64
++#elif WORD_SIZE_IN_BITS < 64
++import GHC.Prim hiding (word64ToWord#)
+ #endif
+ 
+ #ifdef FOUNDATION_BOUNDS_CHECK
+diff --color -W 78 -ruN wasm-pristine/basement-0.0.16/Basement/Terminal/Size.hsc wasm-src/basement-0.0.16/Basement/Terminal/Size.hsc
+--- a/Basement/Terminal/Size.hsc
++++ b/Basement/Terminal/Size.hsc
+@@ -12,6 +12,9 @@
+ import           Prelude (fromIntegral)
+ 
+ #include "foundation_system.h"
++#ifdef __wasi__
++#undef FOUNDATION_SYSTEM_UNIX
++#endif
+ #ifdef FOUNDATION_SYSTEM_WINDOWS
+ 
+ import           System.Win32.Types (HANDLE, BOOL)
+diff --color -W 78 -ruN wasm-pristine/basement-0.0.16/Basement/Types/OffsetSize.hs wasm-src/basement-0.0.16/Basement/Types/OffsetSize.hs
+--- a/Basement/Types/OffsetSize.hs
++++ b/Basement/Types/OffsetSize.hs
+@@ -69,8 +69,10 @@
+ import Data.List (foldl')
+ import qualified Prelude
+ 
+-#if WORD_SIZE_IN_BITS < 64
++#if WORD_SIZE_IN_BITS < 64 && __GLASGOW_HASKELL__ < 904
+ import GHC.IntWord64
++#elif WORD_SIZE_IN_BITS < 64
++import GHC.Prim hiding (word64ToWord#)
+ #endif
+ 
+ -- | File size in bytes
+@@ -225,7 +227,7 @@
+ 
+ csizeOfSize :: CountOf Word8 -> CSize
+ #if WORD_SIZE_IN_BITS < 64
+-csizeOfSize (CountOf (I# sz)) = CSize (W32# (int2Word# sz))
++csizeOfSize (CountOf (I# sz)) = CSize (W32# (wordToWord32# (int2Word# sz)))
+ #else
+ #if __GLASGOW_HASKELL__ >= 904
+ csizeOfSize (CountOf (I# sz)) = CSize (W64# (wordToWord64# (int2Word# sz)))
+@@ -238,7 +240,7 @@
+ 
+ csizeOfOffset :: Offset8 -> CSize
+ #if WORD_SIZE_IN_BITS < 64
+-csizeOfOffset (Offset (I# sz)) = CSize (W32# (int2Word# sz))
++csizeOfOffset (Offset (I# sz)) = CSize (W32# (wordToWord32# (int2Word# sz)))
+ #else
+ #if __GLASGOW_HASKELL__ >= 904
+ csizeOfOffset (Offset (I# sz)) = CSize (W64# (wordToWord64# (int2Word# sz)))
+@@ -250,7 +252,7 @@
+ sizeOfCSSize :: CSsize -> CountOf Word8
+ sizeOfCSSize (CSsize (-1))      = error "invalid size: CSSize is -1"
+ #if WORD_SIZE_IN_BITS < 64
+-sizeOfCSSize (CSsize (I32# sz)) = CountOf (I# sz)
++sizeOfCSSize (CSsize (I32# sz)) = CountOf (I# (int32ToInt# sz))
+ #else
+ #if __GLASGOW_HASKELL__ >= 904
+ sizeOfCSSize (CSsize (I64# sz)) = CountOf (I# (int64ToInt# sz))
+@@ -261,7 +263,7 @@
+ 
+ sizeOfCSize :: CSize -> CountOf Word8
+ #if WORD_SIZE_IN_BITS < 64
+-sizeOfCSize (CSize (W32# sz)) = CountOf (I# (word2Int# sz))
++sizeOfCSize (CSize (W32# sz)) = CountOf (I# (word2Int# (word32ToWord# sz)))
+ #else
+ #if __GLASGOW_HASKELL__ >= 904
+ sizeOfCSize (CSize (W64# sz)) = CountOf (I# (word2Int# (word64ToWord# sz)))
+diff --color -W 78 -ruN wasm-pristine/basement-0.0.16/cbits/foundation_system.h wasm-src/basement-0.0.16/cbits/foundation_system.h
+--- a/cbits/foundation_system.h
++++ b/cbits/foundation_system.h
+@@ -50,6 +50,8 @@
+ #elif __unix__ // all unices not caught above
+     #define FOUNDATION_SYSTEM_UNIX
+     // Unix
++#elif defined(__wasi__)
++    #define FOUNDATION_SYSTEM_UNIX
+ #elif defined(_POSIX_VERSION)
+     #define FOUNDATION_SYSTEM_UNIX
+     // POSIX

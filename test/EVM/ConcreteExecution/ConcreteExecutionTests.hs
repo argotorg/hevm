@@ -24,7 +24,8 @@ import EVM.Effects qualified as Effects
 import EVM.Exec (vmForEthrunCreation)
 import EVM.Expr (maybeLitByteSimp)
 import EVM.Fetch qualified as Fetch
-import EVM.Precompiled (execute)
+import EVM.Precompiled (execute, ecrecover)
+import EVM.Sign (sign)
 import EVM.Solidity (solcRuntime)
 import EVM.Stepper qualified
 import EVM.SymExec
@@ -35,6 +36,7 @@ import EVM (initialContract, makeVm, defaultVMOpts, traceForest)
 import EVM.Test.Helpers
 import Test.Tasty
 import Test.Tasty.HUnit
+import Test.Tasty.QuickCheck (Gen, testProperty, forAll, (===), choose, elements, oneof, vectorOf, arbitrary)
 
 type SourceCode = Text
 type ContractName = Text
@@ -188,6 +190,8 @@ tests = testGroup "Concrete execution tests"
               assertEqualM "fail because bit flip"
                 Nothing
                 (execute 1 (h <> v <> r <> s) 32)
+          , testProperty "haskell-matches-libsecp256k1" $ forAll ecrecoverInput $ \input ->
+              ecrecover input === execute 1 input 32
           ]
       , testGroup "Unimplemented"
           [ test "concrete-call-gives-nonexistent-precompile" $ forM_ [0x0a, 0x10, 0x11, 0x100 :: Addr] $ \a -> do
@@ -326,3 +330,26 @@ consoleLogExample = [here|
     }
   }
 |]
+
+-- | Signatures, corruptions of them, and values at the bounds ecrecover checks
+ecrecoverInput :: Gen ByteString
+ecrecoverInput = do
+  sk <- choose (1, secp256k1N - 1)
+  h <- BS.pack <$> vectorOf 32 arbitrary
+  let (v, r, s) = sign (word h) sk
+      signed = h <> word256Bytes (fromIntegral v) <> word256Bytes r <> word256Bytes s
+      setWord k w = BS.take (32 * k) signed <> word256Bytes w <> BS.drop (32 * (k + 1)) signed
+  oneof
+    [ pure signed
+    , do
+        k <- choose (0, 127)
+        b <- arbitrary
+        pure (BS.take k signed <> BS.singleton b <> BS.drop (k + 1) signed)
+    , setWord 1 <$> elements [0, 1, 26, 27, 28, 29, 0x100 + 27]
+    , do
+        k <- elements [2, 3]
+        setWord k <$> elements [0, 1, fromInteger secp256k1N - 1, fromInteger secp256k1N, fromInteger secp256k1N + 1, maxBound]
+    , BS.pack <$> vectorOf 128 arbitrary
+    ]
+  where
+    secp256k1N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141 :: Integer
