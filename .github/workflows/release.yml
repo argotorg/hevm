@@ -32,7 +32,7 @@ jobs:
         uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035 # v34
       - name: build hevm
         run: |
-          nix build .#redistributable --out-link hevm
+          nix build .#redistributable --out-link hevm ${{ runner.debug == '1' && '-L' || '' }}
           cp ./hevm/bin/hevm ./hevm-${{ matrix.suffix }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
