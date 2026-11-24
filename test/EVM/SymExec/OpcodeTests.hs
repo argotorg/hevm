@@ -2,13 +2,16 @@
 
 module EVM.SymExec.OpcodeTests (tests) where
 
+import Control.Monad (forM_)
 import Control.Monad.ST (stToIO)
 import Control.Monad.State.Strict
 import Data.Bits hiding (And, Xor)
+import Data.ByteString qualified as BS
 import Data.List qualified as List
 import Data.Map.Strict qualified as Map
 import Data.Maybe
 import Data.String.Here
+import Data.Vector.Storable qualified as VS
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -30,7 +33,14 @@ import EVM.Test.Helpers
 
 tests :: [TestTree]
 tests =
-  [ testGroup "Symbolic execution"
+  [ testCase "memory-bytes-trims-zeros" $ do
+      let frozen bytes = stToIO $ VS.thaw (VS.fromList bytes) >>= memoryBytes
+      forM_ [([], []), ([0, 0], []), ([1, 0, 2, 0, 0], [1, 0, 2]), ([0, 3], [0, 3])] $ \(mem, kept) -> do
+        out <- frozen mem
+        assertEqual ("bytes of " <> show mem) (BS.pack kept) out
+        forM_ [0 .. length mem + 1] $ \n -> assertEqual "reads the same"
+          (Expr.readByte (Lit (fromIntegral n)) (ConcreteBuf (BS.pack mem))) (Expr.readByte (Lit (fromIntegral n)) (ConcreteBuf out))
+  , testGroup "Symbolic execution"
       [ test "jump-symbolic" $ do
       Just c <- solcRuntime "C"
         [i|
