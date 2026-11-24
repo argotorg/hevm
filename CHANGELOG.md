@@ -279,6 +279,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of simplifying an ITE of them.
 
 ## Fixed
+- `ECADD`, `ECMUL` and `ECPAIRING` set up libff on every call, which now and then
+  corrupted the heap and crashed hevm; it is set up once.
 - Under a non-UTF-8 locale, e.g. `LANG` unset in Docker, printing a non-ASCII
   character aborted the run. Such characters are now transliterated, and the
   progress lines use ASCII separators when stderr is not a terminal.

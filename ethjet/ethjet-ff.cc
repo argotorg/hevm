@@ -3,6 +3,8 @@
 #include <gmp.h>
 #include <stdio.h>
 
+#include <mutex>
+
 #include <libff/algebra/fields/bigint.hpp>
 #include <libff/algebra/curves/alt_bn128/alt_bn128_init.hpp>
 #include <libff/algebra/curves/alt_bn128/alt_bn128_g1.hpp>
@@ -13,10 +15,15 @@
 using namespace libff;
 
 namespace ethjet_ff {
+  // libff's parameters are globals, meant to be set up once: setting them up again on
+  // every call, as this did, corrupted the heap now and then
   void init() {
-    libff::inhibit_profiling_info     = true;
-    libff::inhibit_profiling_counters = true;
-    init_alt_bn128_params();
+    static std::once_flag once;
+    std::call_once(once, [] {
+      libff::inhibit_profiling_info     = true;
+      libff::inhibit_profiling_counters = true;
+      init_alt_bn128_params();
+    });
   }
 
   // for loading an element of F_q (a coordinate of G_1)

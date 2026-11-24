@@ -38,7 +38,7 @@ import Data.Word (Word64)
 import GHC.Generics (Generic)
 import System.Environment (getEnv)
 import System.FilePath.Find qualified as Find
-import System.FilePath.Posix (makeRelative)
+import System.FilePath.Posix (makeRelative, takeFileName, dropTrailingPathSeparator)
 import Witch (into, unsafeInto)
 import Witherable (Filterable, catMaybes)
 
@@ -118,7 +118,9 @@ prepareTests = do
   cases <- liftIO allTestCases
   let testCount = sum . fmap Map.size $ cases
   let expectedTestCount = 16989
-  when (testCount < expectedTestCount) $ internalError $ "Lower than expected number of tests!\nExpected: " <> (show expectedTestCount) <> "\nGot: " <> (show testCount)
+  -- a subdirectory of the fixtures can be run on its own
+  when (takeFileName (dropTrailingPathSeparator rootDir) == "blockchain_tests" && testCount < expectedTestCount) $
+    internalError $ "Lower than expected number of tests!\nExpected: " <> (show expectedTestCount) <> "\nGot: " <> (show testCount)
   groups <- forM (Map.toList cases) (\(f, subtests) -> testGroup (makeRelative rootDir f) <$> (process subtests))
   liftIO $ putStrLn "Loaded."
   pure $ testGroup "ethereum-tests" groups
