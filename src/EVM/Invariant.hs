@@ -9,11 +9,13 @@ module EVM.Invariant
   , Senders(..)
   , Probe(..)
   , CallConfig(..)
+  , ValueTransfer(..)
   , defaultCallConfig
   , Transition(..)
   , StateKey
   , stateKey
   , startCall
+  , startCallWithValue
   , nextStates
   , nextStatesWith
   , simplifyDisjunction
@@ -42,12 +44,13 @@ import EVM (clearTStorages, loadContract, resetState, pushTrace)
 import EVM.ABI (Sig(..), callSig)
 import EVM.Effects
 import EVM.Expr (simplifyProp)
+import EVM.Expr qualified as Expr
 import EVM.Fetch qualified as Fetch
 import EVM.Keccak.Preimages qualified as Preimages
 import EVM.Solvers (SolverGroup, checkSatWithProps, checkBranchSat)
 import EVM.SymExec (IterConfig, Postcondition, interpretVMAbortable, runExpr, extractProps, verifyResult)
 import EVM.SymExec.Calldata (symCalldataNamed)
-import EVM.Transaction (initTx)
+import EVM.Transaction (accountAt, initTx)
 import EVM.Traversals (foldExpr, foldProp)
 import EVM.Types
 
@@ -65,6 +68,8 @@ data Call = Call
   , timestamp :: Expr EWord
   , blockNumber :: Expr EWord
   , origin :: Expr EAddr
+  , value :: Expr EWord
+  , valueTransfer :: ValueTransfer
   -- | Relative to the state before this call, which may have been changed by
   -- warp/roll cheatcodes in the preceding call.
   , delay :: (Expr EWord, Expr EWord)
@@ -72,17 +77,25 @@ data Call = Call
 
 -- | Context for generated transactions. Bounds are per transaction. With no
 -- number bound the block number stays fixed; time is always monotone and below
--- 2^64. Value is currently zero. Caller-as-origin requires a finite sender list
+-- 2^64. Caller-as-origin requires a finite sender list
 -- so account lookup during transaction initialization stays concrete.
 data CallConfig = CallConfig
   { gas :: Word64
   , maxTimeDelay :: Maybe W256
   , maxBlockDelay :: Maybe W256
   , callerIsOrigin :: Bool
+  , maxValue :: W256
+  , valueTransfer :: ValueTransfer
   }
 
+-- | Normal transactions debit the origin and require sufficient funds.
+-- Some testing frameworks instead credit the target without debiting the
+-- sender. Keep this policy in the call so concrete replay uses the same model.
+data ValueTransfer = TransferValue | MintValue
+  deriving (Eq, Show)
+
 defaultCallConfig :: Word64 -> CallConfig
-defaultCallConfig gas = CallConfig gas Nothing Nothing False
+defaultCallConfig gas = CallConfig gas Nothing Nothing False 0 TransferValue
 
 -- | Outcomes of expanding a frontier. Inconclusive solver results must not
 -- be mistaken for successfully checked paths.
@@ -158,7 +171,12 @@ stateKey vm = StateKey accounts (Set.fromList (connected (foldMap accountAtoms a
 
 -- | Sets up a new transaction calling the given contract
 startCall :: VMOps t => Expr EAddr -> Expr EAddr -> Word64 -> Text -> (Expr Buf, [Prop]) -> EVM t ()
-startCall target caller gas entry (cd, props) = do
+startCall target caller gas = startCallWithValue target caller gas (Lit 0) TransferValue
+
+-- | Initialize call value before transferring funds. The caller must ensure
+-- a normal transfer is affordable; symbolic transitions add that constraint.
+startCallWithValue :: VMOps t => Expr EAddr -> Expr EAddr -> Word64 -> Expr EWord -> ValueTransfer -> Text -> (Expr Buf, [Prop]) -> EVM t ()
+startCallWithValue target caller gas value transfer entry (cd, props) = do
   resetState
   clearTStorages
   -- loop bounds count visits within one transaction
@@ -171,9 +189,14 @@ startCall target caller gas entry (cd, props) = do
   assign (#state % #calldata) cd
   #constraints %= (<> props)
   assign (#state % #caller) caller
+  assign (#state % #callvalue) value
   assign (#state % #gas) (toGas gas)
   pushTrace (EntryTrace entry)
-  modify initTx
+  modify $ \vm -> case transfer of
+    TransferValue -> initTx vm
+    -- Restore the debited value after initTx. Its reversion snapshot remains
+    -- untouched, so reverting a mint does not leave extra funds in the origin.
+    MintValue -> initTx vm & over (#env % #contracts % ix vm.tx.origin % #balance) (`Expr.add` value)
 
 -- | What of a VM at the end of a successful call the next call can see
 endState :: VM Symbolic -> VM Symbolic
@@ -267,15 +290,23 @@ nextStatesWith solvers post fetcher iterConf conf senders targets visited st
         numberProps = maybe [] (\limit -> [PLEq st.vm.block.number blockNumber,
           PLEq (Sub blockNumber st.vm.block.number) (Lit limit)]) conf.maxBlockDelay
         origin = if conf.callerIsOrigin then caller else st.vm.tx.origin
+        value = if conf.maxValue == 0 then Lit 0 else Var ("value" <> n)
+        balance = view (accountAt origin % #balance) st.vm.env.contracts
+        gasCost = Lit (st.vm.tx.gasprice * fromIntegral st.vm.tx.gaslimit)
+        valueProps = [PLEq value (Lit conf.maxValue)] <>
+          [p | conf.maxValue /= 0 && conf.valueTransfer == TransferValue
+             , p <- [PLEq gasCost balance, PLEq value (Expr.sub balance gasCost)]]
     (cd, props, _) <- symCalldataNamed ("call" <> n <> "-") True (callSig target.sig) types [] (AbstractBuf ("txdata" <> n))
-    let call = Call { target, caller, calldata = cd, timestamp, blockNumber, origin,
+    let call = Call { target, caller, calldata = cd, timestamp, blockNumber, origin, value,
+          valueTransfer = conf.valueTransfer,
           delay = (Sub timestamp st.vm.block.timestamp, Sub blockNumber st.vm.block.number) }
         entry = target.contractName <> "." <> callSig target.sig
     vm <- liftIO $ stToIO $ flip execStateT st.vm $ do
       assign (#block % #timestamp) timestamp
       assign (#block % #number) blockNumber
       assign (#tx % #origin) origin
-      startCall target.addr caller conf.gas entry (cd, props <> callerProps <> timeProps <> numberProps)
+      startCallWithValue target.addr caller conf.gas value conf.valueTransfer entry
+        (cd, props <> callerProps <> timeProps <> numberProps <> valueProps)
     abort <- liftIO $ newTVarIO False
     issues <- liftIO $ newIORef []
     leaves <- interpretVMAbortable abort fetcher iterConf vm runExpr $ \leaf endVm _ -> case leaf of

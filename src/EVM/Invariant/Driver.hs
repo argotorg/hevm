@@ -137,7 +137,7 @@ checkInvariant :: App m => SolverGroup -> Fetcher Symbolic m -> VeriOpts -> Chec
 checkInvariant solvers fetcher opts check st = do
   let initial = maybe st.vm (\a -> st.vm & set (#tx % #origin) a) check.origin
       call = Call check.target check.caller (fst check.calldata) initial.block.timestamp
-        initial.block.number initial.tx.origin (Lit 0, Lit 0)
+        initial.block.number initial.tx.origin (Lit 0) TransferValue (Lit 0, Lit 0)
   vm <- liftIO $ stToIO $ execStateT
     (startCall check.target.addr check.caller check.gas (callSig check.target.sig) check.calldata) initial
   (ends, results) <- verify solvers fetcher opts vm check.postcondition Nothing
@@ -168,12 +168,14 @@ searchInvariant solvers fetcher opts exploration (first, lastDepth) check = go (
         Just cex -> pure $ CheckResult (Just cex) ps es
         Nothing -> visit depth ps es rest
 
--- | A replayable zero-value transaction, including decoded ABI arguments and
+-- | A replayable transaction, including decoded ABI arguments, value and
 -- delays relative to the state before each call, including prior cheatcodes.
 data ConcreteCall = ConcreteCall
   { target :: Addr
   , caller :: Addr
   , origin :: Addr
+  , value :: W256
+  , valueTransfer :: ValueTransfer
   , sig :: Sig
   , arguments :: [AbiValue]
   , calldata :: ByteString
@@ -210,6 +212,7 @@ concretizeCalls block model = go (forceLit block.timestamp) (forceLit block.numb
             caller <- address call.caller
             origin <- address call.origin
             Right ConcreteCall { target, caller, origin, sig = call.target.sig, arguments, calldata,
+              value = wordValue 0 call.value, valueTransfer = call.valueTransfer,
               timestamp, blockNumber, delay = (wordValue 0 $ fst call.delay, wordValue 0 $ snd call.delay) }
       case materialized of
         Left err -> pure $ Left err
@@ -225,7 +228,7 @@ replayCall :: App m
   => Fetcher Concrete m -> Word64 -> VM Concrete -> ConcreteCall
   -> m (VM Concrete, Either EvmError (Expr Buf))
 replayCall fetcher gas vm call = Stepper.interpret fetcher initial $ do
-  Stepper.evm $ startCall (LitAddr call.target) (LitAddr call.caller) gas
+  Stepper.evm $ startCallWithValue (LitAddr call.target) (LitAddr call.caller) gas (Lit call.value) call.valueTransfer
     (callSig call.sig) (ConcreteBuf call.calldata, [])
   result <- Stepper.execFully
   (, result) <$> Stepper.evm get

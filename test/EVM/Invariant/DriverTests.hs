@@ -1,11 +1,13 @@
 module EVM.Invariant.DriverTests (tests) where
 
 import Control.Monad (forM_)
+import Data.Map qualified as Map
 import Data.Maybe (isNothing)
 import Data.Text qualified as T
 import Test.Tasty (TestTree, testGroup)
+import Optics.Core
 
-import EVM (symbolify)
+import EVM (initialContract, symbolify)
 import EVM.ABI (AbiType(..), AbiValue(..), Sig(..), selector)
 import EVM.Effects (App)
 import EVM.Expr qualified as Expr
@@ -13,7 +15,7 @@ import EVM.Fetch qualified as Fetch
 import EVM.Invariant
 import EVM.Invariant.Driver
 import EVM.Solidity (solidity)
-import EVM.SymExec (Postcondition, defaultVeriOpts)
+import EVM.SymExec (Postcondition, VeriOpts(..), checkAssertions, defaultVeriOpts)
 import EVM.Test.Helpers (assertBoolM, assertEqualM, loadVM, test, withDefaultSolver)
 import EVM.Types
 
@@ -24,7 +26,7 @@ tests = testGroup "framework-independent driver"
       let fetcher = Fetch.oracle solvers Nothing Fetch.noRpc
           target = Target initial.state.contract "Native" (Sig "advance" [AbiUIntType 256])
           options = ExplorationConfig [target] (OneOf [0x10000, 0x20000])
-            (CallConfig maxBound (Just 3) (Just 2) True) (\_ _ -> PBool True) False
+            ((defaultCallConfig maxBound) { maxTimeDelay = Just 3, maxBlockDelay = Just 2, callerIsOrigin = True }) (\_ _ -> PBool True) False
           check = property initial "valid"
           search cache depth = searchInvariant solvers fetcher defaultVeriOpts cache (0, depth) check
       cache <- newExploration options (symbolify initial)
@@ -65,7 +67,7 @@ tests = testGroup "framework-independent driver"
       initial <- fixture
       let target = Target initial.state.contract "Native" (Sig "noop" [])
           options = ExplorationConfig [target] (OneOf [0x10000])
-            (CallConfig maxBound (Just 1) (Just 1) True) (\_ _ -> PBool True) False
+            ((defaultCallConfig maxBound) { maxTimeDelay = Just 1, maxBlockDelay = Just 1, callerIsOrigin = True }) (\_ _ -> PBool True) False
       cache <- newExploration options (symbolify initial)
       result <- searchInvariant solvers (Fetch.oracle solvers Nothing Fetch.noRpc) defaultVeriOpts
         cache (1, 1) (property initial "clock")
@@ -74,7 +76,7 @@ tests = testGroup "framework-independent driver"
       initial <- fixture
       let target = Target initial.state.contract "Native" (Sig "jump" [])
           options = ExplorationConfig [target] (OneOf [0x10000])
-            (CallConfig maxBound (Just 0) (Just 0) True) (\_ _ -> PBool True) False
+            ((defaultCallConfig maxBound) { maxTimeDelay = Just 0, maxBlockDelay = Just 0, callerIsOrigin = True }) (\_ _ -> PBool True) False
           fetcher = Fetch.oracle solvers Nothing Fetch.noRpc
       cache <- newExploration options (symbolify initial)
       result <- searchInvariant solvers fetcher defaultVeriOpts cache (0, 2) (property initial "valid")
@@ -83,7 +85,60 @@ tests = testGroup "framework-independent driver"
       assertEqualM "cheatcode changes do not become additional delays" [(0, 0), (0, 0), (0, 0)] (map (.delay) calls)
       assertEqualM "timestamps include preceding warp calls" [0, 7, 14] (map (.timestamp) calls)
       assertEqualM "block numbers include preceding roll calls" [0, 3, 6] (map (.blockNumber) calls)
+  , test "symbolic values and block context replay with balance accounting" $ withDefaultSolver $ \solvers -> do
+      initial <- fixture
+      let funded amount = initial & over (#env % #contracts)
+            (Map.insert (LitAddr 0x10000) (initialContract (RuntimeCode (ConcreteRuntimeCode "")) & set #balance (Lit amount)))
+          target = Target initial.state.contract "Native" (Sig "pay" [AbiUIntType 256])
+          calls = (defaultCallConfig maxBound)
+            { maxTimeDelay = Just 2, maxBlockDelay = Just 1, callerIsOrigin = True, maxValue = 6 }
+          fetcher = Fetch.oracle solvers Nothing Fetch.noRpc
+          search config vm = do
+            cache <- newExploration (ExplorationConfig [target] (OneOf [0x10000]) config (\_ _ -> PBool True) False) (symbolify vm)
+            result <- searchInvariant solvers fetcher defaultVeriOpts cache (0, 2) (property initial "valid")
+            (_, transitions) <- explorationStatus cache
+            assertEqualM "complete value search" ([], 0) (result.issues <> transitions.issues, length result.partials + length transitions.partials)
+            pure result
+      forM_ [(TransferValue, 9), (MintValue, 0)] $ \(transfer, balance) -> do
+        let vm = funded balance
+        result <- search calls { valueTransfer = transfer } vm
+        cex <- maybe (internalError "expected value-dependent counterexample") pure result.counterexample
+        concrete <- concretizeCalls vm.block cex.model cex.state.calls >>= either internalError pure
+        assertEqualM "fresh values at each depth" [3, 6] (map (.value) concrete)
+        assertEqualM "timestamps" [2, 4] (map (.timestamp) concrete)
+        assertEqualM "block numbers" [1, 2] (map (.blockNumber) concrete)
+        assertEqualM "per-call delays" [(2, 1), (2, 1)] (map (.delay) concrete)
+        replayed <- replayCalls Fetch.noRpcConcreteFetcher maxBound vm cex.model cex.state.calls >>= either internalError pure
+        assertEqualM "recipient was credited" (Lit 9) (balanceAt replayed initial.state.contract)
+        assertEqualM "sender matches the funding policy" (Lit 0) (balanceAt replayed $ LitAddr 0x10000)
+        checked <- checkInvariant solvers fetcher defaultVeriOpts (property initial "valid") (InvState (symbolify replayed) [])
+        assertBoolM "paid counterexample replays" (not $ isNothing checked.counterexample)
+      forM_ [(calls { maxValue = 5 }, 9), (calls { maxTimeDelay = Just 1 }, 9),
+             (calls { maxBlockDelay = Just 0 }, 9), (calls, 8), (defaultCallConfig maxBound, 9)] $ \(config, balance) -> do
+        result <- search config (funded balance)
+        assertBoolM "bounds, affordability and zero-value default exclude the counterexample" (isNothing result.counterexample)
+  , test "reverted minted value restores both balances" $ withDefaultSolver $ \solvers -> do
+      initial <- fixture
+      let target = Target initial.state.contract "Native" (Sig "reject" [])
+          calls = (defaultCallConfig maxBound)
+            { maxTimeDelay = Just 0, maxBlockDelay = Just 0, callerIsOrigin = True, maxValue = 7, valueTransfer = MintValue }
+          options = ExplorationConfig [target] (OneOf [0x10000]) calls (checkAssertions [0x01]) False
+      cache <- newExploration options (symbolify initial)
+      _ <- exploreLevel solvers (Fetch.oracle solvers Nothing Fetch.noRpc) defaultVeriOpts.iterConf cache 1
+      (_, transitions) <- explorationStatus cache
+      assertEqualM "no transition issues" [] transitions.issues
+      probe <- case transitions.probes of [p] -> pure p; _ -> internalError "expected an assertion probe"
+      concrete <- concretizeCalls initial.block probe.cex probe.state.calls >>= either internalError pure
+      call <- case concrete of [c] -> pure c; _ -> internalError "expected one paid call"
+      assertEqualM "solved value" 7 call.value
+      (replayed, outcome) <- replayCall Fetch.noRpcConcreteFetcher maxBound initial call
+      assertBoolM "call reverted" (case outcome of Left (Revert _) -> True; _ -> False)
+      assertEqualM "recipient balance rolled back" (balanceAt initial initial.state.contract) (balanceAt replayed initial.state.contract)
+      assertEqualM "origin was not credited on revert" (balanceAt initial $ LitAddr call.origin) (balanceAt replayed $ LitAddr call.origin)
   ]
+
+balanceAt :: VM Concrete -> Expr EAddr -> Expr EWord
+balanceAt vm addr = maybe (Lit 0) (.balance) (Map.lookup addr vm.env.contracts)
 
 property :: VM Concrete -> T.Text -> Check
 property vm name = Check (Target vm.state.contract "Native" (Sig name [])) (LitAddr 0xcafe)
@@ -111,6 +166,12 @@ fixture = do
     , "    Vm vm = Vm(address(uint160(uint256(keccak256('hevm cheat code')))));"
     , "    vm.warp(block.timestamp + 7); vm.roll(block.number + 3); count++;"
     , "  }"
+    , "  function pay(uint256 n) public payable {"
+    , "    require(n == count + 1 && n <= 2); require(msg.value == 3 * n);"
+    , "    require(block.timestamp == 2 * n && block.number == n);"
+    , "    require(address(this).balance == (n == 1 ? 3 : 9)); count = n;"
+    , "  }"
+    , "  function reject() public payable { require(msg.value == 7); assert(false); }"
     , "  function clock() public view returns (bool) { return block.number == 0 && block.timestamp == 0; }"
     , "}"
     ]
