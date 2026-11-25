@@ -16,7 +16,17 @@ counterexample for that check. Multiple checks share the same cached frontiers;
 property calls execute on copies and do not change those frontiers. The cache is
 single-threaded and must use the same solver settings and fetcher throughout.
 
-`CallConfig` can bound timestamp and block-number increments per transaction.
+`CallConfig` bounds symbolic call values with `maxValue` (in wei, default zero),
+and timestamp/block-number increments with `maxTimeDelay`/`maxBlockDelay`.
+Values and context variables are fresh at each depth. `Just 0` freezes an
+increment; `Nothing` leaves time monotone below 2^64, or keeps the block number
+fixed. Delays are relative to the preceding state, including warp/roll changes.
+`TransferValue` debits the origin and constrains each payment to its remaining
+balance after the gas deposit. `MintValue` credits the recipient without
+debiting the origin, for clients such as Echidna. Reverted calls roll back either
+kind of value transfer. Isolated property `Check`s still send zero ETH and use
+the reached state's block context.
+
 `callerIsOrigin` requires `OneOf` senders and enumerates them concretely so that
 transaction initialization looks up the correct origin account. Disable
 `pruneStates` for properties that observe context not represented by `stateKey`,
@@ -26,12 +36,9 @@ Read both `CheckResult` and `explorationStatus`: partial paths and solver issues
 are inconclusive, and transition probes report assertion failures before the
 property call. Reaching the depth limit is not an unbounded proof. Counterexamples
 include the symbolic sequence and the property call separately. `concretizeCalls`
-materializes a sequence using one model, including ABI arguments, callers, origins
-and per-call delays. Clients may replay it with their own executor, or use
+materializes a sequence using one model, including ABI arguments, callers, origins,
+ETH values, transfer policy and per-call delays. Clients may replay it with their own executor, or use
 `replayCalls` and classify the final check themselves.
-
-Calls currently send zero ETH. Configurable or symbolic call value is a follow-up
-for hevm; clients should not duplicate the symbolic transition executor for it.
 
 ## Printf-style debugging
 
