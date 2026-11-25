@@ -1,8 +1,9 @@
 # hevm's debugger page
 
-The page of hevm's interactive debugger, formerly hevm-web-ui. The website shows it in its
-Debugger tab, where it debugs on `hevm-web.wasm`: replaying a counterexample, or a test
-function symbolically.
+The page of hevm's interactive debugger, formerly hevm-web-ui. The website opens it in a
+window of its own, where it debugs on `hevm-web.wasm`: replaying a counterexample, or a test
+function symbolically. The website hands each window its session, and hands it again when the
+window is reloaded, while the website is open.
 
 It speaks hevm's JSON API (see `hevm test --interactive` in hevm's docs), so it can also
 debug a native hevm:

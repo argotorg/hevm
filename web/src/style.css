@@ -147,9 +147,7 @@ body:not([data-tab="sol"]) .example-only,
 body:not([data-tab="sourcify"]) .sourcify-only,
 #sol-form[data-empty="true"] > :not(.sourcify-only),
 body:not([data-tab="eq"]) .eq-only,
-body:not([data-tab="bytecode"]) .bytecode-only,
-body:not([data-tab="debug"]) .debug-only,
-body[data-tab="debug"] details {
+body:not([data-tab="bytecode"]) .bytecode-only {
   display: none;
 }
 
@@ -272,7 +270,6 @@ details pre {
 
 body[data-tab="sol"] .tabs [data-tab="sol"],
 body[data-tab="sourcify"] .tabs [data-tab="sourcify"],
-body[data-tab="debug"] .tabs [data-tab="debug"],
 body[data-tab="eq"] .tabs [data-tab="eq"],
 body[data-tab="bytecode"] .tabs [data-tab="bytecode"] {
   color: var(--fg);
@@ -725,25 +722,6 @@ button.secondary {
 
 button.secondary:hover {
   background: color-mix(in srgb, var(--accent) 10%, transparent);
-}
-
-.debug-only {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 0 10px 10px 10px;
-  padding: 0.5rem;
-}
-
-#debug-caption {
-  margin: 0.25rem 0.25rem 0.6rem;
-}
-
-#debugger {
-  display: block;
-  width: 100%;
-  height: max(46rem, calc(100vh - 3rem));
-  border: 0;
-  border-radius: 6px;
 }
 
 

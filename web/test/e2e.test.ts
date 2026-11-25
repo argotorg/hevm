@@ -1,7 +1,7 @@
 // Loads the built site (npm run build) in headless Chromium and runs examples through the UI.
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { chromium, type Browser, type Page } from "playwright-core";
+import { chromium, type Browser, type Locator, type Page } from "playwright-core";
 import { preview, type PreviewServer } from "vite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { examples } from "../src/examples";
@@ -182,8 +182,6 @@ describe.skipIf(!ready)("website in Chromium", () => {
   });
 
   describe("Debugger", () => {
-    const debuggerFrame = () => page.frameLocator("#debugger");
-
     async function proveFirstExample() {
       await page.click('.tabs [data-tab="sol"]');
       await page.selectOption("#sol-example", String(solExamples.findIndex((e) => e.name === "Find x, prove a bound")));
@@ -192,35 +190,57 @@ describe.skipIf(!ready)("website in Chromium", () => {
       return page.locator("#sol-results .card:not(.stats)").filter({ hasText: "prove_linear" });
     }
 
-    it("has no tab until there is something to debug", async () => {
-      const p = await browser.newPage();
-      await p.goto(server.resolvedUrls!.local[0]!);
-      expect(await p.locator('.tabs [data-tab="debug"]').isHidden()).toBe(true);
-      await p.close();
+    // the debugger opens in a window of its own
+    async function debug(card: Locator, button: string) {
+      const [w] = await Promise.all([page.waitForEvent("popup"), card.getByRole("button", { name: button }).click()]);
+      await w.locator("#status .step").waitFor();
+      return w;
+    }
+
+    it("has no tab: it is a window of its own", async () => {
+      expect(await page.locator('.tabs [data-tab="debug"]').count()).toBe(0);
     });
 
     it("replays a counterexample to its failure", async () => {
-      const card = await proveFirstExample();
-      await card.getByRole("button", { name: "Replay in debugger" }).click();
-      expect(await page.locator('.tabs [data-tab="debug"]').isVisible()).toBe(true);
-      expect(await page.locator("#debugger").isVisible()).toBe(true);
-      expect(await page.textContent("#debug-caption")).toBe(
-        "Replaying prove_linear(31): step through it, or press Continue to run to where it fails.");
-      const frame = debuggerFrame();
-      await frame.locator("#status .step").waitFor();
-      await frame.getByRole("button", { name: /^Continue/ }).click();
+      const w = await debug(await proveFirstExample(), "Replay in debugger");
+      expect(await w.title()).toBe("hevm debugger: prove_linear(31)");
+      expect(await w.textContent("#session")).toMatch(
+        /^Replaying prove_linear\(31\): step through it, or press Continue to run to where it fails\. The code as of .+\.$/);
+      await w.getByRole("button", { name: /^Continue/ }).click();
       // Panic(0x01): the assertion
-      await expect.poll(() => frame.locator("#result").textContent(), { timeout: 60_000 }).toMatch(/^revert, returned 0x4e487b7100*1$/);
-      expect(await frame.locator("#status").textContent()).toContain("halted");
+      await expect.poll(() => w.locator("#result").textContent(), { timeout: 60_000 }).toMatch(/^revert, returned 0x4e487b7100*1$/);
+      expect(await w.locator("#status").textContent()).toContain("halted");
+      // reloaded, it asks the site for its session again
+      await w.reload();
+      await w.locator("#status .step").waitFor();
+      expect(await w.locator("#status .step").textContent()).toBe("Step 0");
+      await w.close();
     });
 
-    it("debugs a function symbolically", async () => {
+    it("debugs a function symbolically, beside another session", async () => {
       const card = await proveFirstExample();
-      await card.getByRole("button", { name: "Debug symbolically" }).click();
-      expect(await page.textContent("#debug-caption")).toMatch(/^Debugging prove_linear for all inputs at once/);
-      const frame = debuggerFrame();
-      await frame.locator("#status .step").waitFor();
-      expect(await frame.locator("#status").textContent()).toContain("symbolic");
+      const replay = await debug(card, "Replay in debugger");
+      const w = await debug(card, "Debug symbolically");
+      expect(await w.title()).toBe("hevm debugger: prove_linear, symbolically");
+      expect(await w.textContent("#session")).toMatch(/^Debugging prove_linear for all inputs at once/);
+      expect(await w.locator("#status").textContent()).toContain("symbolic");
+      // the first session still runs, in its own window
+      await replay.getByRole("button", { name: /^Continue/ }).click();
+      await expect.poll(() => replay.locator("#result").textContent(), { timeout: 60_000 }).toMatch(/^revert/);
+      await Promise.all([replay.close(), w.close()]);
+    });
+
+    it("says so when the page a session came from is gone", async () => {
+      const p = await browser.newPage();
+      await p.goto(`${server.resolvedUrls!.local[0]!}#tab=sol&example=Find+x%2C+prove+a+bound`);
+      await p.waitForSelector("#sol-results .card.fail");
+      const [w] = await Promise.all([p.waitForEvent("popup"), p.getByRole("button", { name: "Replay in debugger" }).click()]);
+      await w.locator("#status .step").waitFor();
+      await p.goto("about:blank");
+      await w.reload();
+      await expect.poll(() => w.textContent("#status"), { timeout: 10_000 }).toMatch(/^The page this session came from is closed/);
+      await w.close();
+      await p.close();
     });
 
     it("sends a counterexample to the Bytecode tab", async () => {
@@ -582,8 +602,8 @@ contract OwnerTest is Test {
       expect(scroll).toBeLessThanOrEqual(width);
     });
 
-    it("has the tabs in order, the Debugger last", async () => {
-      expect(await page.locator(".tabs button").allTextContents()).toEqual(["Solidity", "Sourcify", "Equivalence", "Bytecode", "Debugger"]);
+    it("has the tabs in order", async () => {
+      expect(await page.locator(".tabs button").allTextContents()).toEqual(["Solidity", "Sourcify", "Equivalence", "Bytecode"]);
     });
 
     it("fits all the tabs on a phone", async () => {

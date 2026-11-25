@@ -29,27 +29,27 @@ for (const tab of document.querySelectorAll<HTMLButtonElement>(".tabs button")) 
   tab.addEventListener("click", () => showTab(tab.dataset.tab!));
 }
 
-// --- the debugger tab, a page of its own in an iframe ---
+// --- debugging sessions, each in a window of its own ---
 
-const debugFrame = $<HTMLIFrameElement>("debugger");
-const debugCaption = $<HTMLElement>("debug-caption");
-const debugTab = document.querySelector<HTMLButtonElement>('.tabs [data-tab="debug"]')!;
-let debugSession: DebugSession | undefined;
+// kept for a window that asks again, after a reload: the last few
+const debugSessions = new Map<string, DebugSession>();
 
 window.addEventListener("message", (e) => {
-  if (e.source === debugFrame.contentWindow && e.data?.kind === "hevm-debugger-ready" && debugSession) {
-    debugFrame.contentWindow!.postMessage(debugSession, "*");
-  }
+  if (e.origin !== location.origin || e.data?.kind !== "hevm-debugger-ready" || !e.source) return;
+  const session = debugSessions.get(String(e.data.id));
+  if (session) (e.source as Window).postMessage(session, location.origin);
 });
 
-// the tab shows once there is something to debug
-function openDebugger(project: Project, args: string[], caption: string) {
-  debugSession = { kind: "hevm-debug", files: project.files, args };
-  debugCaption.textContent = caption;
-  debugTab.hidden = false;
-  // a fresh page for each session
-  debugFrame.src = `debugger/index.html?session=${Date.now()}`;
-  showTab("debug");
+/** Opens the debugger on what a run compiled: a snapshot, which later edits do not change */
+function openDebugger(project: Project, args: string[], title: string, caption: string) {
+  const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  const at = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  debugSessions.set(id, { kind: "hevm-debug", id, files: project.files, args, title, caption: `${caption} The code as of ${at}.` });
+  while (debugSessions.size > 10) debugSessions.delete(debugSessions.keys().next().value!);
+  if (!window.open(`debugger/index.html?session=${id}`, "_blank")) {
+    debugSessions.delete(id);
+    alert("The browser blocked the debugger's window: allow this page to open windows, then try again.");
+  }
 }
 
 /** The runtime code of a compiled contract, e.g. "src/Main.sol:Example" */
@@ -224,6 +224,7 @@ function renderTest(o: SolOutput, project: Project, t: TestResult) {
       const actions = el("div", "card-actions");
       actions.append(
         button("Replay in debugger", () => openDebugger(project, [...debugArgs, "--calldata", raw],
+          `hevm debugger: ${readableNumbers(c.calldata)}`,
           `Replaying ${readableNumbers(c.calldata)}: step through it, or press Continue to run to where it fails.`)),
         button("Open in Bytecode tab", () => openInBytecode(project, t, raw)),
       );
@@ -234,6 +235,7 @@ function renderTest(o: SolOutput, project: Project, t: TestResult) {
   if (t.status !== "running" && !invariant) {
     const actions = el("div", "card-actions");
     actions.append(button("Debug symbolically", () => openDebugger(project, debugArgs,
+      `hevm debugger: ${t.name.split("(")[0]}, symbolically`,
       `Debugging ${t.name.split("(")[0]} for all inputs at once: at each branch that depends on them, you pick the side to follow.`)));
     if (!t.counterexamples.length) actions.append(button("Open in Bytecode tab", () => openInBytecode(project, t)));
     card.append(actions);

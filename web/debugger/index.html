@@ -37,8 +37,15 @@
 html, body { height: 100%; }
 body {
   margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 var(--sans);
-  display: grid; grid-template-rows: auto auto minmax(0, 1fr) 10rem;
+  display: grid; grid-template-rows: auto auto auto minmax(0, 1fr) 10rem;
+  grid-template-areas: "session" "status" "nav" "main" "log";
 }
+#session { grid-area: session; margin: 0; padding: .45rem 1.1rem; font-size: 13px; color: var(--muted);
+           background: var(--panel); border-bottom: 1px solid var(--line); }
+#status { grid-area: status; }
+nav { grid-area: nav; }
+main { grid-area: main; }
+footer { grid-area: log; }
 body.busy { cursor: progress; }
 ::selection { background: rgba(122, 162, 247, 0.3); }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -192,13 +199,14 @@ dialog { max-width: 52rem; max-height: 85vh; color: var(--fg); background: var(-
 dialog::backdrop { background: rgba(5, 7, 10, .7); backdrop-filter: blur(2px); }
 
 @media (max-width: 1000px) {
-  body { height: auto; grid-template-rows: auto auto auto 16rem; }
+  body { height: auto; grid-template-rows: auto auto auto auto 16rem; }
   main { grid-template-columns: 1fr; }
   .column.state section, .column.state section.stack { flex: none; min-height: 0; }
 }
 </style>
 </head>
 <body>
+<p id="session" hidden></p>
 <header id="status"><span class="empty">Connecting to hevm…</span></header>
 <nav>
   <button type="button" data-command="step">Step<kbd>s</kbd></button>
