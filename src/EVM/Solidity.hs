@@ -708,8 +708,7 @@ mkAbiMap abis = Map.fromList $
                  (toList (abi ^?! key "inputs" % _Array))
               , output = map parseMethodInput
                  (toList (abi ^?! key "outputs" % _Array))
-              , mutability = parseMutability
-                 (abi ^?! key "stateMutability" % _String)
+              , mutability = abiMutability abi
               })
   in f <$> relevant
 
@@ -803,6 +802,15 @@ parseTypeName' x =
     (fromMaybe mempty $ x ^? key "components" % _Array % to parseComponents)
     (x ^?! key "type" % _String)
   where parseComponents = fmap $ snd . parseMethodInput
+
+-- | solc before 0.4.16 gives only "constant" and "payable"
+abiMutability :: Value -> Mutability
+abiMutability abi = case abi ^? key "stateMutability" % _String of
+  Just m -> parseMutability m
+  Nothing
+    | abi ^? key "constant" % _Bool == Just True -> View
+    | abi ^? key "payable" % _Bool == Just True -> Payable
+    | otherwise -> NonPayable
 
 parseMutability :: Text -> Mutability
 parseMutability "view" = View

@@ -8,7 +8,7 @@ the results of its invariants.
 module EVM.Invariant.InvariantTests (tests) where
 
 import Control.Monad.IO.Class
-import Control.Monad.Reader (ReaderT)
+import Control.Monad.Reader (ReaderT, local)
 import Data.Bifunctor (first)
 import Data.List (sort)
 import Data.Text (Text, isPrefixOf, isInfixOf)
@@ -91,15 +91,17 @@ tests = testGroup "invariant"
       runInvariant 1 "actors.sol" "invariant_actor_from_list" >>= assertRun "one branch per actor" [(True, True)]
       runInvariant 1 "actors.sol" "invariant_not_third_actor" >>= assertRun "the third actor breaks it" [(False, True)]
   , test "target-interfaces" $ do
-      (results, out) <- runInvariants 2 "interfaces.sol" (const True)
+      -- few enough array lengths that the wallet's copy of its calldata forks on them
+      (results, out) <- local (\(Env c) -> Env c { maxDynSize = 4 }) $ runInvariants 2 "interfaces.sol" (const True)
       assertRun "the library's functions are called at the wallet"
-        [ (("InvariantInterfacePathTest", "invariant_owner"), (False, True))
+        [ (("InvariantInterfaceDynamicTest", "invariant_owner"), (False, True))
+        , (("InvariantInterfacePathTest", "invariant_owner"), (False, True))
         , (("InvariantInterfaceSelectorTest", "invariant_owner"), (True, True))
         , (("InvariantInterfaceTest", "invariant_owner"), (False, True))
         , (("InvariantInterfaceUnknownTest", "invariant_owner"), (True, False))
         , (("InvariantNoInterfaceTest", "invariant_owner"), (True, False)) ]
         (sort results, out)
-      liftIO $ assertBool "the call is shown" ("WalletLib.initWallet(" `isInfixOf` out)
+      liftIO $ assertBool ("the calls are shown:\n" <> T.unpack out) ("WalletLib.initOwners([0x" `isInfixOf` out)
       liftIO $ assertBool "an unknown name is said" ("no contract NoSuchContract" `isInfixOf` out)
   , test "partial-warnings-short" $ do
       out <- runInvariant 1 "actors.sol" "invariant_named"

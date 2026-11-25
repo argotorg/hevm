@@ -95,6 +95,9 @@ symCalldataNamed prefix exact sig typesignature concreteArgs base = do
     -- with an exact, concrete length, calldatasize is concrete too
     base' = case (exact, cdLen calldatas) of
       (True, Lit n) -> ConcreteBuf (BS.replicate (unsafeInto n) 0)
+      -- of the arguments' length, so that calldatasize depends on that of a dynamic argument,
+      -- and a copy of the calldata can fork on its few values
+      (True, len) -> CopySlice (Lit 0) (Lit 0) len base (ConcreteBuf "")
       _ -> base
     (cdBuf, props) = combineFragments calldatas base'
     withSelector = writeSelector cdBuf sig

@@ -692,6 +692,18 @@ tests =
         assertEqualM "data locations are optional" (Just "f(int256,uint8[],bytes)")
           ((.methodSignature) <$> parseFunctionSig "f(int, uint8[], bytes)")
         assertEqualM "a struct is left to solc" Nothing (parseFunctionSig "f(S memory s)")
+    , testCase "old-abi-mutability" $ do
+        -- solc before 0.4.16 gives "constant" and "payable", no "stateMutability"
+        let fn n c p = "{\"type\":\"function\",\"name\":\"" <> n <> "\",\"inputs\":[],\"outputs\":[],\"constant\":"
+              <> c <> ",\"payable\":" <> p <> "}"
+            json = "{\"abi\":[" <> T.intercalate "," [fn "f" "true" "false", fn "g" "false" "true", fn "h" "false" "false"]
+              <> "],\"bytecode\":{\"object\":\"0x00\"},\"deployedBytecode\":{\"object\":\"0x00\"}"
+              <> ",\"ast\":{\"absolutePath\":\"A.sol\"},\"id\":0}"
+        case readJSON Foundry "A" json of
+          Right (Contracts cs, _) -> assertEqual "mutabilities"
+            [("f", View), ("g", Payable), ("h", NonPayable)]
+            (List.sort [(m.name, m.mutability) | c <- Map.elems cs, m <- Map.elems c.abiMap])
+          Left e -> assertFailure (show e)
     , test "struct-overloads" $ do
         Right (Contracts contracts) <- readStdJSON <$> liftIO (solc Solidity [i|
           contract C {

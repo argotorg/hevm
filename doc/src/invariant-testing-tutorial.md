@@ -125,8 +125,8 @@ The test contract itself can be targeted too; its `test`, `prove`, `check`,
 `invariant_` and `setUp` functions are then not called. `targetSelector` can
 select view functions, and overrides `excludeSelector` for that contract.
 `targetInterface` is for an address whose code does not list the functions it
-answers to, such as a proxy: it names contracts by name, or by `path:Name`, whose
-functions are then called at that address, instead of those of its own code.
+answers to, such as a proxy: the functions of the contracts it names, e.g. as
+`Name` or `File.sol:Name`, are called at that address instead of those of its code.
 
 For example, to call only `mint` and `transfer` of a token, and never from the
 zero address:

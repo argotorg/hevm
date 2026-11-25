@@ -848,12 +848,11 @@ invariantContext opts vm testContract sourceCache = do
       _ -> []
     interfacesType = AbiArrayDynamicType (AbiTupleType (V.fromList [AbiAddressType, AbiArrayDynamicType AbiStringType]))
     shortName c = Text.takeWhileEnd (/= ':') c.contractName
-    -- a contract by its name, or by its path and name, as Foundry's artifact identifiers
-    artifact n = case [c | c <- Map.elems opts.dapp.solcByName, n `elem` [c.contractName, shortName c]] of
+    artifact n = case [c | c <- Map.elems opts.dapp.solcByName, artifactNamed (Text.unpack n) (Text.unpack c.contractName)] of
       [c] -> Right c
       [] -> Left $ "targetInterfaces: no contract " <> n
-      cs -> Left $ "targetInterfaces: " <> Text.pack (show (length cs)) <> " contracts are named " <> n
-        <> ", name one as path:" <> n
+      cs -> Left $ "targetInterfaces: " <> Text.pack (show (length cs)) <> " contracts match " <> n
+        <> ", name one as path:Name"
     -- an account without code has the code hash of every interface
     sourceOf c = case cloneOf c of
       Just impl -> do

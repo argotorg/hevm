@@ -2802,18 +2802,20 @@ cheatActions = Map.fromList
         (CAbi [val],"") -> frameReturn $ AbiTuple $ V.fromList [AbiString $ Char8.pack $ show val]
         _ -> vmError (BadCheatCode ("toString parameter decoding failed for " <> show abitype) sig)
 
--- | A contract by Foundry's names for artifacts: "Name", "File.sol", "File.sol:Name"
--- or "dir/File.sol:Name"
 findArtifact :: Map Text (ByteString, ByteString) -> String -> Either String (ByteString, ByteString)
-findArtifact artifacts what = case [code | (key, code) <- Map.toList artifacts, matches (unpack key)] of
+findArtifact artifacts what = case [code | (key, code) <- Map.toList artifacts, artifactNamed what (unpack key)] of
   [code] -> Right code
   [] -> Left $ "no contract " <> what
   cs -> Left $ show (length cs) <> " contracts match " <> what <> ", name one as path:Name"
+
+-- | Whether a contract's "path:Name" is named by @what@, as Foundry names artifacts:
+-- "Name", "File.sol", "File.sol:Name" or "dir/File.sol:Name"
+artifactNamed :: String -> String -> Bool
+artifactNamed what key = let (path, name) = splitName key in case splitName what of
+  ("", w) | ".sol" `isSuffixOf` w -> fileOf path == w && name == take (length w - 4) w
+          | otherwise -> name == w
+  (file, w) -> name == w && (path == file || ('/' : file) `isSuffixOf` path)
   where
-    matches key = let (path, name) = splitName key in case splitName what of
-      ("", w) | ".sol" `isSuffixOf` w -> fileOf path == w && name == take (length w - 4) w
-              | otherwise -> name == w
-      (file, w) -> name == w && (path == file || ('/' : file) `isSuffixOf` path)
     splitName s = case break (== ':') (reverse s) of
       (n, ':' : p) -> (reverse p, reverse n)
       _ -> ("", s)

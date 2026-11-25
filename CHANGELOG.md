@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   e.g. for contracts compiled with another solc version than the tests.
 - Invariant tests support Foundry's `targetInterfaces()`: the functions of the
   contracts named for an address, such as one behind a proxy, are called there.
+  Contracts are named as for `getCode`, e.g. `Name` or `File.sol:Name`.
 - `hevm test` counterexamples show their calldata as hex too (`raw:`), and
   `hevm test --interactive --calldata` debugs the test with that calldata.
 - `hevm test` shows where in the source a counterexample fails (`at:`), in the
@@ -288,6 +289,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of simplifying an ITE of them.
 
 ## Fixed
+- ABIs from solc before 0.4.16, which give `constant` and `payable` instead of
+  `stateMutability`, are read; they used to stop hevm with an error.
+- In invariant tests, a target that copies its calldata, such as a proxy's
+  fallback, no longer leaves the checks inconclusive when a dynamic argument
+  has at most `--max-mem-arg-split` lengths.
 - In the progress log, an invariant test's `phase-end` event counts its
   counterexample and inconclusive checks, as other tests' do.
 - `ECADD`, `ECMUL` and `ECPAIRING` set up libff on every call, which now and then

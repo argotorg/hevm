@@ -15,6 +15,11 @@ contract WalletLib {
         require(msg.sender == owner);
         owner = o;
     }
+
+    // the wallet copies calldata whose length is that of the array
+    function initOwners(address[] calldata os) public {
+        if (os.length == 2) owner = os[1];
+    }
 }
 
 contract Wallet {
@@ -71,12 +76,21 @@ contract InvariantInterfaceSelectorTest is InvariantInterfaceTest {
     }
 }
 
+contract InvariantInterfaceDynamicTest is InvariantInterfaceTest {
+    function setUp() public override {
+        super.setUp();
+        bytes4[] memory selectors = new bytes4[](1);
+        selectors[0] = WalletLib.initOwners.selector;
+        targetSelector(FuzzSelector({addr: address(wallet), selectors: selectors}));
+    }
+}
+
 contract InvariantInterfacePathTest is WalletTest {
     function setUp() public override {
         super.setUp();
         string[] memory names = new string[](2);
         names[0] = "Lib2";
-        names[1] = "src/unit-tests.t.sol:WalletLib";
+        names[1] = "unit-tests.t.sol:WalletLib";
         targetInterface(FuzzInterface({addr: address(wallet), artifacts: names}));
     }
 }
