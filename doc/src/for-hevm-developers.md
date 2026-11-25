@@ -16,6 +16,22 @@ counterexample for that check. Multiple checks share the same cached frontiers;
 property calls execute on copies and do not change those frontiers. The cache is
 single-threaded and must use the same solver settings and fetcher throughout.
 
+The two postconditions serve different purposes. `ExplorationConfig.postcondition`
+checks each completed transaction, whether it returns successfully or fails. It
+can interpret an assertion revert, a boolean return value, or the final storage.
+It runs before successor-state pruning, and violations are returned as `Probe`s
+with the triggering call included. Successful calls still contribute reachable
+states, so transaction checks and isolated properties can share an exploration.
+A postcondition returning `PBool True` needs no additional solver query.
+
+`Check.postcondition` classifies a separate call on a reached state. This supports
+boolean properties, assertion-style invariants, and properties that must revert;
+the client supplies each convention. Check calls have their own calldata and
+caller, and their writes cannot affect subsequent exploration or other checks.
+Neither path requires a particular function name or a no-argument ABI. Clients
+choose their targets and check calldata explicitly. No event-based assertion
+classification is built into the driver.
+
 `CallConfig` bounds symbolic call values with `maxValue` (in wei, default zero),
 and timestamp/block-number increments with `maxTimeDelay`/`maxBlockDelay`.
 Values and context variables are fresh at each depth. `Just 0` freezes an
@@ -39,6 +55,11 @@ include the symbolic sequence and the property call separately. `concretizeCalls
 materializes a sequence using one model, including ABI arguments, callers, origins,
 ETH values, transfer policy and per-call delays. Clients may replay it with their own executor, or use
 `replayCalls` and classify the final check themselves.
+
+Exploration currently extends successful calls only; ordinary reverting calls do
+not become frontier states. A bound therefore covers successful prefixes followed
+by a checked call. Clients requiring reverted prefixes that advance block context
+must account for this limitation before claiming verification of all sequences.
 
 ## Printf-style debugging
 

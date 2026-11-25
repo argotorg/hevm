@@ -51,6 +51,9 @@ data ExplorationConfig = ExplorationConfig
   { targets :: [Target]
   , senders :: Senders
   , callConfig :: CallConfig
+  -- | Checked on every completed call, including successful calls and calls
+  -- whose successor is pruned. Clients define which return values, storage
+  -- changes or execution failures violate their assertion semantics.
   , postcondition :: Postcondition
   -- | Disable when checks observe context omitted by 'stateKey'.
   , pruneStates :: Bool

@@ -26,7 +26,6 @@ import Control.Monad (forM, forM_)
 import Control.Monad.ST (stToIO)
 import Data.IORef (IORef, newIORef, readIORef, atomicModifyIORef')
 import Control.Monad.State.Strict (execStateT, execState, get, put, liftIO, modify)
-import Data.Either (partitionEithers)
 import Data.List (partition, sortOn)
 import Data.Map qualified as Map
 import Data.Maybe (catMaybes, mapMaybe)
@@ -39,6 +38,7 @@ import Data.Tree.Zipper qualified as Zipper
 import Optics.Core
 import Optics.State
 import Optics.State.Operators
+import Witch (into)
 
 import EVM (clearTStorages, loadContract, resetState, pushTrace)
 import EVM.ABI (Sig(..), callSig)
@@ -113,7 +113,8 @@ instance Semigroup Transition where
 instance Monoid Transition where
   mempty = Transition [] [] [] []
 
--- | A call that can fail an assertion: the calls up to and including it, from the state before it
+-- | A call that can violate the client's postcondition, including successful
+-- calls. The sequence includes the violating call, from the state before it.
 data Probe = Probe
   { state :: InvState
   , leaf :: Expr End
@@ -292,7 +293,7 @@ nextStatesWith solvers post fetcher iterConf conf senders targets visited st
         origin = if conf.callerIsOrigin then caller else st.vm.tx.origin
         value = if conf.maxValue == 0 then Lit 0 else Var ("value" <> n)
         balance = view (accountAt origin % #balance) st.vm.env.contracts
-        gasCost = Lit (st.vm.tx.gasprice * fromIntegral st.vm.tx.gaslimit)
+        gasCost = Lit (st.vm.tx.gasprice * into st.vm.tx.gaslimit)
         valueProps = [PLEq value (Lit conf.maxValue)] <>
           [p | conf.maxValue /= 0 && conf.valueTransfer == TransferValue
              , p <- [PLEq gasCost balance, PLEq value (Expr.sub balance gasCost)]]
@@ -309,28 +310,35 @@ nextStatesWith solvers post fetcher iterConf conf senders targets visited st
         (cd, props <> callerProps <> timeProps <> numberProps <> valueProps)
     abort <- liftIO $ newTVarIO False
     issues <- liftIO $ newIORef []
+    let checkPost :: App m => VM Symbolic -> Expr End -> m [Probe]
+        checkPost endVm leaf = case post vm leaf of
+          PBool True -> pure []
+          p -> do
+            res <- checkSatWithProps solvers (PNeg p : extractProps leaf <> Preimages.recordedProps endVm.keccakPreImgs)
+            recordIssue issues res
+            pure $ case snd (verifyResult vm (res, leaf)) of
+              Cex (l, cex) -> [Probe { state = st { calls = st.calls <> [call] }, leaf = l, cex }]
+              _ -> []
     leaves <- interpretVMAbortable abort fetcher iterConf vm runExpr $ \leaf endVm _ -> case leaf of
       Success {} -> do
+        -- A successful EVM call can still violate a return-value or storage
+        -- postcondition. Check it before pruning its successor state.
+        probes <- checkPost endVm leaf
         known <- maybe (pure False) (liftIO . fmap (Set.member (stateKey endVm)) . readIORef) visited
-        if known then pure Nothing else do
+        ends <- if known then pure [] else do
           -- branches were only decided by the simplifier
           res <- checkBranchSat solvers (extractProps leaf <> Preimages.recordedProps endVm.keccakPreImgs)
           recordIssue issues res
           pure $ case res of
-            Qed -> Nothing
-            _ -> Just $ Left (endState endVm)
-      Partial {} -> pure $ Just $ Right (Left leaf)
-      Failure {} -> case post vm leaf of
-        PBool True -> pure Nothing
-        p -> do
-          res <- checkSatWithProps solvers (PNeg p : extractProps leaf <> Preimages.recordedProps vm.keccakPreImgs)
-          recordIssue issues res
-          pure $ case snd (verifyResult vm (res, leaf)) of
-            Cex (l, cex) -> Just $ Right $ Right Probe { state = st { calls = st.calls <> [call] }, leaf = l, cex }
-            _ -> Nothing
+            Qed -> []
+            _ -> [endState endVm]
+        pure $ Just (ends, [], probes)
+      Partial {} -> pure $ Just ([], [leaf], [])
+      Failure {} -> do
+        probes <- checkPost endVm leaf
+        pure $ Just ([], [], probes)
       _ -> pure Nothing
-    let (ends, others) = partitionEithers (catMaybes leaves)
-        (partials, probes) = partitionEithers others
+    let (ends, partials, probes) = mconcat (catMaybes leaves)
     states <- liftIO $ fmap catMaybes $ forM (mergeStates ends) $ \end -> do
       let k = stateKey end
           reached = InvState { vm = end, calls = st.calls <> [call] }

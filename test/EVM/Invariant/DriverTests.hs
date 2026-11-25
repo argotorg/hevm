@@ -51,8 +51,78 @@ tests = testGroup "framework-independent driver"
       assertEqualM "no partial transitions" 0 (length diagnostics.partials)
       context <- searchInvariant solvers fetcher defaultVeriOpts cache (0, 2) (property initial "context")
       assertBoolM "check caller and origin are independent of the sequence" (isNothing context.counterexample)
+      let invariant = (property initial "invariant_valid" :: Check) { postcondition = checkAssertions [0x01] }
+      asserted <- searchInvariant solvers fetcher defaultVeriOpts cache (0, 2) invariant
+      assertionCex <- maybe (internalError "expected an assertion-style invariant failure") pure asserted.counterexample
+      assertEqualM "assertion invariant uses the same two-call frontier" 2 (length assertionCex.state.calls)
+      assertBoolM "assertion check reverts" (case assertionCex.leaf of Failure _ _ (Revert _) -> True; _ -> False)
+      let expectedRevert = (property initial "reverting_check" :: Check)
+            { postcondition = \_ -> \case Failure _ _ (Revert _) -> PBool True; _ -> PBool False }
+      reverts <- searchInvariant solvers fetcher defaultVeriOpts cache (0, 1) expectedRevert
+      assertBoolM "expected-revert property holds at the first depth" (isNothing reverts.counterexample)
+      returns <- searchInvariant solvers fetcher defaultVeriOpts cache (0, 2) expectedRevert
+      returned <- maybe (internalError "expected a non-reverting counterexample") pure returns.counterexample
+      assertEqualM "expected-revert property uses the same two-call frontier" 2 (length returned.state.calls)
+      assertBoolM "successful return violates the expected-revert property" (case returned.leaf of Success {} -> True; _ -> False)
+      isolated <- searchInvariant solvers fetcher defaultVeriOpts cache (0, 2) (property initial "mutating_check")
+      assertBoolM "mutating check passes" (isNothing isolated.counterexample)
+      unchanged <- search cache 2
+      unchangedCex <- maybe (internalError "property counterexample disappeared") pure unchanged.counterexample
+      assertEqualM "check writes cannot corrupt the shared frontier" 2 (length unchangedCex.state.calls)
       (after, _) <- explorationStatus cache
       assertEqualM "frontiers are reused" before after
+  , test "successful transaction postconditions and isolated properties share a frontier" $ withDefaultSolver $ \solvers -> do
+      initial <- fixture
+      let fetcher = Fetch.oracle solvers Nothing Fetch.noRpc
+          target = Target initial.state.contract "Native" (Sig "advanceAndReport" [AbiUIntType 256])
+          post :: Postcondition
+          post vm leaf = case leaf of
+            Failure {} -> PBool True
+            _ -> returnsTrue vm leaf
+          options = ExplorationConfig [target] (OneOf [0x10000]) (defaultCallConfig maxBound) post False
+      cache <- newExploration options (symbolify initial)
+      one <- searchInvariant solvers fetcher defaultVeriOpts cache (0, 1) (property initial "valid")
+      assertBoolM "property holds after one call" (isNothing one.counterexample)
+      (_, first) <- explorationStatus cache
+      assertEqualM "transaction postcondition holds after one call" 0 (length first.probes)
+      two <- searchInvariant solvers fetcher defaultVeriOpts cache (0, 2) (property initial "valid")
+      assertBoolM "isolated property fails after two calls" (not $ isNothing two.counterexample)
+      (_, transitions) <- explorationStatus cache
+      assertEqualM "complete exploration and checks" ([], 0)
+        (one.issues <> two.issues <> transitions.issues, length one.partials + length two.partials + length transitions.partials)
+      probe <- case transitions.probes of [p] -> pure p; _ -> internalError "expected a successful-call violation"
+      assertBoolM "violation is a successful EVM call" (case probe.leaf of Success {} -> True; _ -> False)
+      concrete <- concretizeCalls initial.block probe.cex probe.state.calls >>= either internalError pure
+      assertEqualM "counterexample includes both calls" [[AbiUInt 256 1], [AbiUInt 256 2]] (map (.arguments) concrete)
+      replayed <- replayCalls Fetch.noRpcConcreteFetcher maxBound initial probe.cex probe.state.calls >>= either internalError pure
+      case replayed.result of
+        Just (VMSuccess buf) -> assertEqualM "last call returned false" (Lit 0) (Expr.simplify $ Expr.readWord (Lit 0) buf)
+        _ -> internalError "expected successful concrete replay"
+  , test "parameterized view assertions follow mixed transaction sequences" $ withDefaultSolver $ \solvers -> do
+      initial <- fixture
+      let fetcher = Fetch.oracle solvers Nothing Fetch.noRpc
+          targets = [Target initial.state.contract "Native" (Sig name [AbiUIntType 256]) | name <- ["advance", "assertBelow"]]
+          options = ExplorationConfig targets (OneOf [0x10000])
+            ((defaultCallConfig maxBound) { callerIsOrigin = True }) (checkAssertions [0x01]) False
+      cache <- newExploration options (symbolify initial)
+      _ <- exploreLevel solvers fetcher defaultVeriOpts.iterConf cache 2
+      (_, two) <- explorationStatus cache
+      assertEqualM "two transactions cannot reach the assertion" 0 (length two.probes)
+      _ <- exploreLevel solvers fetcher defaultVeriOpts.iterConf cache 3
+      (_, three) <- explorationStatus cache
+      assertEqualM "complete mixed-method search" ([], 0) (three.issues, length three.partials)
+      probe <- case three.probes of [p] -> pure p; _ -> internalError "expected a three-call assertion failure"
+      concrete <- concretizeCalls initial.block probe.cex probe.state.calls >>= either internalError pure
+      assertEqualM "mixed-method counterexample"
+        [Sig "advance" [AbiUIntType 256], Sig "advance" [AbiUIntType 256], Sig "assertBelow" [AbiUIntType 256]]
+        (map (.sig) concrete)
+      assertEqualM "independent symbolic arguments" [[AbiUInt 256 1], [AbiUInt 256 2], [AbiUInt 256 42]] (map (.arguments) concrete)
+      setup <- replayCalls Fetch.noRpcConcreteFetcher maxBound initial probe.cex (take 2 probe.state.calls) >>= either internalError pure
+      case concrete of
+        [_, _, finalCall] -> do
+          (_, outcome) <- replayCall Fetch.noRpcConcreteFetcher maxBound setup finalCall
+          assertBoolM "assertion failure replays" (case outcome of Left (Revert _) -> True; _ -> False)
+        _ -> internalError "expected three concrete transactions"
   , test "empty sender list has no successors" $ withDefaultSolver $ \solvers -> do
       initial <- fixture
       let target = Target initial.state.contract "Native" (Sig "advance" [AbiUIntType 256])
@@ -160,6 +230,13 @@ fixture = do
     , "    require(n == count + 1); require(tx.origin == msg.sender); count = n;"
     , "  }"
     , "  function valid() public view returns (bool) { return count < 2; }"
+    , "  function invariant_valid() public view { assert(count < 2); }"
+    , "  function reverting_check() public view { if (count < 2) revert(); }"
+    , "  function assertBelow(uint256 n) public view { require(n == 42); assert(count < 2); }"
+    , "  function mutating_check() public returns (bool) { count = 100; return true; }"
+    , "  function advanceAndReport(uint256 n) public returns (bool) {"
+    , "    require(n == count + 1); count = n; return count < 2;"
+    , "  }"
     , "  function context() public view returns (bool) { return msg.sender == address(0xcafe) && tx.origin == msg.sender; }"
     , "  function noop() public {}"
     , "  function jump() public {"
