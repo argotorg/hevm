@@ -101,7 +101,7 @@ tests = testGroup "framework-independent driver"
             pure result
       forM_ [(TransferValue, 9), (MintValue, 0)] $ \(transfer, balance) -> do
         let vm = funded balance
-        result <- search calls { valueTransfer = transfer } vm
+        result <- search ((calls :: CallConfig) { valueTransfer = transfer }) vm
         cex <- maybe (internalError "expected value-dependent counterexample") pure result.counterexample
         concrete <- concretizeCalls vm.block cex.model cex.state.calls >>= either internalError pure
         assertEqualM "fresh values at each depth" [3, 6] (map (.value) concrete)
