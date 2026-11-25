@@ -759,6 +759,8 @@ tests =
   , testGroup "Unresolved link detection"
     [ testCase "holes-detected" $
         assertBool "linker hole not detected" (containsLinkerHole "608060405273__$f3cbc3eb14e5bd0705af404abcf6f741ec$__63ab5c1ffe")
+    , testCase "old-holes-detected" $
+        assertBool "linker hole not detected" (containsLinkerHole "606060405273__lib/Math.sol:Math_____________________63ab5c1ffe")
     , testCase "no-false-positives" $
         assertBool "false positive" (not $ containsLinkerHole "0x6080604052348015600f57600080fd5b50")
     , testCase "hole-of-the-wrong-length" $

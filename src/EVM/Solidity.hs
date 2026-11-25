@@ -826,8 +826,9 @@ parseMethodInput x =
   , force "method type" (parseTypeName' x)
   )
 
+-- | The placeholder of solc 0.5 on, or before it, the library's name padded with _
 containsLinkerHole :: Text -> Bool
-containsLinkerHole = regexMatches "__\\$[a-z0-9]{34}\\$__"
+containsLinkerHole = regexMatches "__\\$[a-z0-9]{34}\\$__|__[^_$][^$]{35}__"
 
 toCode :: Text -> Text -> Either BytecodeReadingError ByteString
 toCode contractName t = case BS16.decodeBase16Untyped (encodeUtf8 t) of

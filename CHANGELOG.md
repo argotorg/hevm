@@ -289,6 +289,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of simplifying an ITE of them.
 
 ## Fixed
+- A contract compiled with solc before 0.5 that needs an unlinked library is
+  skipped with a warning, as one from a newer solc is, instead of stopping hevm.
 - ABIs from solc before 0.4.16, which give `constant` and `payable` instead of
   `stateMutability`, are read; they used to stop hevm with an error.
 - In invariant tests, a target that copies its calldata, such as a proxy's
