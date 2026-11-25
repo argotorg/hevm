@@ -1,7 +1,7 @@
 // Picks the two programs of an equivalence check out of compiled Solidity.
 import { functions, type AbiFunction } from "./abi";
 import { progressPath } from "./hevm";
-import { artifactPath, type CompileError, type CompileSettings, type Project, type Source } from "./solc";
+import type { CompileError, CompileSettings, Project, Source } from "./solc";
 
 /** Two contracts, or one compiled in two ways */
 export type EqMode = "contracts" | "optimizer" | "via-ir";
@@ -24,7 +24,7 @@ export function contractNames(source: string): string[] {
 }
 
 function program(project: Project, contract: string, label: string): EqProgram {
-  const artifact = project.files[artifactPath(eqSourcePath, contract)];
+  const artifact = project.files[`out/${eqSourcePath.split("/").pop()}/${contract}.json`];
   if (!artifact) throw new Error(`no contract ${contract} in the source`);
   const a = JSON.parse(artifact) as {
     abi: unknown[];

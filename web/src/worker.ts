@@ -1,9 +1,9 @@
 import { runHevm, type Files, type ProgressEvent, type RunResult } from "./hevm";
-import { compileProject, evalSoljson, fetchSoljson, solcUrl, type CompileSettings, type Project, type Soljson, type Source } from "./solc";
+import { compileProject, type CompileSettings, type Project, type Soljson, type Source } from "./solc";
 
 export type WorkerRequest = { id: number; wasmUrl: string; solcUrl: string } & (
   | { kind: "hevm"; args: string[]; files?: Files; stream?: boolean }
-  | { kind: "compile"; sources: Source[]; settings?: CompileSettings; version?: string }
+  | { kind: "compile"; sources: Source[]; settings?: CompileSettings }
 );
 
 /** Sent while hevm runs, before its WorkerResponse */
@@ -16,26 +16,20 @@ export type WorkerResponse = { id: number } & (
 );
 
 let hevm: Promise<WebAssembly.Module> | undefined;
-// the built-in one, and the last other version used: each takes some 100 MB once running
-let bundled: Promise<Soljson> | undefined;
-let other: { version: string; solc: Promise<Soljson> } | undefined;
+let solc: Promise<Soljson> | undefined;
 
 // soljson is a classic script that defines Module, and a module worker cannot importScripts it
 async function loadSolc(url: string): Promise<Soljson> {
-  return evalSoljson(await fetchSoljson(url));
-}
-
-function solcFor(req: { solcUrl: string; version?: string }): Promise<Soljson> {
-  if (!req.version) return (bundled ??= loadSolc(req.solcUrl));
-  if (other?.version !== req.version) other = { version: req.version, solc: loadSolc(solcUrl(req.version)) };
-  return other.solc;
+  const text = await (await fetch(url)).text();
+  return new Function(`${text}\nreturn Module;`)() as Soljson;
 }
 
 self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
   const req = e.data;
   try {
     if (req.kind === "compile") {
-      const project = compileProject(await solcFor(req), req.sources, req.settings);
+      solc ??= loadSolc(req.solcUrl);
+      const project = compileProject(await solc, req.sources, req.settings);
       self.postMessage({ id: req.id, ok: true, project } satisfies WorkerResponse);
     } else {
       hevm ??= WebAssembly.compileStreaming(fetch(req.wasmUrl));
@@ -51,12 +45,8 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       self.postMessage({ id: req.id, ok: true, result } satisfies WorkerResponse);
     }
   } catch (err) {
-    if (req.kind === "compile") {
-      if (req.version) other = undefined;
-      else bundled = undefined;
-    } else {
-      hevm = undefined;
-    }
+    if (req.kind === "compile") solc = undefined;
+    else hevm = undefined;
     self.postMessage({ id: req.id, ok: false, error: String(err) } satisfies WorkerResponse);
   }
 };

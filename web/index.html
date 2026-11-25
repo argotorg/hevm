@@ -12,53 +12,22 @@
         The <a href="https://github.com/argotorg/hevm">hevm</a> symbolic EVM, the
         <a href="https://bitwuzla.github.io/">bitwuzla</a> SMT solver and the
         <a href="https://soliditylang.org/">Solidity</a> compiler, all compiled to WebAssembly.
-        Your code stays on your machine: only a contract you look up on
-        <a href="https://sourcify.dev/">Sourcify</a>, and a solc version you pick, are downloaded.
+        Nothing leaves your machine.
       </p>
     </header>
     <nav class="tabs" role="tablist">
       <button type="button" role="tab" data-tab="sol">Solidity</button>
-      <button type="button" role="tab" data-tab="sourcify">Sourcify</button>
       <button type="button" role="tab" data-tab="eq">Equivalence</button>
       <button type="button" role="tab" data-tab="bytecode">Bytecode</button>
     </nav>
     <main>
       <section class="sol-only">
         <form id="sol-form">
-          <div class="sourcify-only sourcify">
-            <p class="muted">
-              Test a contract verified on <a href="https://sourcify.dev/">Sourcify</a>: hevm gets its files and
-              solc version, and a first test of it, for you to add properties to.
-            </p>
-            <div class="sourcify-form">
-              <label>
-                <span>Chain</span>
-                <select id="sf-chain"></select>
-              </label>
-              <label id="sf-chain-other" hidden>
-                <span>Chain ID</span>
-                <input id="sf-chain-id" inputmode="numeric" spellcheck="false" />
-              </label>
-              <label class="grow">
-                <span>Address, or a link to it on Sourcify</span>
-                <input id="sf-address" spellcheck="false" placeholder="0x…" />
-              </label>
-              <button id="sf-load" type="button">Load</button>
-            </div>
-            <p id="sf-examples" class="muted"></p>
-            <p id="sf-message" class="muted"></p>
-          </div>
-          <div class="sol-pick">
-            <label class="example-only">
-              <span>Example</span>
-              <select id="sol-example"></select>
-            </label>
-            <label>
-              <span>Compiler</span>
-              <select id="sol-version" title="solc's version: other than the built-in one, it is downloaded once"></select>
-            </label>
-          </div>
-          <p id="sol-story" class="story example-only" hidden></p>
+          <label class="row">
+            <span>Example</span>
+            <select id="sol-example"></select>
+          </label>
+          <p id="sol-story" class="story" hidden></p>
           <div class="field">
             <span>
               Source
@@ -66,25 +35,16 @@
                 hevm checks their <code>prove_</code> functions for all inputs, and their
                 <code>invariant_</code> functions after every sequence of calls</small>
             </span>
-            <select id="file-select" class="file-select" hidden></select>
-            <div class="workspace">
-              <nav id="files" class="files" aria-label="Files" hidden></nav>
-              <div id="source" class="editor"></div>
-            </div>
+            <div id="source" class="editor"></div>
           </div>
           <div class="actions">
             <button id="prove" type="submit">Prove</button>
             <button id="sol-share" type="button" class="secondary">Share</button>
-            <button id="new-file" type="button" class="secondary">New file</button>
-            <span id="sol-status" class="status example-only"></span>
-            <span id="sf-status" class="status sourcify-only"></span>
+            <span id="sol-status" class="status"></span>
           </div>
         </form>
-        <section id="sol-progress" class="progress example-only" hidden></section>
-        <section id="sol-results" class="results example-only"></section>
-        <section id="sol-origin" class="story sourcify-only" hidden></section>
-        <section id="sf-progress" class="progress sourcify-only" hidden></section>
-        <section id="sf-results" class="results sourcify-only"></section>
+        <section id="sol-progress" class="progress" hidden></section>
+        <section id="sol-results" class="results"></section>
       </section>
 
       <section class="eq-only">

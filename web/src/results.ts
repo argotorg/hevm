@@ -99,7 +99,6 @@ const panics: Record<number, string> = {
 
 /** Explains a `Revert: 0x...` result that is a Panic(uint256) or an Error(string) */
 export function describeResult(result: string): string {
-  if (result === "Unrecognized opcode: 254") return "INVALID opcode: a failed assert, before Solidity 0.8";
   const m = /^Revert: 0x([0-9a-f]*)$/.exec(result);
   if (!m) return result;
   const data = m[1]!;
