@@ -71,7 +71,8 @@ data Exploration = Exploration
 newExploration :: MonadIO m => ExplorationConfig -> VM Symbolic -> m Exploration
 newExploration options vm = liftIO $ do
   levels <- newIORef [[InvState vm []]]
-  visited <- if options.pruneStates then Just <$> newIORef (Set.singleton $ stateKey vm) else pure Nothing
+  visited <- if options.pruneStates && not options.callConfig.allowNoCalls
+    then Just <$> newIORef (Set.singleton $ stateKey vm) else pure Nothing
   outcomes <- newIORef mempty
   pure Exploration { options, levels, visited, outcomes }
 
@@ -81,7 +82,7 @@ explorationStatus :: MonadIO m => Exploration -> m ([Int], Transition)
 explorationStatus exploration = liftIO $
   (,) <$> (map length <$> readIORef exploration.levels) <*> readIORef exploration.outcomes
 
--- | States reached by exactly the requested number of successful calls.
+-- | States reached by exactly the requested number of calls or context-only steps.
 -- A level is executed once, even when multiple properties search it.
 exploreLevel :: App m => SolverGroup -> Fetcher Symbolic m -> IterConfig -> Exploration -> Int -> m [InvState]
 exploreLevel solvers fetcher iterConf exploration depth
@@ -108,7 +109,7 @@ exploreLevel solvers fetcher iterConf exploration depth
     addProbe found p = if any (sameFunction p) found then found else found <> [p]
     sameFunction :: Probe -> Probe -> Bool
     sameFunction a b = case (reverse a.state.calls, reverse b.state.calls) of
-      (x:_, y:_) -> x.target.addr == y.target.addr && callSig x.target.sig == callSig y.target.sig
+      (x@Call{}:_, y@Call{}:_) -> x.target.addr == y.target.addr && callSig x.target.sig == callSig y.target.sig
       _ -> False
 
 -- | A property call. An absent origin preserves the explored state's origin;
@@ -121,6 +122,9 @@ data Check = Check
   , gas :: Word64
   , calldata :: (Expr Buf, [Prop])
   , postcondition :: Postcondition
+  -- | Some clients only check properties after a contract call. Waiting still
+  -- contributes frontier states and counts toward the depth in either case.
+  , checkAfterNoCall :: Bool
   }
 
 data Counterexample = Counterexample
@@ -137,6 +141,8 @@ data CheckResult = CheckResult
   }
 
 checkInvariant :: App m => SolverGroup -> Fetcher Symbolic m -> VeriOpts -> Check -> InvState -> m CheckResult
+checkInvariant _ _ _ Check{checkAfterNoCall = False} st
+  | NoCall{}:_ <- reverse st.calls = pure $ CheckResult Nothing [] []
 checkInvariant solvers fetcher opts check st = do
   let initial = maybe st.vm (\a -> st.vm & set (#tx % #origin) a) check.origin
       call = Call check.target check.caller (fst check.calldata) initial.block.timestamp
@@ -186,6 +192,11 @@ data ConcreteCall = ConcreteCall
   , blockNumber :: W256
   , delay :: (W256, W256)
   }
+  | ConcreteNoCall
+  { timestamp :: W256
+  , blockNumber :: W256
+  , delay :: (W256, W256)
+  }
 
 concreteAddr :: SMTCex -> Expr EAddr -> Expr EAddr
 concreteAddr model = \case
@@ -198,7 +209,13 @@ concretizeCalls :: App m => Block -> SMTCex -> [Call] -> m (Err [ConcreteCall])
 concretizeCalls block model = go (forceLit block.timestamp) (forceLit block.number)
   where
     go _ _ [] = pure $ Right []
-    go time number (call:rest) = do
+    go time number (call@NoCall{}:rest) = do
+      let timestamp = wordValue time call.timestamp
+          blockNumber = wordValue number call.blockNumber
+          concrete = ConcreteNoCall timestamp blockNumber
+            (wordValue 0 $ fst call.delay, wordValue 0 $ snd call.delay)
+      fmap (concrete :) <$> go timestamp blockNumber rest
+    go time number (call@Call{}:rest) = do
       bytes <- calldataFromCex model call.calldata call.target.sig
       let Sig _ types = call.target.sig
           timestamp = wordValue time call.timestamp
@@ -230,7 +247,10 @@ concretizeCalls block model = go (forceLit block.timestamp) (forceLit block.numb
 replayCall :: App m
   => Fetcher Concrete m -> Word64 -> VM Concrete -> ConcreteCall
   -> m (VM Concrete, Either EvmError (Expr Buf))
-replayCall fetcher gas vm call = Stepper.interpret fetcher initial $ do
+replayCall _ _ vm call@ConcreteNoCall{} = do
+  next <- liftIO $ stToIO $ execStateT (startNoCall (Lit call.timestamp) (Lit call.blockNumber)) vm
+  pure (next, Right $ ConcreteBuf "")
+replayCall fetcher gas vm call@ConcreteCall{} = Stepper.interpret fetcher initial $ do
   Stepper.evm $ startCallWithValue (LitAddr call.target) (LitAddr call.caller) gas (Lit call.value) call.valueTransfer
     (callSig call.sig) (ConcreteBuf call.calldata, [])
   result <- Stepper.execFully

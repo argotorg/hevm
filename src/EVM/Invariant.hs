@@ -16,6 +16,7 @@ module EVM.Invariant
   , stateKey
   , startCall
   , startCallWithValue
+  , startNoCall
   , nextStates
   , nextStatesWith
   , simplifyDisjunction
@@ -74,6 +75,12 @@ data Call = Call
   -- warp/roll cheatcodes in the preceding call.
   , delay :: (Expr EWord, Expr EWord)
   }
+  -- | Advance block context without executing code or touching accounts.
+  | NoCall
+  { timestamp :: Expr EWord
+  , blockNumber :: Expr EWord
+  , delay :: (Expr EWord, Expr EWord)
+  }
 
 -- | Context for generated transactions. Bounds are per transaction. With no
 -- number bound the block number stays fixed; time is always monotone and below
@@ -86,6 +93,8 @@ data CallConfig = CallConfig
   , callerIsOrigin :: Bool
   , maxValue :: W256
   , valueTransfer :: ValueTransfer
+  -- | Include context-only steps. Each consumes one exploration depth.
+  , allowNoCalls :: Bool
   }
 
 -- | Normal transactions debit the origin and require sufficient funds.
@@ -95,7 +104,7 @@ data ValueTransfer = TransferValue | MintValue
   deriving (Eq, Show)
 
 defaultCallConfig :: Word64 -> CallConfig
-defaultCallConfig gas = CallConfig gas Nothing Nothing False 0 TransferValue
+defaultCallConfig gas = CallConfig gas Nothing Nothing False 0 TransferValue False
 
 -- | Outcomes of expanding a frontier. Inconclusive solver results must not
 -- be mistaken for successfully checked paths.
@@ -124,7 +133,7 @@ data Probe = Probe
 -- | Who may send the calls, from targetSender and excludeSender
 data Senders = AnySender | OneOf [Addr] | NoneOf [Addr]
 
--- | A state reached from the initial one by a sequence of successful calls
+-- | A state reached by successful calls and optional context-only steps.
 data InvState = InvState
   { vm :: VM Symbolic
   , calls :: [Call]
@@ -173,6 +182,14 @@ stateKey vm = StateKey accounts (Set.fromList (connected (foldMap accountAtoms a
 -- | Sets up a new transaction calling the given contract
 startCall :: VMOps t => Expr EAddr -> Expr EAddr -> Word64 -> Text -> (Expr Buf, [Prop]) -> EVM t ()
 startCall target caller gas = startCallWithValue target caller gas (Lit 0) TransferValue
+
+-- | A context-only step does not initialize a transaction: balances, nonces,
+-- origin and persistent storage are unchanged, and no bytecode is executed.
+startNoCall :: VMOps t => Expr EWord -> Expr EWord -> EVM t ()
+startNoCall timestamp blockNumber = do
+  resetState
+  assign (#block % #timestamp) timestamp
+  assign (#block % #number) blockNumber
 
 -- | Initialize call value before transferring funds. The caller must ensure
 -- a normal transfer is affordable; symbolic transitions add that constraint.
@@ -266,30 +283,48 @@ nextStates solvers post fetcher iterConf gas senders targets visited st = do
 nextStatesWith :: App m
   => SolverGroup -> Postcondition -> Fetch.Fetcher Symbolic m -> IterConfig -> CallConfig -> Senders -> [Target]
   -> Maybe (IORef (Set StateKey)) -> InvState -> m Transition
-nextStatesWith solvers post fetcher iterConf conf senders targets visited st
-  | conf.callerIsOrigin = case senders of
+nextStatesWith solvers post fetcher iterConf conf senders targets visitedStates st = do
+  called <- if null targets then pure mempty
+    else if conf.callerIsOrigin then case senders of
       OneOf as -> mconcat <$> mapM (expand . OneOf . pure) as
       _ -> pure $ mempty { issues = ["caller-as-origin requires OneOf senders"] }
-  | otherwise = expand senders
+    else expand senders
+  waited <- if conf.allowNoCalls then noCall else pure mempty
+  pure $ called <> waited
   where
+  -- Storage-only keys cannot distinguish the contexts reached by waiting.
+  visited = if conf.allowNoCalls then Nothing else visitedStates
+  n = T.pack (show (length st.calls + 1))
+  timestamp = Var ("timestamp" <> n)
+  blockNumber = maybe st.vm.block.number (const $ Var ("blockNumber" <> n)) conf.maxBlockDelay
+  delay = (Sub timestamp st.vm.block.timestamp, Sub blockNumber st.vm.block.number)
+  timeProps = [PLEq st.vm.block.timestamp timestamp, PLT timestamp (Lit (2 ^ (64 :: Int)))]
+    <> maybe [] (\limit -> [PLEq (fst delay) (Lit limit)]) conf.maxTimeDelay
+  numberProps = maybe [] (\limit -> [PLEq st.vm.block.number blockNumber,
+    PLEq (snd delay) (Lit limit)]) conf.maxBlockDelay
+
+  noCall
+    | conf.maxTimeDelay == Just 0 && maybe True (== 0) conf.maxBlockDelay = pure mempty
+    | otherwise = do
+        -- Zero-delay waits add no reachable context and need not be explored.
+        let props = timeProps <> numberProps <>
+              [POr (PLT st.vm.block.timestamp timestamp) (PLT st.vm.block.number blockNumber)]
+        result <- checkBranchSat solvers (st.vm.constraints <> props <> Preimages.recordedProps st.vm.keccakPreImgs)
+        next <- liftIO $ stToIO $ execStateT (startNoCall timestamp blockNumber) st.vm
+        let reached = InvState
+              (endState next & over #constraints (<> props))
+              (st.calls <> [NoCall timestamp blockNumber delay])
+        pure $ mempty { states = [reached | not (isQed result)], issues = solverIssues result }
+
   expand (OneOf []) = pure mempty
   expand allowed = fmap mconcat $ forM targets $ \target -> do
     let Sig _ types = target.sig
-        -- each call of a sequence needs its own variables, and they are on one path
-        n = T.pack (show (length st.calls + 1))
         anyCaller = SymAddr ("caller" <> n)
         (caller, callerProps) = case allowed of
           OneOf [a] -> (LitAddr a, [])
           OneOf as -> (anyCaller, [por [PEq anyCaller (LitAddr a) | a <- as]])
           NoneOf as -> (anyCaller, [PNeg (PEq anyCaller (LitAddr a)) | a <- as])
           AnySender -> (anyCaller, [])
-        -- time may pass between calls, as in halmos up to 2^64
-        timestamp = Var ("timestamp" <> n)
-        timeProps = [PLEq st.vm.block.timestamp timestamp, PLT timestamp (Lit (2 ^ (64 :: Int)))]
-          <> maybe [] (\limit -> [PLEq (Sub timestamp st.vm.block.timestamp) (Lit limit)]) conf.maxTimeDelay
-        blockNumber = maybe st.vm.block.number (const $ Var ("blockNumber" <> n)) conf.maxBlockDelay
-        numberProps = maybe [] (\limit -> [PLEq st.vm.block.number blockNumber,
-          PLEq (Sub blockNumber st.vm.block.number) (Lit limit)]) conf.maxBlockDelay
         origin = if conf.callerIsOrigin then caller else st.vm.tx.origin
         value = if conf.maxValue == 0 then Lit 0 else Var ("value" <> n)
         balance = view (accountAt origin % #balance) st.vm.env.contracts
@@ -300,7 +335,7 @@ nextStatesWith solvers post fetcher iterConf conf senders targets visited st
     (cd, props, _) <- symCalldataNamed ("call" <> n <> "-") True (callSig target.sig) types [] (AbstractBuf ("txdata" <> n))
     let call = Call { target, caller, calldata = cd, timestamp, blockNumber, origin, value,
           valueTransfer = conf.valueTransfer,
-          delay = (Sub timestamp st.vm.block.timestamp, Sub blockNumber st.vm.block.number) }
+          delay }
         entry = target.contractName <> "." <> callSig target.sig
     vm <- liftIO $ stToIO $ flip execStateT st.vm $ do
       assign (#block % #timestamp) timestamp
@@ -349,8 +384,10 @@ nextStatesWith solvers post fetcher iterConf conf senders targets visited st
     Transition states partials probes <$> liftIO (readIORef issues)
 
   recordIssue :: App m => IORef [Text] -> SMTResult -> m ()
-  recordIssue ref result = case result of
-    Unknown reason -> add (getUnknownStr reason)
-    Error err -> add err
-    _ -> pure ()
-    where add message = liftIO $ atomicModifyIORef' ref $ \found -> (found <> [T.pack message], ())
+  recordIssue ref result = liftIO $ atomicModifyIORef' ref $ \found -> (found <> solverIssues result, ())
+
+  solverIssues :: SMTResult -> [Text]
+  solverIssues = \case
+    Unknown reason -> [T.pack $ getUnknownStr reason]
+    Error err -> [T.pack err]
+    _ -> []

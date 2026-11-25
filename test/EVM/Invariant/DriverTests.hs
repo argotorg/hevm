@@ -123,6 +123,70 @@ tests = testGroup "framework-independent driver"
           (_, outcome) <- replayCall Fetch.noRpcConcreteFetcher maxBound setup finalCall
           assertBoolM "assertion failure replays" (case outcome of Left (Revert _) -> True; _ -> False)
         _ -> internalError "expected three concrete transactions"
+  , test "context-only steps preserve accounts and support optional property checks" $ withDefaultSolver $ \solvers -> do
+      initial <- fixture
+      let fetcher = Fetch.oracle solvers Nothing Fetch.noRpc
+          calls = (defaultCallConfig maxBound)
+            { maxTimeDelay = Just 1, maxBlockDelay = Just 1, allowNoCalls = True }
+          -- Waiting requires neither a target nor a sender. Pruning must not
+          -- discard it just because storage and balances are unchanged.
+          options = ExplorationConfig [] (OneOf []) calls (\_ _ -> PBool False) True
+          check = property initial "beforeDeadline"
+      cache <- newExploration options (symbolify initial)
+      one <- searchInvariant solvers fetcher defaultVeriOpts cache (0, 1) check
+      assertBoolM "one bounded wait is insufficient" (isNothing one.counterexample)
+      skipped <- searchInvariant solvers fetcher defaultVeriOpts cache (0, 2)
+        ((check :: Check) { checkAfterNoCall = False })
+      assertBoolM "clients may check only after contract calls" (isNothing skipped.counterexample)
+      two <- searchInvariant solvers fetcher defaultVeriOpts cache (0, 2) check
+      cex <- maybe (internalError "expected two waits") pure two.counterexample
+      concrete <- concretizeCalls initial.block cex.model cex.state.calls >>= either internalError pure
+      assertEqualM "two independent bounded delays" [(1, 1), (1, 1)] (map (.delay) concrete)
+      assertBoolM "no ABI calls were invented" (all (\case ConcreteNoCall{} -> True; _ -> False) concrete)
+      replayed <- replayCalls Fetch.noRpcConcreteFetcher maxBound initial cex.model cex.state.calls >>= either internalError pure
+      assertEqualM "accounts, balances and nonces are unchanged" initial.env.contracts replayed.env.contracts
+      assertEqualM "origin is unchanged" initial.tx.origin replayed.tx.origin
+      assertEqualM "no gas was consumed" initial.burned replayed.burned
+      assertEqualM "replayed timestamp and block number" (Lit 2, Lit 2) (replayed.block.timestamp, replayed.block.number)
+      (sizes, transitions) <- explorationStatus cache
+      assertEqualM "wait contexts are retained even with pruning requested" [1, 1, 1] sizes
+      assertEqualM "no transition postcondition was run for a wait" 0 (length transitions.probes)
+      assertEqualM "complete wait exploration" ([], 0) (transitions.issues <> two.issues, length transitions.partials + length two.partials)
+      forM_ [calls { allowNoCalls = False }, calls { maxTimeDelay = Just 0, maxBlockDelay = Just 0 }] $ \config -> do
+        stopped <- newExploration ((options :: ExplorationConfig) { callConfig = config }) (symbolify initial)
+        result <- searchInvariant solvers fetcher defaultVeriOpts stopped (0, 2) check
+        assertBoolM "disabled or zero-delay waits cannot reach the deadline" (isNothing result.counterexample)
+        (levels, _) <- explorationStatus stopped
+        assertEqualM "no useless wait successors" [1, 0] levels
+  , test "a bounded wait reaches an assertion beyond the per-call delay" $ withDefaultSolver $ \solvers -> do
+      initial <- fixture
+      let fetcher = Fetch.oracle solvers Nothing Fetch.noRpc
+          target = Target initial.state.contract "Native" (Sig "timedAssert" [])
+          calls = (defaultCallConfig maxBound)
+            { maxTimeDelay = Just 1, maxBlockDelay = Just 1, allowNoCalls = True, callerIsOrigin = True }
+          options = ExplorationConfig [target] (OneOf [0x10000]) calls (checkAssertions [0x01]) True
+      cache <- newExploration options (symbolify initial)
+      _ <- exploreLevel solvers fetcher defaultVeriOpts.iterConf cache 1
+      (_, one) <- explorationStatus cache
+      assertEqualM "the initial call can only revert its precondition" 0 (length one.probes)
+      _ <- exploreLevel solvers fetcher defaultVeriOpts.iterConf cache 2
+      (_, two) <- explorationStatus cache
+      assertEqualM "complete assertion search" ([], 0) (two.issues, length two.partials)
+      probe <- case two.probes of [p] -> pure p; _ -> internalError "expected wait then assertion"
+      concrete <- concretizeCalls initial.block probe.cex probe.state.calls >>= either internalError pure
+      case concrete of
+        [wait@ConcreteNoCall{}, call@ConcreteCall{}] -> do
+          assertEqualM "both steps respect the configured bounds" [(1, 1), (1, 1)] (map (.delay) concrete)
+          assertEqualM "no-argument assertion" (Sig "timedAssert" []) call.sig
+          (waited, _) <- replayCall Fetch.noRpcConcreteFetcher maxBound initial wait
+          (_, outcome) <- replayCall Fetch.noRpcConcreteFetcher maxBound waited call
+          assertBoolM "assertion replays after waiting" (case outcome of Left (Revert _) -> True; _ -> False)
+        _ -> internalError "expected one wait and one contract call"
+      forM_ [calls { allowNoCalls = False }, calls { maxTimeDelay = Just 0 }, calls { maxBlockDelay = Just 0 }] $ \config -> do
+        limited <- newExploration ((options :: ExplorationConfig) { callConfig = config }) (symbolify initial)
+        _ <- exploreLevel solvers fetcher defaultVeriOpts.iterConf limited 2
+        (_, result) <- explorationStatus limited
+        assertEqualM "both time and block increments are needed" 0 (length result.probes)
   , test "empty sender list has no successors" $ withDefaultSolver $ \solvers -> do
       initial <- fixture
       let target = Target initial.state.contract "Native" (Sig "advance" [AbiUIntType 256])
@@ -212,7 +276,7 @@ balanceAt vm addr = maybe (Lit 0) (.balance) (Map.lookup addr vm.env.contracts)
 
 property :: VM Concrete -> T.Text -> Check
 property vm name = Check (Target vm.state.contract "Native" (Sig name [])) (LitAddr 0xcafe)
-  (Just $ LitAddr 0xcafe) maxBound (ConcreteBuf (selector $ name <> "()"), []) returnsTrue
+  (Just $ LitAddr 0xcafe) maxBound (ConcreteBuf (selector $ name <> "()"), []) returnsTrue True
 
 returnsTrue :: Postcondition
 returnsTrue _ = \case
@@ -239,6 +303,8 @@ fixture = do
     , "  }"
     , "  function context() public view returns (bool) { return msg.sender == address(0xcafe) && tx.origin == msg.sender; }"
     , "  function noop() public {}"
+    , "  function beforeDeadline() public view returns (bool) { return block.timestamp < 2 || block.number < 2; }"
+    , "  function timedAssert() public view { require(block.timestamp >= 2 && block.number >= 2); assert(false); }"
     , "  function jump() public {"
     , "    Vm vm = Vm(address(uint160(uint256(keccak256('hevm cheat code')))));"
     , "    vm.warp(block.timestamp + 7); vm.roll(block.number + 3); count++;"

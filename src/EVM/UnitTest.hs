@@ -16,7 +16,7 @@ import EVM.Format
 import EVM.Solidity
 import EVM.SymExec (Postcondition, defaultVeriOpts, verify, verifyResult, extractCex, panicMsg, VeriOpts(..), groupIssues, groupPartials, IterConfig(..), LoopHeuristic, defaultIterConf)
 import EVM.SymExec.Calldata (symAbiArgSupported, symCalldata)
-import EVM.SymExec.Cex (prettyCalldata, calldataFromCex)
+import EVM.SymExec.Cex (prettyCalldata, calldataFromCex, subModel)
 import EVM.Types
 import EVM.Transaction (initTx)
 import EVM.Stepper (Stepper)
@@ -811,7 +811,7 @@ invariantRun opts ctx (nth, numTests) sig@(Sig testName types) = do
     Right _ -> do
       (cdBuf, cdProps, caveats) <- symCalldata cs types [] (AbstractBuf "txdata")
       let check = Invariant.Check (Target opts.testParams.address "" sig) opts.testParams.caller
-            Nothing opts.testParams.gasCall (cdBuf, cdProps) (testPostcondition opts.checkFailBit False)
+            Nothing opts.testParams.gasCall (cdBuf, cdProps) (testPostcondition opts.checkFailBit False) True
           fetcher = Fetch.oracle opts.solvers opts.sess opts.rpcInfo
       result <- Progress.withPhase "test" ["test" JSON..= cs] (const []) $ do
         Progress.phaseTotal numTests
@@ -856,10 +856,16 @@ invariantRun opts ctx (nth, numTests) sig@(Sig testName types) = do
 
 -- | Shows the calls of a counterexample, with their callers when they matter
 callLines :: SMTCex -> [Call] -> [Text]
-callLines cex calls = zipWith (<>) ("  calls:    " : repeat "            ") $ flip map calls $ \call ->
-  let Sig _ argTypes = call.target.sig
-      from = maybe "" (\a -> " from " <> Text.pack (show a)) (Map.lookup call.caller cex.addrs)
-  in call.target.contractName <> "." <> prettyCalldata cex call.calldata (callSig call.target.sig) argTypes <> from
+callLines cex calls = zipWith (<>) ("  calls:    " : repeat "            ") $ flip map calls $ \case
+  call@NoCall{} -> "wait until timestamp " <> showContextWord call.timestamp
+    <> ", block " <> showContextWord call.blockNumber
+  call@Call{} ->
+    let Sig _ argTypes = call.target.sig
+        from = maybe "" (\a -> " from " <> Text.pack (show a)) (Map.lookup call.caller cex.addrs)
+    in call.target.contractName <> "." <> prettyCalldata cex call.calldata (callSig call.target.sig) argTypes <> from
+  where
+    showContextWord :: Expr EWord -> Text
+    showContextWord expression = Text.pack $ show $ either (const expression) Expr.simplify (subModel cex expression)
 
 -- | Runs one call of a counterexample concretely
 replayCall :: App m => UnitTestOptions -> SMTCex -> VM Concrete -> Call -> m (Err (VM Concrete, Either EvmError (Expr Buf)))

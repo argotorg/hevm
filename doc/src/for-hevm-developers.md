@@ -10,7 +10,8 @@ You can also check out a few [presentations](https://github.com/msooseth/hevm-pr
 `EVM.Invariant.Driver` provides bounded exploration without Foundry naming or
 assertion conventions. Create an `Exploration` with explicit `Target`s, allowed
 senders, a `CallConfig` and a transition postcondition. Supply each property as a
-`Check`, including its calldata, caller, optional origin override and postcondition.
+`Check`, including its calldata, caller, optional origin override, postcondition
+and whether it runs immediately after a `NoCall` step (`checkAfterNoCall`).
 `searchInvariant` searches an inclusive depth range and stops at the first
 counterexample for that check. Multiple checks share the same cached frontiers;
 property calls execute on copies and do not change those frontiers. The cache is
@@ -43,6 +44,17 @@ debiting the origin, for clients such as Echidna. Reverted calls roll back eithe
 kind of value transfer. Isolated property `Check`s still send zero ETH and use
 the reached state's block context.
 
+Set `CallConfig.allowNoCalls` to include context-only steps (default `False`). A
+`NoCall` advances timestamp and/or block number using the same per-step bounds,
+without executing bytecode, initializing a transaction, changing accounts, or
+running the transaction postcondition. It needs no target or sender and consumes
+one depth slot. Zero-delay waits are omitted. The driver disables state pruning
+when waits are enabled because `stateKey` omits the block context.
+`concretizeCalls` produces `ConcreteNoCall` entries with the solved context and
+delays; `replayCall` and `replayCalls` preserve them without transferring value or
+incrementing nonces. An isolated `Check` may run after a wait; clients that only
+check after contract calls set `checkAfterNoCall` to `False`.
+
 `callerIsOrigin` requires `OneOf` senders and enumerates them concretely so that
 transaction initialization looks up the correct origin account. Disable
 `pruneStates` for properties that observe context not represented by `stateKey`,
@@ -56,10 +68,10 @@ materializes a sequence using one model, including ABI arguments, callers, origi
 ETH values, transfer policy and per-call delays. Clients may replay it with their own executor, or use
 `replayCalls` and classify the final check themselves.
 
-Exploration currently extends successful calls only; ordinary reverting calls do
-not become frontier states. A bound therefore covers successful prefixes followed
-by a checked call. Clients requiring reverted prefixes that advance block context
-must account for this limitation before claiming verification of all sequences.
+Ordinary reverting calls do not become frontier states. Context-only steps cover
+their delay-only effect for clients such as Echidna, whose shrinker replaces
+reverted setup transactions with `NoCall`. This does not model other lasting
+effects of failed transactions, such as gas payments in a full chain model.
 
 ## Printf-style debugging
 
