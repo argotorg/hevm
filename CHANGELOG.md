@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- Invariant tests support Foundry's `targetInterfaces()`: the functions of the
+  contracts named for an address, such as one behind a proxy, are called there.
 - `hevm test` counterexamples show their calldata as hex too (`raw:`), and
   `hevm test --interactive --calldata` debugs the test with that calldata.
 - `hevm test` shows where in the source a counterexample fails (`at:`), in the

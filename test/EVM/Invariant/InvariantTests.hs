@@ -90,6 +90,17 @@ tests = testGroup "invariant"
   , test "prank-from-list" $ do
       runInvariant 1 "actors.sol" "invariant_actor_from_list" >>= assertRun "one branch per actor" [(True, True)]
       runInvariant 1 "actors.sol" "invariant_not_third_actor" >>= assertRun "the third actor breaks it" [(False, True)]
+  , test "target-interfaces" $ do
+      (results, out) <- runInvariants 2 "interfaces.sol" (const True)
+      assertRun "the library's functions are called at the wallet"
+        [ (("InvariantInterfacePathTest", "invariant_owner"), (False, True))
+        , (("InvariantInterfaceSelectorTest", "invariant_owner"), (True, True))
+        , (("InvariantInterfaceTest", "invariant_owner"), (False, True))
+        , (("InvariantInterfaceUnknownTest", "invariant_owner"), (True, False))
+        , (("InvariantNoInterfaceTest", "invariant_owner"), (True, False)) ]
+        (sort results, out)
+      liftIO $ assertBool "the call is shown" ("WalletLib.initWallet(" `isInfixOf` out)
+      liftIO $ assertBool "an unknown name is said" ("no contract NoSuchContract" `isInfixOf` out)
   , test "partial-warnings-short" $ do
       out <- runInvariant 1 "actors.sol" "invariant_named"
       assertRun "partially explored" [(True, False)] out

@@ -117,12 +117,16 @@ change this; call them in `setUp()`:
 | `excludeContract(addr)` | Never call these contracts |
 | `targetSelector(FuzzSelector)` | Call only these functions of a contract |
 | `excludeSelector(FuzzSelector)` | Never call these functions of a contract |
+| `targetInterface(FuzzInterface)` | Call the functions of these contracts at this address |
 | `targetSender(addr)` | Only these addresses send calls |
 | `excludeSender(addr)` | These addresses never send calls |
 
 The test contract itself can be targeted too; its `test`, `prove`, `check`,
 `invariant_` and `setUp` functions are then not called. `targetSelector` can
 select view functions, and overrides `excludeSelector` for that contract.
+`targetInterface` is for an address whose code does not list the functions it
+answers to, such as a proxy: it names contracts by name, or by `path:Name`, whose
+functions are then called at that address, instead of those of its own code.
 
 For example, to call only `mint` and `transfer` of a token, and never from the
 zero address:

@@ -777,6 +777,7 @@ invariantContext opts vm testContract sourceCache = do
   excluded <- addrs <$> getter "excludeContracts()" (AbiArrayDynamicType AbiAddressType)
   selected <- selectors <$> getter "targetSelectors()" selectorsType
   unselected <- selectors <$> getter "excludeSelectors()" selectorsType
+  interfaces <- fuzzInterfaces <$> getter "targetInterfaces()" interfacesType
   targetSenders <- addrs <$> getter "targetSenders()" (AbiArrayDynamicType AbiAddressType)
   excludedSenders <- addrs <$> getter "excludeSenders()" (AbiArrayDynamicType AbiAddressType)
   let senders = case filter (`notElem` excludedSenders) targetSenders of
@@ -786,13 +787,18 @@ invariantContext opts vm testContract sourceCache = do
   let testAddr = opts.testParams.address
       deployed = [a | (LitAddr a, c) <- Map.toList vm.env.contracts, LitAddr a /= testAddr, isJust (sourceOf c)]
       picked = filter (`notElem` excluded) (if null targeted then deployed else targeted)
-      targetAddrs = List.nub (picked <> map fst selected)
-      targetsOf a = case Map.lookup (LitAddr a) vm.env.contracts >>= sourceOf of
-        Nothing -> Left $ "no source for target contract " <> Text.pack (show a)
-        Just (c, name) -> Right
+      targetAddrs = List.nub (picked <> map fst selected <> map fst interfaces)
+      -- as in Foundry, the contracts named for an address replace the functions of its code
+      methodsOf a = case lookup a interfaces of
+        Just names -> List.nubBy (\(_, m) (_, m') -> m.methodSignature == m'.methodSignature) . concat
+          <$> mapM (\n -> (\c -> [(shortName c, m) | m <- Map.elems c.abiMap]) <$> artifact n) names
+        Nothing -> case Map.lookup (LitAddr a) vm.env.contracts >>= sourceOf of
+          Nothing -> Left $ "no source for target contract " <> Text.pack (show a)
+          Just (c, name) -> Right [(name, m) | m <- Map.elems c.abiMap]
+      targetsOf a = methodsOf a <&> \ms ->
           [ (Target { addr = LitAddr a, contractName = name, sig = mkSig m }
             , all (symAbiArgSupported . snd) m.inputs)
-          | m <- Map.elems c.abiMap
+          | (name, m) <- ms
           -- as in Foundry, excludeSelector is ignored for a contract with targetSelector
           , case lookup a selected of
               Just sels -> selector m.methodSignature `elem` sels
@@ -834,6 +840,19 @@ invariantContext opts vm testContract sourceCache = do
         | AbiTuple t <- V.toList v, [AbiAddress a, AbiArrayDynamic _ sels] <- [V.toList t] ]
       _ -> []
     selectorsType = AbiArrayDynamicType (AbiTupleType (V.fromList [AbiAddressType, AbiArrayDynamicType (AbiBytesType 4)]))
+    fuzzInterfaces = \case
+      Just (AbiArrayDynamic _ v) -> Map.toList $ Map.fromListWith (flip (<>))
+        [ (a, [decodeUtf8With lenientDecode n | AbiString n <- V.toList names])
+        | AbiTuple t <- V.toList v, [AbiAddress a, AbiArrayDynamic _ names] <- [V.toList t] ]
+      _ -> []
+    interfacesType = AbiArrayDynamicType (AbiTupleType (V.fromList [AbiAddressType, AbiArrayDynamicType AbiStringType]))
+    shortName c = Text.takeWhileEnd (/= ':') c.contractName
+    -- a contract by its name, or by its path and name, as Foundry's artifact identifiers
+    artifact n = case [c | c <- Map.elems opts.dapp.solcByName, n `elem` [c.contractName, shortName c]] of
+      [c] -> Right c
+      [] -> Left $ "targetInterfaces: no contract " <> n
+      cs -> Left $ "targetInterfaces: " <> Text.pack (show (length cs)) <> " contracts are named " <> n
+        <> ", name one as path:" <> n
     -- an account without code has the code hash of every interface
     sourceOf c = case cloneOf c of
       Just impl -> do

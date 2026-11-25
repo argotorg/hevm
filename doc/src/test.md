@@ -34,8 +34,8 @@ Functions that start with `invariant_` are invariants: hevm checks them after
 calls to the target functions, with symbolic arguments and callers. Between
 calls, the block timestamp may move forward. The target functions are the
 non-view functions of the contracts deployed in `setUp()`, other than the test
-contract. As in Foundry, `targetContract`, `excludeContract`, `targetSelector`
-and `excludeSelector` change them, and `targetSender` and `excludeSender` the
+contract. As in Foundry, `targetContract`, `excludeContract`, `targetSelector`,
+`excludeSelector` and `targetInterface` change them, and `targetSender` and `excludeSender` the
 callers. A minimal proxy (EIP-1167 clone) gets the functions of the contract it
 delegates to. A state that another sequence of calls already reached is not
 explored again. An assertion that fails in one of the calls fails the test too.
