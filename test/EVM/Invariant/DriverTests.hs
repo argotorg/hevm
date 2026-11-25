@@ -1,6 +1,8 @@
 module EVM.Invariant.DriverTests (tests) where
 
 import Control.Monad (forM_)
+import Control.Monad.IO.Class (liftIO)
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Map qualified as Map
 import Data.Maybe (isNothing)
 import Data.Text qualified as T
@@ -8,7 +10,7 @@ import Test.Tasty (TestTree, testGroup)
 import Optics.Core
 
 import EVM (initialContract, symbolify)
-import EVM.ABI (AbiType(..), AbiValue(..), Sig(..), selector)
+import EVM.ABI (AbiType(..), AbiValue(..), Sig(..), callSig, selector)
 import EVM.Effects (App)
 import EVM.Expr qualified as Expr
 import EVM.Fetch qualified as Fetch
@@ -21,7 +23,50 @@ import EVM.Types
 
 tests :: TestTree
 tests = testGroup "framework-independent driver"
-  [ test "native property, cached depths and concrete replay" $ withDefaultSolver $ \solvers -> do
+  [ test "progress identifies calls, depths, prefixes and cached invariant checks" $ withDefaultSolver $ \solvers -> do
+      initial <- fixture
+      events <- liftIO $ newIORef []
+      let fetcher = Fetch.oracle solvers Nothing Fetch.noRpc
+          target = Target initial.state.contract "Native" (Sig "advance" [AbiUIntType 256])
+          config = (defaultCallConfig maxBound)
+            { callerIsOrigin = True, maxTimeDelay = Just 0, maxBlockDelay = Just 0 }
+          options = ExplorationConfig [target] (OneOf [0x10000]) config (\_ _ -> PBool True) False
+          report event = modifyIORef' events (<> [event])
+          describe :: Progress -> (String, Int, Int, Int, [T.Text], T.Text)
+          describe ExploringCall{depth, stateIndex, stateCount, prefix, currentCall} =
+            ("call", depth, stateIndex, stateCount, map (maybe "NoCall" (callSig . (.sig))) prefix,
+              maybe "NoCall" (callSig . (.sig)) currentCall.target)
+          describe LevelFinished{depth, reachedStates} = ("level", depth, 0, reachedStates, [], "")
+          describe CheckingInvariant{depth, stateIndex, stateCount, prefix, checkTarget} =
+            ("check", depth, stateIndex, stateCount, map (maybe "NoCall" (callSig . (.sig))) prefix, callSig checkTarget.sig)
+      cache <- newExplorationWithProgress options report (symbolify initial)
+      _ <- exploreLevel solvers fetcher defaultVeriOpts.iterConf cache 2
+      first <- liftIO $ readIORef events
+      assertEqualM "call starts precede completed levels"
+        [("call", 1, 1, 1, [], "advance(uint256)"), ("level", 1, 0, 1, [], ""),
+         ("call", 2, 1, 1, ["advance(uint256)"], "advance(uint256)"), ("level", 2, 0, 1, [], "")]
+        (map describe first)
+      forM_ first $ \case
+        ExploringCall{currentCall} -> do
+          assertEqualM "function position" (1, 1) (currentCall.functionIndex, currentCall.functionCount)
+          assertEqualM "concrete caller" (Just $ LitAddr 0x10000) currentCall.caller
+        _ -> pure ()
+      _ <- exploreLevel solvers fetcher defaultVeriOpts.iterConf cache 2
+      cached <- liftIO $ readIORef events
+      assertEqualM "cached levels emit no duplicate calls" (map describe first) (map describe cached)
+      _ <- searchInvariant solvers fetcher defaultVeriOpts cache (2, 2) (property initial "valid")
+      checked <- liftIO $ readIORef events
+      assertEqualM "isolated checks identify their reached state"
+        (map describe first <> [("check", 2, 1, 1, replicate 2 "advance(uint256)", "valid()")])
+        (map describe checked)
+      let waits = options { targets = [], callConfig = config { allowNoCalls = True, maxTimeDelay = Just 1 } }
+      waiting <- newExplorationWithProgress waits report (symbolify initial)
+      _ <- exploreLevel solvers fetcher defaultVeriOpts.iterConf waiting 1
+      waited <- liftIO $ readIORef events
+      assertEqualM "waits have their own progress event"
+        [("call", 1, 1, 1, [], "NoCall"), ("level", 1, 0, 1, [], "")]
+        (map describe $ drop (length checked) waited)
+  , test "native property, cached depths and concrete replay" $ withDefaultSolver $ \solvers -> do
       initial <- fixture
       let fetcher = Fetch.oracle solvers Nothing Fetch.noRpc
           target = Target initial.state.contract "Native" (Sig "advance" [AbiUIntType 256])

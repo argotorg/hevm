@@ -19,6 +19,8 @@ module EVM.Invariant
   , startNoCall
   , nextStates
   , nextStatesWith
+  , nextStatesWithProgress
+  , CallProgress(..)
   , simplifyDisjunction
   ) where
 
@@ -132,6 +134,16 @@ data Probe = Probe
 
 -- | Who may send the calls, from targetSender and excludeSender
 data Senders = AnySender | OneOf [Addr] | NoneOf [Addr]
+
+-- | The call about to be explored. Indices are one-based within the selected
+-- functions, separately for each sender. Nothing denotes a context-only wait.
+-- This deliberately carries no VM or symbolic calldata.
+data CallProgress = CallProgress
+  { target :: Maybe Target
+  , functionIndex :: Int
+  , functionCount :: Int
+  , caller :: Maybe (Expr EAddr)
+  }
 
 -- | A state reached by successful calls and optional context-only steps.
 data InvState = InvState
@@ -283,7 +295,16 @@ nextStates solvers post fetcher iterConf gas senders targets visited st = do
 nextStatesWith :: App m
   => SolverGroup -> Postcondition -> Fetch.Fetcher Symbolic m -> IterConfig -> CallConfig -> Senders -> [Target]
   -> Maybe (IORef (Set StateKey)) -> InvState -> m Transition
-nextStatesWith solvers post fetcher iterConf conf senders targets visitedStates st = do
+nextStatesWith = nextStatesWithProgress (const $ pure ())
+
+-- | Report each call before transaction setup, interpretation and SMT queries.
+-- The callback must return promptly; clients can publish periodic updates from
+-- the latest event while a call is still being explored.
+nextStatesWithProgress :: App m
+  => (CallProgress -> IO ())
+  -> SolverGroup -> Postcondition -> Fetch.Fetcher Symbolic m -> IterConfig -> CallConfig -> Senders -> [Target]
+  -> Maybe (IORef (Set StateKey)) -> InvState -> m Transition
+nextStatesWithProgress progress solvers post fetcher iterConf conf senders targets visitedStates st = do
   called <- if null targets then pure mempty
     else if conf.callerIsOrigin then case senders of
       OneOf as -> mconcat <$> mapM (expand . OneOf . pure) as
@@ -306,6 +327,7 @@ nextStatesWith solvers post fetcher iterConf conf senders targets visitedStates 
   noCall
     | conf.maxTimeDelay == Just 0 && maybe True (== 0) conf.maxBlockDelay = pure mempty
     | otherwise = do
+        liftIO $ progress $ CallProgress Nothing 0 0 Nothing
         -- Zero-delay waits add no reachable context and need not be explored.
         let props = timeProps <> numberProps <>
               [POr (PLT st.vm.block.timestamp timestamp) (PLT st.vm.block.number blockNumber)]
@@ -317,7 +339,7 @@ nextStatesWith solvers post fetcher iterConf conf senders targets visitedStates 
         pure $ mempty { states = [reached | not (isQed result)], issues = solverIssues result }
 
   expand (OneOf []) = pure mempty
-  expand allowed = fmap mconcat $ forM targets $ \target -> do
+  expand allowed = fmap mconcat $ forM (zip [1..] targets) $ \(index, target) -> do
     let Sig _ types = target.sig
         anyCaller = SymAddr ("caller" <> n)
         (caller, callerProps) = case allowed of
@@ -332,6 +354,7 @@ nextStatesWith solvers post fetcher iterConf conf senders targets visitedStates 
         valueProps = [PLEq value (Lit conf.maxValue)] <>
           [p | conf.maxValue /= 0 && conf.valueTransfer == TransferValue
              , p <- [PLEq gasCost balance, PLEq value (Expr.sub balance gasCost)]]
+    liftIO $ progress $ CallProgress (Just target) index (length targets) (Just caller)
     (cd, props, _) <- symCalldataNamed ("call" <> n <> "-") True (callSig target.sig) types [] (AbstractBuf ("txdata" <> n))
     let call = Call { target, caller, calldata = cd, timestamp, blockNumber, origin, value,
           valueTransfer = conf.valueTransfer,

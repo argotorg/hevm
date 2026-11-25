@@ -5,6 +5,8 @@ module EVM.Invariant.Driver
   ( Exploration
   , ExplorationConfig(..)
   , newExploration
+  , newExplorationWithProgress
+  , Progress(..)
   , explorationStatus
   , exploreLevel
   , Check(..)
@@ -19,7 +21,7 @@ module EVM.Invariant.Driver
   , replayCalls
   ) where
 
-import Control.Monad (foldM, when)
+import Control.Monad (foldM, forM, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.ST (stToIO)
 import Control.Monad.State.Strict (execStateT, get)
@@ -66,15 +68,46 @@ data Exploration = Exploration
   , levels :: IORef [[InvState]]
   , visited :: Maybe (IORef (Set StateKey))
   , outcomes :: IORef Transition
+  , progress :: Progress -> IO ()
   }
 
+-- | Positions refer to a known frontier, not a percentage of the whole search.
+-- Later depths can have more states. Prefixes contain only call targets (or
+-- Nothing for waits), so observers need not retain symbolic calldata or VMs.
+data Progress
+  = ExploringCall
+      { depth :: Int
+      , stateIndex :: Int
+      , stateCount :: Int
+      , prefix :: [Maybe Target]
+      , currentCall :: CallProgress
+      }
+  | LevelFinished
+      { depth :: Int
+      , reachedStates :: Int
+      }
+  | CheckingInvariant
+      { depth :: Int
+      , stateIndex :: Int
+      , stateCount :: Int
+      , prefix :: [Maybe Target]
+      , checkTarget :: Target
+      }
+
 newExploration :: MonadIO m => ExplorationConfig -> VM Symbolic -> m Exploration
-newExploration options vm = liftIO $ do
+newExploration options = newExplorationWithProgress options (const $ pure ())
+
+newExplorationWithProgress :: MonadIO m
+  => ExplorationConfig -> (Progress -> IO ()) -> VM Symbolic -> m Exploration
+newExplorationWithProgress options progress vm = liftIO $ do
   levels <- newIORef [[InvState vm []]]
   visited <- if options.pruneStates && not options.callConfig.allowNoCalls
     then Just <$> newIORef (Set.singleton $ stateKey vm) else pure Nothing
   outcomes <- newIORef mempty
-  pure Exploration { options, levels, visited, outcomes }
+  pure Exploration { options, levels, visited, outcomes, progress }
+
+callTargets :: InvState -> [Maybe Target]
+callTargets st = map (\case Call{target} -> Just target; NoCall{} -> Nothing) st.calls
 
 -- | Frontier sizes and accumulated transition diagnostics. Probe diagnostics
 -- retain the first failing call to each target, as in the Foundry runner.
@@ -94,8 +127,12 @@ exploreLevel solvers fetcher iterConf exploration depth
         [] -> do
           previous <- exploreLevel solvers fetcher iterConf exploration (depth - 1)
           let opts = exploration.options
-          result <- mconcat <$> mapM (nextStatesWith solvers opts.postcondition fetcher iterConf
-            opts.callConfig opts.senders opts.targets exploration.visited) previous
+          let total = length previous
+          result <- fmap mconcat $ forM (zip [1..] previous) $ \(index, st) ->
+            nextStatesWithProgress
+              (exploration.progress . ExploringCall depth index total (callTargets st))
+              solvers opts.postcondition fetcher iterConf opts.callConfig opts.senders
+              opts.targets exploration.visited st
           conf <- readConfig
           when conf.debug $ liftIO $ putStrLn $ "Invariant states after " <> show depth
             <> " calls: " <> show (length result.states) <> " new"
@@ -103,6 +140,7 @@ exploreLevel solvers fetcher iterConf exploration depth
             modifyIORef' exploration.levels (<> [result.states])
             modifyIORef' exploration.outcomes $ \old -> (old <> result)
               { states = [], probes = List.foldl' addProbe old.probes result.probes }
+            exploration.progress $ LevelFinished depth (length result.states)
           pure result.states
   where
     addProbe :: [Probe] -> Probe -> [Probe]
@@ -141,8 +179,8 @@ data CheckResult = CheckResult
   }
 
 checkInvariant :: App m => SolverGroup -> Fetcher Symbolic m -> VeriOpts -> Check -> InvState -> m CheckResult
-checkInvariant _ _ _ Check{checkAfterNoCall = False} st
-  | NoCall{}:_ <- reverse st.calls = pure $ CheckResult Nothing [] []
+checkInvariant _ _ _ check st
+  | not (checksState check st) = pure $ CheckResult Nothing [] []
 checkInvariant solvers fetcher opts check st = do
   let initial = maybe st.vm (\a -> st.vm & set (#tx % #origin) a) check.origin
       call = Call check.target check.caller (fst check.calldata) initial.block.timestamp
@@ -156,6 +194,11 @@ checkInvariant solvers fetcher opts check st = do
     , issues = [T.pack (getUnknownStr u) | Unknown u <- results] <> [T.pack e | Error e <- results]
     }
 
+checksState :: Check -> InvState -> Bool
+checksState check st = check.checkAfterNoCall || case reverse st.calls of
+  NoCall{}:_ -> False
+  _ -> True
+
 -- | Search an inclusive range of depths, stopping at the first counterexample
 -- for this check. Exploration is cached across calls for other checks. Partial
 -- paths and solver issues are returned even when a counterexample is found.
@@ -167,15 +210,17 @@ searchInvariant solvers fetcher opts exploration (first, lastDepth) check = go (
       | depth > lastDepth = pure $ CheckResult Nothing partials issues
       | otherwise = exploreLevel solvers fetcher opts.iterConf exploration depth >>= \case
           [] -> pure $ CheckResult Nothing partials issues
-          states -> visit depth partials issues states
-    visit depth partials issues [] = go (depth + 1) partials issues
-    visit depth partials issues (st:rest) = do
+          states -> visit depth (length states) 1 partials issues states
+    visit depth _ _ partials issues [] = go (depth + 1) partials issues
+    visit depth total index partials issues (st:rest) = do
+      when (checksState check st) $ liftIO $ exploration.progress $
+        CheckingInvariant depth index total (callTargets st) check.target
       result <- checkInvariant solvers fetcher opts check st
       let ps = partials <> result.partials
           es = issues <> result.issues
       case result.counterexample of
         Just cex -> pure $ CheckResult (Just cex) ps es
-        Nothing -> visit depth ps es rest
+        Nothing -> visit depth total (index + 1) ps es rest
 
 -- | A replayable transaction, including decoded ABI arguments, value and
 -- delays relative to the state before each call, including prior cheatcodes.
