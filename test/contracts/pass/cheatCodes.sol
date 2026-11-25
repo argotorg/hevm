@@ -558,4 +558,18 @@ contract CheatCodes is Test {
         string memory shortResult = hevm.toString(shortBytes);
         assertEq(shortResult, "0xacab");
     }
+
+    function prove_getCode() public {
+        bytes32 h = keccak256(type(Payable).creationCode);
+        assertEq(keccak256(vm.getCode("Payable")), h);
+        assertEq(keccak256(vm.getCode("unit-tests.t.sol:Payable")), h);
+        assertEq(keccak256(vm.getCode("src/unit-tests.t.sol:Payable")), h);
+        assertEq(keccak256(vm.getDeployedCode("Payable")), keccak256(address(new Payable()).code));
+    }
+
+    function prove_deployCode() public {
+        address p = deployCode("Payable");
+        assertEq(keccak256(p.code), keccak256(type(Payable).runtimeCode));
+        Payable(payable(p)).hi();
+    }
 }

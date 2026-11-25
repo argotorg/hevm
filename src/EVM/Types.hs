@@ -800,6 +800,8 @@ data VM (t :: VMType) = VM
   , forks          :: Seq ForkState
   , currentFork    :: Int
   , srcLookup      :: Maybe SrcLookup
+  , artifacts      :: Map Text (ByteString, ByteString)
+  -- ^ the creation and runtime code of the contracts compiled, by "path:Name", for getCode
   , labels         :: Map Addr Text
   , osEnv          :: Map String String
   , freshVar       :: Int

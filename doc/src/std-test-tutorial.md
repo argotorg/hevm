@@ -304,3 +304,5 @@ implementing the following methods:
 |`function selectFork(uint256 forkId) external`| Takes a fork identifier created by `createFork` and sets the corresponding forked state as active.|
 |`function activeFork() external returns (uint256)`| Returns the identifier of the current fork.|
 |`function label(address addr, string calldata label) external`| Labels the address in traces|
+|`function getCode(string calldata artifact) external returns (bytes memory)`| Returns the creation code of a contract compiled with the tests, named as `Name`, `File.sol`, `File.sol:Name` or `path/File.sol:Name`. forge-std's `deployCode` and `deployCodeTo` use it.|
+|`function getDeployedCode(string calldata artifact) external returns (bytes memory)`| Returns the runtime code of such a contract.|

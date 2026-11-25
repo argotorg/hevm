@@ -48,7 +48,7 @@ import Data.Either (partitionEithers)
 import Data.Either.Extra (maybeToEither)
 import Data.Foldable (Foldable(..))
 import Data.Containers.ListUtils (nubOrdOn)
-import Data.List (delete, find, isPrefixOf)
+import Data.List (delete, find, isPrefixOf, isSuffixOf)
 import Data.List.Split (splitOn)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -56,7 +56,7 @@ import Data.Maybe (fromMaybe, fromJust, isJust, isNothing, listToMaybe, mapMaybe
 import Data.Set (insert, member, fromList)
 import Data.Sequence (Seq)
 import Data.Sequence qualified as Seq
-import Data.Text (unpack, pack)
+import Data.Text (Text, unpack, pack)
 import Data.Text.Encoding (decodeUtf8With)
 import Data.Text.Encoding.Error (lenientDecode)
 import Data.Tree
@@ -208,6 +208,7 @@ makeVm o = do
     , forks = Seq.singleton (ForkState env block mempty "")
     , currentFork = 0
     , srcLookup = Nothing
+    , artifacts = mempty
     , labels = mempty
     , osEnv = mempty
     , freshVar = 0
@@ -2413,6 +2414,9 @@ cheatActions = Map.fromList
             doStop
         _ -> vmError (BadCheatCode "etch(address,bytes) address decoding failed" sig)
 
+  , action "getCode(string)" $ artifactCheat fst
+  , action "getDeployedCode(string)" $ artifactCheat snd
+
   , action "expectRevert()" $
       \_ _ -> setExpectedRevert Nothing False Nothing
 
@@ -2786,10 +2790,34 @@ cheatActions = Map.fromList
           -- rather than risk an unsound pass. May be a false positive.
           frameRevert "assertion failed: assertApproxEqRel (symbolic int256 operands not supported)"
         abivals -> vmError (BadCheatCode ("assertApproxEqRel(int256,int256,uint256) parameter decoding failed: " <> show abivals) sig)
+    artifactCheat pick sig input = case decodeBuf [AbiStringType] input of
+      (CAbi [AbiString what],"") -> do
+        vm <- get
+        case findArtifact vm.artifacts (toString what) of
+          Right code -> frameReturn $ AbiTuple $ V.fromList [AbiBytesDynamic (pick code)]
+          Left err -> vmError (BadCheatCode err sig)
+      _ -> vmError (BadCheatCode "getCode parameter decoding failed" sig)
     toStringCheat abitype sig input = do
       case decodeBuf [abitype] input of
         (CAbi [val],"") -> frameReturn $ AbiTuple $ V.fromList [AbiString $ Char8.pack $ show val]
         _ -> vmError (BadCheatCode ("toString parameter decoding failed for " <> show abitype) sig)
+
+-- | A contract by Foundry's names for artifacts: "Name", "File.sol", "File.sol:Name"
+-- or "dir/File.sol:Name"
+findArtifact :: Map Text (ByteString, ByteString) -> String -> Either String (ByteString, ByteString)
+findArtifact artifacts what = case [code | (key, code) <- Map.toList artifacts, matches (unpack key)] of
+  [code] -> Right code
+  [] -> Left $ "no contract " <> what
+  cs -> Left $ show (length cs) <> " contracts match " <> what <> ", name one as path:Name"
+  where
+    matches key = let (path, name) = splitName key in case splitName what of
+      ("", w) | ".sol" `isSuffixOf` w -> fileOf path == w && name == take (length w - 4) w
+              | otherwise -> name == w
+      (file, w) -> name == w && (path == file || ('/' : file) `isSuffixOf` path)
+    splitName s = case break (== ':') (reverse s) of
+      (n, ':' : p) -> (reverse p, reverse n)
+      _ -> ("", s)
+    fileOf = reverse . takeWhile (/= '/') . reverse
 
 -- * expectRevert support
 --

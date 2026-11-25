@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- `getCode` and `getDeployedCode` cheatcodes, so forge-std's `deployCode` works,
+  e.g. for contracts compiled with another solc version than the tests.
 - Invariant tests support Foundry's `targetInterfaces()`: the functions of the
   contracts named for an address, such as one behind a proxy, are called there.
 - `hevm test` counterexamples show their calldata as hex too (`raw:`), and

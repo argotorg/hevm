@@ -686,6 +686,7 @@ initialUnitTestVm (UnitTestOptions {..}) theContract = do
           & set #nonce (Just 1)
           & set #balance (Lit testParams.balanceCreate)
   pure $ vm & set (#env % #contracts % at (LitAddr ethrunAddress)) (Just creator)
+    & set #artifacts (Map.map (\c -> (c.creationCode, c.runtimeCode)) dapp.solcByName)
 
 -- | Build a SrcLookup callback that resolves (address, pc) to source location info
 makeSrcLookup :: DappInfo -> SourceCache -> SrcLookup
