@@ -26,6 +26,7 @@ import Data.Monoid (All(..))
 import Data.Text (Text)
 import Data.Typeable
 import Numeric.Natural (Natural)
+import Witch (unsafeInto)
 
 import EVM.Effects
 import EVM.Expr qualified as Expr
@@ -49,7 +50,16 @@ tests = testGroup "Expr"
 
 unitTests :: TestTree
 unitTests = testGroup "Unit tests"
-  [ simplificationTests
+  [ testCase "concrete readBytes agrees with individual byte reads at the boundaries" $ do
+      let lengths = [-1,0,1,2,3,4,8,16,31,32,33,64]
+          offsets = [0,1,2,3,4,15,31,32,63,64,65,2^(64 :: Int)-1,2^(255 :: Int),maxBound-2,maxBound]
+          readIndividually n i buf = Expr.joinBytes
+            [Expr.readByte (Expr.add i (Lit (unsafeInto j))) buf | j <- [0 .. min n 32 - 1]]
+      forM_ [0,1,3,4,31,32,63,64] $ \size -> do
+        let buf = ConcreteBuf (BS.pack (take size (cycle [0,1,127,128,255])))
+        forM_ offsets $ \off -> forM_ lengths $ \n ->
+          assertEqual (show (size,off,n)) (readIndividually n (Lit off) buf) (Expr.readBytes n (Lit off) buf)
+  , simplificationTests
   , constantPropagationTests
   , boundPropagationTests
   , comparisonTests

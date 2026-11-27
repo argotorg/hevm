@@ -2197,9 +2197,13 @@ cheat
   -> EVM t ()
 cheat gas (inOffset, inSize) (outOffset, outSize) xs = do
   vm <- get
-  input <- readMemory (Expr.add inOffset (Lit 4)) (Expr.sub inSize (Lit 4))
   calldata <- readMemory inOffset inSize
-  abi <- readBytes 4 (Lit 0) <$> readMemory inOffset (Lit 4)
+  (input, abi) <- case reusableCallInput vm.state.memory inOffset inSize calldata of
+    Just bytes -> pure (ConcreteBuf (BS.drop 4 bytes), Lit (word (BS.take 4 bytes)))
+    Nothing -> do
+      args <- readMemory (Expr.add inOffset (Lit 4)) (Expr.sub inSize (Lit 4))
+      selectorWord <- readBytes 4 (Lit 0) <$> readMemory inOffset (Lit 4)
+      pure (args, selectorWord)
   let newContext = CallContext cheatCode cheatCode outOffset outSize (Lit 0) (maybeLitWordSimp abi) calldata vm.env.contracts vm.tx.subState
 
   pushTrace $ FrameTrace newContext
@@ -2962,7 +2966,9 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
     actualCall target addr xGas vm0 = do
         burn' xGas $ do
           calldata <- readMemory xInOffset xInSize
-          abi <- maybeLitWordSimp . readBytes 4 (Lit 0) <$> readMemory xInOffset (Lit 4)
+          abi <- case reusableCallInput vm0.state.memory xInOffset xInSize calldata of
+            Just bytes -> pure (Just (word (BS.take 4 bytes)))
+            Nothing -> maybeLitWordSimp . readBytes 4 (Lit 0) <$> readMemory xInOffset (Lit 4)
           let newContext = CallContext
                             { target    = addr
                             , context   = xContext
@@ -3555,6 +3561,17 @@ copyCallBytesToMemory
   :: Expr Buf -> Expr EWord -> Expr EWord -> EVM t ()
 copyCallBytesToMemory bs size yOffset =
   copyBytesToMemory bs (Expr.min size (bufLength bs)) (Lit 0) yOffset
+
+-- A selector read spans four physical memory bytes, including bytes outside
+-- short calldata. Only reuse the frozen input when the full slice is present
+-- and readMemory used its ordinary, non-wrapping concrete bounds.
+reusableCallInput :: Memory -> Expr EWord -> Expr EWord -> Expr Buf -> Maybe ByteString
+reusableCallInput ConcreteMemory{} (Lit offset) (Lit size) (ConcreteBuf bytes)
+  | BS.length bytes >= 4
+  , toIntOffset size == Just (BS.length bytes)
+  , size <= Expr.maxBytes
+  , offset <= Expr.maxBytes - size = Just bytes
+reusableCallInput _ _ _ _ = Nothing
 
 readMemory :: Expr EWord -> Expr EWord -> EVM t (Expr Buf)
 readMemory offset' size' = do

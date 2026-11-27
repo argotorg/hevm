@@ -480,6 +480,13 @@ readByte i buf = ReadByte i buf
 --
 -- If n is >= 32 this is the same as readWord
 readBytes :: Int -> Expr EWord -> Expr Buf -> Expr EWord
+-- Reuse the concrete byte slice directly. The general path also handles
+-- short reads, symbolic buffers, and offsets that wrap at 2^256.
+readBytes (Prelude.min 32 -> n) (Lit index) (ConcreteBuf bytes)
+  | n > 0, n <= BS.length bytes
+  , Just off <- toIntOffset index
+  , off <= BS.length bytes - n
+  = Lit (word (BS.take n (BS.drop off bytes)))
 readBytes (Prelude.min 32 -> n) idx buf
   = joinBytes [readByte (add idx (Lit . unsafeInto $ i)) buf | i <- [0 .. n - 1]]
 
