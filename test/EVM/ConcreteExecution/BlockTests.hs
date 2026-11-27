@@ -109,6 +109,25 @@ tests = testGroup "Concrete stack blocks"
               assertEqual (show (ops,offset,size,gas,shift)) wanted actual
               when (offset == 0 && size == 128 && gas >= 3) $
                 assertBool "covered direct memory access" (0 `elem` pcs)
+  , testCase "native offsets reject words outside the signed index range" $ do
+      let largest = maxBound :: Int
+          lastIndex = unsafeInto largest :: EVM.W256
+      assertEqual "zero" (Just 0) (EVM.toIntOffset 0)
+      assertEqual "last index" (Just largest) (EVM.toIntOffset lastIndex)
+      assertEqual "sign bit" Nothing (EVM.toIntOffset (lastIndex + 1))
+      assertEqual "high limb" Nothing (EVM.toIntOffset (2 ^ (64 :: Int)))
+  , testCase "concrete memory reads return immutable snapshots of sliced backing" $ do
+      vm <- stToIO (vmForEthrunCreation BS.empty) :: IO (EVM.VM EVM.Concrete)
+      backing <- VS.thaw (VS.fromList [10,20,30,40])
+      let mem = VSM.slice 1 2 backing
+          start = vm { EVM.state = vm.state { EVM.memory = EVM.ConcreteMemory mem } }
+                  :: EVM.VM EVM.Concrete
+          readAt offset len = stToIO (evalStateT (readMemory (EVM.Lit offset) (EVM.Lit len)) start)
+      snapshot <- readAt 0 2
+      VSM.write mem 1 99
+      assertEqual "original bytes" (EVM.ConcreteBuf (BS.pack [20,30])) snapshot
+      assertEqual "extends past backing" (EVM.ConcreteBuf (BS.pack [99,0])) =<< readAt 1 2
+      assertEqual "wide offset" (EVM.ConcreteBuf (BS.singleton 0)) =<< readAt (2^(64::Int)) 1
   , testCase "literal MSTORE preserves sparse bytes across frame growth" $ do
       vm <- stToIO (vmForEthrunCreation BS.empty) :: IO (EVM.VM EVM.Concrete)
       let code = EVM.RuntimeCode (EVM.ConcreteRuntimeCode (BS.singleton 0x52))

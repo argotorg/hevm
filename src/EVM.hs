@@ -3456,14 +3456,17 @@ accessUnboundedMemoryRange
   -> EVM t ()
 accessUnboundedMemoryRange _ 0 continue = continue
 accessUnboundedMemoryRange f l continue = do
-  m0 <- use (#state % #memorySize)
-  fees <- gets (.block.schedule)
-  -- lazily, each memory access would keep the previous frame states alive
-  let !m1 = 32 * ceilDiv (max m0 (f + l)) 32
-  burn (memoryCost fees m1 - memoryCost fees m0) $ do
-    assign (#state % #memorySize) m1
-    modifying' (#state % #symMemorySize) (fmap (Expr.max (Lit (into m1))))
-    continue
+  frame <- use #state
+  let m0 = frame.memorySize
+      !m1 = 32 * ceilDiv (max m0 (f + l)) 32
+  if m1 == m0 && isNothing frame.symMemorySize
+    then continue
+    else do
+      fees <- gets (.block.schedule)
+      burn (memoryCost fees m1 - memoryCost fees m0) $ do
+        assign (#state % #memorySize) m1
+        modifying' (#state % #symMemorySize) (fmap (Expr.max (Lit (into m1))))
+        continue
 
 accessMemoryRange
   :: VMOps t
@@ -3552,6 +3555,12 @@ readMemory offset' size' = do
   case vm.state.memory of
     ConcreteMemory mem -> do
       case (offset', size') of
+        (Lit offset, Lit size)
+          | Just off <- toIntOffset offset, Just len <- toIntOffset size
+          , let cap = min (VS.Mutable.length mem) (unsafeInto Expr.maxBytes)
+          , off <= cap, len <= cap - off ->
+              ConcreteBuf . vectorToByteString <$>
+                VS.freeze (VS.Mutable.slice off len mem)
         (Lit offset, Lit size) -> do
           let memSize :: Word64 = unsafeInto (VS.Mutable.length mem)
           if size > Expr.maxBytes ||

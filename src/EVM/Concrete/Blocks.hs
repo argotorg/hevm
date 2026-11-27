@@ -9,7 +9,7 @@ module EVM.Concrete.Blocks
   , Scratch, newScratch, runConcreteBlocks
   ) where
 
-import Data.Bits ((.&.), complement, toIntegralSized)
+import Data.Bits ((.&.), complement)
 import Data.ByteString qualified as BS
 import Data.ByteString.Unsafe qualified as BSUnsafe
 import Data.DoubleWord (Word128(..), Word256(..))
@@ -18,7 +18,7 @@ import Data.Vector qualified as V
 import Data.Vector.Mutable qualified as MV
 import Data.Vector.Storable.Mutable qualified as SM
 import Data.Vector.Unboxed qualified as U
-import Data.Word (Word8, Word64)
+import Data.Word (Word8)
 import Foreign.Marshal.Alloc (allocaBytesAligned)
 import Foreign.Marshal.Utils (copyBytes)
 import Foreign.Ptr (Ptr, castPtr, plusPtr, ptrToIntPtr)
@@ -96,9 +96,9 @@ runConcreteBlocks scratch (Just (Program bytes entries)) visit visitBlock vm ini
     fees = vm.block.schedule
     -- Contract lookup is invariant across the instructions in this run.
     jumpMap = (\contract -> contract.opIxMap) <$> currentContract vm
-    maxWordEnd = fromMaybe maxBound (intOffset Expr.maxBytes)
+    maxWordEnd = fromMaybe maxBound (EVM.toIntOffset Expr.maxBytes)
     jumpTarget w
-      | Just pc <- intOffset w
+      | Just pc <- EVM.toIntOffset w
       , pc < BS.length bytes
       , BSUnsafe.unsafeIndex bytes pc == 0x5b
       , Just opMap <- jumpMap, isOpStart opMap pc = Just pc
@@ -124,7 +124,7 @@ runConcreteBlocks scratch (Just (Program bytes entries)) visit visitBlock vm ini
           wordAccess offset action = case frame.memory of
             EVM.ConcreteMemory mem
               | isNothing frame.symMemorySize
-              , Just off <- intOffset offset
+              , Just off <- EVM.toIntOffset offset
               , off < unsafeInto EVM.memoryAccessLimit
               , off <= maxWordEnd - 32
               , off <= SM.length mem - 32
@@ -169,7 +169,7 @@ runConcreteBlocks scratch (Just (Program bytes entries)) visit visitBlock vm ini
               | gas >= fees.g_verylow -> do
                   -- Compare the full-width offset before narrowing it. Reading
                   -- at/past the end yields a zero word, even near 2^256.
-                  value <- case intOffset off of
+                  value <- case EVM.toIntOffset off of
                     Just n | n < BS.length bytes' ->
                       if BS.length bytes' - n >= 32
                         then Lit <$> BSUnsafe.unsafeUseAsCString bytes'
@@ -202,16 +202,6 @@ runConcreteBlocks scratch (Just (Program bytes entries)) visit visitBlock vm ini
             _ -> finish
           _ -> finish
 runConcreteBlocks _ _ _ _ vm context = pure (vm, context)
-
--- Reject oversized offsets before narrowing them to a machine word.
-wordOffset :: EVM.W256 -> Maybe Word64
-wordOffset (EVM.W256 (Word256 (Word128 0 0) (Word128 0 lo))) = Just lo
-wordOffset _ = Nothing
-{-# INLINE wordOffset #-}
-
-intOffset :: EVM.W256 -> Maybe Int
-intOffset w = wordOffset w >>= toIntegralSized
-{-# INLINE intOffset #-}
 
 -- hevm's words use four big-endian limbs. Typed loads require an aligned
 -- address. The byte-copy path also handles unaligned slices on strict targets.

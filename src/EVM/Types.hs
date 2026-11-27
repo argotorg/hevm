@@ -1648,10 +1648,14 @@ memoryAccessLimit :: Word64
 memoryAccessLimit = 0x0fffffff
 
 toWord64 :: W256 -> Maybe Word64
-toWord64 n =
-  if n <= into (maxBound :: Word64)
-    then let (W256 (Word256 _ (Word128 _ n'))) = n in Just n'
-    else Nothing
+toWord64 (W256 (Word256 (Word128 0 0) (Word128 0 lowLimb))) = Just lowLimb
+toWord64 _ = Nothing
+{-# INLINE toWord64 #-}
+
+-- A byte or vector index must fit in the host's signed index type.
+toIntOffset :: W256 -> Maybe Int
+toIntOffset w = toWord64 w >>= toIntegralSized
+{-# INLINE toIntOffset #-}
 
 bssToBs :: ByteStringS -> ByteString
 bssToBs (ByteStringS bs) = bs
