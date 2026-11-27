@@ -9,13 +9,24 @@ module EVM.Concrete.Blocks
   , Scratch, newScratch, runConcreteBlocks
   ) where
 
+import Data.Bits ((.&.), complement)
+import Data.ByteString qualified as BS
+import Data.ByteString.Unsafe qualified as BSUnsafe
+import Data.DoubleWord (Word128(..), Word256(..))
+import Data.Maybe (isNothing)
 import Data.Vector qualified as V
 import Data.Vector.Mutable qualified as MV
+import Data.Vector.Storable.Mutable qualified as SM
 import Data.Vector.Unboxed qualified as U
-import Witch (unsafeInto)
+import Data.Word (Word8)
+import Foreign.Marshal.Utils (copyBytes)
+import Foreign.Ptr (Ptr, castPtr, plusPtr, ptrToIntPtr)
+import Foreign.Storable (peekByteOff, pokeByteOff)
+import Witch (into, unsafeInto)
 
-import EVM (isPrecompileAddr', isValidJumpDest)
+import EVM (isPrecompileAddr', isValidJumpDest, memoryCost)
 import EVM.Concrete.Blocks.Plan
+import EVM.Expr qualified as Expr
 import EVM.FeeSchedule (FeeSchedule(..))
 import EVM.HashCons (hashConsExpr)
 import EVM.Types (ContractCode(..), EType(EWord), Expr(..), FrameState(..), RuntimeCode(..), VM(..), VMType(Concrete))
@@ -97,6 +108,25 @@ runConcreteBlocks scratch (Just (Program bytes entries)) visit visitBlock vm ini
             context' <- visit pc context
             loop True target (gas-cost) memorySize (height-consumed) rest context'
 
+          -- Stay on the fast path only while the backing vector still fits.
+          -- hevm handles allocation, symbolic accesses and every fault.
+          wordAccess offset action = case frame.memory of
+            EVM.ConcreteMemory mem
+              | isNothing frame.symMemorySize
+              , offset < into EVM.memoryAccessLimit
+              , offset + 32 <= Expr.maxBytes
+              , offset + 32 <= unsafeInto (SM.length mem)
+              , memorySize .&. 31 == 0
+              , gas >= fees.g_verylow ->
+                  let end = unsafeInto offset + 32
+                      size = max memorySize ((end + 31) .&. complement 31)
+                      expansion = if size == memorySize then 0 else
+                        memoryCost fees size - memoryCost fees memorySize
+                  in if expansion <= gas - fees.g_verylow
+                    then action mem (unsafeInto offset) size (gas - fees.g_verylow - expansion)
+                    else finish
+            _ -> finish
+
           validTarget w = w < unsafeInto (V.length entries) && isValidJumpDest vm (unsafeInto w)
 
       in if pc < 0 || pc >= V.length entries then finish else
@@ -111,6 +141,18 @@ runConcreteBlocks scratch (Just (Program bytes entries)) visit visitBlock vm ini
                 stack' <- applyBlock scratch block stack
                 context' <- visitBlock block.pcs context
                 loop True block.endPC (gas-cost) memorySize (height+block.heightChange) stack' context'
+          LoadWord -> case stack of
+            Lit offset:xs -> wordAccess offset $ \mem off size remaining -> do
+              value <- SM.unsafeWith mem $ \p -> readWordAt (p `plusPtr` off)
+              context' <- visit pc context
+              loop True (pc+1) remaining size height (Lit value:xs) context'
+            _ -> finish
+          StoreWord -> case stack of
+            Lit offset:Lit value:xs -> wordAccess offset $ \mem off size remaining -> do
+              SM.unsafeWith mem $ \p -> writeWordAt (p `plusPtr` off) value
+              context' <- visit pc context
+              loop True (pc+1) remaining size (height-2) xs context'
+            _ -> finish
           Jump -> case stack of
             Lit w:xs | gas >= fees.g_mid && validTarget w ->
               jump fees.g_mid (unsafeInto w) 1 xs
@@ -122,3 +164,26 @@ runConcreteBlocks scratch (Just (Program bytes entries)) visit visitBlock vm ini
             _ -> finish
           _ -> finish
 runConcreteBlocks _ _ _ _ vm context = pure (vm, context)
+
+-- hevm's words use four big-endian limbs. Typed loads require an aligned
+-- address. The byte-copy path also handles unaligned slices on strict targets.
+readWordAt :: Ptr Word8 -> IO EVM.W256
+readWordAt ptr
+  | ptrToIntPtr ptr .&. 7 /= 0 = EVM.word <$> BS.packCStringLen (castPtr ptr, 32)
+  | otherwise = do
+      let limb offset = EVM.hton64 <$> peekByteOff ptr offset
+      a <- limb 0
+      b <- limb 8
+      c <- limb 16
+      d <- limb 24
+      pure (EVM.W256 (Word256 (Word128 a b) (Word128 c d)))
+
+writeWordAt :: Ptr Word8 -> EVM.W256 -> IO ()
+writeWordAt ptr value@(EVM.W256 (Word256 (Word128 a b) (Word128 c d)))
+  | ptrToIntPtr ptr .&. 7 /= 0 =
+      BSUnsafe.unsafeUseAsCString (EVM.word256Bytes value) $ \src -> copyBytes ptr (castPtr src) 32
+  | otherwise = do
+      pokeByteOff ptr 0 (EVM.hton64 a)
+      pokeByteOff ptr 8 (EVM.hton64 b)
+      pokeByteOff ptr 16 (EVM.hton64 c)
+      pokeByteOff ptr 24 (EVM.hton64 d)

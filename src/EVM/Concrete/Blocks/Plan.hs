@@ -48,7 +48,7 @@ data StackBlock = StackBlock
   , outputs      :: ![Source] -- deepest first, for rebuilding a shared list tail
   }
 
-data Entry = Standard | StackRun !StackBlock | Jump | JumpIf
+data Entry = Standard | StackRun !StackBlock | Jump | JumpIf | LoadWord | StoreWord
 
 data Program = Program !BS.ByteString !(V.Vector Entry)
 -- | A bounded, shareable cache of analysed runtime bytecode.
@@ -168,6 +168,8 @@ analyse bytes = Program bytes $ V.create $ do
               let entry = case getOp (BS.index bytes pc) of
                     OpJump -> Jump
                     OpJumpi -> JumpIf
+                    OpMload -> LoadWord
+                    OpMstore -> StoreWord
                     _ -> Standard
               MV.write table pc entry
               scan end

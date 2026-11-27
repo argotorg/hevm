@@ -7,6 +7,8 @@ import Control.Monad.ST (stToIO)
 import Control.Monad.State.Strict (evalStateT, execStateT, runStateT)
 import Data.ByteString qualified as BS
 import Data.Map.Strict qualified as Map
+import Data.Vector.Storable qualified as VS
+import Data.Vector.Storable.Mutable qualified as VSM
 import Data.Vector.Unboxed qualified as U
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, assertFailure, testCase)
@@ -57,6 +59,40 @@ tests = testGroup "Concrete stack blocks"
           assertEqual (show (ops,depth,gas)) (observe expected) (observe got)
           when (ops == straightLine && depth == 0 && gas == 141) $
             assertEqual "full affordable block" [0,2,3,4,5,6] (reverse reversePCs)
+  , testCase "word loads and stores match hevm on independent memory slices" $ do
+      vm <- stToIO (vmForEthrunCreation BS.empty) :: IO (EVM.VM EVM.Concrete)
+      scratch <- newScratch
+      cache <- newProgramCache
+      let value = 2^(255::Int) + 2^(150::Int) + 2^(65::Int) + 0x1234
+      forM_ [[0x51,0], [0x52,0], [0x52,0x51,0]] $ \ops -> do
+        let code = EVM.RuntimeCode (EVM.ConcreteRuntimeCode (BS.pack ops))
+        plan <- prepareProgram cache code
+        forM_ [0,1,8,32,65,96,97,maxBound] $ \offset ->
+          forM_ [(0,1000),(32,5),(128,3),(128,2)] $ \(size,gas) ->
+            forM_ [0,1] $ \shift -> do
+              let fresh = do
+                    backing <- VS.thaw (VS.fromList (take (128 + shift) (iterate (+ 101) 0)))
+                    let frame = vm.state { EVM.code = code, EVM.gas = gas, EVM.memorySize = size
+                                         , EVM.stack = map EVM.Lit [offset,value,offset]
+                                         , EVM.memory = EVM.ConcreteMemory (VSM.slice shift 128 backing) }
+                    pure (vm { EVM.state = frame } :: EVM.VM EVM.Concrete)
+                  observe x = case x.state.memory of
+                    EVM.ConcreteMemory mem -> do
+                      bytes <- VS.freeze mem
+                      pure (x.state.pc, x.state.gas, x.burned, x.state.stack, x.state.memorySize, bytes)
+                    _ -> fail "expected concrete memory"
+                  visit pc seen = pure (pc:seen)
+              start <- fresh
+              reference <- fresh
+              (got, pcs) <- runConcreteBlocks scratch plan visit (\v xs -> foldM (flip visit) xs (U.toList v)) start []
+              expected <- foldM (\before pc -> do
+                assertEqual "word access PC" before.state.pc pc
+                stToIO (execStateT (exec1 defaultConfig) before)) reference (reverse pcs)
+              wanted <- observe expected
+              actual <- observe got
+              assertEqual (show (ops,offset,size,gas,shift)) wanted actual
+              when (offset == 0 && size == 128 && gas >= 3) $
+                assertBool "covered direct memory access" (0 `elem` pcs)
   , testCase "literal MSTORE preserves sparse bytes across frame growth" $ do
       vm <- stToIO (vmForEthrunCreation BS.empty) :: IO (EVM.VM EVM.Concrete)
       let code = EVM.RuntimeCode (EVM.ConcreteRuntimeCode (BS.singleton 0x52))
