@@ -9,8 +9,8 @@ module EVM.Debugger.ProgressTests (tests) where
 
 import Control.Concurrent (forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar
-import Control.Exception (SomeException, bracket, try)
-import Control.Monad (forM, forM_, unless, void, when)
+import Control.Exception (SomeException, bracket, finally, throwIO, try)
+import Control.Monad ((<=<), forM, forM_, unless, void, when)
 import Control.Monad.IO.Unlift (liftIO)
 import Control.Monad.ST (stToIO)
 import Data.Aeson ((.=))
@@ -28,20 +28,24 @@ import Test.Tasty
 import Test.Tasty.HUnit
 import Test.Tasty.QuickCheck
 
+import EVM.ABI (Sig(..))
 import EVM.Dapp (emptyDapp)
 import EVM.Debugger (newSession, runCommandText)
 import EVM.Debugger.DebuggerTests (http, httpJSON, branchCode, branchJumpi)
 import EVM.Debugger.Server (serveSession, withProgressServer)
 import EVM.Effects
 import EVM.Fetch qualified as Fetch
+import EVM.Invariant qualified as Invariant
+import EVM.Invariant.Driver qualified as Driver
 import EVM.Progress
 import EVM.Solvers (withSolvers, defMemLimit, Solver(..))
-import EVM.SymExec (abstractVM)
-import EVM.Types (Expr(AbstractBuf))
+import EVM.SymExec (VeriOpts(..), abstractVM, defaultVeriOpts)
+import EVM.Types (Expr(AbstractBuf, ConcreteBuf, LitAddr), FrameState(..), Prop(PBool), VM(..), internalError)
 
 tests :: TestTree
 tests = after AllFinish "!/progress-global/" $ dependentTestGroup "progress-global" AllFinish
   [ testCase "not-running" $ do
+      withActivity "disabled" (internalError "disabled progress evaluated its metadata") (pure ())
       v <- currentProgress
       assertEqual "running" (Just (JSON.Bool False)) (at ["running"] v)
   , testCase "phases-and-paths" $ withProgress tracking $ do
@@ -99,17 +103,104 @@ tests = after AllFinish "!/progress-global/" $ dependentTestGroup "progress-glob
       assertEqual "none in flight" (Just 0) (len =<< at ["queries", "inFlight"] v')
   , testCase "progress-over-http" $ withProgress tracking $ do
       portVar <- newEmptyMVar
-      withPhase "served" [] (const []) $ withProgressServer 0 (putMVar portVar) $ do
-        port <- takeMVar portVar
-        v <- JSON.Object <$> httpJSON port "GET" "/progress" ""
-        assertEqual "running" (Just (JSON.Bool True)) (at ["running"] v)
-        assertEqual "phase" (Just "served") (str =<< at ["phase", "name"] v)
-        st <- http port "GET" "/state" ""
-        assertBool "no debugging session" ("not found" `BS.isInfixOf` st)
-        putMVar portVar port
+      withPhase "served" [] (const []) $ withActivity "invariant-call" ["depth" .= (2 :: Int)] $
+        withProgressServer 0 (putMVar portVar) $ do
+          port <- takeMVar portVar
+          v <- JSON.Object <$> httpJSON port "GET" "/progress" ""
+          assertEqual "running" (Just (JSON.Bool True)) (at ["running"] v)
+          assertEqual "phase" (Just "served") (str =<< at ["phase", "name"] v)
+          assertEqual "active transaction" (Just 2) (int =<< at ["activity", "depth"] v)
+          st <- http port "GET" "/state" ""
+          assertBool "no debugging session" ("not found" `BS.isInfixOf` st)
+          putMVar portVar port
       port <- takeMVar portVar
       r <- try (http port "GET" "/progress" "")
       assertBool "stopped with the run" (either (\(_ :: SomeException) -> True) (const False) r)
+  , testCase "activity-context-and-exception-cleanup" $ withProgress tracking $ do
+      withActivity "search" ["maxDepth" .= (3 :: Int)] $ do
+        result <- try $ withActivity "call" ["depth" .= (2 :: Int)] $ do
+          gate <- newEmptyMVar
+          entered <- newEmptyMVar
+          finished <- newEmptyMVar
+          -- Interpreter and solver work happens on child threads, while the
+          -- driver owns the activity on this orchestration thread.
+          bracket (forkIO $ timedQuery "child" [] [] (const "sat")
+            (\started -> started >> putMVar entered () >> takeMVar gate) >> putMVar finished ()) killThread $ \_ -> do
+            takeMVar entered
+            v <- currentProgress
+            assertEqual "nested fields" (Just 3) (int =<< at ["activity", "maxDepth"] v)
+            assertEqual "query keeps its call context" (Just 2)
+              (int =<< at ["activity", "depth"] =<< first =<< at ["queries", "inFlight"] v)
+            putMVar gate ()
+            takeMVar finished
+          throwIO (userError "interrupted call")
+        assertBool "exception propagated" (either (\(_ :: SomeException) -> True) (const False) result)
+        v <- currentProgress
+        assertEqual "parent restored" (Just "search") (str =<< at ["activity", "name"] v)
+        assertEqual "child fields cleared" Nothing (at ["activity", "depth"] v)
+        entered <- newEmptyMVar
+        finished <- newEmptyMVar
+        bracket (forkIO $ withActivity "cancelled" []
+          (putMVar entered () >> threadDelay 60_000_000) `finally` putMVar finished ()) killThread $ \tid -> do
+          takeMVar entered
+          killThread tid
+          takeMVar finished
+        cancelled <- currentProgress
+        assertEqual "parent restored on cancellation" (Just "search") (str =<< at ["activity", "name"] cancelled)
+      v <- currentProgress
+      assertEqual "activity cleared" (Just JSON.Null) (at ["activity"] v)
+  , testCase "invariant-driver-progress" $ withSystemTempDirectory "hevm-invariant-progress" $ \dir -> do
+      let file = dir <> "/log.jsonl"
+      withProgress (ProgressOpts (Just file) False False True) $ runEnv (Env defaultConfig) $
+        withSolvers Bitwuzla 1 Nothing defMemLimit $ \solvers -> do
+          -- STOP accepts any call: a tiny fixture for progress, with no Solidity compiler.
+          vm <- liftIO $ stToIO $ abstractVM (ConcreteBuf "", []) "\x00" Nothing False
+          observations <- liftIO $ newIORef []
+          let target = Invariant.Target vm.state.contract "Progress" (Sig "advance" [])
+              calls = (Invariant.defaultCallConfig maxBound) { Invariant.maxTimeDelay = Just 0, Invariant.maxBlockDelay = Just 0 }
+              options = Driver.ExplorationConfig [target] (Invariant.OneOf [0x10000]) calls (\_ _ -> PBool True) False
+              check = Driver.Check (target { Invariant.sig = Sig "invariant_ok" [] }) (LitAddr 0x10000)
+                Nothing maxBound (ConcreteBuf "", []) (\_ _ -> PBool True) True
+              fetcher = Fetch.oracle solvers Nothing Fetch.noRpc
+              observe = \case
+                Driver.ExploringCall{} -> currentProgress >>= \v -> modifyIORef' observations (<> [v])
+                _ -> pure ()
+          cache <- Driver.newExplorationWithProgress options observe vm
+          void $ Driver.searchInvariant solvers fetcher defaultVeriOpts cache (0, 2) check
+          void $ Driver.exploreLevel solvers fetcher defaultVeriOpts.iterConf cache 2
+          seen <- liftIO $ readIORef observations
+          liftIO $ do
+            assertEqual "callbacks still run once per uncached call" [Just 1, Just 2]
+              (map (int <=< at ["activity", "depth"]) seen)
+            forM_ seen $ \v -> do
+              assertEqual "call visible while the observer runs" (Just "invariant-call") (str =<< at ["activity", "name"] v)
+              assertEqual "search bound inherited" (Just 2) (int =<< at ["activity", "maxDepth"] v)
+              assertEqual "state position" (Just 1) (int =<< at ["activity", "stateIndex"] v)
+          let waits = options { Driver.targets = [], Driver.senders = Invariant.OneOf []
+                              , Driver.callConfig = calls { Invariant.allowNoCalls = True, Invariant.maxTimeDelay = Just 1 } }
+          waiting <- Driver.newExploration waits vm
+          void $ Driver.searchInvariant solvers fetcher defaultVeriOpts waiting (0, 1) check
+          v <- liftIO currentProgress
+          liftIO $ assertEqual "no stale activity after searches" (Just JSON.Null) (at ["activity"] v)
+      events <- mapMaybe JSON.decodeStrict . BC.lines <$> BS.readFile file
+      let named n = [e | e <- events, at ["ev"] e == Just (JSON.String n)]
+          activities n = [e | e <- named "activity-start", at ["activity", "name"] e == Just (JSON.String n)]
+      assertEqual "cached exploration emits no duplicate calls" 2 (length (activities "invariant-call"))
+      assertEqual "explicit wait" 1 (length (activities "invariant-wait"))
+      forM_ (activities "invariant-call") $ \e -> do
+        assertEqual "target function" (Just "advance()") (str =<< at ["activity", "function"] e)
+        assertEqual "target contract" (Just "Progress") (str =<< at ["activity", "contract"] e)
+        assertEqual "function position" (Just 1) (int =<< at ["activity", "functionIndex"] e)
+        assertBool "caller recorded" (isJust (str =<< at ["activity", "caller"] e))
+      assertEqual "every activity is closed" (length (named "activity-start")) (length (named "activity-end"))
+      forM_ (named "activity-end") $ \e -> do
+        assertEqual "completed activity" (Just "completed") (str =<< at ["outcome"] e)
+        assertBool "duration recorded" (case at ["secs"] e of { Just (JSON.Number n) -> n >= 0; _ -> False })
+      assertBool "depth summaries" (any ((== Just 2) . (int <=< at ["depth"])) (named "invariant-level-finished"))
+      assertBool "wait queries retain transaction context" $
+        any ((== Just "invariant-wait") . (str <=< at ["activity", "name"])) (named "query-start")
+      assertBool "checks include waiting prefixes" $
+        any ((== Just (JSON.Array (V.singleton JSON.Null))) . at ["activity", "prefix"]) (activities "invariant-check")
   , testCase "debugger-serves-progress" $ withProgress tracking $ runEnv (Env defaultConfig) $
       withSolvers Bitwuzla 1 Nothing defMemLimit $ \solvers -> do
         vm <- liftIO $ stToIO $ abstractVM (AbstractBuf "txdata", []) branchCode Nothing False

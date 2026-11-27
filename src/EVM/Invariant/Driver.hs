@@ -25,6 +25,9 @@ import Control.Monad (foldM, forM, when)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.ST (stToIO)
 import Control.Monad.State.Strict (execStateT, get)
+import Data.Aeson ((.=))
+import Data.Aeson qualified as JSON
+import Data.Aeson.Types (Pair)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.IORef (IORef, newIORef, readIORef, modifyIORef')
@@ -43,6 +46,7 @@ import EVM.Effects
 import EVM.Expr qualified as Expr
 import EVM.Fetch (Fetcher)
 import EVM.Invariant
+import EVM.Progress qualified as Progress
 import EVM.Solvers (SolverGroup)
 import EVM.Stepper qualified as Stepper
 import EVM.SymExec (IterConfig, Postcondition, VeriOpts(..), verify)
@@ -109,6 +113,19 @@ newExplorationWithProgress options progress vm = liftIO $ do
 callTargets :: InvState -> [Maybe Target]
 callTargets st = map (\case Call{target} -> Just target; NoCall{} -> Nothing) st.calls
 
+targetFields :: Target -> [Pair]
+targetFields target =
+  [ "contract" .= target.contractName
+  , "target" .= T.pack (show target.addr)
+  , "function" .= callSig target.sig
+  ]
+
+stateFields :: Int -> Int -> InvState -> [Pair]
+stateFields index total st =
+  [ "stateIndex" .= index, "stateCount" .= total
+  , "prefix" .= map (maybe JSON.Null (JSON.object . targetFields)) (callTargets st)
+  ]
+
 -- | Frontier sizes and accumulated transition diagnostics. Probe diagnostics
 -- retain the first failing call to each target, as in the Foundry runner.
 explorationStatus :: MonadIO m => Exploration -> m ([Int], Transition)
@@ -123,16 +140,20 @@ exploreLevel solvers fetcher iterConf exploration depth
   | otherwise = do
       known <- liftIO $ readIORef exploration.levels
       case drop depth known of
-        states:_ -> pure states
+        states:_ -> do
+          Progress.emit "invariant-cache-hit" ["depth" .= depth, "states" .= length states]
+          pure states
         [] -> do
           previous <- exploreLevel solvers fetcher iterConf exploration (depth - 1)
           let opts = exploration.options
           let total = length previous
-          result <- fmap mconcat $ forM (zip [1..] previous) $ \(index, st) ->
-            nextStatesWithProgress
-              (exploration.progress . ExploringCall depth index total (callTargets st))
-              solvers opts.postcondition fetcher iterConf opts.callConfig opts.senders
-              opts.targets exploration.visited st
+          result <- Progress.withActivity "invariant-level" ["depth" .= depth, "stateCount" .= total] $
+            fmap mconcat $ forM (zip [1..] previous) $ \(index, st) ->
+              Progress.withActivity "invariant-state" (stateFields index total st) $
+                nextStatesWithProgress
+                  (exploration.progress . ExploringCall depth index total (callTargets st))
+                  solvers opts.postcondition fetcher iterConf opts.callConfig opts.senders
+                  opts.targets exploration.visited st
           conf <- readConfig
           when conf.debug $ liftIO $ putStrLn $ "Invariant states after " <> show depth
             <> " calls: " <> show (length result.states) <> " new"
@@ -141,6 +162,11 @@ exploreLevel solvers fetcher iterConf exploration depth
             modifyIORef' exploration.outcomes $ \old -> (old <> result)
               { states = [], probes = List.foldl' addProbe old.probes result.probes }
             exploration.progress $ LevelFinished depth (length result.states)
+          Progress.emit "invariant-level-finished"
+            [ "depth" .= depth, "reachedStates" .= length result.states
+            , "partials" .= length result.partials, "issues" .= length result.issues
+            , "counterexamples" .= length result.probes
+            ]
           pure result.states
   where
     addProbe :: [Probe] -> Probe -> [Probe]
@@ -181,7 +207,8 @@ data CheckResult = CheckResult
 checkInvariant :: App m => SolverGroup -> Fetcher Symbolic m -> VeriOpts -> Check -> InvState -> m CheckResult
 checkInvariant _ _ _ check st
   | not (checksState check st) = pure $ CheckResult Nothing [] []
-checkInvariant solvers fetcher opts check st = do
+checkInvariant solvers fetcher opts check st = Progress.withActivity "invariant-check"
+  (targetFields check.target <> ["depth" .= length st.calls, "caller" .= T.pack (show check.caller)]) $ do
   let initial = maybe st.vm (\a -> st.vm & set (#tx % #origin) a) check.origin
       call = Call check.target check.caller (fst check.calldata) initial.block.timestamp
         initial.block.number initial.tx.origin (Lit 0) TransferValue (Lit 0, Lit 0)
@@ -204,7 +231,10 @@ checksState check st = check.checkAfterNoCall || case reverse st.calls of
 -- paths and solver issues are returned even when a counterexample is found.
 searchInvariant :: App m
   => SolverGroup -> Fetcher Symbolic m -> VeriOpts -> Exploration -> (Int, Int) -> Check -> m CheckResult
-searchInvariant solvers fetcher opts exploration (first, lastDepth) check = go (max 0 first) [] []
+searchInvariant solvers fetcher opts exploration (first, lastDepth) check =
+  Progress.withActivity "invariant-search"
+    ["firstDepth" .= max 0 first, "maxDepth" .= lastDepth, "invariant" .= callSig check.target.sig] $
+    go (max 0 first) [] []
   where
     go depth partials issues
       | depth > lastDepth = pure $ CheckResult Nothing partials issues
@@ -213,9 +243,11 @@ searchInvariant solvers fetcher opts exploration (first, lastDepth) check = go (
           states -> visit depth (length states) 1 partials issues states
     visit depth _ _ partials issues [] = go (depth + 1) partials issues
     visit depth total index partials issues (st:rest) = do
-      when (checksState check st) $ liftIO $ exploration.progress $
-        CheckingInvariant depth index total (callTargets st) check.target
-      result <- checkInvariant solvers fetcher opts check st
+      result <- if checksState check st
+        then Progress.withActivity "invariant-state" (stateFields index total st) $ do
+          liftIO $ exploration.progress $ CheckingInvariant depth index total (callTargets st) check.target
+          checkInvariant solvers fetcher opts check st
+        else pure $ CheckResult Nothing [] []
       let ps = partials <> result.partials
           es = issues <> result.issues
       case result.counterexample of

@@ -29,6 +29,7 @@ import Control.Monad (forM, forM_)
 import Control.Monad.ST (stToIO)
 import Data.IORef (IORef, newIORef, readIORef, atomicModifyIORef')
 import Control.Monad.State.Strict (execStateT, execState, get, put, liftIO, modify)
+import Data.Aeson qualified as JSON
 import Data.List (partition, sortOn)
 import Data.Map qualified as Map
 import Data.Maybe (catMaybes, mapMaybe)
@@ -50,6 +51,7 @@ import EVM.Expr (simplifyProp)
 import EVM.Expr qualified as Expr
 import EVM.Fetch qualified as Fetch
 import EVM.Keccak.Preimages qualified as Preimages
+import EVM.Progress qualified as Progress
 import EVM.Solvers (SolverGroup, checkSatWithProps, checkBranchSat)
 import EVM.SymExec (IterConfig, Postcondition, interpretVMAbortable, runExpr, extractProps, verifyResult)
 import EVM.SymExec.Calldata (symCalldataNamed)
@@ -326,7 +328,8 @@ nextStatesWithProgress progress solvers post fetcher iterConf conf senders targe
 
   noCall
     | conf.maxTimeDelay == Just 0 && maybe True (== 0) conf.maxBlockDelay = pure mempty
-    | otherwise = do
+    | otherwise = Progress.withActivity "invariant-wait"
+        ["depth" JSON..= (length st.calls + 1), "function" JSON..= ("NoCall" :: Text)] $ do
         liftIO $ progress $ CallProgress Nothing 0 0 Nothing
         -- Zero-delay waits add no reachable context and need not be explored.
         let props = timeProps <> numberProps <>
@@ -354,57 +357,66 @@ nextStatesWithProgress progress solvers post fetcher iterConf conf senders targe
         valueProps = [PLEq value (Lit conf.maxValue)] <>
           [p | conf.maxValue /= 0 && conf.valueTransfer == TransferValue
              , p <- [PLEq gasCost balance, PLEq value (Expr.sub balance gasCost)]]
-    liftIO $ progress $ CallProgress (Just target) index (length targets) (Just caller)
-    (cd, props, _) <- symCalldataNamed ("call" <> n <> "-") True (callSig target.sig) types [] (AbstractBuf ("txdata" <> n))
-    let call = Call { target, caller, calldata = cd, timestamp, blockNumber, origin, value,
-          valueTransfer = conf.valueTransfer,
-          delay }
-        entry = target.contractName <> "." <> callSig target.sig
-    vm <- liftIO $ stToIO $ flip execStateT st.vm $ do
-      assign (#block % #timestamp) timestamp
-      assign (#block % #number) blockNumber
-      assign (#tx % #origin) origin
-      startCallWithValue target.addr caller conf.gas value conf.valueTransfer entry
-        (cd, props <> callerProps <> timeProps <> numberProps <> valueProps)
-    abort <- liftIO $ newTVarIO False
-    issues <- liftIO $ newIORef []
-    let checkPost :: App m => VM Symbolic -> Expr End -> m [Probe]
-        checkPost endVm leaf = case post vm leaf of
-          PBool True -> pure []
-          p -> do
-            res <- checkSatWithProps solvers (PNeg p : extractProps leaf <> Preimages.recordedProps endVm.keccakPreImgs)
+    Progress.withActivity "invariant-call"
+      [ "depth" JSON..= (length st.calls + 1)
+      , "contract" JSON..= target.contractName
+      , "target" JSON..= T.pack (show target.addr)
+      , "function" JSON..= callSig target.sig
+      , "functionIndex" JSON..= index
+      , "functionCount" JSON..= length targets
+      , "caller" JSON..= T.pack (show caller)
+      ] $ do
+      liftIO $ progress $ CallProgress (Just target) index (length targets) (Just caller)
+      (cd, props, _) <- symCalldataNamed ("call" <> n <> "-") True (callSig target.sig) types [] (AbstractBuf ("txdata" <> n))
+      let call = Call { target, caller, calldata = cd, timestamp, blockNumber, origin, value,
+            valueTransfer = conf.valueTransfer,
+            delay }
+          entry = target.contractName <> "." <> callSig target.sig
+      vm <- liftIO $ stToIO $ flip execStateT st.vm $ do
+        assign (#block % #timestamp) timestamp
+        assign (#block % #number) blockNumber
+        assign (#tx % #origin) origin
+        startCallWithValue target.addr caller conf.gas value conf.valueTransfer entry
+          (cd, props <> callerProps <> timeProps <> numberProps <> valueProps)
+      abort <- liftIO $ newTVarIO False
+      issues <- liftIO $ newIORef []
+      let checkPost :: App m => VM Symbolic -> Expr End -> m [Probe]
+          checkPost endVm leaf = case post vm leaf of
+            PBool True -> pure []
+            p -> do
+              res <- checkSatWithProps solvers (PNeg p : extractProps leaf <> Preimages.recordedProps endVm.keccakPreImgs)
+              recordIssue issues res
+              pure $ case snd (verifyResult vm (res, leaf)) of
+                Cex (l, cex) -> [Probe { state = st { calls = st.calls <> [call] }, leaf = l, cex }]
+                _ -> []
+      leaves <- interpretVMAbortable abort fetcher iterConf vm runExpr $ \leaf endVm _ -> case leaf of
+        Success {} -> do
+          -- A successful EVM call can still violate a return-value or storage
+          -- postcondition. Check it before pruning its successor state.
+          probes <- checkPost endVm leaf
+          known <- maybe (pure False) (liftIO . fmap (Set.member (stateKey endVm)) . readIORef) visited
+          ends <- if known then pure [] else do
+            -- branches were only decided by the simplifier
+            res <- checkBranchSat solvers (extractProps leaf <> Preimages.recordedProps endVm.keccakPreImgs)
             recordIssue issues res
-            pure $ case snd (verifyResult vm (res, leaf)) of
-              Cex (l, cex) -> [Probe { state = st { calls = st.calls <> [call] }, leaf = l, cex }]
-              _ -> []
-    leaves <- interpretVMAbortable abort fetcher iterConf vm runExpr $ \leaf endVm _ -> case leaf of
-      Success {} -> do
-        -- A successful EVM call can still violate a return-value or storage
-        -- postcondition. Check it before pruning its successor state.
-        probes <- checkPost endVm leaf
-        known <- maybe (pure False) (liftIO . fmap (Set.member (stateKey endVm)) . readIORef) visited
-        ends <- if known then pure [] else do
-          -- branches were only decided by the simplifier
-          res <- checkBranchSat solvers (extractProps leaf <> Preimages.recordedProps endVm.keccakPreImgs)
-          recordIssue issues res
-          pure $ case res of
-            Qed -> []
-            _ -> [endState endVm]
-        pure $ Just (ends, [], probes)
-      Partial {} -> pure $ Just ([], [leaf], [])
-      Failure {} -> do
-        probes <- checkPost endVm leaf
-        pure $ Just ([], [], probes)
-      _ -> pure Nothing
-    let (ends, partials, probes) = mconcat (catMaybes leaves)
-    states <- liftIO $ fmap catMaybes $ forM (mergeStates ends) $ \end -> do
-      let k = stateKey end
-          reached = InvState { vm = end, calls = st.calls <> [call] }
-      maybe (pure $ Just reached) (\ref -> atomicModifyIORef' ref $ \seen ->
-        (Set.insert k seen, if Set.member k seen then Nothing else Just reached)) visited
-    -- a merged state covers each of its paths
-    liftIO $ forM_ visited $ \ref -> atomicModifyIORef' ref $ \seen -> (seen <> Set.fromList (map stateKey ends), ())
-    Transition states partials probes <$> liftIO (readIORef issues)
+            pure $ case res of
+              Qed -> []
+              _ -> [endState endVm]
+          pure $ Just (ends, [], probes)
+        Partial {} -> pure $ Just ([], [leaf], [])
+        Failure {} -> do
+          probes <- checkPost endVm leaf
+          pure $ Just ([], [], probes)
+        _ -> pure Nothing
+      let (ends, partials, probes) = mconcat (catMaybes leaves)
+      states <- liftIO $ fmap catMaybes $ forM (mergeStates ends) $ \end -> do
+        let k = stateKey end
+            reached = InvState { vm = end, calls = st.calls <> [call] }
+        maybe (pure $ Just reached) (\ref -> atomicModifyIORef' ref $ \seen ->
+          (Set.insert k seen, if Set.member k seen then Nothing else Just reached)) visited
+      -- a merged state covers each of its paths
+      liftIO $ forM_ visited $ \ref -> atomicModifyIORef' ref $ \seen -> (seen <> Set.fromList (map stateKey ends), ())
+      Transition states partials probes <$> liftIO (readIORef issues)
 
   recordIssue :: App m => IORef [Text] -> SMTResult -> m ()
   recordIssue ref result = liftIO $ atomicModifyIORef' ref $ \found -> (found <> solverIssues result, ())
