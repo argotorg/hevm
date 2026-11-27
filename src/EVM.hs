@@ -3989,8 +3989,12 @@ writeMemory memory offset buf = do
       -- that would happen with repeated small expansion operations.
       let growthFactor = 2
       let targetSize = requiredSize * growthFactor
-      -- Always grow at least 8k
-      let toGrow = max 8192 $ targetSize - currentSize
+      -- A small frame gets a short first buffer. If it outgrows that buffer,
+      -- return to the usual 8 KiB capacity and subsequent growth schedule.
+      let toGrow
+            | currentSize == 0 && requiredSize <= 512 = 512
+            | currentSize == 512 && requiredSize <= 8192 = 8192 - currentSize
+            | otherwise = max 8192 (targetSize - currentSize)
       memory' <- VS.Mutable.grow memory toGrow
       assign (#state % #memory) (ConcreteMemory memory')
       pure memory'
