@@ -48,7 +48,7 @@ data StackBlock = StackBlock
   , outputs      :: ![Source] -- deepest first, for rebuilding a shared list tail
   }
 
-data Entry = Standard | StackRun !StackBlock
+data Entry = Standard | StackRun !StackBlock | Jump | JumpIf
 
 data Program = Program !BS.ByteString !(V.Vector Entry)
 -- | A bounded, shareable cache of analysed runtime bytecode.
@@ -164,7 +164,13 @@ analyse bytes = Program bytes $ V.create $ do
   let scan !pc
         | pc >= BS.length bytes = pure ()
         | otherwise = case collect pc 0 [] [] of
-            (end, [], _) -> scan end
+            (end, [], _) -> do
+              let entry = case getOp (BS.index bytes pc) of
+                    OpJump -> Jump
+                    OpJumpi -> JumpIf
+                    _ -> Standard
+              MV.write table pc entry
+              scan end
             (end, operations, positions) -> do
               let a = List.foldl' apply initial (reverse operations)
                   exposed = a.need + a.change

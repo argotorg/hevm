@@ -14,7 +14,7 @@ import Data.Vector.Mutable qualified as MV
 import Data.Vector.Unboxed qualified as U
 import Witch (unsafeInto)
 
-import EVM (isPrecompileAddr')
+import EVM (isPrecompileAddr', isValidJumpDest)
 import EVM.Concrete.Blocks.Plan
 import EVM.FeeSchedule (FeeSchedule(..))
 import EVM.HashCons (hashConsExpr)
@@ -69,7 +69,7 @@ applyBlock (Scratch scratch) block stack = do
 runConcreteBlocks
   :: Scratch -> Maybe Program -> (Int -> a -> IO a) -> (U.Vector Int -> a -> IO a)
   -> VM Concrete -> a -> IO (VM Concrete, a)
-runConcreteBlocks scratch (Just (Program bytes entries)) _visit visitBlock vm initialContext
+runConcreteBlocks scratch (Just (Program bytes entries)) visit visitBlock vm initialContext
   | Nothing <- vm.result
   , RuntimeCode (ConcreteRuntimeCode current) <- frame.code
   , current == bytes
@@ -93,6 +93,12 @@ runConcreteBlocks scratch (Just (Program bytes entries)) _visit visitBlock vm in
                 in pure (vm { state = next, burned = vm.burned + (frame.gas - gas) }, context)
             | otherwise = pure (vm, context)
 
+          jump cost target consumed rest = do
+            context' <- visit pc context
+            loop True target (gas-cost) memorySize (height-consumed) rest context'
+
+          validTarget w = w < unsafeInto (V.length entries) && isValidJumpDest vm (unsafeInto w)
+
       in if pc < 0 || pc >= V.length entries then finish else
         case V.unsafeIndex entries pc of
           StackRun block
@@ -105,5 +111,14 @@ runConcreteBlocks scratch (Just (Program bytes entries)) _visit visitBlock vm in
                 stack' <- applyBlock scratch block stack
                 context' <- visitBlock block.pcs context
                 loop True block.endPC (gas-cost) memorySize (height+block.heightChange) stack' context'
+          Jump -> case stack of
+            Lit w:xs | gas >= fees.g_mid && validTarget w ->
+              jump fees.g_mid (unsafeInto w) 1 xs
+            _ -> finish
+          JumpIf -> case stack of
+            Lit _:Lit 0:xs | gas >= fees.g_high -> jump fees.g_high (pc+1) 2 xs
+            Lit w:Lit condition:xs | condition /= 0 && gas >= fees.g_high && validTarget w ->
+              jump fees.g_high (unsafeInto w) 2 xs
+            _ -> finish
           _ -> finish
 runConcreteBlocks _ _ _ _ vm context = pure (vm, context)
