@@ -868,6 +868,8 @@ exec1 conf = do
                   gets (.state.memory) >>= \case
                     ConcreteMemory mem -> do
                       case y of
+                        Lit w | Lit offset <- x ->
+                          writeMemory mem (unsafeInto offset) (word256Bytes w)
                         Lit w ->
                           copyBytesToMemory (ConcreteBuf (word256Bytes w)) (Lit 32) (Lit 0) x
                         _ -> do
