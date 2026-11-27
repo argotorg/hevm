@@ -202,6 +202,7 @@ runConcreteBlocks scratch (Just (Program bytes entries)) visit visitBlock vm ini
             _ -> finish
           _ -> finish
 runConcreteBlocks _ _ _ _ vm context = pure (vm, context)
+{-# INLINE runConcreteBlocks #-}
 
 -- hevm's words use four big-endian limbs. Typed loads require an aligned
 -- address. The byte-copy path also handles unaligned slices on strict targets.
