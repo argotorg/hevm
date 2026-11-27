@@ -106,9 +106,14 @@ defaultVMOpts = VMOpts
   , txdataFloorGas = Fees.feeSchedule.g_transaction
   }
 
+-- Reserve the first small page when a frame is created. Its logical EVM
+-- memory size remains zero until an instruction pays for expansion.
+initialFrameMemory :: ST RealWorld Memory
+initialFrameMemory = ConcreteMemory <$> VS.Mutable.replicate 512 0
+
 blankState :: VMOps t => ST RealWorld (FrameState t)
 blankState = do
-  memory <- ConcreteMemory <$> VS.Mutable.new 0
+  memory <- initialFrameMemory
   pure $ FrameState
     { contract     = LitAddr 0
     , codeContract = LitAddr 0
@@ -157,7 +162,7 @@ makeVm o = do
         ++ (Map.keys txaccessList)
       initialAccessedStorageKeys = fromList $ foldMap (uncurry (map . (,))) (Map.toList txaccessList)
       touched = if o.create then [txorigin] else [txorigin, txtoAddr]
-  memory <- ConcreteMemory <$> VS.Mutable.new 0
+  memory <- initialFrameMemory
   pure $ setEIP2935Storage o $ setEIP4788Storage o $ VM
     { result = Nothing
     , frames = mempty
@@ -2982,7 +2987,7 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
                 (InitCode _ _) -> InitCode mempty mempty
                 a -> a
 
-          newMemory <- ConcreteMemory <$> VS.Mutable.new 0
+          newMemory <- lift initialFrameMemory
           zoom #state $ do
             assign #gas xGas
             assign #pc 0

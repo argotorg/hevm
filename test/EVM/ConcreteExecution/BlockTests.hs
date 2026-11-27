@@ -128,6 +128,18 @@ tests = testGroup "Concrete stack blocks"
       assertEqual "original bytes" (EVM.ConcreteBuf (BS.pack [20,30])) snapshot
       assertEqual "extends past backing" (EVM.ConcreteBuf (BS.pack [99,0])) =<< readAt 1 2
       assertEqual "wide offset" (EVM.ConcreteBuf (BS.singleton 0)) =<< readAt (2^(64::Int)) 1
+  , testCase "fresh frame backing is zeroed and isolated before memory expansion" $ do
+      let fresh = stToIO (vmForEthrunCreation BS.empty) :: IO (EVM.VM EVM.Concrete)
+      left <- fresh
+      right <- fresh
+      assertEqual "initial logical size" 0 right.state.memorySize
+      case (left.state.memory, right.state.memory) of
+        (EVM.ConcreteMemory first, EVM.ConcreteMemory second) -> do
+          assertBool "initial backing" (VSM.length first >= 96 && VSM.length second >= 96)
+          VSM.write first 64 7
+          actual <- stToIO (evalStateT (readMemory (EVM.Lit 64) (EVM.Lit 32)) right)
+          assertEqual "other frame still empty" (EVM.ConcreteBuf (BS.replicate 32 0)) actual
+        _ -> fail "expected concrete frame memory"
   , testCase "literal MSTORE preserves sparse bytes across frame growth" $ do
       vm <- stToIO (vmForEthrunCreation BS.empty) :: IO (EVM.VM EVM.Concrete)
       let code = EVM.RuntimeCode (EVM.ConcreteRuntimeCode (BS.singleton 0x52))
