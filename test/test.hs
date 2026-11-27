@@ -15,6 +15,7 @@ import EVM.Expr.ExprTests qualified as ExprTests
 import EVM.Expr.RewriteFuzz qualified as RewriteFuzz
 import EVM.Expr.KeccakFuzz qualified as KeccakFuzz
 import EVM.Expr.HashConsTests qualified as HashConsTests
+import EVM.ConcreteExecution.BlockTests qualified as BlockTests
 import EVM.ConcreteExecution.ConcreteExecutionTests qualified as ConcreteExecutionTests
 import EVM.Equivalence.EquivalenceTests qualified as EquivalenceTests
 import EVM.Equivalence.EquivalenceTests (YulVerbosity)
@@ -65,6 +66,7 @@ tests = testGroup "hevm" $
   , RewriteFuzz.tests
   , KeccakFuzz.tests
   , HashConsTests.tests
+  , BlockTests.tests
   , ConcreteExecutionTests.tests
   , SymExecTests.tests
   , DebuggerTests.tests

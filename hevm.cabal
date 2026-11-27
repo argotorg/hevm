@@ -95,6 +95,7 @@ library
     EVM.ABI,
     EVM.Assembler,
     EVM.Concrete,
+    EVM.Concrete.Blocks,
     EVM.Dapp,
     EVM.Debugger,
     EVM.Debugger.Server,
@@ -137,6 +138,7 @@ library
     EVM.SMT.ArithEncoding,
   other-modules:
     EVM.CheatsTH,
+    EVM.Concrete.Blocks.Plan,
     EVM.SMT.Types,
     EVM.SMT.SMTLIB,
     Paths_hevm
@@ -320,6 +322,7 @@ test-suite test
     EVM.Expr.Generator
     EVM.Expr.HashConsTests
     EVM.Expr.Probe
+    EVM.ConcreteExecution.BlockTests
     EVM.ConcreteExecution.ConcreteExecutionTests
     EVM.SymExec.SymExecTests
     EVM.Test.FuzzSymExec

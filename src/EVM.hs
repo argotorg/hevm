@@ -106,9 +106,14 @@ defaultVMOpts = VMOpts
   , txdataFloorGas = Fees.feeSchedule.g_transaction
   }
 
+-- Reserve the first small page when a frame is created. Its logical EVM
+-- memory size remains zero until an instruction pays for expansion.
+initialFrameMemory :: ST RealWorld Memory
+initialFrameMemory = ConcreteMemory <$> VS.Mutable.replicate 512 0
+
 blankState :: VMOps t => ST RealWorld (FrameState t)
 blankState = do
-  memory <- ConcreteMemory <$> VS.Mutable.new 0
+  memory <- initialFrameMemory
   pure $ FrameState
     { contract     = LitAddr 0
     , codeContract = LitAddr 0
@@ -157,7 +162,7 @@ makeVm o = do
         ++ (Map.keys txaccessList)
       initialAccessedStorageKeys = fromList $ foldMap (uncurry (map . (,))) (Map.toList txaccessList)
       touched = if o.create then [txorigin] else [txorigin, txtoAddr]
-  memory <- ConcreteMemory <$> VS.Mutable.new 0
+  memory <- initialFrameMemory
   pure $ setEIP2935Storage o $ setEIP4788Storage o $ VM
     { result = Nothing
     , frames = mempty
@@ -863,6 +868,8 @@ exec1 conf = do
                   gets (.state.memory) >>= \case
                     ConcreteMemory mem -> do
                       case y of
+                        Lit w | Lit offset <- x ->
+                          writeMemory mem (unsafeInto offset) (word256Bytes w)
                         Lit w ->
                           copyBytesToMemory (ConcreteBuf (word256Bytes w)) (Lit 32) (Lit 0) x
                         _ -> do
@@ -2190,9 +2197,13 @@ cheat
   -> EVM t ()
 cheat gas (inOffset, inSize) (outOffset, outSize) xs = do
   vm <- get
-  input <- readMemory (Expr.add inOffset (Lit 4)) (Expr.sub inSize (Lit 4))
   calldata <- readMemory inOffset inSize
-  abi <- readBytes 4 (Lit 0) <$> readMemory inOffset (Lit 4)
+  (input, abi) <- case reusableCallInput vm.state.memory inOffset inSize calldata of
+    Just bytes -> pure (ConcreteBuf (BS.drop 4 bytes), Lit (word (BS.take 4 bytes)))
+    Nothing -> do
+      args <- readMemory (Expr.add inOffset (Lit 4)) (Expr.sub inSize (Lit 4))
+      selectorWord <- readBytes 4 (Lit 0) <$> readMemory inOffset (Lit 4)
+      pure (args, selectorWord)
   let newContext = CallContext cheatCode cheatCode outOffset outSize (Lit 0) (maybeLitWordSimp abi) calldata vm.env.contracts vm.tx.subState
 
   pushTrace $ FrameTrace newContext
@@ -2955,7 +2966,9 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
     actualCall target addr xGas vm0 = do
         burn' xGas $ do
           calldata <- readMemory xInOffset xInSize
-          abi <- maybeLitWordSimp . readBytes 4 (Lit 0) <$> readMemory xInOffset (Lit 4)
+          abi <- case reusableCallInput vm0.state.memory xInOffset xInSize calldata of
+            Just bytes -> pure (Just (word (BS.take 4 bytes)))
+            Nothing -> maybeLitWordSimp . readBytes 4 (Lit 0) <$> readMemory xInOffset (Lit 4)
           let newContext = CallContext
                             { target    = addr
                             , context   = xContext
@@ -2982,7 +2995,7 @@ delegateCall this gasGiven xTo xContext xValue xInOffset xInSize xOutOffset xOut
                 (InitCode _ _) -> InitCode mempty mempty
                 a -> a
 
-          newMemory <- ConcreteMemory <$> VS.Mutable.new 0
+          newMemory <- lift initialFrameMemory
           zoom #state $ do
             assign #gas xGas
             assign #pc 0
@@ -3456,14 +3469,17 @@ accessUnboundedMemoryRange
   -> EVM t ()
 accessUnboundedMemoryRange _ 0 continue = continue
 accessUnboundedMemoryRange f l continue = do
-  m0 <- use (#state % #memorySize)
-  fees <- gets (.block.schedule)
-  -- lazily, each memory access would keep the previous frame states alive
-  let !m1 = 32 * ceilDiv (max m0 (f + l)) 32
-  burn (memoryCost fees m1 - memoryCost fees m0) $ do
-    assign (#state % #memorySize) m1
-    modifying' (#state % #symMemorySize) (fmap (Expr.max (Lit (into m1))))
-    continue
+  frame <- use #state
+  let m0 = frame.memorySize
+      !m1 = 32 * ceilDiv (max m0 (f + l)) 32
+  if m1 == m0 && isNothing frame.symMemorySize
+    then continue
+    else do
+      fees <- gets (.block.schedule)
+      burn (memoryCost fees m1 - memoryCost fees m0) $ do
+        assign (#state % #memorySize) m1
+        modifying' (#state % #symMemorySize) (fmap (Expr.max (Lit (into m1))))
+        continue
 
 accessMemoryRange
   :: VMOps t
@@ -3546,12 +3562,29 @@ copyCallBytesToMemory
 copyCallBytesToMemory bs size yOffset =
   copyBytesToMemory bs (Expr.min size (bufLength bs)) (Lit 0) yOffset
 
+-- A selector read spans four physical memory bytes, including bytes outside
+-- short calldata. Only reuse the frozen input when the full slice is present
+-- and readMemory used its ordinary, non-wrapping concrete bounds.
+reusableCallInput :: Memory -> Expr EWord -> Expr EWord -> Expr Buf -> Maybe ByteString
+reusableCallInput ConcreteMemory{} (Lit offset) (Lit size) (ConcreteBuf bytes)
+  | BS.length bytes >= 4
+  , toIntOffset size == Just (BS.length bytes)
+  , size <= Expr.maxBytes
+  , offset <= Expr.maxBytes - size = Just bytes
+reusableCallInput _ _ _ _ = Nothing
+
 readMemory :: Expr EWord -> Expr EWord -> EVM t (Expr Buf)
 readMemory offset' size' = do
   vm <- get
   case vm.state.memory of
     ConcreteMemory mem -> do
       case (offset', size') of
+        (Lit offset, Lit size)
+          | Just off <- toIntOffset offset, Just len <- toIntOffset size
+          , let cap = min (VS.Mutable.length mem) (unsafeInto Expr.maxBytes)
+          , off <= cap, len <= cap - off ->
+              ConcreteBuf . vectorToByteString <$>
+                VS.freeze (VS.Mutable.slice off len mem)
         (Lit offset, Lit size) -> do
           let memSize :: Word64 = unsafeInto (VS.Mutable.length mem)
           if size > Expr.maxBytes ||
@@ -3980,8 +4013,12 @@ writeMemory memory offset buf = do
       -- that would happen with repeated small expansion operations.
       let growthFactor = 2
       let targetSize = requiredSize * growthFactor
-      -- Always grow at least 8k
-      let toGrow = max 8192 $ targetSize - currentSize
+      -- A small frame gets a short first buffer. If it outgrows that buffer,
+      -- return to the usual 8 KiB capacity and subsequent growth schedule.
+      let toGrow
+            | currentSize == 0 && requiredSize <= 512 = 512
+            | currentSize == 512 && requiredSize <= 8192 = 8192 - currentSize
+            | otherwise = max 8192 (targetSize - currentSize)
       memory' <- VS.Mutable.grow memory toGrow
       assign (#state % #memory) (ConcreteMemory memory')
       pure memory'

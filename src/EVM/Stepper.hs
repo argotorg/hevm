@@ -22,7 +22,7 @@ where
 -- as the framework for monadic interpretation.
 
 import Control.Monad.IO.Class
-import Control.Monad.Operational (Program, ProgramViewT(..), ProgramView, singleton, view)
+import Control.Monad.Operational (Program, ProgramViewT(..), singleton, view)
 import Control.Monad.ST (stToIO)
 import Control.Monad.State.Strict (execStateT, get, StateT(..))
 import Data.Text (Text)
@@ -99,21 +99,21 @@ interpret
   -> VM Concrete
   -> Stepper Concrete a
   -> m a
-interpret fetcher vm = eval . view
-  where
-    eval :: ProgramView (Action Concrete) a -> m a
-    eval (Return x) = pure x
-    eval (action :>>= k) =
-      case action of
-        Exec -> do
-          conf <- readConfig
-          (r, vm') <- liftIO $ stToIO $ runStateT (EVM.Exec.exec conf) vm
-          interpret fetcher vm' (k r)
-        Wait q -> do
-          m <- fetcher q
-          vm' <- liftIO $ stToIO $ execStateT m vm
-          interpret fetcher vm' (k ())
-        EVM m -> do
-          (r, vm') <- liftIO $ stToIO $ runStateT m vm
-          interpret fetcher vm' (k r)
-
+interpret fetcher initial program = do
+  execute <- liftIO EVM.Exec.newConcreteExec
+  let eval :: VM Concrete -> Stepper Concrete a -> m a
+      eval vm stepper = case view stepper of
+        Return x -> pure x
+        action :>>= k -> case action of
+          Exec -> do
+            conf <- readConfig
+            (r, vm') <- liftIO $ stToIO $ runStateT (execute conf) vm
+            eval vm' (k r)
+          Wait q -> do
+            m <- fetcher q
+            vm' <- liftIO $ stToIO $ execStateT m vm
+            eval vm' (k ())
+          EVM m -> do
+            (r, vm') <- liftIO $ stToIO $ runStateT m vm
+            eval vm' (k r)
+  eval initial program
