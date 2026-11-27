@@ -102,7 +102,7 @@ WARNING-s related to `Branches too deep at program counter`.
 
 ## Progress, ``--no-progress``, ``--progress-log``, ``--progress-exprs``
 
-While `hevm symbolic` and `hevm equivalence` run, a status line on stderr
+While `hevm test`, `hevm symbolic` and `hevm equivalence` run, a status line on stderr
 shows the current phase, the number of finished paths, the SMT queries done,
 being solved and waiting for a free solver, the program counter whose queries
 took the most solver time in this phase, and the interpreter tasks. Finished
@@ -121,3 +121,27 @@ each worker and each running query is doing. Every line is flushed, so the log o
 was killed or timed out is still complete up to that point, which shows where
 it got stuck. `--progress-exprs` (or `--verb 4`) also logs the expressions and
 path conditions sent to the solver.
+
+For invariant exploration, the status line also identifies the current target
+function or `NoCall` wait, transaction depth, position in the known state
+frontier, and elapsed time in that call or check. During an invariant search,
+the depth includes the configured bound. These positions describe the current
+frontier, not a percentage of the whole search: later depths may have more states.
+
+The JSONL log records scoped `activity-start` / `activity-end` events for
+searches, levels, calls, waits and isolated checks. Each carries an `activity`
+object with inherited context: depth and bound, state and function positions,
+contract, target, caller and a target-only call prefix (`null` entries are waits).
+End events include duration and whether the activity completed or was interrupted.
+`invariant-level-finished` reports reached states, partial paths, solver issues
+and transition counterexamples; `invariant-cache-hit` identifies reused levels.
+Cached levels do not emit duplicate call events.
+
+Interpreter events and SMT queries carry the active context too, including
+queries issued on worker threads. Heartbeats and the debugger's `/progress`
+endpoint expose the current `activity` and its elapsed time. Context is cleared
+on completion, exceptions and cancellation. Library clients enable this by
+wrapping their run in `EVM.Progress.withProgress`; the driver's default
+constructor is sufficient. `newExplorationWithProgress` remains available for
+additional client callbacks. With progress disabled, metadata is not rendered
+and no log is produced.

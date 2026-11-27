@@ -19,6 +19,7 @@ module EVM.Progress
   , emit
   , emitExprs
   , withPhase
+  , withActivity
   , markPhase
   , phaseTotal
   , phaseTick
@@ -38,7 +39,7 @@ module EVM.Progress
 import Control.Concurrent (ThreadId, forkIO, killThread, myThreadId, threadDelay)
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Applicative ((<|>))
-import Control.Exception (IOException, bracket, try)
+import Control.Exception (IOException, SomeException, bracket, throwIO, try)
 import Control.Monad (forever, join, unless, when)
 import Control.Monad.IO.Unlift (MonadIO, MonadUnliftIO, liftIO, withRunInIO)
 import Data.Aeson ((.=))
@@ -76,6 +77,14 @@ data ProgressOpts = ProgressOpts
 
 data Worker = Worker
   { fields :: [Pair]
+  , since :: Double
+  }
+
+-- | High-level work enclosing the interpreter and its solver threads. Like
+-- phases, activities are scoped by the run's orchestration thread, not workers.
+data Activity = Activity
+  { name :: Text
+  , fields :: [Pair]
   , since :: Double
   }
 
@@ -126,6 +135,7 @@ data St = St
   , queriesDone :: IORef Int
   , phaseStats :: IORef PhaseStats
   , phase :: IORef Phase
+  , activity :: IORef (Maybe Activity)
   , paths :: IORef (Int, Int)
   , taskCounter :: IORef (IO Int)
   , statusOn :: IORef Bool
@@ -153,7 +163,7 @@ withProgress opts act
       tty <- hSupportsANSI stderr
       st <- St h opts.logExprs tty
         <$> newMVar () <*> getMonotonicTime <*> newIORef mempty <*> newIORef mempty <*> newIORef 0 <*> newIORef 0 <*> newIORef (PhaseStats mempty mempty Nothing)
-        <*> newIORef (Phase "starting" 0 0) <*> newIORef (0, 0) <*> newIORef (pure 0) <*> newIORef opts.statusLine <*> newIORef False
+        <*> newIORef (Phase "starting" 0 0) <*> newIORef Nothing <*> newIORef (0, 0) <*> newIORef (pure 0) <*> newIORef opts.statusLine <*> newIORef False
         <*> newIORef [] <*> newIORef mempty
       writeIORef global (Just st)
       write st "start" []
@@ -227,6 +237,37 @@ bigText k t
   where
     n = T.length t
     limit = 20000
+
+-- | Attach high-level context to status, heartbeats and solver queries, also
+-- those issued by child threads. Nested activities inherit their parent's
+-- fields and restore it on return or exception. No fields are rendered when
+-- progress is disabled. End events distinguish completion from interruption.
+withActivity :: MonadUnliftIO m => Text -> [Pair] -> m a -> m a
+withActivity name fs act = withRunInIO $ \run -> readIORef global >>= \case
+  Nothing -> run act
+  Just st -> bracket (begin st) (writeIORef st.activity . fst) $ \(_, active) -> do
+    write st "activity-start" []
+    result <- try (run act)
+    now <- getMonotonicTime
+    write st "activity-end"
+      [ "secs" .= (now - active.since)
+      , "outcome" .= (either (const "interrupted") (const "completed") result :: Text)
+      ]
+    either (throwIO :: SomeException -> IO a) pure result
+  where
+    begin st = do
+      now <- getMonotonicTime
+      atomicModifyIORef' st.activity $ \previous ->
+        let inherited = maybe [] (.fields) previous
+            active = Activity name (fs <> filter (\(k, _) -> k `notElem` map fst fs) inherited) now
+        in (Just active, (previous, active))
+
+activityFields :: Maybe Activity -> [Pair]
+activityFields = maybe [] $ \a -> ["activity" .= JSON.object (("name" .= a.name) : a.fields)]
+
+activitySnapshot :: Double -> Maybe Activity -> JSON.Value
+activitySnapshot now = maybe JSON.Null $ \a ->
+  JSON.object (["name" .= a.name, "secs" .= (now - a.since)] <> a.fields)
 
 -- | Brackets a phase of a run (e.g. exploring one program) with
 -- @phase-start@ and @phase-end@ events; @summary@ adds fields to the end event.
@@ -357,9 +398,10 @@ timedQuery kind fs exprFs showRes act = readIORef global >>= \case
   Just st -> do
     tid <- myThreadId
     ctx <- maybe [] (.fields) . Map.lookup tid <$> readIORef st.workers
+    active <- activityFields <$> readIORef st.activity
     qid <- atomicModifyIORef' st.nextQuery $ \n -> (n + 1, n)
     t0 <- getMonotonicTime
-    let qfs = ["query" .= qid, "kind" .= kind] <> fs <> ctx
+    let qfs = ["query" .= qid, "kind" .= kind] <> fs <> ctx <> active
         loc = (,) <$> textField "addr" ctx <*> intField "pc" ctx
         started = do
           t <- getMonotonicTime
@@ -380,7 +422,7 @@ timedQuery kind fs exprFs showRes act = readIORef global >>= \case
       , slowest = if maybe True ((solve >) . fst) ps.slowest then Just (solve, loc) else ps.slowest
       , byResult = Map.insertWith (\(a, b, c) (a', b', c') -> (a + a', b + b', c + c')) (kind, T.takeWhile (/= ':') res) (1, wait, solve) ps.byResult
       }, ())
-    write st "query-end" ["query" .= qid, "kind" .= kind, "secs" .= (t1 - t0), "waitSecs" .= wait, "solveSecs" .= solve, "result" .= res]
+    write st "query-end" $ ["query" .= qid, "kind" .= kind, "secs" .= (t1 - t0), "waitSecs" .= wait, "solveSecs" .= solve, "result" .= res] <> active
     pure r
   where
     textField k ctx = case lookup k ctx of
@@ -434,6 +476,7 @@ currentProgress = readIORef global >>= \case
   Just st -> do
     now <- getMonotonicTime
     p <- readIORef st.phase
+    active <- readIORef st.activity
     (nPaths, nPartial) <- readIORef st.paths
     tasks <- join (readIORef st.taskCounter)
     ws <- Map.toList <$> readIORef st.workers
@@ -446,6 +489,7 @@ currentProgress = readIORef global >>= \case
       [ "running" .= True
       , "elapsedSecs" .= (now - st.start)
       , "phase" .= JSON.object ["name" .= p.name, "done" .= p.done, "total" .= p.total]
+      , "activity" .= activitySnapshot now active
       , "paths" .= JSON.object ["done" .= nPaths, "partial" .= nPartial]
       , "tasks" .= tasks
       , "workers" .= [JSON.object (["thread" .= T.pack (show tid), "secs" .= (now - w.since)] <> w.fields) | (tid, w) <- ws]
@@ -463,10 +507,12 @@ currentProgress = readIORef global >>= \case
 heartbeat :: St -> IO ()
 heartbeat st = do
   now <- getMonotonicTime
+  active <- readIORef st.activity
   ws <- Map.toList <$> readIORef st.workers
   qs <- Map.elems <$> readIORef st.queries
   write st "heartbeat"
-    [ "workers" .= [JSON.object (["thread" .= T.pack (show tid), "secs" .= (now - w.since)] <> w.fields) | (tid, w) <- ws]
+    [ "activity" .= activitySnapshot now active
+    , "workers" .= [JSON.object (["thread" .= T.pack (show tid), "secs" .= (now - w.since)] <> w.fields) | (tid, w) <- ws]
     , "queries" .= [JSON.object (("secs" .= (now - q.qStart)) : q.qFields) | q <- qs]
     ]
 
@@ -476,7 +522,8 @@ write st ev fs = case st.logH of
   Just h -> do
     now <- getMonotonicTime
     tid <- myThreadId
-    let line = JSON.encode $ JSON.object (["t" .= (now - st.start), "ev" .= ev, "thread" .= T.pack (show tid)] <> fs)
+    active <- activityFields <$> readIORef st.activity
+    let line = JSON.encode $ JSON.object (["t" .= (now - st.start), "ev" .= ev, "thread" .= T.pack (show tid)] <> active <> fs)
     withMVar st.lock $ \_ -> do
       isClosed <- readIORef st.closed
       unless isClosed $ do
@@ -517,6 +564,7 @@ statusSegments :: St -> IO [(Text, [SGR], Text)]
 statusSegments st = do
   now <- getMonotonicTime
   p <- readIORef st.phase
+  active <- readIORef st.activity
   (nPaths, nPartial) <- readIORef st.paths
   tasks <- join (readIORef st.taskCounter)
   nWorkers <- Map.size <$> readIORef st.workers
@@ -535,9 +583,10 @@ statusSegments st = do
       progress
         | p.total > 0 = pad (T.length (tshow p.total)) p.done <> "/" <> tshow p.total
         | otherwise = ""
-  pure
-    [ (T.justifyLeft 11 ' ' p.name, [bold, fg Magenta], progress)
-    , ("paths", [fg Green], pad 6 nPaths <> " (" <> pad 5 nPartial <> " partial)")
+  pure $
+    [(T.justifyLeft 11 ' ' p.name, [bold, fg Magenta], progress)]
+    <> [("", [fg Cyan], activityStatus now a) | a <- maybe [] pure active]
+    <> [ ("paths", [fg Green], pad 6 nPaths <> " (" <> pad 5 nPartial <> " partial)")
     , ("SMT", [fg Blue], pad 7 qDone <> " done, " <> pad 3 solving <> " solving, " <> pad 3 queued <> " queued")
     , ("hottest", [fg Yellow], hot)
     , ("tasks", [], pad 6 tasks <> ", " <> pad 3 nWorkers <> " busy")
@@ -550,6 +599,21 @@ statusSegments st = do
     tshow = T.pack . show
     pad :: Show a => Int -> a -> Text
     pad n = T.justifyRight n ' ' . tshow
+
+-- | Keep the active transaction and function before the lower-level counters
+-- so they remain visible on narrow terminals. Full metadata stays in JSON.
+activityStatus :: Double -> Activity -> Text
+activityStatus now a = T.unwords $ filter (not . T.null)
+  [ fromMaybe a.name (T.stripPrefix "invariant-" a.name)
+  , maybe "" (\d -> "depth " <> d <> maybe "" ("/" <>) (numberField "maxDepth")) (numberField "depth")
+  , maybe "" (contract <>) (textField "function")
+  , maybe "" (\i -> "state " <> i <> maybe "" ("/" <>) (numberField "stateCount")) (numberField "stateIndex")
+  , T.pack (printf "%.1fs" (now - a.since))
+  ]
+  where
+    contract = maybe "" (\c -> if T.null c then "" else c <> ".") (textField "contract")
+    textField k = case lookup k a.fields of { Just (JSON.String t) -> Just t; _ -> Nothing }
+    numberField k = case lookup k a.fields of { Just (JSON.Number n) -> Just (T.pack (show (round n :: Int))); _ -> Nothing }
 
 -- | The segments, cut to @width@ columns, with colours.
 render :: Text -> Int -> [(Text, [SGR], Text)] -> String

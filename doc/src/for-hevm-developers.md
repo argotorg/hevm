@@ -5,6 +5,74 @@ You can also check out a few [presentations](https://github.com/msooseth/hevm-pr
 
 # Debugging
 
+## Embedding the invariant driver
+
+`EVM.Invariant.Driver` provides bounded exploration without Foundry naming or
+assertion conventions. Create an `Exploration` with explicit `Target`s, allowed
+senders, a `CallConfig` and a transition postcondition. Supply each property as a
+`Check`, including its calldata, caller, optional origin override, postcondition
+and whether it runs immediately after a `NoCall` step (`checkAfterNoCall`).
+`searchInvariant` searches an inclusive depth range and stops at the first
+counterexample for that check. Multiple checks share the same cached frontiers;
+property calls execute on copies and do not change those frontiers. The cache is
+single-threaded and must use the same solver settings and fetcher throughout.
+
+The two postconditions serve different purposes. `ExplorationConfig.postcondition`
+checks each completed transaction, whether it returns successfully or fails. It
+can interpret an assertion revert, a boolean return value, or the final storage.
+It runs before successor-state pruning, and violations are returned as `Probe`s
+with the triggering call included. Successful calls still contribute reachable
+states, so transaction checks and isolated properties can share an exploration.
+A postcondition returning `PBool True` needs no additional solver query.
+
+`Check.postcondition` classifies a separate call on a reached state. This supports
+boolean properties, assertion-style invariants, and properties that must revert;
+the client supplies each convention. Check calls have their own calldata and
+caller, and their writes cannot affect subsequent exploration or other checks.
+Neither path requires a particular function name or a no-argument ABI. Clients
+choose their targets and check calldata explicitly. No event-based assertion
+classification is built into the driver.
+
+`CallConfig` bounds symbolic call values with `maxValue` (in wei, default zero),
+and timestamp/block-number increments with `maxTimeDelay`/`maxBlockDelay`.
+Values and context variables are fresh at each depth. `Just 0` freezes an
+increment; `Nothing` leaves time monotone below 2^64, or keeps the block number
+fixed. Delays are relative to the preceding state, including warp/roll changes.
+`TransferValue` debits the origin and constrains each payment to its remaining
+balance after the gas deposit. `MintValue` credits the recipient without
+debiting the origin, for clients such as Echidna. Reverted calls roll back either
+kind of value transfer. Isolated property `Check`s still send zero ETH and use
+the reached state's block context.
+
+Set `CallConfig.allowNoCalls` to include context-only steps (default `False`). A
+`NoCall` advances timestamp and/or block number using the same per-step bounds,
+without executing bytecode, initializing a transaction, changing accounts, or
+running the transaction postcondition. It needs no target or sender and consumes
+one depth slot. Zero-delay waits are omitted. The driver disables state pruning
+when waits are enabled because `stateKey` omits the block context.
+`concretizeCalls` produces `ConcreteNoCall` entries with the solved context and
+delays; `replayCall` and `replayCalls` preserve them without transferring value or
+incrementing nonces. An isolated `Check` may run after a wait; clients that only
+check after contract calls set `checkAfterNoCall` to `False`.
+
+`callerIsOrigin` requires `OneOf` senders and enumerates them concretely so that
+transaction initialization looks up the correct origin account. Disable
+`pruneStates` for properties that observe context not represented by `stateKey`,
+such as time or block number. Foundry keeps its existing pruning policy.
+
+Read both `CheckResult` and `explorationStatus`: partial paths and solver issues
+are inconclusive, and transition probes report assertion failures before the
+property call. Reaching the depth limit is not an unbounded proof. Counterexamples
+include the symbolic sequence and the property call separately. `concretizeCalls`
+materializes a sequence using one model, including ABI arguments, callers, origins,
+ETH values, transfer policy and per-call delays. Clients may replay it with their own executor, or use
+`replayCalls` and classify the final check themselves.
+
+Ordinary reverting calls do not become frontier states. Context-only steps cover
+their delay-only effect for clients such as Echidna, whose shrinker replaces
+reverted setup transactions with `NoCall`. This does not model other lasting
+effects of failed transactions, such as gas payments in a full chain model.
+
 ## Printf-style debugging
 
 Haskell offers a way to print messages anywhere in the code with [Debug.Trace](https://hackage.haskell.org/package/base-4.20.0.1/docs/Debug-Trace.html).
