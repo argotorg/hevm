@@ -4,18 +4,18 @@ module EVM.ConcreteExecution.BlockTests (tests) where
 
 import Control.Monad (foldM, forM_, when)
 import Control.Monad.ST (stToIO)
-import Control.Monad.State.Strict (evalStateT, execStateT)
+import Control.Monad.State.Strict (evalStateT, execStateT, runStateT)
 import Data.ByteString qualified as BS
 import Data.Map.Strict qualified as Map
 import Data.Vector.Unboxed qualified as U
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (assertBool, assertEqual, testCase)
+import Test.Tasty.HUnit (assertBool, assertEqual, assertFailure, testCase)
 import Witch (unsafeInto)
 
-import EVM (exec1, initialContract, readMemory)
+import EVM (defaultVMOpts, exec1, initialContract, makeVm, readMemory)
 import EVM.Concrete.Blocks (newProgramCache, newScratch, prepareProgram, runConcreteBlocks)
 import EVM.Effects (defaultConfig)
-import EVM.Exec (vmForEthrunCreation)
+import EVM.Exec (exec, vmForEthrunCreation)
 import EVM.Types qualified as EVM
 
 tests :: TestTree
@@ -81,4 +81,20 @@ tests = testGroup "Concrete stack blocks"
       plan <- prepareProgram cache (code [0x60,1,0])
       (_,visited) <- runConcreteBlocks scratch plan (\_ _ -> pure True) (\_ _ -> pure True) start False
       assertBool "stale plan bypassed" (not visited)
+  , testCase "exec pauses for a query between blocks and resumes with the supplied balance" $ do
+      -- BALANCE(0xcafe) + 2, returned as a 32-byte word.
+      let code = EVM.RuntimeCode . EVM.ConcreteRuntimeCode . BS.pack
+          ops = [0x61,0xca,0xfe,0x31,0x60,2,0x01,0x5f,0x52,0x60,32,0x5f,0xf3]
+          account = (initialContract (code [])) { EVM.balance = EVM.Lit 40 } :: EVM.Contract
+      start <- stToIO (makeVm defaultVMOpts { EVM.contract = initialContract (code ops) })
+               :: IO (EVM.VM EVM.Concrete)
+      (pending, paused) <- stToIO (runStateT (exec defaultConfig) start)
+      case pending of
+        EVM.HandleEffect (EVM.Query (EVM.PleaseFetchContract addr _ supply)) -> do
+          assertEqual "account requested" 0xcafe addr
+          result <- stToIO (evalStateT (supply account >> exec defaultConfig) paused)
+          case result of
+            EVM.VMSuccess buf -> assertEqual "returned word" (EVM.ConcreteBuf (EVM.word256Bytes 42)) buf
+            other -> assertFailure (show other)
+        other -> assertFailure (show other)
   ]
