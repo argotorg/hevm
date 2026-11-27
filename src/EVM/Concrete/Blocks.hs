@@ -141,6 +141,29 @@ runConcreteBlocks scratch (Just (Program bytes entries)) visit visitBlock vm ini
                 stack' <- applyBlock scratch block stack
                 context' <- visitBlock block.pcs context
                 loop True block.endPC (gas-cost) memorySize (height+block.heightChange) stack' context'
+          ReadField field | height < 1024 && gas >= fees.g_base ->
+            let remaining = gas - fees.g_base
+                pushField value = do
+                  context' <- visit pc context
+                  loop True (pc+1) remaining memorySize (height+1) (value:stack) context'
+            in case field of
+              Caller -> case frame.caller of
+                LitAddr addr -> pushField (Expr.litAddr addr)
+                _ -> finish
+              CallValue -> pushField frame.callvalue
+              CallDataSize -> pushField (Expr.bufLength frame.calldata)
+              ReturnDataSize -> pushField (Expr.bufLength frame.returndata)
+              RemainingGas -> pushField (Lit (into remaining))
+          LoadCallData -> case (stack, frame.calldata) of
+            (index@(Lit off):rest, buf@(ConcreteBuf bytes'))
+              | gas >= fees.g_verylow -> do
+                  -- Compare the full-width offset before narrowing it. Reading
+                  -- at/past the end yields a zero word, even near 2^256.
+                  let value | off >= unsafeInto (BS.length bytes') = Lit 0
+                            | otherwise = hashConsExpr (Expr.readWord index buf)
+                  context' <- visit pc context
+                  loop True (pc+1) (gas-fees.g_verylow) memorySize height (value:rest) context'
+            _ -> finish
           LoadWord -> case stack of
             Lit offset:xs -> wordAccess offset $ \mem off size remaining -> do
               value <- SM.unsafeWith mem $ \p -> readWordAt (p `plusPtr` off)

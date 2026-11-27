@@ -5,7 +5,7 @@
 -- block reads and its arithmetic intermediates need indexed scratch storage.
 module EVM.Concrete.Blocks.Plan
   ( Entry(..), StackBlock(..), Program(..), ProgramCache, newProgramCache, prepareProgram
-  , Source(..), Action(..), scratchInputs, maxBlockLength
+  , FrameField(..), Source(..), Action(..), scratchInputs, maxBlockLength
   ) where
 
 import Data.ByteString qualified as BS
@@ -48,8 +48,9 @@ data StackBlock = StackBlock
   , outputs      :: ![Source] -- deepest first, for rebuilding a shared list tail
   }
 
+data FrameField = Caller | CallValue | CallDataSize | ReturnDataSize | RemainingGas
 data Entry = Standard | StackRun !StackBlock | Jump | JumpIf | LoadWord | StoreWord
-
+           | LoadCallData | ReadField !FrameField
 data Program = Program !BS.ByteString !(V.Vector Entry)
 -- | A bounded, shareable cache of analysed runtime bytecode.
 newtype ProgramCache = ProgramCache (IORef [(BS.ByteString, Program)])
@@ -168,6 +169,12 @@ analyse bytes = Program bytes $ V.create $ do
               let entry = case getOp (BS.index bytes pc) of
                     OpJump -> Jump
                     OpJumpi -> JumpIf
+                    OpCalldataload -> LoadCallData
+                    OpCaller -> ReadField Caller
+                    OpCallvalue -> ReadField CallValue
+                    OpCalldatasize -> ReadField CallDataSize
+                    OpReturndatasize -> ReadField ReturnDataSize
+                    OpGas -> ReadField RemainingGas
                     OpMload -> LoadWord
                     OpMstore -> StoreWord
                     _ -> Standard

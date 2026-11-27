@@ -59,6 +59,22 @@ tests = testGroup "Concrete stack blocks"
           assertEqual (show (ops,depth,gas)) (observe expected) (observe got)
           when (ops == straightLine && depth == 0 && gas == 141) $
             assertEqual "full affordable block" [0,2,3,4,5,6] (reverse reversePCs)
+  , testCase "literal calldata offsets include partially padded and very large reads" $ do
+      base <- stToIO (vmForEthrunCreation BS.empty) :: IO (EVM.VM EVM.Concrete)
+      scratch <- newScratch
+      cache <- newProgramCache
+      let code = EVM.RuntimeCode (EVM.ConcreteRuntimeCode (BS.pack [0x35,0]))
+      plan <- prepareProgram cache code
+      forM_ [BS.empty, BS.pack [1..63]] $ \bytes ->
+        forM_ [0,1,31,32,62,63,64,maxBound-1,maxBound] $ \offset -> do
+          let start :: EVM.VM EVM.Concrete
+              start = base { EVM.state = base.state { EVM.code = code, EVM.gas = 10
+                           , EVM.stack = [EVM.Lit offset], EVM.calldata = EVM.ConcreteBuf bytes } }
+          (actual,seen) <- runConcreteBlocks scratch plan (\pc _ -> pure [pc]) (\_ xs -> pure xs) start []
+          reference <- stToIO (execStateT (exec1 defaultConfig) start)
+          assertEqual "executed calldata load" [0] seen
+          assertEqual "calldata word" reference.state.stack actual.state.stack
+          assertEqual "calldata gas" reference.state.gas actual.state.gas
   , testCase "word loads and stores match hevm on independent memory slices" $ do
       vm <- stToIO (vmForEthrunCreation BS.empty) :: IO (EVM.VM EVM.Concrete)
       scratch <- newScratch
